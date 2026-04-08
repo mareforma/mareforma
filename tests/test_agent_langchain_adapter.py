@@ -11,6 +11,9 @@ Tests translation of LangChain callback events into AgentEvent:
 
 LangChain is not required to be installed. All tests mock the LangChain
 import so the test suite runs without langchain in the environment.
+
+The adapter imports BaseCallbackHandler from langchain_core.callbacks.base
+(the stable home since LangChain ≥0.3 / 1.x; langchain.callbacks was removed).
 """
 
 from __future__ import annotations
@@ -28,32 +31,28 @@ from mareforma.agent._observer import AgentEvent
 # ---------------------------------------------------------------------------
 # LangChain mock setup
 #
-# We create a minimal mock of the langchain.callbacks.base module so tests
-# run without langchain installed. The adapter gates the import with
-# try/except, so we patch sys.modules before importing the adapter.
+# We create a minimal mock of langchain_core.callbacks.base so tests run
+# without langchain installed. The adapter gates the import with try/except,
+# so we patch sys.modules before importing the adapter.
 # ---------------------------------------------------------------------------
 
 def _install_langchain_mock():
-    """Install a minimal langchain mock into sys.modules."""
+    """Install a minimal langchain_core mock into sys.modules."""
     # Base class that LangChainAdapter inherits from
     class BaseCallbackHandler:
         def __init__(self): pass
 
-    lc_mod = types.ModuleType("langchain")
-    lc_callbacks = types.ModuleType("langchain.callbacks")
-    lc_base = types.ModuleType("langchain.callbacks.base")
-    lc_schema = types.ModuleType("langchain.schema")
+    lc_core = types.ModuleType("langchain_core")
+    lc_core_callbacks = types.ModuleType("langchain_core.callbacks")
+    lc_core_base = types.ModuleType("langchain_core.callbacks.base")
 
-    lc_base.BaseCallbackHandler = BaseCallbackHandler
-    lc_schema.LLMResult = object
+    lc_core_base.BaseCallbackHandler = BaseCallbackHandler
+    lc_core.callbacks = lc_core_callbacks
+    lc_core_callbacks.base = lc_core_base
 
-    lc_mod.callbacks = lc_callbacks
-    lc_callbacks.base = lc_base
-
-    sys.modules.setdefault("langchain", lc_mod)
-    sys.modules.setdefault("langchain.callbacks", lc_callbacks)
-    sys.modules.setdefault("langchain.callbacks.base", lc_base)
-    sys.modules.setdefault("langchain.schema", lc_schema)
+    sys.modules.setdefault("langchain_core", lc_core)
+    sys.modules.setdefault("langchain_core.callbacks", lc_core_callbacks)
+    sys.modules.setdefault("langchain_core.callbacks.base", lc_core_base)
 
     return BaseCallbackHandler
 

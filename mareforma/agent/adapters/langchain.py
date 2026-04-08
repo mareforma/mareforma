@@ -40,7 +40,7 @@ from datetime import datetime, timezone
 from typing import Any, Union
 
 try:
-    from langchain.callbacks.base import BaseCallbackHandler
+    from langchain_core.callbacks.base import BaseCallbackHandler
     _HAS_LANGCHAIN = True
 except ImportError:
     _HAS_LANGCHAIN = False
