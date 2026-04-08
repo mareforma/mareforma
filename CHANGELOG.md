@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.0] - 2026-04-08
+
+### Added
+- `mareforma.agent` — framework-agnostic agent provenance module
+- `AgentEvent` — canonical dataclass for one AI scientist provenance event (LLM call, tool call, chain step, or custom)
+- `MareformaObserver` — context manager that records `AgentEvent`s to `graph.db` (`agent_events` table) and full payloads to `.mareforma/artifacts/agent_payloads/`; works with any AI scientist framework
+- `mareforma.agent.adapters.langchain.LangChainAdapter` — LangChain `BaseCallbackHandler` adapter; hooks `on_llm_start/end/error`, `on_tool_start/end/error`, `on_chain_end/error`
+- `mareforma agent-log [run_id]` — CLI command to inspect recorded agent events
+- `ctx.root` and `ctx.run_id` public properties on `BuildContext`
+
+### Changed
+- `open_db()` now uses `check_same_thread=False` — safe for LangChain's background callback threads under WAL mode
+
 ## [0.1.0] - 2026-03-25
 
 ### Added

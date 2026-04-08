@@ -1304,3 +1304,111 @@ def claim_update(claim_id, confidence, status, replication_status, text, support
         sys.exit(1)
 
     _ok(f"Claim '{claim_id}' updated.")
+
+
+# ---------------------------------------------------------------------------
+# agent-log
+# ---------------------------------------------------------------------------
+
+@cli.command("agent-log")
+@click.argument("run_id", required=False, default=None)
+@click.option("--limit", default=50, show_default=True,
+              help="Maximum number of events to show.")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Emit JSON to stdout.")
+def agent_log(run_id: str | None, limit: int, as_json: bool) -> None:
+    """Show agent provenance events recorded by MareformaObserver.
+
+    Lists events from the agent_events table. If RUN_ID is provided, shows
+    events for that transform run only. RUN_ID may be a partial prefix.
+
+    Examples:
+
+        mareforma agent-log
+
+        mareforma agent-log abc123
+
+        mareforma agent-log --limit 20 --json
+    """
+    from mareforma.db import open_db, DatabaseError
+
+    root = _root()
+
+    try:
+        conn = open_db(root)
+    except DatabaseError as exc:
+        _err(f"Could not open graph.db: {exc}")
+        sys.exit(1)
+
+    try:
+        # Ensure agent_events table exists (created lazily — may not be present)
+        from mareforma.agent._schema import AGENT_EVENTS_DDL
+        conn.executescript(AGENT_EVENTS_DDL)
+
+        if run_id is not None:
+            # Support partial prefix match
+            rows = conn.execute(
+                """
+                SELECT event_id, run_id, event_type, name, timestamp,
+                       status, duration_ms, input_hash, output_hash
+                FROM agent_events
+                WHERE run_id LIKE ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (f"{run_id}%", limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT event_id, run_id, event_type, name, timestamp,
+                       status, duration_ms, input_hash, output_hash
+                FROM agent_events
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+    except Exception as exc:
+        _err(f"Failed to read agent events: {exc}")
+        sys.exit(1)
+    finally:
+        conn.close()
+
+    events = [dict(r) for r in rows]
+
+    if as_json:
+        click.echo(json.dumps(events, indent=2))
+        return
+
+    if not events:
+        _info("No agent events recorded.")
+        if run_id:
+            _info(f"No events found for run_id prefix '{run_id}'.")
+        return
+
+    click.echo(click.style(f"AGENT LOG  ({len(events)} events)", bold=True, fg="cyan"))
+    click.echo("")
+
+    for ev in events:
+        status = ev["status"]
+        icon = (
+            click.style("✓", fg="green") if status == "success"
+            else click.style("✗", fg="red") if status == "failed"
+            else click.style("○", fg="yellow")
+        )
+        ts = (ev["timestamp"] or "")[:19].replace("T", " ")
+        duration = f"  {ev['duration_ms']}ms" if ev["duration_ms"] is not None else ""
+        run_short = (ev["run_id"] or "")[:8]
+        event_short = (ev["event_id"] or "")[:8]
+
+        click.echo(
+            f"  {icon} [{ev['event_type']:12}] {ev['name']:30} "
+            f"{status:12}{duration}"
+        )
+        click.echo(f"       run:{run_short}  event:{event_short}  {ts}")
+        if ev.get("input_hash"):
+            click.echo(f"       in :{ev['input_hash'][:16]}...")
+        if ev.get("output_hash"):
+            click.echo(f"       out:{ev['output_hash'][:16]}...")
+        click.echo("")

@@ -346,6 +346,16 @@ class BuildContext:
     # ------------------------------------------------------------------
 
     @property
+    def root(self) -> Path:
+        """Project root directory (where mareforma.project.toml lives)."""
+        return self._root
+
+    @property
+    def run_id(self) -> str:
+        """UUID string for the current transform run."""
+        return self._run_id
+
+    @property
     def saved_artifacts(self) -> dict[str, Path]:
         """Mapping of full artifact name → path for artifacts saved this run."""
         return dict(self._saved)

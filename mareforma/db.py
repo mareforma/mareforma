@@ -223,7 +223,7 @@ def open_db(root: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        conn = sqlite3.connect(str(path))
+        conn = sqlite3.connect(str(path), check_same_thread=False)
         conn.row_factory = sqlite3.Row
 
         version = conn.execute("PRAGMA user_version").fetchone()[0]
