@@ -356,6 +356,24 @@ class BuildContext:
         return self._run_id
 
     @property
+    def params(self) -> dict:
+        """Runtime parameters from the [params] section of mareforma.project.toml.
+
+        Use this to pass hypothesis text, domain, or other run-time values
+        into transforms without hardcoding them. Returns an empty dict if
+        no [params] section exists.
+
+        Example TOML:
+            [params]
+            hypothesis = "PV+ cells have higher out-degree than SST+ cells"
+            domain = "neuroscience"
+
+        Example transform:
+            hypothesis_text = ctx.params["hypothesis"]
+        """
+        return dict(self._registry_data.get("params", {}))
+
+    @property
     def saved_artifacts(self) -> dict[str, Path]:
         """Mapping of full artifact name → path for artifacts saved this run."""
         return dict(self._saved)
