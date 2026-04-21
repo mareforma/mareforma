@@ -12,7 +12,7 @@ Automatic epistemic provenance for life sciences pipelines. Write transforms, ru
 ## Install
 
 ```bash
-pip install mareforma
+uv pip install mareforma
 ```
 
 Requires Python ≥ 3.10.
