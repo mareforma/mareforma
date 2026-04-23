@@ -955,6 +955,41 @@ def list_claims(
     return [dict(row) for row in rows]
 
 
+def query_claims(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 10,
+    min_confidence: str | None = None,
+) -> list[dict]:
+    """Return top claims ordered by confidence (desc) then recency (desc).
+
+    Parameters
+    ----------
+    limit:
+        Maximum number of claims to return. Default 10.
+    min_confidence:
+        If set, exclude claims below this confidence tier.
+        Uses the same scale as add_claim: anecdotal / exploratory /
+        preliminary / supported / established.
+    """
+    if min_confidence is not None:
+        threshold = validate_confidence(min_confidence)
+        where = "WHERE confidence_float >= ?"
+        params: list = [threshold, limit]
+    else:
+        where = ""
+        params = [limit]
+    try:
+        rows = conn.execute(
+            f"SELECT {_CLAIM_SELECT} FROM claims {where} "
+            f"ORDER BY confidence_float DESC, created_at DESC LIMIT ?",
+            params,
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        raise DatabaseError(f"Failed to query claims: {exc}") from exc
+    return [dict(row) for row in rows]
+
+
 def list_claims_with_evidence(conn: sqlite3.Connection, claim_id: str) -> list[dict]:
     """Return evidence rows for a specific claim."""
     try:
