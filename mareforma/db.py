@@ -955,6 +955,39 @@ def list_claims(
     return [dict(row) for row in rows]
 
 
+def delete_claims_by_generated_by(
+    conn: sqlite3.Connection,
+    root: Path,
+    generated_by: str,
+) -> int:
+    """Delete all claims with the given generated_by tag.
+
+    Also deletes linked evidence rows. Triggers a claims.toml backup.
+    Returns the number of claims deleted.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT claim_id FROM claims WHERE generated_by = ?",
+            (generated_by,),
+        ).fetchall()
+        claim_ids = [r[0] for r in rows]
+        if not claim_ids:
+            return 0
+        placeholders = ",".join("?" * len(claim_ids))
+        conn.execute(
+            f"DELETE FROM evidence WHERE claim_id IN ({placeholders})", claim_ids
+        )
+        conn.execute(
+            f"DELETE FROM claims WHERE claim_id IN ({placeholders})", claim_ids
+        )
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        raise DatabaseError(f"Failed to delete claims: {exc}") from exc
+
+    _backup_claims_toml(conn, root)
+    return len(claim_ids)
+
+
 def query_claims(
     conn: sqlite3.Connection,
     *,
