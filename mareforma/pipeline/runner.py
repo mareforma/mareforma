@@ -259,6 +259,8 @@ class TransformRunner:
                     rerun_set.add(record.name)
                     classify_run(conn, run_id, record.name, self._root)
                     _print_node(console, record.name, "done")
+                    if console:
+                        console.print()
 
         finally:
             conn.close()
