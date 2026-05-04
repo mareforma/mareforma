@@ -296,10 +296,6 @@ class BuildContext:
             supports=resolved_supports or None,
             contradicts=contradicts,
         )
-        self.log(
-            f"  claim recorded [{confidence}]: "
-            f"{text[:60]}{'...' if len(text) > 60 else ''}"
-        )
         return claim_id
 
     def _warn(self, msg: str) -> None:
