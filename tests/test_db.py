@@ -106,7 +106,7 @@ class TestOpenDb:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
         finally:
             conn.close()
-        assert version == 1
+        assert version == 2
 
     def test_idempotent_second_open(self, tmp_path: Path) -> None:
         """Opening an already-initialised db must not raise."""

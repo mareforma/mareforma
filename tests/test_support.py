@@ -58,7 +58,7 @@ def _add_claim_with_support(conn, transform_name: str) -> None:
         """
         INSERT INTO claims
             (claim_id, source_name, text, confidence, supports_json, contradicts_json,
-             status, confidence_float, generation_method, generated_by, created_at, updated_at)
+             status, stated_confidence, generation_method, generated_by, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
@@ -166,7 +166,7 @@ def test_not_consistent_claim_empty_supports(tmp_path):
         """
         INSERT INTO claims
             (claim_id, source_name, text, confidence, supports_json, contradicts_json,
-             status, confidence_float, generation_method, generated_by, created_at, updated_at)
+             status, stated_confidence, generation_method, generated_by, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (claim_id, "morphology", "test", "exploratory", "[]", "[]", "open",

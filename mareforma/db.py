@@ -8,13 +8,21 @@ Tables
   artifacts       : artifacts saved via ctx.save() per run
   claims          : explicit scientific assertions
   evidence        : links from claims to transform runs or artifacts
+  agent_events    : AI scientist event log (LLM calls, tool calls, chain steps)
   build_meta      : key-value store for build-level metadata
 
 Schema version
 --------------
-  Stored in PRAGMA user_version. Current: 1.
-  Version 0 → fresh db, full schema applied, user_version=1.
-  Version >1 → DatabaseError with upgrade guidance.
+  Stored in PRAGMA user_version. Current: 2.
+  Version 0 → fresh db, full schema applied, user_version=2.
+  Version 1 → migrate to 2 (see _migrate_v1_to_v2).
+  Version >2 → DatabaseError with upgrade guidance.
+
+  Migration v1→v2:
+    - claims.confidence_float  renamed  claims.stated_confidence
+    - claims gains: classification, support_level, idempotency_key,
+                    validated_by, validated_at
+    - agent_events incorporated into versioned schema
 
 Connection lifecycle
 --------------------
@@ -42,10 +50,18 @@ Confidence scale (categorical → internal float)
   supported   → 0.80  : externally replicated or large N
   established → 0.95  : multiple independent replications
 
+Support levels (v0.3.0+)
+-------------------------
+  PRELIMINARY  : one agent claimed it
+  REPLICATED   : ≥2 agents with different generated_by, sharing the same
+                 upstream claim in supports[] (checked at INSERT time)
+  ESTABLISHED  : explicit human validation via validate_claim() only
+
 ERD
 ---
   transform_runs ──< artifacts      (run_id FK)
   transform_runs ──< evidence       (run_id FK, nullable)
+  transform_runs ──< agent_events   (run_id FK)
   claims         ──< evidence       (claim_id FK)
 """
 
@@ -67,7 +83,7 @@ from mareforma.registry import MareformaError
 # ---------------------------------------------------------------------------
 
 DB_FILENAME = "graph.db"
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 CONFIDENCE_SCALE: dict[str, float] = {
     "anecdotal": 0.20,
@@ -86,6 +102,17 @@ VALID_REPLICATION_STATUSES = (
     "failed_replication",
     "meta_analyzed",
 )
+
+VALID_CLASSIFICATIONS = ("INFERRED", "ANALYTICAL", "DERIVED")
+
+VALID_SUPPORT_LEVELS = ("PRELIMINARY", "REPLICATED", "ESTABLISHED")
+
+# Maps min_support value to the set of levels that satisfy it.
+_SUPPORT_LEVEL_TIERS: dict[str, tuple[str, ...]] = {
+    "PRELIMINARY": ("PRELIMINARY", "REPLICATED", "ESTABLISHED"),
+    "REPLICATED":  ("REPLICATED", "ESTABLISHED"),
+    "ESTABLISHED": ("ESTABLISHED",),
+}
 
 _SCHEMA_SQL = """
 PRAGMA journal_mode=WAL;
@@ -119,20 +146,25 @@ CREATE TABLE IF NOT EXISTS artifacts (
 );
 
 CREATE TABLE IF NOT EXISTS claims (
-    claim_id              TEXT PRIMARY KEY,
-    text                  TEXT NOT NULL,
-    confidence            TEXT NOT NULL DEFAULT 'exploratory',
-    confidence_float      REAL NOT NULL DEFAULT 0.4,
-    generation_method     TEXT NOT NULL DEFAULT 'explicit',
-    status                TEXT NOT NULL DEFAULT 'open',
-    replication_status    TEXT NOT NULL DEFAULT 'unknown',
-    source_name           TEXT,
-    generated_by          TEXT NOT NULL DEFAULT 'human',
-    supports_json         TEXT NOT NULL DEFAULT '[]',
-    contradicts_json      TEXT NOT NULL DEFAULT '[]',
-    comparison_summary    TEXT,
-    created_at            TEXT NOT NULL,
-    updated_at            TEXT NOT NULL
+    claim_id           TEXT PRIMARY KEY,
+    text               TEXT NOT NULL,
+    confidence         TEXT NOT NULL DEFAULT 'exploratory',
+    stated_confidence  REAL NOT NULL DEFAULT 0.4,
+    classification     TEXT NOT NULL DEFAULT 'INFERRED',
+    support_level      TEXT NOT NULL DEFAULT 'PRELIMINARY',
+    idempotency_key    TEXT,
+    validated_by       TEXT,
+    validated_at       TEXT,
+    generation_method  TEXT NOT NULL DEFAULT 'explicit',
+    status             TEXT NOT NULL DEFAULT 'open',
+    replication_status TEXT NOT NULL DEFAULT 'unknown',
+    source_name        TEXT,
+    generated_by       TEXT NOT NULL DEFAULT 'human',
+    supports_json      TEXT NOT NULL DEFAULT '[]',
+    contradicts_json   TEXT NOT NULL DEFAULT '[]',
+    comparison_summary TEXT,
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS evidence (
@@ -142,6 +174,21 @@ CREATE TABLE IF NOT EXISTS evidence (
     artifact_name TEXT,
     created_at    TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS agent_events (
+    event_id      TEXT PRIMARY KEY,
+    run_id        TEXT NOT NULL,
+    event_type    TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    timestamp     TEXT NOT NULL,
+    status        TEXT NOT NULL,
+    duration_ms   INTEGER,
+    input_hash    TEXT,
+    output_hash   TEXT,
+    metadata_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_agent_events_run_id
+    ON agent_events(run_id);
 
 CREATE TABLE IF NOT EXISTS build_meta (
     key   TEXT PRIMARY KEY,
@@ -154,6 +201,10 @@ CREATE INDEX IF NOT EXISTS idx_claims_source
     ON claims(source_name);
 CREATE INDEX IF NOT EXISTS idx_claims_generated_by
     ON claims(generated_by);
+CREATE INDEX IF NOT EXISTS idx_claims_support_level
+    ON claims(support_level);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_claims_idempotency_key
+    ON claims(idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_transform_runs_name
     ON transform_runs(transform_name);
 CREATE INDEX IF NOT EXISTS idx_transform_runs_status
@@ -168,9 +219,36 @@ CREATE TABLE IF NOT EXISTS transform_deps (
 );
 """
 
-# Explicit column list for list_claims() — avoids SELECT * coupling to schema.
+_MIGRATION_V1_TO_V2 = """
+ALTER TABLE claims RENAME COLUMN confidence_float TO stated_confidence;
+ALTER TABLE claims ADD COLUMN classification  TEXT NOT NULL DEFAULT 'INFERRED';
+ALTER TABLE claims ADD COLUMN support_level   TEXT NOT NULL DEFAULT 'PRELIMINARY';
+ALTER TABLE claims ADD COLUMN idempotency_key TEXT;
+ALTER TABLE claims ADD COLUMN validated_by    TEXT;
+ALTER TABLE claims ADD COLUMN validated_at    TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_claims_idempotency_key ON claims(idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE TABLE IF NOT EXISTS agent_events (
+    event_id      TEXT PRIMARY KEY,
+    run_id        TEXT NOT NULL,
+    event_type    TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    timestamp     TEXT NOT NULL,
+    status        TEXT NOT NULL,
+    duration_ms   INTEGER,
+    input_hash    TEXT,
+    output_hash   TEXT,
+    metadata_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_agent_events_run_id
+    ON agent_events(run_id);
+CREATE INDEX IF NOT EXISTS idx_claims_support_level ON claims(support_level);
+"""
+
+# Explicit column list — avoids SELECT * coupling to schema changes.
 _CLAIM_COLUMNS = (
-    "claim_id", "text", "confidence", "confidence_float",
+    "claim_id", "text", "confidence", "stated_confidence",
+    "classification", "support_level", "idempotency_key",
+    "validated_by", "validated_at",
     "generation_method", "status", "replication_status", "source_name",
     "generated_by", "supports_json", "contradicts_json",
     "comparison_summary", "created_at", "updated_at",
@@ -210,9 +288,10 @@ def open_db(root: Path) -> sqlite3.Connection:
 
     Schema migration
     ----------------
-    - version 0 : fresh db — apply full schema, set user_version=1
-    - version 1 : ready to use
-    - version >1: DatabaseError — upgrade mareforma
+    - version 0 : fresh db — apply full schema, set user_version=2
+    - version 1 : migrate to v2 (confidence_float→stated_confidence + new columns)
+    - version 2 : ready to use
+    - version >2: DatabaseError — upgrade mareforma
 
     Raises
     ------
@@ -229,10 +308,11 @@ def open_db(root: Path) -> sqlite3.Connection:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
 
         if version == 0:
-            # Fresh database — apply full schema and set version.
             conn.executescript(_SCHEMA_SQL)
             conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             conn.commit()
+        elif version == 1:
+            _migrate_v1_to_v2(conn)
         elif version == _SCHEMA_VERSION:
             pass  # Current version — ready to use.
         else:
@@ -245,6 +325,30 @@ def open_db(root: Path) -> sqlite3.Connection:
 
     except sqlite3.OperationalError as exc:
         raise DatabaseError(f"Could not open database at {path}: {exc}") from exc
+
+
+def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
+    """Migrate graph.db from user_version=1 to user_version=2.
+
+    Renames confidence_float → stated_confidence; adds classification,
+    support_level, idempotency_key, validated_by, validated_at; incorporates
+    agent_events into the versioned schema. Wrapped in a transaction — rolls
+    back fully on any failure.
+    """
+    try:
+        conn.execute("BEGIN")
+        for stmt in _MIGRATION_V1_TO_V2.strip().split(";"):
+            stmt = stmt.strip()
+            if stmt:
+                conn.execute(stmt)
+        conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+        conn.execute("COMMIT")
+    except sqlite3.OperationalError as exc:
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        raise DatabaseError(f"Migration v1→v2 failed (rolled back): {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -747,10 +851,21 @@ def add_claim(
     generation_method: str = "explicit",
     supports: list[str] | None = None,
     contradicts: list[str] | None = None,
+    # v0.3.0 fields — optional, backward-compatible defaults
+    classification: str = "INFERRED",
+    stated_confidence: float | None = None,
+    idempotency_key: str | None = None,
 ) -> str:
     """Insert a new claim and return its claim_id.
 
     Also writes a claims.toml backup and links evidence if run_id is provided.
+    If idempotency_key is provided and already exists, returns the existing
+    claim_id without inserting a duplicate.
+
+    After insert, checks whether the new claim triggers REPLICATED status on
+    any upstream claim: if ≥2 claims now share the same upstream claim_id in
+    their supports[] and have different generated_by values, all such claims
+    are promoted to support_level='REPLICATED'.
 
     Parameters
     ----------
@@ -762,17 +877,42 @@ def add_claim(
         'human' or a model identifier string.
     generation_method:
         'explicit' | 'agent-wrapped' | 'inferred'
+    classification:
+        'INFERRED' | 'ANALYTICAL' | 'DERIVED'
+    stated_confidence:
+        Float 0.0–1.0. Defaults to CONFIDENCE_SCALE[confidence] if not set.
+    idempotency_key:
+        Stable key for retry-safe writes. Same key → same claim_id returned.
 
     Raises
     ------
     ValueError
-        If confidence, status, or replication_status values are invalid.
+        If confidence, status, replication_status, or classification are invalid.
     """
     if not text or not text.strip():
         raise ValueError("Claim text cannot be empty.")
+    if classification not in VALID_CLASSIFICATIONS:
+        raise ValueError(
+            f"Unknown classification '{classification}'. "
+            f"Use one of: {', '.join(VALID_CLASSIFICATIONS)}"
+        )
     confidence_float = validate_confidence(confidence)
+    if stated_confidence is None:
+        stated_confidence = confidence_float
     validate_status(status)
     validate_replication_status(replication_status)
+
+    # Idempotency check — return existing claim_id if key already present.
+    if idempotency_key is not None:
+        try:
+            row = conn.execute(
+                "SELECT claim_id FROM claims WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            if row:
+                return row["claim_id"]
+        except sqlite3.OperationalError as exc:
+            raise DatabaseError(f"Idempotency check failed: {exc}") from exc
 
     claim_id = str(uuid.uuid4())
     now = _now()
@@ -783,15 +923,16 @@ def add_claim(
         conn.execute(
             """
             INSERT INTO claims
-                (claim_id, text, confidence, confidence_float, generation_method,
+                (claim_id, text, confidence, stated_confidence, classification,
+                 support_level, idempotency_key, generation_method,
                  status, replication_status, source_name, generated_by,
                  supports_json, contradicts_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, 'PRELIMINARY', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                claim_id, text.strip(), confidence, confidence_float,
-                generation_method, status, replication_status,
-                source_name, generated_by,
+                claim_id, text.strip(), confidence, stated_confidence,
+                classification, idempotency_key, generation_method,
+                status, replication_status, source_name, generated_by,
                 supports_json, contradicts_json, now, now,
             ),
         )
@@ -807,8 +948,104 @@ def add_claim(
     except sqlite3.OperationalError as exc:
         raise DatabaseError(f"Failed to add claim: {exc}") from exc
 
+    # Check whether this claim triggers REPLICATED status on shared upstreams.
+    _maybe_update_replicated(conn, claim_id, supports or [], generated_by)
+
     _backup_claims_toml(conn, root)
     return claim_id
+
+
+def _maybe_update_replicated(
+    conn: sqlite3.Connection,
+    new_claim_id: str,
+    supports: list[str],
+    generated_by: str,
+) -> None:
+    """Promote claims to REPLICATED when convergence is detected.
+
+    Convergence: ≥2 claims share the same upstream claim_id in their
+    supports[] and have different generated_by values. Uses json_each()
+    for correct JSON array element extraction (no fragile LIKE).
+
+    Called immediately after a successful INSERT in add_claim().
+    Failures are swallowed — convergence detection must not crash writes.
+    """
+    if not supports:
+        return
+    try:
+        placeholders = ",".join("?" * len(supports))
+        # Find all claims (excluding the new one) that reference the same
+        # upstream claim_ids and have a different generated_by.
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT c.claim_id, c.generated_by
+            FROM claims c, json_each(c.supports_json) j
+            WHERE j.value IN ({placeholders})
+              AND c.claim_id != ?
+              AND c.generated_by != ?
+              AND c.support_level != 'ESTABLISHED'
+            """,
+            (*supports, new_claim_id, generated_by),
+        ).fetchall()
+
+        if not rows:
+            return
+
+        # At least one independent agent shares an upstream — promote all.
+        peer_ids = [r["claim_id"] for r in rows] + [new_claim_id]
+        peer_placeholders = ",".join("?" * len(peer_ids))
+        conn.execute(
+            f"UPDATE claims SET support_level = 'REPLICATED', updated_at = ? "
+            f"WHERE claim_id IN ({peer_placeholders})",
+            (_now(), *peer_ids),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # Convergence detection is best-effort — never crash a write.
+
+
+def validate_claim(
+    conn: sqlite3.Connection,
+    claim_id: str,
+    *,
+    validated_by: str | None = None,
+) -> None:
+    """Promote a REPLICATED claim to ESTABLISHED (human validation).
+
+    Raises
+    ------
+    ClaimNotFoundError
+        If no claim with claim_id exists.
+    ValueError
+        If the claim's support_level is not 'REPLICATED'.
+    """
+    row = conn.execute(
+        "SELECT support_level FROM claims WHERE claim_id = ?",
+        (claim_id,),
+    ).fetchone()
+    if row is None:
+        raise ClaimNotFoundError(f"Claim '{claim_id}' not found.")
+    if row["support_level"] != "REPLICATED":
+        raise ValueError(
+            f"Claim '{claim_id}' has support_level='{row['support_level']}'. "
+            "Only REPLICATED claims can be promoted to ESTABLISHED."
+        )
+    now = _now()
+    try:
+        conn.execute(
+            """
+            UPDATE claims
+            SET support_level = 'ESTABLISHED',
+                validated_by = ?,
+                validated_at = ?,
+                updated_at   = ?
+            WHERE claim_id = ?
+            """,
+            (validated_by, now, now, claim_id),
+        )
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        raise DatabaseError(f"Failed to validate claim '{claim_id}': {exc}") from exc
 
 
 def update_claim(
@@ -838,7 +1075,7 @@ def update_claim(
         raise ClaimNotFoundError(f"Claim '{claim_id}' not found.")
 
     new_confidence = existing["confidence"]
-    new_confidence_float = existing["confidence_float"]
+    new_stated_confidence = existing["stated_confidence"]
     new_status = existing["status"]
     new_replication_status = existing["replication_status"]
     new_text = existing["text"]
@@ -847,7 +1084,7 @@ def update_claim(
     new_comparison_summary = existing.get("comparison_summary")
 
     if confidence is not None:
-        new_confidence_float = validate_confidence(confidence)
+        new_stated_confidence = validate_confidence(confidence)
         new_confidence = confidence
     if status is not None:
         validate_status(status)
@@ -870,13 +1107,13 @@ def update_claim(
         conn.execute(
             """
             UPDATE claims
-            SET text = ?, confidence = ?, confidence_float = ?, status = ?,
+            SET text = ?, confidence = ?, stated_confidence = ?, status = ?,
                 replication_status = ?, supports_json = ?, contradicts_json = ?,
                 comparison_summary = ?, updated_at = ?
             WHERE claim_id = ?
             """,
             (
-                new_text, new_confidence, new_confidence_float,
+                new_text, new_confidence, new_stated_confidence,
                 new_status, new_replication_status,
                 new_supports_json, new_contradicts_json,
                 new_comparison_summary, _now(), claim_id,
@@ -993,29 +1230,67 @@ def query_claims(
     *,
     limit: int = 10,
     min_confidence: str | None = None,
+    text: str | None = None,
+    min_support: str | None = None,
+    classification: str | None = None,
 ) -> list[dict]:
-    """Return top claims ordered by confidence (desc) then recency (desc).
+    """Return claims ordered by stated_confidence (desc) then recency (desc).
 
     Parameters
     ----------
     limit:
         Maximum number of claims to return. Default 10.
     min_confidence:
-        If set, exclude claims below this confidence tier.
-        Uses the same scale as add_claim: anecdotal / exploratory /
-        preliminary / supported / established.
+        Exclude claims below this confidence tier (anecdotal / exploratory /
+        preliminary / supported / established). Legacy @transform filter.
+    text:
+        Optional substring filter — case-insensitive LIKE match on claim text.
+    min_support:
+        Minimum support level: 'PRELIMINARY' | 'REPLICATED' | 'ESTABLISHED'.
+        PRELIMINARY returns all; REPLICATED returns REPLICATED + ESTABLISHED;
+        ESTABLISHED returns only ESTABLISHED.
+    classification:
+        Filter by classification: 'INFERRED' | 'ANALYTICAL' | 'DERIVED'.
     """
+    conditions: list[str] = []
+    params: list = []
+
     if min_confidence is not None:
         threshold = validate_confidence(min_confidence)
-        where = "WHERE confidence_float >= ?"
-        params: list = [threshold, limit]
-    else:
-        where = ""
-        params = [limit]
+        conditions.append("stated_confidence >= ?")
+        params.append(threshold)
+
+    if text is not None:
+        conditions.append("text LIKE ?")
+        params.append(f"%{text}%")
+
+    if min_support is not None:
+        if min_support not in VALID_SUPPORT_LEVELS:
+            raise ValueError(
+                f"Unknown min_support '{min_support}'. "
+                f"Use one of: {', '.join(VALID_SUPPORT_LEVELS)}"
+            )
+        tiers = _SUPPORT_LEVEL_TIERS[min_support]
+        tier_placeholders = ",".join("?" * len(tiers))
+        conditions.append(f"support_level IN ({tier_placeholders})")
+        params.extend(tiers)
+
+    if classification is not None:
+        if classification not in VALID_CLASSIFICATIONS:
+            raise ValueError(
+                f"Unknown classification '{classification}'. "
+                f"Use one of: {', '.join(VALID_CLASSIFICATIONS)}"
+            )
+        conditions.append("classification = ?")
+        params.append(classification)
+
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    params.append(limit)
+
     try:
         rows = conn.execute(
             f"SELECT {_CLAIM_SELECT} FROM claims {where} "
-            f"ORDER BY confidence_float DESC, created_at DESC LIMIT ?",
+            f"ORDER BY stated_confidence DESC, created_at DESC LIMIT ?",
             params,
         ).fetchall()
     except sqlite3.OperationalError as exc:
@@ -1131,6 +1406,9 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
             entry: dict[str, Any] = {
                 "text": c["text"],
                 "confidence": c["confidence"],
+                "stated_confidence": c.get("stated_confidence") or 0.4,
+                "classification": c.get("classification") or "INFERRED",
+                "support_level": c.get("support_level") or "PRELIMINARY",
                 "generation_method": c.get("generation_method", "explicit"),
                 "generated_by": c.get("generated_by", "human"),
                 "status": c["status"],
@@ -1143,6 +1421,10 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
             }
             if c.get("source_name"):
                 entry["source_name"] = c["source_name"]
+            if c.get("validated_by"):
+                entry["validated_by"] = c["validated_by"]
+            if c.get("validated_at"):
+                entry["validated_at"] = c["validated_at"]
             data["claims"][c["claim_id"]] = entry
 
         out = root / "claims.toml"
