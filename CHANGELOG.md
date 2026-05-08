@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.1] - 2026-05-08
+
+### Added
+- `ctx.params` — runtime parameter injection from TOML for transforms
+- `query_claims()` — read primitive for the epistemic graph
+- `delete_claims_by_generated_by()` — delete claims by their source agent
+
+### Fixed
+- `LangChainAdapter` updated to use `langchain_core.callbacks.base` (replaces deprecated import path)
+- Blank line after each transform's done line in build output
+
+### Changed
+- Removed verbose logging of recorded claims in `BuildContext`
+
 ## [0.2.0] - 2026-04-08
 
 ### Added
