@@ -1,7 +1,7 @@
 """Mareforma — The provenance layer for AI-driven research pipelines."""
 
 __description__ = "Mareforma — The provenance layer for AI-driven research pipelines."
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 from mareforma.transforms import transform, registry
 from mareforma.initializer import initialize
