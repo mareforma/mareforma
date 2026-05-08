@@ -1,8 +1,8 @@
 # Mareforma — agent integration guide
 
 Mareforma is the epistemic layer AI scientists run on. It gives agents a
-local SQLite graph for asserting claims with provenance and querying what
-has already been established before making new assertions.
+local graph for asserting claims with provenance and querying what has
+already been established before making new assertions.
 
 ## Install
 
@@ -15,34 +15,23 @@ pip install mareforma
 ```python
 import mareforma
 
-# Open the graph (creates .mareforma/graph.db in cwd if missing)
-graph = mareforma.open()
-
-# Assert a claim — returns a stable claim_id
-claim_id = graph.assert_claim(
-    "BC cells receive more inhibitory input than MC cells",
-    classification="ANALYTICAL",       # ANALYTICAL | DERIVED | INFERRED (default)
-    stated_confidence=0.85,            # float 0.0–1.0, default 0.4
-    supports=["prior_claim_uuid"],     # upstream claim_ids this builds on
-    idempotency_key="run_abc_claim_1", # retry-safe: same key → same id
-)
-
-# Query before asserting
-established = graph.query("inhibitory input", min_support="REPLICATED")
-for claim in established:
-    print(claim["text"], claim["support_level"], claim["stated_confidence"])
-
-# Inspect a specific claim
-claim = graph.get_claim(claim_id)
-
-graph.close()
-```
-
-Context manager (recommended for agents):
-
-```python
 with mareforma.open() as graph:
-    claim_id = graph.assert_claim("...", stated_confidence=0.9)
+
+    # Query before asserting — check what is already established
+    prior = graph.query("inhibitory input", min_support="REPLICATED")
+    prior_ids = [c["claim_id"] for c in prior]
+
+    # Assert a claim
+    claim_id = graph.assert_claim(
+        "BC cells receive more inhibitory input than MC cells",
+        classification="ANALYTICAL",       # ANALYTICAL | DERIVED | INFERRED (default)
+        supports=prior_ids,                # upstream claim_ids this builds on
+        idempotency_key="run_abc_claim_1", # retry-safe: same key → same id
+    )
+
+    # Inspect the result
+    claim = graph.get_claim(claim_id)
+    print(claim["text"], claim["support_level"])
 ```
 
 ## Classification
@@ -55,6 +44,8 @@ with mareforma.open() as graph:
 
 ## Support levels
 
+Trust in a claim is derived from the graph, not from the agent that made it.
+
 | Level | Meaning |
 |---|---|
 | `PRELIMINARY` | One agent claimed it |
@@ -62,19 +53,22 @@ with mareforma.open() as graph:
 | `ESTABLISHED` | Human-validated — only reachable via `graph.validate()` |
 
 REPLICATED is set automatically when two claims share an upstream in `supports[]`
-and have different `generated_by` values.
+and have different `generated_by` values. No agent can self-promote to ESTABLISHED.
 
 ## Query filters
 
 ```python
-# All established claims
-graph.query(min_support="ESTABLISHED")
+# All claims
+graph.query()
 
-# Text search + support filter
+# Text search + minimum support
 graph.query("synaptic", min_support="REPLICATED", limit=10)
 
 # By classification
 graph.query(classification="ANALYTICAL")
+
+# Only human-validated findings
+graph.query(min_support="ESTABLISHED")
 ```
 
 ## Idempotency

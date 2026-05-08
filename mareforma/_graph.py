@@ -8,7 +8,7 @@ Usage
   graph = mareforma.open(Path("my_project"))
 
   with mareforma.open() as graph:                  # context manager
-      claim_id = graph.assert_claim("...", stated_confidence=0.8)
+      claim_id = graph.assert_claim("...", classification="ANALYTICAL")
       results  = graph.query("inhibitory input", min_support="REPLICATED")
       graph.validate(claim_id, validated_by="jane@lab.org")
 
@@ -57,7 +57,6 @@ class EpistemicGraph:
         text: str,
         *,
         classification: str = "INFERRED",
-        stated_confidence: float | None = None,
         supports: list[str] | None = None,
         contradicts: list[str] | None = None,
         idempotency_key: str | None = None,
@@ -72,8 +71,6 @@ class EpistemicGraph:
             The claim text. Cannot be empty.
         classification:
             'INFERRED' (default) | 'ANALYTICAL' | 'DERIVED'
-        stated_confidence:
-            Float 0.0–1.0. Defaults to 0.4 if not provided.
         supports:
             List of claim_ids or DOIs this claim is grounded in.
         contradicts:
@@ -90,7 +87,6 @@ class EpistemicGraph:
             self._root,
             text,
             classification=classification,
-            stated_confidence=stated_confidence,
             supports=supports,
             contradicts=contradicts,
             idempotency_key=idempotency_key,
@@ -121,7 +117,7 @@ class EpistemicGraph:
 
         Returns
         -------
-        List of claim dicts ordered by stated_confidence desc, recency desc.
+        List of claim dicts ordered by support_level desc, recency desc.
         """
         return _db.query_claims(
             self._conn,

@@ -386,11 +386,10 @@ def status_cmd(as_json: bool) -> None:
     else:
         click.echo("  Sources with no claims: none")
 
-    if report.confidence_breakdown:
-        click.echo("  Confidence breakdown:")
-        order = ["anecdotal", "exploratory", "preliminary", "supported", "established"]
-        for level in order:
-            count = report.confidence_breakdown.get(level, 0)
+    if report.support_level_breakdown:
+        click.echo("  Support level breakdown:")
+        for level in ("ESTABLISHED", "REPLICATED", "PRELIMINARY"):
+            count = report.support_level_breakdown.get(level, 0)
             if count:
                 bar = "\u2588" * min(count, 20)
                 click.echo(f"    {level:14} {bar}  {count}")
@@ -1043,35 +1042,29 @@ def export(output, as_json):
 
 @cli.group()
 def claim() -> None:
-    """Manage explicit scientific claims.
+    """Manage scientific claims.
 
-    Claims are falsifiable scientific assertions with a confidence level,
-    epistemic status, and optional evidence link to a transform run.
-
-    Confidence levels (least → most certain):
-      anecdotal, exploratory, preliminary, supported, established
+    Claims are falsifiable assertions with a classification (INFERRED |
+    ANALYTICAL | DERIVED) and a graph-derived support level (PRELIMINARY →
+    REPLICATED → ESTABLISHED).
 
     Examples:
 
         mareforma claim add "L2/3 neurons have a mean axon extent of 0.7 mm (n=312)"
-            --confidence exploratory --source morphology
+            --classification ANALYTICAL --source morphology
 
         mareforma claim list --status open
 
-        mareforma claim update <ID> --confidence preliminary --status supported
+        mareforma claim update <ID> --status contested
     """
 
 
 @claim.command("add")
 @click.argument("text")
-@click.option("--confidence", default="exploratory", show_default=True,
-              help="Confidence level: anecdotal, exploratory, preliminary, "
-                   "supported, established.")
+@click.option("--classification", default="INFERRED", show_default=True,
+              help="Claim classification: INFERRED, ANALYTICAL, DERIVED.")
 @click.option("--status", default="open", show_default=True,
-              help="Epistemic status: open, supported, contested, retracted.")
-@click.option("--replication-status", default="unknown", show_default=True,
-              help="Replication evidence: unknown, single_study, "
-                   "independently_replicated, failed_replication, meta_analyzed.")
+              help="Editorial status: open, contested, retracted.")
 @click.option("--source", "source_name", default=None,
               help="Registered source this claim is about.")
 @click.option("--supports", "supports", multiple=True, metavar="DOI_OR_ID",
@@ -1080,24 +1073,15 @@ def claim() -> None:
               help="DOI or claim_id this claim contests (repeatable).")
 @click.option("--generated-by", "generated_by", default="human", show_default=True,
               help="'human' or a model identifier string.")
-@click.option("--generation-method", "generation_method", default="explicit",
-              show_default=True,
-              help="explicit | agent-wrapped | inferred")
-def claim_add(
-    text, confidence, status, replication_status, source_name,
-    supports, contradicts, generated_by, generation_method,
-):
+def claim_add(text, classification, status, source_name, supports, contradicts, generated_by):
     """Add a new scientific claim TEXT.
-
-    Use --supports to link DOIs or claim_ids that support this claim.
 
     Examples:
 
         mareforma claim add "L2/3 neurons have a mean axon extent of 0.7 mm (n=312)"
-            --confidence exploratory --source morphology
+            --classification ANALYTICAL --source morphology
 
-        mareforma claim add "Spiking frecuency increases with cortical depth"
-            --confidence preliminary --status supported
+        mareforma claim add "Spiking frequency increases with cortical depth"
             --supports 10.64898/2026.03.05.709819
     """
     from mareforma.db import open_db, add_claim, DatabaseError
@@ -1115,12 +1099,10 @@ def claim_add(
         try:
             claim_id = add_claim(
                 conn, root, text,
-                confidence=confidence,
+                classification=classification,
                 status=status,
-                replication_status=replication_status,
                 source_name=source_name,
                 generated_by=generated_by,
-                generation_method=generation_method,
                 supports=list(supports) or None,
                 contradicts=list(contradicts) or None,
             )
@@ -1133,13 +1115,13 @@ def claim_add(
         _err(str(exc))
         sys.exit(1)
 
-    _ok(f"Claim added [{confidence}]: {text[:60]}{'...' if len(text) > 60 else ''}")
+    _ok(f"Claim added [{classification}]: {text[:60]}{'...' if len(text) > 60 else ''}")
     _info(f"  ID: {claim_id}")
 
 
 @claim.command("list")
 @click.option("--status", default=None,
-              help="Filter by status: open, supported, contested, retracted.")
+              help="Filter by status: open, contested, retracted.")
 @click.option("--source", "source_name", default=None,
               help="Filter by registered source name.")
 @click.option("--json", "as_json", is_flag=True, default=False,
@@ -1177,8 +1159,7 @@ def claim_list(status, source_name, as_json):
     click.echo(click.style(f"CLAIMS  ({len(claims)} total)", bold=True, fg="cyan"))
     click.echo("")
     for c in claims:
-        conf_display = f"{c['confidence']} ({c['confidence_float']:.2f})"
-        click.echo(f"  [{c['status']:10}] [{conf_display:25}] {c['text'][:70]}")
+        click.echo(f"  [{c['status']:10}] [{c.get('support_level', 'PRELIMINARY'):12}] [{c.get('classification', 'INFERRED'):10}] {c['text'][:60]}")
         click.echo(f"             id: {c['claim_id']}")
         if c.get("source_name"):
             click.echo(f"         source: {c['source_name']}")
@@ -1219,20 +1200,18 @@ def claim_show(claim_id, as_json):
         click.echo(json.dumps({"claim": c, "evidence": evidence}, indent=2))
         return
 
-    import json as _json
     click.echo(click.style("CLAIM", bold=True, fg="cyan"))
-    click.echo(f"  id                 : {c['claim_id']}")
-    click.echo(f"  text               : {c['text']}")
-    click.echo(f"  confidence         : {c['confidence']} ({c['confidence_float']:.2f})")
-    click.echo(f"  generation_method  : {c.get('generation_method', 'explicit')}")
-    click.echo(f"  generated_by       : {c.get('generated_by', 'human')}")
-    click.echo(f"  status             : {c['status']}")
-    click.echo(f"  replication_status : {c['replication_status']}")
+    click.echo(f"  id             : {c['claim_id']}")
+    click.echo(f"  text           : {c['text']}")
+    click.echo(f"  classification : {c.get('classification', 'INFERRED')}")
+    click.echo(f"  support_level  : {c.get('support_level', 'PRELIMINARY')}")
+    click.echo(f"  generated_by   : {c.get('generated_by', 'human')}")
+    click.echo(f"  status         : {c['status']}")
     if c.get("source_name"):
         click.echo(f"  source             : {c['source_name']}")
 
-    supports = _json.loads(c.get("supports_json", "[]") or "[]")
-    contradicts = _json.loads(c.get("contradicts_json", "[]") or "[]")
+    supports = json.loads(c.get("supports_json", "[]") or "[]")
+    contradicts = json.loads(c.get("contradicts_json", "[]") or "[]")
     if supports:
         click.echo(f"  supports           : {', '.join(supports)}")
     if contradicts:
@@ -1255,19 +1234,15 @@ def claim_show(claim_id, as_json):
 
 @claim.command("update")
 @click.argument("claim_id")
-@click.option("--confidence", default=None,
-              help="New confidence level.")
 @click.option("--status", default=None,
-              help="New epistemic status.")
-@click.option("--replication-status", default=None,
-              help="New replication status.")
+              help="New editorial status: open, contested, retracted.")
 @click.option("--text", default=None,
               help="New claim text.")
 @click.option("--supports", "supports", multiple=True, metavar="DOI_OR_ID",
-              help="Replace supports list (repeatable). Pass once with empty string to clear.")
+              help="Replace supports list (repeatable).")
 @click.option("--contradicts", "contradicts", multiple=True, metavar="DOI_OR_ID",
               help="Replace contradicts list (repeatable).")
-def claim_update(claim_id, confidence, status, replication_status, text, supports, contradicts):
+def claim_update(claim_id, status, text, supports, contradicts):
     """Update fields on an existing claim by ID."""
     from mareforma.db import open_db, update_claim, DatabaseError, ClaimNotFoundError
 
@@ -1284,9 +1259,7 @@ def claim_update(claim_id, confidence, status, replication_status, text, support
         try:
             update_claim(
                 conn, root, claim_id,
-                confidence=confidence,
                 status=status,
-                replication_status=replication_status,
                 text=text,
                 supports=list(supports) if supports else None,
                 contradicts=list(contradicts) if contradicts else None,

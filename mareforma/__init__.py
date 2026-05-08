@@ -33,7 +33,7 @@ def open(path: "str | Path | None" = None) -> "EpistemicGraph":  # noqa: A001
     Example
     -------
     >>> graph = mareforma.open()
-    >>> claim_id = graph.assert_claim("...", stated_confidence=0.8)
+    >>> claim_id = graph.assert_claim("...", classification="ANALYTICAL")
     >>> results = graph.query("...", min_support="REPLICATED")
     >>> graph.close()
 

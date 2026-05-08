@@ -17,7 +17,6 @@ Covers:
   - list_claims: filtered and unfiltered
   - update_claim: fields updated, backup written
   - delete_claim: row removed from db
-  - validate_confidence: valid labels pass, invalid raises ValueError
   - claims.toml backup written after add_claim
   - migrate_from_lock_json: lock data imported, .bak created
   - migrate_from_lock_json: idempotent (skipped if .bak exists)
@@ -52,7 +51,6 @@ from mareforma.db import (
     record_deps,
     set_build_meta,
     update_claim,
-    validate_confidence,
     write_transform_class,
 )
 
@@ -106,7 +104,7 @@ class TestOpenDb:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
         finally:
             conn.close()
-        assert version == 2
+        assert version == 1
 
     def test_idempotent_second_open(self, tmp_path: Path) -> None:
         """Opening an already-initialised db must not raise."""
@@ -340,26 +338,6 @@ class TestBuildMeta:
 
 
 # ---------------------------------------------------------------------------
-# validate_confidence
-# ---------------------------------------------------------------------------
-
-class TestValidateConfidence:
-    def test_valid_labels(self) -> None:
-        for label in ("anecdotal", "exploratory", "preliminary", "supported", "established"):
-            val = validate_confidence(label)
-            assert 0.0 < val <= 1.0
-
-    def test_invalid_raises(self) -> None:
-        with pytest.raises(ValueError, match="Unknown confidence"):
-            validate_confidence("certain")
-
-    def test_scale_ordering(self) -> None:
-        from mareforma.db import CONFIDENCE_SCALE
-        vals = list(CONFIDENCE_SCALE.values())
-        assert vals == sorted(vals), "CONFIDENCE_SCALE must be in ascending order"
-
-
-# ---------------------------------------------------------------------------
 # Claims CRUD
 # ---------------------------------------------------------------------------
 
@@ -378,12 +356,12 @@ class TestClaimCRUD:
         try:
             claim_id = add_claim(
                 conn, tmp_path, "L2/3 neurons show X",
-                confidence="preliminary", status="open",
+                classification="ANALYTICAL",
             )
             c = get_claim(conn, claim_id)
             assert c is not None
             assert c["text"] == "L2/3 neurons show X"
-            assert c["confidence"] == "preliminary"
+            assert c["classification"] == "ANALYTICAL"
         finally:
             conn.close()
 
@@ -408,7 +386,7 @@ class TestClaimCRUD:
         conn = _open(tmp_path)
         try:
             add_claim(conn, tmp_path, "Open claim", status="open")
-            add_claim(conn, tmp_path, "Supported claim", status="supported")
+            add_claim(conn, tmp_path, "Contested claim", status="contested")
             open_claims = list_claims(conn, status="open")
             assert len(open_claims) == 1
             assert open_claims[0]["text"] == "Open claim"
@@ -422,16 +400,6 @@ class TestClaimCRUD:
             add_claim(conn, tmp_path, "About ephys", source_name="ephys")
             morph_claims = list_claims(conn, source_name="morphology")
             assert len(morph_claims) == 1
-        finally:
-            conn.close()
-
-    def test_update_claim_confidence(self, tmp_path: Path) -> None:
-        conn = _open(tmp_path)
-        try:
-            claim_id = add_claim(conn, tmp_path, "Original claim", confidence="exploratory")
-            update_claim(conn, tmp_path, claim_id, confidence="supported")
-            c = get_claim(conn, claim_id)
-            assert c["confidence"] == "supported"
         finally:
             conn.close()
 
@@ -449,7 +417,7 @@ class TestClaimCRUD:
         conn = _open(tmp_path)
         try:
             with pytest.raises(ClaimNotFoundError):
-                update_claim(conn, tmp_path, "no-such-id", status="supported")
+                update_claim(conn, tmp_path, "no-such-id", status="contested")
         finally:
             conn.close()
 
@@ -475,14 +443,6 @@ class TestClaimCRUD:
         try:
             with pytest.raises(ValueError, match="empty"):
                 add_claim(conn, tmp_path, "   ")
-        finally:
-            conn.close()
-
-    def test_invalid_confidence_raises(self, tmp_path: Path) -> None:
-        conn = _open(tmp_path)
-        try:
-            with pytest.raises(ValueError, match="confidence"):
-                add_claim(conn, tmp_path, "Valid text", confidence="bogus")
         finally:
             conn.close()
 

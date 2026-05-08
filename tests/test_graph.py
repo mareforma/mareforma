@@ -19,6 +19,7 @@ Coverage
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -51,7 +52,7 @@ def test_open_context_manager_closes_connection(tmp_path):
     with mareforma.open(tmp_path) as graph:
         claim_id = graph.assert_claim("test claim")
     # Connection is closed — further use should raise
-    with pytest.raises(Exception):
+    with pytest.raises(sqlite3.ProgrammingError):
         graph.query()
 
 

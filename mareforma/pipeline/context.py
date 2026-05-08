@@ -23,23 +23,13 @@ Provenance
 Every ctx.save() call records the artifact in graph.db linked to the current
 run_id. Every ctx.claim() call creates a Claim linked to this run_id.
 
-Confidence scale (for ctx.claim)
----------------------------------
-  anecdotal   : single observation, no systematic analysis
-  exploratory : systematic, single dataset, not replicated  (default)
-  preliminary : internally replicated or consistent across subsets
-  supported   : externally replicated or large N
-  established : multiple independent replications
-
 ctx.claim() flow
 -----------------------
   @transform fn calls ctx.claim("L2/3 neurons have X", supports=["10.1038/x"])
        │
-       ├─▶ validate confidence/status/replication_status
+       ├─▶ validate status
        │
-       ├─▶ Emit warnings (non-fatal):
-       │     1. source_name is None → provenance incomplete warning
-       │     2. confidence in (supported, established) and not supports → no literature warning
+       ├─▶ Warn if source_name is None (non-fatal)
        │
        └─▶ db.add_claim(conn, root, text, ..., supports=supports, run_id=self._run_id)
                │
@@ -209,74 +199,52 @@ class BuildContext:
         self,
         text: str,
         *,
-        confidence: str = "exploratory",
+        classification: str = "INFERRED",
         status: str = "open",
-        replication_status: str = "unknown",
         source_name: str | None = None,
         artifact_name: str | None = None,
         supports: list[str] | None = None,
         contradicts: list[str] | None = None,
         generated_by: str = "human",
-        generation_method: str = "explicit",
+        idempotency_key: str | None = None,
     ) -> str:
-        """Assert an explicit scientific claim, linked to this transform run.
+        """Assert a scientific claim, linked to this transform run.
 
         Parameters
         ----------
         text:
-            The claim as a plain-English, falsifiable assertion.
-            E.g. ``"L2/3 neurons have a mean axon extent of 0.7 mm (n=312)"``.
-        confidence:
-            Confidence category. One of: anecdotal, exploratory (default),
-            preliminary, supported, established.
+            Falsifiable assertion. E.g. ``"L2/3 neurons have a mean axon extent
+            of 0.7 mm (n=312)"``.
+        classification:
+            'INFERRED' (default) | 'ANALYTICAL' | 'DERIVED'
         status:
-            Epistemic status. One of: open (default), supported, contested,
-            retracted.
-        replication_status:
-            Replication evidence. One of: unknown (default), single_study,
-            independently_replicated, failed_replication, meta_analyzed.
+            Editorial status: 'open' (default) | 'contested' | 'retracted'
         source_name:
-            Optional: the registered source this claim is about.
+            Registered source this claim is about.
         artifact_name:
-            Optional: the specific artifact (within this run) that supports
-            the claim. E.g. ``"morphology.features.features"``.
+            Specific artifact within this run that supports the claim.
         supports:
-            Optional list of DOI strings or claim_ids this claim rests on.
-            PaperConnector is called for each DOI; failures are non-fatal.
+            DOI strings or claim_ids this claim rests on.
         contradicts:
-            Optional list of DOI strings or claim_ids this claim contests.
+            DOI strings or claim_ids this claim contests.
         generated_by:
             'human' (default) or a model identifier string.
-        generation_method:
-            'explicit' (default) | 'agent-wrapped' | 'inferred'
+        idempotency_key:
+            Retry-safe writes — same key returns the same claim_id.
 
         Returns
         -------
         str
-            The UUID claim_id for future reference.
-
-        Raises
-        ------
-        ValueError
-            If confidence, status, or replication_status are invalid.
+            The UUID claim_id.
         """
-        from mareforma.db import add_claim, validate_confidence, validate_status, validate_replication_status
+        from mareforma.db import add_claim, validate_status
 
-        # Validate first so we fail before any literature writes
-        validate_confidence(confidence)
         validate_status(status)
-        validate_replication_status(replication_status)
 
-        # Warnings — non-fatal, yellow-styled
         if source_name is None:
             self._warn(
                 f"Claim '{text[:40]}{'...' if len(text) > 40 else ''}' "
                 "has no source_name — provenance will be incomplete."
-            )
-        if confidence in ("supported", "established") and not supports:
-            self._warn(
-                f"Claim has '{confidence}' confidence but no supporting "
-                "literature (supports=[])."
             )
 
         resolved_supports = list(supports) if supports else []
@@ -285,16 +253,15 @@ class BuildContext:
             self._db,
             self._root,
             text,
-            confidence=confidence,
+            classification=classification,
             status=status,
-            replication_status=replication_status,
             source_name=source_name,
             run_id=self._run_id,
             artifact_name=artifact_name,
             generated_by=generated_by,
-            generation_method=generation_method,
             supports=resolved_supports or None,
             contradicts=contradicts,
+            idempotency_key=idempotency_key,
         )
         return claim_id
 

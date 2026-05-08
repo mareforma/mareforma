@@ -57,14 +57,14 @@ def _add_claim_with_support(conn, transform_name: str) -> None:
     conn.execute(
         """
         INSERT INTO claims
-            (claim_id, source_name, text, confidence, supports_json, contradicts_json,
-             status, stated_confidence, generation_method, generated_by, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (claim_id, source_name, text, classification, supports_json, contradicts_json,
+             status, generated_by, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             claim_id, transform_name.split(".")[0], "test claim",
-            "exploratory", json.dumps(["10.1038/test"]), "[]", "open",
-            0.4, "explicit", "human", "2026-01-01", "2026-01-01",
+            "ANALYTICAL", json.dumps(["10.1038/test"]), "[]", "open",
+            "human", "2026-01-01", "2026-01-01",
         ),
     )
     conn.execute(
@@ -165,12 +165,12 @@ def test_not_consistent_claim_empty_supports(tmp_path):
     conn.execute(
         """
         INSERT INTO claims
-            (claim_id, source_name, text, confidence, supports_json, contradicts_json,
-             status, stated_confidence, generation_method, generated_by, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (claim_id, source_name, text, classification, supports_json, contradicts_json,
+             status, generated_by, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (claim_id, "morphology", "test", "exploratory", "[]", "[]", "open",
-         0.4, "explicit", "human", "2026-01-01", "2026-01-01"),
+        (claim_id, "morphology", "test", "INFERRED", "[]", "[]", "open",
+         "human", "2026-01-01", "2026-01-01"),
     )
     conn.execute(
         "INSERT INTO evidence (claim_id, run_id, created_at) VALUES (?, ?, ?)",

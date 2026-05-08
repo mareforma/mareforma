@@ -3,7 +3,7 @@ tests/test_health.py — unit tests for mareforma/health.py.
 
 Covers:
   - compute_health: red (no claims), yellow (unclaimed/no-lit/unsupported-source), green
-  - compute_health: confidence_breakdown and contradicted counts
+  - compute_health: support_level_breakdown and contradicted counts
   - compute_health: never raises on empty project
   - compute_health: epistemic fields (classes, distances, support) populated
 """
@@ -85,22 +85,7 @@ class TestYellow:
         raw = project / "data" / "morphology" / "raw"
         raw.mkdir(parents=True)
         add_source(project, "morphology", str(raw), "Test")
-
-        # Add a claim not tied to any source
         add_claim(conn, project, "Unrelated finding", source_name=None)
-
-        report = compute_health(project, conn)
-        assert report.traffic_light == "yellow"
-        assert "morphology" in report.unsupported_sources
-
-    def test_yellow_when_source_has_no_claims(
-        self, project: Path, conn: sqlite3.Connection
-    ) -> None:
-        # Register a source but don't claim it → yellow (unsupported_sources non-empty)
-        raw = project / "data" / "morphology" / "raw"
-        raw.mkdir(parents=True)
-        add_source(project, "morphology", str(raw), "Test")
-        add_claim(conn, project, "A finding", source_name=None)
         report = compute_health(project, conn)
         assert report.traffic_light == "yellow"
         assert "morphology" in report.unsupported_sources
@@ -127,18 +112,17 @@ class TestGreen:
 # ---------------------------------------------------------------------------
 
 class TestCounts:
-    def test_confidence_breakdown(self, project: Path, conn: sqlite3.Connection) -> None:
-        add_claim(conn, project, "Claim 1", confidence="exploratory")
-        add_claim(conn, project, "Claim 2", confidence="exploratory")
-        add_claim(conn, project, "Claim 3", confidence="preliminary")
+    def test_support_level_breakdown(self, project: Path, conn: sqlite3.Connection) -> None:
+        add_claim(conn, project, "Claim 1", classification="INFERRED")
+        add_claim(conn, project, "Claim 2", classification="INFERRED")
+        add_claim(conn, project, "Claim 3", classification="ANALYTICAL")
 
         report = compute_health(project, conn)
-        assert report.confidence_breakdown["exploratory"] == 2
-        assert report.confidence_breakdown["preliminary"] == 1
+        assert report.support_level_breakdown.get("PRELIMINARY", 0) == 3
 
     def test_claims_open_vs_resolved(self, project: Path, conn: sqlite3.Connection) -> None:
         add_claim(conn, project, "Open claim", status="open")
-        add_claim(conn, project, "Resolved claim", status="supported")
+        add_claim(conn, project, "Resolved claim", status="contested")
 
         report = compute_health(project, conn)
         assert report.claims_open == 1

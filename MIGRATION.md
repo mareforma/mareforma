@@ -1,7 +1,21 @@
 # Migration guide — v0.2.x → v0.3.0
 
-v0.3.0 is an **intentional breaking change**. The API has been redesigned from the
-ground up for AI-native use. This document explains what changed and how to update.
+v0.3.0 is an **intentional breaking change**. The database schema, API, and claim model
+have been redesigned for AI-native use. There is no automatic migration.
+
+---
+
+## Upgrade steps
+
+1. Back up your project (especially `claims.toml` — it is always a human-readable copy
+   of every claim).
+2. Delete `.mareforma/graph.db`.
+3. `pip install --upgrade mareforma`
+4. Run `mareforma build` or `python -c "import mareforma; mareforma.open()"` to create
+   a fresh v0.3.0 database.
+
+> If you try to open a v0.2.x `graph.db` with v0.3.0, a `DatabaseError` is raised
+> with instructions to delete the file.
 
 ---
 
@@ -12,99 +26,69 @@ with the epistemic graph without a human first writing `@transform` decorators a
 running `mareforma init`. v0.3.0 fixes this with a new primary interface:
 
 ```python
-graph = mareforma.open()
-claim_id = graph.assert_claim("BC cells receive more inhibitory input than MC cells",
-                              classification="ANALYTICAL",
-                              stated_confidence=0.85)
-results = graph.query("inhibitory input", min_support="REPLICATED")
+with mareforma.open() as graph:
+    claim_id = graph.assert_claim(
+        "BC cells receive more inhibitory input than MC cells",
+        classification="ANALYTICAL",
+        supports=["10.1038/s41586-023-06814-7"],
+    )
+    results = graph.query("inhibitory input", min_support="REPLICATED")
 ```
 
-`@transform` and `BuildContext` are preserved and unchanged. They remain the right
-tool for human-authored pipeline steps. The new interface is the right tool for
-agents that need to read from and write to the graph directly.
+`@transform` and `BuildContext` are preserved and unchanged.
 
 ---
 
 ## Breaking changes
 
-### 1. Database schema — `graph.db` migrates automatically
+### 1. Database schema — no migration, delete graph.db
 
-On first `mareforma.open()` or `mareforma build` with v0.3.0, `graph.db` migrates
-from `user_version=1` to `user_version=2`. The migration:
+The `claims` table has been redesigned. Columns removed: `confidence_float`,
+`replication_status`, `generation_method`. Columns added: `classification`,
+`support_level`, `idempotency_key`, `validated_by`, `validated_at`.
 
-- Renames `confidence_float` → `stated_confidence` in the `claims` table
-- Adds columns: `classification`, `support_level`, `idempotency_key`,
-  `validated_by`, `validated_at`
-- Formally incorporates the `agent_events` table into the versioned schema
+### 2. `confidence_float` removed
 
-**Existing claims are preserved.** Defaults applied to existing rows:
-- `classification = 'INFERRED'`
-- `support_level = 'PRELIMINARY'`
-- `stated_confidence` = former `confidence_float` value
-
-**Back up `graph.db` before upgrading** if you need to retain the ability to
-downgrade. `claims.toml` is always a human-readable backup.
-
-### 2. `confidence_float` column renamed to `stated_confidence`
-
-Any code that reads `row["confidence_float"]` directly from SQLite must be updated
-to `row["stated_confidence"]`.
+Stated confidence is gone from the API entirely. Trust in a claim is derived from the
+graph (how many independent agents reached the same conclusion), not from
+agent self-reporting.
 
 ### 3. Support levels — 3 levels replace 5
 
-The old `replication_status` values (`single_study`, `independently_replicated`,
-`failed_replication`, `meta_analyzed`, `unknown`) are replaced by three
-`support_level` values:
+The old `replication_status` values are replaced by three `support_level` values:
 
 | Old | New |
 |---|---|
 | `single_study` / `unknown` | `PRELIMINARY` |
 | `independently_replicated` | `REPLICATED` |
-| `meta_analyzed` | `ESTABLISHED` (requires human validation) |
+| `meta_analyzed` | `ESTABLISHED` |
 
-`ESTABLISHED` can **only** be set by `graph.validate(claim_id)` — there is no
-automated path.
+`REPLICATED` is set automatically when ≥2 claims with different `generated_by`
+share the same upstream in `supports[]`. `ESTABLISHED` can only be set by
+`graph.validate(claim_id)` — there is no automated path.
 
 ### 4. Claim classification — 3 labels replace 4
-
-The old pipeline-level `transform_class` values (RAW/PROCESSED/ANALYSED/INFERRED)
-are not claim-level classifications. Claims now have:
 
 | Label | Meaning |
 |---|---|
 | `INFERRED` | Default — LLM reasoning without explicit grounding |
-| `ANALYTICAL` | Deterministic analysis against source data (agent-declared) |
-| `DERIVED` | Built on ESTABLISHED or REPLICATED claims (agent-declared) |
+| `ANALYTICAL` | Deterministic analysis against source data |
+| `DERIVED` | Built on ESTABLISHED or REPLICATED claims |
 
 ### 5. `query_claims()` signature change
 
-The `min_confidence` parameter now accepts `stated_confidence` float threshold.
-New parameters `text` (substring filter) and `min_support` (support level filter)
-have been added. See `db.py` docstring.
+`min_confidence` is removed. New parameters: `text` (substring filter),
+`min_support` (support level filter), `classification` (classification filter).
 
 ---
 
 ## What is unchanged
 
 - `@transform` decorator — works exactly as before
-- `BuildContext` — all methods unchanged (`ctx.claim()`, `ctx.save()`, `ctx.params`, etc.)
-- `MareformaObserver` and `LangChainAdapter` — unchanged
-- `mareforma build`, `mareforma status`, `mareforma trace`, `mareforma diff`,
-  `mareforma cross-diff`, `mareforma log`, `mareforma claim`, `mareforma export` — all CLI commands unchanged
-- `claims.toml` backup — still auto-generated on every claim mutation
-- `ontology.jsonld` export — extended with new fields, backward compatible
-- Local-first, no network calls, SQLite, `open_db()` as the single entry point
-
----
-
-## Upgrade steps
-
-```bash
-pip install --upgrade mareforma
-
-# graph.db migrates automatically on next use — no manual step needed
-mareforma build   # or: python -c "import mareforma; mareforma.open()"
-```
-
-If you read `confidence_float` directly anywhere in your code, rename to
-`stated_confidence`.
+- `BuildContext` — `ctx.claim()`, `ctx.save()`, `ctx.params`, etc.
+- `MareformaObserver` and `LangChainAdapter`
+- All CLI commands: `build`, `status`, `trace`, `diff`, `cross-diff`, `log`,
+  `claim`, `export`
+- `claims.toml` backup — auto-generated on every claim mutation
+- `ontology.jsonld` export — extended with new fields
+- Local-first, no network calls, SQLite

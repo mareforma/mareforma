@@ -1,20 +1,25 @@
 """
 health.py — Epistemic health report for mareforma status.
 
-Traffic light (claim-based layer)
-----------------------------------
+Traffic light (claim-based)
+---------------------------
   green  : claims exist, all transforms have claims, all sources have claims
   yellow : any unclaimed transforms OR sources with no claims
   red    : no claims at all
 
-Support levels (from support.py)
-----------------------------------
-  SINGLE      → REPLICATED → CONVERGED → CONSISTENT → ESTABLISHED
-  CONSISTENT requires at least one DOI in supports_json (via claim --supports).
-  No metadata fetch needed — the DOI string alone suffices.
+Claim support levels (graph-derived, per claim)
+------------------------------------------------
+  PRELIMINARY  : one agent claimed it
+  REPLICATED   : ≥2 independent agents, shared upstream
+  ESTABLISHED  : human-validated only
 
-Epistemic distance layer (v0.3+)
----------------------------------
+Pipeline support levels (from support.py, per transform run)
+-------------------------------------------------------------
+  SINGLE → REPLICATED → CONVERGED → CONSISTENT → ESTABLISHED
+  Used by mareforma trace and the transform_support field below.
+
+Epistemic distance layer (pipeline)
+-------------------------------------
   transform_classes  : dict[name → class string] from transform_runs
   transform_distances: dict[name → float] from distance.compute_all()
   transform_support  : dict[name → level string] from support.compute_all()
@@ -32,16 +37,14 @@ from pathlib import Path
 
 @dataclass
 class HealthReport:
-    # Claim-based layer (v0.2.x)
     claims_open: int = 0
-    claims_resolved: int = 0          # supported + contested + retracted
+    claims_resolved: int = 0          # contested + retracted
     claims_contradicted: int = 0      # claims with non-empty contradicts_json
+    support_level_breakdown: dict[str, int] = field(default_factory=dict)
     unclaimed_transforms: list[str] = field(default_factory=list)
     unsupported_sources: list[str] = field(default_factory=list)
-    confidence_breakdown: dict[str, int] = field(default_factory=dict)
     traffic_light: str = "green"
     rationale: str = ""
-    # Epistemic distance layer (v0.3)
     transform_classes: dict[str, str] = field(default_factory=dict)
     transform_distances: dict[str, float] = field(default_factory=dict)
     transform_support: dict[str, str] = field(default_factory=dict)
@@ -70,9 +73,9 @@ def compute_health(root: Path, conn: sqlite3.Connection) -> HealthReport:
             if contradicts:
                 report.claims_contradicted += 1
 
-            conf = c.get("confidence", "exploratory")
-            report.confidence_breakdown[conf] = (
-                report.confidence_breakdown.get(conf, 0) + 1
+            level = c.get("support_level", "PRELIMINARY")
+            report.support_level_breakdown[level] = (
+                report.support_level_breakdown.get(level, 0) + 1
             )
 
         report.unclaimed_transforms = get_unclaimed_transforms(conn)
@@ -104,7 +107,7 @@ def compute_health(root: Path, conn: sqlite3.Connection) -> HealthReport:
     # --- Traffic light ---
     report.traffic_light, report.rationale = _compute_traffic_light(report)
 
-    # --- Epistemic distance layer (v0.3) ---
+    # --- Pipeline epistemic distance layer ---
     try:
         from mareforma.distance import compute_all as dist_all
         report.transform_distances = dist_all(conn)

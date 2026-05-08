@@ -13,16 +13,10 @@ Tables
 
 Schema version
 --------------
-  Stored in PRAGMA user_version. Current: 2.
-  Version 0 → fresh db, full schema applied, user_version=2.
-  Version 1 → migrate to 2 (see _migrate_v1_to_v2).
-  Version >2 → DatabaseError with upgrade guidance.
-
-  Migration v1→v2:
-    - claims.confidence_float  renamed  claims.stated_confidence
-    - claims gains: classification, support_level, idempotency_key,
-                    validated_by, validated_at
-    - agent_events incorporated into versioned schema
+  Stored in PRAGMA user_version. Current: 1.
+  Version 0 → fresh db, full schema applied, user_version=1.
+  Version 1 → ready to use.
+  Any other version → DatabaseError — delete graph.db to start fresh.
 
 Connection lifecycle
 --------------------
@@ -42,27 +36,19 @@ Connection lifecycle
   │    conn.close()                → SIGINT / success / exception all close │
   └─────────────────────────────────────────────────────────────────────────┘
 
-Confidence scale (categorical → internal float)
-------------------------------------------------
-  anecdotal   → 0.20  : single observation, no systematic analysis
-  exploratory → 0.40  : systematic, single dataset, not replicated
-  preliminary → 0.60  : internally replicated or consistent across subsets
-  supported   → 0.80  : externally replicated or large N
-  established → 0.95  : multiple independent replications
-
-Support levels (v0.3.0+)
--------------------------
+Support levels — graph-derived trust signal
+-------------------------------------------
   PRELIMINARY  : one agent claimed it
-  REPLICATED   : ≥2 agents with different generated_by, sharing the same
-                 upstream claim in supports[] (checked at INSERT time)
+  REPLICATED   : ≥2 agents with different generated_by share the same
+                 upstream claim in supports[] (auto-detected at INSERT)
   ESTABLISHED  : explicit human validation via validate_claim() only
 
 ERD
 ---
-  transform_runs ──< artifacts      (run_id FK)
-  transform_runs ──< evidence       (run_id FK, nullable)
-  transform_runs ──< agent_events   (run_id FK)
-  claims         ──< evidence       (claim_id FK)
+  transform_runs ──< artifacts    (run_id FK, enforced)
+  transform_runs ──< evidence     (run_id FK, nullable, enforced)
+  transform_runs ──< agent_events (run_id, soft reference — not enforced)
+  claims         ──< evidence     (claim_id FK, enforced)
 """
 
 from __future__ import annotations
@@ -83,25 +69,9 @@ from mareforma.registry import MareformaError
 # ---------------------------------------------------------------------------
 
 DB_FILENAME = "graph.db"
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 1
 
-CONFIDENCE_SCALE: dict[str, float] = {
-    "anecdotal": 0.20,
-    "exploratory": 0.40,
-    "preliminary": 0.60,
-    "supported": 0.80,
-    "established": 0.95,
-}
-
-VALID_STATUSES = ("open", "supported", "contested", "retracted")
-
-VALID_REPLICATION_STATUSES = (
-    "unknown",
-    "single_study",
-    "independently_replicated",
-    "failed_replication",
-    "meta_analyzed",
-)
+VALID_STATUSES = ("open", "contested", "retracted")
 
 VALID_CLASSIFICATIONS = ("INFERRED", "ANALYTICAL", "DERIVED")
 
@@ -146,25 +116,21 @@ CREATE TABLE IF NOT EXISTS artifacts (
 );
 
 CREATE TABLE IF NOT EXISTS claims (
-    claim_id           TEXT PRIMARY KEY,
-    text               TEXT NOT NULL,
-    confidence         TEXT NOT NULL DEFAULT 'exploratory',
-    stated_confidence  REAL NOT NULL DEFAULT 0.4,
-    classification     TEXT NOT NULL DEFAULT 'INFERRED',
-    support_level      TEXT NOT NULL DEFAULT 'PRELIMINARY',
-    idempotency_key    TEXT,
-    validated_by       TEXT,
-    validated_at       TEXT,
-    generation_method  TEXT NOT NULL DEFAULT 'explicit',
-    status             TEXT NOT NULL DEFAULT 'open',
-    replication_status TEXT NOT NULL DEFAULT 'unknown',
-    source_name        TEXT,
-    generated_by       TEXT NOT NULL DEFAULT 'human',
-    supports_json      TEXT NOT NULL DEFAULT '[]',
-    contradicts_json   TEXT NOT NULL DEFAULT '[]',
+    claim_id        TEXT PRIMARY KEY,
+    text            TEXT NOT NULL,
+    classification  TEXT NOT NULL DEFAULT 'INFERRED',
+    support_level   TEXT NOT NULL DEFAULT 'PRELIMINARY',
+    idempotency_key TEXT,
+    validated_by    TEXT,
+    validated_at    TEXT,
+    status          TEXT NOT NULL DEFAULT 'open',
+    source_name     TEXT,
+    generated_by    TEXT NOT NULL DEFAULT 'human',
+    supports_json   TEXT NOT NULL DEFAULT '[]',
+    contradicts_json TEXT NOT NULL DEFAULT '[]',
     comparison_summary TEXT,
-    created_at         TEXT NOT NULL,
-    updated_at         TEXT NOT NULL
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS evidence (
@@ -219,38 +185,13 @@ CREATE TABLE IF NOT EXISTS transform_deps (
 );
 """
 
-_MIGRATION_V1_TO_V2 = """
-ALTER TABLE claims RENAME COLUMN confidence_float TO stated_confidence;
-ALTER TABLE claims ADD COLUMN classification  TEXT NOT NULL DEFAULT 'INFERRED';
-ALTER TABLE claims ADD COLUMN support_level   TEXT NOT NULL DEFAULT 'PRELIMINARY';
-ALTER TABLE claims ADD COLUMN idempotency_key TEXT;
-ALTER TABLE claims ADD COLUMN validated_by    TEXT;
-ALTER TABLE claims ADD COLUMN validated_at    TEXT;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_claims_idempotency_key ON claims(idempotency_key) WHERE idempotency_key IS NOT NULL;
-CREATE TABLE IF NOT EXISTS agent_events (
-    event_id      TEXT PRIMARY KEY,
-    run_id        TEXT NOT NULL,
-    event_type    TEXT NOT NULL,
-    name          TEXT NOT NULL,
-    timestamp     TEXT NOT NULL,
-    status        TEXT NOT NULL,
-    duration_ms   INTEGER,
-    input_hash    TEXT,
-    output_hash   TEXT,
-    metadata_json TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_agent_events_run_id
-    ON agent_events(run_id);
-CREATE INDEX IF NOT EXISTS idx_claims_support_level ON claims(support_level);
-"""
 
 # Explicit column list — avoids SELECT * coupling to schema changes.
 _CLAIM_COLUMNS = (
-    "claim_id", "text", "confidence", "stated_confidence",
-    "classification", "support_level", "idempotency_key",
-    "validated_by", "validated_at",
-    "generation_method", "status", "replication_status", "source_name",
-    "generated_by", "supports_json", "contradicts_json",
+    "claim_id", "text", "classification", "support_level",
+    "idempotency_key", "validated_by", "validated_at",
+    "status", "source_name", "generated_by",
+    "supports_json", "contradicts_json",
     "comparison_summary", "created_at", "updated_at",
 )
 _CLAIM_SELECT = ", ".join(_CLAIM_COLUMNS)
@@ -286,12 +227,11 @@ def open_db(root: Path) -> sqlite3.Connection:
     Returns an open sqlite3.Connection with row_factory set to
     sqlite3.Row for dict-like access.
 
-    Schema migration
-    ----------------
-    - version 0 : fresh db — apply full schema, set user_version=2
-    - version 1 : migrate to v2 (confidence_float→stated_confidence + new columns)
-    - version 2 : ready to use
-    - version >2: DatabaseError — upgrade mareforma
+    Schema version
+    --------------
+    - version 0 : fresh db — full schema applied, user_version set to 1
+    - version 1 : ready to use
+    - any other : DatabaseError — delete graph.db to start fresh
 
     Raises
     ------
@@ -311,44 +251,19 @@ def open_db(root: Path) -> sqlite3.Connection:
             conn.executescript(_SCHEMA_SQL)
             conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             conn.commit()
-        elif version == 1:
-            _migrate_v1_to_v2(conn)
         elif version == _SCHEMA_VERSION:
             pass  # Current version — ready to use.
         else:
             conn.close()
             raise DatabaseError(
-                f"graph.db schema v{version} is newer than this mareforma supports. "
-                "Upgrade with: pip install --upgrade mareforma"
+                f"graph.db schema v{version} is not compatible with mareforma v0.3.0. "
+                "Delete .mareforma/graph.db to start fresh — "
+                "your claims are backed up in claims.toml."
             )
         return conn
 
     except sqlite3.OperationalError as exc:
         raise DatabaseError(f"Could not open database at {path}: {exc}") from exc
-
-
-def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
-    """Migrate graph.db from user_version=1 to user_version=2.
-
-    Renames confidence_float → stated_confidence; adds classification,
-    support_level, idempotency_key, validated_by, validated_at; incorporates
-    agent_events into the versioned schema. Wrapped in a transaction — rolls
-    back fully on any failure.
-    """
-    try:
-        conn.execute("BEGIN")
-        for stmt in _MIGRATION_V1_TO_V2.strip().split(";"):
-            stmt = stmt.strip()
-            if stmt:
-                conn.execute(stmt)
-        conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
-        conn.execute("COMMIT")
-    except sqlite3.OperationalError as exc:
-        try:
-            conn.rollback()
-        except Exception:  # noqa: BLE001
-            pass
-        raise DatabaseError(f"Migration v1→v2 failed (rolled back): {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -389,39 +304,12 @@ def record_deps(
 # Validation
 # ---------------------------------------------------------------------------
 
-def validate_confidence(confidence: str) -> float:
-    """Return the internal float for *confidence* category.
-
-    Raises
-    ------
-    ValueError
-        If *confidence* is not a recognised category name.
-    """
-    if confidence not in CONFIDENCE_SCALE:
-        allowed = ", ".join(CONFIDENCE_SCALE)
-        raise ValueError(
-            f"Unknown confidence level '{confidence}'. "
-            f"Use one of: {allowed}"
-        )
-    return CONFIDENCE_SCALE[confidence]
-
-
 def validate_status(status: str) -> None:
     """Raise ValueError if *status* is not a recognised claim status."""
     if status not in VALID_STATUSES:
         allowed = ", ".join(VALID_STATUSES)
         raise ValueError(
             f"Unknown claim status '{status}'. Use one of: {allowed}"
-        )
-
-
-def validate_replication_status(replication_status: str) -> None:
-    """Raise ValueError if *replication_status* is not recognised."""
-    if replication_status not in VALID_REPLICATION_STATUSES:
-        allowed = ", ".join(VALID_REPLICATION_STATUSES)
-        raise ValueError(
-            f"Unknown replication status '{replication_status}'. "
-            f"Use one of: {allowed}"
         )
 
 
@@ -841,53 +729,48 @@ def add_claim(
     root: Path,
     text: str,
     *,
-    confidence: str = "exploratory",
-    status: str = "open",
-    replication_status: str = "unknown",
-    source_name: str | None = None,
-    run_id: str | None = None,
-    artifact_name: str | None = None,
-    generated_by: str = "human",
-    generation_method: str = "explicit",
+    classification: str = "INFERRED",
+    idempotency_key: str | None = None,
     supports: list[str] | None = None,
     contradicts: list[str] | None = None,
-    # v0.3.0 fields — optional, backward-compatible defaults
-    classification: str = "INFERRED",
-    stated_confidence: float | None = None,
-    idempotency_key: str | None = None,
+    generated_by: str = "human",
+    source_name: str | None = None,
+    status: str = "open",
+    run_id: str | None = None,
+    artifact_name: str | None = None,
 ) -> str:
     """Insert a new claim and return its claim_id.
 
-    Also writes a claims.toml backup and links evidence if run_id is provided.
-    If idempotency_key is provided and already exists, returns the existing
-    claim_id without inserting a duplicate.
+    Called by EpistemicGraph.assert_claim() and ctx.claim(). Returns the
+    existing claim_id without inserting if idempotency_key already exists.
 
-    After insert, checks whether the new claim triggers REPLICATED status on
-    any upstream claim: if ≥2 claims now share the same upstream claim_id in
-    their supports[] and have different generated_by values, all such claims
-    are promoted to support_level='REPLICATED'.
+    After insert, checks for REPLICATED: if ≥2 claims share the same upstream
+    claim_id in supports[] with different generated_by, all are promoted to
+    support_level='REPLICATED'.
 
     Parameters
     ----------
-    supports:
-        List of DOI strings or claim_ids this claim rests on.
-    contradicts:
-        List of DOI strings or claim_ids this claim contests.
-    generated_by:
-        'human' or a model identifier string.
-    generation_method:
-        'explicit' | 'agent-wrapped' | 'inferred'
     classification:
         'INFERRED' | 'ANALYTICAL' | 'DERIVED'
-    stated_confidence:
-        Float 0.0–1.0. Defaults to CONFIDENCE_SCALE[confidence] if not set.
     idempotency_key:
-        Stable key for retry-safe writes. Same key → same claim_id returned.
+        Retry-safe writes — same key returns the same claim_id.
+    supports:
+        Upstream claim_ids or DOIs this claim is grounded in.
+    contradicts:
+        Claim_ids or DOIs this claim contests.
+    generated_by:
+        Agent or human identifier.
+    source_name:
+        Data source this claim derives from.
+    status:
+        Editorial status: 'open' | 'contested' | 'retracted'
+    run_id / artifact_name:
+        @transform pipeline — link claim to a specific run.
 
     Raises
     ------
     ValueError
-        If confidence, status, replication_status, or classification are invalid.
+        If classification or status are invalid.
     """
     if not text or not text.strip():
         raise ValueError("Claim text cannot be empty.")
@@ -896,11 +779,7 @@ def add_claim(
             f"Unknown classification '{classification}'. "
             f"Use one of: {', '.join(VALID_CLASSIFICATIONS)}"
         )
-    confidence_float = validate_confidence(confidence)
-    if stated_confidence is None:
-        stated_confidence = confidence_float
     validate_status(status)
-    validate_replication_status(replication_status)
 
     # Idempotency check — return existing claim_id if key already present.
     if idempotency_key is not None:
@@ -923,16 +802,14 @@ def add_claim(
         conn.execute(
             """
             INSERT INTO claims
-                (claim_id, text, confidence, stated_confidence, classification,
-                 support_level, idempotency_key, generation_method,
-                 status, replication_status, source_name, generated_by,
+                (claim_id, text, classification, support_level, idempotency_key,
+                 status, source_name, generated_by,
                  supports_json, contradicts_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, 'PRELIMINARY', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, 'PRELIMINARY', ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                claim_id, text.strip(), confidence, stated_confidence,
-                classification, idempotency_key, generation_method,
-                status, replication_status, source_name, generated_by,
+                claim_id, text.strip(), classification, idempotency_key,
+                status, source_name, generated_by,
                 supports_json, contradicts_json, now, now,
             ),
         )
@@ -1053,9 +930,7 @@ def update_claim(
     root: Path,
     claim_id: str,
     *,
-    confidence: str | None = None,
     status: str | None = None,
-    replication_status: str | None = None,
     text: str | None = None,
     supports: list[str] | None = None,
     contradicts: list[str] | None = None,
@@ -1068,30 +943,21 @@ def update_claim(
     ClaimNotFoundError
         If no claim with *claim_id* exists.
     ValueError
-        If any updated field has an invalid value.
+        If status is invalid.
     """
     existing = get_claim(conn, claim_id)
     if existing is None:
         raise ClaimNotFoundError(f"Claim '{claim_id}' not found.")
 
-    new_confidence = existing["confidence"]
-    new_stated_confidence = existing["stated_confidence"]
     new_status = existing["status"]
-    new_replication_status = existing["replication_status"]
     new_text = existing["text"]
     new_supports_json = existing.get("supports_json", "[]")
     new_contradicts_json = existing.get("contradicts_json", "[]")
     new_comparison_summary = existing.get("comparison_summary")
 
-    if confidence is not None:
-        new_stated_confidence = validate_confidence(confidence)
-        new_confidence = confidence
     if status is not None:
         validate_status(status)
         new_status = status
-    if replication_status is not None:
-        validate_replication_status(replication_status)
-        new_replication_status = replication_status
     if text is not None:
         if not text.strip():
             raise ValueError("Claim text cannot be empty.")
@@ -1107,14 +973,12 @@ def update_claim(
         conn.execute(
             """
             UPDATE claims
-            SET text = ?, confidence = ?, stated_confidence = ?, status = ?,
-                replication_status = ?, supports_json = ?, contradicts_json = ?,
+            SET text = ?, status = ?, supports_json = ?, contradicts_json = ?,
                 comparison_summary = ?, updated_at = ?
             WHERE claim_id = ?
             """,
             (
-                new_text, new_confidence, new_stated_confidence,
-                new_status, new_replication_status,
+                new_text, new_status,
                 new_supports_json, new_contradicts_json,
                 new_comparison_summary, _now(), claim_id,
             ),
@@ -1229,36 +1093,25 @@ def query_claims(
     conn: sqlite3.Connection,
     *,
     limit: int = 10,
-    min_confidence: str | None = None,
     text: str | None = None,
     min_support: str | None = None,
     classification: str | None = None,
 ) -> list[dict]:
-    """Return claims ordered by stated_confidence (desc) then recency (desc).
+    """Return claims ordered by support_level (desc) then recency (desc).
 
     Parameters
     ----------
     limit:
         Maximum number of claims to return. Default 10.
-    min_confidence:
-        Exclude claims below this confidence tier (anecdotal / exploratory /
-        preliminary / supported / established). Legacy @transform filter.
     text:
         Optional substring filter — case-insensitive LIKE match on claim text.
     min_support:
         Minimum support level: 'PRELIMINARY' | 'REPLICATED' | 'ESTABLISHED'.
-        PRELIMINARY returns all; REPLICATED returns REPLICATED + ESTABLISHED;
-        ESTABLISHED returns only ESTABLISHED.
     classification:
         Filter by classification: 'INFERRED' | 'ANALYTICAL' | 'DERIVED'.
     """
     conditions: list[str] = []
     params: list = []
-
-    if min_confidence is not None:
-        threshold = validate_confidence(min_confidence)
-        conditions.append("stated_confidence >= ?")
-        params.append(threshold)
 
     if text is not None:
         conditions.append("text LIKE ?")
@@ -1290,7 +1143,9 @@ def query_claims(
     try:
         rows = conn.execute(
             f"SELECT {_CLAIM_SELECT} FROM claims {where} "
-            f"ORDER BY stated_confidence DESC, created_at DESC LIMIT ?",
+            f"ORDER BY CASE support_level "
+            f"WHEN 'ESTABLISHED' THEN 3 WHEN 'REPLICATED' THEN 2 ELSE 1 END DESC, "
+            f"created_at DESC LIMIT ?",
             params,
         ).fetchall()
     except sqlite3.OperationalError as exc:
@@ -1405,14 +1260,10 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
             contradicts = json.loads(c.get("contradicts_json", "[]") or "[]")
             entry: dict[str, Any] = {
                 "text": c["text"],
-                "confidence": c["confidence"],
-                "stated_confidence": c.get("stated_confidence") or 0.4,
                 "classification": c.get("classification") or "INFERRED",
                 "support_level": c.get("support_level") or "PRELIMINARY",
-                "generation_method": c.get("generation_method", "explicit"),
                 "generated_by": c.get("generated_by", "human"),
                 "status": c["status"],
-                "replication_status": c["replication_status"],
                 "supports": supports,
                 "contradicts": contradicts,
                 "comparison_summary": c.get("comparison_summary") or "",

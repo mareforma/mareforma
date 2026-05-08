@@ -61,7 +61,8 @@ class TestContextAndStructure:
         doc = JSONLDExporter(tmp_path).export()
         ctx = doc["@context"]
         assert "claimText" in ctx
-        assert "confidence" in ctx
+        assert "classification" in ctx
+        assert "supportLevel" in ctx
         assert "claimStatus" in ctx
 
     def test_graph_present(self, tmp_path: Path) -> None:
@@ -198,7 +199,7 @@ class TestClaimNodes:
         _init_project(tmp_path)
         conn = open_db(tmp_path)
         try:
-            add_claim(conn, tmp_path, "Test claim text", confidence="preliminary")
+            add_claim(conn, tmp_path, "Test claim text", classification="ANALYTICAL")
         finally:
             conn.close()
 
@@ -207,7 +208,7 @@ class TestClaimNodes:
             n for n in doc["@graph"] if n.get("@type") == "mare:Claim"
         )
         assert claim_node["claimText"] == "Test claim text"
-        assert claim_node["confidence"] == "preliminary"
+        assert claim_node["classification"] == "ANALYTICAL"
 
     def test_claim_id_format(self, tmp_path: Path) -> None:
         _init_project(tmp_path)
