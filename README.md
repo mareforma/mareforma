@@ -117,7 +117,7 @@ uv add mareforma
 See [AGENTS.md](AGENTS.md) — execution contract, forbidden patterns,
 idempotency convention, `generated_by` requirements.
 
-Full documentation: **https://mareforma.com/docs**
+Full documentation: **https://mareforma.readthedocs.io**
 
 ## Examples
 

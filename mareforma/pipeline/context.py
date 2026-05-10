@@ -25,7 +25,7 @@ run_id. Every ctx.claim() call creates a Claim linked to this run_id.
 
 ctx.claim() flow
 -----------------------
-  @transform fn calls ctx.claim("L2/3 neurons have X", supports=["10.1038/x"])
+  @transform fn calls ctx.claim("Cell type A has property X", supports=["upstream_ref"])
        │
        ├─▶ validate status
        │
@@ -213,8 +213,8 @@ class BuildContext:
         Parameters
         ----------
         text:
-            Falsifiable assertion. E.g. ``"L2/3 neurons have a mean axon extent
-            of 0.7 mm (n=312)"``.
+            Falsifiable assertion. E.g. ``"Cell type A exhibits property X
+            under condition Y (n=312, p<0.001)"``.
         classification:
             'INFERRED' (default) | 'ANALYTICAL' | 'DERIVED'
         status:

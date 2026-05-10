@@ -359,4 +359,4 @@ consequential actions — it must not be reachable from a single-agent finding.
 - [Mental model](tutorials/02_mental_model.md)
 - [Why mareforma](tutorials/03_why_mareforma.md)
 - [Examples](examples/)
-- Full API reference: https://mareforma.com/docs
+- Full API reference: https://mareforma.readthedocs.io

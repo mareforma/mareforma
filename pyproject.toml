@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mareforma"
-version = "0.2.1"
-description = "Automatic provenance for AI-driven research pipelines"
+version = "0.3.0"
+description = "Epistemic infrastructure for AI scientists"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-keywords = ["provenance", "reproducibility", "ai-agents", "research", "data-pipeline"]
+keywords = ["epistemic-graph", "ai-scientists", "provenance", "reproducibility", "multi-agent", "research"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
@@ -28,6 +28,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/mareforma/mareforma"
+Documentation = "https://mareforma.readthedocs.io"
 Repository = "https://github.com/mareforma/mareforma"
 Issues = "https://github.com/mareforma/mareforma/issues"
 
@@ -44,6 +45,12 @@ dev = [
     "pytest-httpx>=0.30",
     "gitpython>=3.1",
     "httpx>=0.27",
+]
+docs = [
+    "sphinx>=7.0",
+    "furo>=2024.1.29",
+    "myst-parser>=2.0",
+    "sphinx-autodoc-typehints>=1.25",
 ]
 
 [project.scripts]
