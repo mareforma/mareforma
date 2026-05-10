@@ -1,11 +1,13 @@
 [project]
-name = "ai_agent_drug_target"
-description = "Stress-testing MEDEA drug target predictions across biological contexts"
+name = "drug_target_provenance"
+description = "Drug target identification from multi-omics data — epistemic provenance for AI scientist findings"
 created = "2026-03-24T00:00:00+00:00"
-mareforma_version = "0.1.0"
+mareforma_version = "0.3.0"
 
 [project.author]
-name = "Felipe Yáñez"
+name = "Jane Doe"
+email = "jane.doe@example-lab.org"
+institution = "Example Research Institute"
 
 [sources.medeadb]
 path = "data/medeadb/raw"
