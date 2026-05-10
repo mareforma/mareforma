@@ -91,7 +91,7 @@ def schema() -> dict:
             "classification": "INFERRED",
             "support_level": "PRELIMINARY",
             "status": "open",
-            "generated_by": "agent",
+            "generated_by": "agent",  # EpistemicGraph default; ctx.claim() defaults to "human"
         },
         "transitions": [
             {
