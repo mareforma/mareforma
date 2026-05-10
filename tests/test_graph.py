@@ -1,6 +1,6 @@
 """
 tests/test_graph.py — EpistemicGraph: mareforma.open(), assert_claim(),
-query(), get_claim(), validate().
+query(), get_claim(), validate(), and mareforma.schema().
 
 Coverage
 --------
@@ -15,6 +15,7 @@ Coverage
   get_claim()     : found, not found
   validate()      : REPLICATED→ESTABLISHED, validated_by stored,
                     PRELIMINARY raises, nonexistent raises
+  schema()        : required keys present, values match db constants
 """
 
 from __future__ import annotations
@@ -291,3 +292,39 @@ def test_validate_nonexistent_claim_raises(tmp_path):
     with mareforma.open(tmp_path) as graph:
         with pytest.raises(ClaimNotFoundError):
             graph.validate("no-such-uuid")
+
+
+# ---------------------------------------------------------------------------
+# schema()
+# ---------------------------------------------------------------------------
+
+def test_schema_returns_required_keys():
+    s = mareforma.schema()
+    assert "schema_version" in s
+    assert "classifications" in s
+    assert "support_levels" in s
+    assert "statuses" in s
+    assert "defaults" in s
+    assert "transitions" in s
+
+
+def test_schema_values_match_db_constants():
+    from mareforma.db import VALID_CLASSIFICATIONS, VALID_SUPPORT_LEVELS, VALID_STATUSES
+    s = mareforma.schema()
+    assert set(s["classifications"]) == set(VALID_CLASSIFICATIONS)
+    assert set(s["support_levels"]) == set(VALID_SUPPORT_LEVELS)
+    assert set(s["statuses"]) == set(VALID_STATUSES)
+
+
+def test_schema_transitions_cover_all_support_level_paths():
+    s = mareforma.schema()
+    froms = {t["from"] for t in s["transitions"]}
+    tos   = {t["to"]   for t in s["transitions"]}
+    assert "PRELIMINARY" in froms
+    assert "REPLICATED"  in froms
+    assert "REPLICATED"  in tos
+    assert "ESTABLISHED" in tos
+
+
+def test_schema_is_stable_across_calls():
+    assert mareforma.schema() == mareforma.schema()
