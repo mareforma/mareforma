@@ -5,114 +5,126 @@
 [![PyPI](https://img.shields.io/pypi/v/mareforma)](https://pypi.org/project/mareforma/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-The epistemic layer AI scientists run on.
+AI scientists are being deployed on real research problems before any infrastructure exists to know which of their findings can be trusted. Observability tools record what an agent did — they do not record what it means, whether it converges with independent evidence, or how far a conclusion is from its raw data.
 
----
+Mareforma is a local epistemic graph that accumulates findings across agent runs, detects convergence automatically when independent agents reach the same conclusion through different data paths, and exposes the full provenance chain so trust can be derived from structure rather than from self-reported confidence.
 
-## Install
-
-```bash
-uv pip install mareforma
-```
-
-Requires Python ≥ 3.10.
-
----
-
-## Agent interface
+**Trust in a finding should come from the graph, not from the agent that made it.**
 
 ```python
 import mareforma
 
 with mareforma.open() as graph:
 
-    # Query before asserting — check what is already established
-    prior = graph.query("inhibitory neurons", min_support="REPLICATED")
-    prior_ids = [c["claim_id"] for c in prior]
+    # Query what is already established before asserting
+    prior = graph.query("topic X", min_support="REPLICATED")
 
-    # Assert a finding
     claim_id = graph.assert_claim(
-        "BC cells receive more inhibitory input than MC cells",
+        "Cell type A exhibits property X under condition Y (n=842, p<0.001)",
         classification="ANALYTICAL",
-        supports=prior_ids,
-        idempotency_key="run_abc_claim_1",
+        generated_by="agent/model-a/lab_a",
+        supports=[c["claim_id"] for c in prior],
     )
 ```
 
-No `mareforma init` required. `graph.db` is created on first `open()`.
+<!-- TODO: replace with graph.png once generated -->
+```
+prior_ref ──► [ANALYTICAL/lab_a] ──┐
+                                   ├──► REPLICATED ──► (human) ──► ESTABLISHED
+prior_ref ──► [ANALYTICAL/lab_b] ──┘
+```
 
-Trust is derived from the graph, not from the agent.
+## Findings contradict — both stay in the graph
 
-**Support levels** — set automatically:
+```python
+# ESTABLISHED consensus sits in the graph
+prior = graph.query("Treatment X", min_support="ESTABLISHED")
+
+# New larger study gets a different result — don't discard it, document it
+graph.assert_claim(
+    "Treatment X shows no effect (n=1240, p=0.21) — larger and more diverse cohort",
+    classification="ANALYTICAL",
+    contradicts=[c["claim_id"] for c in prior],
+)
+```
+
+Science advances by documented contestation, not by one side disappearing.
+Both claims coexist. A human reviewer sees the tension explicitly in the graph.
+
+## Why existing systems fail
+
+- **Observability tools** record what your agent did. They do not record what 
+it means, whether it can be trusted, or whether another agent already found 
+the same thing by a different path.
+
+- **Self-reported confidence** is not a trust signal. An agent that is wrong
+is still confident. Mareforma stores no confidence score — trust is derived
+from the provenance graph.
+
+- **One-shot pipelines** evaporate findings between runs. There is no memory
+of what was established, no way to detect convergence, no accumulated graph.
+Each run starts from scratch.
+
+- **Silent pipeline failures** look like results. If the data pipeline returns
+null and the agent falls back to LLM prior knowledge, the finding looks
+identical to a data-driven one — unless you record the classification at
+assertion time.
+
+## Architecture
+
+Two complementary interfaces, one graph:
+
+**Agent interface** — for autonomous AI scientists:
+```python
+graph = mareforma.open()          # zero setup, no init required
+graph.assert_claim(text, classification="ANALYTICAL", supports=[...])
+graph.query(text, min_support="REPLICATED")
+graph.validate(claim_id)          # human promotes to ESTABLISHED
+```
+
+**Pipeline interface** — for human-authored processing steps:
+```python
+@transform("analysis.features", depends_on=["analysis.load"])
+def extract(ctx):
+    ctx.save("features", df, fmt="csv")
+    ctx.claim("...", classification="ANALYTICAL", supports=["upstream_ref"])
+```
+
+**Trust levels** — derived from graph topology, never self-reported:
 
 | Level | Meaning |
 |---|---|
 | `PRELIMINARY` | One agent claimed it |
-| `REPLICATED` | ≥2 independent agents reached the same conclusion |
-| `ESTABLISHED` | Human-validated via `graph.validate(claim_id)` only |
+| `REPLICATED` | ≥2 independent agents converged on the same upstream evidence |
+| `ESTABLISHED` | Human-validated — only via `graph.validate()` |
 
-**Claim classification** — declared by the agent:
+**Classification** — declared by the agent, records epistemic origin:
 
-| Classification | Use when |
+| Value | When |
 |---|---|
-| `INFERRED` | LLM reasoning or extrapolation (default) |
-| `ANALYTICAL` | Deterministic code ran against data |
+| `INFERRED` | LLM reasoning (default) |
+| `ANALYTICAL` | Deterministic analysis against source data |
 | `DERIVED` | Explicitly built on ESTABLISHED or REPLICATED claims |
 
----
+Storage: local SQLite, WAL mode, no network calls, ACID guarantees.
 
-## Pipeline interface
-
-For human-authored pipelines, `@transform` records provenance automatically:
-
-```python
-from mareforma import transform, BuildContext
-
-@transform("morphology.load")
-def load(ctx: BuildContext) -> None:
-    files = list(ctx.source_path("morphology").glob("*.swc"))
-    ctx.save("skeletons", files, fmt="pickle")
-
-@transform("morphology.features", depends_on=["morphology.load"])
-def compute_features(ctx: BuildContext) -> None:
-    skeletons = ctx.load("morphology.load.skeletons")
-    df = pd.DataFrame([_extract_features(s) for s in skeletons])
-    ctx.save("features", df, fmt="csv")
-    ctx.claim("Feature extraction complete", supports=["10.64898/2026.03.05.709819"])
-```
+## Get started
 
 ```bash
-mareforma build
-mareforma trace morphology.features
-mareforma status
+uv add mareforma
 ```
 
----
+See [AGENTS.md](AGENTS.md) — execution contract, forbidden patterns,
+idempotency convention, `generated_by` requirements.
 
-## CLI reference
+Full documentation: **https://mareforma.com/docs**
 
-| Command | Description |
-|---|---|
-| `mareforma init` | Initialise a pipeline project |
-| `mareforma add-source <name>` | Register a data source |
-| `mareforma build [source]` | Run the pipeline DAG (`--dry-run`, `--force`) |
-| `mareforma trace <transform>` | Ancestry tree with class and support level |
-| `mareforma status` | Epistemic health dashboard (`--json`) |
-| `mareforma diff <transform>` | Compare the two most recent runs |
-| `mareforma log` | Last build status |
-| `mareforma export` | Write `ontology.jsonld` (PROV-O, schema.org) |
-| `mareforma claim add TEXT` | Add a claim with optional DOI support |
-| `mareforma claim list` | List claims |
+## Examples
 
----
-
-## Project layout
-
-```
-<project>/
-  .mareforma/
-    graph.db               ← epistemic graph (SQLite, WAL)
-  claims.toml              ← human-readable claims backup
-  mareforma.project.toml   ← project config (pipeline interface)
-  ontology.jsonld          ← PROV-O export
-```
+| | Example | What it shows |
+|---|---|---|
+| 01 | [API Walkthrough](examples/01_api_walkthrough/) | Full API reference |
+| 02 | [Compounding Agents](examples/02_compounding_agents/) | Findings accumulate across agent runs |
+| 03 | [Documented Contestation](examples/03_documented_contestation/) | Agent challenges established consensus |
+| 04 | [Private Data, Public Findings](examples/04_private_data_public_findings/) | Two labs share provenance without sharing data |
+| 05 | [Drug Target Provenance](examples/05_drug_target_provenance/) | Real AI scientist with honest epistemic status |
