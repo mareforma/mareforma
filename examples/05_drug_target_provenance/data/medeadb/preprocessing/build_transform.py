@@ -27,8 +27,8 @@ pipeline actually ran:
 
 Requirements
 ------------
-    python run_demo.py --install
-    python run_demo.py --data
+    python 05_drug_target_provenance.py --install
+    python 05_drug_target_provenance.py --data
 
     # .env in this directory:
     OPENAI_API_KEY=your-key

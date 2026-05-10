@@ -89,12 +89,13 @@ def assert_finding(
     classification: str,
     generated_by: str,
     supports: list[str],
-    source_name: str,
+    source_name: str | None = None,
 ) -> str:
     """Assert a scientific finding into the epistemic graph. Returns claim_id.
 
     classification: INFERRED | ANALYTICAL | DERIVED
     supports: list of upstream claim_ids or reference strings
+    source_name: data source this finding was derived from, or None
     """
     return graph.assert_claim(
         text,
@@ -170,7 +171,7 @@ synthesis = assert_finding.invoke({
     "classification": "DERIVED",
     "generated_by": "synthesizer/model-c/lab_b",
     "supports": replicated_ids,
-    "source_name": "",
+    "source_name": None,
 })
 
 c_synthesis = graph.get_claim(synthesis)

@@ -30,6 +30,7 @@ Scenarios covered
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -323,7 +324,6 @@ class TestDerivedChain:
 
             c_derived = graph.get_claim(derived)
 
-        import json
         supports = json.loads(c_derived["supports_json"])
         assert upstream in supports
         assert c_derived["classification"] == "DERIVED"
