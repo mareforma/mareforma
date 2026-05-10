@@ -9,8 +9,8 @@ Usage
 
   with mareforma.open() as graph:                  # context manager
       claim_id = graph.assert_claim("...", classification="ANALYTICAL")
-      results  = graph.query("inhibitory input", min_support="REPLICATED")
-      graph.validate(claim_id, validated_by="jane@lab.org")
+      results  = graph.query("topic X", min_support="REPLICATED")
+      graph.validate(claim_id, validated_by="reviewer@example.org")
 
 Flow
 ----
@@ -78,9 +78,21 @@ class EpistemicGraph:
         idempotency_key:
             Stable key for retry-safe writes. Same key → same claim_id returned.
         generated_by:
-            Agent identifier. Defaults to 'agent'.
+            Agent identifier. Use ``"model/version/context"`` format.
+            Defaults to ``'agent'``.
         source_name:
-            Data source this claim derives from.
+            Data source this claim derives from. Required for ANALYTICAL
+            classification to be meaningful.
+
+        Returns
+        -------
+        str
+            The UUID claim_id.
+
+        Raises
+        ------
+        ValueError
+            If ``classification`` is not a valid value or ``text`` is empty.
         """
         return _db.add_claim(
             self._conn,
@@ -117,7 +129,18 @@ class EpistemicGraph:
 
         Returns
         -------
-        List of claim dicts ordered by support_level desc, recency desc.
+        list[dict]
+            Claim dicts ordered by support_level (desc) then created_at (desc).
+            Each dict contains: ``claim_id``, ``text``, ``classification``,
+            ``support_level``, ``idempotency_key``, ``validated_by``,
+            ``validated_at``, ``status``, ``source_name``, ``generated_by``,
+            ``supports_json``, ``contradicts_json``, ``comparison_summary``,
+            ``created_at``, ``updated_at``.
+
+        Raises
+        ------
+        ValueError
+            If ``min_support`` or ``classification`` is not a valid value.
         """
         return _db.query_claims(
             self._conn,
@@ -133,6 +156,13 @@ class EpistemicGraph:
 
     def validate(self, claim_id: str, *, validated_by: str | None = None) -> None:
         """Promote a REPLICATED claim to ESTABLISHED (human validation).
+
+        Parameters
+        ----------
+        claim_id:
+            UUID of the claim to promote.
+        validated_by:
+            Identifier of the human reviewer (e.g. email). Stored on the claim.
 
         Raises
         ------

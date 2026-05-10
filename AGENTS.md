@@ -98,7 +98,8 @@ support level (descending) then recency (descending).
 | `limit` | `int` | `20` | Maximum results. |
 
 Each dict contains: `claim_id`, `text`, `classification`, `support_level`,
-`status`, `source_name`, `generated_by`, `supports_json`, `contradicts_json`,
+`idempotency_key`, `validated_by`, `validated_at`, `status`, `source_name`,
+`generated_by`, `supports_json`, `contradicts_json`, `comparison_summary`,
 `created_at`, `updated_at`.
 
 **Raises:** `ValueError` if `min_support` or `classification` is invalid.
