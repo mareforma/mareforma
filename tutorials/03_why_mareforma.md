@@ -1,0 +1,98 @@
+# Why mareforma
+
+## The problem
+
+AI scientists are being deployed on real research problems — drug targets,
+clinical hypotheses, materials discovery — before any infrastructure exists
+to answer a basic question: which of their findings can be trusted?
+
+The problem is not that AI scientists get things wrong. Every scientist gets
+things wrong. The problem is that the current generation of agent systems
+provides no principled way to distinguish:
+
+- a finding backed by data from one backed by LLM prior knowledge
+- genuine independent replication from two agents repeating each other
+- an established consensus from a single speculative assertion
+
+Without that structure, every output looks like a result.
+
+## What existing systems offer
+
+**Observability tools** (LangSmith, Langfuse, Weights & Biases) record
+what the agent did: which tools were called, what was returned, how long
+it took. This is useful for debugging. It is not epistemic infrastructure.
+Knowing that an agent called a retrieval tool does not tell you whether the
+retrieved finding was independently replicated or whether the data pipeline
+actually ran.
+
+**Self-reported confidence** is common but structurally broken. A model
+reports 0.9 confidence on a hallucination just as readily as on a
+well-grounded finding. Confidence is a property of the model's output
+distribution, not a property of the evidence. It cannot be verified,
+cannot be challenged, and does not accumulate across runs.
+
+**Structured outputs and validation schemas** catch format errors. They
+do not catch epistemic errors — a correctly structured claim can still be
+wrong, ungrounded, or a duplicate of something already known.
+
+**Vector stores and retrieval** give agents access to prior knowledge.
+They do not record which of that knowledge has been independently validated,
+which is contested, or which paths the current claim was derived from.
+
+## What mareforma does differently
+
+Mareforma is not an observability tool. It does not record execution traces.
+It records **epistemic objects** — claims with provenance — and derives trust
+from the structure of the graph, not from the agents that populate it.
+
+**Trust from topology, not introspection.** Two independent agents reaching
+the same conclusion through different data paths is a stronger signal than
+one agent reporting high confidence. Mareforma detects this automatically.
+
+**Classification as epistemic honesty.** The distinction between ANALYTICAL
+(data ran) and INFERRED (LLM reasoning) is recorded permanently at assertion
+time. An agent that asserts ANALYTICAL on a silent pipeline failure is making
+a claim the graph will preserve — and that a reviewer can challenge.
+
+**Accumulation, not evaporation.** Findings persist across runs. When a new
+agent asserts something, it can query what is already established and build
+on it with `DERIVED` classification. Knowledge compounds instead of
+resetting with every run.
+
+**Documented contestation.** When a new finding contradicts an established
+one, both coexist in the graph with an explicit `contradicts[]` link. Science
+advances by documented tension, not by one side being silently overwritten.
+
+**Human oversight at the right layer.** Agents accumulate at machine speed.
+Humans review at the ESTABLISHED gate — not per-step, but per finding that
+has earned independent replication. The graph does the accumulation; the
+human does the validation.
+
+## Who this is for
+
+**Autonomous AI scientists** — agents running multi-step research pipelines
+on real scientific problems. Mareforma gives them a shared memory where
+findings accumulate and can be queried before any new assertion is made.
+
+**Labs building AI science infrastructure** — teams that need to know which
+of their agents' outputs are grounded in data, which are replicated, and
+which are speculative. Mareforma provides the epistemic substrate without
+requiring changes to the agents themselves.
+
+**Multi-agent research systems** — where multiple agents contribute to a
+shared knowledge base and convergence needs to be detected automatically
+across runs, agents, and data sources.
+
+## What mareforma is not
+
+Mareforma is not a guarantee of truth. The graph records what agents assert
+and what the provenance structure supports — it does not verify that
+assertions are correct. A REPLICATED finding can still be wrong if both
+agents were reasoning from the same false prior.
+
+Mareforma is not a replacement for scientific methodology. It is
+infrastructure that makes methodology legible — that records the difference
+between "two agents happened to say the same thing" and "two agents reached
+the same conclusion through independent data paths."
+
+The distinction matters enormously. Mareforma makes it computable.
