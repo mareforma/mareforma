@@ -55,27 +55,27 @@ sep("2. Assert claims")
 
 # INFERRED — default. LLM reasoning without explicit grounding.
 c_inferred = graph.assert_claim(
-    "BC cells receive more inhibitory input than MC cells",
+    "Cell type A receives more inhibitory input than cell type B",
 )
 show("INFERRED id", c_inferred[:8] + "…")
 
 # ANALYTICAL — deterministic analysis against source data. Agent-declared.
 # Only use this when the data pipeline actually ran and produced output.
 c_analytical = graph.assert_claim(
-    "BC cells receive more inhibitory input than MC cells (n=1,204 synapses, p<0.001)",
+    "Cell type A receives more inhibitory input than cell type B (n=1,204, p<0.001)",
     classification="ANALYTICAL",
-    source_name="connectomics_v1",
-    generated_by="agent_alpha/gpt-4o-2024-11",
-    supports=["10.1038/s41586-021-03397-3"],   # DOI as upstream anchor
+    source_name="dataset_alpha",
+    generated_by="agent_alpha/model-a",
+    supports=["upstream_ref_A"],   # upstream anchor: claim_id or reference
 )
 show("ANALYTICAL id", c_analytical[:8] + "…")
 
 # DERIVED — explicitly built on claims already in the graph.
 # Incentivises agents to query before asserting.
 c_derived = graph.assert_claim(
-    "Inhibitory specialisation of BC cells is a conserved cortical motif",
+    "Inhibitory specialisation of cell type A is a conserved motif",
     classification="DERIVED",
-    generated_by="agent_alpha/gpt-4o-2024-11",
+    generated_by="agent_alpha/model-a",
     supports=[c_analytical],
 )
 show("DERIVED id", c_derived[:8] + "…")
@@ -87,8 +87,8 @@ show("DERIVED id", c_derived[:8] + "…")
 sep("3. Query")
 
 # Text substring (case-insensitive)
-r = graph.query("inhibitory")
-show("text='inhibitory'", f"{len(r)} claims")
+r = graph.query("cell type A")
+show("text='cell type A'", f"{len(r)} claims")
 
 # Classification filter
 r = graph.query(classification="ANALYTICAL")
@@ -104,8 +104,9 @@ show("limit=2", f"{len(r)} claims")
 
 # get_claim — single record by id
 claim = graph.get_claim(c_analytical)
-show("get_claim support_level", claim["support_level"])
-show("get_claim classification", claim["classification"])
+if claim:
+    show("get_claim support_level", claim["support_level"])
+    show("get_claim classification", claim["classification"])
 
 
 # ---------------------------------------------------------------------------
@@ -115,15 +116,15 @@ sep("4. Idempotency")
 
 # Same idempotency_key → same claim_id returned, no duplicate inserted.
 # Useful for retry-safe agent loops.
-KEY = "BC_inhibitory_dominance_2026"
+KEY = "cell_A_inhibitory_dominance"
 
 id_a = graph.assert_claim(
-    "BC cells receive more inhibitory input than MC cells",
+    "Cell type A receives more inhibitory input than cell type B",
     generated_by="agent_beta",
     idempotency_key=KEY,
 )
 id_b = graph.assert_claim(
-    "BC cells receive more inhibitory input than MC cells",
+    "Cell type A receives more inhibitory input than cell type B",
     generated_by="agent_beta",
     idempotency_key=KEY,
 )
@@ -132,7 +133,7 @@ show("second call", id_b[:8] + "…")
 show("same id?", id_a == id_b)
 
 # Structured keys are also a convergence convention.
-# Two agents using "BC_inhibitory_dominance_2026" as their key
+# Two agents using "cell_A_inhibitory_dominance" as their key
 # will converge on the same claim-id even with different text phrasing,
 # without needing explicit supports= links between them.
 
@@ -147,30 +148,32 @@ sep("5. REPLICATED (automatic)")
 # This is the signal that two independent agents reached the same conclusion.
 
 upstream = graph.assert_claim(
-    "Inhibitory synapse density is higher in perisomatic compartments",
+    "Property X is elevated in compartment Y",
     classification="ANALYTICAL",
-    generated_by="agent_seed",
-    source_name="connectomics_v1",
+    generated_by="agent_seed/model-a",
+    source_name="dataset_alpha",
 )
 
 rep_a = graph.assert_claim(
-    "BC cells preferentially target perisomatic compartments (lab A, n=800)",
+    "Cell type A preferentially targets compartment Y (lab_a, n=800)",
     classification="ANALYTICAL",
-    generated_by="agent_lab_a/gpt-4o-2024-11",
+    generated_by="agent_lab_a/model-a",
     supports=[upstream],
-    source_name="connectomics_v1",
+    source_name="dataset_alpha",
 )
 
 rep_b = graph.assert_claim(
-    "BC cells preferentially target perisomatic compartments (lab B, n=1100)",
+    "Cell type A preferentially targets compartment Y (lab_b, n=1100)",
     classification="ANALYTICAL",
-    generated_by="agent_lab_b/claude-sonnet-4-6",
+    generated_by="agent_lab_b/model-b",
     supports=[upstream],          # same upstream, different agent → REPLICATED fires
-    source_name="connectomics_v2",
+    source_name="dataset_beta",
 )
 
-show("lab_a support_level", graph.get_claim(rep_a)["support_level"])
-show("lab_b support_level", graph.get_claim(rep_b)["support_level"])
+c_rep_a = graph.get_claim(rep_a)
+c_rep_b = graph.get_claim(rep_b)
+show("lab_a support_level", c_rep_a["support_level"] if c_rep_a else "—")
+show("lab_b support_level", c_rep_b["support_level"] if c_rep_b else "—")
 show("REPLICATED count", len(graph.query(min_support="REPLICATED")))
 
 
@@ -189,9 +192,10 @@ except ValueError as exc:
 
 graph.validate(rep_a, validated_by="jane@lab.org")
 established = graph.get_claim(rep_a)
-show("support_level", established["support_level"])
-show("validated_by", established["validated_by"])
-show("validated_at", established["validated_at"][:10])
+if established:
+    show("support_level", established["support_level"])
+    show("validated_by", established["validated_by"])
+    show("validated_at", established["validated_at"][:10])
 
 
 # ---------------------------------------------------------------------------
@@ -205,11 +209,12 @@ sep("7. Anti-patterns")
 data_result = None                      # simulate silent pipeline failure
 honest_classification = "ANALYTICAL" if data_result is not None else "INFERRED"
 cid = graph.assert_claim(
-    "STAT3 is a therapeutic target for RA in CD4+ T cells",
+    "Gene X is a therapeutic target for disease Y",
     classification=honest_classification,
-    generated_by="agent_medea/gpt-4o",
+    generated_by="agent_example/model-a",
 )
-show("null data → classification", graph.get_claim(cid)["classification"])
+c_cid = graph.get_claim(cid)
+show("null data → classification", c_cid["classification"] if c_cid else "—")
 
 print()
 
