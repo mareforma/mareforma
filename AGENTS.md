@@ -11,7 +11,7 @@ is the only trust signal.
 ## Install
 
 ```bash
-pip install mareforma
+uv add mareforma
 ```
 
 ## Core pattern
@@ -45,6 +45,97 @@ No `mareforma init` required.
 
 ---
 
+## API reference
+
+### `mareforma.open(path=None) → EpistemicGraph`
+
+Open the epistemic graph and return an `EpistemicGraph`. Use as a context
+manager to ensure the connection is closed.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `path` | `str \| Path \| None` | `None` | Project root. Defaults to `cwd()`. Graph stored at `<path>/.mareforma/graph.db`. |
+
+```python
+graph = mareforma.open()                  # cwd
+graph = mareforma.open("/path/to/project")
+with mareforma.open() as graph: ...       # auto-closes
+```
+
+---
+
+### `graph.assert_claim(text, *, ...) → str`
+
+Assert a claim into the graph. Returns `claim_id` (UUID string).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `text` | `str` | required | Falsifiable assertion. Cannot be empty. |
+| `classification` | `str` | `"INFERRED"` | Epistemic origin: `INFERRED` \| `ANALYTICAL` \| `DERIVED` |
+| `generated_by` | `str \| None` | `"agent"` | Agent identifier. Use `model/version/context` format. |
+| `supports` | `list[str] \| None` | `None` | Upstream claim_ids or reference strings. |
+| `contradicts` | `list[str] \| None` | `None` | Claim_ids this finding is in explicit tension with. |
+| `source_name` | `str \| None` | `None` | Data source name. Required for ANALYTICAL to be meaningful. |
+| `idempotency_key` | `str \| None` | `None` | Retry-safe key. Same key → same claim_id, no INSERT. |
+
+**Raises:** `ValueError` if `classification` is invalid or `text` is empty.
+
+**Side effect:** if ≥2 claims now share the same upstream in `supports[]`
+with different `generated_by`, both are promoted to `REPLICATED` automatically.
+
+---
+
+### `graph.query(text=None, *, ...) → list[dict]`
+
+Query claims from the graph. Returns a list of claim dicts ordered by
+support level (descending) then recency (descending).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `text` | `str \| None` | `None` | Substring filter on claim text (case-insensitive). |
+| `min_support` | `str \| None` | `None` | Minimum support level: `PRELIMINARY` \| `REPLICATED` \| `ESTABLISHED` |
+| `classification` | `str \| None` | `None` | Filter by classification. |
+| `limit` | `int` | `20` | Maximum results. |
+
+Each dict contains: `claim_id`, `text`, `classification`, `support_level`,
+`status`, `source_name`, `generated_by`, `supports_json`, `contradicts_json`,
+`created_at`, `updated_at`.
+
+**Raises:** `ValueError` if `min_support` or `classification` is invalid.
+
+---
+
+### `graph.get_claim(claim_id) → dict | None`
+
+Return a single claim dict by ID, or `None` if not found.
+
+---
+
+### `graph.validate(claim_id, *, validated_by=None) → None`
+
+Promote a `REPLICATED` claim to `ESTABLISHED`. Human-only gate.
+
+**Raises:** `ClaimNotFoundError` if the claim does not exist.
+**Raises:** `ValueError` if `support_level` is not `REPLICATED`.
+
+---
+
+### `mareforma.schema() → dict`
+
+Return the full epistemic schema — valid values, defaults, and state
+transitions. Call this before making any assertions to inspect the system.
+
+```python
+s = mareforma.schema()
+s["classifications"]   # ['INFERRED', 'ANALYTICAL', 'DERIVED']
+s["support_levels"]    # ['PRELIMINARY', 'REPLICATED', 'ESTABLISHED']
+s["statuses"]          # ['open', 'contested', 'retracted']
+s["transitions"]       # [{from: PRELIMINARY, to: REPLICATED, trigger: automatic}, ...]
+s["schema_version"]    # 1
+```
+
+---
+
 ## Classification
 
 Classification encodes how knowledge was derived — the epistemic origin.
@@ -75,23 +166,75 @@ No agent can self-promote to `ESTABLISHED`.
 
 ---
 
-## Query filters
+## Claim status
+
+Status is an editorial signal, separate from support level.
+
+| Value | Meaning |
+|---|---|
+| `open` | Active claim — default |
+| `contested` | Under active dispute |
+| `retracted` | Withdrawn by the asserting agent or a reviewer |
 
 ```python
-# All claims
-graph.query()
+graph.assert_claim("...", status="open")      # default
+graph.assert_claim("...", status="contested") # flagging dispute at assertion time
+```
 
-# Text search + minimum support
-graph.query("topic X", min_support="REPLICATED", limit=10)
+Status is mutable via `mareforma claim update` (CLI) or directly via the
+database. It does not affect `support_level`.
 
-# By classification
-graph.query(classification="ANALYTICAL")
+---
+
+## Contradiction pattern
+
+When a new finding is in tension with an existing claim, assert with
+`contradicts=` pointing to the existing claim. Both coexist in the graph
+with an explicit link — neither is overwritten.
+
+```python
+# Find what is established on this topic
+prior = graph.query("Treatment X", min_support="ESTABLISHED")
+
+# New analysis gets a different result — document the tension
+graph.assert_claim(
+    "Treatment X shows no effect (n=1240, p=0.21)",
+    classification="ANALYTICAL",
+    contradicts=[c["claim_id"] for c in prior],
+    supports=["upstream_ref_B"],
+)
+```
+
+Science advances by documented contestation, not by one side disappearing.
+
+---
+
+## Query patterns
+
+```python
+# All claims about a topic
+graph.query("topic X")
+
+# Only independently replicated findings
+graph.query("topic X", min_support="REPLICATED")
 
 # Only human-validated findings
 graph.query(min_support="ESTABLISHED")
 
-# Single record by id
-graph.get_claim(claim_id)
+# Filter genuine replication from spurious (both ANALYTICAL + source present)
+results = graph.query("topic X", min_support="REPLICATED")
+trustworthy = [
+    r for r in results
+    if r["classification"] == "ANALYTICAL" and r.get("source_name")
+]
+
+# Claims this finding contradicts
+import json
+claim = graph.get_claim(claim_id)
+contradicts = json.loads(claim["contradicts_json"])
+
+# Claims this finding rests on
+supports = json.loads(claim["supports_json"])
 ```
 
 ---
@@ -111,9 +254,8 @@ claim_id = graph.assert_claim("...", idempotency_key="run_abc_claim_1")
 
 **Convergence convention.** Agents running the same conceptual query should
 use a structured key that encodes the semantic content of the claim — not a
-random run ID. Two agents using the same key will converge on the same
-`claim_id` even with different text phrasing, without needing explicit
-`supports=` links between them:
+random run ID. Two agents using the same key converge on the same `claim_id`
+even with different text phrasing, without needing explicit `supports=` links:
 
 ```python
 # Lab A
@@ -190,15 +332,7 @@ labs become indistinguishable. `REPLICATED` will never fire between them.
 **✗ Treat REPLICATED as proof of truth.**
 Two agents repeating the same LLM prior — with no data pipeline behind either
 finding — will both be `INFERRED` but can still trigger `REPLICATED` if they
-share an upstream. Always check `classification` alongside `support_level`:
-
-```python
-results = graph.query("topic X", min_support="REPLICATED")
-trustworthy = [
-    r for r in results
-    if r["classification"] == "ANALYTICAL" and r.get("source_name")
-]
-```
+share an upstream. Always check `classification` alongside `support_level`.
 
 **✗ Call `graph.validate()` on a PRELIMINARY claim.**
 `validate()` requires `support_level == "REPLICATED"`. Attempting to validate
@@ -220,5 +354,8 @@ consequential actions — it must not be reachable from a single-agent finding.
 
 ## For more
 
-- Examples: [github.com/mareforma/mareforma/examples](https://github.com/mareforma/mareforma/tree/main/examples)
+- [Quickstart](tutorials/01_quickstart.md)
+- [Mental model](tutorials/02_mental_model.md)
+- [Why mareforma](tutorials/03_why_mareforma.md)
+- [Examples](examples/)
 - Full API reference: https://mareforma.com/docs
