@@ -2,15 +2,16 @@
 examples/02_compounding_agents.py — How agent findings compound.
 
 Run:
+    pip install langchain-core
     python examples/02_compounding_agents.py
 
-No API key required. No external dependencies beyond mareforma.
+No API key required.
 
 Story
 -----
 Two agents work sequentially on the same research question.
 
-  Agent A (Analyst) runs on two independent connectomics datasets.
+  Agent A (Analyst) runs on two independent datasets.
   Both analyses cite the same upstream evidence.
   Different agents, shared upstream → REPLICATED fires automatically.
 
@@ -23,15 +24,21 @@ Two agents work sequentially on the same research question.
 
 LangChain integration
 ---------------------
-The agents below are plain Python to keep this example self-contained.
-In a real deployment, each EpistemicAgent method becomes a @tool and the
-class is driven by a LangChain AgentExecutor. The graph interaction is identical.
+The mareforma primitives are defined as real @tools below.
+The agent control flow is explicit Python — simulating what an LLM would decide.
+To drive these tools with a real LLM, replace the control flow with:
+
+    from langchain_openai import ChatOpenAI
+    from langgraph.prebuilt import create_react_agent
+    agent = create_react_agent(ChatOpenAI(model="gpt-4o"), tools=[query_graph, assert_finding])
+    agent.invoke({"messages": [HumanMessage("Synthesise findings about cell type A.")]})
 """
 
 import tempfile
 from pathlib import Path
 
 import mareforma
+from langchain_core.tools import tool
 
 
 def sep(title: str) -> None:
@@ -53,70 +60,86 @@ graph = mareforma.open(tmp)
 
 
 # ---------------------------------------------------------------------------
-# Agent interface
-# The two methods an agent needs. In a LangChain agent these become @tools.
+# Mareforma as LangChain tools
+# These are real @tools — schema, name, and description are exposed to any LLM.
 # ---------------------------------------------------------------------------
 
-class EpistemicAgent:
-    def __init__(self, name: str) -> None:
-        self.name = name
+@tool
+def query_graph(text: str, min_support: str = "PRELIMINARY") -> list[dict]:
+    """Query the epistemic graph for existing findings.
 
-    def query(self, text: str, min_support: str = "PRELIMINARY") -> list[dict]:
-        """Query the graph before asserting — standard agent pattern."""
-        return graph.query(text, min_support=min_support)
+    Returns claims matching the text filter, ordered by support level.
+    min_support: PRELIMINARY | REPLICATED | ESTABLISHED
+    """
+    results = graph.query(text, min_support=min_support)
+    return [
+        {
+            "claim_id": r["claim_id"],
+            "text": r["text"],
+            "support_level": r["support_level"],
+            "classification": r["classification"],
+        }
+        for r in results
+    ]
 
-    def assert_finding(
-        self,
-        text: str,
-        classification: str = "INFERRED",
-        supports: list[str] | None = None,
-        source_name: str | None = None,
-    ) -> str:
-        return graph.assert_claim(
-            text,
-            classification=classification,
-            generated_by=self.name,
-            supports=supports or [],
-            source_name=source_name,
-        )
+
+@tool
+def assert_finding(
+    text: str,
+    classification: str,
+    generated_by: str,
+    supports: list[str],
+    source_name: str,
+) -> str:
+    """Assert a scientific finding into the epistemic graph. Returns claim_id.
+
+    classification: INFERRED | ANALYTICAL | DERIVED
+    supports: list of upstream claim_ids or reference strings
+    """
+    return graph.assert_claim(
+        text,
+        classification=classification,
+        generated_by=generated_by,
+        supports=supports,
+        source_name=source_name,
+    )
 
 
 # ---------------------------------------------------------------------------
-# Agent A — Analyst
-# Runs on two independent datasets. Both cite the same prior literature.
+# Agent A — Analyst (two independent runs)
+# Explicit control flow simulates what the LLM would decide to do.
 # ---------------------------------------------------------------------------
 
 sep("Agent A — Analyst (two independent runs)")
 
-agent_a1 = EpistemicAgent("analyst/model-a/lab_a")
-agent_a2 = EpistemicAgent("analyst/model-b/lab_b")
-
 # Shared upstream anchor — a prior claim both analyses build on.
-# In a real project this would be a claim_id already in the graph, 
-# or a DOI from the actual literature.
+# In a real project this would be a claim_id already in the graph,
+# or a reference from the actual literature.
 prior_ref = "upstream_finding_X"
 
 # Run 1: Lab A, dataset alpha
-finding_a = agent_a1.assert_finding(
-    "Cell type A forms the majority of inhibitory connections onto cell type B"
-    " (dataset_alpha, n=842, p<0.001)",
-    classification="ANALYTICAL",
-    supports=[prior_ref],
-    source_name="dataset_alpha",
-)
+finding_a = assert_finding.invoke({
+    "text": "Cell type A forms the majority of inhibitory connections onto cell type B"
+            " (dataset_alpha, n=842, p<0.001)",
+    "classification": "ANALYTICAL",
+    "generated_by": "analyst/model-a/lab_a",
+    "supports": [prior_ref],
+    "source_name": "dataset_alpha",
+})
 c_a = graph.get_claim(finding_a)
 show("lab_a claim_id", finding_a[:8] + "…")
 show("lab_a support_level", c_a["support_level"] if c_a else "—")
 
 # Run 2: Lab B, independent dataset beta
 # Same upstream reference, different agent, different source → REPLICATED fires
-finding_b = agent_a2.assert_finding(
-    "Cell type A dominates inhibitory input onto cell type B"
-    " (dataset_beta, n=1104, p<0.001)",
-    classification="ANALYTICAL",
-    supports=[prior_ref],
-    source_name="dataset_beta",
-)
+finding_b = assert_finding.invoke({
+    "text": "Cell type A dominates inhibitory input onto cell type B"
+            " (dataset_beta, n=1104, p<0.001)",
+    "classification": "ANALYTICAL",
+    "generated_by": "analyst/model-b/lab_b",
+    "supports": [prior_ref],
+    "source_name": "dataset_beta",
+})
 c_b = graph.get_claim(finding_b)
 show("lab_b claim_id", finding_b[:8] + "…")
 show("lab_b support_level", c_b["support_level"] if c_b else "—")
@@ -132,23 +155,23 @@ print("  Two independent agents, shared upstream → REPLICATED fires automatica
 
 sep("Agent B — Synthesizer")
 
-agent_b = EpistemicAgent("synthesizer/model-c/lab_b")
-
 # Step 1: query before asserting — the standard agent pattern
-existing = agent_b.query("cell type A", min_support="REPLICATED")
-print(f"  graph.query('cell type A', min_support='REPLICATED') → {len(existing)} claims")
+existing = query_graph.invoke({"text": "cell type A", "min_support": "REPLICATED"})
+print(f"  query_graph('cell type A', min_support='REPLICATED') → {len(existing)} claims")
 for c in existing:
     print(f"    [{c['support_level']:12}] {c['text'][:65]}…")
 
 # Step 2: build on what the graph already supports
 replicated_ids = [c["claim_id"] for c in existing]
 
-synthesis = agent_b.assert_finding(
-    "Inhibitory dominance of cell type A over cell type B is a replicated finding"
-    " across independent datasets and consistent with prior literature",
-    classification="DERIVED",          # explicitly built on REPLICATED graph claims
-    supports=replicated_ids,
-)
+synthesis = assert_finding.invoke({
+    "text": "Inhibitory dominance of cell type A over cell type B is a replicated finding"
+            " across independent datasets and consistent with prior literature",
+    "classification": "DERIVED",
+    "generated_by": "synthesizer/model-c/lab_b",
+    "supports": replicated_ids,
+    "source_name": "",
+})
 
 c_synthesis = graph.get_claim(synthesis)
 show("synthesis claim_id", synthesis[:8] + "…")
@@ -173,7 +196,7 @@ for c in sorted(all_claims, key=lambda x: level_order.get(x["support_level"], 3)
 
 print()
 print("  Agent B's synthesis is traceable:")
-print("  prior literature → ANALYTICAL (×2, independent) → REPLICATED → DERIVED")
+print("  prior reference → ANALYTICAL (×2, independent) → REPLICATED → DERIVED")
 print()
 print("  Without querying the graph, Agent B would have asserted from scratch.")
 print("  The graph is what makes findings compound instead of evaporate.")
@@ -184,5 +207,5 @@ print("  The graph is what makes findings compound instead of evaporate.")
 # ---------------------------------------------------------------------------
 
 graph.close()
-print(f"{'─' * 60}")
+print(f"\n{'─' * 60}")
 print("  Done. Graph written to:", tmp / ".mareforma" / "graph.db")
