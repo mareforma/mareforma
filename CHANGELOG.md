@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-05-11
+
+Breaking change from v0.2.x. No migration path — delete `graph.db` to start
+fresh. Claims are backed up in `claims.toml`.
+
+### Added
+
+- `mareforma.open()` — returns `EpistemicGraph`; no `@transform` required
+- `EpistemicGraph.assert_claim()` — assert claims directly from any agent
+- `EpistemicGraph.query()` — query by text, support level, or classification
+- `EpistemicGraph.get_claim()` — fetch a single claim by ID
+- `EpistemicGraph.validate()` — human gate to ESTABLISHED
+- `EpistemicGraph.get_tools()` — returns `[query_graph, assert_finding]` as plain Python callables; `generated_by` baked into closure; wraps in one line for any framework
+- `mareforma.schema()` — runtime introspection of valid values and state transitions
+- Claims schema v1: `classification`, `support_level`, `idempotency_key`, `validated_by`, `validated_at`, `branch_id`
+- REPLICATED auto-trigger: fires automatically when ≥2 claims share the same upstream in `supports[]` with different `generated_by`
+- Framework integrations: AGENTS.md table covering Anthropic SDK, OpenAI SDK, LangChain, LangGraph, CrewAI, AutoGen, LlamaIndex, PydanticAI, Smol Agents
+- Mintlify docs at `docs.mareforma.com`
+- 5 runnable examples (API walkthrough, compounding agents, documented contestation, private data / public findings, MEDEA drug target)
+
+### Changed
+
+- `mareforma status` — rewritten to show epistemic health by support level (red/yellow/green); no pipeline dependency
+- `mareforma export` — rewritten to produce claims-only JSON-LD
+- `mareforma claim` group unchanged
+
+### Removed
+
+- `@transform` decorator and `BuildContext` — pipeline layer removed
+- `MareformaObserver`, `LangChainAdapter` — execution tracing removed
+- Pipeline CLI commands: `init`, `add-source`, `explain`, `build`, `log`, `diff`, `cross-diff`, `trace`
+- `MareformaError` moved from `registry.py` into `db.py`
+
 ## [0.2.1] - 2026-05-08
 
 ### Added
