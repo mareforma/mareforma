@@ -1,0 +1,88 @@
+---
+title: "The graph"
+description: "How claims connect to each other: the provenance structure that determines trust."
+---
+
+The graph is the set of all claims and the relationships between them:
+`supports[]` links (what this claim rests on) and `contradicts[]` links
+(what this claim is in tension with).
+
+```
+upstream_ref ──► ANALYTICAL claim (lab_a)  ──┐
+                                              ├──► REPLICATED
+upstream_ref ──► ANALYTICAL claim (lab_b)  ──┘
+                    │
+                    └──► DERIVED synthesis ──► (human) ──► ESTABLISHED
+```
+
+Trust is derived from this structure. The more independent paths converge
+on the same upstream evidence, the higher the support level. A single agent
+asserting the same claim a thousand times is still PRELIMINARY — independence
+of provenance paths is what matters.
+
+## supports[]
+
+`supports[]` is the provenance chain. It records what a claim rests on —
+upstream claim_ids or reference strings (e.g. DOIs).
+
+```python
+graph.assert_claim(
+    "Synthesis of A and B suggests mechanism M",
+    classification="DERIVED",
+    supports=["claim_id_A", "claim_id_B", "10.1038/some-doi"],
+)
+```
+
+Leaving `supports[]` empty for a DERIVED claim makes the chain unverifiable.
+For ANALYTICAL and INFERRED claims, `supports[]` is optional but records
+what the finding is explicitly grounded in.
+
+## contradicts[]
+
+`contradicts[]` documents explicit tension. When a new finding is in conflict
+with an existing one, both coexist in the graph — neither is silently
+overwritten.
+
+```python
+established_id = "..."  # ESTABLISHED finding
+
+graph.assert_claim(
+    "Contrary to the established finding, our larger cohort (n=1200) "
+    "shows no significant elevation",
+    classification="ANALYTICAL",
+    contradicts=[established_id],
+    source_name="cohort_2026",
+)
+```
+
+Science advances by documented contestation. ESTABLISHED means
+human-validated evidence — not settled truth.
+
+## Epistemic distance
+
+Epistemic distance measures how far a conclusion is from its raw data.
+A short chain of ANALYTICAL steps close to raw data is more trustworthy
+than a long chain of INFERRED steps, even if each step looks locally valid.
+
+The pessimistic rule: one INFERRED step in a chain means the full chain
+carries INFERRED-level epistemic fragility. Classification does not average
+— it takes the weakest link.
+
+```
+raw data → ANALYTICAL → ANALYTICAL → INFERRED → conclusion
+                                                  ↑
+                                     full chain is INFERRED
+```
+
+This is why the `classification` field is recorded at assertion time and
+cannot be changed retroactively. The epistemic origin of every claim is
+permanently visible in the graph.
+
+## Graph fragmentation
+
+The most common failure mode: two agents assert the same finding in different
+words without linking to a common upstream in `supports[]`. REPLICATED never
+fires because the graph cannot detect convergence without a shared anchor.
+
+The mitigation: `idempotency_key` as a convergence convention. See
+[Idempotency](/concepts/idempotency).

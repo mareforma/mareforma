@@ -1,0 +1,88 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Mareforma",
+  "colors": {
+    "primary": "#0D9488",
+    "light": "#14B8A6",
+    "dark": "#0F766E"
+  },
+  "favicon": "/favicon.png",
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/mareforma/mareforma"
+      }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "AGENTS.md",
+      "href": "/for-agents/agents"
+    }
+  },
+  "navigation": {
+    "anchors": [
+      {
+        "anchor": "Documentation",
+        "icon": "book-open",
+        "groups": [
+          {
+            "group": "Introduction",
+            "pages": [
+              "introduction/why-mareforma",
+              "introduction/quickstart"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "concepts/trust",
+              "concepts/classification",
+              "concepts/the-graph"
+            ]
+          },
+          {
+            "group": "For agents",
+            "pages": [
+              "for-agents/agents"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/api",
+              "reference/data-model",
+              "reference/cli",
+              "reference/changelog"
+            ]
+          },
+          {
+            "group": "Examples",
+            "pages": [
+              "examples/api-walkthrough",
+              "examples/compounding-agents",
+              "examples/documented-contestation",
+              "examples/private-data-public-findings",
+              "examples/drug-target-provenance"
+            ]
+          }
+        ]
+      }
+    ],
+    "global": {
+      "anchors": [
+        {
+          "anchor": "GitHub",
+          "href": "https://github.com/mareforma/mareforma",
+          "icon": "github"
+        }
+      ]
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/mareforma/mareforma"
+    }
+  }
+}

@@ -1,0 +1,43 @@
+---
+title: "Drug Target Provenance"
+description: "MEDEA, an AI scientist, identifies drug targets from multi-omics data. Mareforma records the epistemic status of every finding."
+---
+
+<Card title="View on GitHub" icon="github" href="https://github.com/mareforma/mareforma/tree/main/examples/05_drug_target_provenance">
+  `examples/05_drug_target_provenance/`
+</Card>
+
+[MEDEA](https://github.com/mims-harvard/Medea) is an AI scientist that identifies drug targets from multi-omics data.
+Two forks run on different diseases (RA and SLE, CD4+ T cells). Mareforma
+records whether MEDEA's data pipeline actually ran or whether the answer
+came from LLM prior knowledge.
+
+## Classification at assertion time
+
+```python
+result = run_medea_fork(disease="rheumatoid arthritis", cell_type="CD4")
+classification = "ANALYTICAL" if result["generated_code"] else "INFERRED"
+
+graph.assert_claim(
+    result["final_hypothesis"],
+    classification=classification,
+    generated_by="medea/gpt-4o/ra_cd4",
+    source_name="medeadb",
+)
+```
+
+## What we found
+
+Both forks returned `generated_code = null`. Both findings were `INFERRED`.
+The classification surfaced a silent pipeline failure immediately — before
+anyone acted on the results. Led to a bug report:
+[mims-harvard/Medea#6](https://github.com/mims-harvard/Medea/pull/6).
+
+## Setup
+
+```bash
+python 05_drug_target_provenance.py --install   # ~21 GB MedeaDB download
+python 05_drug_target_provenance.py --data
+cp Medea/env_template.txt .env                  # set OPENAI_API_KEY
+python 05_drug_target_provenance.py --run
+```

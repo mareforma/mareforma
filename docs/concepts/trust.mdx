@@ -1,0 +1,82 @@
+---
+title: "Trust"
+description: "How Mareforma derives trust from graph topology, not from agent self-reporting."
+---
+
+Trust in a claim is a property of its position in the graph, not a property
+of the agent that made it.
+
+There is no confidence score. An agent that is wrong is still confident.
+The graph does not ask the agent how sure it is — it tracks what the agent
+can demonstrate.
+
+## Support levels
+
+<AccordionGroup>
+  <Accordion title="PRELIMINARY">
+    One agent claimed it. Could be correct. No independent confirmation yet.
+
+    Set automatically at INSERT. Every new claim starts here.
+  </Accordion>
+  <Accordion title="REPLICATED">
+    ≥2 agents with different `generated_by` values share the same upstream in
+    `supports[]`. Set automatically at INSERT. No extra step required.
+
+    This is the minimum bar for treating a finding as non-anecdotal.
+  </Accordion>
+  <Accordion title="ESTABLISHED">
+    A human reviewed the provenance chain and validated it. Only reachable via
+    `graph.validate()`. No agent can self-promote.
+
+    This is the gate for consequential actions.
+  </Accordion>
+</AccordionGroup>
+
+## How REPLICATED fires
+
+```
+upstream_ref ──► ANALYTICAL claim (lab_a, generated_by="agent/a")  ──┐
+                                                                      ├──► REPLICATED
+upstream_ref ──► ANALYTICAL claim (lab_b, generated_by="agent/b")  ──┘
+```
+
+Two conditions must both be true:
+1. Both claims reference the **same upstream** in `supports[]`
+2. Both claims have **different `generated_by`** values
+
+A single agent asserting the same claim a thousand times is still PRELIMINARY.
+Independence of provenance paths is what matters, not count.
+
+```python
+prior = graph.assert_claim("upstream evidence", generated_by="seed")
+
+id_a = graph.assert_claim(
+    "finding A", supports=[prior], generated_by="agent/model-a"
+)
+id_b = graph.assert_claim(
+    "finding B", supports=[prior], generated_by="agent/model-b"
+)
+
+graph.get_claim(id_a)["support_level"]  # → "REPLICATED"
+graph.get_claim(id_b)["support_level"]  # → "REPLICATED"
+```
+
+## How ESTABLISHED is reached
+
+```python
+# Only after REPLICATED — will raise ValueError if PRELIMINARY
+graph.validate(claim_id, validated_by="reviewer@example.org")
+```
+
+`validate()` raises `ValueError` if the claim is not yet REPLICATED. The
+human reviews the full provenance chain via `supports[]` links — not
+individual steps.
+
+## What trust is not
+
+ESTABLISHED does not mean the claim is true. The graph records what agents
+assert and what the provenance structure supports. A REPLICATED finding can
+still be wrong if both agents were reasoning from the same false prior.
+
+Trust in Mareforma is a structural property — a measure of how the finding
+was reached, not of whether it is correct.

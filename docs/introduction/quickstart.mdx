@@ -1,6 +1,7 @@
-# Quickstart
-
-Five minutes to your first claim.
+---
+title: "Quickstart"
+description: "Five minutes to your first claim."
+---
 
 ## Install
 
@@ -30,8 +31,16 @@ claim_id = graph.assert_claim(
 )
 ```
 
-`claim_id` is a UUID. The claim is immediately persisted and backed up to
-`claims.toml`.
+`claim_id` is a UUID. The claim is immediately persisted to `graph.db` and
+backed up to `claims.toml` — a human-readable TOML file written after every
+mutation. If `graph.db` is ever deleted or corrupted, `claims.toml` preserves
+the full record.
+
+A claim is a falsifiable assertion with provenance: what was asserted,
+how the knowledge was derived (`classification`), from which data source,
+and building on which upstream claims (`supports`). Claims are append-only
+— once recorded, a claim is built upon, contradicted, or retracted, never
+overwritten.
 
 ## Query what is already known
 
@@ -97,7 +106,17 @@ with mareforma.open() as graph:
 
 ## Next
 
-- [Mental model](02_mental_model.md) — what is a claim, what is the graph, what is trust
-- [Why mareforma](03_why_mareforma.md) — the problem it solves
-- [AGENTS.md](../AGENTS.md) — full execution contract for agents
-- [Examples](../examples/) — five runnable examples
+<CardGroup cols={2}>
+  <Card title="Concepts" icon="book" href="/concepts/claims">
+    What is a claim, what is trust, what is the graph.
+  </Card>
+  <Card title="For agents" icon="robot" href="/for-agents/agents">
+    Full execution contract — methods, patterns, forbidden patterns.
+  </Card>
+  <Card title="API reference" icon="code" href="/reference/api">
+    Complete method signatures and return types.
+  </Card>
+  <Card title="Examples" icon="play" href="/examples/api-walkthrough">
+    Five runnable examples, from walkthrough to real AI scientists.
+  </Card>
+</CardGroup>

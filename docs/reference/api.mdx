@@ -1,0 +1,211 @@
+---
+title: "API Reference"
+description: "Complete method signatures, parameters, and return types for the Mareforma Python API."
+---
+
+## `mareforma.open(path=None)`
+
+Open the epistemic graph and return an `EpistemicGraph`.
+
+```python
+import mareforma
+
+graph = mareforma.open()                    # defaults to cwd
+graph = mareforma.open("/path/to/project")
+graph = mareforma.open(Path("./my_project"))
+
+# Preferred: context manager closes automatically
+with mareforma.open() as graph:
+    graph.assert_claim("...")
+```
+
+**Parameters**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `path` | `str \| Path \| None` | `None` | Project root. Graph stored at `<path>/.mareforma/graph.db`. Created on first use. |
+
+**Returns** `EpistemicGraph`
+
+**Raises** `DatabaseError` if the database cannot be opened or the schema version is incompatible.
+
+---
+
+## `mareforma.schema()`
+
+Return the epistemic schema — valid values, defaults, and state transitions.
+
+```python
+s = mareforma.schema()
+s["schema_version"]    # 1
+s["classifications"]   # ['INFERRED', 'ANALYTICAL', 'DERIVED']
+s["support_levels"]    # ['PRELIMINARY', 'REPLICATED', 'ESTABLISHED']
+s["statuses"]          # ['open', 'contested', 'retracted']
+s["defaults"]          # {'classification': 'INFERRED', 'support_level': 'PRELIMINARY', ...}
+s["transitions"]       # list of state transition dicts
+```
+
+**Returns** `dict` — stable across patch releases within a major version.
+
+---
+
+## EpistemicGraph
+
+Returned by `mareforma.open()`. Do not instantiate directly.
+
+### `assert_claim(text, *, classification, generated_by, supports, contradicts, source_name, idempotency_key, status)`
+
+Assert a claim into the graph.
+
+```python
+claim_id = graph.assert_claim(
+    "Target T is elevated in condition C (n=620, p<0.001)",
+    classification="ANALYTICAL",
+    generated_by="agent/model-a/lab_a",
+    supports=["upstream_ref_A"],
+    source_name="dataset_alpha",
+    idempotency_key="run_xyz_target_T",
+)
+```
+
+**Parameters**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `text` | `str` | required | Falsifiable assertion. Cannot be empty or whitespace. |
+| `classification` | `str` | `"INFERRED"` | `INFERRED` \| `ANALYTICAL` \| `DERIVED` |
+| `generated_by` | `str \| None` | `"agent"` | Agent identifier. Independence signal for REPLICATED detection. |
+| `supports` | `list[str] \| None` | `None` | Upstream claim_ids or DOIs this claim rests on. |
+| `contradicts` | `list[str] \| None` | `None` | Claim_ids this finding is in explicit tension with. |
+| `source_name` | `str \| None` | `None` | Data source. Stored as-is; required for ANALYTICAL to be meaningful. |
+| `idempotency_key` | `str \| None` | `None` | Unique key — same key returns existing `claim_id`, no INSERT. |
+| `status` | `str` | `"open"` | `open` \| `contested` \| `retracted` |
+
+**Returns** `str` — `claim_id` UUID
+
+**Raises**
+- `ValueError` — if `text` is empty, `classification` is invalid, or `status` is invalid
+- `DatabaseError` — on SQLite write failure
+
+**Side effect** — if ≥2 claims now share the same upstream in `supports[]` with different `generated_by` values, all are promoted to `REPLICATED` automatically.
+
+#### Idempotency
+
+`idempotency_key` solves two distinct problems:
+
+**Retry safety** — same key returns the existing `claim_id` with no INSERT. Use whenever a run may be interrupted and retried:
+
+```python
+claim_id = graph.assert_claim("...", idempotency_key="run_abc_claim_1")
+# On retry — same claim_id returned, graph unchanged
+```
+
+**Convergence convention** — two agents using the same structured key converge on the same `claim_id` even with different text, without needing explicit `supports=` links:
+
+```python
+# Lab A
+graph.assert_claim("Target T elevated (cohort_1)", idempotency_key="target_T_condition_C", generated_by="agent/a")
+# Lab B — same key, different text, different agent → same claim_id returned
+graph.assert_claim("Target T elevated (cohort_2)", idempotency_key="target_T_condition_C", generated_by="agent/b")
+```
+
+Use a structured key encoding the semantic content: `"target_T_condition_C"`, not a random run ID.
+
+---
+
+### `query(text=None, *, min_support=None, classification=None, limit=20)`
+
+Query claims ordered by support level (descending) then recency (descending).
+
+```python
+results = graph.query("cell type A", min_support="REPLICATED")
+for r in results:
+    print(r["text"], r["support_level"], r["classification"])
+```
+
+**Parameters**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `text` | `str \| None` | `None` | Case-insensitive substring filter on claim text. |
+| `min_support` | `str \| None` | `None` | `PRELIMINARY` \| `REPLICATED` \| `ESTABLISHED` |
+| `classification` | `str \| None` | `None` | `INFERRED` \| `ANALYTICAL` \| `DERIVED` |
+| `limit` | `int` | `20` | Maximum number of results. |
+
+**Returns** `list[dict]` — each dict contains all 15 claim fields:
+`claim_id`, `text`, `classification`, `support_level`, `idempotency_key`,
+`validated_by`, `validated_at`, `status`, `source_name`, `generated_by`,
+`supports_json`, `contradicts_json`, `comparison_summary`, `created_at`, `updated_at`.
+
+**Raises** `ValueError` if `min_support` or `classification` is invalid.
+
+---
+
+### `get_claim(claim_id)`
+
+Return a single claim dict by ID.
+
+```python
+claim = graph.get_claim(claim_id)
+if claim:
+    print(claim["support_level"])
+```
+
+**Parameters** `claim_id: str`
+
+**Returns** `dict | None` — `None` if not found. Dict has the same 15 fields as `query()`.
+
+---
+
+### `validate(claim_id, *, validated_by=None)`
+
+Promote a `REPLICATED` claim to `ESTABLISHED`. Human-only gate.
+
+```python
+graph.validate(claim_id, validated_by="reviewer@example.org")
+```
+
+**Parameters**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `claim_id` | `str` | required | UUID of the claim to validate. |
+| `validated_by` | `str \| None` | `None` | Identifier of the human reviewer. Stored permanently. |
+
+**Raises**
+- `ClaimNotFoundError` — if the claim does not exist
+- `ValueError` — if `support_level` is not `REPLICATED`
+
+---
+
+### `close()`
+
+Close the graph database connection.
+
+```python
+graph.close()
+```
+
+Not required when using the context manager — `__exit__` calls `close()` automatically.
+
+---
+
+## Exceptions
+
+### `DatabaseError`
+
+Raised on SQLite errors or schema version mismatch.
+
+```python
+from mareforma.db import DatabaseError
+```
+
+Schema mismatch message: `"graph.db schema vN is not compatible with mareforma v0.3.0. Delete .mareforma/graph.db to start fresh — your claims are backed up in claims.toml."`
+
+### `ClaimNotFoundError`
+
+Raised by `validate()` when the specified `claim_id` does not exist.
+
+```python
+from mareforma.db import ClaimNotFoundError
+```

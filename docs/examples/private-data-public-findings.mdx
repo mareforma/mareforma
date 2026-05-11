@@ -1,0 +1,27 @@
+---
+title: "Private Data, Public Findings"
+description: "Two labs share a Mareforma graph but never share raw data. Provenance travels; proprietary data does not."
+---
+
+<Card title="View on GitHub" icon="github" href="https://github.com/mareforma/mareforma/tree/main/examples/04_private_data_public_findings">
+  `examples/04_private_data_public_findings/`
+</Card>
+
+Lab A discovers a finding and publishes its provenance trace. Lab B reads the
+trace, replicates on its own private dataset, and publishes back. The graph
+answers three questions automatically:
+
+1. **Independent paths?** Different data sources, or both from LLM prior?
+2. **Genuinely reproducible?** Stable across datasets, or a data artifact?
+3. **Provenance distance?** How far is each conclusion from raw data?
+
+Also demonstrates spurious REPLICATED — two INFERRED claims repeating the
+same LLM prior — and how to detect it from `classification`.
+
+## Run
+
+```bash
+pip install langchain-core
+cd examples/04_private_data_public_findings
+python 04_private_data_public_findings.py
+```

@@ -1,0 +1,274 @@
+---
+title: "AGENTS.md"
+description: "The full execution contract for AI agents using Mareforma."
+---
+
+<Info>
+  This is the primary document for agent consumption. If you are an AI
+  scientist integrating Mareforma, start here.
+</Info>
+
+Mareforma is the epistemic layer AI scientists run on. It gives agents a
+local graph for asserting claims with provenance and querying what has
+already been established before making new assertions.
+
+Trust in a claim is derived from the graph, not from the agent that made it.
+No confidence score. No self-reporting. The structure of the provenance graph
+is the only trust signal.
+
+## Install
+
+```bash
+uv add mareforma
+```
+
+## Core pattern
+
+```python
+import mareforma
+
+with mareforma.open() as graph:
+
+    # 1. Query before asserting — check what is already established
+    prior = graph.query("finding about topic X", min_support="REPLICATED")
+    prior_ids = [c["claim_id"] for c in prior]
+
+    # 2. Assert a claim, grounded in what the graph already supports
+    claim_id = graph.assert_claim(
+        "Cell type A exhibits property X under condition Y (n=842, p<0.001)",
+        classification="ANALYTICAL",            # INFERRED (default) | ANALYTICAL | DERIVED
+        generated_by="agent/model-a/lab_a",     # model + version + context
+        supports=prior_ids,                     # upstream claim_ids this builds on
+        source_name="dataset_alpha",            # data source this was derived from
+        idempotency_key="run_abc_claim_1",      # retry-safe: same key → same id
+    )
+
+    # 3. Inspect the result
+    claim = graph.get_claim(claim_id)
+    print(claim["text"], claim["support_level"])
+```
+
+`graph.db` is created automatically on first `mareforma.open()`. No `mareforma init` required.
+
+---
+
+## API reference
+
+### `mareforma.open(path=None) → EpistemicGraph`
+
+Open the epistemic graph and return an `EpistemicGraph`. Use as a context
+manager to ensure the connection is closed.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `path` | `str \| Path \| None` | `None` | Project root. Defaults to `cwd()`. Graph stored at `<path>/.mareforma/graph.db`. |
+
+```python
+graph = mareforma.open()
+graph = mareforma.open("/path/to/project")
+with mareforma.open() as graph: ...
+```
+
+---
+
+### `graph.assert_claim(text, *, ...) → str`
+
+Assert a claim into the graph. Returns `claim_id` (UUID string).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `text` | `str` | required | Falsifiable assertion. Cannot be empty. |
+| `classification` | `str` | `"INFERRED"` | Epistemic origin: `INFERRED` \| `ANALYTICAL` \| `DERIVED` |
+| `generated_by` | `str \| None` | `"agent"` | Agent identifier. Use `model/version/context` format. |
+| `supports` | `list[str] \| None` | `None` | Upstream claim_ids or reference strings. |
+| `contradicts` | `list[str] \| None` | `None` | Claim_ids this finding is in explicit tension with. |
+| `source_name` | `str \| None` | `None` | Data source name. Required for ANALYTICAL to be meaningful. |
+| `idempotency_key` | `str \| None` | `None` | Retry-safe key. Same key → same claim_id, no INSERT. |
+
+**Raises:** `ValueError` if `classification` is invalid or `text` is empty.
+
+**Side effect:** if ≥2 claims now share the same upstream in `supports[]`
+with different `generated_by`, both are promoted to `REPLICATED` automatically.
+
+---
+
+### `graph.query(text=None, *, ...) → list[dict]`
+
+Query claims from the graph. Returns a list of claim dicts ordered by
+support level (descending) then recency (descending).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `text` | `str \| None` | `None` | Substring filter on claim text (case-insensitive). |
+| `min_support` | `str \| None` | `None` | Minimum support level: `PRELIMINARY` \| `REPLICATED` \| `ESTABLISHED` |
+| `classification` | `str \| None` | `None` | Filter by classification. |
+| `limit` | `int` | `20` | Maximum results. |
+
+Each dict contains: `claim_id`, `text`, `classification`, `support_level`,
+`idempotency_key`, `validated_by`, `validated_at`, `status`, `source_name`,
+`generated_by`, `supports_json`, `contradicts_json`, `comparison_summary`,
+`created_at`, `updated_at`.
+
+**Raises:** `ValueError` if `min_support` or `classification` is invalid.
+
+---
+
+### `graph.get_claim(claim_id) → dict | None`
+
+Return a single claim dict by ID, or `None` if not found.
+
+---
+
+### `graph.validate(claim_id, *, validated_by=None) → None`
+
+Promote a `REPLICATED` claim to `ESTABLISHED`. Human-only gate.
+
+**Raises:** `ClaimNotFoundError` if the claim does not exist.  
+**Raises:** `ValueError` if `support_level` is not `REPLICATED`.
+
+---
+
+### `mareforma.schema() → dict`
+
+Return the full epistemic schema — valid values, defaults, and state
+transitions. Call this before making any assertions to inspect the system.
+
+```python
+s = mareforma.schema()
+s["classifications"]   # ['INFERRED', 'ANALYTICAL', 'DERIVED']
+s["support_levels"]    # ['PRELIMINARY', 'REPLICATED', 'ESTABLISHED']
+s["transitions"]       # [{from: PRELIMINARY, to: REPLICATED, trigger: automatic}, ...]
+```
+
+---
+
+## Classification
+
+| Value | Use when |
+|---|---|
+| `INFERRED` | LLM reasoning, synthesis, extrapolation — default |
+| `ANALYTICAL` | Deterministic analysis ran against source data and produced output |
+| `DERIVED` | Explicitly built on ESTABLISHED or REPLICATED claims in the graph |
+
+---
+
+## Support levels
+
+| Level | Meaning | How reached |
+|---|---|---|
+| `PRELIMINARY` | One agent claimed it | Automatic on first assertion |
+| `REPLICATED` | ≥2 independent agents converged on the same upstream | Automatic at INSERT |
+| `ESTABLISHED` | Human-validated | `graph.validate()` only — requires REPLICATED first |
+
+---
+
+## Claim status
+
+| Value | Meaning |
+|---|---|
+| `open` | Active claim — default |
+| `contested` | Under active dispute |
+| `retracted` | Withdrawn |
+
+---
+
+## Contradiction pattern
+
+```python
+prior = graph.query("Treatment X", min_support="ESTABLISHED")
+
+graph.assert_claim(
+    "Treatment X shows no effect (n=1240, p=0.21)",
+    classification="ANALYTICAL",
+    contradicts=[c["claim_id"] for c in prior],
+    supports=["upstream_ref_B"],
+)
+```
+
+---
+
+## Query patterns
+
+```python
+graph.query("topic X")
+graph.query("topic X", min_support="REPLICATED")
+graph.query(min_support="ESTABLISHED")
+
+# Filter genuine replication (ANALYTICAL + source)
+results = graph.query("topic X", min_support="REPLICATED")
+trustworthy = [
+    r for r in results
+    if r["classification"] == "ANALYTICAL" and r.get("source_name")
+]
+```
+
+---
+
+## Idempotency
+
+```python
+# Retry safety
+claim_id = graph.assert_claim("...", idempotency_key="run_abc_claim_1")
+
+# Convergence convention — two agents, same key, same claim_id
+graph.assert_claim("Target T elevated (cohort_1)", idempotency_key="target_T_condition_C", generated_by="agent/a")
+graph.assert_claim("Target T elevated (cohort_2)", idempotency_key="target_T_condition_C", generated_by="agent/b")
+```
+
+---
+
+## generated_by convention
+
+```
+"gpt-4o-2024-11/lab_a"     ✓ model + version + context
+"claude-sonnet-4-6/lab_b"  ✓
+"agent"                    ✗ all claims look identical
+"gpt-4o"                   ✗ no context — indistinguishable across labs
+```
+
+---
+
+## Forbidden patterns
+
+<Warning>
+  These patterns are accepted by the API but silently corrupt the epistemic graph.
+</Warning>
+
+**Assert ANALYTICAL when the data pipeline returned null.**
+
+```python
+# Wrong
+graph.assert_claim("Target T is relevant", classification="ANALYTICAL")  # no data ran
+
+# Correct
+result = run_analysis()
+classification = "ANALYTICAL" if result else "INFERRED"
+graph.assert_claim("Target T is relevant", classification=classification)
+```
+
+**Assert DERIVED without `supports=`.**
+
+```python
+# Wrong — unverifiable chain
+graph.assert_claim("...", classification="DERIVED")
+
+# Correct
+graph.assert_claim("...", classification="DERIVED", supports=[upstream_id])
+```
+
+**Use unstructured `generated_by`.** `"agent"` makes independence tracking meaningless.
+
+**Treat REPLICATED as proof of truth.** Two INFERRED claims from the same LLM prior can still trigger REPLICATED. Always check `classification` alongside `support_level`.
+
+**Call `graph.validate()` on a PRELIMINARY claim.** Raises `ValueError`.
+
+---
+
+## Project layout
+
+```
+<project>/
+  .mareforma/
+    graph.db        ← epistemic graph (SQLite, WAL mode)
+  claims.toml       ← human-readable backup, auto-generated after every write
+```

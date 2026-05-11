@@ -1,0 +1,36 @@
+---
+title: "Documented Contestation"
+description: "An agent challenges an ESTABLISHED finding. Both coexist in the graph with an explicit link."
+---
+
+<Card title="View on GitHub" icon="github" href="https://github.com/mareforma/mareforma/tree/main/examples/03_documented_contestation">
+  `examples/03_documented_contestation/`
+</Card>
+
+An ESTABLISHED finding sits in the graph. A new agent runs a larger analysis
+and gets a different result. Using `contradicts=`, it names the tension
+explicitly. Both coexist — neither is overwritten.
+
+ESTABLISHED means human-validated evidence — not settled truth.
+
+## Run
+
+```bash
+pip install langchain-core
+cd examples/03_documented_contestation
+python 03_documented_contestation.py
+```
+
+## Key pattern
+
+```python
+established = graph.query("treatment X", min_support="ESTABLISHED")
+
+graph.assert_claim(
+    "Treatment X shows no effect (n=1240, p=0.21)",
+    classification="ANALYTICAL",
+    contradicts=[c["claim_id"] for c in established],
+    supports=["cohort_2026_upstream"],
+    generated_by="agent/model-b/lab_b",
+)
+```

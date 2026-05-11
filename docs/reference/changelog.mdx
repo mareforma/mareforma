@@ -1,0 +1,60 @@
+---
+title: "Changelog"
+description: "Notable changes across Mareforma releases."
+---
+
+## v0.3.0 — 2026-05-11
+
+Breaking change from v0.2.x. No migration path — delete `graph.db` to start
+fresh (claims are backed up in `claims.toml`).
+
+### What changed
+
+**New: agent-native EpistemicGraph API**
+- `mareforma.open()` returns an `EpistemicGraph` — no `@transform` required
+- `graph.assert_claim()` — assert claims directly from any agent
+- `graph.query()` — query by text, support level, or classification
+- `graph.get_claim()` — fetch a single claim by ID
+- `graph.validate()` — human gate to ESTABLISHED
+- `mareforma.schema()` — runtime introspection of the state machine
+
+**New: claims schema v1**
+- `classification` — INFERRED / ANALYTICAL / DERIVED
+- `support_level` — PRELIMINARY / REPLICATED / ESTABLISHED (graph-derived)
+- `idempotency_key` — retry-safe writes and convergence convention
+- `validated_by`, `validated_at` — set by `validate()` only
+
+**New: REPLICATED auto-trigger**
+Fires automatically when ≥2 claims share the same upstream in `supports[]`
+with different `generated_by`. No extra step required.
+
+**Removed**
+- `@transform` decorator and `BuildContext` — pipeline layer removed
+- `MareformaObserver`, `LangChainAdapter` — execution tracing removed
+- Pipeline CLI commands: `init`, `add-source`, `explain`, `build`, `log`,
+  `diff`, `cross-diff`, `trace`
+
+**CLI**
+- `mareforma claim` — add, list, show, update
+- `mareforma status` — epistemic health dashboard (red/yellow/green by support level)
+- `mareforma export` — claims-only JSON-LD
+
+---
+
+## v0.2.1 — 2026-05-08
+
+- `ctx.params` — runtime parameter injection from TOML
+- `query_claims()` — read primitive for the epistemic graph
+- `delete_claims_by_generated_by()` — delete claims by source agent
+- Fixed `LangChainAdapter` import path
+
+## v0.2.0 — 2026-04-08
+
+- `mareforma.agent` — framework-agnostic agent provenance module
+- `MareformaObserver` — context manager recording agent events to `graph.db`
+- `LangChainAdapter` — LangChain callback handler
+
+## v0.1.0 — 2026-03-25
+
+Initial release. `@transform` decorator, `ctx.claim()`, `mareforma build`,
+SQLite epistemic graph, `claims.toml` backup.

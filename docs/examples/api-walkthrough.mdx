@@ -1,0 +1,47 @@
+---
+title: "API Walkthrough"
+description: "Complete EpistemicGraph API in a single runnable script. No external dependencies."
+---
+
+<Card title="View on GitHub" icon="github" href="https://github.com/mareforma/mareforma/tree/main/examples/01_api_walkthrough">
+  `examples/01_api_walkthrough/`
+</Card>
+
+Every API method — assert, query, get, validate — demonstrated in sequence.
+Runs in a temporary directory with no external dependencies.
+
+## What it covers
+
+1. **Open** — zero setup, no init required
+2. **Assert** — INFERRED, ANALYTICAL, DERIVED classifications
+3. **Query** — text filter, `min_support`, classification, limit
+4. **Idempotency** — retry-safe writes and convergence convention
+5. **REPLICATED** — automatic when two independent agents share upstream evidence
+6. **ESTABLISHED** — human validation only, requires REPLICATED first
+7. **Anti-patterns** — what silently corrupts the epistemic model
+
+## Run
+
+```bash
+cd examples/01_api_walkthrough
+python 01_api_walkthrough.py
+```
+
+No external dependencies. Uses a temporary directory — safe to run anywhere.
+
+## Key snippet
+
+```python
+import tempfile, mareforma
+
+with tempfile.TemporaryDirectory() as tmp:
+    with mareforma.open(tmp) as graph:
+        prior_id = graph.assert_claim("upstream reference", generated_by="seed")
+        id_a = graph.assert_claim(
+            "finding A", supports=[prior_id], generated_by="agent/a"
+        )
+        id_b = graph.assert_claim(
+            "finding B", supports=[prior_id], generated_by="agent/b"
+        )
+        assert graph.get_claim(id_a)["support_level"] == "REPLICATED"
+```

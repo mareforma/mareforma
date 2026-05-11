@@ -1,0 +1,73 @@
+---
+title: "Data Model"
+description: "All claim fields: types, defaults, constraints, and semantics."
+---
+
+All claims are stored in a single `claims` table in `graph.db` (SQLite, WAL mode).
+Schema version: `1`.
+
+## Claims table
+
+| Field | Type | Default | Nullable | Description |
+|---|---|---|---|---|
+| `claim_id` | TEXT | UUID at insert | No | Primary key |
+| `text` | TEXT | required | No | The falsifiable assertion |
+| `classification` | TEXT | `INFERRED` | No | Epistemic origin: INFERRED / ANALYTICAL / DERIVED |
+| `support_level` | TEXT | `PRELIMINARY` | No | Graph-derived trust: PRELIMINARY / REPLICATED / ESTABLISHED |
+| `idempotency_key` | TEXT | `NULL` | Yes | UNIQUE — same key → same `claim_id`, no INSERT |
+| `validated_by` | TEXT | `NULL` | Yes | Set by `graph.validate()` only |
+| `validated_at` | TEXT | `NULL` | Yes | UTC ISO 8601 timestamp of validation |
+| `status` | TEXT | `open` | No | Editorial: open / contested / retracted |
+| `source_name` | TEXT | `NULL` | Yes | Data source name; required for ANALYTICAL to be meaningful |
+| `generated_by` | TEXT | `human` | No | Agent identifier; independence signal for REPLICATED |
+| `supports_json` | TEXT | `[]` | No | JSON array of upstream claim_ids or DOIs |
+| `contradicts_json` | TEXT | `[]` | No | JSON array of claim_ids this finding contests |
+| `comparison_summary` | TEXT | `NULL` | Yes | Human-readable diff note for contradictions |
+| `created_at` | TEXT | UTC now | No | ISO 8601 UTC timestamp |
+| `updated_at` | TEXT | UTC now | No | ISO 8601 UTC; updated on every mutation |
+
+## Indexes
+
+| Index | Column(s) | Type | Notes |
+|---|---|---|---|
+| `idx_claims_status` | `status` | Non-unique | Filters by `open`, `contested`, `retracted` |
+| `idx_claims_source` | `source_name` | Non-unique | Filters by data source |
+| `idx_claims_generated_by` | `generated_by` | Non-unique | Filters by agent |
+| `idx_claims_support_level` | `support_level` | Non-unique | Filters by trust tier |
+| `idx_claims_idempotency_key` | `idempotency_key` | Unique (partial) | `WHERE idempotency_key IS NOT NULL` |
+
+## Valid values
+
+```python
+VALID_CLASSIFICATIONS = ("INFERRED", "ANALYTICAL", "DERIVED")
+VALID_SUPPORT_LEVELS  = ("PRELIMINARY", "REPLICATED", "ESTABLISHED")
+VALID_STATUSES        = ("open", "contested", "retracted")
+```
+
+Available at runtime via `mareforma.schema()`:
+
+```python
+s = mareforma.schema()
+s["classifications"]  # ['INFERRED', 'ANALYTICAL', 'DERIVED']
+s["support_levels"]   # ['PRELIMINARY', 'REPLICATED', 'ESTABLISHED']
+s["statuses"]         # ['open', 'contested', 'retracted']
+```
+
+## Schema versioning
+
+The schema version is stored in SQLite's `user_version` pragma.
+
+| Version | State |
+|---|---|
+| `0` | Fresh database — full schema applied on first `open_db()` |
+| `1` | v0.3.0 schema — ready to use |
+| Any other | `DatabaseError` — delete `graph.db` to start fresh; `claims.toml` is the backup |
+
+## Storage
+
+`graph.db` is stored at `<project_root>/.mareforma/graph.db`. Created automatically
+on first `mareforma.open()`. The `.mareforma/` directory is created if it does not exist.
+
+`claims.toml` at the project root is a human-readable backup of all claims,
+written after every mutation. It is not the source of truth — `graph.db` is —
+but it survives `graph.db` deletion.

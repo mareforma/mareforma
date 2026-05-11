@@ -1,0 +1,193 @@
+---
+title: "CLI Reference"
+description: "The Mareforma command-line interface: claim management, epistemic health, and export."
+---
+
+## Overview
+
+```bash
+mareforma [COMMAND] [OPTIONS]
+```
+
+Available commands: `claim`, `status`, `export`.
+
+---
+
+## claim
+
+Manage scientific claims.
+
+```bash
+mareforma claim [SUBCOMMAND]
+```
+
+### claim add
+
+Assert a new scientific claim.
+
+```bash
+mareforma claim add TEXT [OPTIONS]
+```
+
+**Arguments**
+
+| Argument | Description |
+|---|---|
+| `TEXT` | The claim text. Falsifiable assertion. |
+
+**Options**
+
+| Option | Default | Description |
+|---|---|---|
+| `--classification` | `INFERRED` | `INFERRED` \| `ANALYTICAL` \| `DERIVED` |
+| `--status` | `open` | `open` \| `contested` \| `retracted` |
+| `--source TEXT` | — | Data source name |
+| `--supports ID_OR_DOI` | — | Upstream claim_id or DOI (repeatable) |
+| `--contradicts ID_OR_DOI` | — | Claim_id this finding contests (repeatable) |
+| `--generated-by TEXT` | `human` | Agent identifier |
+
+**Examples**
+
+```bash
+# Basic claim
+mareforma claim add "Target T is elevated in condition C"
+
+# With classification and source
+mareforma claim add "Target T is elevated in condition C (n=620)" \
+  --classification ANALYTICAL \
+  --source dataset_alpha \
+  --generated-by "agent/model-a/lab_a"
+
+# Building on prior findings
+mareforma claim add "The mechanism is likely M" \
+  --classification DERIVED \
+  --supports 3f8a1b2c-...
+```
+
+---
+
+### claim list
+
+List claims, optionally filtered.
+
+```bash
+mareforma claim list [OPTIONS]
+```
+
+**Options**
+
+| Option | Default | Description |
+|---|---|---|
+| `--status TEXT` | — | Filter by status: `open`, `contested`, `retracted` |
+| `--source TEXT` | — | Filter by source name |
+| `--json` | `False` | Emit JSON to stdout |
+
+**Examples**
+
+```bash
+mareforma claim list
+mareforma claim list --status open
+mareforma claim list --json | jq '.[].support_level'
+```
+
+---
+
+### claim show
+
+Show full details for one claim.
+
+```bash
+mareforma claim show CLAIM_ID [OPTIONS]
+```
+
+**Options**
+
+| Option | Description |
+|---|---|
+| `--json` | Emit JSON to stdout |
+
+---
+
+### claim update
+
+Update fields on an existing claim.
+
+```bash
+mareforma claim update CLAIM_ID [OPTIONS]
+```
+
+**Options**
+
+| Option | Description |
+|---|---|
+| `--status TEXT` | New status: `open`, `contested`, `retracted` |
+| `--text TEXT` | New claim text |
+| `--supports ID_OR_DOI` | Replace supports list (repeatable) |
+| `--contradicts ID_OR_DOI` | Replace contradicts list (repeatable) |
+
+---
+
+## status
+
+Show the epistemic health dashboard.
+
+```bash
+mareforma status [OPTIONS]
+```
+
+**Traffic light**
+
+| Color | Condition |
+|---|---|
+| 🔴 RED | No claims recorded |
+| 🟡 YELLOW | Claims exist but all are PRELIMINARY |
+| 🟢 GREEN | At least one REPLICATED or ESTABLISHED claim |
+
+**Options**
+
+| Option | Description |
+|---|---|
+| `--json` | Emit JSON to stdout |
+
+**Examples**
+
+```bash
+mareforma status
+mareforma status --json
+```
+
+---
+
+## export
+
+Export all claims as a JSON-LD document.
+
+```bash
+mareforma export [OPTIONS]
+```
+
+Writes to `ontology.jsonld` in the current directory by default.
+
+**Options**
+
+| Option | Default | Description |
+|---|---|---|
+| `--output PATH` | `./ontology.jsonld` | Output file path |
+| `--json` | `False` | Print JSON-LD to stdout instead of writing a file |
+
+**Examples**
+
+```bash
+# Write to default path
+mareforma export
+
+# Print to stdout and pipe to jq
+mareforma export --json | jq '.["@graph"][] | select(.["@type"] == "mare:Claim")'
+
+# Custom output path
+mareforma export --output /tmp/my_claims.jsonld
+```
+
+The JSON-LD output uses `mare:`, `prov:`, and `schema:` vocabularies.
+Each claim is a `mare:Claim` node with `claimText`, `classification`,
+`supportLevel`, `generatedBy`, and `supports` fields.
