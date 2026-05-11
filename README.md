@@ -27,11 +27,19 @@ with mareforma.open() as graph:
     )
 ```
 
-<!-- TODO: replace with graph.png once generated -->
-```
-prior_ref ──► [ANALYTICAL/lab_a] ──┐
-                                   ├──► REPLICATED ──► (human) ──► ESTABLISHED
-prior_ref ──► [ANALYTICAL/lab_b] ──┘
+```mermaid
+graph LR
+    P([prior_ref]) --> A["ANALYTICAL · lab_a"]
+    P --> B["ANALYTICAL · lab_b"]
+    A --> R(["REPLICATED ✓"])
+    B --> R
+    R -->|"graph.validate()"| E(["ESTABLISHED ✓"])
+
+    style P fill:#334155,stroke:#475569,color:#cbd5e1
+    style A fill:#1e3a5f,stroke:#3b82f6,color:#93c5fd
+    style B fill:#1e3a5f,stroke:#3b82f6,color:#93c5fd
+    style R fill:#14532d,stroke:#22c55e,color:#86efac
+    style E fill:#713f12,stroke:#f59e0b,color:#fde68a
 ```
 
 ## Findings contradict — both stay in the graph
