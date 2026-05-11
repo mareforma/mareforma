@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS claims (
     supports_json   TEXT NOT NULL DEFAULT '[]',
     contradicts_json TEXT NOT NULL DEFAULT '[]',
     comparison_summary TEXT,
+    branch_id       TEXT NOT NULL DEFAULT 'main',
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );
@@ -94,7 +95,7 @@ _CLAIM_COLUMNS = (
     "idempotency_key", "validated_by", "validated_at",
     "status", "source_name", "generated_by",
     "supports_json", "contradicts_json",
-    "comparison_summary", "created_at", "updated_at",
+    "comparison_summary", "branch_id", "created_at", "updated_at",
 )
 _CLAIM_SELECT = ", ".join(_CLAIM_COLUMNS)
 

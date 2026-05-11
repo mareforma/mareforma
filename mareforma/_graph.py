@@ -29,6 +29,7 @@ Flow
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -172,6 +173,112 @@ class EpistemicGraph:
             If support_level is not 'REPLICATED'.
         """
         _db.validate_claim(self._conn, claim_id, validated_by=validated_by)
+
+    def get_tools(self, *, generated_by: str = "agent") -> list:
+        """Return agent tool callables pre-bound to this graph.
+
+        Returns two plain Python functions that any agent framework can wrap.
+        ``generated_by`` is baked into the closure — set it to the calling
+        agent's identifier so REPLICATED detection works across independent runs.
+
+        Parameters
+        ----------
+        generated_by:
+            Agent identifier, e.g. ``"agent/model-a/lab_a"``.
+            Defaults to ``'agent'``.
+
+        Returns
+        -------
+        list
+            ``[query_graph, assert_finding]``
+
+        Note
+        ----
+        The returned callables are bound to this graph instance.
+        Using them after ``graph.close()`` raises a SQLite error.
+
+        Example
+        -------
+        >>> tools = graph.get_tools(generated_by="agent/claude-sonnet-4-6/lab_a")
+        >>> # LangChain
+        >>> lc_tools = [tool(fn) for fn in tools]
+        >>> # Anthropic SDK — pass to tools= in client.messages.create()
+        """
+
+        def query_graph(topic: str, min_support: str = "PRELIMINARY") -> str:
+            """Query the epistemic graph for what is already established about a topic.
+
+            Call this BEFORE asserting any new finding. If REPLICATED or ESTABLISHED
+            findings exist, build on them using DERIVED classification with their
+            claim_ids in supports=[]. Returns a JSON list of matching claims.
+
+            Parameters
+            ----------
+            topic:
+                Substring to search for in claim text (case-insensitive).
+            min_support:
+                Minimum trust level: PRELIMINARY, REPLICATED, or ESTABLISHED.
+
+            Returns
+            -------
+            str
+                JSON array of claim dicts with keys: text, support_level,
+                classification, claim_id.
+            """
+            results = self.query(topic, min_support=min_support)
+            return json.dumps([
+                {
+                    "text": r["text"],
+                    "support_level": r["support_level"],
+                    "classification": r["classification"],
+                    "claim_id": r["claim_id"],
+                }
+                for r in results
+            ])
+
+        def assert_finding(
+            text: str,
+            classification: str = "INFERRED",
+            supports: list[str] | None = None,
+            contradicts: list[str] | None = None,
+            source: str = "",
+        ) -> str:
+            """Record a new finding in the epistemic graph.
+
+            Use ANALYTICAL only if a real data pipeline ran and returned output.
+            Asserting ANALYTICAL on null data is permanently recorded as such.
+            Use DERIVED when building explicitly on existing graph claims — cite
+            their claim_ids in supports=[]. Use INFERRED for all LLM reasoning.
+            Use contradicts= to document explicit tension with existing claims.
+
+            Parameters
+            ----------
+            text:
+                The falsifiable assertion. Cannot be empty.
+            classification:
+                Epistemic origin: INFERRED (default), ANALYTICAL, or DERIVED.
+            supports:
+                List of upstream claim_ids this finding rests on.
+            contradicts:
+                List of claim_ids this finding is in explicit tension with.
+            source:
+                Data source name. Required for ANALYTICAL to be meaningful.
+
+            Returns
+            -------
+            str
+                The claim_id UUID of the recorded finding.
+            """
+            return self.assert_claim(
+                text,
+                classification=classification,
+                generated_by=generated_by,
+                supports=supports,
+                contradicts=contradicts,
+                source_name=source or None,
+            )
+
+        return [query_graph, assert_finding]
 
     # ------------------------------------------------------------------
     # Lifecycle

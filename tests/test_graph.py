@@ -328,3 +328,58 @@ def test_schema_transitions_cover_all_support_level_paths():
 
 def test_schema_is_stable_across_calls():
     assert mareforma.schema() == mareforma.schema()
+
+
+# ---------------------------------------------------------------------------
+# get_tools()
+# ---------------------------------------------------------------------------
+
+def test_get_tools_returns_two_callables(tmp_path):
+    with mareforma.open(tmp_path) as graph:
+        tools = graph.get_tools()
+    assert len(tools) == 2
+    assert callable(tools[0])
+    assert callable(tools[1])
+
+
+def test_get_tools_query_returns_valid_json(tmp_path):
+    import json
+    with mareforma.open(tmp_path) as graph:
+        graph.assert_claim("Target T is elevated", classification="ANALYTICAL")
+        query_graph, _ = graph.get_tools()
+        result = query_graph("Target T")
+    data = json.loads(result)
+    assert len(data) == 1
+    assert data[0]["text"] == "Target T is elevated"
+    assert "support_level" in data[0]
+    assert "claim_id" in data[0]
+
+
+def test_get_tools_assert_creates_claim(tmp_path):
+    with mareforma.open(tmp_path) as graph:
+        _, assert_finding = graph.get_tools(generated_by="agent/a")
+        claim_id = assert_finding("Finding X", classification="INFERRED")
+        claim = graph.get_claim(claim_id)
+    assert claim is not None
+    assert claim["text"] == "Finding X"
+    assert claim["generated_by"] == "agent/a"
+
+
+def test_get_tools_generated_by_baked_into_closure_triggers_replicated(tmp_path):
+    with mareforma.open(tmp_path) as graph:
+        prior = graph.assert_claim("upstream evidence", generated_by="seed")
+        _, assert_finding_a = graph.get_tools(generated_by="agent/a")
+        _, assert_finding_b = graph.get_tools(generated_by="agent/b")
+        id_a = assert_finding_a("finding A", supports=[prior])
+        id_b = assert_finding_b("finding B", supports=[prior])
+        claim_a = graph.get_claim(id_a)
+        claim_b = graph.get_claim(id_b)
+    assert claim_a["support_level"] == "REPLICATED"
+    assert claim_b["support_level"] == "REPLICATED"
+
+
+def test_get_tools_supports_none_is_valid(tmp_path):
+    with mareforma.open(tmp_path) as graph:
+        _, assert_finding = graph.get_tools()
+        claim_id = assert_finding("Simple finding", supports=None)
+    assert claim_id is not None

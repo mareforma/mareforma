@@ -26,13 +26,15 @@ than silence.
 
 LangChain integration
 ---------------------
-The mareforma primitives are defined as real @tools below.
-The agent control flow is explicit Python — simulating what an LLM would decide.
-To drive these tools with a real LLM, replace the control flow with:
+graph.get_tools(generated_by="...") returns [query_graph, assert_finding] as plain
+callables. Wrap with @tool for LangChain. generated_by is baked into the closure.
 
     from langchain_openai import ChatOpenAI
     from langgraph.prebuilt import create_react_agent
-    agent = create_react_agent(ChatOpenAI(model="gpt-4o"), tools=[query_graph, assert_finding])
+    from langchain_core.tools import tool as lc_tool
+
+    lc_tools = [lc_tool(fn) for fn in graph.get_tools(generated_by="agent/gpt-4o/lab_c")]
+    agent = create_react_agent(ChatOpenAI(model="gpt-4o"), tools=lc_tools)
     agent.invoke({"messages": [HumanMessage("Analyse cohort_3 and record your finding.")]})
 """
 
@@ -59,51 +61,18 @@ graph = mareforma.open(tmp)
 
 
 # ---------------------------------------------------------------------------
-# Mareforma as LangChain tools
+# Mareforma tools via get_tools() — one set per agent, generated_by baked in
 # ---------------------------------------------------------------------------
 
-@tool
-def query_graph(text: str, min_support: str = "PRELIMINARY") -> list[dict]:
-    """Query the epistemic graph for existing findings.
-
-    Returns claims matching the text filter, ordered by support level.
-    min_support: PRELIMINARY | REPLICATED | ESTABLISHED
-    """
-    results = graph.query(text, min_support=min_support)
-    return [
-        {
-            "claim_id": r["claim_id"],
-            "text": r["text"],
-            "support_level": r["support_level"],
-            "classification": r["classification"],
-        }
-        for r in results
-    ]
-
-
-@tool
-def assert_finding(
-    text: str,
-    classification: str,
-    generated_by: str,
-    supports: list[str],
-    contradicts: list[str],
-    source_name: str,
-) -> str:
-    """Assert a scientific finding into the epistemic graph. Returns claim_id.
-
-    classification: INFERRED | ANALYTICAL | DERIVED
-    supports: upstream claim_ids or reference strings this finding rests on
-    contradicts: claim_ids this finding is in tension with
-    """
-    return graph.assert_claim(
-        text,
-        classification=classification,
-        generated_by=generated_by,
-        supports=supports,
-        contradicts=contradicts,
-        source_name=source_name,
-    )
+query_graph, assert_finding_a = [tool(fn) for fn in graph.get_tools(
+    generated_by="agent_lab_a/model-a"
+)]
+_, assert_finding_b = [tool(fn) for fn in graph.get_tools(
+    generated_by="agent_lab_b/model-b"
+)]
+_, assert_finding_c = [tool(fn) for fn in graph.get_tools(
+    generated_by="agent_lab_c/model-c"
+)]
 
 
 # ---------------------------------------------------------------------------
@@ -115,22 +84,18 @@ sep("Setup — prior consensus (ESTABLISHED)")
 
 upstream_ref = "upstream_ref_A"
 
-consensus_a = assert_finding.invoke({
+consensus_a = assert_finding_a.invoke({
     "text": "Treatment X reduces outcome Y in population P (cohort_1, n=500, p=0.003)",
     "classification": "ANALYTICAL",
-    "generated_by": "agent_lab_a/model-a",
     "supports": [upstream_ref],
-    "contradicts": [],
-    "source_name": "dataset_alpha",
+    "source": "dataset_alpha",
 })
 
-consensus_b = assert_finding.invoke({
+consensus_b = assert_finding_b.invoke({
     "text": "Treatment X reduces outcome Y in population P (cohort_2, n=480, p=0.011)",
     "classification": "ANALYTICAL",
-    "generated_by": "agent_lab_b/model-b",
     "supports": [upstream_ref],
-    "contradicts": [],
-    "source_name": "dataset_beta",
+    "source": "dataset_beta",
 })
 
 c_a = graph.get_claim(consensus_a)
@@ -148,7 +113,7 @@ show("after validate()", established["support_level"] if established else "—")
 sep("New agent — larger analysis, different result")
 
 # Step 1: query the graph — what is already established on this topic?
-prior = query_graph.invoke({"text": "Treatment X", "min_support": "ESTABLISHED"})
+prior = json.loads(query_graph.invoke({"topic": "Treatment X", "min_support": "ESTABLISHED"}))
 print(f"  query_graph('Treatment X', min_support='ESTABLISHED') → {len(prior)} claims")
 for c in prior:
     print(f"    [{c['support_level']:12}] {c['text'][:65]}…")
@@ -162,14 +127,13 @@ print()
 # Step 2: analysis returns a different result — no significant effect.
 # The agent does not discard this. It asserts it with contradicts= pointing
 # to the established consensus, and documents the methodological difference.
-challenge = assert_finding.invoke({
+challenge = assert_finding_c.invoke({
     "text": "Treatment X shows no significant effect on outcome Y in population P"
             " (cohort_3, n=1240, p=0.21) — larger and more diverse cohort than prior studies",
     "classification": "ANALYTICAL",
-    "generated_by": "agent_lab_c/model-c",
     "supports": ["upstream_ref_B"],
     "contradicts": established_ids,
-    "source_name": "dataset_gamma",
+    "source": "dataset_gamma",
 })
 
 c_challenge = graph.get_claim(challenge)
@@ -218,8 +182,8 @@ sep("What NOT to do")
 print("""
   ✗  Asserting the challenge without contradicts=
 
-       assert_finding.invoke({"text": "Treatment X has no effect ...",
-                              "contradicts": [], ...})
+       assert_finding_c.invoke({"text": "Treatment X has no effect ...",
+                                "contradicts": None, ...})
 
      The tension is invisible. The graph looks like two unrelated claims.
      A future agent querying 'Treatment X' gets contradictory signals
@@ -233,12 +197,12 @@ print("""
 
   ✓  The correct pattern:
 
-       assert_finding.invoke({
+       assert_finding_c.invoke({
            "text": "...",
            "classification": "ANALYTICAL",
            "contradicts": [established_id],   # name the tension
            "supports": [new_upstream_ref],    # ground the provenance
-           ...
+           "source": "dataset_gamma",
        })
 """)
 

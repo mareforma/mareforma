@@ -41,14 +41,16 @@ The shared graph then answers three questions automatically:
 
 LangChain integration
 ---------------------
-The mareforma primitives are defined as real @tools below.
-To drive them with a real LLM:
+graph.get_tools(generated_by="...") returns [query_graph, assert_finding].
+get_provenance_trace is defined separately (wraps graph.get_claim).
 
     from langchain_openai import ChatOpenAI
     from langgraph.prebuilt import create_react_agent
-    agent = create_react_agent(ChatOpenAI(model="gpt-4o"), tools=[
-        query_graph, get_provenance_trace, assert_finding
-    ])
+    from langchain_core.tools import tool as lc_tool
+
+    lab_a_tools = [lc_tool(fn) for fn in graph.get_tools(generated_by="lab_a/model-a")]
+    lab_a_tools.append(lc_tool(get_provenance_trace))
+    agent = create_react_agent(ChatOpenAI(model="gpt-4o"), tools=lab_a_tools)
 """
 
 import json
@@ -79,28 +81,15 @@ graph = mareforma.open(tmp)
 
 
 # ---------------------------------------------------------------------------
-# Mareforma as LangChain tools
+# Mareforma tools — get_tools() per lab, get_provenance_trace defined separately
 # ---------------------------------------------------------------------------
 
-@tool
-def query_graph(text: str, min_support: str = "PRELIMINARY") -> list[dict]:
-    """Query the shared epistemic graph for existing findings.
-
-    Returns claims matching the text filter, ordered by support level.
-    min_support: PRELIMINARY | REPLICATED | ESTABLISHED
-    """
-    results = graph.query(text, min_support=min_support)
-    return [
-        {
-            "claim_id": r["claim_id"],
-            "text": r["text"],
-            "support_level": r["support_level"],
-            "classification": r["classification"],
-            "source_name": r.get("source_name"),
-            "generated_by": r.get("generated_by"),
-        }
-        for r in results
-    ]
+query_graph, assert_finding_a = [tool(fn) for fn in graph.get_tools(
+    generated_by="lab_a/model-a"
+)]
+_, assert_finding_b = [tool(fn) for fn in graph.get_tools(
+    generated_by="lab_b/model-b"
+)]
 
 
 @tool
@@ -127,30 +116,6 @@ def get_provenance_trace(claim_id: str) -> dict:
     }
 
 
-@tool
-def assert_finding(
-    text: str,
-    classification: str,
-    generated_by: str,
-    supports: list[str],
-    source_name: str,
-) -> str:
-    """Assert a scientific finding into the shared epistemic graph.
-
-    classification: INFERRED | ANALYTICAL | DERIVED
-    supports: upstream claim_ids or reference strings
-    source_name: the private data source this finding was derived from
-                 (name only — the data itself stays private)
-    """
-    return graph.assert_claim(
-        text,
-        classification=classification,
-        generated_by=generated_by,
-        supports=supports,
-        source_name=source_name,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Lab A — discovers the finding, publishes the trace
 # ---------------------------------------------------------------------------
@@ -163,22 +128,20 @@ upstream_ref = "upstream_ref_A"
 # Each intermediate step is published as a claim with provenance.
 # The raw data never leaves Lab A.
 
-step_1 = assert_finding.invoke({
+step_1 = assert_finding_a.invoke({
     "text": "Candidate target T shows elevated activity in condition C"
             " (partition_1, n=620, fold-change=2.3)",
     "classification": "ANALYTICAL",
-    "generated_by": "lab_a/model-a",
     "supports": [upstream_ref],
-    "source_name": "private_dataset_A",     # name only — data stays at Lab A
+    "source": "private_dataset_A",          # name only — data stays at Lab A
 })
 
-step_2 = assert_finding.invoke({
+step_2 = assert_finding_a.invoke({
     "text": "Target T activity in condition C is specific to cell subtype S"
             " (partition_1, pathway analysis, p=0.004)",
     "classification": "ANALYTICAL",
-    "generated_by": "lab_a/model-a",
     "supports": [step_1],                   # builds on the previous step
-    "source_name": "private_dataset_A",
+    "source": "private_dataset_A",
 })
 
 print("  Lab A published 2 claims to the shared graph.")
@@ -197,7 +160,7 @@ sep("Lab B — reads trace, runs independent replication")
 
 # Step 1: Lab B reads Lab A's provenance trace from the shared graph.
 # It sees the experimental logic — not the data.
-lab_a_findings = query_graph.invoke({"text": "Target T", "min_support": "PRELIMINARY"})
+lab_a_findings = json.loads(query_graph.invoke({"topic": "Target T", "min_support": "PRELIMINARY"}))
 print(f"  query_graph('Target T') → {len(lab_a_findings)} claims from Lab A\n")
 
 for f in lab_a_findings:
@@ -212,22 +175,20 @@ for f in lab_a_findings:
 # It runs the same hypothesis on its own private dataset.
 print("  Lab B reconstructs experimental logic and replicates on private_dataset_B…\n")
 
-rep_1 = assert_finding.invoke({
+rep_1 = assert_finding_b.invoke({
     "text": "Candidate target T shows elevated activity in condition C"
             " (partition_2, n=580, fold-change=2.1)",
     "classification": "ANALYTICAL",
-    "generated_by": "lab_b/model-b",
     "supports": [upstream_ref],             # same upstream anchor, independent data
-    "source_name": "private_dataset_B",     # different private dataset
+    "source": "private_dataset_B",          # different private dataset
 })
 
-rep_2 = assert_finding.invoke({
+rep_2 = assert_finding_b.invoke({
     "text": "Target T activity in condition C is specific to cell subtype S"
             " (partition_2, pathway analysis, p=0.009)",
     "classification": "ANALYTICAL",
-    "generated_by": "lab_b/model-b",
     "supports": [step_2],                   # cites Lab A's published claim as upstream
-    "source_name": "private_dataset_B",
+    "source": "private_dataset_B",
 })
 
 print(f"  Lab B published 2 claims.")
@@ -310,20 +271,16 @@ sep("Contrast — spurious replication (what to watch for)")
 # REPLICATED fires because they share the same upstream,
 # but the finding is backed entirely by LLM prior knowledge.
 
-spurious_a = assert_finding.invoke({
+spurious_a = assert_finding_a.invoke({
     "text": "Target T is likely relevant in condition C based on literature",
     "classification": "INFERRED",           # no data pipeline ran
-    "generated_by": "lab_a/model-a",
     "supports": [upstream_ref],
-    "source_name": "",                      # no source — LLM prior only
 })
 
-spurious_b = assert_finding.invoke({
+spurious_b = assert_finding_b.invoke({
     "text": "Target T is likely relevant in condition C based on literature",
     "classification": "INFERRED",
-    "generated_by": "lab_b/model-b",
     "supports": [upstream_ref],             # same upstream → REPLICATED fires
-    "source_name": "",
 })
 
 c_sp_a = graph.get_claim(spurious_a)

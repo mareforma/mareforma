@@ -128,6 +128,22 @@ Promote a `REPLICATED` claim to `ESTABLISHED`. Human-only gate.
 
 ---
 
+### `graph.get_tools(*, generated_by="agent") → list`
+
+Return `[query_graph, assert_finding]` as plain Python callables. `generated_by` is baked into the closure — set it to the calling agent's identity.
+
+```python
+tools = graph.get_tools(generated_by="agent/model-a/lab_a")
+
+# LangChain
+from langchain_core.tools import tool
+lc_tools = [tool(fn) for fn in tools]
+```
+
+See [Framework integrations](#framework-integrations) below for all frameworks.
+
+---
+
 ### `mareforma.schema() → dict`
 
 Return the full epistemic schema — valid values, defaults, and state

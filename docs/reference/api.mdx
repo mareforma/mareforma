@@ -178,6 +178,37 @@ graph.validate(claim_id, validated_by="reviewer@example.org")
 
 ---
 
+### `get_tools(*, generated_by="agent")`
+
+Return `[query_graph, assert_finding]` as plain Python callables with behavioral contracts in their docstrings. Wrap with any framework's tool adapter in one line.
+
+```python
+tools = graph.get_tools(generated_by="agent/model-a/lab_a")
+
+# LangChain
+from langchain_core.tools import tool
+lc_tools = [tool(fn) for fn in tools]
+
+# Anthropic SDK — build JSON schema from fn.__doc__ and fn.__annotations__
+# LangGraph — pass to create_react_agent(llm, tools)
+```
+
+**Parameters**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `generated_by` | `str` | `"agent"` | Agent identifier baked into the closure. Set this to the calling agent's identity so REPLICATED detection works across independent runs. |
+
+**Returns** `list` — `[query_graph, assert_finding]`
+
+`query_graph(topic, min_support="PRELIMINARY") -> str` — returns JSON string of matching claims.
+
+`assert_finding(text, classification="INFERRED", supports=None, contradicts=None, source="") -> str` — returns `claim_id`.
+
+See [Framework integrations](/for-agents/agents#framework-integrations) for per-framework wrapping.
+
+---
+
 ### `close()`
 
 Close the graph database connection.
