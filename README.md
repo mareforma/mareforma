@@ -59,15 +59,19 @@ graph.assert_claim(
 Science advances by documented contestation, not by one side disappearing.
 Both claims coexist. A human reviewer sees the tension explicitly in the graph.
 
-## Why existing systems fail
+## The infrastructure gap
 
-- **Observability tools** record what your agent did. They do not record what 
-it means, whether it can be trusted, or whether another agent already found 
-the same thing by a different path.
+The current generation of agent systems provides no principled way to distinguish:
 
-- **Self-reported confidence** is not a trust signal. An agent that is wrong
-is still confident. Mareforma stores no confidence score — trust is derived
-from the provenance graph.
+- a finding backed by data from one backed by LLM prior knowledge
+- genuine independent replication from two agents repeating each other
+- an established consensus from a single speculative assertion
+
+Without that structure, every output looks like a result.
+
+- **Tracing and observability tools** record what the agent did. They do not
+record what it means, whether it can be trusted, or whether another agent
+already found the same thing by a different path.
 
 - **One-shot pipelines** evaporate findings between runs. There is no memory
 of what was established, no way to detect convergence, no accumulated graph.
@@ -80,22 +84,12 @@ assertion time.
 
 ## Architecture
 
-Two complementary interfaces, one graph:
-
-**Agent interface** — for autonomous AI scientists:
 ```python
 graph = mareforma.open()          # zero setup, no init required
 graph.assert_claim(text, classification="ANALYTICAL", supports=[...])
 graph.query(text, min_support="REPLICATED")
 graph.validate(claim_id)          # human promotes to ESTABLISHED
-```
-
-**Pipeline interface** — for human-authored processing steps:
-```python
-@transform("analysis.features", depends_on=["analysis.load"])
-def extract(ctx):
-    ctx.save("features", df, fmt="csv")
-    ctx.claim("...", classification="ANALYTICAL", supports=["upstream_ref"])
+graph.get_tools(generated_by="agent/model-a/lab_a")  # framework-ready callables
 ```
 
 **Trust levels** — derived from graph topology, never self-reported:
@@ -125,7 +119,7 @@ uv add mareforma
 See [AGENTS.md](AGENTS.md) — execution contract, forbidden patterns,
 idempotency convention, `generated_by` requirements.
 
-Full documentation: **https://mareforma.readthedocs.io**
+Full documentation: **https://docs.mareforma.com**
 
 ## Examples
 
