@@ -1,8 +1,8 @@
-# AI Agent Drug Target — MEDEA + Mareforma
+# AI Agent Drug Target
 
 [MEDEA](https://github.com/mims-harvard/Medea) is an AI scientist that identifies drug targets from multi-omics data.
-This example wraps MEDEA in a `@transform` pipeline to give every finding
-a verifiable epistemic status — not just a hypothesis text.
+This example runs MEDEA as an agent and records every finding via the
+mareforma EpistemicGraph — giving each hypothesis a verifiable epistemic status.
 
 ## The epistemic question
 
@@ -12,7 +12,7 @@ When an AI scientist returns a drug target candidate, the key question is not
 - Did MEDEA actually query MedeaDB and analyse omics data? → `ANALYTICAL`
 - Or did the data pipeline fail silently and the answer came from LLM prior knowledge? → `INFERRED`
 
-Mareforma records this distinction permanently in the claim. An `INFERRED`
+Mareforma records this distinction permanently at assertion time. An `INFERRED`
 finding and an `ANALYTICAL` finding can look identical as text — the graph
 is what makes the difference visible.
 
@@ -28,49 +28,39 @@ One variable changed — the disease.
 
 ## What mareforma adds
 
-**Classification at assertion time.** Each `ctx.claim()` call inspects
-`generated_code` from MEDEA's output. If it is null — the data pipeline
+**Classification at assertion time.** After each MEDEA run, `run_experiment.py`
+inspects `generated_code` from the output. If it is null — the data pipeline
 failed — the claim is recorded as `INFERRED`. If real code ran and returned
 output, it is recorded as `ANALYTICAL`.
 
 ```python
 classification = "ANALYTICAL" if generated_code else "INFERRED"
-ctx.claim(text=final, classification=classification, source_name="medeadb", ...)
+graph.assert_claim(
+    final_hypothesis,
+    classification=classification,
+    generated_by="medea/gpt-4o/ra_cd4",
+    source_name="medeadb",
+)
 ```
 
-**Query-before-assert.** Before running MEDEA, each transform checks the
-graph for prior `REPLICATED` findings on the same disease. If they exist,
-MEDEA can build on them rather than starting from scratch.
+**Query-before-assert.** Before running MEDEA, `run_experiment.py` checks the
+graph for prior `REPLICATED` findings. If they exist, MEDEA can build on them
+rather than starting from scratch.
 
-**Cross-diff for process comparison.** After both forks complete, `cross-diff`
-shows whether MEDEA generated different database queries per disease, or ran
-the same query regardless:
+**Independent replication.** The two forks run with different `generated_by`
+values (`ra_cd4` vs `sle_cd4`). If both reach the same conclusion through the
+same upstream evidence, `REPLICATED` fires automatically — no extra step.
 
-```bash
-mareforma cross-diff ra_cd4.medea_run sle_cd4.medea_run
-```
-
-**Case A — data pipeline ran and adapted to the disease:**
-```
-≠  generated_code   (2102B → 2806B)
-≠  executed_output
-≠  final_hypothesis
-```
-The two targets were reached by two different data paths. The divergence
-is data-driven.
+## What we found when we ran this
 
 **Case B — data pipeline failed silently:**
-```
-=  generated_code   (4 bytes = null)
-=  executed_output  (4 bytes = null)
-≠  final_hypothesis
-```
-Both runs returned null. The hypotheses still look different — but both
-came from LLM prior knowledge, not from MedeaDB. Mareforma records both
-as `INFERRED`. The graph makes this visible before anyone acts on the result.
 
-When we ran this example, we hit Case B. `cross-diff` surfaced it
-immediately and led to a bug report in MEDEA's EFO ID lookup:
+Both forks returned `generated_code = null`. The final hypotheses still looked
+different — but both came from LLM prior knowledge, not from MedeaDB. Mareforma
+recorded both as `INFERRED`. The classification made the silent failure visible
+immediately, before anyone acted on the results.
+
+This led directly to a bug report in MEDEA's EFO ID lookup:
 [mims-harvard/Medea#6](https://github.com/mims-harvard/Medea/pull/6).
 
 ## Setup
@@ -88,15 +78,10 @@ cp Medea/env_template.txt .env
 ## Run
 
 ```bash
-mareforma build
+python 05_drug_target_provenance.py --run
 
 # Inspect the epistemic status of findings
 mareforma claim list
-
-# Compare the two forks artifact-by-artifact
-mareforma cross-diff ra_cd4.medea_run sle_cd4.medea_run
-
-# Full epistemic health
 mareforma status
 ```
 
@@ -115,4 +100,3 @@ is complete.
 To upgrade a finding to `REPLICATED`, run an additional fork (different
 disease or cell type) that reaches the same conclusion through the same
 upstream evidence. Mareforma detects this automatically.
-

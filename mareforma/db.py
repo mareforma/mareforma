@@ -1,15 +1,9 @@
 """
-db.py — SQLite-backed provenance and epistemic graph for mareforma.
+db.py — SQLite-backed epistemic graph for mareforma.
 
 Tables
 ------
-  transform_runs  : one row per @transform execution
-  transform_deps  : DAG edges (transform_name → depends_on_name)
-  artifacts       : artifacts saved via ctx.save() per run
-  claims          : explicit scientific assertions
-  evidence        : links from claims to transform runs or artifacts
-  agent_events    : AI scientist event log (LLM calls, tool calls, chain steps)
-  build_meta      : key-value store for build-level metadata
+  claims : explicit scientific assertions with provenance
 
 Schema version
 --------------
@@ -21,20 +15,6 @@ Schema version
 Connection lifecycle
 --------------------
   Use open_db(root) to get a connection. Close when done.
-  For a build: one connection for the whole build, closed in a finally block.
-
-  ┌─ runner.run() ─────────────────────────────────────────────────────────┐
-  │  conn = open_db(root)                                                   │
-  │  try:                                                                   │
-  │    for record:                                                          │
-  │      begin_run(conn, ...)      → transform_runs row (status=running)    │
-  │      ctx = BuildContext(..., run_id=run_id, db=conn)                    │
-  │      record.fn(ctx)            → ctx.claim() writes claims + evidence   │
-  │      record_artifacts(conn, ..) → artifacts rows                        │
-  │      end_run(conn, ...)        → update transform_runs row              │
-  │  finally:                                                               │
-  │    conn.close()                → SIGINT / success / exception all close │
-  └─────────────────────────────────────────────────────────────────────────┘
 
 Support levels — graph-derived trust signal
 -------------------------------------------
@@ -42,26 +22,16 @@ Support levels — graph-derived trust signal
   REPLICATED   : ≥2 agents with different generated_by share the same
                  upstream claim in supports[] (auto-detected at INSERT)
   ESTABLISHED  : explicit human validation via validate_claim() only
-
-ERD
----
-  transform_runs ──< artifacts    (run_id FK, enforced)
-  transform_runs ──< evidence     (run_id FK, nullable, enforced)
-  transform_runs ──< agent_events (run_id, soft reference — not enforced)
-  claims         ──< evidence     (claim_id FK, enforced)
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-
-from mareforma.registry import MareformaError
 
 
 # ---------------------------------------------------------------------------
@@ -87,34 +57,6 @@ _SUPPORT_LEVEL_TIERS: dict[str, tuple[str, ...]] = {
 _SCHEMA_SQL = """
 PRAGMA journal_mode=WAL;
 
-CREATE TABLE IF NOT EXISTS transform_runs (
-    run_id           TEXT PRIMARY KEY,
-    transform_name   TEXT NOT NULL,
-    input_hash       TEXT NOT NULL,
-    source_hash      TEXT NOT NULL,
-    output_hash      TEXT,
-    status           TEXT NOT NULL DEFAULT 'running',
-    error_message    TEXT,
-    duration_ms      INTEGER,
-    timestamp        TEXT NOT NULL,
-    transform_class  TEXT,
-    class_confidence REAL,
-    class_method     TEXT,
-    class_reason     TEXT
-);
-
-CREATE TABLE IF NOT EXISTS artifacts (
-    artifact_id   INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id        TEXT NOT NULL REFERENCES transform_runs(run_id),
-    artifact_name TEXT NOT NULL,
-    path          TEXT NOT NULL,
-    format        TEXT,
-    sha256        TEXT,
-    size_bytes    INTEGER,
-    schema_json   TEXT,
-    timestamp     TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS claims (
     claim_id        TEXT PRIMARY KEY,
     text            TEXT NOT NULL,
@@ -133,34 +75,6 @@ CREATE TABLE IF NOT EXISTS claims (
     updated_at      TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS evidence (
-    evidence_id   INTEGER PRIMARY KEY AUTOINCREMENT,
-    claim_id      TEXT NOT NULL REFERENCES claims(claim_id),
-    run_id        TEXT REFERENCES transform_runs(run_id),
-    artifact_name TEXT,
-    created_at    TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS agent_events (
-    event_id      TEXT PRIMARY KEY,
-    run_id        TEXT NOT NULL,
-    event_type    TEXT NOT NULL,
-    name          TEXT NOT NULL,
-    timestamp     TEXT NOT NULL,
-    status        TEXT NOT NULL,
-    duration_ms   INTEGER,
-    input_hash    TEXT,
-    output_hash   TEXT,
-    metadata_json TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_agent_events_run_id
-    ON agent_events(run_id);
-
-CREATE TABLE IF NOT EXISTS build_meta (
-    key   TEXT PRIMARY KEY,
-    value TEXT
-);
-
 CREATE INDEX IF NOT EXISTS idx_claims_status
     ON claims(status);
 CREATE INDEX IF NOT EXISTS idx_claims_source
@@ -171,18 +85,6 @@ CREATE INDEX IF NOT EXISTS idx_claims_support_level
     ON claims(support_level);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_claims_idempotency_key
     ON claims(idempotency_key) WHERE idempotency_key IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_transform_runs_name
-    ON transform_runs(transform_name);
-CREATE INDEX IF NOT EXISTS idx_transform_runs_status
-    ON transform_runs(status);
-CREATE INDEX IF NOT EXISTS idx_transform_runs_output_hash
-    ON transform_runs(output_hash);
-
-CREATE TABLE IF NOT EXISTS transform_deps (
-    transform_name  TEXT NOT NULL,
-    depends_on_name TEXT NOT NULL,
-    PRIMARY KEY (transform_name, depends_on_name)
-);
 """
 
 
@@ -198,8 +100,12 @@ _CLAIM_SELECT = ", ".join(_CLAIM_COLUMNS)
 
 
 # ---------------------------------------------------------------------------
-# Custom exceptions
+# Exceptions
 # ---------------------------------------------------------------------------
+
+class MareformaError(Exception):
+    """Base exception for all mareforma errors."""
+
 
 class DatabaseError(MareformaError):
     """Raised when a graph.db operation fails."""
@@ -207,10 +113,6 @@ class DatabaseError(MareformaError):
 
 class ClaimNotFoundError(MareformaError):
     """Raised when a claim lookup finds no matching record."""
-
-
-class ContextError(MareformaError):
-    """Raised when ctx.claim() is called outside a @transform context."""
 
 
 # ---------------------------------------------------------------------------
@@ -267,40 +169,6 @@ def open_db(root: Path) -> sqlite3.Connection:
 
 
 # ---------------------------------------------------------------------------
-# DAG dependency recording
-# ---------------------------------------------------------------------------
-
-def record_deps(
-    conn: sqlite3.Connection,
-    transform_name: str,
-    depends_on: list[str],
-) -> None:
-    """Persist the DAG edges for *transform_name* into transform_deps.
-
-    Uses INSERT OR IGNORE — idempotent across re-runs of the same build.
-    Called from runner.py immediately after begin_run().
-
-    Parameters
-    ----------
-    transform_name:
-        The name of the transform whose dependencies are being recorded.
-    depends_on:
-        List of transform names this transform directly depends on.
-    """
-    try:
-        conn.executemany(
-            "INSERT OR IGNORE INTO transform_deps (transform_name, depends_on_name) "
-            "VALUES (?, ?)",
-            [(transform_name, dep) for dep in depends_on],
-        )
-        conn.commit()
-    except sqlite3.OperationalError as exc:
-        raise DatabaseError(
-            f"Failed to record deps for '{transform_name}': {exc}"
-        ) from exc
-
-
-# ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
 
@@ -311,413 +179,6 @@ def validate_status(status: str) -> None:
         raise ValueError(
             f"Unknown claim status '{status}'. Use one of: {allowed}"
         )
-
-
-# ---------------------------------------------------------------------------
-# Transform run lifecycle
-# ---------------------------------------------------------------------------
-
-def is_stale(
-    conn: sqlite3.Connection,
-    transform_name: str,
-    input_hash: str,
-    source_hash: str,
-    *,
-    force: bool = False,
-) -> bool:
-    """Return True if the transform needs to run.
-
-    A transform is stale if:
-      1. No previous successful run exists in the database
-      2. The input_hash has changed (raw data changed)
-      3. The source_hash has changed (transform code changed)
-      4. ``force`` is True
-    """
-    if force:
-        return True
-    try:
-        row = conn.execute(
-            """
-            SELECT input_hash, source_hash FROM transform_runs
-            WHERE transform_name = ? AND status = 'success'
-            ORDER BY timestamp DESC
-            LIMIT 1
-            """,
-            (transform_name,),
-        ).fetchone()
-    except sqlite3.OperationalError as exc:
-        raise DatabaseError(f"Staleness check failed for '{transform_name}': {exc}") from exc
-
-    if row is None:
-        return True  # never run successfully
-    if row["input_hash"] != input_hash:
-        return True  # raw data changed
-    if row["source_hash"] != source_hash:
-        return True  # transform code changed
-    return False
-
-
-def begin_run(
-    conn: sqlite3.Connection,
-    run_id: str,
-    transform_name: str,
-    input_hash: str,
-    source_hash: str,
-) -> None:
-    """Insert a transform_runs row with status='running'."""
-    now = _now()
-    try:
-        conn.execute(
-            """
-            INSERT INTO transform_runs
-                (run_id, transform_name, input_hash, source_hash, status, timestamp)
-            VALUES (?, ?, ?, ?, 'running', ?)
-            """,
-            (run_id, transform_name, input_hash, source_hash, now),
-        )
-        conn.commit()
-    except sqlite3.OperationalError as exc:
-        raise DatabaseError(f"Failed to begin run for '{transform_name}': {exc}") from exc
-
-
-def end_run(
-    conn: sqlite3.Connection,
-    run_id: str,
-    *,
-    status: str,
-    output_hash: str = "",
-    duration_ms: int = 0,
-    error_message: str | None = None,
-) -> None:
-    """Update the transform_runs row when a transform finishes."""
-    try:
-        conn.execute(
-            """
-            UPDATE transform_runs
-            SET status = ?, output_hash = ?, duration_ms = ?, error_message = ?
-            WHERE run_id = ?
-            """,
-            (status, output_hash, duration_ms, error_message, run_id),
-        )
-        conn.commit()
-    except sqlite3.OperationalError as exc:
-        raise DatabaseError(f"Failed to end run '{run_id}': {exc}") from exc
-
-
-def record_artifact(
-    conn: sqlite3.Connection,
-    run_id: str,
-    artifact_name: str,
-    path: Path,
-    fmt: str,
-    *,
-    sha256: str | None = None,
-    size_bytes: int | None = None,
-    schema: dict | None = None,
-) -> None:
-    """Record an artifact saved by ctx.save()."""
-    now = _now()
-    schema_json = json.dumps(schema) if schema else None
-    try:
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO artifacts
-                (run_id, artifact_name, path, format, sha256, size_bytes,
-                 schema_json, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                run_id, artifact_name, str(path), fmt,
-                sha256, size_bytes, schema_json, now,
-            ),
-        )
-        conn.commit()
-    except sqlite3.OperationalError as exc:
-        raise DatabaseError(f"Failed to record artifact '{artifact_name}': {exc}") from exc
-
-
-# ---------------------------------------------------------------------------
-# Transform classification
-# ---------------------------------------------------------------------------
-
-def write_transform_class(
-    conn: sqlite3.Connection,
-    run_id: str,
-    *,
-    transform_class: str,
-    class_confidence: float,
-    class_method: str,
-    class_reason: str,
-) -> None:
-    """Write classification result for a completed run.
-
-    Called by inspector.classify_run() after content inspection.
-
-    Parameters
-    ----------
-    transform_class:
-        One of: 'raw', 'processed', 'analysed', 'inferred', 'unknown'.
-    class_confidence:
-        0.0–1.0 confidence in the classification.
-    class_method:
-        How classification was determined: 'content_inspection', 'heuristic', 'manual'.
-    class_reason:
-        Human-readable explanation (capped at 500 chars by caller).
-    """
-    try:
-        conn.execute(
-            """
-            UPDATE transform_runs
-            SET transform_class = ?, class_confidence = ?,
-                class_method = ?, class_reason = ?
-            WHERE run_id = ?
-            """,
-            (transform_class, class_confidence, class_method, class_reason, run_id),
-        )
-        conn.commit()
-    except sqlite3.OperationalError as exc:
-        raise DatabaseError(
-            f"Failed to write transform class for run '{run_id}': {exc}"
-        ) from exc
-
-
-def lookup_cached_class(
-    conn: sqlite3.Connection,
-    output_hash: str,
-) -> tuple[str, float, str, str] | None:
-    """Return cached classification for *output_hash* if available.
-
-    Uses idx_transform_runs_output_hash for O(log N) lookup.
-
-    Returns
-    -------
-    (transform_class, class_confidence, class_method, class_reason)
-        or None if no cached non-unknown classification exists.
-    """
-    if not output_hash:
-        return None
-    try:
-        row = conn.execute(
-            """
-            SELECT transform_class, class_confidence, class_method, class_reason
-            FROM transform_runs
-            WHERE output_hash = ?
-              AND transform_class IS NOT NULL
-              AND transform_class != 'unknown'
-            LIMIT 1
-            """,
-            (output_hash,),
-        ).fetchone()
-        if row:
-            return (
-                row["transform_class"],
-                row["class_confidence"] or 0.0,
-                row["class_method"] or "content_inspection",
-                row["class_reason"] or "",
-            )
-        return None
-    except sqlite3.OperationalError:
-        return None
-
-
-def get_artifact_paths(
-    conn: sqlite3.Connection,
-    run_id: str,
-) -> list[str]:
-    """Return all artifact paths recorded for *run_id*."""
-    try:
-        rows = conn.execute(
-            "SELECT path FROM artifacts WHERE run_id = ? ORDER BY artifact_id",
-            (run_id,),
-        ).fetchall()
-        return [row["path"] for row in rows]
-    except sqlite3.OperationalError:
-        return []
-
-
-def get_artifacts_for_run(
-    conn: sqlite3.Connection,
-    run_id: str,
-) -> list[dict]:
-    """Return all artifacts recorded for *run_id* with name, path, sha256, format, size.
-
-    Used by ``mareforma cross-diff`` to compare artifacts across two transform runs.
-    """
-    try:
-        rows = conn.execute(
-            """
-            SELECT artifact_name, path, format, sha256, size_bytes
-            FROM artifacts
-            WHERE run_id = ?
-            ORDER BY artifact_name
-            """,
-            (run_id,),
-        ).fetchall()
-        return [dict(row) for row in rows]
-    except sqlite3.OperationalError:
-        return []
-
-
-def get_parent_artifact_paths(
-    conn: sqlite3.Connection,
-    transform_name: str,
-) -> list[str]:
-    """Return artifact paths from the most recent successful run of each parent transform.
-
-    Used by inspector to get input files for content comparison.
-    """
-    try:
-        # Get direct parents from transform_deps
-        parents = conn.execute(
-            "SELECT depends_on_name FROM transform_deps WHERE transform_name = ?",
-            (transform_name,),
-        ).fetchall()
-
-        paths: list[str] = []
-        for (parent_name,) in parents:
-            # Most recent successful run for this parent
-            row = conn.execute(
-                """
-                SELECT run_id FROM transform_runs
-                WHERE transform_name = ? AND status = 'success'
-                ORDER BY timestamp DESC LIMIT 1
-                """,
-                (parent_name,),
-            ).fetchone()
-            if row:
-                parent_paths = get_artifact_paths(conn, row["run_id"])
-                paths.extend(parent_paths)
-        return paths
-    except sqlite3.OperationalError:
-        return []
-
-
-# ---------------------------------------------------------------------------
-# Build metadata
-# ---------------------------------------------------------------------------
-
-def set_build_meta(
-    conn: sqlite3.Connection,
-    *,
-    timestamp: str,
-    git_sha: str | None,
-) -> None:
-    """Store build-level metadata (written by CLI after runner finishes)."""
-    try:
-        conn.execute(
-            "INSERT OR REPLACE INTO build_meta (key, value) VALUES ('last_build_timestamp', ?)",
-            (timestamp,),
-        )
-        conn.execute(
-            "INSERT OR REPLACE INTO build_meta (key, value) VALUES ('last_git_sha', ?)",
-            (git_sha,),
-        )
-        conn.commit()
-    except sqlite3.OperationalError as exc:
-        raise DatabaseError(f"Failed to write build metadata: {exc}") from exc
-
-
-def get_build_meta(conn: sqlite3.Connection) -> dict[str, str | None]:
-    """Return last build timestamp and git_sha (or None if never built)."""
-    try:
-        rows = conn.execute(
-            "SELECT key, value FROM build_meta WHERE key IN "
-            "('last_build_timestamp', 'last_git_sha')"
-        ).fetchall()
-    except sqlite3.OperationalError as exc:
-        raise DatabaseError(f"Failed to read build metadata: {exc}") from exc
-    meta: dict[str, str | None] = {"last_build_timestamp": None, "last_git_sha": None}
-    for row in rows:
-        meta[row["key"]] = row["value"]
-    return meta
-
-
-def all_transform_runs(conn: sqlite3.Connection) -> dict[str, dict]:
-    """Return the latest run record for each transform, keyed by transform_name.
-
-    Used by ``mareforma log``.
-    """
-    try:
-        rows = conn.execute(
-            """
-            SELECT t1.transform_name, t1.status, t1.duration_ms,
-                   t1.timestamp, t1.error_message
-            FROM transform_runs t1
-            WHERE t1.timestamp = (
-                SELECT MAX(t2.timestamp)
-                FROM transform_runs t2
-                WHERE t2.transform_name = t1.transform_name
-            )
-            ORDER BY t1.transform_name
-            """
-        ).fetchall()
-    except sqlite3.OperationalError as exc:
-        raise DatabaseError(f"Failed to read transform runs: {exc}") from exc
-    return {
-        row["transform_name"]: {
-            "status": row["status"],
-            "duration_ms": row["duration_ms"] or 0,
-            "timestamp": row["timestamp"],
-            "error_message": row["error_message"],
-        }
-        for row in rows
-    }
-
-
-def get_runs_for_transform(
-    conn: sqlite3.Connection,
-    transform_name: str,
-    limit: int | None = None,
-) -> list[dict]:
-    """Return all runs for *transform_name* ordered by timestamp DESC.
-
-    Used by ``mareforma diff``.
-
-    Parameters
-    ----------
-    limit:
-        If provided, return at most this many rows (e.g. 2 for diff).
-    """
-    query = """
-        SELECT run_id, transform_name, status, input_hash, source_hash,
-               output_hash, duration_ms, timestamp, error_message
-        FROM transform_runs
-        WHERE transform_name = ?
-        ORDER BY timestamp DESC
-    """
-    params: list = [transform_name]
-    if limit is not None:
-        query += " LIMIT ?"
-        params.append(int(limit))
-    try:
-        rows = conn.execute(query, params).fetchall()
-    except sqlite3.OperationalError as exc:
-        raise DatabaseError(
-            f"Failed to read runs for '{transform_name}': {exc}"
-        ) from exc
-    return [dict(row) for row in rows]
-
-
-def get_unclaimed_transforms(conn: sqlite3.Connection) -> list[str]:
-    """Return transform names with successful runs but no evidence rows.
-
-    Used by health.py and ctx.claim() warnings.
-    """
-    try:
-        rows = conn.execute(
-            """
-            SELECT DISTINCT transform_name FROM transform_runs
-            WHERE status = 'success'
-            AND run_id NOT IN (
-                SELECT DISTINCT run_id FROM evidence
-                WHERE run_id IS NOT NULL
-            )
-            ORDER BY transform_name
-            """
-        ).fetchall()
-    except sqlite3.OperationalError as exc:
-        raise DatabaseError(f"Failed to get unclaimed transforms: {exc}") from exc
-    return [row["transform_name"] for row in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -736,17 +197,13 @@ def add_claim(
     generated_by: str = "human",
     source_name: str | None = None,
     status: str = "open",
-    run_id: str | None = None,
-    artifact_name: str | None = None,
 ) -> str:
     """Insert a new claim and return its claim_id.
 
-    Called by EpistemicGraph.assert_claim() and ctx.claim(). Returns the
-    existing claim_id without inserting if idempotency_key already exists.
-
-    After insert, checks for REPLICATED: if ≥2 claims share the same upstream
-    claim_id in supports[] with different generated_by, all are promoted to
-    support_level='REPLICATED'.
+    Returns the existing claim_id without inserting if idempotency_key
+    already exists. After insert, checks for REPLICATED: if ≥2 claims share
+    the same upstream claim_id in supports[] with different generated_by,
+    all are promoted to support_level='REPLICATED'.
 
     Parameters
     ----------
@@ -764,8 +221,6 @@ def add_claim(
         Data source this claim derives from.
     status:
         Editorial status: 'open' | 'contested' | 'retracted'
-    run_id / artifact_name:
-        @transform pipeline — link claim to a specific run.
 
     Raises
     ------
@@ -813,14 +268,6 @@ def add_claim(
                 supports_json, contradicts_json, now, now,
             ),
         )
-        if run_id is not None:
-            conn.execute(
-                """
-                INSERT INTO evidence (claim_id, run_id, artifact_name, created_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (claim_id, run_id, artifact_name, now),
-            )
         conn.commit()
     except sqlite3.OperationalError as exc:
         raise DatabaseError(f"Failed to add claim: {exc}") from exc
@@ -851,8 +298,6 @@ def _maybe_update_replicated(
         return
     try:
         placeholders = ",".join("?" * len(supports))
-        # Find all claims (excluding the new one) that reference the same
-        # upstream claim_ids and have a different generated_by.
         rows = conn.execute(
             f"""
             SELECT DISTINCT c.claim_id, c.generated_by
@@ -868,7 +313,6 @@ def _maybe_update_replicated(
         if not rows:
             return
 
-        # At least one independent agent shares an upstream — promote all.
         peer_ids = [r["claim_id"] for r in rows] + [new_claim_id]
         peer_placeholders = ",".join("?" * len(peer_ids))
         conn.execute(
@@ -991,7 +435,7 @@ def update_claim(
 
 
 def delete_claim(conn: sqlite3.Connection, root: Path, claim_id: str) -> None:
-    """Delete a claim and its evidence links.
+    """Delete a claim.
 
     Raises
     ------
@@ -1001,7 +445,6 @@ def delete_claim(conn: sqlite3.Connection, root: Path, claim_id: str) -> None:
     if get_claim(conn, claim_id) is None:
         raise ClaimNotFoundError(f"Claim '{claim_id}' not found.")
     try:
-        conn.execute("DELETE FROM evidence WHERE claim_id = ?", (claim_id,))
         conn.execute("DELETE FROM claims WHERE claim_id = ?", (claim_id,))
         conn.commit()
     except sqlite3.OperationalError as exc:
@@ -1063,7 +506,6 @@ def delete_claims_by_generated_by(
 ) -> int:
     """Delete all claims with the given generated_by tag.
 
-    Also deletes linked evidence rows. Triggers a claims.toml backup.
     Returns the number of claims deleted.
     """
     try:
@@ -1075,9 +517,6 @@ def delete_claims_by_generated_by(
         if not claim_ids:
             return 0
         placeholders = ",".join("?" * len(claim_ids))
-        conn.execute(
-            f"DELETE FROM evidence WHERE claim_id IN ({placeholders})", claim_ids
-        )
         conn.execute(
             f"DELETE FROM claims WHERE claim_id IN ({placeholders})", claim_ids
         )
@@ -1153,88 +592,6 @@ def query_claims(
     return [dict(row) for row in rows]
 
 
-def list_claims_with_evidence(conn: sqlite3.Connection, claim_id: str) -> list[dict]:
-    """Return evidence rows for a specific claim."""
-    try:
-        rows = conn.execute(
-            "SELECT * FROM evidence WHERE claim_id = ? ORDER BY created_at",
-            (claim_id,),
-        ).fetchall()
-    except sqlite3.OperationalError as exc:
-        raise DatabaseError(f"Failed to fetch evidence for '{claim_id}': {exc}") from exc
-    return [dict(row) for row in rows]
-
-
-# ---------------------------------------------------------------------------
-# Migration from pipeline.lock.json (legacy format)
-# ---------------------------------------------------------------------------
-
-def migrate_from_lock_json(conn: sqlite3.Connection, root: Path) -> bool:
-    """Import pipeline.lock.json into graph.db if present.
-
-    Returns True if migration ran, False if skipped (no lock file or already done).
-    No-op for fresh installs that never had a lock file.
-    """
-    lock_path = root / ".mareforma" / "pipeline.lock.json"
-    bak_path = root / ".mareforma" / "pipeline.lock.json.bak"
-
-    if bak_path.exists() or not lock_path.exists():
-        return False
-
-    try:
-        data = json.loads(lock_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return False  # corrupt or unreadable — skip, don't crash
-
-    nodes = data.get("nodes", {})
-    build_ts = data.get("build_timestamp")
-    git_sha = data.get("git_sha")
-
-    try:
-        for name, node in nodes.items():
-            run_id = str(uuid.uuid4())
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO transform_runs
-                    (run_id, transform_name, input_hash, source_hash,
-                     output_hash, status, duration_ms, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    run_id, name,
-                    node.get("input_hash", ""),
-                    node.get("source_hash", ""),
-                    node.get("output_hash", ""),
-                    node.get("status", "unknown"),
-                    node.get("duration_ms", 0),
-                    node.get("timestamp", _now()),
-                ),
-            )
-        if build_ts:
-            conn.execute(
-                "INSERT OR REPLACE INTO build_meta (key, value) VALUES "
-                "('last_build_timestamp', ?)",
-                (build_ts,),
-            )
-        if git_sha:
-            conn.execute(
-                "INSERT OR REPLACE INTO build_meta (key, value) VALUES "
-                "('last_git_sha', ?)",
-                (git_sha,),
-            )
-        conn.commit()
-    except sqlite3.OperationalError as exc:
-        raise DatabaseError(f"Migration from lock.json failed: {exc}") from exc
-
-    # Rename only after successful SQLite writes (atomicity guarantee).
-    try:
-        lock_path.rename(bak_path)
-    except OSError:
-        pass  # Rename failed — next run will detect existing rows and skip.
-
-    return True
-
-
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -1247,7 +604,6 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
     """Write all claims to claims.toml in the project root.
 
     Called after every claim mutation (add, update, delete).
-    Uses an explicit column list to avoid coupling to schema changes.
     Failure is non-fatal: a warning is printed but the exception is not raised.
     """
     try:
@@ -1284,12 +640,3 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
     except Exception as exc:  # noqa: BLE001
         import warnings
         warnings.warn(f"claims.toml backup failed (claim is saved in graph.db): {exc}")
-
-
-# ---------------------------------------------------------------------------
-# Utility (moved from pipeline/lock.py)
-# ---------------------------------------------------------------------------
-
-def hash_string(s: str) -> str:
-    """Return SHA-256 hex digest of a UTF-8 string."""
-    return hashlib.sha256(s.encode("utf-8")).hexdigest()

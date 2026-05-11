@@ -6,10 +6,6 @@ __version__ = "0.3.0"
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from mareforma.transforms import transform, registry
-from mareforma.initializer import initialize
-from mareforma.pipeline.context import BuildContext
-
 if TYPE_CHECKING:
     from mareforma._graph import EpistemicGraph
 
@@ -91,7 +87,7 @@ def schema() -> dict:
             "classification": "INFERRED",
             "support_level": "PRELIMINARY",
             "status": "open",
-            "generated_by": "agent",  # EpistemicGraph default; ctx.claim() defaults to "human"
+            "generated_by": "agent",  # EpistemicGraph default
         },
         "transitions": [
             {
@@ -116,6 +112,5 @@ def schema() -> dict:
 __all__ = [
     "open",
     "schema",
-    "transform", "registry", "initialize", "BuildContext",
     "__version__",
 ]

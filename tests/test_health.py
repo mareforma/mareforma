@@ -1,204 +1,91 @@
-"""
-tests/test_health.py — unit tests for mareforma/health.py.
-
-Covers:
-  - compute_health: red (no claims), yellow (unclaimed/no-lit/unsupported-source), green
-  - compute_health: support_level_breakdown and contradicted counts
-  - compute_health: never raises on empty project
-  - compute_health: epistemic fields (classes, distances, support) populated
-"""
+"""tests/test_health.py — unit tests for mareforma/health.py."""
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from pathlib import Path
 
 import pytest
 
-from mareforma.db import (
-    add_claim,
-    begin_run,
-    end_run,
-    open_db,
-    record_deps,
-    write_transform_class,
-)
+from mareforma.db import add_claim, open_db
 from mareforma.health import HealthReport, compute_health
-from mareforma.initializer import initialize
-from mareforma.registry import add_source
 
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-@pytest.fixture()
-def project(tmp_path: Path) -> Path:
-    initialize(tmp_path)
-    return tmp_path
+def _open(tmp_path: Path) -> sqlite3.Connection:
+    (tmp_path / ".mareforma").mkdir(parents=True, exist_ok=True)
+    return open_db(tmp_path)
 
 
-@pytest.fixture()
-def conn(project: Path) -> sqlite3.Connection:
-    c = open_db(project)
-    yield c
-    c.close()
-
-
-# ---------------------------------------------------------------------------
-# Traffic light: red
-# ---------------------------------------------------------------------------
-
-class TestRed:
-    def test_no_claims_is_red(self, project: Path, conn: sqlite3.Connection) -> None:
-        report = compute_health(project, conn)
+class TestTrafficLight:
+    def test_red_when_no_claims(self, tmp_path: Path) -> None:
+        conn = _open(tmp_path)
+        try:
+            report = compute_health(tmp_path, conn)
+        finally:
+            conn.close()
         assert report.traffic_light == "red"
         assert "claim" in report.rationale.lower()
-        assert report.claims_open == 0
-        assert report.claims_resolved == 0
 
-
-# ---------------------------------------------------------------------------
-# Traffic light: yellow
-# ---------------------------------------------------------------------------
-
-class TestYellow:
-    def test_yellow_when_unclaimed_transforms(
-        self, project: Path, conn: sqlite3.Connection
-    ) -> None:
-        # Record a transform run but add NO claims
-        import uuid
-        run_id = str(uuid.uuid4())
-        begin_run(conn, run_id, "mydata.load", "h1", "h2")
-        end_run(conn, run_id, status="success", duration_ms=100)
-        # Add a claim linked to a different transform to avoid red
-        add_claim(conn, project, "Some finding", source_name=None)
-
-        report = compute_health(project, conn)
+    def test_yellow_when_all_preliminary(self, tmp_path: Path) -> None:
+        conn = _open(tmp_path)
+        try:
+            add_claim(conn, tmp_path, "Single agent finding")
+            report = compute_health(tmp_path, conn)
+        finally:
+            conn.close()
         assert report.traffic_light == "yellow"
-        assert "mydata.load" in report.unclaimed_transforms
+        assert "PRELIMINARY" in report.rationale
 
-    def test_yellow_when_source_has_no_claims(
-        self, project: Path, conn: sqlite3.Connection
-    ) -> None:
-        raw = project / "data" / "morphology" / "raw"
-        raw.mkdir(parents=True)
-        add_source(project, "morphology", str(raw), "Test")
-        add_claim(conn, project, "Unrelated finding", source_name=None)
-        report = compute_health(project, conn)
-        assert report.traffic_light == "yellow"
-        assert "morphology" in report.unsupported_sources
-
-
-# ---------------------------------------------------------------------------
-# Traffic light: green
-# ---------------------------------------------------------------------------
-
-class TestGreen:
-    def test_green_all_covered(self, project: Path, conn: sqlite3.Connection) -> None:
-        # Register source and add a claim linked to it
-        raw = project / "data" / "morphology" / "raw"
-        raw.mkdir(parents=True)
-        add_source(project, "morphology", str(raw), "Test")
-        add_claim(conn, project, "A finding", source_name="morphology")
-
-        report = compute_health(project, conn)
+    def test_green_when_replicated_claim_exists(self, tmp_path: Path) -> None:
+        conn = _open(tmp_path)
+        try:
+            prior = add_claim(conn, tmp_path, "prior", generated_by="seed")
+            add_claim(conn, tmp_path, "finding A", supports=[prior], generated_by="agent_A")
+            add_claim(conn, tmp_path, "finding B", supports=[prior], generated_by="agent_B")
+            report = compute_health(tmp_path, conn)
+        finally:
+            conn.close()
         assert report.traffic_light == "green"
 
 
-# ---------------------------------------------------------------------------
-# Counts and breakdowns
-# ---------------------------------------------------------------------------
-
 class TestCounts:
-    def test_support_level_breakdown(self, project: Path, conn: sqlite3.Connection) -> None:
-        add_claim(conn, project, "Claim 1", classification="INFERRED")
-        add_claim(conn, project, "Claim 2", classification="INFERRED")
-        add_claim(conn, project, "Claim 3", classification="ANALYTICAL")
-
-        report = compute_health(project, conn)
-        assert report.support_level_breakdown.get("PRELIMINARY", 0) == 3
-
-    def test_claims_open_vs_resolved(self, project: Path, conn: sqlite3.Connection) -> None:
-        add_claim(conn, project, "Open claim", status="open")
-        add_claim(conn, project, "Resolved claim", status="contested")
-
-        report = compute_health(project, conn)
+    def test_claims_open_vs_resolved(self, tmp_path: Path) -> None:
+        conn = _open(tmp_path)
+        try:
+            add_claim(conn, tmp_path, "Open claim", status="open")
+            add_claim(conn, tmp_path, "Resolved claim", status="contested")
+            report = compute_health(tmp_path, conn)
+        finally:
+            conn.close()
         assert report.claims_open == 1
         assert report.claims_resolved == 1
 
-    def test_claims_contradicted_count(self, project: Path, conn: sqlite3.Connection) -> None:
-        add_claim(conn, project, "Contradicted claim", contradicts=["10.1038/some"])
-        add_claim(conn, project, "Normal claim")
-
-        report = compute_health(project, conn)
+    def test_claims_contradicted_count(self, tmp_path: Path) -> None:
+        conn = _open(tmp_path)
+        try:
+            add_claim(conn, tmp_path, "Contested finding", contradicts=["10.1038/some"])
+            add_claim(conn, tmp_path, "Normal finding")
+            report = compute_health(tmp_path, conn)
+        finally:
+            conn.close()
         assert report.claims_contradicted == 1
 
+    def test_support_level_breakdown(self, tmp_path: Path) -> None:
+        conn = _open(tmp_path)
+        try:
+            add_claim(conn, tmp_path, "Claim 1")
+            add_claim(conn, tmp_path, "Claim 2")
+            report = compute_health(tmp_path, conn)
+        finally:
+            conn.close()
+        assert report.support_level_breakdown.get("PRELIMINARY", 0) == 2
 
-# ---------------------------------------------------------------------------
-# Never raises
-# ---------------------------------------------------------------------------
 
 class TestNeverRaises:
     def test_empty_project_no_error(self, tmp_path: Path) -> None:
-        """compute_health must not raise even on a minimal/empty project."""
-        initialize(tmp_path)
-        conn = open_db(tmp_path)
+        conn = _open(tmp_path)
         try:
             report = compute_health(tmp_path, conn)
             assert isinstance(report, HealthReport)
         finally:
             conn.close()
-
-
-# ---------------------------------------------------------------------------
-# Epistemic distance layer fields (v0.3)
-# ---------------------------------------------------------------------------
-
-class TestEpistemicDistanceFields:
-    def _make_run(
-        self,
-        conn: sqlite3.Connection,
-        name: str,
-        deps: list[str] | None = None,
-        cls: str | None = None,
-        output_hash: str | None = None,
-    ) -> str:
-        import uuid
-        run_id = str(uuid.uuid4())
-        begin_run(conn, run_id, name, "ih", "sh")
-        record_deps(conn, name, deps or [])
-        end_run(conn, run_id, status="success", output_hash=output_hash or f"h_{name}")
-        if cls:
-            write_transform_class(
-                conn, run_id,
-                transform_class=cls,
-                class_confidence=0.9,
-                class_method="heuristic",
-                class_reason="test",
-            )
-        return run_id
-
-    def test_epistemic_fields_populated(self, project: Path, conn: sqlite3.Connection) -> None:
-        """All three dicts populated from a single-step linear pipeline."""
-        self._make_run(conn, "src.load", cls="raw")
-        self._make_run(conn, "src.filter", deps=["src.load"], cls="processed")
-
-        report = compute_health(project, conn)
-        # transform_classes
-        assert report.transform_classes["src.load"] == "raw"
-        assert report.transform_classes["src.filter"] == "processed"
-        # transform_distances
-        assert report.transform_distances["src.load"] == pytest.approx(0.0)
-        assert report.transform_distances["src.filter"] == pytest.approx(0.1)
-        # transform_support (single runs → SINGLE)
-        assert report.transform_support["src.load"] == "SINGLE"
-        assert report.transform_support["src.filter"] == "SINGLE"
-
-    def test_epistemic_fields_empty_on_empty_db(self, project: Path, conn: sqlite3.Connection) -> None:
-        """All three dicts are empty when no transforms have been run."""
-        report = compute_health(project, conn)
-        assert report.transform_classes == {}
-        assert report.transform_distances == {}
-        assert report.transform_support == {}
