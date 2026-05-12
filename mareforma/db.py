@@ -44,6 +44,14 @@ _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 DB_FILENAME = "graph.db"
 _SCHEMA_VERSION = 1
 
+# Hard cap on a single claim's ``text`` field. 100k chars covers any
+# realistic scientific finding (≈ a 15k-word paragraph) and matches the
+# truncation point in ``prompt_safety._MAX_FIELD_LEN`` so claim text
+# never silently degrades when consumed by an LLM. A multi-MB claim is
+# either a bug or a write-side DoS attempt; rejecting is the simpler
+# defence than silently truncating.
+_MAX_CLAIM_TEXT_LEN = 100_000
+
 VALID_STATUSES = ("open", "contested", "retracted")
 
 VALID_CLASSIFICATIONS = ("INFERRED", "ANALYTICAL", "DERIVED")
@@ -382,6 +390,24 @@ def add_claim(
     """
     if not text or not text.strip():
         raise ValueError("Claim text cannot be empty.")
+    if len(text) > _MAX_CLAIM_TEXT_LEN:
+        raise ValueError(
+            f"Claim text exceeds {_MAX_CLAIM_TEXT_LEN}-char cap "
+            f"(got {len(text)}). Split the finding into smaller claims "
+            "and link them via supports=[]."
+        )
+    # Sanitize-on-write strips zero-width / bidi / Goodside-tag-plane
+    # codepoints BEFORE the text is signed. Defense in depth: any
+    # consumer that reads ``text`` directly (not just ``query_for_llm``)
+    # gets a clean string, and the signed payload binds the cleaned
+    # form so downstream verifiers see what the LLM will see.
+    from mareforma import prompt_safety as _ps
+    text = _ps.sanitize_for_llm(text.strip())
+    if not text or not text.strip():
+        raise ValueError(
+            "Claim text became empty after stripping zero-width / control "
+            "characters. The input contained no visible content."
+        )
     if classification not in VALID_CLASSIFICATIONS:
         raise ValueError(
             f"Unknown classification '{classification}'. "

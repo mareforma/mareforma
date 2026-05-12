@@ -1,0 +1,18 @@
+version: 2
+updates:
+  # GitHub Actions are SHA-pinned (see workflows). Dependabot keeps the
+  # pins current with PRs that bump SHA + version-comment together.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  # Python deps tracked in pyproject.toml + uv.lock. Dependabot opens
+  # one PR per direct dep update; transitive bumps ride along via the
+  # lockfile resolver.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5

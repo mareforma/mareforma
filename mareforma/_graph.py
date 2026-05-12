@@ -710,9 +710,12 @@ class EpistemicGraph:
             -------
             str
                 JSON array of claim dicts with keys: text, support_level,
-                classification, claim_id.
+                classification, claim_id. The ``text`` field is sanitized
+                and wrapped in ``<untrusted_data>...</untrusted_data>`` —
+                this tool is consumed by an LLM, so it routes through the
+                same prompt-safety layer as :meth:`query_for_llm`.
             """
-            results = self.query(topic, min_support=min_support)
+            results = self.query_for_llm(topic, min_support=min_support)
             return json.dumps([
                 {
                     "text": r["text"],

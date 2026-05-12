@@ -17,6 +17,7 @@ Covers:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -265,12 +266,16 @@ class TestQueryForLLM:
         assert rows[0]["support_level"] == "PRELIMINARY"
         assert "T" in rows[0]["created_at"]  # ISO 8601
 
-    def test_query_still_returns_raw_text(self, open_graph) -> None:
-        """The opt-in nature of LLM-safe: graph.query() must not be
-        contaminated by the helper. Existing callers see raw text."""
-        open_graph.assert_claim("untouched​zero-width")
+    def test_query_returns_unwrapped_text(self, open_graph) -> None:
+        """``graph.query()`` returns sanitized but UN-wrapped text — the
+        wrapper layer is opt-in via ``query_for_llm``. Sanitize-on-write
+        means raw query never carries zero-width / forged-tag payloads
+        in the first place; that contract is verified in
+        :class:`TestSanitizeOnWrite`. Here we only pin that ``query``
+        does not add ``<untrusted_data>`` delimiters."""
+        open_graph.assert_claim("plain finding")
         raw = open_graph.query()
-        assert "​" in raw[0]["text"]
+        assert raw[0]["text"] == "plain finding"
         assert "<untrusted_data>" not in raw[0]["text"]
 
     def test_filters_apply_same_as_query(self, open_graph) -> None:
@@ -342,3 +347,69 @@ class TestPublicExports:
 
     def test_top_level_safe_for_llm(self) -> None:
         assert mareforma.safe_for_llm is safe_for_llm
+
+
+# ---------------------------------------------------------------------------
+# Sanitize-on-write — defense in depth at the DB layer
+# ---------------------------------------------------------------------------
+
+class TestSanitizeOnWrite:
+    def test_zero_width_stripped_at_write(self, open_graph) -> None:
+        """A claim asserted with zero-width characters is persisted
+        clean. Any consumer reading the row directly (not just via
+        query_for_llm) sees sanitized text."""
+        cid = open_graph.assert_claim("a​b​c")  # ZWSPs between letters
+        row = open_graph.get_claim(cid)
+        assert row["text"] == "abc"
+
+    def test_goodside_tag_plane_stripped_at_write(self, open_graph) -> None:
+        """Goodside ASCII-smuggler payload (U+E0000-E007F language tag
+        plane) is invisible to a human reader but ASCII-decodable by
+        an LLM. Strip at write so any downstream consumer is safe."""
+        payload = "real" + chr(0xE0049) + chr(0xE0047) + chr(0xE004E) + "text"
+        cid = open_graph.assert_claim(payload)
+        row = open_graph.get_claim(cid)
+        assert row["text"] == "realtext"
+        for cp in (0xE0049, 0xE0047, 0xE004E):
+            assert chr(cp) not in row["text"]
+
+    def test_all_zero_width_text_rejected(self, open_graph) -> None:
+        """If sanitization removes everything, the input had no real
+        content — reject rather than persist an empty claim."""
+        with pytest.raises(ValueError, match="empty after stripping"):
+            open_graph.assert_claim("​​​​")  # all zero-width
+
+    def test_signed_payload_binds_sanitized_text(self, tmp_path: Path) -> None:
+        """The Ed25519 signature is computed over the SANITIZED text,
+        not the raw input. A verifier independently re-deriving the
+        canonical payload from the row sees byte-for-byte equality."""
+        from mareforma import signing as _signing
+        key_path = tmp_path / "key"
+        _signing.bootstrap_key(key_path)
+        with mareforma.open(tmp_path, key_path=key_path) as g:
+            cid = g.assert_claim("hello​world")  # ZWSP in middle
+            row = g.get_claim(cid)
+        envelope = json.loads(row["signature_bundle"])
+        payload = _signing.envelope_payload(envelope)
+        # Signed payload's text matches the persisted (sanitized) text
+        # exactly — neither carries the zero-width char.
+        assert payload["text"] == "helloworld"
+        assert row["text"] == "helloworld"
+
+
+# ---------------------------------------------------------------------------
+# Claim text length cap
+# ---------------------------------------------------------------------------
+
+class TestClaimTextLengthCap:
+    def test_text_at_cap_accepted(self, open_graph) -> None:
+        from mareforma.db import _MAX_CLAIM_TEXT_LEN
+        text = "x" * _MAX_CLAIM_TEXT_LEN
+        cid = open_graph.assert_claim(text)
+        assert open_graph.get_claim(cid)["text"] == text
+
+    def test_text_over_cap_rejected(self, open_graph) -> None:
+        from mareforma.db import _MAX_CLAIM_TEXT_LEN
+        text = "x" * (_MAX_CLAIM_TEXT_LEN + 1)
+        with pytest.raises(ValueError, match="exceeds"):
+            open_graph.assert_claim(text)

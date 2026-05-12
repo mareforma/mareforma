@@ -1,0 +1,19 @@
+# CODEOWNERS — required-review surface for mareforma.
+#
+# Single-maintainer pre-1.0 today; documenting the trust model now so
+# the protection survives the first time a collaborator joins.
+#
+# Enable "Require review from Code Owners" in GitHub repo Settings →
+# Branches → Branch protection rules → main, scoped to at least
+# .github/workflows/* and SECURITY.md.
+
+# Default: any change requires the maintainer's review.
+* @felipeyanez
+
+# Belt-and-suspenders for the release pipeline. A compromised
+# workflow + the id-token: write permission needed for Trusted
+# Publishing means workflow changes deserve their own line — even
+# though the wildcard above already covers them, an explicit rule
+# makes the intent visible to future collaborators.
+/.github/ @felipeyanez
+/SECURITY.md @felipeyanez
