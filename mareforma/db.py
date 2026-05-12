@@ -27,11 +27,14 @@ Support levels — graph-derived trust signal
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +84,7 @@ CREATE TABLE IF NOT EXISTS claims (
     transparency_logged INTEGER NOT NULL DEFAULT 1
                         CHECK (transparency_logged IN (0, 1)),
     validation_signature TEXT,
+    artifact_hash   TEXT,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );
@@ -97,6 +101,8 @@ CREATE INDEX IF NOT EXISTS idx_claims_unresolved
     ON claims(unresolved);
 CREATE INDEX IF NOT EXISTS idx_claims_transparency_logged
     ON claims(transparency_logged);
+CREATE INDEX IF NOT EXISTS idx_claims_artifact_hash
+    ON claims(artifact_hash) WHERE artifact_hash IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_claims_idempotency_key
     ON claims(idempotency_key) WHERE idempotency_key IS NOT NULL;
 
@@ -128,6 +134,7 @@ _CLAIM_COLUMNS = (
     "comparison_summary", "branch_id", "unresolved",
     "signature_bundle", "transparency_logged",
     "validation_signature",
+    "artifact_hash",
     "created_at", "updated_at",
 )
 _CLAIM_SELECT = ", ".join(_CLAIM_COLUMNS)
@@ -158,6 +165,17 @@ class SignedClaimImmutableError(MareformaError):
     the signature without surfacing the change. To revise a signed claim,
     retract the old one (``status='retracted'``) and assert a new one that
     cites the old via ``contradicts=[<old_claim_id>]``.
+    """
+
+
+class IdempotencyConflictError(MareformaError):
+    """Raised when an idempotency_key replay arrives with conflicting fields.
+
+    Idempotency means "same logical operation." A retry that supplies a
+    different ``artifact_hash`` is not a retry — it is a different claim
+    that happens to share a key. Silently returning the first claim_id
+    would let a caller believe their new hash was registered when it was
+    not, losing tamper-evidence in the process. Surface the inconsistency.
     """
 
 
@@ -257,6 +275,34 @@ def validate_status(status: str) -> None:
         )
 
 
+def normalize_artifact_hash(value: str | None) -> str | None:
+    """Validate and lowercase a SHA256 hex digest. Returns None for None.
+
+    A claim's ``artifact_hash`` is the SHA256 of the output bytes that
+    backed the claim (a figure, a CSV, a pickled model). It is signed
+    into the claim envelope and used as a parallel REPLICATED signal:
+    when two peers cite the same upstream and both supply a hash, the
+    hashes must match for REPLICATED to fire.
+
+    Accepts canonical hex digests only — no ``sha256:`` prefix, no
+    base64, no whitespace. Case is normalised to lowercase so two
+    spellings of the same digest compare equal in the REPLICATED query.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(
+            f"artifact_hash must be a string or None, got {type(value).__name__}."
+        )
+    candidate = value.strip().lower()
+    if not _SHA256_HEX_RE.match(candidate):
+        raise ValueError(
+            f"artifact_hash {value!r} is not a 64-character lowercase SHA256 "
+            "hex digest. Compute with hashlib.sha256(bytes).hexdigest()."
+        )
+    return candidate
+
+
 # ---------------------------------------------------------------------------
 # Claims
 # ---------------------------------------------------------------------------
@@ -274,6 +320,7 @@ def add_claim(
     source_name: str | None = None,
     status: str = "open",
     unresolved: bool = False,
+    artifact_hash: str | None = None,
     signer: "object | None" = None,
     rekor_url: str | None = None,
     require_rekor: bool = False,
@@ -304,6 +351,13 @@ def add_claim(
     unresolved:
         True if any DOI in supports[]/contradicts[] failed to resolve.
         Unresolved claims are ineligible for REPLICATED promotion.
+    artifact_hash:
+        Optional SHA256 hex digest of the artifact bytes (figure, CSV,
+        model) backing this claim. When supplied it is included in the
+        signed payload and used as a parallel REPLICATED signal: peers
+        that share an upstream AND both supply a hash must agree on the
+        hash to converge. When ``None`` on either peer, behaviour falls
+        back to identity-only REPLICATED.
     signer:
         Optional Ed25519 private key. When provided, the claim is signed
         before INSERT and the signature envelope is persisted to the
@@ -334,15 +388,27 @@ def add_claim(
             f"Use one of: {', '.join(VALID_CLASSIFICATIONS)}"
         )
     validate_status(status)
+    artifact_hash = normalize_artifact_hash(artifact_hash)
 
     # Idempotency check — return existing claim_id if key already present.
+    # Replays must agree on artifact_hash: a retry that supplies a different
+    # hash is a different claim, not the same op. Silently keeping the first
+    # hash would let the caller think their new hash was registered.
     if idempotency_key is not None:
         try:
             row = conn.execute(
-                "SELECT claim_id FROM claims WHERE idempotency_key = ?",
+                "SELECT claim_id, artifact_hash FROM claims WHERE idempotency_key = ?",
                 (idempotency_key,),
             ).fetchone()
             if row:
+                existing_hash = row["artifact_hash"]
+                if existing_hash != artifact_hash:
+                    raise IdempotencyConflictError(
+                        f"idempotency_key={idempotency_key!r} already exists "
+                        f"with artifact_hash={existing_hash!r}, but this call "
+                        f"supplied {artifact_hash!r}. Use a different "
+                        "idempotency_key or omit the conflicting field."
+                    )
                 return row["claim_id"]
         except sqlite3.OperationalError as exc:
             raise DatabaseError(f"Idempotency check failed: {exc}") from exc
@@ -368,6 +434,7 @@ def add_claim(
                 "supports": supports or [],
                 "contradicts": contradicts or [],
                 "source_name": source_name,
+                "artifact_hash": artifact_hash,
                 "created_at": now,
             },
             signer,
@@ -388,14 +455,16 @@ def add_claim(
                  status, source_name, generated_by,
                  supports_json, contradicts_json, unresolved,
                  signature_bundle, transparency_logged,
+                 artifact_hash,
                  created_at, updated_at)
-            VALUES (?, ?, ?, 'PRELIMINARY', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, 'PRELIMINARY', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 claim_id, text.strip(), classification, idempotency_key,
                 status, source_name, generated_by,
                 supports_json, contradicts_json, 1 if unresolved else 0,
                 signature_bundle, transparency_logged,
+                artifact_hash,
                 now, now,
             ),
         )
@@ -446,7 +515,9 @@ def add_claim(
     # Check whether this claim triggers REPLICATED status on shared upstreams.
     # Unresolved DOIs OR pending transparency-log inclusion block eligibility.
     if not unresolved and transparency_logged == 1:
-        _maybe_update_replicated(conn, claim_id, supports or [], generated_by)
+        _maybe_update_replicated(
+            conn, claim_id, supports or [], generated_by, artifact_hash,
+        )
 
     _backup_claims_toml(conn, root)
     return claim_id
@@ -457,11 +528,20 @@ def _maybe_update_replicated_unlocked(
     new_claim_id: str,
     supports: list[str],
     generated_by: str,
+    artifact_hash: str | None = None,
 ) -> None:
     """REPLICATED-detection SQL without a commit — caller controls the txn.
 
     Used by ``mark_claim_resolved`` so the unresolved-flag clear and the
     REPLICATED promotion land in the same SQLite transaction.
+
+    Artifact-hash gating
+    --------------------
+    When BOTH the new claim and a candidate peer carry a non-NULL
+    ``artifact_hash``, the hashes must match for the peer to count
+    toward convergence. When either side is NULL (the back-compat
+    case), behaviour falls back to identity-only REPLICATED: the
+    hash signal is opt-in, not retroactive.
     """
     if not supports:
         return
@@ -476,8 +556,13 @@ def _maybe_update_replicated_unlocked(
           AND c.support_level != 'ESTABLISHED'
           AND c.unresolved = 0
           AND c.transparency_logged = 1
+          AND (
+              c.artifact_hash IS NULL
+              OR ? IS NULL
+              OR c.artifact_hash = ?
+          )
         """,
-        (*supports, new_claim_id, generated_by),
+        (*supports, new_claim_id, generated_by, artifact_hash, artifact_hash),
     ).fetchall()
 
     if not rows:
@@ -497,6 +582,7 @@ def _maybe_update_replicated(
     new_claim_id: str,
     supports: list[str],
     generated_by: str,
+    artifact_hash: str | None = None,
 ) -> None:
     """Promote claims to REPLICATED when convergence is detected.
 
@@ -508,7 +594,9 @@ def _maybe_update_replicated(
     Failures are swallowed — convergence detection must not crash writes.
     """
     try:
-        _maybe_update_replicated_unlocked(conn, new_claim_id, supports, generated_by)
+        _maybe_update_replicated_unlocked(
+            conn, new_claim_id, supports, generated_by, artifact_hash,
+        )
         conn.commit()
     except sqlite3.OperationalError:
         pass  # Convergence detection is best-effort — never crash a write.
@@ -632,7 +720,7 @@ def mark_claim_logged(
         not match.
     """
     row = conn.execute(
-        "SELECT supports_json, generated_by, unresolved "
+        "SELECT supports_json, generated_by, unresolved, artifact_hash "
         "FROM claims WHERE claim_id = ?",
         (claim_id,),
     ).fetchone()
@@ -657,6 +745,7 @@ def mark_claim_logged(
     supports = json.loads(row["supports_json"] or "[]")
     generated_by = row["generated_by"]
     unresolved = int(row["unresolved"] or 0)
+    artifact_hash = row["artifact_hash"]
     now = _now()
 
     try:
@@ -673,7 +762,7 @@ def mark_claim_logged(
             if not unresolved:
                 try:
                     _maybe_update_replicated_unlocked(
-                        conn, claim_id, supports, generated_by,
+                        conn, claim_id, supports, generated_by, artifact_hash,
                     )
                 except sqlite3.OperationalError:
                     pass
@@ -701,7 +790,8 @@ def mark_claim_resolved(
         If no claim with claim_id exists.
     """
     row = conn.execute(
-        "SELECT supports_json, generated_by FROM claims WHERE claim_id = ?",
+        "SELECT supports_json, generated_by, artifact_hash "
+        "FROM claims WHERE claim_id = ?",
         (claim_id,),
     ).fetchone()
     if row is None:
@@ -709,6 +799,7 @@ def mark_claim_resolved(
 
     supports = json.loads(row["supports_json"] or "[]")
     generated_by = row["generated_by"]
+    artifact_hash = row["artifact_hash"]
     now = _now()
 
     try:
@@ -724,7 +815,7 @@ def mark_claim_resolved(
             # flag-clear (which is the actual user intent).
             try:
                 _maybe_update_replicated_unlocked(
-                    conn, claim_id, supports, generated_by,
+                    conn, claim_id, supports, generated_by, artifact_hash,
                 )
             except sqlite3.OperationalError:
                 pass
@@ -869,6 +960,7 @@ def update_claim(
                     new_supports = json.loads(new_supports_json)
                     _maybe_update_replicated_unlocked(
                         conn, claim_id, new_supports, existing["generated_by"],
+                        existing.get("artifact_hash"),
                     )
                 except sqlite3.OperationalError:
                     # Convergence detection is best-effort — never crash an update.
@@ -1085,6 +1177,8 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
             # default (1). A 0 means "signed but awaiting Rekor inclusion".
             if c.get("transparency_logged") == 0:
                 entry["transparency_logged"] = False
+            if c.get("artifact_hash"):
+                entry["artifact_hash"] = c["artifact_hash"]
             data["claims"][c["claim_id"]] = entry
 
         out = root / "claims.toml"

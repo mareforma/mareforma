@@ -218,6 +218,27 @@ claim without `supports=` is unverifiable — the chain is broken.
 claim_id in `supports[]` and have different `generated_by` values.
 No agent can self-promote to `ESTABLISHED`.
 
+**Artifact-hash gate.** When two converging peers BOTH supply
+`artifact_hash` (a SHA256 hex digest of the output bytes — figure, CSV,
+model), the hashes must match for `REPLICATED` to fire. Identity
+convergence alone is no longer enough in that case. When either peer
+omits the hash, the gate is bypassed and identity-only `REPLICATED`
+applies as before; the signal is opt-in, not retroactive. The hash is
+part of the signed payload, so an attacker who edits the column without
+the private key breaks verification.
+
+```python
+import hashlib
+result_bytes = open("figure_3.png", "rb").read()
+digest = hashlib.sha256(result_bytes).hexdigest()
+graph.assert_claim(
+    "Treatment X reduces response by 18% (95% CI 12-24)",
+    classification="ANALYTICAL",
+    supports=[upstream_id],
+    artifact_hash=digest,
+)
+```
+
 ---
 
 ## Claim status
@@ -251,8 +272,8 @@ keypair at `~/.config/mareforma/key` (mode 0600). After that, every
 `assert_claim` auto-signs and persists the signature envelope to the
 `signature_bundle` field on the claim. The signed payload binds
 `claim_id`, `text`, `classification`, `generated_by`, `supports`,
-`contradicts`, `source_name`, and `created_at` — any tamper on the row
-breaks verification.
+`contradicts`, `source_name`, `artifact_hash`, and `created_at` — any
+tamper on the row breaks verification.
 
 **Append-only invariant.** Signed claims refuse mutation of any
 signed-surface field. `update_claim(text=...)` /
@@ -457,6 +478,13 @@ graph.assert_claim(
     generated_by="agent/model-b/lab_b",
 )
 ```
+
+**Hash conflicts raise.** A replay that supplies a different `artifact_hash`
+than the original is not a retry — it is a different claim that happens to
+share a key. `assert_claim` raises `IdempotencyConflictError` rather than
+silently dropping the new hash, so a caller cannot believe their new hash
+was registered when it was not. Use a different `idempotency_key` or
+re-assert without the conflicting field.
 
 ---
 

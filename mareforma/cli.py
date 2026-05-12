@@ -362,7 +362,10 @@ def claim() -> None:
               help="Claim_id or DOI this claim contests (repeatable).")
 @click.option("--generated-by", "generated_by", default="agent", show_default=True,
               help="Agent identifier.")
-def claim_add(text, classification, status, source_name, supports, contradicts, generated_by):
+@click.option("--artifact-hash", "artifact_hash", default=None,
+              help="SHA256 hex digest of the artifact backing this claim.")
+def claim_add(text, classification, status, source_name, supports, contradicts,
+              generated_by, artifact_hash):
     """Add a new scientific claim TEXT."""
     from mareforma.db import open_db, add_claim, DatabaseError
 
@@ -378,6 +381,7 @@ def claim_add(text, classification, status, source_name, supports, contradicts, 
                 generated_by=generated_by,
                 supports=list(supports) or None,
                 contradicts=list(contradicts) or None,
+                artifact_hash=artifact_hash,
             )
         finally:
             conn.close()

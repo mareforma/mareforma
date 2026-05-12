@@ -113,6 +113,7 @@ class EpistemicGraph:
         idempotency_key: str | None = None,
         generated_by: str | None = None,
         source_name: str | None = None,
+        artifact_hash: str | None = None,
     ) -> str:
         """Assert a claim into the epistemic graph. Returns claim_id.
 
@@ -134,6 +135,13 @@ class EpistemicGraph:
         source_name:
             Data source this claim derives from. Required for ANALYTICAL
             classification to be meaningful.
+        artifact_hash:
+            SHA256 hex digest of the output artifact (figure, CSV, model)
+            backing this claim. When supplied it is bound into the signed
+            payload and used as a parallel REPLICATED signal: two peers
+            citing the same upstream that BOTH supply a hash must agree
+            on the hash before they converge. Compute with
+            ``hashlib.sha256(bytes).hexdigest()``.
 
         Returns
         -------
@@ -143,7 +151,8 @@ class EpistemicGraph:
         Raises
         ------
         ValueError
-            If ``classification`` is not a valid value or ``text`` is empty.
+            If ``classification`` is not a valid value, ``text`` is empty,
+            or ``artifact_hash`` is not a 64-character lowercase hex SHA256.
 
         Notes
         -----
@@ -171,6 +180,7 @@ class EpistemicGraph:
             generated_by=generated_by or "agent",
             source_name=source_name,
             unresolved=unresolved,
+            artifact_hash=artifact_hash,
             signer=self._signer,
             rekor_url=self._rekor_url,
             require_rekor=self._require_rekor,
@@ -557,6 +567,7 @@ class EpistemicGraph:
                 "supports": json.loads(claim.get("supports_json") or "[]"),
                 "contradicts": json.loads(claim.get("contradicts_json") or "[]"),
                 "source_name": claim.get("source_name"),
+                "artifact_hash": claim.get("artifact_hash"),
                 "created_at": claim["created_at"],
             })
             if live_payload != payload_bytes:

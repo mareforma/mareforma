@@ -112,6 +112,7 @@ SIGNED_FIELDS = (
     "supports",
     "contradicts",
     "source_name",
+    "artifact_hash",
     "created_at",
 )
 
@@ -460,6 +461,7 @@ def canonical_payload(claim_fields: dict[str, Any]) -> bytes:
         "supports": list(claim_fields.get("supports") or []),
         "contradicts": list(claim_fields.get("contradicts") or []),
         "source_name": claim_fields.get("source_name"),
+        "artifact_hash": claim_fields.get("artifact_hash"),
         "created_at": claim_fields["created_at"],
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
