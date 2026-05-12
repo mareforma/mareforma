@@ -257,15 +257,20 @@ out of `REPLICATED` promotion until `graph.refresh_unsigned()` completes
 the submission.
 
 ```python
+# Prerequisite: run `mareforma bootstrap` once to create ~/.config/mareforma/key.
+# Without a key, mareforma.open() falls through to unsigned mode and no Rekor
+# submission is attempted, regardless of rekor_url. require_signed=True fails
+# fast with KeyNotFoundError if the bootstrap was missed.
+
 import mareforma
 from mareforma.signing import PUBLIC_REKOR_URL
 
-with mareforma.open(rekor_url=PUBLIC_REKOR_URL) as graph:
+with mareforma.open(rekor_url=PUBLIC_REKOR_URL, require_signed=True) as graph:
     claim_id = graph.assert_claim("...", classification="ANALYTICAL")
     # claim is signed + logged to Rekor before this line returns
 
 # Later, after a network outage:
-with mareforma.open(rekor_url=PUBLIC_REKOR_URL) as graph:
+with mareforma.open(rekor_url=PUBLIC_REKOR_URL, require_signed=True) as graph:
     result = graph.refresh_unsigned()
     # {"checked": N, "logged": M, "still_unlogged": K}
 ```
