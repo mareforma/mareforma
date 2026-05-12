@@ -10,7 +10,12 @@ if TYPE_CHECKING:
     from mareforma._graph import EpistemicGraph
 
 
-def open(path: "str | Path | None" = None) -> "EpistemicGraph":  # noqa: A001
+def open(  # noqa: A001
+    path: "str | Path | None" = None,
+    *,
+    key_path: "str | Path | None" = None,
+    require_signed: bool = False,
+) -> "EpistemicGraph":
     """Open the epistemic graph at *path* and return an EpistemicGraph.
 
     Parameters
@@ -19,6 +24,16 @@ def open(path: "str | Path | None" = None) -> "EpistemicGraph":  # noqa: A001
         Project root directory. Defaults to the current working directory.
         The graph is stored at <path>/.mareforma/graph.db and is created
         on first use.
+    key_path:
+        Path to an Ed25519 private key (PEM). If ``None``, the XDG default
+        ``~/.config/mareforma/key`` is used. Run ``mareforma bootstrap`` once
+        to create it. If the path does not exist and ``require_signed`` is
+        False, the graph operates in unsigned mode (claims persist with
+        ``signature_bundle=NULL``).
+    require_signed:
+        When True, raise :class:`mareforma.signing.KeyNotFoundError` if no
+        key is found at ``key_path``. Use for high-assurance contexts where
+        an unsigned claim is unacceptable.
 
     Returns
     -------
@@ -28,9 +43,9 @@ def open(path: "str | Path | None" = None) -> "EpistemicGraph":  # noqa: A001
 
     Example
     -------
-    >>> graph = mareforma.open()
+    >>> graph = mareforma.open()                       # signs if XDG key exists
+    >>> graph = mareforma.open(require_signed=True)    # raises if no key
     >>> claim_id = graph.assert_claim("...", classification="ANALYTICAL")
-    >>> results = graph.query("...", min_support="REPLICATED")
     >>> graph.close()
 
     Or with a context manager::
@@ -40,10 +55,25 @@ def open(path: "str | Path | None" = None) -> "EpistemicGraph":  # noqa: A001
     """
     from mareforma._graph import EpistemicGraph
     from mareforma.db import open_db
+    from mareforma import signing as _signing
 
     root = Path(path) if path is not None else Path.cwd()
     conn = open_db(root)
-    return EpistemicGraph(conn, root)
+
+    resolved_key_path = (
+        Path(key_path) if key_path is not None else _signing.default_key_path()
+    )
+    signer = None
+    if resolved_key_path.exists():
+        signer = _signing.load_private_key(resolved_key_path)
+    elif require_signed:
+        raise _signing.KeyNotFoundError(
+            f"No private key at {resolved_key_path}. Run `mareforma bootstrap` "
+            "to create one, or call mareforma.open(require_signed=False) to "
+            "operate in unsigned mode."
+        )
+
+    return EpistemicGraph(conn, root, signer=signer)
 
 
 def schema() -> dict:

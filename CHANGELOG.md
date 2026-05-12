@@ -9,6 +9,10 @@ fresh. Claims are backed up in `claims.toml`.
 
 ### Added
 
+- Ed25519 claim signing (P0.1, phase A). New `mareforma/signing.py` module: keypair gen + PEM save/load + DSSE-style envelope sign/verify. Private key lives at `~/.config/mareforma/key` (XDG-compliant, mode 0600). Public-key id is SHA-256 of the raw Ed25519 public bytes.
+- `mareforma bootstrap` CLI command: one-time identity setup. Generates a fresh keypair, prints the public-key id. Refuses to overwrite an existing key unless `--overwrite` (avoids orphaning every previously-signed claim).
+- `mareforma.open(key_path=..., require_signed=...)` parameters. When a key exists at the XDG path (or `key_path`), claims are automatically signed before INSERT and the envelope is persisted to a new `signature_bundle` TEXT column. `require_signed=True` raises `KeyNotFoundError` if no key is found — high-assurance opt-in.
+- Signed payload binds `claim_id`, `text`, `classification`, `generated_by`, `supports`, `contradicts`, `source_name`, `created_at`. Any tamper with the row breaks verification.
 - `mareforma.open()` — returns `EpistemicGraph`; no `@transform` required
 - `EpistemicGraph.assert_claim()` — assert claims directly from any agent
 - `EpistemicGraph.query()` — query by text, support level, or classification

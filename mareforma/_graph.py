@@ -46,9 +46,16 @@ class EpistemicGraph:
     Do not instantiate directly — use mareforma.open().
     """
 
-    def __init__(self, conn: "sqlite3.Connection", root: Path) -> None:
+    def __init__(
+        self,
+        conn: "sqlite3.Connection",
+        root: Path,
+        *,
+        signer: object | None = None,
+    ) -> None:
         self._conn = conn
         self._root = root
+        self._signer = signer
 
     # ------------------------------------------------------------------
     # Core API
@@ -122,6 +129,7 @@ class EpistemicGraph:
             generated_by=generated_by or "agent",
             source_name=source_name,
             unresolved=unresolved,
+            signer=self._signer,
         )
 
     def query(

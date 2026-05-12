@@ -3,6 +3,7 @@ cli.py — Mareforma command-line interface.
 
 Commands
 --------
+    mareforma bootstrap                        generate Ed25519 signing key
     mareforma claim add TEXT [options]         assert a scientific claim
     mareforma claim list [--status] [--source] list claims
     mareforma claim show ID                    show claim details
@@ -56,6 +57,44 @@ def _info(msg: str) -> None:
 @click.version_option(__version__, prog_name="mareforma")
 def cli() -> None:
     pass
+
+
+# ---------------------------------------------------------------------------
+# bootstrap — one-time identity setup
+# ---------------------------------------------------------------------------
+
+@cli.command("bootstrap")
+@click.option(
+    "--key-path", default=None,
+    help="Override the default key path (~/.config/mareforma/key).",
+)
+@click.option(
+    "--overwrite", is_flag=True, default=False,
+    help="Replace an existing key. WARNING: every claim signed by the prior "
+         "key becomes unverifiable.",
+)
+def bootstrap_cmd(key_path: str | None, overwrite: bool) -> None:
+    """Generate an Ed25519 signing key for this user.
+
+    Run once after installing mareforma. The key is written to
+    ``~/.config/mareforma/key`` (XDG-compliant) with mode 0600. Every claim
+    written via ``mareforma.open()`` is then signed with this key.
+
+    To verify a claim, share the public key (printed below) with whoever
+    needs to validate your output.
+    """
+    from mareforma import signing as _signing
+
+    target = Path(key_path) if key_path else _signing.default_key_path()
+    try:
+        path, keyid = _signing.bootstrap_key(target, overwrite=overwrite)
+    except _signing.SigningError as exc:
+        _err(str(exc))
+        sys.exit(1)
+
+    _ok(f"Generated signing key at {path}")
+    _info(f"Public key id: {keyid}")
+    _info("Share the keyid with collaborators so they can verify your claims.")
 
 
 # ---------------------------------------------------------------------------

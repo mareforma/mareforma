@@ -23,6 +23,20 @@ def _reset_doi_client():
     doi_resolver._reset_client_for_testing()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_xdg_config(tmp_path_factory, monkeypatch):
+    """Scope XDG_CONFIG_HOME to a per-session tmpdir so tests never observe
+    (or write to) the real user's ~/.config/mareforma/key.
+
+    Without this, ``mareforma.open(tmp_path)`` on a developer machine that
+    has run ``mareforma bootstrap`` would auto-sign every test claim with
+    the developer's key, while CI would not — flaky difference.
+    """
+    sandbox = tmp_path_factory.mktemp("xdg")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(sandbox))
+    yield
+
+
 @pytest.fixture()
 def open_graph(tmp_path: Path):
     """Open an EpistemicGraph in a temp directory and close it after the test."""

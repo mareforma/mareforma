@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS claims (
     branch_id       TEXT NOT NULL DEFAULT 'main',
     unresolved      INTEGER NOT NULL DEFAULT 0
                         CHECK (unresolved IN (0, 1)),
+    signature_bundle TEXT,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );
@@ -111,6 +112,7 @@ _CLAIM_COLUMNS = (
     "status", "source_name", "generated_by",
     "supports_json", "contradicts_json",
     "comparison_summary", "branch_id", "unresolved",
+    "signature_bundle",
     "created_at", "updated_at",
 )
 _CLAIM_SELECT = ", ".join(_CLAIM_COLUMNS)
@@ -245,6 +247,7 @@ def add_claim(
     source_name: str | None = None,
     status: str = "open",
     unresolved: bool = False,
+    signer: "object | None" = None,
 ) -> str:
     """Insert a new claim and return its claim_id.
 
@@ -272,6 +275,10 @@ def add_claim(
     unresolved:
         True if any DOI in supports[]/contradicts[] failed to resolve.
         Unresolved claims are ineligible for REPLICATED promotion.
+    signer:
+        Optional Ed25519 private key. When provided, the claim is signed
+        before INSERT and the signature envelope is persisted to the
+        ``signature_bundle`` column. ``None`` skips signing.
 
     Raises
     ------
@@ -304,6 +311,27 @@ def add_claim(
     supports_json = json.dumps(supports or [])
     contradicts_json = json.dumps(contradicts or [])
 
+    # Sign the claim if a signer was supplied. The signature is bound to the
+    # claim_id + canonical fields + created_at, so any later tamper (text edit,
+    # support reattribution) breaks verification.
+    signature_bundle: str | None = None
+    if signer is not None:
+        from mareforma import signing as _signing
+        envelope = _signing.sign_claim(
+            {
+                "claim_id": claim_id,
+                "text": text.strip(),
+                "classification": classification,
+                "generated_by": generated_by,
+                "supports": supports or [],
+                "contradicts": contradicts or [],
+                "source_name": source_name,
+                "created_at": now,
+            },
+            signer,
+        )
+        signature_bundle = json.dumps(envelope, sort_keys=True, separators=(",", ":"))
+
     try:
         conn.execute(
             """
@@ -311,13 +339,15 @@ def add_claim(
                 (claim_id, text, classification, support_level, idempotency_key,
                  status, source_name, generated_by,
                  supports_json, contradicts_json, unresolved,
+                 signature_bundle,
                  created_at, updated_at)
-            VALUES (?, ?, ?, 'PRELIMINARY', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, 'PRELIMINARY', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 claim_id, text.strip(), classification, idempotency_key,
                 status, source_name, generated_by,
                 supports_json, contradicts_json, 1 if unresolved else 0,
+                signature_bundle,
                 now, now,
             ),
         )
@@ -808,6 +838,8 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
                 entry["validated_at"] = c["validated_at"]
             if c.get("unresolved"):
                 entry["unresolved"] = True
+            if c.get("signature_bundle"):
+                entry["signature_bundle"] = c["signature_bundle"]
             data["claims"][c["claim_id"]] = entry
 
         out = root / "claims.toml"
