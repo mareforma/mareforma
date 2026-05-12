@@ -45,6 +45,31 @@ if TYPE_CHECKING:
     import sqlite3
 
 
+# Fields that get sanitize-and-wrap for LLM consumption. Free-form text
+# the LLM is likely to splice into a reasoning step.
+_LLM_WRAP_FIELDS = ("text", "comparison_summary")
+
+# Fields that get sanitize-only — short labels we don't wrap because
+# delimiters would add noise without containing anything an attacker
+# could realistically use as a multi-line injection payload.
+_LLM_SANITIZE_FIELDS = ("source_name", "generated_by", "validated_by")
+
+
+def _format_row_for_llm(row: dict, prompt_safety) -> dict:
+    """Apply prompt-safety sanitization to a claim row. Pure function;
+    the ``prompt_safety`` module is passed in to keep the import lazy
+    on the hot path of plain ``query``."""
+    out = dict(row)
+    for field in _LLM_WRAP_FIELDS:
+        if field in out and out[field] is not None:
+            sanitized = prompt_safety.sanitize_for_llm(out[field])
+            out[field] = prompt_safety.wrap_untrusted(sanitized)
+    for field in _LLM_SANITIZE_FIELDS:
+        if field in out:
+            out[field] = prompt_safety.sanitize_for_llm(out[field])
+    return out
+
+
 class EpistemicGraph:
     """Agent-native interface to a local mareforma epistemic graph.
 
@@ -233,6 +258,43 @@ class EpistemicGraph:
     def get_claim(self, claim_id: str) -> dict | None:
         """Return a single claim dict by ID, or None if not found."""
         return _db.get_claim(self._conn, claim_id)
+
+    def query_for_llm(
+        self,
+        text: str | None = None,
+        *,
+        min_support: str | None = None,
+        classification: str | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        """Same as :meth:`query` but the result is safe to splice into an
+        LLM prompt as untrusted data.
+
+        Each result dict's ``text`` and ``comparison_summary`` fields are
+        sanitized (zero-width / bidi / control characters stripped, length
+        capped at 100k chars) AND wrapped in
+        ``<untrusted_data>...</untrusted_data>`` delimiters. The short
+        metadata fields ``source_name``, ``generated_by``, ``validated_by``
+        are sanitized but not wrapped — they are short labels, not
+        free-form text. Other fields (``claim_id``, ``support_level``,
+        timestamps) pass through unchanged.
+
+        The caller must still tell the LLM in the system prompt that
+        everything inside ``<untrusted_data>`` is data, not instructions.
+        This method provides the safe content; the prompt contract is
+        the caller's responsibility.
+
+        See :mod:`mareforma.prompt_safety` for the underlying primitives.
+        """
+        from mareforma import prompt_safety as _ps
+
+        rows = self.query(
+            text=text,
+            min_support=min_support,
+            classification=classification,
+            limit=limit,
+        )
+        return [_format_row_for_llm(row, _ps) for row in rows]
 
     def validate(self, claim_id: str, *, validated_by: str | None = None) -> None:
         """Promote a REPLICATED claim to ESTABLISHED (human validation).

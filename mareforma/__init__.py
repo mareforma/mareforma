@@ -182,8 +182,14 @@ def schema() -> dict:
     }
 
 
+from mareforma.prompt_safety import safe_for_llm, sanitize_for_llm, wrap_untrusted
+
+
 __all__ = [
     "open",
     "schema",
+    "safe_for_llm",
+    "sanitize_for_llm",
+    "wrap_untrusted",
     "__version__",
 ]
