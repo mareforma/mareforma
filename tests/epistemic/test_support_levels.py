@@ -44,7 +44,17 @@ from mareforma.db import ClaimNotFoundError
 # ---------------------------------------------------------------------------
 
 def open_graph(tmp_path: Path):
-    return mareforma.open(tmp_path)
+    """Open a graph with a bootstrapped key so seed=True works.
+
+    P1.7 made ESTABLISHED-upstream the default rule for REPLICATED
+    promotion, so REPLICATED tests need seed=True on the upstream —
+    which in turn requires a loaded signing key. The local helper
+    bootstraps one transparently."""
+    from mareforma import signing as _signing
+    key_path = tmp_path / "_test_key"
+    if not key_path.exists():
+        _signing.bootstrap_key(key_path)
+    return mareforma.open(tmp_path, key_path=key_path)
 
 
 def open_signed_graph(tmp_path: Path):
@@ -69,7 +79,7 @@ class TestReplicatedGenuine:
         self, tmp_path: Path
     ) -> None:
         with open_graph(tmp_path) as graph:
-            upstream = graph.assert_claim("upstream finding", generated_by="seed")
+            upstream = graph.assert_claim("upstream finding", generated_by="seed", seed=True)
 
             id_a = graph.assert_claim(
                 "finding from agent A",
@@ -95,7 +105,7 @@ class TestReplicatedGenuine:
     ) -> None:
         """Same agent making two claims on the same upstream is not independent."""
         with open_graph(tmp_path) as graph:
-            upstream = graph.assert_claim("upstream finding", generated_by="seed")
+            upstream = graph.assert_claim("upstream finding", generated_by="seed", seed=True)
 
             id_a = graph.assert_claim(
                 "first claim from agent A",
@@ -119,8 +129,8 @@ class TestReplicatedGenuine:
     ) -> None:
         """Two independent agents with no shared upstream do not trigger REPLICATED."""
         with open_graph(tmp_path) as graph:
-            upstream_a = graph.assert_claim("upstream A", generated_by="seed")
-            upstream_b = graph.assert_claim("upstream B", generated_by="seed")
+            upstream_a = graph.assert_claim("upstream A", generated_by="seed", seed=True)
+            upstream_b = graph.assert_claim("upstream B", generated_by="seed", seed=True)
 
             id_a = graph.assert_claim(
                 "finding from agent A",
@@ -144,7 +154,7 @@ class TestReplicatedGenuine:
     ) -> None:
         """REPLICATED fires as soon as the second independent agent asserts."""
         with open_graph(tmp_path) as graph:
-            upstream = graph.assert_claim("upstream", generated_by="seed")
+            upstream = graph.assert_claim("upstream", generated_by="seed", seed=True)
 
             id_a = graph.assert_claim(
                 "claim A", generated_by="agent/model-a/lab_a", supports=[upstream]
@@ -175,7 +185,7 @@ class TestReplicatedSpurious:
         no source_name. The graph makes this detectable.
         """
         with open_graph(tmp_path) as graph:
-            upstream = graph.assert_claim("prior literature ref", generated_by="seed")
+            upstream = graph.assert_claim("prior literature ref", generated_by="seed", seed=True)
 
             id_a = graph.assert_claim(
                 "target T is likely relevant (LLM prior)",
@@ -210,7 +220,7 @@ class TestReplicatedSpurious:
     ) -> None:
         """ANALYTICAL + source_name distinguishes genuine from spurious REPLICATED."""
         with open_graph(tmp_path) as graph:
-            upstream = graph.assert_claim("upstream", generated_by="seed")
+            upstream = graph.assert_claim("upstream", generated_by="seed", seed=True)
 
             # Genuine: data-driven
             genuine_a = graph.assert_claim(
@@ -244,8 +254,11 @@ class TestReplicatedSpurious:
 
             all_replicated = graph.query(min_support="REPLICATED")
 
-        # All four are REPLICATED — topology alone does not distinguish
-        assert len(all_replicated) == 4
+        # All four downstream peers REPLICATE plus the ESTABLISHED
+        # seeded upstream (min_support='REPLICATED' is inclusive of
+        # ESTABLISHED). Topology alone does not distinguish trustworthy
+        # from spurious.
+        assert len(all_replicated) == 5
 
         # Filter for trustworthy: ANALYTICAL + source present
         trustworthy = [
@@ -380,7 +393,7 @@ class TestEstablishedGate:
 
     def test_validate_on_replicated_succeeds(self, tmp_path: Path) -> None:
         with open_signed_graph(tmp_path) as graph:
-            upstream = graph.assert_claim("upstream", generated_by="seed")
+            upstream = graph.assert_claim("upstream", generated_by="seed", seed=True)
             id_a = graph.assert_claim(
                 "claim A", generated_by="agent/model-a/lab_a", supports=[upstream]
             )

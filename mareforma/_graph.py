@@ -139,6 +139,7 @@ class EpistemicGraph:
         generated_by: str | None = None,
         source_name: str | None = None,
         artifact_hash: str | None = None,
+        seed: bool = False,
     ) -> str:
         """Assert a claim into the epistemic graph. Returns claim_id.
 
@@ -206,6 +207,7 @@ class EpistemicGraph:
             source_name=source_name,
             unresolved=unresolved,
             artifact_hash=artifact_hash,
+            seed=seed,
             signer=self._signer,
             rekor_url=self._rekor_url,
             require_rekor=self._require_rekor,

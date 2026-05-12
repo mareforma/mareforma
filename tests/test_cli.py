@@ -244,7 +244,7 @@ class TestClaimValidate:
         """Return (prior_id, replicated_id) using the Python API in cwd."""
         import mareforma
         with mareforma.open() as g:
-            prior = g.assert_claim("upstream reference", generated_by="seed")
+            prior = g.assert_claim("upstream reference", generated_by="seed", seed=True)
             rep_id = g.assert_claim("finding A", supports=[prior], generated_by="agent-A")
             g.assert_claim("finding B", supports=[prior], generated_by="agent-B")
         return prior, rep_id

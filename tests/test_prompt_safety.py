@@ -279,19 +279,21 @@ class TestQueryForLLM:
         assert "<untrusted_data>" not in raw[0]["text"]
 
     def test_filters_apply_same_as_query(self, open_graph) -> None:
-        upstream = open_graph.assert_claim("upstream", generated_by="seed")
+        upstream = open_graph.assert_claim("upstream", generated_by="seed", seed=True)
         open_graph.assert_claim(
             "peer A", supports=[upstream], generated_by="A",
         )
         open_graph.assert_claim(
             "peer B", supports=[upstream], generated_by="B",
         )
-        # Both peers converge → REPLICATED. Filter to REPLICATED only.
+        # Both peers converge → REPLICATED. min_support='REPLICATED' is
+        # inclusive of ESTABLISHED, so the seeded upstream is also
+        # returned. The filter still applies — three results, none at
+        # PRELIMINARY.
         rows = open_graph.query_for_llm(min_support="REPLICATED")
-        assert len(rows) == 2
+        assert len(rows) == 3
         texts = " ".join(r["text"] for r in rows)
-        assert "peer A" in texts and "peer B" in texts
-        assert "upstream" not in texts  # upstream itself stays PRELIMINARY
+        assert "peer A" in texts and "peer B" in texts and "upstream" in texts
 
 
 # ---------------------------------------------------------------------------

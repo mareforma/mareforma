@@ -99,6 +99,7 @@ _MAX_REKOR_RESPONSE_SIZE = 64 * 1024
 _PAYLOAD_TYPE = "application/vnd.mareforma.claim+json"
 _PAYLOAD_TYPE_VALIDATOR_ENROLLMENT = "application/vnd.mareforma.validator-enrollment+json"
 _PAYLOAD_TYPE_VALIDATION = "application/vnd.mareforma.validation+json"
+_PAYLOAD_TYPE_SEED = "application/vnd.mareforma.seed+json"
 
 # Fields included in the signed payload of a claim. Sorted at envelope build
 # time so the signature is order-stable across writers. Public so
@@ -130,6 +131,17 @@ _VALIDATION_FIELDS = (
     "claim_id",
     "validator_keyid",
     "validated_at",
+)
+
+# Fields included in the signed payload of a seed-claim attestation.
+# A seed envelope establishes the bootstrap of trust for a fresh graph:
+# the validator who asserts the seed claim signs (claim_id,
+# validator_keyid, seeded_at) so a verifier can confirm the seed
+# came from an enrolled validator at the time of assertion.
+_SEED_FIELDS = (
+    "claim_id",
+    "validator_keyid",
+    "seeded_at",
 )
 
 
@@ -562,6 +574,34 @@ def sign_validation(
     return _build_envelope(
         payload, private_key,
         payload_type=_PAYLOAD_TYPE_VALIDATION,
+    )
+
+
+def sign_seed_claim(
+    seed: dict[str, Any],
+    private_key: Ed25519PrivateKey,
+) -> dict[str, Any]:
+    """Sign a seed-claim attestation.
+
+    The record must contain ``claim_id``, ``validator_keyid``
+    (the asserting validator's keyid), and ``seeded_at``
+    (ISO 8601 UTC). The envelope establishes the bootstrap of trust
+    for a fresh graph: only enrolled validators can produce seed
+    envelopes, and the envelope binds the moment of assertion so a
+    verifier can detect post-hoc tampering with the ``validated_at``
+    timestamp or the validator identity.
+
+    The envelope is persisted to the claim's ``validation_signature``
+    column, satisfying the CHECK constraint that requires ESTABLISHED
+    rows to carry a signed validation envelope. The payload type
+    ``application/vnd.mareforma.seed+json`` is distinct from the
+    regular validation payload type so cross-type envelope
+    substitution is detectable.
+    """
+    payload = _canonical_record(_SEED_FIELDS, seed)
+    return _build_envelope(
+        payload, private_key,
+        payload_type=_PAYLOAD_TYPE_SEED,
     )
 
 

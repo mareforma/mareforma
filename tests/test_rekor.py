@@ -299,7 +299,7 @@ class TestReplicatedGating:
         with mareforma.open(
             tmp_path, key_path=key_path, rekor_url=_TEST_REKOR_URL,
         ) as graph:
-            upstream = graph.assert_claim("upstream", generated_by="seed")
+            upstream = graph.assert_claim("upstream", generated_by="seed", seed=True)
             assert graph.get_claim(upstream)["transparency_logged"] == 0
 
             id_a = graph.assert_claim(
@@ -321,7 +321,7 @@ class TestReplicatedGating:
         with mareforma.open(
             tmp_path, key_path=key_path, rekor_url=_TEST_REKOR_URL,
         ) as graph:
-            upstream = graph.assert_claim("upstream", generated_by="seed")
+            upstream = graph.assert_claim("upstream", generated_by="seed", seed=True)
             id_a = graph.assert_claim(
                 "agent A", supports=[upstream], generated_by="agent/a",
             )
@@ -384,7 +384,7 @@ class TestRefreshUnsigned:
         with mareforma.open(
             tmp_path, key_path=key_path, rekor_url=_TEST_REKOR_URL,
         ) as graph:
-            upstream = graph.assert_claim("upstream", generated_by="seed")
+            upstream = graph.assert_claim("upstream", generated_by="seed", seed=True)
             id_a = graph.assert_claim(
                 "agent A", supports=[upstream], generated_by="agent/a",
             )
@@ -840,7 +840,7 @@ class TestOnePeerLoggedOneNot:
         with mareforma.open(
             tmp_path, key_path=key_path, rekor_url=_TEST_REKOR_URL,
         ) as graph:
-            upstream = graph.assert_claim("upstream", generated_by="seed")
+            upstream = graph.assert_claim("upstream", generated_by="seed", seed=True)
             id_a = graph.assert_claim(
                 "agent A", supports=[upstream], generated_by="agent/a",
             )

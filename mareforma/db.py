@@ -648,6 +648,7 @@ def add_claim(
     status: str = "open",
     unresolved: bool = False,
     artifact_hash: str | None = None,
+    seed: bool = False,
     signer: "object | None" = None,
     rekor_url: str | None = None,
     require_rekor: bool = False,
@@ -769,6 +770,41 @@ def add_claim(
     # half-built state on rejection.
     _check_no_cycle(conn, claim_id, supports or [])
 
+    # Seed-claim bootstrap (P1.7). A seed claim is asserted by an
+    # enrolled validator and inserted directly with
+    # support_level='ESTABLISHED' + a signed seed envelope. This is
+    # the only path that can place a claim at ESTABLISHED without
+    # going through REPLICATED + validate(); it exists to bootstrap
+    # the chain of trust on a fresh graph (otherwise the
+    # ESTABLISHED-upstream rule blocks the first REPLICATED forever).
+    seed_envelope_json: str | None = None
+    if seed:
+        if signer is None:
+            raise ValueError(
+                "seed=True requires a signing key (open the graph with "
+                "key_path=... or run `mareforma bootstrap` once)."
+            )
+        from mareforma import signing as _signing
+        from mareforma import validators as _validators
+        signer_keyid = _signing.public_key_id(signer.public_key())
+        if not _validators.is_enrolled(conn, signer_keyid):
+            raise ValueError(
+                f"seed=True refused: key {signer_keyid[:12]}… is not an "
+                "enrolled validator on this project. Only enrolled "
+                "validators can bootstrap the trust chain."
+            )
+        seed_envelope = _signing.sign_seed_claim(
+            {
+                "claim_id": claim_id,
+                "validator_keyid": signer_keyid,
+                "seeded_at": now,
+            },
+            signer,
+        )
+        seed_envelope_json = json.dumps(
+            seed_envelope, sort_keys=True, separators=(",", ":"),
+        )
+
     # Sign the claim if a signer was supplied. The signature is bound to the
     # claim_id + canonical fields + created_at, so any later tamper (text edit,
     # support reattribution) breaks verification.
@@ -822,6 +858,12 @@ def add_claim(
     # that case the caller's transaction supplies the serialization;
     # our SELECT runs inside their snapshot and the chain stays linear.
     _own_transaction = not conn.in_transaction
+    # Seed claims insert with support_level='ESTABLISHED' and carry
+    # the seed envelope in validation_signature. The INSERT trigger
+    # accepts ESTABLISHED rows when validation_signature is non-NULL.
+    initial_level = "ESTABLISHED" if seed else "PRELIMINARY"
+    initial_validation_signature = seed_envelope_json
+    initial_validated_at = now if seed else None
     try:
         if _own_transaction:
             conn.execute("BEGIN IMMEDIATE")
@@ -833,15 +875,17 @@ def add_claim(
                  status, source_name, generated_by,
                  supports_json, contradicts_json, unresolved,
                  signature_bundle, transparency_logged,
+                 validation_signature, validated_at,
                  artifact_hash, prev_hash,
                  created_at, updated_at)
-            VALUES (?, ?, ?, 'PRELIMINARY', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                claim_id, text, classification, idempotency_key,
+                claim_id, text, classification, initial_level, idempotency_key,
                 status, source_name, generated_by,
                 supports_json, contradicts_json, 1 if unresolved else 0,
                 signature_bundle, transparency_logged,
+                initial_validation_signature, initial_validated_at,
                 artifact_hash, prev_hash,
                 now, now,
             ),
@@ -930,9 +974,32 @@ def _maybe_update_replicated_unlocked(
     toward convergence. When either side is NULL (the back-compat
     case), behaviour falls back to identity-only REPLICATED: the
     hash signal is opt-in, not retroactive.
+
+    ESTABLISHED-upstream requirement (P1.7)
+    ---------------------------------------
+    The candidate peer's ``supports[]`` must include at least one
+    claim with ``support_level = 'ESTABLISHED'``. Matches Cochrane /
+    GRADE evidence-chain methodology: REPLICATED-of-noise is not
+    replication. Bootstrap a fresh graph with the ``seed=True``
+    parameter on :func:`add_claim` to create an ESTABLISHED root.
     """
     if not supports:
         return
+
+    # P1.7: the NEW claim's supports[] must include at least one
+    # ESTABLISHED claim. The SQL clause below applies the same rule
+    # to candidate peers (their supports[] is checked there). If the
+    # new claim doesn't satisfy the rule, no promotion fires — saves
+    # an unnecessary SQL roundtrip and makes the semantics explicit.
+    sup_placeholders = ",".join("?" * len(supports))
+    has_established_upstream = conn.execute(
+        f"SELECT 1 FROM claims WHERE claim_id IN ({sup_placeholders}) "
+        f"AND support_level = 'ESTABLISHED' LIMIT 1",
+        supports,
+    ).fetchone()
+    if has_established_upstream is None:
+        return
+
     placeholders = ",".join("?" * len(supports))
     rows = conn.execute(
         f"""
@@ -948,6 +1015,12 @@ def _maybe_update_replicated_unlocked(
               c.artifact_hash IS NULL
               OR ? IS NULL
               OR c.artifact_hash = ?
+          )
+          AND EXISTS (
+              SELECT 1
+              FROM claims sup, json_each(c.supports_json) j2
+              WHERE sup.claim_id = j2.value
+                AND sup.support_level = 'ESTABLISHED'
           )
         """,
         (*supports, new_claim_id, generated_by, artifact_hash, artifact_hash),

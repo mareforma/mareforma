@@ -44,7 +44,12 @@ from mareforma.db import open_db, add_claim, update_claim
 # ---------------------------------------------------------------------------
 
 def open_graph(tmp_path: Path):
-    return mareforma.open(tmp_path)
+    """Open with a bootstrapped key so seed=True works (P1.7)."""
+    from mareforma import signing as _signing
+    key_path = tmp_path / "_test_key"
+    if not key_path.exists():
+        _signing.bootstrap_key(key_path)
+    return mareforma.open(tmp_path, key_path=key_path)
 
 
 def open_signed_graph(tmp_path: Path):
@@ -71,7 +76,7 @@ class TestTrustLaundering:
         table if they want to know who actually validated.
         """
         with open_signed_graph(tmp_path) as g:
-            upstream = g.assert_claim("upstream reference", generated_by="seed")
+            upstream = g.assert_claim("upstream reference", generated_by="seed", seed=True)
             id_a = g.assert_claim(
                 "Drug X causes effect Y",
                 supports=[upstream],
@@ -98,7 +103,7 @@ class TestTrustLaundering:
     def test_validate_accepts_any_validated_by_string(self, tmp_path: Path) -> None:
         """validate() stores whatever display string is passed."""
         with open_signed_graph(tmp_path) as g:
-            upstream = g.assert_claim("prior", generated_by="seed")
+            upstream = g.assert_claim("prior", generated_by="seed", seed=True)
             rep_id = g.assert_claim("finding", supports=[upstream], generated_by="A")
             g.assert_claim("finding", supports=[upstream], generated_by="B")
 
@@ -146,20 +151,32 @@ class TestCyclicSupports:
         Closed by v0.3.0 P1.6: cycle detection on ``update_claim``
         walks the supports[] graph forward from the proposed edge and
         rejects any closure back to the updated claim.
+
+        Uses unsigned graph directly (not the keyed open_graph fixture)
+        because the cycle test exercises the unsigned-edit window —
+        signed claims refuse supports[] mutation upstream of cycle
+        detection (SignedClaimImmutableError fires first).
         """
         from mareforma.db import CycleDetectedError
-        with open_graph(tmp_path) as g:
-            id_a = g.assert_claim("Claim A", generated_by="agent-1")
-            id_b = g.assert_claim("Claim B", supports=[id_a], generated_by="agent-2")
+        conn = open_db(tmp_path)
+        try:
+            id_a = add_claim(conn, tmp_path, "Claim A", generated_by="agent-1")
+            id_b = add_claim(conn, tmp_path, "Claim B", supports=[id_a], generated_by="agent-2")
+            with pytest.raises(CycleDetectedError, match="cycle"):
+                update_claim(conn, tmp_path, id_a, supports=[id_b])
+        finally:
+            conn.close()
 
         conn = open_db(tmp_path)
-        with pytest.raises(CycleDetectedError, match="cycle"):
-            update_claim(conn, tmp_path, id_a, supports=[id_b])
-        conn.close()
-
-        with open_graph(tmp_path) as g:
-            a = g.get_claim(id_a)
-            b = g.get_claim(id_b)
+        try:
+            a = dict(conn.execute(
+                "SELECT * FROM claims WHERE claim_id = ?", (id_a,),
+            ).fetchone())
+            b = dict(conn.execute(
+                "SELECT * FROM claims WHERE claim_id = ?", (id_b,),
+            ).fetchone())
+        finally:
+            conn.close()
 
         # a.supports unchanged; b.supports still contains id_a.
         assert id_b not in json.loads(a["supports_json"])

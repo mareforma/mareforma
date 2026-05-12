@@ -37,9 +37,18 @@ class TestTrafficLight:
         assert "PRELIMINARY" in report.rationale
 
     def test_green_when_replicated_claim_exists(self, tmp_path: Path) -> None:
+        # Seed the upstream via the graph API (P1.7 requires an
+        # ESTABLISHED upstream for REPLICATED), then drop down to the
+        # db API for the rest of the test.
+        from mareforma import signing as _sig
+        import mareforma
+        key = tmp_path / "k"
+        _sig.bootstrap_key(key)
+        with mareforma.open(tmp_path, key_path=key) as g:
+            prior = g.assert_claim("prior", generated_by="seed", seed=True)
+
         conn = _open(tmp_path)
         try:
-            prior = add_claim(conn, tmp_path, "prior", generated_by="seed")
             add_claim(conn, tmp_path, "finding A", supports=[prior], generated_by="agent_A")
             add_claim(conn, tmp_path, "finding B", supports=[prior], generated_by="agent_B")
             report = compute_health(tmp_path, conn)

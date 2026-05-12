@@ -123,8 +123,9 @@ def test_assert_claim_different_keys_creates_two(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_assert_claim_replicated_triggers_on_independent_agents(tmp_path):
-    with mareforma.open(tmp_path) as graph:
-        prior = graph.assert_claim("prior finding", generated_by="agent_seed")
+    key_path = _bootstrap_key(tmp_path)
+    with mareforma.open(tmp_path, key_path=key_path) as graph:
+        prior = graph.assert_claim("prior finding", generated_by="agent_seed", seed=True)
         # Two independent agents both support the same prior
         id1 = graph.assert_claim(
             "agent A finding", supports=[prior], generated_by="agent_A"
@@ -139,8 +140,9 @@ def test_assert_claim_replicated_triggers_on_independent_agents(tmp_path):
 
 
 def test_assert_claim_replicated_not_triggered_same_agent(tmp_path):
-    with mareforma.open(tmp_path) as graph:
-        prior = graph.assert_claim("prior finding", generated_by="agent_seed")
+    key_path = _bootstrap_key(tmp_path)
+    with mareforma.open(tmp_path, key_path=key_path) as graph:
+        prior = graph.assert_claim("prior finding", generated_by="agent_seed", seed=True)
         id1 = graph.assert_claim(
             "first claim", supports=[prior], generated_by="agent_A"
         )
@@ -198,8 +200,9 @@ def test_query_text_no_match_returns_empty(tmp_path):
 
 
 def test_query_min_support_filters_correctly(tmp_path):
-    with mareforma.open(tmp_path) as graph:
-        prior = graph.assert_claim("prior", generated_by="seed")
+    key_path = _bootstrap_key(tmp_path)
+    with mareforma.open(tmp_path, key_path=key_path) as graph:
+        prior = graph.assert_claim("prior", generated_by="seed", seed=True)
         # Create a REPLICATED pair
         rep1 = graph.assert_claim("rep claim", supports=[prior], generated_by="A")
         rep2 = graph.assert_claim("rep claim", supports=[prior], generated_by="B")
@@ -271,7 +274,7 @@ def _bootstrap_key(tmp_path):
 def test_validate_replicated_to_established(tmp_path):
     key_path = _bootstrap_key(tmp_path)
     with mareforma.open(tmp_path, key_path=key_path) as graph:
-        prior = graph.assert_claim("prior", generated_by="seed")
+        prior = graph.assert_claim("prior", generated_by="seed", seed=True)
         id1 = graph.assert_claim("finding", supports=[prior], generated_by="A")
         id2 = graph.assert_claim("finding", supports=[prior], generated_by="B")
         graph.validate(id1)
@@ -282,7 +285,7 @@ def test_validate_replicated_to_established(tmp_path):
 def test_validate_stores_validated_by(tmp_path):
     key_path = _bootstrap_key(tmp_path)
     with mareforma.open(tmp_path, key_path=key_path) as graph:
-        prior = graph.assert_claim("prior", generated_by="seed")
+        prior = graph.assert_claim("prior", generated_by="seed", seed=True)
         id1 = graph.assert_claim("finding", supports=[prior], generated_by="A")
         graph.assert_claim("finding", supports=[prior], generated_by="B")
         graph.validate(id1, validated_by="jane@lab.org")
@@ -307,11 +310,20 @@ def test_validate_nonexistent_claim_raises(tmp_path):
 
 
 def test_validate_without_signer_raises(tmp_path):
-    """No key loaded → graph.validate() refuses with a clear error."""
-    with mareforma.open(tmp_path, key_path=tmp_path / "absent") as graph:
-        prior = graph.assert_claim("prior", generated_by="seed")
+    """No key loaded → graph.validate() refuses with a clear error.
+
+    Phase 1: bootstrap a key, build a REPLICATED pair via the seeded
+    upstream pathway. Phase 2: re-open without the key and confirm
+    validate() refuses on the loaded-signer gate.
+    """
+    key_path = _bootstrap_key(tmp_path)
+    with mareforma.open(tmp_path, key_path=key_path) as graph:
+        prior = graph.assert_claim("prior", generated_by="seed", seed=True)
         id1 = graph.assert_claim("finding", supports=[prior], generated_by="A")
         graph.assert_claim("finding", supports=[prior], generated_by="B")
+
+    # Re-open with a deliberately-missing key path so no signer loads.
+    with mareforma.open(tmp_path, key_path=tmp_path / "absent") as graph:
         with pytest.raises(ValueError, match="loaded signing key"):
             graph.validate(id1)
 
@@ -414,8 +426,11 @@ def test_get_tools_assert_creates_claim(tmp_path):
 
 
 def test_get_tools_generated_by_baked_into_closure_triggers_replicated(tmp_path):
-    with mareforma.open(tmp_path) as graph:
-        prior = graph.assert_claim("upstream evidence", generated_by="seed")
+    key_path = _bootstrap_key(tmp_path)
+    with mareforma.open(tmp_path, key_path=key_path) as graph:
+        prior = graph.assert_claim(
+            "upstream evidence", generated_by="seed", seed=True,
+        )
         _, assert_finding_a = graph.get_tools(generated_by="agent/a")
         _, assert_finding_b = graph.get_tools(generated_by="agent/b")
         id_a = assert_finding_a("finding A", supports=[prior])
@@ -635,13 +650,18 @@ class TestDoiResolution:
             status_code=200,
         )
 
-        conn = open_db(tmp_path)
-        try:
-            # Seed an upstream both agents will cite.
-            upstream = add_claim(
-                conn, tmp_path, "upstream observation", generated_by="seed",
+        # P1.7 requires an ESTABLISHED upstream for REPLICATED. Bootstrap
+        # a key and seed the upstream via the graph API, then drop down
+        # to the db API for the DOI-curing flow this test actually
+        # exercises.
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as g:
+            upstream = g.assert_claim(
+                "upstream observation", generated_by="seed", seed=True,
             )
 
+        conn = open_db(tmp_path)
+        try:
             # Agent A cites upstream cleanly → PRELIMINARY (no peer yet).
             id_a = add_claim(
                 conn, tmp_path, "agent A finding",

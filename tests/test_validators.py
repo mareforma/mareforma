@@ -183,7 +183,7 @@ class TestEnrollValidator:
 class TestValidateIdentityCheck:
     def _setup_replicated(self, graph) -> str:
         """Helper: assert seed + 2 agents to produce a REPLICATED claim."""
-        seed = graph.assert_claim("seed", generated_by="seed")
+        seed = graph.assert_claim("seed", generated_by="seed", seed=True)
         id_a = graph.assert_claim(
             "finding", supports=[seed], generated_by="agent-A",
         )
@@ -194,9 +194,13 @@ class TestValidateIdentityCheck:
         return id_a
 
     def test_validate_requires_loaded_signer(self, tmp_path: Path) -> None:
-        # Open WITHOUT a key — validate() must refuse.
-        with mareforma.open(tmp_path, key_path=tmp_path / "absent") as graph:
+        # Phase 1: bootstrap a key, build the REPLICATED chain via the
+        # seeded-upstream path. Phase 2: re-open without a key and
+        # confirm validate() refuses on the loaded-signer gate.
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
             id_a = self._setup_replicated(graph)
+        with mareforma.open(tmp_path, key_path=tmp_path / "absent") as graph:
             with pytest.raises(ValueError, match="loaded signing key"):
                 graph.validate(id_a)
 
@@ -515,7 +519,7 @@ class TestValidationTimestampParity:
         microseconds and defeat the tamper-evidence claim."""
         key_path = _bootstrap_key(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as graph:
-            upstream = graph.assert_claim("u", generated_by="seed")
+            upstream = graph.assert_claim("u", generated_by="seed", seed=True)
             id_a = graph.assert_claim("f", supports=[upstream], generated_by="A")
             graph.assert_claim("f", supports=[upstream], generated_by="B")
             graph.validate(id_a)
@@ -844,7 +848,7 @@ class TestCLIValidateProducesSignedEnvelope:
 
         # Build a REPLICATED claim via the library.
         with mareforma.open(tmp_path) as graph:
-            upstream = graph.assert_claim("u", generated_by="seed")
+            upstream = graph.assert_claim("u", generated_by="seed", seed=True)
             rep_id = graph.assert_claim("f", supports=[upstream], generated_by="A")
             graph.assert_claim("f", supports=[upstream], generated_by="B")
 

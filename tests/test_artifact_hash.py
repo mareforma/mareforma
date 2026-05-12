@@ -159,7 +159,7 @@ class TestArtifactHashSigned:
 
 class TestReplicatedHashGate:
     def test_matching_hashes_promote_to_replicated(self, open_graph) -> None:
-        upstream = open_graph.assert_claim("upstream finding", generated_by="seed")
+        upstream = open_graph.assert_claim("upstream finding", generated_by="seed", seed=True)
         a = open_graph.assert_claim(
             "agent A finding", supports=[upstream],
             generated_by="agent-A", artifact_hash=HASH_A,
@@ -172,7 +172,7 @@ class TestReplicatedHashGate:
         assert open_graph.get_claim(b)["support_level"] == "REPLICATED"
 
     def test_mismatched_hashes_block_replicated(self, open_graph) -> None:
-        upstream = open_graph.assert_claim("upstream finding", generated_by="seed")
+        upstream = open_graph.assert_claim("upstream finding", generated_by="seed", seed=True)
         a = open_graph.assert_claim(
             "agent A finding", supports=[upstream],
             generated_by="agent-A", artifact_hash=HASH_A,
@@ -190,7 +190,7 @@ class TestReplicatedHashGate:
         """Back-compat: if EITHER peer lacks a hash, REPLICATED still fires
         on identity convergence alone. The hash signal is opt-in, not
         retroactive."""
-        upstream = open_graph.assert_claim("upstream finding", generated_by="seed")
+        upstream = open_graph.assert_claim("upstream finding", generated_by="seed", seed=True)
         a = open_graph.assert_claim(
             "agent A finding", supports=[upstream],
             generated_by="agent-A", artifact_hash=HASH_A,
@@ -203,7 +203,7 @@ class TestReplicatedHashGate:
         assert open_graph.get_claim(b)["support_level"] == "REPLICATED"
 
     def test_neither_has_hash_legacy_path_preserved(self, open_graph) -> None:
-        upstream = open_graph.assert_claim("upstream finding", generated_by="seed")
+        upstream = open_graph.assert_claim("upstream finding", generated_by="seed", seed=True)
         a = open_graph.assert_claim(
             "agent A finding", supports=[upstream], generated_by="agent-A",
         )
@@ -218,7 +218,7 @@ class TestReplicatedHashGate:
     ) -> None:
         """When A has HASH_A and B has HASH_B (blocked), a third claim C
         with HASH_A still converges with A — independent pair-by-pair."""
-        upstream = open_graph.assert_claim("upstream finding", generated_by="seed")
+        upstream = open_graph.assert_claim("upstream finding", generated_by="seed", seed=True)
         a = open_graph.assert_claim(
             "agent A", supports=[upstream],
             generated_by="agent-A", artifact_hash=HASH_A,
@@ -241,7 +241,7 @@ class TestReplicatedHashGate:
     def test_same_agent_same_hash_does_not_promote(self, open_graph) -> None:
         """The hash gate must not bypass the same-agent independence check.
         Identity convergence requires distinct generated_by, full stop."""
-        upstream = open_graph.assert_claim("upstream finding", generated_by="seed")
+        upstream = open_graph.assert_claim("upstream finding", generated_by="seed", seed=True)
         a = open_graph.assert_claim(
             "first finding", supports=[upstream],
             generated_by="agent-A", artifact_hash=HASH_A,
@@ -257,7 +257,7 @@ class TestReplicatedHashGate:
         """When a DOI resolves late, the deferred REPLICATED re-check must
         consult the row's persisted artifact_hash — not bypass the gate."""
         # Peer A converges on upstream with HASH_A (no DOIs → resolved).
-        upstream = open_graph.assert_claim("upstream", generated_by="seed")
+        upstream = open_graph.assert_claim("upstream", generated_by="seed", seed=True)
         a = open_graph.assert_claim(
             "peer A", supports=[upstream],
             generated_by="agent-A", artifact_hash=HASH_A,
@@ -283,7 +283,7 @@ class TestReplicatedHashGate:
         self, open_graph,
     ) -> None:
         """Mirror of the above: matching hash + late DOI resolution promotes."""
-        upstream = open_graph.assert_claim("upstream", generated_by="seed")
+        upstream = open_graph.assert_claim("upstream", generated_by="seed", seed=True)
         a = open_graph.assert_claim(
             "peer A", supports=[upstream],
             generated_by="agent-A", artifact_hash=HASH_A,

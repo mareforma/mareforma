@@ -104,8 +104,11 @@ class TestInsertTrigger:
 class TestUpdateTrigger:
     def test_preliminary_to_replicated_allowed(self, tmp_path: Path) -> None:
         # The auto-promotion path that _maybe_update_replicated takes.
-        with mareforma.open(tmp_path) as g:
-            upstream = g.assert_claim("upstream", generated_by="seed")
+        from mareforma import signing as _sig
+        key = tmp_path / "k"
+        _sig.bootstrap_key(key)
+        with mareforma.open(tmp_path, key_path=key) as g:
+            upstream = g.assert_claim("upstream", generated_by="seed", seed=True)
             a = g.assert_claim("a", supports=[upstream], generated_by="A")
             b = g.assert_claim("b", supports=[upstream], generated_by="B")
             assert g.get_claim(a)["support_level"] == "REPLICATED"
@@ -140,7 +143,7 @@ class TestUpdateTrigger:
         if not (tmp_path / "k").exists():
             _sig.bootstrap_key(tmp_path / "k")
         with mareforma.open(tmp_path, key_path=tmp_path / "k") as g:
-            upstream = g.assert_claim("upstream", generated_by="seed")
+            upstream = g.assert_claim("upstream", generated_by="seed", seed=True)
             id_a = g.assert_claim("a", supports=[upstream], generated_by="A")
             g.assert_claim("b", supports=[upstream], generated_by="B")
             g.validate(id_a)
@@ -191,7 +194,7 @@ class TestCheckConstraint:
         if not (tmp_path / "k").exists():
             _sig.bootstrap_key(tmp_path / "k")
         with mareforma.open(tmp_path, key_path=tmp_path / "k") as g:
-            upstream = g.assert_claim("upstream", generated_by="seed")
+            upstream = g.assert_claim("upstream", generated_by="seed", seed=True)
             id_a = g.assert_claim("a", supports=[upstream], generated_by="A")
             g.assert_claim("b", supports=[upstream], generated_by="B")
             g.validate(id_a)
@@ -411,8 +414,11 @@ class TestStatusOnlyEditsBypassTrigger:
     def test_retraction_of_replicated_claim(self, tmp_path: Path) -> None:
         """A REPLICATED claim's status can be set to retracted without
         the state-machine trigger firing (it fires on OF support_level)."""
-        with mareforma.open(tmp_path) as g:
-            up = g.assert_claim("up", generated_by="seed")
+        from mareforma import signing as _sig
+        key = tmp_path / "k"
+        _sig.bootstrap_key(key)
+        with mareforma.open(tmp_path, key_path=key) as g:
+            up = g.assert_claim("up", generated_by="seed", seed=True)
             a = g.assert_claim("a", supports=[up], generated_by="A")
             g.assert_claim("b", supports=[up], generated_by="B")
             assert g.get_claim(a)["support_level"] == "REPLICATED"
