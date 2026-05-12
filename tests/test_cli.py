@@ -221,3 +221,61 @@ class TestExport:
             written = Path(os.getcwd()) / "ontology.jsonld"
         assert result.exit_code == 0
         assert written.exists()
+
+
+# ---------------------------------------------------------------------------
+# claim validate
+# ---------------------------------------------------------------------------
+
+class TestClaimValidate:
+    def _make_replicated_claim_id(self) -> tuple[str, str]:
+        """Return (prior_id, replicated_id) using the Python API in cwd."""
+        import mareforma
+        with mareforma.open() as g:
+            prior = g.assert_claim("upstream reference", generated_by="seed")
+            rep_id = g.assert_claim("finding A", supports=[prior], generated_by="agent-A")
+            g.assert_claim("finding B", supports=[prior], generated_by="agent-B")
+        return prior, rep_id
+
+    def test_validate_success(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            _, rep_id = self._make_replicated_claim_id()
+            result = runner.invoke(cli, ["claim", "validate", rep_id],
+                                   catch_exceptions=False)
+        assert result.exit_code == 0
+        assert "ESTABLISHED" in result.output
+
+    def test_validate_not_found_exits_1(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            result = runner.invoke(cli, ["claim", "validate", "nonexistent-id"])
+        assert result.exit_code == 1
+
+    def test_validate_preliminary_claim_exits_1(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            add = runner.invoke(cli, ["claim", "add", "only one agent"],
+                                catch_exceptions=False)
+            claim_id = next(
+                line.split("ID:")[-1].strip()
+                for line in add.output.splitlines()
+                if "ID:" in line
+            )
+            result = runner.invoke(cli, ["claim", "validate", claim_id])
+        assert result.exit_code == 1
+        assert "REPLICATED" in result.output
+
+    def test_validate_with_validated_by(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            _, rep_id = self._make_replicated_claim_id()
+            runner.invoke(
+                cli,
+                ["claim", "validate", rep_id, "--validated-by", "reviewer@example.org"],
+                catch_exceptions=False,
+            )
+            result = runner.invoke(cli, ["claim", "show", rep_id, "--json"],
+                                   catch_exceptions=False)
+        data = json.loads(result.output)
+        assert data["validated_by"] == "reviewer@example.org"

@@ -110,7 +110,7 @@ class JSONLDExporter:
             "classification": claim.get("classification", "INFERRED"),
             "supportLevel": claim.get("support_level", "PRELIMINARY"),
             "claimStatus": claim["status"],
-            "generatedBy": claim.get("generated_by", "human"),
+            "generatedBy": claim.get("generated_by", "agent"),
             "dateCreated": claim["created_at"],
         }
         supports = json.loads(claim.get("supports_json", "[]") or "[]")

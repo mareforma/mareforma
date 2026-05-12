@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.3.0] - 2026-05-11
+## [0.3.0] - 2026-05-12
 
 Breaking change from v0.2.x. No migration path — delete `graph.db` to start
 fresh. Claims are backed up in `claims.toml`.
@@ -14,9 +14,10 @@ fresh. Claims are backed up in `claims.toml`.
 - `EpistemicGraph.query()` — query by text, support level, or classification
 - `EpistemicGraph.get_claim()` — fetch a single claim by ID
 - `EpistemicGraph.validate()` — human gate to ESTABLISHED
+- `mareforma claim validate` — CLI command to promote REPLICATED → ESTABLISHED; `--validated-by` optional
 - `EpistemicGraph.get_tools()` — returns `[query_graph, assert_finding]` as plain Python callables; `generated_by` baked into closure; wraps in one line for any framework
 - `mareforma.schema()` — runtime introspection of valid values and state transitions
-- Claims schema v1: `classification`, `support_level`, `idempotency_key`, `validated_by`, `validated_at`, `branch_id`
+- Claims schema v1: `classification`, `support_level`, `idempotency_key`, `validated_by`, `validated_at`, `branch_id`; CHECK constraints on `classification`, `support_level`, `status`
 - REPLICATED auto-trigger: fires automatically when ≥2 claims share the same upstream in `supports[]` with different `generated_by`
 - Framework integrations: AGENTS.md table covering Anthropic SDK, OpenAI SDK, LangChain, LangGraph, CrewAI, AutoGen, LlamaIndex, PydanticAI, Smol Agents
 - Mintlify docs at `docs.mareforma.com`
@@ -26,7 +27,8 @@ fresh. Claims are backed up in `claims.toml`.
 
 - `mareforma status` — rewritten to show epistemic health by support level (red/yellow/green); no pipeline dependency
 - `mareforma export` — rewritten to produce claims-only JSON-LD
-- `mareforma claim` group unchanged
+- `mareforma claim` group: added `validate` subcommand; `--generated-by` default changed from `"human"` to `"agent"`
+- `generated_by` default unified to `"agent"` across `db.add_claim`, CLI, and schema DDL
 
 ### Removed
 

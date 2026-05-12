@@ -172,7 +172,7 @@ class EpistemicGraph:
         ValueError
             If support_level is not 'REPLICATED'.
         """
-        _db.validate_claim(self._conn, claim_id, validated_by=validated_by)
+        _db.validate_claim(self._conn, self._root, claim_id, validated_by=validated_by)
 
     def get_tools(self, *, generated_by: str = "agent") -> list:
         """Return agent tool callables pre-bound to this graph.

@@ -22,7 +22,6 @@ classifiers = [
 dependencies = [
     "click>=8.1",
     "tomli-w>=1.0",
-    "rich>=13.0",
     "tomli>=2.0; python_version < '3.11'",
 ]
 

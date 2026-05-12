@@ -60,14 +60,17 @@ PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS claims (
     claim_id        TEXT PRIMARY KEY,
     text            TEXT NOT NULL,
-    classification  TEXT NOT NULL DEFAULT 'INFERRED',
-    support_level   TEXT NOT NULL DEFAULT 'PRELIMINARY',
+    classification  TEXT NOT NULL DEFAULT 'INFERRED'
+                        CHECK (classification IN ('INFERRED', 'ANALYTICAL', 'DERIVED')),
+    support_level   TEXT NOT NULL DEFAULT 'PRELIMINARY'
+                        CHECK (support_level IN ('PRELIMINARY', 'REPLICATED', 'ESTABLISHED')),
     idempotency_key TEXT,
     validated_by    TEXT,
     validated_at    TEXT,
-    status          TEXT NOT NULL DEFAULT 'open',
+    status          TEXT NOT NULL DEFAULT 'open'
+                        CHECK (status IN ('open', 'contested', 'retracted')),
     source_name     TEXT,
-    generated_by    TEXT NOT NULL DEFAULT 'human',
+    generated_by    TEXT NOT NULL DEFAULT 'agent',
     supports_json   TEXT NOT NULL DEFAULT '[]',
     contradicts_json TEXT NOT NULL DEFAULT '[]',
     comparison_summary TEXT,
@@ -195,7 +198,7 @@ def add_claim(
     idempotency_key: str | None = None,
     supports: list[str] | None = None,
     contradicts: list[str] | None = None,
-    generated_by: str = "human",
+    generated_by: str = "agent",
     source_name: str | None = None,
     status: str = "open",
 ) -> str:
@@ -270,7 +273,7 @@ def add_claim(
             ),
         )
         conn.commit()
-    except sqlite3.OperationalError as exc:
+    except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
         raise DatabaseError(f"Failed to add claim: {exc}") from exc
 
     # Check whether this claim triggers REPLICATED status on shared upstreams.
@@ -328,6 +331,7 @@ def _maybe_update_replicated(
 
 def validate_claim(
     conn: sqlite3.Connection,
+    root: Path,
     claim_id: str,
     *,
     validated_by: str | None = None,
@@ -366,8 +370,9 @@ def validate_claim(
             (validated_by, now, now, claim_id),
         )
         conn.commit()
-    except sqlite3.OperationalError as exc:
+    except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
         raise DatabaseError(f"Failed to validate claim '{claim_id}': {exc}") from exc
+    _backup_claims_toml(conn, root)
 
 
 def update_claim(
@@ -429,7 +434,7 @@ def update_claim(
             ),
         )
         conn.commit()
-    except sqlite3.OperationalError as exc:
+    except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
         raise DatabaseError(f"Failed to update claim '{claim_id}': {exc}") from exc
 
     _backup_claims_toml(conn, root)
@@ -619,7 +624,7 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
                 "text": c["text"],
                 "classification": c.get("classification") or "INFERRED",
                 "support_level": c.get("support_level") or "PRELIMINARY",
-                "generated_by": c.get("generated_by", "human"),
+                "generated_by": c.get("generated_by", "agent"),
                 "status": c["status"],
                 "supports": supports,
                 "contradicts": contradicts,

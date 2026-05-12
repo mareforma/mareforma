@@ -19,7 +19,7 @@ Schema version: `1`.
 | `validated_at` | TEXT | `NULL` | Yes | UTC ISO 8601 timestamp of validation |
 | `status` | TEXT | `open` | No | Editorial: open / contested / retracted |
 | `source_name` | TEXT | `NULL` | Yes | Data source name; required for ANALYTICAL to be meaningful |
-| `generated_by` | TEXT | `human` | No | Agent identifier; independence signal for REPLICATED |
+| `generated_by` | TEXT | `agent` | No | Agent identifier; independence signal for REPLICATED |
 | `supports_json` | TEXT | `[]` | No | JSON array of upstream claim_ids or DOIs |
 | `contradicts_json` | TEXT | `[]` | No | JSON array of claim_ids this finding contests |
 | `comparison_summary` | TEXT | `NULL` | Yes | Human-readable diff note for contradictions |

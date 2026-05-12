@@ -7,6 +7,7 @@ Commands
     mareforma claim list [--status] [--source] list claims
     mareforma claim show ID                    show claim details
     mareforma claim update ID [options]        update a claim
+    mareforma claim validate ID [options]      promote REPLICATED → ESTABLISHED
     mareforma status                           epistemic health dashboard
     mareforma export [--output path]           write ontology.jsonld
 """
@@ -193,8 +194,8 @@ def claim() -> None:
               help="Upstream claim_id or DOI (repeatable).")
 @click.option("--contradicts", "contradicts", multiple=True, metavar="ID_OR_DOI",
               help="Claim_id or DOI this claim contests (repeatable).")
-@click.option("--generated-by", "generated_by", default="human", show_default=True,
-              help="Agent identifier or 'human'.")
+@click.option("--generated-by", "generated_by", default="agent", show_default=True,
+              help="Agent identifier.")
 def claim_add(text, classification, status, source_name, supports, contradicts, generated_by):
     """Add a new scientific claim TEXT."""
     from mareforma.db import open_db, add_claim, DatabaseError
@@ -296,7 +297,7 @@ def claim_show(claim_id, as_json):
     click.echo(f"  text           : {c['text']}")
     click.echo(f"  classification : {c.get('classification', 'INFERRED')}")
     click.echo(f"  support_level  : {c.get('support_level', 'PRELIMINARY')}")
-    click.echo(f"  generated_by   : {c.get('generated_by', 'human')}")
+    click.echo(f"  generated_by   : {c.get('generated_by', 'agent')}")
     click.echo(f"  status         : {c['status']}")
     if c.get("source_name"):
         click.echo(f"  source         : {c['source_name']}")
@@ -346,3 +347,42 @@ def claim_update(claim_id, status, text, supports, contradicts):
         sys.exit(1)
 
     _ok(f"Claim '{claim_id}' updated.")
+
+
+@claim.command("validate")
+@click.argument("claim_id")
+@click.option("--validated-by", "validated_by", default=None,
+              help="Identifier of the human reviewer (e.g. email).")
+def claim_validate(claim_id, validated_by):
+    """Promote a REPLICATED claim to ESTABLISHED (human validation).
+
+    This is the human gate — only REPLICATED claims can be promoted.
+
+    Examples:
+
+        mareforma claim validate <ID>
+
+        mareforma claim validate <ID> --validated-by reviewer@example.org
+    """
+    from mareforma.db import open_db, validate_claim, DatabaseError, ClaimNotFoundError
+
+    root = _root()
+    try:
+        conn = open_db(root)
+        try:
+            validate_claim(conn, root, claim_id, validated_by=validated_by)
+        finally:
+            conn.close()
+    except ClaimNotFoundError as exc:
+        _err(str(exc))
+        sys.exit(1)
+    except ValueError as exc:
+        _err(str(exc))
+        sys.exit(1)
+    except DatabaseError as exc:
+        _err(f"Failed to validate claim: {exc}")
+        sys.exit(1)
+
+    _ok(f"Claim '{claim_id}' promoted to ESTABLISHED.")
+    if validated_by:
+        _info(f"validated_by: {validated_by}")

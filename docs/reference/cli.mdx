@@ -127,6 +127,32 @@ mareforma claim update CLAIM_ID [OPTIONS]
 
 ---
 
+### claim validate
+
+Promote a `REPLICATED` claim to `ESTABLISHED` (human validation gate).
+
+```bash
+mareforma claim validate CLAIM_ID [OPTIONS]
+```
+
+Only `REPLICATED` claims can be promoted. Raises an error if the claim does not exist
+or is not yet `REPLICATED`.
+
+**Options**
+
+| Option | Description |
+|---|---|
+| `--validated-by TEXT` | Identifier of the human reviewer (e.g. email) |
+
+**Examples**
+
+```bash
+mareforma claim validate abc123
+mareforma claim validate abc123 --validated-by reviewer@example.org
+```
+
+---
+
 ## status
 
 Show the epistemic health dashboard.
