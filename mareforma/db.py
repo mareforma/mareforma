@@ -186,12 +186,24 @@ def open_db(root: Path) -> sqlite3.Connection:
         if existing_cols != expected_cols:
             missing = expected_cols - existing_cols
             extra = existing_cols - expected_cols
+            conn.close()
+
+            # Extras-only is the downgrade case: the db was written by a
+            # newer mareforma. Direct the user to upgrade rather than to
+            # delete — claims.toml may not be a faithful backup for columns
+            # the older version does not understand.
+            if extra and not missing:
+                raise DatabaseError(
+                    f"graph.db was created by a newer mareforma version "
+                    f"(extra columns: {sorted(extra)}). Upgrade the mareforma "
+                    "package or back up claims.toml before downgrading."
+                )
+
             parts: list[str] = []
             if missing:
                 parts.append(f"missing: {sorted(missing)}")
             if extra:
                 parts.append(f"unexpected: {sorted(extra)}")
-            conn.close()
             raise DatabaseError(
                 f"graph.db schema mismatch ({'; '.join(parts)}). "
                 "Delete .mareforma/graph.db to start fresh — "
@@ -473,7 +485,15 @@ def mark_claim_resolved(
                 "UPDATE claims SET unresolved = 0, updated_at = ? WHERE claim_id = ?",
                 (now, claim_id),
             )
-            _maybe_update_replicated_unlocked(conn, claim_id, supports, generated_by)
+            # Convergence detection is best-effort by design: a transient
+            # lock or convergence-query failure must not roll back the
+            # flag-clear (which is the actual user intent).
+            try:
+                _maybe_update_replicated_unlocked(
+                    conn, claim_id, supports, generated_by,
+                )
+            except sqlite3.OperationalError:
+                pass
     except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
         raise DatabaseError(f"Failed to mark claim resolved: {exc}") from exc
 
@@ -532,6 +552,7 @@ def update_claim(
     # identical lists (e.g. when only `text` or `status` is being edited).
     old_supports_json = existing.get("supports_json") or "[]"
     old_contradicts_json = existing.get("contradicts_json") or "[]"
+    old_unresolved = int(existing.get("unresolved") or 0)
     supports_changed = supports is not None and new_supports_json != old_supports_json
     contradicts_changed = (
         contradicts is not None and new_contradicts_json != old_contradicts_json
@@ -546,21 +567,41 @@ def update_claim(
         else:
             new_unresolved = 0
 
+    # If the claim just became resolved (or supports changed while resolved),
+    # we MUST re-evaluate REPLICATED. Otherwise a claim cured via update_claim
+    # stays at PRELIMINARY even when a peer is already waiting for convergence.
+    needs_replicated_check = (
+        supports_changed
+        and new_unresolved == 0
+        and existing.get("support_level") != "ESTABLISHED"
+    ) or (old_unresolved == 1 and new_unresolved == 0)
+
     try:
-        conn.execute(
-            """
-            UPDATE claims
-            SET text = ?, status = ?, supports_json = ?, contradicts_json = ?,
-                comparison_summary = ?, unresolved = ?, updated_at = ?
-            WHERE claim_id = ?
-            """,
-            (
-                new_text, new_status,
-                new_supports_json, new_contradicts_json,
-                new_comparison_summary, new_unresolved, _now(), claim_id,
-            ),
-        )
-        conn.commit()
+        # Wrap the UPDATE and (optional) convergence check in one txn so the
+        # unresolved-flag transition and the REPLICATED promotion are atomic.
+        with conn:
+            conn.execute(
+                """
+                UPDATE claims
+                SET text = ?, status = ?, supports_json = ?, contradicts_json = ?,
+                    comparison_summary = ?, unresolved = ?, updated_at = ?
+                WHERE claim_id = ?
+                """,
+                (
+                    new_text, new_status,
+                    new_supports_json, new_contradicts_json,
+                    new_comparison_summary, new_unresolved, _now(), claim_id,
+                ),
+            )
+            if needs_replicated_check:
+                try:
+                    new_supports = json.loads(new_supports_json)
+                    _maybe_update_replicated_unlocked(
+                        conn, claim_id, new_supports, existing["generated_by"],
+                    )
+                except sqlite3.OperationalError:
+                    # Convergence detection is best-effort — never crash an update.
+                    pass
     except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
         raise DatabaseError(f"Failed to update claim '{claim_id}': {exc}") from exc
 

@@ -554,3 +554,114 @@ class TestDoiResolution:
             assert get_claim(conn, claim_id)["unresolved"] == 0
         finally:
             conn.close()
+
+    def test_update_claim_curing_unresolved_triggers_replicated(
+        self, tmp_path, httpx_mock,
+    ):
+        """Curing a stale-unresolved claim via update_claim must trigger REPLICATED.
+
+        Two agents both cite the same upstream claim_id, but one starts with a
+        bad DOI (unresolved=1). When that agent's DOI is replaced via
+        update_claim, the resulting unresolved 1→0 transition must re-run the
+        REPLICATED convergence check — otherwise both claims stay PRELIMINARY
+        forever, defeating the convergence guarantee.
+        """
+        from mareforma.db import open_db, add_claim, update_claim, get_claim
+        from mareforma import doi_resolver as _doi
+
+        # Agent B's initial fake DOI fails on both registries.
+        httpx_mock.add_response(
+            method="HEAD",
+            url=_CROSSREF.format(doi="10.9999/bad"),
+            status_code=404,
+        )
+        httpx_mock.add_response(
+            method="HEAD",
+            url=_DATACITE.format(doi="10.9999/bad"),
+            status_code=404,
+        )
+        # The replacement DOI resolves cleanly on Crossref.
+        httpx_mock.add_response(
+            method="HEAD",
+            url=_CROSSREF.format(doi="10.1038/cure"),
+            status_code=200,
+        )
+
+        conn = open_db(tmp_path)
+        try:
+            # Seed an upstream both agents will cite.
+            upstream = add_claim(
+                conn, tmp_path, "upstream observation", generated_by="seed",
+            )
+
+            # Agent A cites upstream cleanly → PRELIMINARY (no peer yet).
+            id_a = add_claim(
+                conn, tmp_path, "agent A finding",
+                supports=[upstream],
+                generated_by="agent/a",
+            )
+            assert get_claim(conn, id_a)["support_level"] == "PRELIMINARY"
+
+            # Agent B cites upstream plus a fake DOI; unresolved=1 blocks REPLICATED.
+            _doi.resolve_dois_with_cache(conn, ["10.9999/bad"])
+            id_b = add_claim(
+                conn, tmp_path, "agent B finding",
+                supports=[upstream, "10.9999/bad"],
+                generated_by="agent/b",
+                unresolved=True,
+            )
+            assert get_claim(conn, id_b)["unresolved"] == 1
+            assert get_claim(conn, id_b)["support_level"] == "PRELIMINARY"
+            assert get_claim(conn, id_a)["support_level"] == "PRELIMINARY"
+
+            # Agent B replaces the bad DOI. unresolved should flip to 0 AND
+            # REPLICATED should fire on both claims.
+            update_claim(
+                conn, tmp_path, id_b,
+                supports=[upstream, "10.1038/cure"],
+            )
+            assert get_claim(conn, id_b)["unresolved"] == 0
+            assert get_claim(conn, id_b)["support_level"] == "REPLICATED"
+            assert get_claim(conn, id_a)["support_level"] == "REPLICATED"
+        finally:
+            conn.close()
+
+    def test_refresh_unresolved_quarantines_corrupt_json(self, tmp_path):
+        """A claim with corrupt supports_json must NOT abort the whole refresh.
+
+        Other unresolved claims in the same call must still be processed,
+        and the corrupt one must be reported as still_unresolved.
+        """
+        from mareforma.db import open_db, add_claim
+
+        conn = open_db(tmp_path)
+        try:
+            # Manually insert a claim with corrupt supports_json.
+            import uuid as _uuid
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc).isoformat()
+            bad_id = str(_uuid.uuid4())
+            conn.execute(
+                "INSERT INTO claims (claim_id, text, classification, "
+                "support_level, status, generated_by, supports_json, "
+                "contradicts_json, unresolved, created_at, updated_at) "
+                "VALUES (?, ?, 'INFERRED', 'PRELIMINARY', 'open', 'seed', "
+                "'{not valid json', '[]', 1, ?, ?)",
+                (bad_id, "corrupt claim", now, now),
+            )
+            # Insert a healthy unresolved claim with no DOIs (should clear).
+            good_id = add_claim(
+                conn, tmp_path, "healthy claim", generated_by="seed", unresolved=True,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        import mareforma
+        with mareforma.open(tmp_path) as graph:
+            result = graph.refresh_unresolved()
+
+        # Both claims processed; corrupt one stays unresolved, healthy one cleared.
+        assert result["checked"] == 2
+        assert result["resolved"] == 1
+        assert result["still_unresolved"] == 1

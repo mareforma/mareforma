@@ -82,7 +82,7 @@ class TestResolveDoi:
             url=CROSSREF.format(doi="10.1038/test"),
             status_code=200,
         )
-        resolved, registry = resolve_doi("10.1038/test")
+        resolved, registry, _rate_limited = resolve_doi("10.1038/test")
         assert resolved is True
         assert registry == "crossref"
 
@@ -97,7 +97,7 @@ class TestResolveDoi:
             url=DATACITE.format(doi="10.5061/dryad.test"),
             status_code=200,
         )
-        resolved, registry = resolve_doi("10.5061/dryad.test")
+        resolved, registry, _rate_limited = resolve_doi("10.5061/dryad.test")
         assert resolved is True
         assert registry == "datacite"
 
@@ -112,14 +112,14 @@ class TestResolveDoi:
             url=DATACITE.format(doi="10.9999/fake"),
             status_code=404,
         )
-        resolved, registry = resolve_doi("10.9999/fake")
+        resolved, registry, _rate_limited = resolve_doi("10.9999/fake")
         assert resolved is False
         assert registry is None
 
     def test_network_error_falls_through(self, httpx_mock) -> None:
         httpx_mock.add_exception(httpx.ConnectTimeout("timeout"))
         httpx_mock.add_exception(httpx.ConnectTimeout("timeout"))
-        resolved, registry = resolve_doi("10.1234/timeout")
+        resolved, registry, _rate_limited = resolve_doi("10.1234/timeout")
         assert resolved is False
         assert registry is None
 
@@ -299,7 +299,7 @@ class TestResolveDoiHardening:
             url="https://api.crossref.org/works/10.1234/foo%23bar%40evil.com",
             status_code=200,
         )
-        resolved, registry = resolve_doi("10.1234/foo#bar@evil.com")
+        resolved, registry, _rate_limited = resolve_doi("10.1234/foo#bar@evil.com")
         assert resolved is True
         assert registry == "crossref"
 
@@ -315,7 +315,7 @@ class TestResolveDoiHardening:
             url=DATACITE.format(doi="10.1038/rate-limited"),
             status_code=200,
         )
-        resolved, registry = resolve_doi("10.1038/rate-limited")
+        resolved, registry, _rate_limited = resolve_doi("10.1038/rate-limited")
         assert resolved is True
         assert registry == "datacite"
 
@@ -336,7 +336,7 @@ class TestResolveDoiHardening:
             url=DATACITE.format(doi="10.1038/redirect"),
             status_code=404,
         )
-        resolved, registry = resolve_doi("10.1038/redirect")
+        resolved, registry, _rate_limited = resolve_doi("10.1038/redirect")
         assert resolved is False
         assert registry is None
 
@@ -356,3 +356,95 @@ class TestResolveDoiHardening:
         assert sent, "resolver did not issue an HTTP request"
         ua = sent[0].headers.get("user-agent", "")
         assert "mareforma" in ua.lower()
+
+    def test_multi_slash_doi_preserves_inner_slashes(self, httpx_mock) -> None:
+        """A real DOI like ``10.1093/imamat/35.3.337`` must keep its inner slash.
+
+        DataCite historically requires slashes-as-slashes for hierarchical
+        suffixes; over-encoding to ``%2F`` would 404 there. The mock matches
+        only the slash-preserving form.
+        """
+        httpx_mock.add_response(
+            method="HEAD",
+            url="https://api.crossref.org/works/10.1093/imamat/35.3.337",
+            status_code=200,
+        )
+        resolved, registry, _rate_limited = resolve_doi("10.1093/imamat/35.3.337")
+        assert resolved is True
+        assert registry == "crossref"
+
+    def test_dual_429_marks_rate_limited(self, httpx_mock) -> None:
+        """If BOTH registries return 429, resolve_doi reports rate_limited=True.
+
+        Callers (resolve_dois_with_cache) use this to skip the cache write —
+        a registry-wide throttling event should not poison the cache for 24h.
+        """
+        httpx_mock.add_response(
+            method="HEAD",
+            url=CROSSREF.format(doi="10.1038/both-throttled"),
+            status_code=429,
+        )
+        httpx_mock.add_response(
+            method="HEAD",
+            url=DATACITE.format(doi="10.1038/both-throttled"),
+            status_code=429,
+        )
+        resolved, registry, rate_limited = resolve_doi("10.1038/both-throttled")
+        assert resolved is False
+        assert registry is None
+        assert rate_limited is True
+
+    def test_dual_429_does_not_persist_to_cache(
+        self, tmp_path: Path, httpx_mock,
+    ) -> None:
+        """A dual-429 outcome must NOT write a negative cache entry.
+
+        Otherwise a transient registry-wide rate-limit would block REPLICATED
+        promotion for the full 24h negative-TTL window after recovery.
+        """
+        conn = open_db(tmp_path)
+        httpx_mock.add_response(
+            method="HEAD",
+            url=CROSSREF.format(doi="10.1038/throttle-poison"),
+            status_code=429,
+        )
+        httpx_mock.add_response(
+            method="HEAD",
+            url=DATACITE.format(doi="10.1038/throttle-poison"),
+            status_code=429,
+        )
+
+        results = resolve_dois_with_cache(conn, ["10.1038/throttle-poison"])
+        assert results == {"10.1038/throttle-poison": False}
+
+        cached = conn.execute(
+            "SELECT doi FROM doi_cache WHERE doi = ?",
+            ("10.1038/throttle-poison",),
+        ).fetchone()
+        assert cached is None, "throttled DOI must not be cached as unresolved"
+        conn.close()
+
+    def test_z_suffix_timestamp_parses_within_ttl(
+        self, tmp_path: Path, httpx_mock,
+    ) -> None:
+        """A cache row with a ``Z``-suffixed timestamp must be honored.
+
+        Python 3.10's fromisoformat doesn't parse ``Z`` natively; the helper
+        must normalize it so externally-loaded rows behave the same as
+        internally-written ``+00:00`` ones.
+        """
+        conn = open_db(tmp_path)
+        fresh_z = (datetime.now(timezone.utc) - timedelta(days=1)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        conn.execute(
+            "INSERT INTO doi_cache (doi, resolved, registry, last_checked_at) "
+            "VALUES (?, 1, 'crossref', ?)",
+            ("10.1038/z-suffix", fresh_z),
+        )
+        conn.commit()
+
+        # No httpx mocks — network call here would fail the test.
+        results = resolve_dois_with_cache(conn, ["10.1038/z-suffix"])
+        assert results == {"10.1038/z-suffix": True}
+        conn.close()

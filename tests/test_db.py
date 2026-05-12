@@ -82,20 +82,21 @@ class TestOpenDb:
         with pytest.raises(DatabaseError, match="schema mismatch"):
             open_db(tmp_path)
 
-    def test_extra_columns_raises(self, tmp_path: Path) -> None:
-        """A claims table with an unexpected extra column is rejected.
+    def test_extra_columns_raise_downgrade_error(self, tmp_path: Path) -> None:
+        """A claims table with an extra column is treated as a downgrade.
 
-        Hand-edited or partially-migrated schemas should fail loudly. A
-        permissive ``_CLAIM_COLUMNS ⊆ existing_cols`` check would let stale
-        columns drift forever — and code that does ``INSERT INTO claims``
-        without an explicit column list would silently misalign.
+        Hand-edited or partially-migrated schemas should fail loudly, AND the
+        error message must guide the user toward upgrading rather than
+        deleting (because claims.toml may not be a faithful backup of columns
+        the older version doesn't know about).
         """
-        # Initialise normally, then sneak an extra column in.
+        # Initialise normally, then sneak an extra column in (simulates a
+        # newer mareforma having written this db).
         conn = open_db(tmp_path)
         conn.execute("ALTER TABLE claims ADD COLUMN sneaky_field TEXT")
         conn.commit()
         conn.close()
-        with pytest.raises(DatabaseError, match="unexpected"):
+        with pytest.raises(DatabaseError, match="newer mareforma version"):
             open_db(tmp_path)
 
 

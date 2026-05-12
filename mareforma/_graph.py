@@ -223,11 +223,24 @@ class EpistemicGraph:
         unresolved_claims = _db.list_unresolved_claims(self._conn)
 
         # Pass 1: dedupe DOIs across all unresolved claims and resolve once.
+        # A single corrupt JSON row (manual edit, partial restore from
+        # claims.toml) must not abort the entire refresh — quarantine it
+        # and let the rest of the claims through.
         claim_dois: dict[str, list[str]] = {}
         all_dois: set[str] = set()
+        quarantined: list[str] = []
         for claim in unresolved_claims:
-            supports = json.loads(claim.get("supports_json") or "[]")
-            contradicts = json.loads(claim.get("contradicts_json") or "[]")
+            try:
+                supports = json.loads(claim.get("supports_json") or "[]")
+                contradicts = json.loads(claim.get("contradicts_json") or "[]")
+            except json.JSONDecodeError:
+                warnings.warn(
+                    f"Claim {claim['claim_id']} has corrupt supports_json or "
+                    "contradicts_json; skipping during refresh.",
+                    stacklevel=2,
+                )
+                quarantined.append(claim["claim_id"])
+                continue
             dois = _doi.extract_dois(supports + contradicts)
             claim_dois[claim["claim_id"]] = dois
             all_dois.update(dois)
@@ -240,9 +253,11 @@ class EpistemicGraph:
 
         # Pass 2: decide per-claim using the shared results.
         resolved_count = 0
-        still_unresolved = 0
+        still_unresolved = len(quarantined)
         for claim in unresolved_claims:
             cid = claim["claim_id"]
+            if cid in quarantined:
+                continue
             dois = claim_dois[cid]
             if not dois:
                 warnings.warn(

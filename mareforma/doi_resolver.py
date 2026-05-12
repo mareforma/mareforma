@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import threading
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -65,6 +66,7 @@ _USER_AGENT = (
 
 
 _client: Optional["httpx.Client"] = None
+_client_lock = threading.Lock()
 
 
 def _get_client() -> "httpx.Client":
@@ -73,26 +75,32 @@ def _get_client() -> "httpx.Client":
     A single pooled client across the process amortises TCP+TLS setup across
     many DOI resolutions. ``follow_redirects=False`` is enforced here so a
     poisoned DOI cannot redirect the resolver off-registry.
+
+    Initialization is locked so a multi-threaded harness cannot race two
+    Client constructors and leak the loser's connection pool.
     """
     global _client
     if _client is None:
-        _client = httpx.Client(
-            headers={"User-Agent": _USER_AGENT},
-            timeout=_DEFAULT_TIMEOUT,
-            follow_redirects=False,
-        )
+        with _client_lock:
+            if _client is None:
+                _client = httpx.Client(
+                    headers={"User-Agent": _USER_AGENT},
+                    timeout=_DEFAULT_TIMEOUT,
+                    follow_redirects=False,
+                )
     return _client
 
 
 def _reset_client_for_testing() -> None:
     """Drop the cached client so a test fixture can install fresh mocks."""
     global _client
-    if _client is not None:
-        try:
-            _client.close()
-        except Exception:  # noqa: BLE001
-            pass
-        _client = None
+    with _client_lock:
+        if _client is not None:
+            try:
+                _client.close()
+            except Exception:  # noqa: BLE001
+                pass
+            _client = None
 
 
 def is_doi(s: str) -> bool:
@@ -118,34 +126,50 @@ def _encode_doi(doi: str) -> str:
 
     A DOI is ``<prefix>/<suffix>``. The suffix may contain almost any
     Unicode codepoint; an unencoded ``#`` or ``?`` would terminate the URL
-    path and let a poisoned DOI redirect the resolver elsewhere. We encode
-    prefix and suffix separately and rejoin with a literal ``/``.
+    path and let a poisoned DOI redirect the resolver elsewhere.
+
+    Slashes are PRESERVED inside the suffix: real-world DOIs commonly have
+    multi-segment suffixes (e.g. ``10.1093/imamat/35.3.337``), and DataCite's
+    /dois/ endpoint historically required slashes-as-slashes for hierarchical
+    suffixes. ``urllib.parse.quote`` with ``safe='/'`` keeps slashes literal
+    and still escapes the dangerous characters.
     """
     if "/" not in doi:
         return urllib.parse.quote(doi, safe="")
     prefix, _, suffix = doi.partition("/")
-    return f"{urllib.parse.quote(prefix, safe='')}/{urllib.parse.quote(suffix, safe='')}"
+    return f"{urllib.parse.quote(prefix, safe='')}/{urllib.parse.quote(suffix, safe='/')}"
 
 
 def resolve_doi(
     doi: str,
     *,
     timeout: float = _DEFAULT_TIMEOUT,
-) -> tuple[bool, Optional[str]]:
+) -> tuple[bool, Optional[str], bool]:
     """HEAD-check a DOI against Crossref then DataCite.
 
     Returns
     -------
-    (resolved, registry)
+    (resolved, registry, rate_limited)
         ``resolved`` is True iff the DOI returned 2xx from either registry
         (no redirects followed). ``registry`` is ``"crossref"`` or
-        ``"datacite"`` on success, ``None`` on failure.
+        ``"datacite"`` on success, ``None`` on failure. ``rate_limited`` is
+        True if ANY registry returned 429 — callers should refrain from
+        caching the result, since a transient rate-limit incident would
+        otherwise poison the cache for the full negative-TTL.
+
+    Exception handling
+    ------------------
+    Network/transport errors and OS errors are treated as a failed registry
+    attempt and we fall through to the next one. Unexpected exceptions
+    (TypeError, AttributeError, programmer bugs) propagate so they remain
+    visible in tracebacks instead of being silently dropped to unresolved.
     """
     if not HAS_HTTPX:
-        return (False, None)
+        return (False, None, False)
 
     encoded = _encode_doi(doi.strip())
     client = _get_client()
+    rate_limited = False
 
     for registry, url_template in (
         ("crossref", _CROSSREF_URL),
@@ -154,20 +178,31 @@ def resolve_doi(
         url = url_template.format(doi=encoded)
         try:
             r = client.head(url, timeout=timeout)
-        except Exception:  # noqa: BLE001 — network failures of any kind
+        except (httpx.HTTPError, httpx.InvalidURL, OSError):
             continue
         if 200 <= r.status_code < 300:
-            return (True, registry)
-        # 429 = rate-limited. Do not cache as unresolved; let the next
-        # refresh retry after the TTL expires.
+            return (True, registry, rate_limited)
+        # 429 = rate-limited. Note it and try the other registry, but do
+        # NOT let the cache write below treat the final negative as
+        # authoritative — a registry-wide throttling event would otherwise
+        # block REPLICATED for 24 h after recovery.
         if r.status_code == 429:
+            rate_limited = True
             continue
 
-    return (False, None)
+    return (False, None, rate_limited)
 
 
 def _is_fresh(last_checked_at: str, resolved: bool) -> bool:
-    """Return True if a cache entry is still within its TTL."""
+    """Return True if a cache entry is still within its TTL.
+
+    Tolerates ``Z`` UTC suffix in addition to ``+00:00`` — Python 3.10's
+    ``datetime.fromisoformat`` doesn't parse the ``Z`` form (3.11+ does),
+    so an external tool that admin-loads a cache row with a ``Z``-suffixed
+    timestamp would otherwise silently fail the parse and look expired.
+    """
+    if isinstance(last_checked_at, str) and last_checked_at.endswith("Z"):
+        last_checked_at = last_checked_at[:-1] + "+00:00"
     try:
         ts = datetime.fromisoformat(last_checked_at)
     except (ValueError, TypeError):
@@ -210,7 +245,14 @@ def resolve_dois_with_cache(
                 results[doi] = bool(cached["resolved"])
                 continue
 
-        resolved, registry = resolve_doi(doi, timeout=timeout)
+        resolved, registry, rate_limited = resolve_doi(doi, timeout=timeout)
+
+        # Don't persist a rate-limited failure: a registry-wide throttling
+        # event would otherwise pin the DOI as unresolved for the full
+        # negative-TTL, blocking REPLICATED promotion after recovery.
+        if not resolved and rate_limited:
+            results[doi] = resolved
+            continue
 
         try:
             conn.execute(

@@ -16,15 +16,17 @@ fresh. Claims are backed up in `claims.toml`.
 - `EpistemicGraph.validate()` — human gate to ESTABLISHED
 - `mareforma claim validate` — CLI command to promote REPLICATED → ESTABLISHED; `--validated-by` optional
 - DOI resolution: every DOI in `supports[]`/`contradicts[]` is HEAD-checked against Crossref and DataCite at assert time. Unresolved DOIs mark the claim `unresolved=True` and block REPLICATED promotion. `EpistemicGraph.refresh_unresolved()` retries previously-failed resolutions.
-- DOI resolver hardening: DOI suffix URL-encoded before interpolation (prevents host injection via `#`/`@`); `follow_redirects=False` (registry must answer directly); pooled `httpx.Client` with `User-Agent` (Crossref polite-pool); HTTP 429 falls through to DataCite without caching as unresolved.
+- DOI resolver hardening: DOI suffix URL-encoded before interpolation (prevents host injection via `#`/`@`, preserves inner `/` for hierarchical suffixes like `10.1093/imamat/35.3.337`); `follow_redirects=False` (registry must answer directly); pooled `httpx.Client` with `User-Agent` and threading lock around lazy init (Crossref polite-pool, FD-leak-safe under concurrency); HTTP 429 from EITHER registry skips the cache write (a registry-wide throttling event no longer poisons the cache for 24h); tight exception clause (`httpx.HTTPError`, `httpx.InvalidURL`, `OSError`) so programmer bugs surface in tracebacks instead of silently becoming "unresolved".
 - `doi_cache` table: persistent cache of DOI resolution results to avoid repeated network calls. TTLs: 30 days for resolved entries, 24 hours for unresolved (so retractions and registry blips self-correct).
 - `httpx` is now a required dependency (was `paper` extra)
 - `EpistemicGraph.get_tools()` — returns `[query_graph, assert_finding]` as plain Python callables; `generated_by` baked into closure; wraps in one line for any framework
 - `mareforma.schema()` — runtime introspection of valid values and state transitions
 - Claims schema v1: `classification`, `support_level`, `idempotency_key`, `validated_by`, `validated_at`, `branch_id`, `unresolved`; CHECK constraints on `classification`, `support_level`, `status`, `unresolved`
-- Schema validation: `open_db()` enforces an exact column-set match against `_CLAIM_COLUMNS`. Replaces the version-number compare. Missing **or unexpected** columns raise `DatabaseError` instructing the user to delete `graph.db`.
-- `mark_claim_resolved()` is atomic: the unresolved-flag clear and the REPLICATED re-evaluation run in the same SQLite transaction.
-- `update_claim()` only re-resolves DOIs when `supports`/`contradicts` actually change (diff-check against prior JSON).
+- Schema validation: `open_db()` enforces an exact column-set match against `_CLAIM_COLUMNS`. Replaces the version-number compare. Missing columns instruct the user to delete `graph.db`; **extras-only** is treated as a downgrade attempt and instructs the user to upgrade mareforma instead.
+- `mark_claim_resolved()` is atomic: the unresolved-flag clear and the REPLICATED re-evaluation run in the same SQLite transaction; convergence detection remains best-effort within the transaction (transient lock errors no longer roll back the flag-clear).
+- `update_claim()` re-resolves DOIs only when `supports`/`contradicts` actually change (diff-check against prior JSON), and re-runs REPLICATED convergence inside the update transaction when a claim transitions from `unresolved=1` to `0` — otherwise a claim cured via `update_claim` would stay PRELIMINARY forever even with a sibling waiting on it.
+- `refresh_unresolved()` quarantines claims with corrupt `supports_json`/`contradicts_json` instead of aborting the entire refresh.
+- DOI cache TTL parsing tolerates `Z` UTC suffix as well as `+00:00` (Python 3.10 compatibility for externally-loaded rows).
 - REPLICATED auto-trigger: fires automatically when ≥2 claims share the same upstream in `supports[]` with different `generated_by`
 - Framework integrations: AGENTS.md table covering Anthropic SDK, OpenAI SDK, LangChain, LangGraph, CrewAI, AutoGen, LlamaIndex, PydanticAI, Smol Agents
 - Mintlify docs at `docs.mareforma.com`
