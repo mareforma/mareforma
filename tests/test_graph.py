@@ -386,7 +386,7 @@ def test_get_tools_supports_none_is_valid(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# DOI resolution (P0.4)
+# DOI resolution
 # ---------------------------------------------------------------------------
 
 _CROSSREF = "https://api.crossref.org/works/{doi}"

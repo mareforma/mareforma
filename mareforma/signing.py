@@ -18,9 +18,8 @@ Key lifecycle
 Envelope format
 ---------------
 A simplified DSSE shape. The payload is canonical JSON of the signed claim
-fields; the signature covers the payload bytes directly (no PAE wrapping
-yet — Rekor integration in Phase B will switch to PAE for sigstore
-compatibility).
+fields; the signature covers the payload bytes directly. (No PAE wrapping
+yet — that switch lands when full sigstore-bundle compatibility ships.)
 
 ::
 
@@ -29,14 +28,18 @@ compatibility).
       "payload":     "<base64 of canonical JSON>",
       "signatures": [
         {"keyid": "<hex sha256 of pubkey bytes>", "sig": "<base64 sig>"}
-      ]
+      ],
+      "rekor": {"uuid": ..., "logIndex": ..., "integratedTime": ...}
     }
+
+The ``rekor`` block is added by :func:`attach_rekor_entry` after a successful
+transparency-log submission; it does not affect signature verification.
 
 The signed payload always contains exactly these fields (sorted, no nulls):
 ``claim_id``, ``text``, ``classification``, ``generated_by``, ``supports``,
 ``contradicts``, ``source_name``, ``created_at``. Including ``created_at``
-binds the signature to an authorial timestamp; once Rekor is wired in
-Phase B, the transparency log entry adds an independent witnessed time.
+binds the signature to an authorial timestamp; the Rekor entry contributes
+an independent witnessed time.
 """
 
 from __future__ import annotations
