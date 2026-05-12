@@ -57,6 +57,7 @@ _CONTEXT = {
     "comparisonSummary": "mare:comparisonSummary",
     "validatedBy":     "mare:validatedBy",
     "usedSource":      "mare:usedSource",
+    "artifactHash":    "mare:artifactHash",
 }
 
 
@@ -116,6 +117,13 @@ class JSONLDExporter:
     # ------------------------------------------------------------------
 
     def _claim_node(self, claim: dict) -> dict:
+        # Always include every SIGNED_FIELDS member so a downstream
+        # consumer (e.g. SCITT bundle verification in P1.9) can
+        # re-derive the canonical_payload from the node alone.
+        # Optional fields use null/[] defaults to match
+        # canonical_payload's expected shape.
+        supports = json.loads(claim.get("supports_json", "[]") or "[]")
+        contradicts = json.loads(claim.get("contradicts_json", "[]") or "[]")
         node: dict[str, Any] = {
             "@type": "mare:Claim",
             "@id": f"mare:claim/{claim['claim_id']}",
@@ -125,17 +133,14 @@ class JSONLDExporter:
             "claimStatus": claim["status"],
             "generatedBy": claim.get("generated_by", "agent"),
             "dateCreated": claim["created_at"],
+            "supports": supports,
+            "contradicts": contradicts,
+            "sourceName": claim.get("source_name"),
+            "artifactHash": claim.get("artifact_hash"),
         }
-        supports = json.loads(claim.get("supports_json", "[]") or "[]")
-        contradicts = json.loads(claim.get("contradicts_json", "[]") or "[]")
-        if supports:
-            node["supports"] = supports
-        if contradicts:
-            node["contradicts"] = contradicts
         if claim.get("comparison_summary"):
             node["comparisonSummary"] = claim["comparison_summary"]
         if claim.get("source_name"):
-            node["sourceName"] = claim["source_name"]
             node["usedSource"] = f"mare:source/{claim['source_name']}"
         if claim.get("validated_by"):
             node["validatedBy"] = claim["validated_by"]

@@ -295,21 +295,50 @@ def status_cmd(as_json: bool) -> None:
 
 @cli.command()
 @click.option("--output", default=None,
-              help="Output path. Default: <cwd>/ontology.jsonld.")
+              help="Output path. Default: <cwd>/ontology.jsonld or "
+                   "<cwd>/mareforma-bundle.json when --bundle is set.")
 @click.option("--json", "as_json", is_flag=True, default=False,
               help="Print JSON-LD to stdout instead of writing a file.")
-def export(output: str | None, as_json: bool) -> None:
-    """Export all claims as a JSON-LD document (ontology.jsonld).
+@click.option("--bundle", is_flag=True, default=False,
+              help="Produce a SCITT-style signed bundle (in-toto Statement "
+                   "v1 + DSSE envelope). Requires a loaded signing key.")
+def export(output: str | None, as_json: bool, bundle: bool) -> None:
+    """Export all claims as a JSON-LD document, optionally as a signed bundle.
 
     Examples:
 
         mareforma export
-
+        mareforma export --bundle
         cat ontology.jsonld | jq '.["@graph"][]'
     """
-    from mareforma.exporters.jsonld import JSONLDExporter
-
     root = _root()
+
+    if bundle:
+        # Signed bundle path — needs a key.
+        from mareforma import signing as _signing
+        from mareforma.export_bundle import write_bundle
+        try:
+            key_path = _signing.default_key_path()
+            if not key_path.exists():
+                _err(
+                    "mareforma export --bundle requires a signing key. "
+                    "Run `mareforma bootstrap` first."
+                )
+                sys.exit(1)
+            private_key = _signing.load_private_key(key_path)
+            out_path = (
+                Path(output)
+                if output
+                else root / "mareforma-bundle.json"
+            )
+            written = write_bundle(root, out_path, private_key)
+            _ok(f"Exported signed bundle → {written.relative_to(root)}")
+        except Exception as exc:
+            _err(f"Bundle export failed: {exc}")
+            sys.exit(1)
+        return
+
+    from mareforma.exporters.jsonld import JSONLDExporter
 
     try:
         exporter = JSONLDExporter(root)
@@ -322,6 +351,38 @@ def export(output: str | None, as_json: bool) -> None:
         _ok(f"Exported claims → {written.relative_to(root)}")
     except Exception as exc:
         _err(f"Export failed: {exc}")
+        sys.exit(1)
+
+
+@cli.command()
+@click.argument("bundle_path")
+def verify(bundle_path: str) -> None:
+    """Verify a SCITT-style signed bundle against the local signing key.
+
+    Examples:
+
+        mareforma verify mareforma-bundle.json
+    """
+    from mareforma import signing as _signing
+    from mareforma.export_bundle import BundleVerificationError, verify_bundle
+
+    try:
+        key_path = _signing.default_key_path()
+        if not key_path.exists():
+            _err(
+                "mareforma verify requires the signing key that produced "
+                "the bundle. Run `mareforma bootstrap` or restore the key."
+            )
+            sys.exit(1)
+        private_key = _signing.load_private_key(key_path)
+        statement = verify_bundle(Path(bundle_path), private_key.public_key())
+        n_subjects = len(statement.get("subject") or [])
+        _ok(f"Bundle verified: {n_subjects} claim subject(s) match.")
+    except BundleVerificationError as exc:
+        _err(f"Bundle verification failed: {exc}")
+        sys.exit(1)
+    except Exception as exc:
+        _err(f"Verify failed: {exc}")
         sys.exit(1)
 
 
