@@ -262,6 +262,18 @@ class ChainIntegrityError(MareformaError):
     """
 
 
+class CycleDetectedError(MareformaError):
+    """Raised when an INSERT or UPDATE would create a cycle in ``supports[]``.
+
+    The graph of claim → upstream supports is required to be acyclic.
+    Self-loops (a claim that supports itself) and indirect cycles
+    introduced by mutating ``supports`` on an unsigned claim are both
+    rejected. Signed claims cannot mutate ``supports`` at all (see
+    :class:`SignedClaimImmutableError`), so the cycle window is the
+    unsigned-edit path.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Connection management
 # ---------------------------------------------------------------------------
@@ -450,6 +462,104 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
     conn.executescript(_SCHEMA_SQL)
     conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
     conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Cycle / self-loop detection
+# ---------------------------------------------------------------------------
+
+# Pattern for the UUID format we generate via uuid.uuid4(). Strings in
+# ``supports[]`` that DON'T match are external references (DOIs etc.)
+# and do not participate in cycle checking — they are not graph nodes.
+_CLAIM_ID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+
+# Walk depth cap for cycle detection. Same value as the validator-chain
+# cap; defends against pathologically long planted chains.
+_CYCLE_MAX_DEPTH = 1024
+
+
+def _is_claim_id(value: str) -> bool:
+    return bool(_CLAIM_ID_RE.match(value))
+
+
+def _check_no_cycle(
+    conn: sqlite3.Connection,
+    new_claim_id: str,
+    supports: list[str],
+) -> None:
+    """Raise :class:`CycleDetectedError` if extending the graph with
+    ``new_claim_id → supports`` would create a cycle.
+
+    Algorithm: simple DFS reachability with a visited set. From each
+    supports[] entry that looks like a claim_id, walk forward (i.e.
+    follow that claim's own supports[]) and check whether we ever
+    encounter ``new_claim_id``. If yes, the new edge closes a cycle.
+
+    Why DFS (not Tarjan's SCC): the existing graph is acyclic by
+    induction (we reject cycles on every write). A new claim has no
+    incoming edges at INSERT time, so the only cycle it can create is
+    one that goes ``new → supports → ... → new``. A forward walk from
+    each support entry is sufficient. For ``update_claim``, the new
+    edge is the changed ``supports[]``; same algorithm applies.
+
+    DOI strings in ``supports[]`` are external references — skipped
+    in the walk.
+    """
+    if not supports:
+        return
+
+    visited: set[str] = set()
+    # Seed the DFS with the new-claim's supports themselves. If any
+    # entry IS new_claim_id, that's a direct self-loop.
+    stack: list[tuple[str, int]] = []
+    for s in supports:
+        if not _is_claim_id(s):
+            continue
+        if s == new_claim_id:
+            raise CycleDetectedError(
+                f"Claim {new_claim_id!r} cannot support itself "
+                f"(self-loop in supports[])."
+            )
+        stack.append((s, 1))
+
+    while stack:
+        current, depth = stack.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+        if depth > _CYCLE_MAX_DEPTH:
+            raise CycleDetectedError(
+                f"supports[] walk exceeded depth cap of {_CYCLE_MAX_DEPTH} "
+                "hops. The graph contains a pathologically long chain — "
+                "investigate before relaxing the cap."
+            )
+        row = conn.execute(
+            "SELECT supports_json FROM claims WHERE claim_id = ?",
+            (current,),
+        ).fetchone()
+        if row is None:
+            # supports[] referenced a non-existent claim_id. Not a
+            # cycle issue — typically a typo or out-of-order insert.
+            # Leave the broader validation to the caller.
+            continue
+        try:
+            child_supports = json.loads(row["supports_json"] or "[]")
+        except json.JSONDecodeError:
+            # Corrupt row — skip rather than crash. Quarantining is
+            # the resolver path's responsibility, not the cycle check.
+            continue
+        for child in child_supports:
+            if not _is_claim_id(child):
+                continue
+            if child == new_claim_id:
+                raise CycleDetectedError(
+                    f"Inserting/updating {new_claim_id!r} with the given "
+                    f"supports[] would create a cycle through {current!r}."
+                )
+            if child not in visited:
+                stack.append((child, depth + 1))
 
 
 def _state_error_from_integrity(
@@ -652,6 +762,12 @@ def add_claim(
     now = _now()
     supports_json = json.dumps(supports or [])
     contradicts_json = json.dumps(contradicts or [])
+
+    # Cycle / self-loop check on supports[]. DOI entries are external
+    # references and not graph nodes — _check_no_cycle filters them
+    # out. The walk runs before signing and INSERT so we don't strand
+    # half-built state on rejection.
+    _check_no_cycle(conn, claim_id, supports or [])
 
     # Sign the claim if a signer was supplied. The signature is bound to the
     # claim_id + canonical fields + created_at, so any later tamper (text edit,
@@ -1200,6 +1316,15 @@ def update_claim(
     contradicts_changed = (
         contradicts is not None and new_contradicts_json != old_contradicts_json
     )
+
+    # Cycle / self-loop check on the NEW supports[] if it changed. Signed
+    # claims refuse supports mutation upstream (SignedClaimImmutableError
+    # raised earlier in this function), so reaching here implies an
+    # unsigned claim — the cycle-introduction window P1.6 closes.
+    if supports_changed:
+        new_supports_list = json.loads(new_supports_json)
+        _check_no_cycle(conn, claim_id, new_supports_list)
+
     if supports_changed or contradicts_changed:
         from mareforma import doi_resolver as _doi
         all_refs = json.loads(new_supports_json) + json.loads(new_contradicts_json)

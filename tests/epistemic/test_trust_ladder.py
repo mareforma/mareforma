@@ -16,12 +16,13 @@ Scenarios covered
     - Anyone with read access to the project's signing key can act as the
       enrolled root validator. Mareforma is local-trust, not cross-org PKI.
 
-  Self-supporting claim
-    - A claim's supports[] can contain its own claim_id (via update_claim).
-      No cycle detection prevents this.
+  Self-supporting claim (closed in P1.6)
+    - Updating a claim to include its own claim_id in supports[] is
+      rejected with CycleDetectedError.
 
-  Cyclic supports
-    - A supports B, B supports A — accepted without error.
+  Cyclic supports (closed in P1.6)
+    - A supports B, B supports A — the second edge is rejected with
+      CycleDetectedError on update_claim.
 
   Contradicting and supporting the same claim
     - A claim can list the same claim_id in both supports and contradicts.
@@ -31,6 +32,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
+import pytest
 
 import mareforma
 from mareforma.db import open_db, add_claim, update_claim
@@ -111,22 +114,25 @@ class TestTrustLaundering:
 # ---------------------------------------------------------------------------
 
 class TestSelfSupport:
-    def test_self_supporting_claim_via_update(self, tmp_path: Path) -> None:
-        """A claim can be updated to include its own claim_id in supports[].
+    def test_self_supporting_claim_via_update_rejected(self, tmp_path: Path) -> None:
+        """A claim cannot be updated to include its own claim_id in
+        ``supports[]``.
 
-        No validation prevents a claim from citing itself. The provenance
-        chain contains a trivial cycle, which is logically unsound but
-        accepted by the graph.
+        Closed by v0.3.0 P1.6: cycle detection on ``update_claim``
+        rejects the self-loop. Provenance chains are required to be
+        acyclic.
         """
+        from mareforma.db import CycleDetectedError
         conn = open_db(tmp_path)
         claim_id = add_claim(conn, tmp_path, "Self-referencing finding")
-        update_claim(conn, tmp_path, claim_id, supports=[claim_id])
+        with pytest.raises(CycleDetectedError, match="self-loop"):
+            update_claim(conn, tmp_path, claim_id, supports=[claim_id])
         conn.close()
 
         with open_graph(tmp_path) as g:
             claim = g.get_claim(claim_id)
             supports = json.loads(claim["supports_json"])
-        assert claim_id in supports
+        assert claim_id not in supports
 
 
 # ---------------------------------------------------------------------------
@@ -134,25 +140,29 @@ class TestSelfSupport:
 # ---------------------------------------------------------------------------
 
 class TestCyclicSupports:
-    def test_cyclic_supports_accepted(self, tmp_path: Path) -> None:
-        """A supports B, B supports A — accepted without error.
+    def test_cyclic_supports_rejected(self, tmp_path: Path) -> None:
+        """A supports B, B supports A — the second edge is rejected.
 
-        No cycle detection exists in assert_claim or update_claim.
-        A cycle in supports[] is logically unsound but structurally valid.
+        Closed by v0.3.0 P1.6: cycle detection on ``update_claim``
+        walks the supports[] graph forward from the proposed edge and
+        rejects any closure back to the updated claim.
         """
+        from mareforma.db import CycleDetectedError
         with open_graph(tmp_path) as g:
             id_a = g.assert_claim("Claim A", generated_by="agent-1")
             id_b = g.assert_claim("Claim B", supports=[id_a], generated_by="agent-2")
 
         conn = open_db(tmp_path)
-        update_claim(conn, tmp_path, id_a, supports=[id_b])
+        with pytest.raises(CycleDetectedError, match="cycle"):
+            update_claim(conn, tmp_path, id_a, supports=[id_b])
         conn.close()
 
         with open_graph(tmp_path) as g:
             a = g.get_claim(id_a)
             b = g.get_claim(id_b)
 
-        assert id_b in json.loads(a["supports_json"])
+        # a.supports unchanged; b.supports still contains id_a.
+        assert id_b not in json.loads(a["supports_json"])
         assert id_a in json.loads(b["supports_json"])
 
 
