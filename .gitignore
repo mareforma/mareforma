@@ -213,3 +213,8 @@ docs/_build/
 
 # GStack artifacts
 .gstack/
+
+# Mareforma runtime artifacts
+.mareforma/
+claims.toml
+ontology.jsonld
