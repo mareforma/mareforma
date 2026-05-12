@@ -211,5 +211,5 @@ SPEC.md
 TODOS.md
 docs/_build/
 
-# Security reports and gstack artifacts
+# GStack artifacts
 .gstack/
