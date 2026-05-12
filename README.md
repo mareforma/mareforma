@@ -89,8 +89,22 @@ graph = mareforma.open()          # zero setup, no init required
 graph.assert_claim(text, classification="ANALYTICAL", supports=[...])
 graph.query(text, min_support="REPLICATED")
 graph.validate(claim_id)          # human promotes to ESTABLISHED
+graph.refresh_unresolved()        # retry DOI verification for offline claims
+graph.refresh_unsigned()          # retry Rekor transparency log submission
 graph.get_tools(generated_by="agent/model-a/lab_a")  # framework-ready callables
 ```
+
+**External verification, opt-in by component:**
+
+- **DOIs in `supports[]`/`contradicts[]`** are HEAD-checked against Crossref
+  and DataCite at assertion time. Failed verifications hold the claim out
+  of `REPLICATED` until `refresh_unresolved()` succeeds.
+- **Cryptographic signing** is opt-in. `mareforma bootstrap` once to
+  generate an Ed25519 keypair; every claim is then signed and tamper-evident.
+- **Sigstore-Rekor transparency log** is opt-in via
+  `mareforma.open(rekor_url=mareforma.signing.PUBLIC_REKOR_URL)`. Signed
+  claims become publicly verifiable; submission failures are retried by
+  `refresh_unsigned()`.
 
 **Trust levels** — derived from graph topology, never self-reported:
 
@@ -108,16 +122,22 @@ graph.get_tools(generated_by="agent/model-a/lab_a")  # framework-ready callables
 | `ANALYTICAL` | Deterministic analysis against source data |
 | `DERIVED` | Explicitly built on ESTABLISHED or REPLICATED claims |
 
-Storage: local SQLite, WAL mode, no network calls, ACID guarantees.
+Storage: local SQLite, WAL mode, ACID guarantees. Network calls only for opt-in external verification: DOI lookups (Crossref + DataCite) and Sigstore-Rekor transparency log.
 
 ## Get started
 
 ```bash
 uv add mareforma
+mareforma bootstrap            # one-time: generate Ed25519 signing key
 ```
 
+`mareforma bootstrap` is optional. Without it, claims are stored
+unsigned. With it, every claim carries a tamper-evident signature and
+can be published to a Sigstore-Rekor transparency log on demand.
+
 See [AGENTS.md](AGENTS.md) — execution contract, forbidden patterns,
-idempotency convention, `generated_by` requirements.
+signing and transparency log, idempotency convention, `generated_by`
+requirements.
 
 Full documentation: **https://docs.mareforma.com**
 

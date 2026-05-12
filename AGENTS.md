@@ -47,7 +47,7 @@ No `mareforma init` required.
 
 ## API reference
 
-### `mareforma.open(path=None) → EpistemicGraph`
+### `mareforma.open(path=None, *, ...) → EpistemicGraph`
 
 Open the epistemic graph and return an `EpistemicGraph`. Use as a context
 manager to ensure the connection is closed.
@@ -55,12 +55,22 @@ manager to ensure the connection is closed.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `path` | `str \| Path \| None` | `None` | Project root. Defaults to `cwd()`. Graph stored at `<path>/.mareforma/graph.db`. |
+| `key_path` | `str \| Path \| None` | `None` | Ed25519 private key (PEM). `None` → use the XDG default `~/.config/mareforma/key`. If the path does not exist, the graph operates unsigned. |
+| `require_signed` | `bool` | `False` | Raise `KeyNotFoundError` if no key is found at `key_path`. |
+| `rekor_url` | `str \| None` | `None` | Sigstore-Rekor transparency log endpoint. When set, every signed claim is submitted at INSERT time. `None` disables Rekor entirely. Use `mareforma.signing.PUBLIC_REKOR_URL` for the public instance. |
+| `require_rekor` | `bool` | `False` | Raise `SigningError` if `rekor_url` is unset or initial submission fails. |
+| `trust_insecure_rekor` | `bool` | `False` | Skip SSRF validation on `rekor_url` (only for private Rekor instances on internal networks). |
 
 ```python
-graph = mareforma.open()                  # cwd
-graph = mareforma.open("/path/to/project")
-with mareforma.open() as graph: ...       # auto-closes
+graph = mareforma.open()                                # cwd, unsigned if no key
+graph = mareforma.open(require_signed=True)             # fail-fast if no key
+graph = mareforma.open(rekor_url=mareforma.signing.PUBLIC_REKOR_URL)  # public transparency log
+with mareforma.open() as graph: ...                     # auto-closes
 ```
+
+First-time setup: run `mareforma bootstrap` once to generate an Ed25519
+keypair at `~/.config/mareforma/key`. After that, every `assert_claim`
+auto-signs.
 
 ---
 
@@ -100,6 +110,7 @@ support level (descending) then recency (descending).
 Each dict contains: `claim_id`, `text`, `classification`, `support_level`,
 `idempotency_key`, `validated_by`, `validated_at`, `status`, `source_name`,
 `generated_by`, `supports_json`, `contradicts_json`, `comparison_summary`,
+`branch_id`, `unresolved`, `signature_bundle`, `transparency_logged`,
 `created_at`, `updated_at`.
 
 **Raises:** `ValueError` if `min_support` or `classification` is invalid.
@@ -118,6 +129,34 @@ Promote a `REPLICATED` claim to `ESTABLISHED`. Human-only gate.
 
 **Raises:** `ClaimNotFoundError` if the claim does not exist.
 **Raises:** `ValueError` if `support_level` is not `REPLICATED`.
+
+---
+
+### `graph.refresh_unresolved() → dict`
+
+Retry external DOI verification for every claim currently flagged
+`unresolved=1`. Returns `{"checked": N, "resolved": M, "still_unresolved": K}`.
+
+DOIs in `supports[]`/`contradicts[]` are HEAD-checked against Crossref and
+DataCite at `assert_claim` time. If the registries are unreachable, the
+claim is persisted with `unresolved=True` and is ineligible for
+`REPLICATED` promotion until the next `refresh_unresolved()` confirms the
+DOIs.
+
+---
+
+### `graph.refresh_unsigned() → dict`
+
+Retry transparency-log submission for every signed-but-unlogged claim
+when the graph was opened with `rekor_url=...`. Returns
+`{"checked": N, "logged": M, "still_unlogged": K}`. No-op when `rekor_url`
+is unset.
+
+Each retry compares the envelope's signed payload against the live row
+before re-submitting — a tampered row is quarantined rather than
+cementing a stale signature in the public log. An envelope whose keyid
+no longer matches the current signer (key was rotated since
+`assert_claim`) is skipped with a warning.
 
 ---
 
@@ -184,6 +223,73 @@ graph.assert_claim("...", status="contested") # flagging dispute at assertion ti
 
 Status is mutable via `mareforma claim update` (CLI) or directly via the
 database. It does not affect `support_level`.
+
+---
+
+## Signing and transparency log
+
+Mareforma can attach a verifiable cryptographic signature to every claim
+and (optionally) log it to a public transparency log. Both are opt-in
+features — agents that don't need them keep the default behavior.
+
+**Local signing.** Run `mareforma bootstrap` once to generate an Ed25519
+keypair at `~/.config/mareforma/key` (mode 0600). After that, every
+`assert_claim` auto-signs and persists the signature envelope to the
+`signature_bundle` field on the claim. The signed payload binds
+`claim_id`, `text`, `classification`, `generated_by`, `supports`,
+`contradicts`, `source_name`, and `created_at` — any tamper on the row
+breaks verification.
+
+**Append-only invariant.** Signed claims refuse mutation of any
+signed-surface field. `update_claim(text=...)` /
+`update_claim(supports=...)` / `update_claim(contradicts=...)` on a
+signed row raise `SignedClaimImmutableError`. `status` and
+`comparison_summary` remain editable since neither is part of the signed
+payload. To revise a signed claim, retract it (`status='retracted'`) and
+assert a new one citing the old via `contradicts=[<old_claim_id>]`.
+
+**Transparency log (Rekor).** Pass `rekor_url=mareforma.signing.PUBLIC_REKOR_URL`
+to `mareforma.open()` and every signed claim is submitted to the public
+Sigstore Rekor instance at INSERT time. The entry uuid + logIndex are
+attached to the bundle and `transparency_logged` flips to 1. If Rekor is
+unreachable, the claim persists with `transparency_logged=0` and is held
+out of `REPLICATED` promotion until `graph.refresh_unsigned()` completes
+the submission.
+
+```python
+import mareforma
+from mareforma.signing import PUBLIC_REKOR_URL
+
+with mareforma.open(rekor_url=PUBLIC_REKOR_URL) as graph:
+    claim_id = graph.assert_claim("...", classification="ANALYTICAL")
+    # claim is signed + logged to Rekor before this line returns
+
+# Later, after a network outage:
+with mareforma.open(rekor_url=PUBLIC_REKOR_URL) as graph:
+    result = graph.refresh_unsigned()
+    # {"checked": N, "logged": M, "still_unlogged": K}
+```
+
+**Key rotation is destructive.** `mareforma bootstrap --overwrite`
+strands every claim signed by the prior key — verification breaks AND
+any claim not yet submitted to Rekor becomes permanently un-loggable.
+Safe rotation: back up the old key, run `refresh_unsigned()` to drain
+the pending queue, then rotate.
+
+---
+
+## DOI verification
+
+DOIs anywhere in `supports[]` or `contradicts[]` are HEAD-checked against
+Crossref then DataCite at `assert_claim` time. Failure persists the claim
+with `unresolved=True` and blocks `REPLICATED` promotion until
+`graph.refresh_unresolved()` confirms the DOIs. Strings in `supports[]`
+that don't match the DOI format (`10.<registrant>/<suffix>`) are treated
+as claim_id references and pass through without a network call.
+
+Results are cached in the `doi_cache` table (30-day TTL for resolved
+entries, 24-hour TTL for unresolved) so repeated assertions of the same
+DOI don't hit the registries.
 
 ---
 
