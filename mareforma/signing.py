@@ -63,10 +63,12 @@ an independent witnessed time.
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import ipaddress
 import json
 import os
+import re
 import warnings
 from pathlib import Path
 from typing import Any, Optional
@@ -135,16 +137,58 @@ class InvalidEnvelopeError(SigningError):
 # Key paths
 # ---------------------------------------------------------------------------
 
+_NUMERIC_HOSTNAME_RE = re.compile(r"^[0-9.]+$")
+
+
+def _b64_decode_tolerant(s: str) -> Optional[bytes]:
+    """Decode a base64 string accepting both standard and URL-safe alphabets,
+    with or without padding.
+
+    Returns ``None`` on failure. Used for signature equality where a
+    third-party server (Rekor) may canonicalize the encoding differently
+    than we sent; the raw bytes are the real signature.
+
+    Internals: ``urlsafe_b64decode`` translates ``_``→``/`` and ``-``→``+``
+    before delegating to the standard decoder, so it transparently accepts
+    inputs in either alphabet. The standard decoder is permissive of
+    non-alphabet bytes by default, which is intentional here — garbage
+    inputs decode to wrong bytes and the downstream equality check
+    rejects them.
+    """
+    if not isinstance(s, str):
+        return None
+    padded = s + "=" * (-len(s) % 4)
+    try:
+        return base64.urlsafe_b64decode(padded)
+    except (ValueError, binascii.Error):
+        return None
+_LOOPBACK_DNS_NAMES = frozenset({
+    "localhost",
+    "localhost.localdomain",
+    "ip6-localhost",
+    "ip6-loopback",
+})
+
+
 def validate_rekor_url(url: str, *, allow_insecure: bool = False) -> None:
     """Reject Rekor URLs that look like SSRF probes.
 
-    Enforces ``https://`` and rejects loopback / private / link-local IP
-    literals. DNS hostnames are accepted as-is; defending against a DNS
-    rebind that resolves to a private IP at connect-time would need
-    ahead-of-time resolution which is fragile — TLS at the registry host
-    is the actual authentication boundary.
+    Enforces ``https://`` and rejects:
 
-    Pass ``allow_insecure=True`` to skip both checks (only useful for
+    - Loopback / private / link-local / multicast / unspecified (``0.0.0.0``,
+      ``::``) IP literals.
+    - DNS shortcuts that resolve to loopback at connect time:
+      ``localhost`` and friends, plus numeric-only hostnames like
+      ``127.1`` and ``2130706433`` (decimal IPv4 form). These bypass
+      :func:`ipaddress.ip_address` because Python rejects the shortcut
+      form, but ``socket.getaddrinfo`` happily resolves them to loopback.
+
+    DNS hostnames that don't look like loopback shortcuts are accepted;
+    defending against a DNS rebind at connect-time would need ahead-of-time
+    resolution which is fragile — TLS at the registry host is the actual
+    authentication boundary.
+
+    Pass ``allow_insecure=True`` to skip all checks (only useful for
     internal testing against a private Rekor instance on a non-public
     address).
 
@@ -167,8 +211,30 @@ def validate_rekor_url(url: str, *, allow_insecure: bool = False) -> None:
     try:
         ip = ipaddress.ip_address(hostname)
     except ValueError:
-        return  # DNS hostname; rely on TLS to authenticate the registry.
-    if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_multicast:
+        # Not a strict IP literal — apply the DNS-shortcut bypass guards.
+        hl = hostname.lower()
+        if (
+            hl in _LOOPBACK_DNS_NAMES
+            or hl.endswith(".localhost")
+            or hl.startswith("localhost.")
+        ):
+            raise SigningError(
+                f"rekor_url hostname {hostname!r} resolves to loopback. "
+                "Pass trust_insecure_rekor=True if this is intentional."
+            )
+        if _NUMERIC_HOSTNAME_RE.fullmatch(hostname):
+            # 127.1, 2130706433, 0177.0.0.1 etc. — ipaddress rejects these
+            # but socket.getaddrinfo resolves them to private addresses on
+            # most kernels. Numeric-only labels are not valid public DNS.
+            raise SigningError(
+                f"rekor_url hostname {hostname!r} is a numeric IP shortcut. "
+                "Pass trust_insecure_rekor=True if this is intentional."
+            )
+        return
+    if (
+        ip.is_loopback or ip.is_private or ip.is_link_local
+        or ip.is_multicast or ip.is_unspecified
+    ):
         raise SigningError(
             f"rekor_url resolves to a non-public address ({ip}). "
             "Pass trust_insecure_rekor=True if this is intentional "
@@ -241,8 +307,19 @@ def save_private_key(
         )
         try:
             os.write(fd, pem)
-        finally:
+        except OSError:
+            # If the write failed (disk full, IO error), the O_EXCL'd file
+            # is on disk but empty. Without cleanup, the next bootstrap
+            # hits FileExistsError and reports "key already exists" — a
+            # misleading message that strands the user behind a zero-byte
+            # file they don't know to delete. Unlink before re-raising.
             os.close(fd)
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            raise
+        os.close(fd)
         return
 
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -443,14 +520,27 @@ def envelope_payload(envelope: dict[str, Any]) -> dict[str, Any]:
     Does NOT verify the signature — that is :func:`verify_envelope`'s job.
     Use this only after a successful verify, or when you only need to
     inspect the payload structure.
+
+    Raises
+    ------
+    InvalidEnvelopeError
+        If the envelope shape is wrong, the payload cannot be decoded,
+        or the decoded JSON is not a top-level object. The dict-only
+        contract matters: callers downstream do ``payload.get(...)`` and
+        a bare JSON string would otherwise raise AttributeError.
     """
     if not isinstance(envelope, dict) or "payload" not in envelope:
         raise InvalidEnvelopeError("envelope is missing 'payload'")
     try:
         raw = base64.standard_b64decode(envelope["payload"])
-        return json.loads(raw.decode("utf-8"))
+        parsed = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise InvalidEnvelopeError(f"payload could not be decoded: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise InvalidEnvelopeError(
+            f"payload must decode to a JSON object, got {type(parsed).__name__}"
+        )
+    return parsed
 
 
 # ---------------------------------------------------------------------------
@@ -524,37 +614,44 @@ def submit_to_rekor(
         },
     }
 
+    # Stream the response so a multi-MB body never lands fully in memory.
+    # httpx.post() reads the full body before returning; switch to
+    # httpx.stream() with a running-byte accumulator that aborts at
+    # _MAX_REKOR_RESPONSE_SIZE.
+    body_bytes: Optional[bytes] = None
     try:
-        r = httpx.post(
+        with httpx.stream(
+            "POST",
             rekor_url,
             json=proposed_entry,
             headers={"User-Agent": _REKOR_USER_AGENT},
             timeout=timeout,
             follow_redirects=False,
-        )
+        ) as r:
+            if not (200 <= r.status_code < 300):
+                return (False, None)
+            content_length = r.headers.get("content-length")
+            if content_length is not None:
+                try:
+                    if int(content_length) > _MAX_REKOR_RESPONSE_SIZE:
+                        return (False, None)
+                except ValueError:
+                    return (False, None)
+            received = bytearray()
+            for chunk in r.iter_bytes():
+                received.extend(chunk)
+                if len(received) > _MAX_REKOR_RESPONSE_SIZE:
+                    return (False, None)
+            body_bytes = bytes(received)
     except (httpx.HTTPError, httpx.InvalidURL, OSError):
         return (False, None)
 
-    if not (200 <= r.status_code < 300):
-        return (False, None)
-
-    # Size cap: a hostile or buggy server must not be able to land a
-    # multi-MB JSON blob in graph.db and amplify it through every
-    # subsequent backup. Check the advertised Content-Length first, then
-    # the actually-received bytes.
-    content_length = r.headers.get("content-length")
-    if content_length is not None:
-        try:
-            if int(content_length) > _MAX_REKOR_RESPONSE_SIZE:
-                return (False, None)
-        except ValueError:
-            return (False, None)
-    if len(r.content) > _MAX_REKOR_RESPONSE_SIZE:
+    if body_bytes is None:
         return (False, None)
 
     try:
-        body = r.json()
-    except ValueError:
+        body = json.loads(body_bytes.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
         return (False, None)
 
     # Rekor returns {<uuid>: {body, integratedTime, logIndex, ...}}.
@@ -586,7 +683,16 @@ def submit_to_rekor(
         return (False, None)
     if rec_hash.lower() != expected_hash.lower():
         return (False, None)
-    if rec_sig != sig_b64:
+    # Byte-level signature comparison. Real Rekor instances may canonicalize
+    # the entry body's base64 differently than what we POSTed (URL-safe vs
+    # standard alphabet, padding variants); literal string equality would
+    # false-reject those wire-equivalent representations. Decode both sides
+    # tolerantly to raw bytes and compare.
+    rec_sig_bytes = _b64_decode_tolerant(rec_sig)
+    expected_sig_bytes = _b64_decode_tolerant(sig_b64)
+    if rec_sig_bytes is None or expected_sig_bytes is None:
+        return (False, None)
+    if rec_sig_bytes != expected_sig_bytes:
         return (False, None)
 
     return (
@@ -626,12 +732,28 @@ def bootstrap_key(
     """Generate and persist a fresh keypair at *path*.
 
     Returns ``(path, public_key_id)``. Refuses to overwrite an existing key
-    unless ``overwrite=True`` — accidental regeneration would orphan every
-    claim ever signed with the prior key.
+    unless ``overwrite=True``.
 
     No-overwrite mode uses ``O_CREAT|O_EXCL`` so two concurrent bootstraps
     cannot both pass the existence check and race-write conflicting keys.
     The loser of the race raises :class:`SigningError`.
+
+    Overwrite mode is destructive in two ways
+    -----------------------------------------
+    1. **Verification:** every claim signed with the prior key becomes
+       unverifiable from this machine — the old public key is gone, so
+       :func:`verify_envelope` will see ``keyid`` mismatches forever.
+    2. **Rekor stranding:** any signed claim that has not yet been
+       submitted to Rekor (``transparency_logged=0``) becomes permanently
+       un-loggable. :meth:`EpistemicGraph.refresh_unsigned` checks the
+       envelope's keyid against the current signer's keyid and skips
+       mismatches; without the old key on disk, those claims cannot
+       advance to ``transparency_logged=1`` and will never reach
+       ``REPLICATED``.
+
+    If you must rotate, back up the prior key first, run
+    ``refresh_unsigned()`` with the old key to drain the pending queue,
+    then bootstrap the new one.
     """
     target = Path(path) if path is not None else default_key_path()
     key = generate_keypair()

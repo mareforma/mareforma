@@ -282,10 +282,10 @@ class TestResolveDoisWithCache:
 
 
 # ---------------------------------------------------------------------------
-# Hardening: URL encoding, redirect-blocking, rate-limit handling
+# resolve_doi network contract: URL encoding, redirect blocking, rate-limit
 # ---------------------------------------------------------------------------
 
-class TestResolveDoiHardening:
+class TestResolveDoiNetworkContract:
     def test_doi_suffix_is_url_encoded(self, httpx_mock) -> None:
         """A DOI suffix with ``#``/``@`` must be percent-encoded into the URL.
 

@@ -2,7 +2,7 @@
 tests/epistemic/test_support_levels.py — Epistemic correctness tests.
 
 Unlike unit tests (which verify function behaviour), these tests validate
-the thesis: that the graph's trust signals are honest under adversarial
+the thesis: that the graph's trust signals are honest under hostile inputs
 and edge-case conditions.
 
 Scenarios covered

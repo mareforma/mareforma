@@ -36,7 +36,10 @@ from typing import TYPE_CHECKING
 
 from mareforma import db as _db
 from mareforma import doi_resolver as _doi
-from mareforma import signing as _signing
+# NOTE: mareforma.signing is imported lazily inside refresh_unsigned so that
+# unsigned-only users can still open the graph even if the cryptography
+# extension fails at import time. Don't promote this to a module-level
+# import without weighing that failure-mode tradeoff.
 
 if TYPE_CHECKING:
     import sqlite3
@@ -238,7 +241,7 @@ class EpistemicGraph:
 
         unresolved_claims = _db.list_unresolved_claims(self._conn)
 
-        # Pass 1: dedupe DOIs across all unresolved claims and resolve once.
+        # Step 1: dedupe DOIs across all unresolved claims and resolve once.
         # A single corrupt JSON row (manual edit, partial restore from
         # claims.toml) must not abort the entire refresh — quarantine it
         # and let the rest of the claims through.
@@ -267,7 +270,7 @@ class EpistemicGraph:
             else {}
         )
 
-        # Pass 2: decide per-claim using the shared results.
+        # Step 2: decide per-claim using the shared results.
         resolved_count = 0
         still_unresolved = len(quarantined)
         for claim in unresolved_claims:
@@ -324,6 +327,7 @@ class EpistemicGraph:
             return {"checked": 0, "logged": 0, "still_unlogged": 0}
 
         import warnings
+        from mareforma import signing as _signing
 
         unlogged = _db.list_unlogged_claims(self._conn)
         logged_count = 0

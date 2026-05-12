@@ -254,3 +254,137 @@ class TestPublicKeyPEM:
         )
         with pytest.raises(SigningError, match="not an Ed25519 public key"):
             public_key_from_pem(pem)
+
+
+# ---------------------------------------------------------------------------
+# Private key on-disk storage — parent dir perms, race-safe creation
+# ---------------------------------------------------------------------------
+
+class TestPrivateKeyStorage:
+    def test_parent_dir_is_0o700_on_posix(self, tmp_path):
+        import os
+        from mareforma.signing import bootstrap_key
+        key_path = tmp_path / "deep" / "nest" / "mareforma" / "key"
+        bootstrap_key(key_path)
+        if os.name == "posix":
+            mode = stat.S_IMODE(key_path.parent.stat().st_mode)
+            assert mode == 0o700, f"expected 0o700, got {oct(mode)}"
+
+    def test_bootstrap_concurrent_calls_only_one_wins(self, tmp_path):
+        """Two threads racing on the same path: O_CREAT|O_EXCL must let
+        exactly one succeed and the others raise SigningError. Closes the
+        TOCTOU between exists() and the on-disk write."""
+        import threading
+        from mareforma.signing import bootstrap_key
+
+        key_path = tmp_path / "racy.key"
+        results: list[object] = []
+
+        def runner():
+            try:
+                bootstrap_key(key_path)
+                results.append("ok")
+            except SigningError as exc:
+                results.append(exc)
+
+        threads = [threading.Thread(target=runner) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        oks = [r for r in results if r == "ok"]
+        errs = [r for r in results if isinstance(r, SigningError)]
+        assert len(oks) == 1, f"expected exactly one winner, got {oks}"
+        assert len(errs) == 3, f"expected three losers, got {errs}"
+
+    def test_save_private_key_exclusive_refuses_to_replace(self, tmp_path):
+        key_a = generate_keypair()
+        key_b = generate_keypair()
+        path = tmp_path / "key"
+        save_private_key(key_a, path, exclusive=True)
+        with pytest.raises(FileExistsError):
+            save_private_key(key_b, path, exclusive=True)
+        # First key still on disk, untouched.
+        loaded = load_private_key(path)
+        assert public_key_id(loaded.public_key()) == public_key_id(key_a.public_key())
+
+
+# ---------------------------------------------------------------------------
+# save_private_key cleanup on mid-write failure
+# ---------------------------------------------------------------------------
+
+class TestSavePrivateKeyCleanup:
+    def test_write_failure_in_exclusive_mode_unlinks_the_file(self, tmp_path, monkeypatch):
+        """If os.write raises mid-write, the O_EXCL'd file is unlinked so
+        the next bootstrap can re-attempt without hitting a misleading
+        FileExistsError on a zero-byte leftover."""
+        import os as _os
+        key = generate_keypair()
+        path = tmp_path / "key"
+
+        def flaky_write(fd, data):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(_os, "write", flaky_write)
+        with pytest.raises(OSError):
+            save_private_key(key, path, exclusive=True)
+
+        assert not path.exists(), (
+            "save_private_key(exclusive=True) left a zero-byte file behind "
+            "after write failure; next bootstrap would hit FileExistsError."
+        )
+
+    def test_after_failed_exclusive_save_next_attempt_succeeds(self, tmp_path, monkeypatch):
+        """The cleanup must restore the precondition for a retry."""
+        import os as _os
+        key_a = generate_keypair()
+        path = tmp_path / "key"
+
+        monkeypatch.setattr(
+            _os, "write",
+            lambda fd, data: (_ for _ in ()).throw(OSError(28, "ENOSPC")),
+        )
+        with pytest.raises(OSError):
+            save_private_key(key_a, path, exclusive=True)
+
+        monkeypatch.undo()
+        key_b = generate_keypair()
+        save_private_key(key_b, path, exclusive=True)
+        assert path.exists()
+        loaded = load_private_key(path)
+        assert public_key_id(loaded.public_key()) == public_key_id(key_b.public_key())
+
+
+# ---------------------------------------------------------------------------
+# envelope_payload dict-only contract
+# ---------------------------------------------------------------------------
+
+class TestEnvelopePayloadDictContract:
+    """envelope_payload must reject payloads that decode to non-dict JSON.
+
+    Downstream callers (e.g. mark_claim_logged) do ``payload.get(...)``
+    which would otherwise AttributeError on a bare string/list/number.
+    """
+
+    def test_payload_string_raises_InvalidEnvelopeError(self):
+        import base64
+        bad_payload_b64 = base64.standard_b64encode(b'"just a string"').decode("ascii")
+        envelope = {
+            "payloadType": "application/vnd.mareforma.claim+json",
+            "payload": bad_payload_b64,
+            "signatures": [{"keyid": "x", "sig": "y"}],
+        }
+        with pytest.raises(InvalidEnvelopeError, match="JSON object"):
+            envelope_payload(envelope)
+
+    def test_payload_list_raises_InvalidEnvelopeError(self):
+        import base64
+        bad_payload_b64 = base64.standard_b64encode(b'[1, 2, 3]').decode("ascii")
+        envelope = {
+            "payloadType": "application/vnd.mareforma.claim+json",
+            "payload": bad_payload_b64,
+            "signatures": [{"keyid": "x", "sig": "y"}],
+        }
+        with pytest.raises(InvalidEnvelopeError, match="JSON object"):
+            envelope_payload(envelope)

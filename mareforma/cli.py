@@ -70,8 +70,10 @@ def cli() -> None:
 )
 @click.option(
     "--overwrite", is_flag=True, default=False,
-    help="Replace an existing key. WARNING: every claim signed by the prior "
-         "key becomes unverifiable.",
+    help="Replace an existing key. DESTRUCTIVE: every claim signed by the "
+         "prior key becomes unverifiable AND any claim not yet submitted to "
+         "Rekor (transparency_logged=0) becomes permanently un-loggable. "
+         "Back up the old key and drain the unlogged queue first.",
 )
 def bootstrap_cmd(key_path: str | None, overwrite: bool) -> None:
     """Generate an Ed25519 signing key for this user.
@@ -82,6 +84,10 @@ def bootstrap_cmd(key_path: str | None, overwrite: bool) -> None:
 
     To verify a claim, share the public key (printed below) with whoever
     needs to validate your output.
+
+    ``--overwrite`` is destructive: it strands every claim signed by the
+    prior key — both for verification and for any pending Rekor submission.
+    See ``mareforma.signing.bootstrap_key`` for the safe rotation path.
     """
     from mareforma import signing as _signing
 

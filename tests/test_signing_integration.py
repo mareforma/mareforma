@@ -185,3 +185,143 @@ class TestBootstrapCLI:
             _signing.load_private_key(key_path).public_key(),
         )
         assert first_keyid != second_keyid
+
+
+# ---------------------------------------------------------------------------
+# Signed claims are append-only across the signed surface
+# ---------------------------------------------------------------------------
+
+class TestUpdateClaimSignedSurface:
+    """A claim that carries a signature must be immutable across the fields
+    in the signed payload: text / supports / contradicts. Mutating those
+    via ``update_claim`` would silently invalidate the signature while
+    leaving ``transparency_logged=1`` in place. ``status`` and
+    ``comparison_summary`` are not in the signed payload and stay editable.
+    """
+
+    def test_text_change_on_signed_claim_raises(self, tmp_path):
+        from mareforma.db import (
+            SignedClaimImmutableError, open_db, update_claim,
+        )
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            claim_id = graph.assert_claim("original text")
+        conn = open_db(tmp_path)
+        try:
+            with pytest.raises(SignedClaimImmutableError, match="signed"):
+                update_claim(conn, tmp_path, claim_id, text="tampered text")
+        finally:
+            conn.close()
+
+    def test_supports_change_on_signed_claim_raises(self, tmp_path):
+        from mareforma.db import (
+            SignedClaimImmutableError, open_db, update_claim,
+        )
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            claim_id = graph.assert_claim("anchor", supports=["upstream-1"])
+        conn = open_db(tmp_path)
+        try:
+            with pytest.raises(SignedClaimImmutableError):
+                update_claim(conn, tmp_path, claim_id, supports=["upstream-2"])
+        finally:
+            conn.close()
+
+    def test_contradicts_change_on_signed_claim_raises(self, tmp_path):
+        from mareforma.db import (
+            SignedClaimImmutableError, open_db, update_claim,
+        )
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            claim_id = graph.assert_claim("anchor")
+        conn = open_db(tmp_path)
+        try:
+            with pytest.raises(SignedClaimImmutableError):
+                update_claim(conn, tmp_path, claim_id, contradicts=["xx"])
+        finally:
+            conn.close()
+
+    def test_status_change_on_signed_claim_allowed(self, tmp_path):
+        """status is not part of the signed payload — must still be editable."""
+        from mareforma.db import get_claim, open_db, update_claim
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            claim_id = graph.assert_claim("retract me")
+        conn = open_db(tmp_path)
+        try:
+            update_claim(conn, tmp_path, claim_id, status="retracted")
+            assert get_claim(conn, claim_id)["status"] == "retracted"
+        finally:
+            conn.close()
+
+    def test_comparison_summary_on_signed_claim_allowed(self, tmp_path):
+        """comparison_summary is not part of the signed payload."""
+        from mareforma.db import get_claim, open_db, update_claim
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            claim_id = graph.assert_claim("with summary")
+        conn = open_db(tmp_path)
+        try:
+            update_claim(
+                conn, tmp_path, claim_id,
+                comparison_summary="reviewed 2026-05-12",
+            )
+            assert get_claim(conn, claim_id)["comparison_summary"] == "reviewed 2026-05-12"
+        finally:
+            conn.close()
+
+    def test_unsigned_claim_can_still_mutate_freely(self, tmp_path):
+        from mareforma.db import add_claim, get_claim, open_db, update_claim
+        conn = open_db(tmp_path)
+        try:
+            claim_id = add_claim(conn, tmp_path, "unsigned")
+            update_claim(conn, tmp_path, claim_id, text="freely edited")
+            assert get_claim(conn, claim_id)["text"] == "freely edited"
+        finally:
+            conn.close()
+
+    def test_redundant_signed_field_set_is_a_noop(self, tmp_path):
+        """Passing supports=<existing supports> on a signed claim must NOT raise.
+
+        The refuse logic compares old vs new; identical values shouldn't trip it.
+        """
+        from mareforma.db import get_claim, open_db, update_claim
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            claim_id = graph.assert_claim("redundant", supports=["u1"])
+        conn = open_db(tmp_path)
+        try:
+            update_claim(
+                conn, tmp_path, claim_id,
+                supports=["u1"], status="contested",
+            )
+            assert get_claim(conn, claim_id)["status"] == "contested"
+        finally:
+            conn.close()
+
+    def test_update_claim_signed_params_match_refuse_list(self):
+        """Force a future contributor who exposes a new SIGNED_FIELDS member
+        on update_claim to update db.update_claim's refuse block too.
+
+        Today update_claim exposes exactly the three signed-surface fields
+        text / supports / contradicts. Adding e.g. ``classification`` to
+        update_claim's signature without extending the refuse block would
+        re-open the silent-mutation hole; this test fails until the refuse
+        list catches up.
+        """
+        import inspect
+        from mareforma.db import update_claim
+
+        params = set(inspect.signature(update_claim).parameters.keys())
+        # claim_id is the row lookup key, not a mutable field. Exclude it
+        # from the writable set even though it appears in SIGNED_FIELDS.
+        params -= {"claim_id"}
+        signed_writable = params & set(_signing.SIGNED_FIELDS)
+
+        expected = {"text", "supports", "contradicts"}
+        assert signed_writable == expected, (
+            f"update_claim now exposes signed-surface params {signed_writable!r} "
+            f"but db.update_claim's refuse block only covers {expected!r}. "
+            "Update the refuse block when extending coverage, OR update this "
+            "test if intentionally narrowing it."
+        )
