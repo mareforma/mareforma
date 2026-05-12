@@ -52,10 +52,14 @@ class EpistemicGraph:
         root: Path,
         *,
         signer: object | None = None,
+        rekor_url: str | None = None,
+        require_rekor: bool = False,
     ) -> None:
         self._conn = conn
         self._root = root
         self._signer = signer
+        self._rekor_url = rekor_url
+        self._require_rekor = require_rekor
 
     # ------------------------------------------------------------------
     # Core API
@@ -130,6 +134,8 @@ class EpistemicGraph:
             source_name=source_name,
             unresolved=unresolved,
             signer=self._signer,
+            rekor_url=self._rekor_url,
+            require_rekor=self._require_rekor,
         )
 
     def query(
@@ -287,6 +293,90 @@ class EpistemicGraph:
             "checked": len(unresolved_claims),
             "resolved": resolved_count,
             "still_unresolved": still_unresolved,
+        }
+
+    def refresh_unsigned(self) -> dict[str, int]:
+        """Retry Rekor submission for every signed-but-not-logged claim.
+
+        Mirrors :meth:`refresh_unresolved`. For each claim whose
+        ``signature_bundle`` is non-NULL and whose ``transparency_logged``
+        is 0, the original envelope is re-submitted to the Rekor URL the
+        graph was opened with. Success updates the bundle (attaches the
+        log entry coordinates) and flips ``transparency_logged`` to 1; the
+        REPLICATED check fires inside the same transaction.
+
+        No-op modes
+        -----------
+        - If the graph was opened without ``rekor_url``, returns immediately:
+          there is no log to submit to. The result reports zero checked.
+        - If a row has a malformed ``signature_bundle`` (manual edit,
+          partial restore from claims.toml), it is quarantined as still
+          unlogged with a warning.
+
+        Returns
+        -------
+        dict
+            ``{"checked": N, "logged": M, "still_unlogged": K}``.
+        """
+        if self._rekor_url is None:
+            return {"checked": 0, "logged": 0, "still_unlogged": 0}
+
+        import warnings
+        from mareforma import signing as _signing
+
+        unlogged = _db.list_unlogged_claims(self._conn)
+        logged_count = 0
+        still_unlogged = 0
+
+        # If the user lacks a signer, we cannot rebuild the public key from
+        # the bundle alone for Rekor's hashedrekord schema (it needs the
+        # PEM). Return early with a warning.
+        if self._signer is None:
+            if unlogged:
+                warnings.warn(
+                    f"refresh_unsigned() found {len(unlogged)} unlogged claims "
+                    "but the graph was opened without a key. Open with "
+                    "key_path=... to retry the Rekor submission.",
+                    stacklevel=2,
+                )
+            return {
+                "checked": len(unlogged),
+                "logged": 0,
+                "still_unlogged": len(unlogged),
+            }
+
+        public_key = self._signer.public_key()
+
+        for claim in unlogged:
+            cid = claim["claim_id"]
+            try:
+                envelope = json.loads(claim["signature_bundle"])
+            except (json.JSONDecodeError, TypeError):
+                warnings.warn(
+                    f"Claim {cid} has a malformed signature_bundle; "
+                    "skipping during refresh_unsigned.",
+                    stacklevel=2,
+                )
+                still_unlogged += 1
+                continue
+
+            logged, entry = _signing.submit_to_rekor(
+                envelope, public_key, rekor_url=self._rekor_url,
+            )
+            if logged and entry is not None:
+                augmented = _signing.attach_rekor_entry(envelope, entry)
+                new_bundle = json.dumps(
+                    augmented, sort_keys=True, separators=(",", ":"),
+                )
+                _db.mark_claim_logged(self._conn, self._root, cid, new_bundle)
+                logged_count += 1
+            else:
+                still_unlogged += 1
+
+        return {
+            "checked": len(unlogged),
+            "logged": logged_count,
+            "still_unlogged": still_unlogged,
         }
 
     def get_tools(self, *, generated_by: str = "agent") -> list:

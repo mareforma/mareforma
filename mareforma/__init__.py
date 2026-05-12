@@ -15,6 +15,8 @@ def open(  # noqa: A001
     *,
     key_path: "str | Path | None" = None,
     require_signed: bool = False,
+    rekor_url: "str | None" = None,
+    require_rekor: bool = False,
 ) -> "EpistemicGraph":
     """Open the epistemic graph at *path* and return an EpistemicGraph.
 
@@ -34,6 +36,21 @@ def open(  # noqa: A001
         When True, raise :class:`mareforma.signing.KeyNotFoundError` if no
         key is found at ``key_path``. Use for high-assurance contexts where
         an unsigned claim is unacceptable.
+    rekor_url:
+        Transparency-log endpoint. When set, every signed claim is submitted
+        to Rekor at INSERT time; the entry uuid + logIndex are attached to
+        the signature bundle and ``transparency_logged`` is set to 1.
+        Submission failure persists the claim with ``transparency_logged=0``
+        and blocks REPLICATED promotion (mirrors the DOI ``unresolved``
+        pattern). ``EpistemicGraph.refresh_unsigned()`` retries the
+        pending entries. ``None`` (default) disables Rekor entirely — signed
+        claims still REPLICATE based on the local signature alone.
+        Use :data:`mareforma.signing.PUBLIC_REKOR_URL` for the public
+        sigstore instance.
+    require_rekor:
+        When True, ``rekor_url`` must be set and the initial submission must
+        succeed; otherwise :class:`mareforma.signing.SigningError` is
+        raised. Use for production-grade high-assurance flows.
 
     Returns
     -------
@@ -45,6 +62,7 @@ def open(  # noqa: A001
     -------
     >>> graph = mareforma.open()                       # signs if XDG key exists
     >>> graph = mareforma.open(require_signed=True)    # raises if no key
+    >>> graph = mareforma.open(rekor_url=mareforma.signing.PUBLIC_REKOR_URL)
     >>> claim_id = graph.assert_claim("...", classification="ANALYTICAL")
     >>> graph.close()
 
@@ -73,7 +91,19 @@ def open(  # noqa: A001
             "operate in unsigned mode."
         )
 
-    return EpistemicGraph(conn, root, signer=signer)
+    if require_rekor and rekor_url is None:
+        raise _signing.SigningError(
+            "require_rekor=True needs an explicit rekor_url. Pass "
+            "mareforma.signing.PUBLIC_REKOR_URL or your private Rekor "
+            "instance URL."
+        )
+
+    return EpistemicGraph(
+        conn, root,
+        signer=signer,
+        rekor_url=rekor_url,
+        require_rekor=require_rekor,
+    )
 
 
 def schema() -> dict:

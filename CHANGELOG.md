@@ -9,10 +9,15 @@ fresh. Claims are backed up in `claims.toml`.
 
 ### Added
 
-- Ed25519 claim signing (P0.1, phase A). New `mareforma/signing.py` module: keypair gen + PEM save/load + DSSE-style envelope sign/verify. Private key lives at `~/.config/mareforma/key` (XDG-compliant, mode 0600). Public-key id is SHA-256 of the raw Ed25519 public bytes.
+- Ed25519 claim signing. New `mareforma/signing.py` module: keypair gen + PEM save/load + DSSE-style envelope sign/verify. Private key lives at `~/.config/mareforma/key` (XDG-compliant, mode 0600). Public-key id is SHA-256 of the raw Ed25519 public bytes.
 - `mareforma bootstrap` CLI command: one-time identity setup. Generates a fresh keypair, prints the public-key id. Refuses to overwrite an existing key unless `--overwrite` (avoids orphaning every previously-signed claim).
 - `mareforma.open(key_path=..., require_signed=...)` parameters. When a key exists at the XDG path (or `key_path`), claims are automatically signed before INSERT and the envelope is persisted to a new `signature_bundle` TEXT column. `require_signed=True` raises `KeyNotFoundError` if no key is found — high-assurance opt-in.
 - Signed payload binds `claim_id`, `text`, `classification`, `generated_by`, `supports`, `contradicts`, `source_name`, `created_at`. Any tamper with the row breaks verification.
+- Sigstore-Rekor transparency-log integration. New `mareforma.open(rekor_url=..., require_rekor=...)` parameters. When a Rekor URL is set, every signed claim is submitted to the transparency log at INSERT time using the `hashedrekord` entry kind; the entry uuid + logIndex are attached to the bundle and `transparency_logged` flips to 1. Submission failure persists the claim with `transparency_logged=0` and blocks REPLICATED promotion — mirroring the DOI `unresolved` pattern.
+- New `EpistemicGraph.refresh_unsigned()` retries Rekor submission for every signed-but-unlogged claim. Mirrors `refresh_unresolved()`. Returns `{checked, logged, still_unlogged}`.
+- REPLICATED detection now requires `transparency_logged = 1` alongside `unresolved = 0`. Unsigned claims and Rekor-disabled mode (no `rekor_url`) keep the default `transparency_logged=1`, so they REPLICATE unchanged.
+- `transparency_logged INTEGER NOT NULL DEFAULT 1 CHECK(IN (0,1))` column on the claims table + `idx_claims_transparency_logged` index.
+- `mareforma.signing.PUBLIC_REKOR_URL` constant points to the public sigstore Rekor instance for users who want it without typing the URL.
 - `mareforma.open()` — returns `EpistemicGraph`; no `@transform` required
 - `EpistemicGraph.assert_claim()` — assert claims directly from any agent
 - `EpistemicGraph.query()` — query by text, support level, or classification

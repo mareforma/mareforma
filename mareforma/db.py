@@ -78,6 +78,8 @@ CREATE TABLE IF NOT EXISTS claims (
     unresolved      INTEGER NOT NULL DEFAULT 0
                         CHECK (unresolved IN (0, 1)),
     signature_bundle TEXT,
+    transparency_logged INTEGER NOT NULL DEFAULT 1
+                        CHECK (transparency_logged IN (0, 1)),
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );
@@ -92,6 +94,8 @@ CREATE INDEX IF NOT EXISTS idx_claims_support_level
     ON claims(support_level);
 CREATE INDEX IF NOT EXISTS idx_claims_unresolved
     ON claims(unresolved);
+CREATE INDEX IF NOT EXISTS idx_claims_transparency_logged
+    ON claims(transparency_logged);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_claims_idempotency_key
     ON claims(idempotency_key) WHERE idempotency_key IS NOT NULL;
 
@@ -112,7 +116,7 @@ _CLAIM_COLUMNS = (
     "status", "source_name", "generated_by",
     "supports_json", "contradicts_json",
     "comparison_summary", "branch_id", "unresolved",
-    "signature_bundle",
+    "signature_bundle", "transparency_logged",
     "created_at", "updated_at",
 )
 _CLAIM_SELECT = ", ".join(_CLAIM_COLUMNS)
@@ -248,6 +252,8 @@ def add_claim(
     status: str = "open",
     unresolved: bool = False,
     signer: "object | None" = None,
+    rekor_url: str | None = None,
+    require_rekor: bool = False,
 ) -> str:
     """Insert a new claim and return its claim_id.
 
@@ -279,11 +285,23 @@ def add_claim(
         Optional Ed25519 private key. When provided, the claim is signed
         before INSERT and the signature envelope is persisted to the
         ``signature_bundle`` column. ``None`` skips signing.
+    rekor_url:
+        When set, every signed claim is submitted to the Rekor
+        transparency log at this URL. Success augments the signature
+        bundle with the log entry coordinates and sets
+        ``transparency_logged=1``. Failure persists ``transparency_logged=0``,
+        blocking REPLICATED promotion until
+        :meth:`EpistemicGraph.refresh_unsigned` retries.
+    require_rekor:
+        When True, raise :class:`SigningError` if the initial Rekor
+        submission fails. Use for production high-assurance flows.
 
     Raises
     ------
     ValueError
         If classification or status are invalid.
+    SigningError
+        If ``require_rekor=True`` and the Rekor submission fails.
     """
     if not text or not text.strip():
         raise ValueError("Claim text cannot be empty.")
@@ -315,6 +333,7 @@ def add_claim(
     # claim_id + canonical fields + created_at, so any later tamper (text edit,
     # support reattribution) breaks verification.
     signature_bundle: str | None = None
+    envelope: dict | None = None
     if signer is not None:
         from mareforma import signing as _signing
         envelope = _signing.sign_claim(
@@ -332,6 +351,12 @@ def add_claim(
         )
         signature_bundle = json.dumps(envelope, sort_keys=True, separators=(",", ":"))
 
+    # ``transparency_logged`` defaults to 1 (ready). We flip it to 0 only when
+    # Rekor is enabled AND we have something to submit — the row then waits
+    # for either a successful submission below or a refresh_unsigned() retry.
+    rekor_enabled = rekor_url is not None and signer is not None and envelope is not None
+    transparency_logged = 0 if rekor_enabled else 1
+
     try:
         conn.execute(
             """
@@ -339,15 +364,15 @@ def add_claim(
                 (claim_id, text, classification, support_level, idempotency_key,
                  status, source_name, generated_by,
                  supports_json, contradicts_json, unresolved,
-                 signature_bundle,
+                 signature_bundle, transparency_logged,
                  created_at, updated_at)
-            VALUES (?, ?, ?, 'PRELIMINARY', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, 'PRELIMINARY', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 claim_id, text.strip(), classification, idempotency_key,
                 status, source_name, generated_by,
                 supports_json, contradicts_json, 1 if unresolved else 0,
-                signature_bundle,
+                signature_bundle, transparency_logged,
                 now, now,
             ),
         )
@@ -355,9 +380,42 @@ def add_claim(
     except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
         raise DatabaseError(f"Failed to add claim: {exc}") from exc
 
+    # Attempt Rekor submission. On success, augment the envelope with the
+    # log entry and flip transparency_logged → 1. On failure, leave the row
+    # at transparency_logged=0 — REPLICATED is blocked until refresh_unsigned
+    # succeeds.
+    if rekor_enabled:
+        from mareforma import signing as _signing
+        logged, entry = _signing.submit_to_rekor(
+            envelope, signer.public_key(), rekor_url=rekor_url,
+        )
+        if logged and entry is not None:
+            augmented = _signing.attach_rekor_entry(envelope, entry)
+            new_bundle = json.dumps(augmented, sort_keys=True, separators=(",", ":"))
+            try:
+                conn.execute(
+                    "UPDATE claims SET signature_bundle = ?, "
+                    "transparency_logged = 1, updated_at = ? "
+                    "WHERE claim_id = ?",
+                    (new_bundle, _now(), claim_id),
+                )
+                conn.commit()
+                transparency_logged = 1
+            except (sqlite3.OperationalError, sqlite3.IntegrityError):
+                # Rekor succeeded but the local UPDATE failed. The row stays
+                # at transparency_logged=0; refresh_unsigned will re-submit
+                # to Rekor and overwrite the bundle then.
+                pass
+        elif require_rekor:
+            raise _signing.SigningError(
+                f"Rekor submission to {rekor_url} failed and require_rekor=True. "
+                "Claim was persisted with transparency_logged=0; call "
+                "EpistemicGraph.refresh_unsigned() to retry."
+            )
+
     # Check whether this claim triggers REPLICATED status on shared upstreams.
-    # Unresolved claims are ineligible — promotion would anchor on unverified DOIs.
-    if not unresolved:
+    # Unresolved DOIs OR pending transparency-log inclusion block eligibility.
+    if not unresolved and transparency_logged == 1:
         _maybe_update_replicated(conn, claim_id, supports or [], generated_by)
 
     _backup_claims_toml(conn, root)
@@ -387,6 +445,7 @@ def _maybe_update_replicated_unlocked(
           AND c.generated_by != ?
           AND c.support_level != 'ESTABLISHED'
           AND c.unresolved = 0
+          AND c.transparency_logged = 1
         """,
         (*supports, new_claim_id, generated_by),
     ).fetchall()
@@ -477,6 +536,76 @@ def list_unresolved_claims(conn: sqlite3.Connection) -> list[dict]:
         f"SELECT {_CLAIM_SELECT} FROM claims WHERE unresolved = 1 ORDER BY created_at"
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def list_unlogged_claims(conn: sqlite3.Connection) -> list[dict]:
+    """Return signed claims still awaiting Rekor inclusion.
+
+    A claim is "unlogged" when ``signature_bundle`` is non-NULL but
+    ``transparency_logged`` is 0. Unsigned claims are excluded — they have
+    no envelope to submit.
+    """
+    rows = conn.execute(
+        f"SELECT {_CLAIM_SELECT} FROM claims "
+        "WHERE signature_bundle IS NOT NULL AND transparency_logged = 0 "
+        "ORDER BY created_at"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_claim_logged(
+    conn: sqlite3.Connection,
+    root: Path,
+    claim_id: str,
+    new_signature_bundle: str,
+) -> None:
+    """Mark a claim as transparency-log included and update its bundle.
+
+    The bundle is rewritten with the Rekor entry attached (uuid + logIndex +
+    integratedTime). The flag-flip and REPLICATED re-evaluation happen in a
+    single transaction so a crash between them cannot strand a claim at
+    PRELIMINARY despite ``transparency_logged=1``.
+
+    Raises
+    ------
+    ClaimNotFoundError
+        If no claim with claim_id exists.
+    """
+    row = conn.execute(
+        "SELECT supports_json, generated_by, unresolved "
+        "FROM claims WHERE claim_id = ?",
+        (claim_id,),
+    ).fetchone()
+    if row is None:
+        raise ClaimNotFoundError(f"Claim '{claim_id}' not found.")
+
+    supports = json.loads(row["supports_json"] or "[]")
+    generated_by = row["generated_by"]
+    unresolved = int(row["unresolved"] or 0)
+    now = _now()
+
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE claims SET signature_bundle = ?, "
+                "transparency_logged = 1, updated_at = ? "
+                "WHERE claim_id = ?",
+                (new_signature_bundle, now, claim_id),
+            )
+            # Convergence detection is best-effort by design: a transient
+            # lock error during the REPLICATED check must not roll back
+            # the flag flip the operator just committed.
+            if not unresolved:
+                try:
+                    _maybe_update_replicated_unlocked(
+                        conn, claim_id, supports, generated_by,
+                    )
+                except sqlite3.OperationalError:
+                    pass
+    except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
+        raise DatabaseError(f"Failed to mark claim logged: {exc}") from exc
+
+    _backup_claims_toml(conn, root)
 
 
 def mark_claim_resolved(
@@ -840,6 +969,10 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
                 entry["unresolved"] = True
             if c.get("signature_bundle"):
                 entry["signature_bundle"] = c["signature_bundle"]
+            # transparency_logged: only record when it deviates from the
+            # default (1). A 0 means "signed but awaiting Rekor inclusion".
+            if c.get("transparency_logged") == 0:
+                entry["transparency_logged"] = False
             data["claims"][c["claim_id"]] = entry
 
         out = root / "claims.toml"

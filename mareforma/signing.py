@@ -48,11 +48,20 @@ import os
 from pathlib import Path
 from typing import Any, Optional
 
+import httpx
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
+)
+
+
+PUBLIC_REKOR_URL = "https://rekor.sigstore.dev/api/v1/log/entries"
+_REKOR_TIMEOUT = 10.0
+_REKOR_USER_AGENT = (
+    "mareforma/0.3.0 (+https://github.com/mareforma/mareforma; "
+    "mailto:hello@mareforma.com)"
 )
 
 
@@ -325,6 +334,119 @@ def envelope_payload(envelope: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Convenience helpers
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Rekor transparency log
+# ---------------------------------------------------------------------------
+
+def submit_to_rekor(
+    envelope: dict[str, Any],
+    public_key: Ed25519PublicKey,
+    *,
+    rekor_url: str,
+    timeout: float = _REKOR_TIMEOUT,
+) -> tuple[bool, Optional[dict[str, Any]]]:
+    """Submit a signed envelope to a Rekor transparency log.
+
+    Uses the ``hashedrekord`` entry kind: Rekor receives the SHA-256 of the
+    signed payload bytes, the raw signature, and the PEM public key. Rekor
+    re-verifies the signature server-side and appends an immutable entry to
+    the Merkle log, returning an inclusion proof.
+
+    Returns
+    -------
+    (logged, log_entry)
+        ``logged`` is True iff Rekor returned 2xx and the response parsed.
+        ``log_entry`` carries the uuid + integratedTime + logIndex on
+        success, ``None`` on failure.
+
+    Failure modes
+    -------------
+    Network errors, timeouts, non-2xx, and malformed responses all return
+    ``(False, None)`` — never raise. Caller persists the claim with
+    ``transparency_logged=0`` and retries later via ``refresh_unsigned()``.
+    """
+    try:
+        payload_bytes = base64.standard_b64decode(envelope["payload"])
+        sig_b64 = envelope["signatures"][0]["sig"]
+    except (KeyError, IndexError, TypeError, ValueError):
+        return (False, None)
+
+    pem = public_key_to_pem(public_key)
+    proposed_entry = {
+        "apiVersion": "0.0.1",
+        "kind": "hashedrekord",
+        "spec": {
+            "data": {
+                "hash": {
+                    "algorithm": "sha256",
+                    "value": hashlib.sha256(payload_bytes).hexdigest(),
+                },
+            },
+            "signature": {
+                "content": sig_b64,
+                "publicKey": {
+                    "content": base64.standard_b64encode(pem).decode("ascii"),
+                },
+            },
+        },
+    }
+
+    try:
+        r = httpx.post(
+            rekor_url,
+            json=proposed_entry,
+            headers={"User-Agent": _REKOR_USER_AGENT},
+            timeout=timeout,
+            follow_redirects=False,
+        )
+    except (httpx.HTTPError, httpx.InvalidURL, OSError):
+        return (False, None)
+
+    if not (200 <= r.status_code < 300):
+        return (False, None)
+
+    try:
+        body = r.json()
+    except ValueError:
+        return (False, None)
+
+    # Rekor returns {<uuid>: {body, integratedTime, logIndex, ...}}.
+    if not isinstance(body, dict) or not body:
+        return (False, None)
+    try:
+        uuid_key = next(iter(body))
+        entry = body[uuid_key]
+        return (
+            True,
+            {
+                "uuid": uuid_key,
+                "integratedTime": entry.get("integratedTime"),
+                "logIndex": entry.get("logIndex"),
+            },
+        )
+    except (StopIteration, TypeError):
+        return (False, None)
+
+
+def attach_rekor_entry(
+    envelope: dict[str, Any],
+    log_entry: dict[str, Any],
+) -> dict[str, Any]:
+    """Return a copy of *envelope* with a ``rekor`` block attached.
+
+    The block is a future-compatible carrier for the transparency-log
+    coordinates. It does NOT replace or modify the original payload or
+    signatures — the envelope still verifies via :func:`verify_envelope`.
+    """
+    augmented = dict(envelope)
+    augmented["rekor"] = {
+        "uuid": log_entry.get("uuid"),
+        "integratedTime": log_entry.get("integratedTime"),
+        "logIndex": log_entry.get("logIndex"),
+    }
+    return augmented
+
 
 def bootstrap_key(
     path: Optional[Path] = None,
