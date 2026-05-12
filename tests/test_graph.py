@@ -260,8 +260,17 @@ def test_get_claim_nonexistent_returns_none(tmp_path):
 # validate()
 # ---------------------------------------------------------------------------
 
+def _bootstrap_key(tmp_path):
+    """Generate a signing key inside tmp_path and return its absolute path."""
+    from mareforma import signing as _signing
+    key_path = tmp_path / "mareforma.key"
+    _signing.bootstrap_key(key_path)
+    return key_path
+
+
 def test_validate_replicated_to_established(tmp_path):
-    with mareforma.open(tmp_path) as graph:
+    key_path = _bootstrap_key(tmp_path)
+    with mareforma.open(tmp_path, key_path=key_path) as graph:
         prior = graph.assert_claim("prior", generated_by="seed")
         id1 = graph.assert_claim("finding", supports=[prior], generated_by="A")
         id2 = graph.assert_claim("finding", supports=[prior], generated_by="B")
@@ -271,7 +280,8 @@ def test_validate_replicated_to_established(tmp_path):
 
 
 def test_validate_stores_validated_by(tmp_path):
-    with mareforma.open(tmp_path) as graph:
+    key_path = _bootstrap_key(tmp_path)
+    with mareforma.open(tmp_path, key_path=key_path) as graph:
         prior = graph.assert_claim("prior", generated_by="seed")
         id1 = graph.assert_claim("finding", supports=[prior], generated_by="A")
         graph.assert_claim("finding", supports=[prior], generated_by="B")
@@ -282,16 +292,28 @@ def test_validate_stores_validated_by(tmp_path):
 
 
 def test_validate_preliminary_raises(tmp_path):
-    with mareforma.open(tmp_path) as graph:
+    key_path = _bootstrap_key(tmp_path)
+    with mareforma.open(tmp_path, key_path=key_path) as graph:
         claim_id = graph.assert_claim("single agent claim")
         with pytest.raises(ValueError, match="REPLICATED"):
             graph.validate(claim_id)
 
 
 def test_validate_nonexistent_claim_raises(tmp_path):
-    with mareforma.open(tmp_path) as graph:
+    key_path = _bootstrap_key(tmp_path)
+    with mareforma.open(tmp_path, key_path=key_path) as graph:
         with pytest.raises(ClaimNotFoundError):
             graph.validate("no-such-uuid")
+
+
+def test_validate_without_signer_raises(tmp_path):
+    """No key loaded → graph.validate() refuses with a clear error."""
+    with mareforma.open(tmp_path, key_path=tmp_path / "absent") as graph:
+        prior = graph.assert_claim("prior", generated_by="seed")
+        id1 = graph.assert_claim("finding", supports=[prior], generated_by="A")
+        graph.assert_claim("finding", supports=[prior], generated_by="B")
+        with pytest.raises(ValueError, match="loaded signing key"):
+            graph.validate(id1)
 
 
 # ---------------------------------------------------------------------------

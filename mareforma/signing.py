@@ -97,10 +97,19 @@ _MAX_REKOR_RESPONSE_SIZE = 64 * 1024
 
 
 _PAYLOAD_TYPE = "application/vnd.mareforma.claim+json"
+_PAYLOAD_TYPE_VALIDATOR_ENROLLMENT = "application/vnd.mareforma.validator-enrollment+json"
+_PAYLOAD_TYPE_VALIDATION = "application/vnd.mareforma.validation+json"
 
-# Fields included in the signed payload. Sorted at envelope build time so the
-# signature is order-stable across writers. Public so db.update_claim can
-# refuse mutations on these fields when the row already carries a signature.
+_KNOWN_PAYLOAD_TYPES = frozenset({
+    _PAYLOAD_TYPE,
+    _PAYLOAD_TYPE_VALIDATOR_ENROLLMENT,
+    _PAYLOAD_TYPE_VALIDATION,
+})
+
+# Fields included in the signed payload of a claim. Sorted at envelope build
+# time so the signature is order-stable across writers. Public so
+# db.update_claim can refuse mutations on these fields when the row already
+# carries a signature.
 SIGNED_FIELDS = (
     "claim_id",
     "text",
@@ -110,6 +119,22 @@ SIGNED_FIELDS = (
     "contradicts",
     "source_name",
     "created_at",
+)
+
+# Fields included in the signed payload of a validator enrollment.
+_ENROLLMENT_FIELDS = (
+    "keyid",
+    "pubkey_pem",
+    "identity",
+    "enrolled_at",
+    "enrolled_by_keyid",
+)
+
+# Fields included in the signed payload of a validation event.
+_VALIDATION_FIELDS = (
+    "claim_id",
+    "validator_keyid",
+    "validated_at",
 )
 
 
@@ -475,23 +500,110 @@ def sign_claim(
     }
 
 
+def _canonical_record(fields: tuple[str, ...], record: dict[str, Any]) -> bytes:
+    """Canonicalise an arbitrary record using a fixed field list.
+
+    Sorted keys, no whitespace. Generalises :func:`canonical_payload` for
+    envelope kinds other than claim (validator enrollment, validation).
+    """
+    payload = {name: record.get(name) for name in fields}
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _build_envelope(
+    payload_bytes: bytes,
+    private_key: Ed25519PrivateKey,
+    *,
+    payload_type: str,
+) -> dict[str, Any]:
+    """Sign *payload_bytes* and wrap into the standard envelope shape."""
+    sig = private_key.sign(payload_bytes)
+    keyid = public_key_id(private_key.public_key())
+    return {
+        "payloadType": payload_type,
+        "payload": base64.standard_b64encode(payload_bytes).decode("ascii"),
+        "signatures": [
+            {
+                "keyid": keyid,
+                "sig": base64.standard_b64encode(sig).decode("ascii"),
+            }
+        ],
+    }
+
+
+def sign_validator_enrollment(
+    enrollment: dict[str, Any],
+    private_key: Ed25519PrivateKey,
+) -> dict[str, Any]:
+    """Sign a validator-enrollment record.
+
+    The record must contain ``keyid`` (sha256-hex of the NEW validator's
+    raw public key), ``pubkey_pem`` (base64 of the new validator's PEM),
+    ``identity``, ``enrolled_at``, and ``enrolled_by_keyid``.
+    *private_key* is the parent validator's key (equal to the new key for
+    the root self-enrollment).
+    """
+    payload = _canonical_record(_ENROLLMENT_FIELDS, enrollment)
+    return _build_envelope(
+        payload, private_key,
+        payload_type=_PAYLOAD_TYPE_VALIDATOR_ENROLLMENT,
+    )
+
+
+def sign_validation(
+    validation: dict[str, Any],
+    private_key: Ed25519PrivateKey,
+) -> dict[str, Any]:
+    """Sign a validation event for a claim.
+
+    The record must contain ``claim_id`` (the claim being promoted to
+    ESTABLISHED), ``validator_keyid`` (the signing validator), and
+    ``validated_at`` (ISO 8601 UTC). The envelope is persisted to the
+    claim's ``validation_signature`` column so the promotion event is
+    independently verifiable.
+    """
+    payload = _canonical_record(_VALIDATION_FIELDS, validation)
+    return _build_envelope(
+        payload, private_key,
+        payload_type=_PAYLOAD_TYPE_VALIDATION,
+    )
+
+
 def verify_envelope(
     envelope: dict[str, Any],
     public_key: Ed25519PublicKey,
+    *,
+    expected_payload_type: Optional[str] = None,
 ) -> bool:
     """Verify a signature envelope against a public key.
 
     Returns True iff the envelope is well-formed, names this public key
     (by keyid), and the signature matches the payload bytes.
 
-    Does NOT decode the payload or re-validate claim fields — those are the
-    caller's concern. The contract here is purely cryptographic.
+    Does NOT decode the payload or re-validate semantic fields — those are
+    the caller's concern. The contract here is purely cryptographic.
+
+    Parameters
+    ----------
+    expected_payload_type:
+        If given, the envelope's ``payloadType`` must match this exact
+        value. If ``None``, any payload type from the mareforma set is
+        accepted (claim, validator-enrollment, validation). Callers that
+        care about semantic boundaries (e.g. a claim verifier rejecting
+        an enrollment envelope) should pass the expected type.
     """
     if not isinstance(envelope, dict):
         raise InvalidEnvelopeError("envelope must be a dict")
-    if envelope.get("payloadType") != _PAYLOAD_TYPE:
+    declared = envelope.get("payloadType")
+    if expected_payload_type is not None:
+        if declared != expected_payload_type:
+            raise InvalidEnvelopeError(
+                f"unexpected payloadType: {declared!r} "
+                f"(expected {expected_payload_type!r})"
+            )
+    elif declared not in _KNOWN_PAYLOAD_TYPES:
         raise InvalidEnvelopeError(
-            f"unexpected payloadType: {envelope.get('payloadType')!r}"
+            f"unexpected payloadType: {declared!r}"
         )
     try:
         payload_bytes = base64.standard_b64decode(envelope["payload"])

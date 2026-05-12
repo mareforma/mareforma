@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS claims (
     signature_bundle TEXT,
     transparency_logged INTEGER NOT NULL DEFAULT 1
                         CHECK (transparency_logged IN (0, 1)),
+    validation_signature TEXT,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );
@@ -105,6 +106,15 @@ CREATE TABLE IF NOT EXISTS doi_cache (
     registry         TEXT,
     last_checked_at  TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS validators (
+    keyid                TEXT PRIMARY KEY,
+    pubkey_pem           TEXT NOT NULL,
+    identity             TEXT NOT NULL,
+    enrolled_at          TEXT NOT NULL,
+    enrolled_by_keyid    TEXT NOT NULL,
+    enrollment_envelope  TEXT NOT NULL
+);
 """
 
 
@@ -117,6 +127,7 @@ _CLAIM_COLUMNS = (
     "supports_json", "contradicts_json",
     "comparison_summary", "branch_id", "unresolved",
     "signature_bundle", "transparency_logged",
+    "validation_signature",
     "created_at", "updated_at",
 )
 _CLAIM_SELECT = ", ".join(_CLAIM_COLUMNS)
@@ -509,8 +520,19 @@ def validate_claim(
     claim_id: str,
     *,
     validated_by: str | None = None,
+    validation_signature: str | None = None,
 ) -> None:
     """Promote a REPLICATED claim to ESTABLISHED (human validation).
+
+    Parameters
+    ----------
+    validation_signature:
+        Optional JSON-encoded DSSE-style envelope binding (claim_id,
+        validator_keyid, validated_at). Produced by
+        :func:`mareforma.signing.sign_validation` and stored verbatim
+        on the row so the validation event itself is independently
+        verifiable (tampering with ``validated_by``/``validated_at``
+        post-hoc is detectable).
 
     Raises
     ------
@@ -538,10 +560,11 @@ def validate_claim(
             SET support_level = 'ESTABLISHED',
                 validated_by = ?,
                 validated_at = ?,
+                validation_signature = ?,
                 updated_at   = ?
             WHERE claim_id = ?
             """,
-            (validated_by, now, now, claim_id),
+            (validated_by, now, validation_signature, now, claim_id),
         )
         conn.commit()
     except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:

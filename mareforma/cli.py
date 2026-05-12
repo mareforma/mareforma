@@ -4,6 +4,8 @@ cli.py — Mareforma command-line interface.
 Commands
 --------
     mareforma bootstrap                        generate Ed25519 signing key
+    mareforma validator add --pubkey ...       enroll a new validator
+    mareforma validator list                   list enrolled validators
     mareforma claim add TEXT [options]         assert a scientific claim
     mareforma claim list [--status] [--source] list claims
     mareforma claim show ID                    show claim details
@@ -101,6 +103,107 @@ def bootstrap_cmd(key_path: str | None, overwrite: bool) -> None:
     _ok(f"Generated signing key at {path}")
     _info(f"Public key id: {keyid}")
     _info("Share the keyid with collaborators so they can verify your claims.")
+
+
+# ---------------------------------------------------------------------------
+# validator — manage the per-project validators table
+# ---------------------------------------------------------------------------
+
+@cli.group()
+def validator() -> None:
+    """Manage the per-project validators table (who may promote ESTABLISHED)."""
+
+
+@validator.command("add")
+@click.option(
+    "--pubkey", "pubkey_arg", required=True,
+    help="PEM-encoded public key. Pass a file path or paste the PEM text.",
+)
+@click.option(
+    "--identity", required=True,
+    help="Display label for the validator (email, lab name, etc.).",
+)
+def validator_add(pubkey_arg: str, identity: str) -> None:
+    """Enroll a new validator on the current project.
+
+    The currently loaded signing key (from ``~/.config/mareforma/key`` or
+    the path passed to ``mareforma.open(key_path=...)``) signs the
+    enrollment and becomes the parent of the new validator. The signer
+    must already be enrolled — typically because they were the first key
+    opened against this project's graph.db and auto-enrolled as the root.
+    """
+    import mareforma
+    from mareforma import signing as _signing
+    from mareforma import validators as _validators
+
+    pem_bytes: bytes
+    pubkey_path = Path(pubkey_arg)
+    if pubkey_path.exists():
+        pem_bytes = pubkey_path.read_bytes()
+    else:
+        pem_bytes = pubkey_arg.encode("utf-8")
+
+    try:
+        _signing.public_key_from_pem(pem_bytes)
+    except _signing.SigningError as exc:
+        _err(f"Invalid public key: {exc}")
+        sys.exit(1)
+
+    try:
+        with mareforma.open(_root()) as graph:
+            if graph._signer is None:
+                _err(
+                    "No signing key loaded. Run `mareforma bootstrap` first, "
+                    "or pass key_path explicitly via the library API."
+                )
+                sys.exit(1)
+            try:
+                row = _validators.enroll_validator(
+                    graph._conn, graph._signer, pem_bytes, identity=identity,
+                )
+            except _validators.ValidatorNotEnrolledError as exc:
+                _err(str(exc))
+                sys.exit(1)
+            except _validators.ValidatorAlreadyEnrolledError as exc:
+                _err(str(exc))
+                sys.exit(1)
+    except _signing.SigningError as exc:
+        _err(str(exc))
+        sys.exit(1)
+
+    _ok(f"Enrolled validator {row['identity']}")
+    _info(f"keyid:            {row['keyid']}")
+    _info(f"enrolled_by:      {row['enrolled_by_keyid']}")
+    _info(f"enrolled_at:      {row['enrolled_at']}")
+
+
+@validator.command("list")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Emit JSON to stdout.")
+def validator_list(as_json: bool) -> None:
+    """List enrolled validators for the current project."""
+    import mareforma
+    from mareforma import validators as _validators
+
+    with mareforma.open(_root()) as graph:
+        rows = _validators.list_validators(graph._conn)
+
+    if as_json:
+        click.echo(json.dumps(rows, indent=2))
+        return
+
+    if not rows:
+        _info("No validators enrolled. Run `mareforma bootstrap` and open "
+              "the project once with that key to enroll the root validator.")
+        return
+
+    for row in rows:
+        is_root = row["enrolled_by_keyid"] == row["keyid"]
+        marker = " (root)" if is_root else ""
+        click.echo(click.style(f"  {row['identity']}{marker}", bold=True))
+        click.echo(f"    keyid:       {row['keyid']}")
+        click.echo(f"    enrolled_by: {row['enrolled_by_keyid']}")
+        click.echo(f"    enrolled_at: {row['enrolled_at']}")
 
 
 # ---------------------------------------------------------------------------

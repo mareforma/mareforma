@@ -7,12 +7,14 @@ test_support_levels.py: make the known limitations explicit and visible.
 
 Scenarios covered
 -----------------
-  Trust laundering
-    - seed + 2 agents → REPLICATED → validate("anyone") → ESTABLISHED
-      Documents: the human gate is a string field, not an authenticated action.
+  validated_by is a cosmetic label
+    - The validator's authenticated identity is the keyid embedded in the
+      signed validation envelope; ``validated_by`` is a free-form display
+      string and ``validate()`` stores whatever the caller passes.
 
-  validated_by is unverified
-    - validate() accepts any validated_by string without authentication.
+  Local-key trust footprint
+    - Anyone with read access to the project's signing key can act as the
+      enrolled root validator. Mareforma is local-trust, not cross-org PKI.
 
   Self-supporting claim
     - A claim's supports[] can contain its own claim_id (via update_claim).
@@ -42,18 +44,30 @@ def open_graph(tmp_path: Path):
     return mareforma.open(tmp_path)
 
 
+def open_signed_graph(tmp_path: Path):
+    """Open a graph with a bootstrapped signing key (auto-enrolled as root)."""
+    from mareforma import signing as _signing
+    key_path = tmp_path / "mareforma.key"
+    _signing.bootstrap_key(key_path)
+    return mareforma.open(tmp_path, key_path=key_path)
+
+
 # ---------------------------------------------------------------------------
-# Trust laundering — ESTABLISHED via any validated_by string
+# validated_by is a cosmetic label (the keyid in validation_signature is truth)
 # ---------------------------------------------------------------------------
 
 class TestTrustLaundering:
-    def test_trust_laundering_reaches_established(self, tmp_path: Path) -> None:
-        """Three assert_claim calls + one validate call reach ESTABLISHED.
+    def test_validated_by_is_a_cosmetic_label(self, tmp_path: Path) -> None:
+        """validate() requires an enrolled validator (the loaded key auto-
+        enrolls as root on first open), but the ``validated_by`` parameter
+        is a free-form display string — the authenticated identity is the
+        keyid embedded in the signed validation envelope.
 
-        This documents that the 'human gate' is a string field: any caller
-        with file access can promote a claim to ESTABLISHED.
+        A caller can pass any label they like; downstream consumers MUST
+        check ``validation_signature``'s keyid against the validators
+        table if they want to know who actually validated.
         """
-        with open_graph(tmp_path) as g:
+        with open_signed_graph(tmp_path) as g:
             upstream = g.assert_claim("upstream reference", generated_by="seed")
             id_a = g.assert_claim(
                 "Drug X causes effect Y",
@@ -68,15 +82,19 @@ class TestTrustLaundering:
             claim = g.get_claim(id_a)
             assert claim["support_level"] == "REPLICATED"
 
+            # The label "attacker@example.org" is stored verbatim in
+            # validated_by, but the validator's real keyid lives in
+            # validation_signature.
             g.validate(id_a, validated_by="attacker@example.org")
 
             claim = g.get_claim(id_a)
             assert claim["support_level"] == "ESTABLISHED"
             assert claim["validated_by"] == "attacker@example.org"
+            assert claim["validation_signature"] is not None
 
     def test_validate_accepts_any_validated_by_string(self, tmp_path: Path) -> None:
-        """validate() stores whatever string is passed — no authentication check."""
-        with open_graph(tmp_path) as g:
+        """validate() stores whatever display string is passed."""
+        with open_signed_graph(tmp_path) as g:
             upstream = g.assert_claim("prior", generated_by="seed")
             rep_id = g.assert_claim("finding", supports=[upstream], generated_by="A")
             g.assert_claim("finding", supports=[upstream], generated_by="B")

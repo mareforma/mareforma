@@ -125,10 +125,24 @@ Return a single claim dict by ID, or `None` if not found.
 
 ### `graph.validate(claim_id, *, validated_by=None) → None`
 
-Promote a `REPLICATED` claim to `ESTABLISHED`. Human-only gate.
+Promote a `REPLICATED` claim to `ESTABLISHED`. Identity-gated.
+
+The graph must have a loaded signer (from `mareforma bootstrap` or
+`mareforma.open(key_path=...)`) AND that key must be enrolled in the
+project's `validators` table. The first key opened against a fresh
+graph auto-enrolls as the root validator. The validation event itself
+is signed: a DSSE-style envelope binding `(claim_id, validator_keyid,
+validated_at)` is persisted to the row's `validation_signature`
+column, so the promotion is independently verifiable.
+
+`validated_by` is a cosmetic display label. The authenticated identity
+is the keyid embedded in the signed envelope; consumers that care about
+who validated must check `validation_signature` against the validators
+table, not the `validated_by` string.
 
 **Raises:** `ClaimNotFoundError` if the claim does not exist.
-**Raises:** `ValueError` if `support_level` is not `REPLICATED`.
+**Raises:** `ValueError` if `support_level` is not `REPLICATED`, no
+signer is loaded, or the loaded signer is not an enrolled validator.
 
 ---
 
@@ -280,6 +294,51 @@ strands every claim signed by the prior key — verification breaks AND
 any claim not yet submitted to Rekor becomes permanently un-loggable.
 Safe rotation: back up the old key, run `refresh_unsigned()` to drain
 the pending queue, then rotate.
+
+---
+
+## Validators (who can promote ESTABLISHED)
+
+`graph.validate()` is the only path to `ESTABLISHED` and is identity-
+gated. Only keys enrolled in the project's per-graph `validators` table
+can validate. Mareforma is local-trust: the table is just the set of
+public keys the project's operator has chosen to trust, not a cross-org
+PKI.
+
+**Root of trust.** The first key opened against a fresh `graph.db`
+auto-enrolls as the root with a self-signed enrollment envelope. This
+is silent and zero-ceremony: run `mareforma bootstrap` once, open the
+project, and you are the root.
+
+**Adding more validators.** From the project root, with an already-
+enrolled key loaded:
+
+```bash
+mareforma validator add --pubkey ./alice.pub.pem --identity alice@lab.example
+mareforma validator list
+```
+
+Or programmatically:
+
+```python
+from mareforma import validators
+
+with mareforma.open() as graph:
+    validators.enroll_validator(
+        graph._conn, graph._signer,
+        alice_pub_pem_bytes, identity="alice@lab.example",
+    )
+```
+
+Each enrollment is signed by the parent validator (root for the first
+additions, then any already-enrolled key thereafter). The chain is
+verifiable: every `enrollment_envelope` matches the parent's pubkey,
+which matches a row in the same table, terminating at a self-signed
+root.
+
+**Removal is not supported in v0.3.0.** Validators are append-only,
+mirroring claim history. If a key is compromised, rotate the bootstrap
+key and re-bless validators under a fresh root.
 
 ---
 

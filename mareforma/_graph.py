@@ -57,6 +57,7 @@ class EpistemicGraph:
         root: Path,
         *,
         signer: object | None = None,
+        signer_identity: str | None = None,
         rekor_url: str | None = None,
         require_rekor: bool = False,
     ) -> None:
@@ -65,6 +66,19 @@ class EpistemicGraph:
         self._signer = signer
         self._rekor_url = rekor_url
         self._require_rekor = require_rekor
+
+        # Bootstrap-of-trust: the first key opened against a fresh project's
+        # graph.db auto-enrolls as the root validator. This is silent and
+        # idempotent — subsequent opens with the same key are no-ops. New
+        # validators (beyond the root) are added explicitly via the
+        # `mareforma validator add` CLI or validators.enroll_validator().
+        if signer is not None:
+            from mareforma import validators as _validators
+            _validators.auto_enroll_root(
+                self._conn,
+                signer,
+                identity=signer_identity or "root",
+            )
 
     # ------------------------------------------------------------------
     # Core API
@@ -194,21 +208,72 @@ class EpistemicGraph:
     def validate(self, claim_id: str, *, validated_by: str | None = None) -> None:
         """Promote a REPLICATED claim to ESTABLISHED (human validation).
 
+        Identity check
+        --------------
+        The graph must have a loaded signer (open with ``key_path=...`` or
+        run ``mareforma bootstrap`` once) AND that key must be enrolled in
+        the project's ``validators`` table. The first key opened on a
+        fresh graph auto-enrolls as the root; additional validators are
+        added via ``mareforma validator add`` (CLI) or
+        :func:`mareforma.validators.enroll_validator`.
+
+        The validation event is itself signed (binding claim_id +
+        validator_keyid + validated_at). The signed envelope is stored
+        on the row's ``validation_signature`` column so the promotion is
+        independently verifiable.
+
         Parameters
         ----------
         claim_id:
             UUID of the claim to promote.
         validated_by:
-            Identifier of the human reviewer (e.g. email). Stored on the claim.
+            Optional human-readable label stored alongside the keyid.
+            The validator's keyid is the real identity; this string is
+            for display only.
 
         Raises
         ------
         ClaimNotFoundError
             If claim_id does not exist.
         ValueError
-            If support_level is not 'REPLICATED'.
+            If support_level is not 'REPLICATED', or the graph has no
+            loaded signer, or the loaded signer is not enrolled as a
+            validator on this project.
         """
-        _db.validate_claim(self._conn, self._root, claim_id, validated_by=validated_by)
+        from mareforma import signing as _signing
+        from mareforma import validators as _validators
+
+        if self._signer is None:
+            raise ValueError(
+                "graph.validate() requires a loaded signing key. Run "
+                "`mareforma bootstrap` once, then open the graph with "
+                "the default XDG key path (or pass key_path=... explicitly)."
+            )
+        keyid = _signing.public_key_id(self._signer.public_key())
+        if not _validators.is_enrolled(self._conn, keyid):
+            raise ValueError(
+                f"Key {keyid[:12]}… is not an enrolled validator on this "
+                "project. The first key opened against a fresh graph auto-"
+                "enrolls as the root; additional validators must be enrolled "
+                "by an already-enrolled key via `mareforma validator add`."
+            )
+
+        now = _db._now()
+        envelope = _signing.sign_validation(
+            {
+                "claim_id": claim_id,
+                "validator_keyid": keyid,
+                "validated_at": now,
+            },
+            self._signer,
+        )
+        bundle_json = json.dumps(envelope, sort_keys=True, separators=(",", ":"))
+
+        _db.validate_claim(
+            self._conn, self._root, claim_id,
+            validated_by=validated_by,
+            validation_signature=bundle_json,
+        )
 
     def refresh_unresolved(self) -> dict[str, int]:
         """Retry DOI resolution for all claims currently marked unresolved.

@@ -47,6 +47,19 @@ def open_graph(tmp_path: Path):
     return mareforma.open(tmp_path)
 
 
+def open_signed_graph(tmp_path: Path):
+    """Open a graph with a bootstrapped signing key.
+
+    Required for tests that exercise ``graph.validate()`` — the loaded
+    key auto-enrolls as the root validator, which is the prerequisite
+    for promoting a claim to ESTABLISHED.
+    """
+    from mareforma import signing as _signing
+    key_path = tmp_path / "mareforma.key"
+    _signing.bootstrap_key(key_path)
+    return mareforma.open(tmp_path, key_path=key_path)
+
+
 # ---------------------------------------------------------------------------
 # REPLICATED — genuine independent convergence
 # ---------------------------------------------------------------------------
@@ -357,7 +370,7 @@ class TestDerivedChain:
 
 class TestEstablishedGate:
     def test_validate_on_preliminary_raises(self, tmp_path: Path) -> None:
-        with open_graph(tmp_path) as graph:
+        with open_signed_graph(tmp_path) as graph:
             claim_id = graph.assert_claim(
                 "single agent claim",
                 generated_by="agent/model-a/lab_a",
@@ -366,7 +379,7 @@ class TestEstablishedGate:
                 graph.validate(claim_id)
 
     def test_validate_on_replicated_succeeds(self, tmp_path: Path) -> None:
-        with open_graph(tmp_path) as graph:
+        with open_signed_graph(tmp_path) as graph:
             upstream = graph.assert_claim("upstream", generated_by="seed")
             id_a = graph.assert_claim(
                 "claim A", generated_by="agent/model-a/lab_a", supports=[upstream]
@@ -403,6 +416,6 @@ class TestEstablishedGate:
     def test_validate_on_nonexistent_claim_raises(
         self, tmp_path: Path
     ) -> None:
-        with open_graph(tmp_path) as graph:
+        with open_signed_graph(tmp_path) as graph:
             with pytest.raises(ClaimNotFoundError):
                 graph.validate("no-such-uuid")
