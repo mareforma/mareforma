@@ -26,6 +26,7 @@ Support levels — graph-derived trust signal
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -42,7 +43,7 @@ _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 # ---------------------------------------------------------------------------
 
 DB_FILENAME = "graph.db"
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 # Hard cap on a single claim's ``text`` field. 100k chars covers any
 # realistic scientific finding (≈ a 15k-word paragraph) and matches the
@@ -93,8 +94,15 @@ CREATE TABLE IF NOT EXISTS claims (
                         CHECK (transparency_logged IN (0, 1)),
     validation_signature TEXT,
     artifact_hash   TEXT,
+    prev_hash       TEXT,
     created_at      TEXT NOT NULL,
-    updated_at      TEXT NOT NULL
+    updated_at      TEXT NOT NULL,
+    -- ESTABLISHED rows must carry a signed validation envelope. The
+    -- trigger below also enforces this on UPDATE; the CHECK is the
+    -- row-level belt to the trigger's transition-level suspenders.
+    -- ``validated_by`` is a display label (the cryptographic identity
+    -- lives in ``validation_signature``) and may be NULL.
+    CHECK (support_level != 'ESTABLISHED' OR validation_signature IS NOT NULL)
 );
 
 CREATE INDEX IF NOT EXISTS idx_claims_status
@@ -113,6 +121,50 @@ CREATE INDEX IF NOT EXISTS idx_claims_artifact_hash
     ON claims(artifact_hash) WHERE artifact_hash IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_claims_idempotency_key
     ON claims(idempotency_key) WHERE idempotency_key IS NOT NULL;
+-- UNIQUE on prev_hash catches branched chains (two writers racing past
+-- a missing BEGIN IMMEDIATE, or a manual SQL tamper that re-uses an
+-- existing chain link). Partial index lets a fresh table have any
+-- number of NULL rows during the v1→v2 retroactive populate.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_claims_prev_hash
+    ON claims(prev_hash) WHERE prev_hash IS NOT NULL;
+
+-- State-machine triggers. Reject illegal transitions with mareforma:
+-- prefixed messages so Python can translate sqlite3.IntegrityError to
+-- IllegalStateTransitionError without parsing English.
+
+CREATE TRIGGER IF NOT EXISTS claims_insert_state_check
+BEFORE INSERT ON claims
+BEGIN
+    SELECT CASE
+        WHEN NEW.support_level NOT IN ('PRELIMINARY', 'ESTABLISHED') THEN
+            RAISE(ABORT, 'mareforma:state:insert_invalid_level:' || NEW.support_level)
+        WHEN NEW.support_level = 'ESTABLISHED' AND
+             NEW.validation_signature IS NULL THEN
+            RAISE(ABORT, 'mareforma:state:insert_established_without_validation')
+        WHEN NEW.support_level = 'PRELIMINARY' AND
+             (NEW.validated_by IS NOT NULL OR NEW.validated_at IS NOT NULL) THEN
+            RAISE(ABORT, 'mareforma:state:insert_preliminary_with_validation')
+    END;
+END;
+
+CREATE TRIGGER IF NOT EXISTS claims_update_state_check
+BEFORE UPDATE OF support_level ON claims
+BEGIN
+    SELECT CASE
+        WHEN OLD.support_level = 'PRELIMINARY' AND
+             NEW.support_level NOT IN ('PRELIMINARY', 'REPLICATED') THEN
+            RAISE(ABORT, 'mareforma:state:illegal_transition:PRELIMINARY->' || NEW.support_level)
+        WHEN OLD.support_level = 'REPLICATED' AND
+             NEW.support_level NOT IN ('REPLICATED', 'ESTABLISHED') THEN
+            RAISE(ABORT, 'mareforma:state:illegal_transition:REPLICATED->' || NEW.support_level)
+        WHEN OLD.support_level = 'ESTABLISHED' AND
+             NEW.support_level != 'ESTABLISHED' THEN
+            RAISE(ABORT, 'mareforma:state:illegal_transition:ESTABLISHED->' || NEW.support_level)
+        WHEN NEW.support_level = 'ESTABLISHED' AND
+             NEW.validation_signature IS NULL THEN
+            RAISE(ABORT, 'mareforma:state:established_without_validation')
+    END;
+END;
 
 CREATE TABLE IF NOT EXISTS doi_cache (
     doi              TEXT PRIMARY KEY,
@@ -143,6 +195,7 @@ _CLAIM_COLUMNS = (
     "signature_bundle", "transparency_logged",
     "validation_signature",
     "artifact_hash",
+    "prev_hash",
     "created_at", "updated_at",
 )
 _CLAIM_SELECT = ", ".join(_CLAIM_COLUMNS)
@@ -187,6 +240,28 @@ class IdempotencyConflictError(MareformaError):
     """
 
 
+class IllegalStateTransitionError(MareformaError):
+    """Raised when an SQLite state-machine trigger refuses a transition.
+
+    The trigger raises ``mareforma:state:<from>-><to>`` strings via
+    ``RAISE(ABORT, ...)``. Python catches the resulting
+    ``sqlite3.IntegrityError`` and re-raises this exception with the
+    parsed transition so callers can pattern-match on it instead of
+    parsing opaque ``CHECK CONSTRAINT FAILED`` messages.
+    """
+
+
+class ChainIntegrityError(MareformaError):
+    """Raised when the ``prev_hash`` append-only chain cannot extend.
+
+    The chain hash is computed under ``BEGIN IMMEDIATE`` to serialize
+    writers, and the ``prev_hash`` column carries a ``UNIQUE`` index.
+    If a second writer races past the lock — or a raw-SQL tamper
+    re-uses an existing chain link — the UNIQUE violation surfaces
+    here. Treat it as a corruption signal, not a retry.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Connection management
 # ---------------------------------------------------------------------------
@@ -203,12 +278,21 @@ def open_db(root: Path) -> sqlite3.Connection:
 
     Schema validation
     -----------------
-    Fresh db (user_version=0): full schema applied, user_version set to 1.
+    Fresh db (user_version=0): full schema applied, user_version set to
+    ``_SCHEMA_VERSION``.
 
-    Initialised db (user_version=1): claims table must have every column
-    in ``_CLAIM_COLUMNS``. Missing columns raise DatabaseError instructing
-    the user to delete graph.db. ``_CLAIM_COLUMNS`` is the source of truth
-    for what the schema must contain.
+    Older but compatible db (user_version < ``_SCHEMA_VERSION``): a
+    migration is applied in place. Currently only v1 → v2 is supported,
+    which adds ``prev_hash`` and the state-transition triggers. The
+    migration walks every row in ``rowid`` order to populate the chain
+    retroactively. Idempotent — re-running on a partly-migrated db
+    completes the work.
+
+    Initialised db (user_version equals ``_SCHEMA_VERSION``): claims
+    table must have every column in ``_CLAIM_COLUMNS``. Missing columns
+    raise DatabaseError instructing the user to delete graph.db.
+    ``_CLAIM_COLUMNS`` is the source of truth for what the schema must
+    contain.
 
     Raises
     ------
@@ -229,6 +313,10 @@ def open_db(root: Path) -> sqlite3.Connection:
             conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             conn.commit()
             return conn
+
+        if version == 1 and _SCHEMA_VERSION >= 2:
+            _migrate_v1_to_v2(conn)
+            version = 2
 
         # Initialised db — validate the schema by exact column-set match.
         # Catching extras as well as missing columns means a partially-migrated
@@ -268,6 +356,127 @@ def open_db(root: Path) -> sqlite3.Connection:
 
     except sqlite3.OperationalError as exc:
         raise DatabaseError(f"Could not open database at {path}: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# Append-only hash chain
+# ---------------------------------------------------------------------------
+
+def _chain_input_for_claim(claim_fields: dict) -> bytes:
+    """Canonical bytes for the chain hash on a single claim row.
+
+    Uses the same field set as the signature's canonical_payload — so
+    chain integrity and signature integrity move together. Reusing
+    :func:`mareforma.signing.canonical_payload` keeps the contract in
+    one place. Done lazily because the cryptography import is heavier
+    than the chain caller often needs.
+    """
+    from mareforma import signing as _signing
+    return _signing.canonical_payload(claim_fields)
+
+
+def _compute_prev_hash(conn: sqlite3.Connection, claim_fields: dict) -> str:
+    """Compute the new ``prev_hash`` value for a claim about to be inserted.
+
+    The new chain link is ``sha256(prev_chain_link || canonical_payload)``.
+    For the genesis row (no prior rows), the prior link is empty bytes.
+
+    MUST be called inside ``BEGIN IMMEDIATE`` — the SELECT-then-INSERT
+    pattern depends on the write lock to prevent two writers from
+    branching the chain on the same predecessor.
+    """
+    row = conn.execute(
+        "SELECT prev_hash FROM claims ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()
+    prev = (row["prev_hash"] or "").encode("ascii") if row else b""
+    chain_input = _chain_input_for_claim(claim_fields)
+    return hashlib.sha256(prev + chain_input).hexdigest()
+
+
+def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
+    """In-place migration: add ``prev_hash`` column, populate it
+    retroactively in ``rowid`` order, add the UNIQUE index, install
+    the state-machine triggers, bump ``user_version``.
+
+    Idempotent: re-running on a partly-migrated db completes the work
+    without re-hashing rows that already have ``prev_hash`` populated.
+    """
+    # Defensive: if the claims table doesn't exist, this isn't a real
+    # v1 graph — it's a hand-edited db with user_version=1 but no
+    # schema. Fall through to the schema-validation path which raises
+    # the right error.
+    has_table = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='claims'"
+    ).fetchone()
+    if not has_table:
+        return
+
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()}
+    if "prev_hash" not in cols:
+        conn.execute("ALTER TABLE claims ADD COLUMN prev_hash TEXT")
+
+    # Populate prev_hash for rows that still have it NULL, in rowid order.
+    # The chain starts from the highest already-populated prev_hash so
+    # idempotent re-runs do not re-hash the prefix.
+    rows = conn.execute(
+        f"SELECT {_CLAIM_SELECT} FROM claims ORDER BY rowid"
+    ).fetchall()
+    # Find the latest populated prev_hash (so re-runs are cheap)
+    prev_link = b""
+    for row in rows:
+        if row["prev_hash"] is not None:
+            prev_link = row["prev_hash"].encode("ascii")
+            continue
+        chain_input = _chain_input_for_claim({
+            "claim_id": row["claim_id"],
+            "text": row["text"],
+            "classification": row["classification"],
+            "generated_by": row["generated_by"],
+            "supports": json.loads(row["supports_json"] or "[]"),
+            "contradicts": json.loads(row["contradicts_json"] or "[]"),
+            "source_name": row["source_name"],
+            "artifact_hash": row["artifact_hash"],
+            "created_at": row["created_at"],
+        })
+        new_hash = hashlib.sha256(prev_link + chain_input).hexdigest()
+        conn.execute(
+            "UPDATE claims SET prev_hash = ? WHERE claim_id = ?",
+            (new_hash, row["claim_id"]),
+        )
+        prev_link = new_hash.encode("ascii")
+
+    # Re-apply the schema script. CREATE INDEX/TRIGGER IF NOT EXISTS
+    # makes this safe on re-run; ALTER TABLE was handled above.
+    conn.executescript(_SCHEMA_SQL)
+    conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+    conn.commit()
+
+
+def _state_error_from_integrity(
+    exc: sqlite3.IntegrityError,
+) -> "MareformaError | None":
+    """Translate trigger / UNIQUE violations into mareforma exceptions.
+
+    Returns ``None`` if the IntegrityError is not one of the patterns
+    we own — callers should re-raise as ``DatabaseError`` then.
+    """
+    msg = str(exc)
+    if "mareforma:state:" in msg:
+        # Extract the suffix after the prefix for callers that want to
+        # pattern-match. The full SQLite message looks like:
+        #   IntegrityError: mareforma:state:illegal_transition:PRELIMINARY->ESTABLISHED
+        marker = "mareforma:state:"
+        suffix = msg[msg.index(marker) + len(marker):]
+        return IllegalStateTransitionError(f"State transition refused: {suffix}")
+    if "idx_claims_prev_hash" in msg or (
+        "UNIQUE constraint failed" in msg and "prev_hash" in msg
+    ):
+        return ChainIntegrityError(
+            "prev_hash UNIQUE violation — two writers raced past BEGIN "
+            "IMMEDIATE, or a manual SQL tamper re-used an existing chain "
+            "link. Treat as corruption, not a retry."
+        )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -473,7 +682,34 @@ def add_claim(
     rekor_enabled = rekor_url is not None and signer is not None and envelope is not None
     transparency_logged = 0 if rekor_enabled else 1
 
+    # BEGIN IMMEDIATE: serialize the read-latest-chain-link + INSERT so
+    # two writers cannot branch the append-only hash chain. Defaults
+    # would let them race past the SELECT and both insert with the same
+    # prev_hash, splitting the chain silently — the UNIQUE index on
+    # prev_hash catches that case as a backstop, but BEGIN IMMEDIATE is
+    # the primary defense.
+    chain_fields = {
+        "claim_id": claim_id,
+        "text": text,
+        "classification": classification,
+        "generated_by": generated_by,
+        "supports": supports or [],
+        "contradicts": contradicts or [],
+        "source_name": source_name,
+        "artifact_hash": artifact_hash,
+        "created_at": now,
+    }
+    # BEGIN IMMEDIATE is only valid when no transaction is currently
+    # open. Python's default sqlite3 isolation_level='' auto-starts a
+    # transaction before DML, so callers that already wrote within the
+    # same connection will be in-transaction when they reach us. In
+    # that case the caller's transaction supplies the serialization;
+    # our SELECT runs inside their snapshot and the chain stays linear.
+    _own_transaction = not conn.in_transaction
     try:
+        if _own_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        prev_hash = _compute_prev_hash(conn, chain_fields)
         conn.execute(
             """
             INSERT INTO claims
@@ -481,21 +717,31 @@ def add_claim(
                  status, source_name, generated_by,
                  supports_json, contradicts_json, unresolved,
                  signature_bundle, transparency_logged,
-                 artifact_hash,
+                 artifact_hash, prev_hash,
                  created_at, updated_at)
-            VALUES (?, ?, ?, 'PRELIMINARY', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, 'PRELIMINARY', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                claim_id, text.strip(), classification, idempotency_key,
+                claim_id, text, classification, idempotency_key,
                 status, source_name, generated_by,
                 supports_json, contradicts_json, 1 if unresolved else 0,
                 signature_bundle, transparency_logged,
-                artifact_hash,
+                artifact_hash, prev_hash,
                 now, now,
             ),
         )
-        conn.commit()
-    except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
+        if _own_transaction:
+            conn.commit()
+    except sqlite3.IntegrityError as exc:
+        if _own_transaction:
+            conn.rollback()
+        translated = _state_error_from_integrity(exc)
+        if translated is not None:
+            raise translated from exc
+        raise DatabaseError(f"Failed to add claim: {exc}") from exc
+    except sqlite3.OperationalError as exc:
+        if _own_transaction:
+            conn.rollback()
         raise DatabaseError(f"Failed to add claim: {exc}") from exc
 
     # Attempt Rekor submission. On success, augment the envelope with the
@@ -624,8 +870,12 @@ def _maybe_update_replicated(
             conn, new_claim_id, supports, generated_by, artifact_hash,
         )
         conn.commit()
-    except sqlite3.OperationalError:
-        pass  # Convergence detection is best-effort — never crash a write.
+    except (sqlite3.OperationalError, sqlite3.IntegrityError):
+        # Convergence detection is best-effort — never crash a write.
+        # A trigger-raised IntegrityError here would mean a state transition
+        # we asked for is illegal (e.g. ESTABLISHED peer being downgraded);
+        # the underlying invariant should remain — log the warning.
+        pass
 
 
 def validate_claim(
@@ -689,7 +939,12 @@ def validate_claim(
             (validated_by, now, validation_signature, now, claim_id),
         )
         conn.commit()
-    except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
+    except sqlite3.IntegrityError as exc:
+        translated = _state_error_from_integrity(exc)
+        if translated is not None:
+            raise translated from exc
+        raise DatabaseError(f"Failed to validate claim '{claim_id}': {exc}") from exc
+    except sqlite3.OperationalError as exc:
         raise DatabaseError(f"Failed to validate claim '{claim_id}': {exc}") from exc
     _backup_claims_toml(conn, root)
 

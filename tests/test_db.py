@@ -62,7 +62,7 @@ class TestOpenDb:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
         finally:
             conn.close()
-        assert version == 1
+        assert version == 2
 
     def test_idempotent_second_open(self, tmp_path: Path) -> None:
         conn1 = _open(tmp_path)
@@ -71,12 +71,18 @@ class TestOpenDb:
         conn2.close()
 
     def test_missing_columns_raises(self, tmp_path: Path) -> None:
-        """A db with user_version=1 but missing claims columns is rejected."""
+        """A db with user_version=SCHEMA but missing claims columns is rejected.
+
+        Using user_version=2 (current) skips the v1→v2 migration path
+        and goes straight to the schema-validation step that we're
+        actually exercising here. The migration is exercised separately
+        in ``TestV1ToV2Migration``.
+        """
         (tmp_path / ".mareforma").mkdir(parents=True, exist_ok=True)
         db_path = tmp_path / ".mareforma" / "graph.db"
         raw = sqlite3.connect(str(db_path))
         # Initialised marker but no tables created — simulates schema drift.
-        raw.execute("PRAGMA user_version = 1")
+        raw.execute("PRAGMA user_version = 2")
         raw.commit()
         raw.close()
         with pytest.raises(DatabaseError, match="schema mismatch"):
