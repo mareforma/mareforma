@@ -136,10 +136,28 @@ def validator_add(pubkey_arg: str, identity: str) -> None:
     from mareforma import signing as _signing
     from mareforma import validators as _validators
 
+    # 64 KB is generous — Ed25519 PEM public keys are well under 1 KB.
+    # The cap prevents `--pubkey /var/log/syslog` (or any oversized
+    # readable file) from loading megabytes into RAM before PEM parsing
+    # rejects them.
+    _MAX_PEM_SIZE = 64 * 1024
+
     pem_bytes: bytes
     pubkey_path = Path(pubkey_arg)
     if pubkey_path.exists():
-        pem_bytes = pubkey_path.read_bytes()
+        try:
+            with pubkey_path.open("rb") as fh:
+                pem_bytes = fh.read(_MAX_PEM_SIZE + 1)
+        except OSError as exc:
+            _err(f"Could not read {pubkey_path}: {exc}")
+            sys.exit(1)
+        if len(pem_bytes) > _MAX_PEM_SIZE:
+            _err(
+                f"--pubkey file {pubkey_path} exceeds the "
+                f"{_MAX_PEM_SIZE}-byte limit; an Ed25519 PEM should be "
+                "well under 1 KB. Pass the actual public-key file."
+            )
+            sys.exit(1)
     else:
         pem_bytes = pubkey_arg.encode("utf-8")
 
@@ -504,7 +522,9 @@ def claim_update(claim_id, status, text, supports, contradicts):
 def claim_validate(claim_id, validated_by):
     """Promote a REPLICATED claim to ESTABLISHED (human validation).
 
-    This is the human gate — only REPLICATED claims can be promoted.
+    The currently loaded signing key (from ``~/.config/mareforma/key``)
+    must be enrolled as a validator on this project. The validation
+    event is signed and the signed envelope is persisted to the row.
 
     Examples:
 
@@ -512,15 +532,12 @@ def claim_validate(claim_id, validated_by):
 
         mareforma claim validate <ID> --validated-by reviewer@example.org
     """
-    from mareforma.db import open_db, validate_claim, DatabaseError, ClaimNotFoundError
+    import mareforma
+    from mareforma.db import DatabaseError, ClaimNotFoundError
 
-    root = _root()
     try:
-        conn = open_db(root)
-        try:
-            validate_claim(conn, root, claim_id, validated_by=validated_by)
-        finally:
-            conn.close()
+        with mareforma.open(_root()) as graph:
+            graph.validate(claim_id, validated_by=validated_by)
     except ClaimNotFoundError as exc:
         _err(str(exc))
         sys.exit(1)

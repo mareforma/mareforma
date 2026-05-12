@@ -72,13 +72,32 @@ class EpistemicGraph:
         # idempotent — subsequent opens with the same key are no-ops. New
         # validators (beyond the root) are added explicitly via the
         # `mareforma validator add` CLI or validators.enroll_validator().
+        #
+        # If a different key has already enrolled as root (the user
+        # opened the project with the wrong key, or two simultaneous
+        # bootstraps and this one lost the race), auto_enroll_root
+        # silently returns None and the loaded signer is NOT enrolled.
+        # Surface that immediately so the operator notices before any
+        # validate() call fails with a less obvious error.
         if signer is not None:
+            from mareforma import signing as _signing
             from mareforma import validators as _validators
             _validators.auto_enroll_root(
                 self._conn,
                 signer,
                 identity=signer_identity or "root",
             )
+            keyid = _signing.public_key_id(signer.public_key())
+            if not _validators.is_enrolled(self._conn, keyid):
+                import warnings as _warnings
+                _warnings.warn(
+                    f"Opened project with key {keyid[:12]}… but this key "
+                    "is not an enrolled validator (a different key holds "
+                    "the root). graph.validate() will refuse until this "
+                    "key is enrolled by an existing validator via "
+                    "`mareforma validator add`.",
+                    stacklevel=2,
+                )
 
     # ------------------------------------------------------------------
     # Core API
@@ -258,6 +277,10 @@ class EpistemicGraph:
                 "by an already-enrolled key via `mareforma validator add`."
             )
 
+        # CRITICAL: the timestamp signed into the envelope MUST equal the
+        # timestamp written to the row. Computing _now() twice (once here
+        # and again inside db.validate_claim) would diverge by microseconds
+        # and silently defeat the tamper-evidence claim.
         now = _db._now()
         envelope = _signing.sign_validation(
             {
@@ -273,7 +296,62 @@ class EpistemicGraph:
             self._conn, self._root, claim_id,
             validated_by=validated_by,
             validation_signature=bundle_json,
+            validated_at=now,
         )
+
+    def enroll_validator(
+        self,
+        pubkey_pem: bytes,
+        *,
+        identity: str,
+    ) -> dict:
+        """Enroll a new validator on this project, signed by the loaded key.
+
+        The graph's current signer (which must already be an enrolled
+        validator on this project) signs the new validator's enrollment
+        envelope and inserts a row. The new validator can then call
+        :meth:`validate` on this project's claims.
+
+        The new row is committed before this method returns. There is no
+        rollback path — append-only validator history mirrors the
+        append-only claim history.
+
+        Parameters
+        ----------
+        pubkey_pem:
+            PEM-encoded SubjectPublicKeyInfo bytes of the new validator's
+            Ed25519 public key.
+        identity:
+            Display label (email, lab name). Bound into the signed
+            enrollment envelope. Capped at 256 printable characters;
+            control characters are rejected.
+
+        Raises
+        ------
+        ValueError
+            If no signer is loaded.
+        ValidatorNotEnrolledError
+            If the current signer is not yet enrolled on this project.
+        ValidatorAlreadyEnrolledError
+            If the new public key is already in the validators table.
+        InvalidIdentityError
+            If ``identity`` is empty, too long, or contains control
+            characters.
+        """
+        from mareforma import validators as _validators
+        if self._signer is None:
+            raise ValueError(
+                "graph.enroll_validator requires a loaded signing key. "
+                "Run `mareforma bootstrap` once and reopen the graph."
+            )
+        return _validators.enroll_validator(
+            self._conn, self._signer, pubkey_pem, identity=identity,
+        )
+
+    def list_validators(self) -> list[dict]:
+        """Return all enrolled validators ordered by enrollment time."""
+        from mareforma import validators as _validators
+        return _validators.list_validators(self._conn)
 
     def refresh_unresolved(self) -> dict[str, int]:
         """Retry DOI resolution for all claims currently marked unresolved.

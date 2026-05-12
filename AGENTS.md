@@ -321,24 +321,38 @@ mareforma validator list
 Or programmatically:
 
 ```python
-from mareforma import validators
-
 with mareforma.open() as graph:
-    validators.enroll_validator(
-        graph._conn, graph._signer,
-        alice_pub_pem_bytes, identity="alice@lab.example",
-    )
+    alice_pem = open("./alice.pub.pem", "rb").read()
+    graph.enroll_validator(alice_pem, identity="alice@lab.example")
+    for row in graph.list_validators():
+        print(row["identity"], row["keyid"])
 ```
 
 Each enrollment is signed by the parent validator (root for the first
-additions, then any already-enrolled key thereafter). The chain is
-verifiable: every `enrollment_envelope` matches the parent's pubkey,
-which matches a row in the same table, terminating at a self-signed
-root.
+additions, then any already-enrolled key thereafter). On read,
+`graph.validate()` walks the chain back to a self-signed root and
+verifies every link's enrollment envelope against the parent's pubkey
+before accepting the validator — a row planted via direct sqlite
+INSERT with a fabricated parent does not pass.
+
+**Local-trust scope.** The chain anchors at a self-signed row inside
+the project's own `graph.db`. A verifier who trusts that file's
+integrity can verify; a verifier who suspects the file is tampered
+has no external anchor in v0.3.0 (no cross-org PKI, no notary
+endorsement). Mareforma is a local epistemic graph; this section
+gates *who can validate within the project*, not who can vouch for
+the project to the outside world.
 
 **Removal is not supported in v0.3.0.** Validators are append-only,
 mirroring claim history. If a key is compromised, rotate the bootstrap
 key and re-bless validators under a fresh root.
+
+**Auto-enrollment is irrevocable.** The first key opened against a
+fresh graph silently becomes the immutable root. A `UserWarning`
+fires on that first enrollment so an operator who opened the project
+with the wrong key has a chance to notice — verify the warning's
+keyid prefix against the one you intended before any further
+`validate()` calls.
 
 ---
 

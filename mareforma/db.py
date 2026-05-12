@@ -521,6 +521,7 @@ def validate_claim(
     *,
     validated_by: str | None = None,
     validation_signature: str | None = None,
+    validated_at: str | None = None,
 ) -> None:
     """Promote a REPLICATED claim to ESTABLISHED (human validation).
 
@@ -533,6 +534,13 @@ def validate_claim(
         on the row so the validation event itself is independently
         verifiable (tampering with ``validated_by``/``validated_at``
         post-hoc is detectable).
+    validated_at:
+        Optional ISO 8601 UTC timestamp to write to the row. When the
+        caller has already signed a validation envelope binding a
+        timestamp, the SAME timestamp must be threaded through here so
+        the envelope's ``validated_at`` matches the row's
+        ``validated_at`` byte-for-byte. If ``None``, a fresh timestamp
+        is generated — appropriate only for the legacy unsigned path.
 
     Raises
     ------
@@ -552,7 +560,7 @@ def validate_claim(
             f"Claim '{claim_id}' has support_level='{row['support_level']}'. "
             "Only REPLICATED claims can be promoted to ESTABLISHED."
         )
-    now = _now()
+    now = validated_at if validated_at is not None else _now()
     try:
         conn.execute(
             """

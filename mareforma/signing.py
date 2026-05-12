@@ -100,12 +100,6 @@ _PAYLOAD_TYPE = "application/vnd.mareforma.claim+json"
 _PAYLOAD_TYPE_VALIDATOR_ENROLLMENT = "application/vnd.mareforma.validator-enrollment+json"
 _PAYLOAD_TYPE_VALIDATION = "application/vnd.mareforma.validation+json"
 
-_KNOWN_PAYLOAD_TYPES = frozenset({
-    _PAYLOAD_TYPE,
-    _PAYLOAD_TYPE_VALIDATOR_ENROLLMENT,
-    _PAYLOAD_TYPE_VALIDATION,
-})
-
 # Fields included in the signed payload of a claim. Sorted at envelope build
 # time so the signature is order-stable across writers. Public so
 # db.update_claim can refuse mutations on these fields when the row already
@@ -586,24 +580,24 @@ def verify_envelope(
     Parameters
     ----------
     expected_payload_type:
-        If given, the envelope's ``payloadType`` must match this exact
-        value. If ``None``, any payload type from the mareforma set is
-        accepted (claim, validator-enrollment, validation). Callers that
-        care about semantic boundaries (e.g. a claim verifier rejecting
-        an enrollment envelope) should pass the expected type.
+        The envelope's ``payloadType`` must match this exact value.
+        Defaults to the claim payload type — the most common case —
+        so callers that omit the kwarg get type-safe behavior. Pass
+        :data:`_PAYLOAD_TYPE_VALIDATOR_ENROLLMENT` or
+        :data:`_PAYLOAD_TYPE_VALIDATION` explicitly when verifying
+        those envelopes. There is no "accept any type" mode by design:
+        cross-type acceptance lets an attacker pass a validation or
+        enrollment envelope through a verifier expecting a claim.
     """
     if not isinstance(envelope, dict):
         raise InvalidEnvelopeError("envelope must be a dict")
+    if expected_payload_type is None:
+        expected_payload_type = _PAYLOAD_TYPE
     declared = envelope.get("payloadType")
-    if expected_payload_type is not None:
-        if declared != expected_payload_type:
-            raise InvalidEnvelopeError(
-                f"unexpected payloadType: {declared!r} "
-                f"(expected {expected_payload_type!r})"
-            )
-    elif declared not in _KNOWN_PAYLOAD_TYPES:
+    if declared != expected_payload_type:
         raise InvalidEnvelopeError(
-            f"unexpected payloadType: {declared!r}"
+            f"unexpected payloadType: {declared!r} "
+            f"(expected {expected_payload_type!r})"
         )
     try:
         payload_bytes = base64.standard_b64decode(envelope["payload"])

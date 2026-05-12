@@ -228,6 +228,18 @@ class TestExport:
 # ---------------------------------------------------------------------------
 
 class TestClaimValidate:
+    def _ensure_xdg_key(self) -> None:
+        """Bootstrap the XDG signing key the CLI's validate path needs.
+
+        ``mareforma claim validate`` now routes through ``graph.validate()``
+        which requires an enrolled validator. Bootstrapping the default
+        XDG key auto-enrolls it as root on first project open.
+        """
+        from mareforma import signing as _signing
+        key_path = _signing.default_key_path()
+        if not key_path.exists():
+            _signing.bootstrap_key(key_path)
+
     def _make_replicated_claim_id(self) -> tuple[str, str]:
         """Return (prior_id, replicated_id) using the Python API in cwd."""
         import mareforma
@@ -240,6 +252,7 @@ class TestClaimValidate:
     def test_validate_success(self, tmp_path: Path) -> None:
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
+            self._ensure_xdg_key()
             _, rep_id = self._make_replicated_claim_id()
             result = runner.invoke(cli, ["claim", "validate", rep_id],
                                    catch_exceptions=False)
@@ -249,12 +262,14 @@ class TestClaimValidate:
     def test_validate_not_found_exits_1(self, tmp_path: Path) -> None:
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
+            self._ensure_xdg_key()
             result = runner.invoke(cli, ["claim", "validate", "nonexistent-id"])
         assert result.exit_code == 1
 
     def test_validate_preliminary_claim_exits_1(self, tmp_path: Path) -> None:
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
+            self._ensure_xdg_key()
             add = runner.invoke(cli, ["claim", "add", "only one agent"],
                                 catch_exceptions=False)
             claim_id = next(
@@ -269,6 +284,7 @@ class TestClaimValidate:
     def test_validate_with_validated_by(self, tmp_path: Path) -> None:
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
+            self._ensure_xdg_key()
             _, rep_id = self._make_replicated_claim_id()
             runner.invoke(
                 cli,
@@ -279,3 +295,5 @@ class TestClaimValidate:
                                    catch_exceptions=False)
         data = json.loads(result.output)
         assert data["validated_by"] == "reviewer@example.org"
+        # CLI now produces a signed envelope persisted to the row.
+        assert data["validation_signature"] is not None
