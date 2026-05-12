@@ -19,6 +19,8 @@ Covers:
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 from pathlib import Path
 
@@ -38,14 +40,98 @@ def _bootstrap_key(tmp_path: Path) -> Path:
     return key_path
 
 
-def _rekor_200_payload(uuid: str = "abc-uuid", log_index: int = 42) -> dict:
+def _rekor_response_for(
+    *,
+    payload_hash: str,
+    sig_b64: str,
+    uuid: str = "abc-uuid",
+    log_index: int = 42,
+    integrated_time: int = 1700000000,
+) -> dict:
+    """Build a realistic Rekor 201 body whose `body` field actually
+    records the submitted hash + signature.
+
+    submit_to_rekor now verifies the response — a generic mock without a
+    matching body fails the equality check.
+    """
+    record = {
+        "apiVersion": "0.0.1",
+        "kind": "hashedrekord",
+        "spec": {
+            "data": {"hash": {"algorithm": "sha256", "value": payload_hash}},
+            "signature": {
+                "content": sig_b64,
+                "publicKey": {"content": "<not-checked>"},
+            },
+        },
+    }
+    encoded = base64.standard_b64encode(
+        json.dumps(record, separators=(",", ":")).encode("utf-8"),
+    ).decode("ascii")
     return {
         uuid: {
-            "body": "<rekor body>",
-            "integratedTime": 1700000000,
+            "body": encoded,
+            "integratedTime": integrated_time,
             "logIndex": log_index,
         }
     }
+
+
+def _hash_and_sig(envelope: dict) -> tuple[str, str]:
+    """Extract (sha256 hex of payload, base64 sig) from an envelope."""
+    payload_bytes = base64.standard_b64decode(envelope["payload"])
+    return (
+        hashlib.sha256(payload_bytes).hexdigest(),
+        envelope["signatures"][0]["sig"],
+    )
+
+
+def _rekor_response_for_envelope(
+    envelope: dict,
+    *,
+    uuid: str = "abc-uuid",
+    log_index: int = 42,
+) -> dict:
+    payload_hash, sig_b64 = _hash_and_sig(envelope)
+    return _rekor_response_for(
+        payload_hash=payload_hash,
+        sig_b64=sig_b64,
+        uuid=uuid,
+        log_index=log_index,
+    )
+
+
+def _mirror_rekor(httpx_mock, *, uuid_prefix: str = "m") -> None:
+    """Register a reusable Rekor 201 callback that mirrors the inbound
+    submission's hash + signature back in the response body.
+
+    submit_to_rekor verifies that the returned entry actually records OUR
+    submission; this helper produces a body that satisfies that check for
+    any number of subsequent POSTs (auto-incrementing uuid + logIndex).
+    """
+    import httpx
+
+    counter = {"n": 0}
+
+    def callback(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        spec = body["spec"]
+        hash_value = spec["data"]["hash"]["value"]
+        sig_content = spec["signature"]["content"]
+        counter["n"] += 1
+        return httpx.Response(
+            201,
+            json=_rekor_response_for(
+                payload_hash=hash_value,
+                sig_b64=sig_content,
+                uuid=f"{uuid_prefix}-{counter['n']}",
+                log_index=counter["n"],
+            ),
+        )
+
+    httpx_mock.add_callback(
+        callback, method="POST", url=_TEST_REKOR_URL, is_reusable=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -68,9 +154,12 @@ class TestSubmitToRekor:
             },
             key,
         )
+        # submit_to_rekor verifies the response's encoded body records our
+        # hash + sig, so the mock must be built from this envelope.
         httpx_mock.add_response(
             method="POST", url=_TEST_REKOR_URL,
-            status_code=201, json=_rekor_200_payload("uuid-A", 7),
+            status_code=201,
+            json=_rekor_response_for_envelope(envelope, uuid="uuid-A", log_index=7),
         )
         logged, entry = _signing.submit_to_rekor(
             envelope, key.public_key(), rekor_url=_TEST_REKOR_URL,
@@ -145,10 +234,7 @@ class TestAssertClaimWithRekor:
     def test_rekor_success_attaches_log_entry_and_flips_flag(
         self, tmp_path: Path, httpx_mock,
     ) -> None:
-        httpx_mock.add_response(
-            method="POST", url=_TEST_REKOR_URL,
-            status_code=201, json=_rekor_200_payload("first-uuid", 1),
-        )
+        _mirror_rekor(httpx_mock, uuid_prefix="first")
         key_path = _bootstrap_key(tmp_path)
         with mareforma.open(
             tmp_path, key_path=key_path, rekor_url=_TEST_REKOR_URL,
@@ -158,7 +244,7 @@ class TestAssertClaimWithRekor:
 
         assert claim["transparency_logged"] == 1
         envelope = json.loads(claim["signature_bundle"])
-        assert envelope["rekor"]["uuid"] == "first-uuid"
+        assert envelope["rekor"]["uuid"] == "first-1"
         assert envelope["rekor"]["logIndex"] == 1
 
     def test_rekor_failure_persists_with_transparency_logged_false(
@@ -228,12 +314,7 @@ class TestReplicatedGating:
     def test_logged_claims_replicate_normally(
         self, tmp_path: Path, httpx_mock,
     ) -> None:
-        # Rekor responses for upstream + agent_a + agent_b inserts.
-        for i in range(3):
-            httpx_mock.add_response(
-                method="POST", url=_TEST_REKOR_URL,
-                status_code=201, json=_rekor_200_payload(f"u-{i}", i),
-            )
+        _mirror_rekor(httpx_mock)
         key_path = _bootstrap_key(tmp_path)
         with mareforma.open(
             tmp_path, key_path=key_path, rekor_url=_TEST_REKOR_URL,
@@ -277,15 +358,8 @@ class TestRefreshUnsigned:
             assert graph.get_claim(id_1)["transparency_logged"] == 0
             assert graph.get_claim(id_2)["transparency_logged"] == 0
 
-            # Two more Rekor calls, both succeed.
-            httpx_mock.add_response(
-                method="POST", url=_TEST_REKOR_URL,
-                status_code=201, json=_rekor_200_payload("u1", 1),
-            )
-            httpx_mock.add_response(
-                method="POST", url=_TEST_REKOR_URL,
-                status_code=201, json=_rekor_200_payload("u2", 2),
-            )
+            # Rekor recovers — register a reusable mirror callback.
+            _mirror_rekor(httpx_mock)
             result = graph.refresh_unsigned()
 
             assert result["checked"] == 2
@@ -317,12 +391,8 @@ class TestRefreshUnsigned:
             )
             assert graph.get_claim(id_a)["support_level"] == "PRELIMINARY"
 
-            # Three Rekor recoveries (upstream, A, B).
-            for i in range(3):
-                httpx_mock.add_response(
-                    method="POST", url=_TEST_REKOR_URL,
-                    status_code=201, json=_rekor_200_payload(f"late-{i}", i),
-                )
+            # Rekor recovers — register a reusable mirror callback.
+            _mirror_rekor(httpx_mock, uuid_prefix="late")
             result = graph.refresh_unsigned()
             assert result == {"checked": 3, "logged": 3, "still_unlogged": 0}
 

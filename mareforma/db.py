@@ -138,6 +138,18 @@ class ClaimNotFoundError(MareformaError):
     """Raised when a claim lookup finds no matching record."""
 
 
+class SignedClaimImmutableError(MareformaError):
+    """Raised when `update_claim` is asked to mutate a signed-surface field.
+
+    Once a claim has a signature attached, mutating any field that was part
+    of the signed payload (``text``, ``supports``, ``contradicts``,
+    ``classification``, ``generated_by``, ``source_name``) would invalidate
+    the signature without surfacing the change. To revise a signed claim,
+    retract the old one (``status='retracted'``) and assert a new one that
+    cites the old via ``contradicts=[<old_claim_id>]``.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Connection management
 # ---------------------------------------------------------------------------
@@ -401,11 +413,18 @@ def add_claim(
                 )
                 conn.commit()
                 transparency_logged = 1
-            except (sqlite3.OperationalError, sqlite3.IntegrityError):
+            except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
                 # Rekor succeeded but the local UPDATE failed. The row stays
                 # at transparency_logged=0; refresh_unsigned will re-submit
-                # to Rekor and overwrite the bundle then.
-                pass
+                # to Rekor and overwrite the bundle then. Warn loudly so
+                # operators see the inconsistency.
+                import warnings as _warnings
+                _warnings.warn(
+                    f"Claim {claim_id} was accepted by Rekor but the local "
+                    f"UPDATE failed ({exc}). transparency_logged remains 0; "
+                    "run EpistemicGraph.refresh_unsigned() to reconcile.",
+                    stacklevel=2,
+                )
         elif require_rekor:
             raise _signing.SigningError(
                 f"Rekor submission to {rekor_url} failed and require_rekor=True. "
@@ -566,10 +585,20 @@ def mark_claim_logged(
     single transaction so a crash between them cannot strand a claim at
     PRELIMINARY despite ``transparency_logged=1``.
 
+    Verification
+    ------------
+    Before writing, the supplied bundle is decoded and its payload's
+    ``claim_id`` is checked against the row's ``claim_id``. A buggy caller
+    that mixes up claim ids cannot silently write Alice's bundle onto
+    Bob's row.
+
     Raises
     ------
     ClaimNotFoundError
         If no claim with claim_id exists.
+    DatabaseError
+        If the supplied bundle is malformed or its payload's claim_id does
+        not match.
     """
     row = conn.execute(
         "SELECT supports_json, generated_by, unresolved "
@@ -578,6 +607,21 @@ def mark_claim_logged(
     ).fetchone()
     if row is None:
         raise ClaimNotFoundError(f"Claim '{claim_id}' not found.")
+
+    # Sanity-check that the supplied bundle actually belongs to this claim.
+    from mareforma import signing as _signing
+    try:
+        envelope = json.loads(new_signature_bundle)
+        payload = _signing.envelope_payload(envelope)
+    except (json.JSONDecodeError, _signing.InvalidEnvelopeError) as exc:
+        raise DatabaseError(
+            f"mark_claim_logged given malformed bundle for {claim_id}: {exc}"
+        ) from exc
+    if payload.get("claim_id") != claim_id:
+        raise DatabaseError(
+            f"mark_claim_logged bundle's payload.claim_id "
+            f"({payload.get('claim_id')!r}) does not match row {claim_id!r}."
+        )
 
     supports = json.loads(row["supports_json"] or "[]")
     generated_by = row["generated_by"]
@@ -672,16 +716,53 @@ def update_claim(
 ) -> None:
     """Update fields on an existing claim.
 
+    Signed claims are append-only across the signed surface. If the row
+    carries a non-NULL ``signature_bundle``, this call refuses to mutate
+    ``text`` / ``supports`` / ``contradicts`` — those fields are part of
+    the signed payload and editing them would silently invalidate the
+    signature while leaving ``transparency_logged=1`` and the Rekor entry
+    in place. ``status`` and ``comparison_summary`` remain editable since
+    they are not part of the signed payload.
+
+    To revise a signed claim, retract it (``status='retracted'``) and
+    assert a new one with ``contradicts=[<old_claim_id>]``.
+
     Raises
     ------
     ClaimNotFoundError
         If no claim with *claim_id* exists.
     ValueError
         If status is invalid.
+    SignedClaimImmutableError
+        If the claim is signed and the caller tries to mutate a signed-
+        surface field.
     """
     existing = get_claim(conn, claim_id)
     if existing is None:
         raise ClaimNotFoundError(f"Claim '{claim_id}' not found.")
+
+    # Refuse signed-surface mutations on signed claims. text/supports/
+    # contradicts are the only signed-surface fields currently exposed by
+    # update_claim's parameter list.
+    if existing.get("signature_bundle") is not None:
+        signed_field_changes: list[str] = []
+        if text is not None and text.strip() != existing.get("text"):
+            signed_field_changes.append("text")
+        if supports is not None:
+            old_supports = json.loads(existing.get("supports_json") or "[]")
+            if list(supports) != old_supports:
+                signed_field_changes.append("supports")
+        if contradicts is not None:
+            old_contradicts = json.loads(existing.get("contradicts_json") or "[]")
+            if list(contradicts) != old_contradicts:
+                signed_field_changes.append("contradicts")
+        if signed_field_changes:
+            raise SignedClaimImmutableError(
+                f"Claim '{claim_id}' is signed; refused to mutate "
+                f"{signed_field_changes!r}. To revise, retract this claim "
+                "(status='retracted') and assert a new one with "
+                "contradicts=[<this_id>]."
+            )
 
     new_status = existing["status"]
     new_text = existing["text"]

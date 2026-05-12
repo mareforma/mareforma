@@ -9,11 +9,29 @@ bundle format without schema changes.
 Key lifecycle
 -------------
 - One Ed25519 keypair per user. Private key at ``~/.config/mareforma/key``
-  (XDG-compliant, mode 0600). Public key derived on the fly.
-- ``mareforma bootstrap`` generates the key once at install time.
+  (XDG-compliant, mode 0600 — POSIX). On Windows, file-mode bits are mostly
+  advisory; mareforma issues a warning when loading a key on a non-POSIX
+  platform because the on-disk perm guarantees do not hold.
+- ``mareforma bootstrap`` generates the key once at install time, atomically
+  (``O_CREAT|O_EXCL``) so concurrent invocations cannot race to overwrite
+  each other.
 - The library never auto-creates a key. Missing key + ``require_signed=False``
   → claims are inserted with ``signature_bundle=NULL`` (unsigned).
 - Missing key + ``require_signed=True`` → :class:`KeyNotFoundError`.
+
+Timestamps
+----------
+The signed payload includes ``created_at`` (microsecond ISO 8601 UTC) so the
+signature binds an authorial timestamp. The Rekor entry then contributes an
+independent witnessed time (``integratedTime``). Downstream verifiers should
+treat ``created_at`` as the agent's claim about when the assertion was made
+and ``integratedTime`` as a third party's claim about when the log first
+observed it.
+
+Rekor submission is synchronous and blocks ``assert_claim`` for up to
+``_REKOR_TIMEOUT`` seconds. For batch workflows where this matters, run
+unsigned (no key) or signed-without-Rekor (``rekor_url=None``) and call
+``EpistemicGraph.refresh_unsigned()`` later.
 
 Envelope format
 ---------------
@@ -46,10 +64,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import json
 import os
+import warnings
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import httpx
 from cryptography.exceptions import InvalidSignature
@@ -67,12 +88,18 @@ _REKOR_USER_AGENT = (
     "mailto:hello@mareforma.com)"
 )
 
+# 64 KB: a Rekor entry should be under a few KB in practice. A malicious or
+# buggy server returning multi-MB JSON would otherwise land in graph.db and
+# then be re-encoded into claims.toml on every backup.
+_MAX_REKOR_RESPONSE_SIZE = 64 * 1024
+
 
 _PAYLOAD_TYPE = "application/vnd.mareforma.claim+json"
 
 # Fields included in the signed payload. Sorted at envelope build time so the
-# signature is order-stable across writers.
-_SIGNED_FIELDS = (
+# signature is order-stable across writers. Public so db.update_claim can
+# refuse mutations on these fields when the row already carries a signature.
+SIGNED_FIELDS = (
     "claim_id",
     "text",
     "classification",
@@ -108,6 +135,47 @@ class InvalidEnvelopeError(SigningError):
 # Key paths
 # ---------------------------------------------------------------------------
 
+def validate_rekor_url(url: str, *, allow_insecure: bool = False) -> None:
+    """Reject Rekor URLs that look like SSRF probes.
+
+    Enforces ``https://`` and rejects loopback / private / link-local IP
+    literals. DNS hostnames are accepted as-is; defending against a DNS
+    rebind that resolves to a private IP at connect-time would need
+    ahead-of-time resolution which is fragile — TLS at the registry host
+    is the actual authentication boundary.
+
+    Pass ``allow_insecure=True`` to skip both checks (only useful for
+    internal testing against a private Rekor instance on a non-public
+    address).
+
+    Raises
+    ------
+    SigningError
+        If the URL fails any check and ``allow_insecure`` is False.
+    """
+    if allow_insecure:
+        return
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise SigningError(
+            f"rekor_url must use https:// (got {parsed.scheme!r}). "
+            "Pass trust_insecure_rekor=True to bypass for private/test instances."
+        )
+    hostname = parsed.hostname
+    if hostname is None:
+        raise SigningError(f"rekor_url is missing a hostname: {url!r}")
+    try:
+        ip = ipaddress.ip_address(hostname)
+    except ValueError:
+        return  # DNS hostname; rely on TLS to authenticate the registry.
+    if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_multicast:
+        raise SigningError(
+            f"rekor_url resolves to a non-public address ({ip}). "
+            "Pass trust_insecure_rekor=True if this is intentional "
+            "(e.g. a private Rekor instance on an internal network)."
+        )
+
+
 def default_key_path() -> Path:
     """Return the XDG-compliant default path for the user's private key.
 
@@ -128,20 +196,55 @@ def generate_keypair() -> Ed25519PrivateKey:
     return Ed25519PrivateKey.generate()
 
 
-def save_private_key(key: Ed25519PrivateKey, path: Path) -> None:
+def save_private_key(
+    key: Ed25519PrivateKey,
+    path: Path,
+    *,
+    exclusive: bool = False,
+) -> None:
     """Write a private key to *path* as PEM with mode 0600.
 
-    Creates parent directories as needed. Overwrites any existing file
-    atomically (write-temp-then-rename) so a crash mid-write cannot leave
-    a truncated key on disk.
+    Creates parent directories as needed. The leaf parent directory is
+    chmodded to 0o700 on POSIX so its contents are not enumerable by
+    other local users; ``~/.config`` itself is left alone since it is
+    conventionally shared by many tools.
+
+    Parameters
+    ----------
+    exclusive:
+        If True, open *path* itself with ``O_CREAT|O_EXCL`` — the call
+        raises ``FileExistsError`` if *path* already exists. Use this for
+        first-time bootstrap to close the TOCTOU race between an
+        ``exists()`` check and the rename. If False (default), the write
+        uses an atomic tmp + rename so a crash mid-write cannot leave a
+        truncated key on disk; an existing key is silently replaced.
     """
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    leaf_dir = path.parent
+    leaf_dir.mkdir(parents=True, exist_ok=True)
+    if os.name == "posix":
+        try:
+            os.chmod(leaf_dir, 0o700)
+        except OSError:
+            pass  # Non-fatal; the file itself still gets 0o600.
+
     pem = key.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.PKCS8,
         encryption_algorithm=serialization.NoEncryption(),
     )
+
+    if exclusive:
+        # No tmp+rename: O_EXCL is the no-overwrite contract.
+        fd = os.open(
+            path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600,
+        )
+        try:
+            os.write(fd, pem)
+        finally:
+            os.close(fd)
+        return
+
     tmp = path.with_suffix(path.suffix + ".tmp")
     # Create with 0600 from the start so the key never exists with looser perms.
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -176,6 +279,16 @@ def load_private_key(path: Path) -> Ed25519PrivateKey:
                 f"Private key {path} has mode {oct(mode)}; must be 0600. "
                 f"Fix with: chmod 600 {path}"
             )
+    else:
+        # Windows / other non-POSIX: file-mode bits are largely advisory.
+        # Operators relying on filesystem perms for key confidentiality
+        # need ACL-based controls (NTFS ACEs); mareforma does not set them.
+        warnings.warn(
+            f"Loaded {path} on a non-POSIX platform ({os.name!r}). "
+            "File-mode perm check is skipped; key confidentiality depends "
+            "on filesystem ACLs, which mareforma does not configure.",
+            stacklevel=2,
+        )
     try:
         pem = path.read_bytes()
         key = serialization.load_pem_private_key(pem, password=None)
@@ -234,13 +347,14 @@ def public_key_from_pem(pem: bytes) -> Ed25519PublicKey:
 # Envelope build / verify
 # ---------------------------------------------------------------------------
 
-def _canonical_payload(claim_fields: dict[str, Any]) -> bytes:
+def canonical_payload(claim_fields: dict[str, Any]) -> bytes:
     """Canonicalise a claim into the bytes that get signed.
 
-    Only keys in ``_SIGNED_FIELDS`` are included. ``supports``/``contradicts``
+    Only keys in :data:`SIGNED_FIELDS` are included. ``supports``/``contradicts``
     default to ``[]``; ``source_name`` defaults to ``None``. Output is JSON
     with sorted keys and no whitespace — same input → same bytes → same
-    signature.
+    signature. Public so verifiers can independently re-derive the bytes
+    that should be signed.
     """
     payload = {
         "claim_id": claim_fields["claim_id"],
@@ -253,6 +367,11 @@ def _canonical_payload(claim_fields: dict[str, Any]) -> bytes:
         "created_at": claim_fields["created_at"],
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _canonical_payload(claim_fields: dict[str, Any]) -> bytes:
+    """Legacy private alias retained for internal callers; use canonical_payload."""
+    return canonical_payload(claim_fields)
 
 
 def sign_claim(
@@ -356,16 +475,25 @@ def submit_to_rekor(
     re-verifies the signature server-side and appends an immutable entry to
     the Merkle log, returning an inclusion proof.
 
+    The call is synchronous and blocks up to ``timeout`` seconds. Callers
+    that batch many claims should consider running unsigned or signed-
+    without-Rekor (``rekor_url=None``) and flushing with
+    ``EpistemicGraph.refresh_unsigned()`` rather than blocking each
+    ``assert_claim``.
+
     Returns
     -------
     (logged, log_entry)
-        ``logged`` is True iff Rekor returned 2xx and the response parsed.
-        ``log_entry`` carries the uuid + integratedTime + logIndex on
-        success, ``None`` on failure.
+        ``logged`` is True iff Rekor returned 2xx, the response body
+        decoded as JSON within the size cap, AND the body's encoded entry
+        verifies against our submission (same payload hash and same
+        signature). ``log_entry`` carries the uuid + integratedTime +
+        logIndex on success, ``None`` on failure.
 
     Failure modes
     -------------
-    Network errors, timeouts, non-2xx, and malformed responses all return
+    Network errors, timeouts, non-2xx, oversized responses, and Rekor
+    responses that fail body-matches-submission verification all return
     ``(False, None)`` — never raise. Caller persists the claim with
     ``transparency_logged=0`` and retries later via ``refresh_unsigned()``.
     """
@@ -376,6 +504,7 @@ def submit_to_rekor(
         return (False, None)
 
     pem = public_key_to_pem(public_key)
+    expected_hash = hashlib.sha256(payload_bytes).hexdigest()
     proposed_entry = {
         "apiVersion": "0.0.1",
         "kind": "hashedrekord",
@@ -383,7 +512,7 @@ def submit_to_rekor(
             "data": {
                 "hash": {
                     "algorithm": "sha256",
-                    "value": hashlib.sha256(payload_bytes).hexdigest(),
+                    "value": expected_hash,
                 },
             },
             "signature": {
@@ -409,6 +538,20 @@ def submit_to_rekor(
     if not (200 <= r.status_code < 300):
         return (False, None)
 
+    # Size cap: a hostile or buggy server must not be able to land a
+    # multi-MB JSON blob in graph.db and amplify it through every
+    # subsequent backup. Check the advertised Content-Length first, then
+    # the actually-received bytes.
+    content_length = r.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > _MAX_REKOR_RESPONSE_SIZE:
+                return (False, None)
+        except ValueError:
+            return (False, None)
+    if len(r.content) > _MAX_REKOR_RESPONSE_SIZE:
+        return (False, None)
+
     try:
         body = r.json()
     except ValueError:
@@ -417,19 +560,43 @@ def submit_to_rekor(
     # Rekor returns {<uuid>: {body, integratedTime, logIndex, ...}}.
     if not isinstance(body, dict) or not body:
         return (False, None)
+
     try:
         uuid_key = next(iter(body))
         entry = body[uuid_key]
-        return (
-            True,
-            {
-                "uuid": uuid_key,
-                "integratedTime": entry.get("integratedTime"),
-                "logIndex": entry.get("logIndex"),
-            },
-        )
     except (StopIteration, TypeError):
         return (False, None)
+
+    # Verify the returned entry actually records OUR submission. Without
+    # this, a hostile or buggy server can hand back any uuid/logIndex and
+    # mareforma would attach it to the bundle as proof of inclusion.
+    encoded_body = entry.get("body") if isinstance(entry, dict) else None
+    if not isinstance(encoded_body, str):
+        return (False, None)
+    try:
+        decoded = base64.standard_b64decode(encoded_body)
+        record = json.loads(decoded.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return (False, None)
+    try:
+        spec = record["spec"]
+        rec_hash = spec["data"]["hash"]["value"]
+        rec_sig = spec["signature"]["content"]
+    except (KeyError, TypeError):
+        return (False, None)
+    if rec_hash.lower() != expected_hash.lower():
+        return (False, None)
+    if rec_sig != sig_b64:
+        return (False, None)
+
+    return (
+        True,
+        {
+            "uuid": uuid_key,
+            "integratedTime": entry.get("integratedTime"),
+            "logIndex": entry.get("logIndex"),
+        },
+    )
 
 
 def attach_rekor_entry(
@@ -461,14 +628,24 @@ def bootstrap_key(
     Returns ``(path, public_key_id)``. Refuses to overwrite an existing key
     unless ``overwrite=True`` — accidental regeneration would orphan every
     claim ever signed with the prior key.
+
+    No-overwrite mode uses ``O_CREAT|O_EXCL`` so two concurrent bootstraps
+    cannot both pass the existence check and race-write conflicting keys.
+    The loser of the race raises :class:`SigningError`.
     """
     target = Path(path) if path is not None else default_key_path()
-    if target.exists() and not overwrite:
+    key = generate_keypair()
+
+    if overwrite:
+        save_private_key(key, target)
+        return target, public_key_id(key.public_key())
+
+    try:
+        save_private_key(key, target, exclusive=True)
+    except FileExistsError as exc:
         raise SigningError(
             f"Key already exists at {target}. Refuse to overwrite — every "
             "claim signed by the existing key would become unverifiable. "
             "Pass overwrite=True if this is intentional."
-        )
-    key = generate_keypair()
-    save_private_key(key, target)
+        ) from exc
     return target, public_key_id(key.public_key())

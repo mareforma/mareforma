@@ -29,12 +29,14 @@ Flow
 
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mareforma import db as _db
 from mareforma import doi_resolver as _doi
+from mareforma import signing as _signing
 
 if TYPE_CHECKING:
     import sqlite3
@@ -322,7 +324,6 @@ class EpistemicGraph:
             return {"checked": 0, "logged": 0, "still_unlogged": 0}
 
         import warnings
-        from mareforma import signing as _signing
 
         unlogged = _db.list_unlogged_claims(self._conn)
         logged_count = 0
@@ -346,6 +347,7 @@ class EpistemicGraph:
             }
 
         public_key = self._signer.public_key()
+        current_keyid = _signing.public_key_id(public_key)
 
         for claim in unlogged:
             cid = claim["claim_id"]
@@ -355,6 +357,66 @@ class EpistemicGraph:
                 warnings.warn(
                     f"Claim {cid} has a malformed signature_bundle; "
                     "skipping during refresh_unsigned.",
+                    stacklevel=2,
+                )
+                still_unlogged += 1
+                continue
+
+            # Key-rotation guard. If the user ran `mareforma bootstrap
+            # --overwrite` since the claim was signed, this graph's signer
+            # cannot re-submit on the old key's behalf. Rekor would reject
+            # the public-key vs signature mismatch every time; warn and
+            # skip so the operator notices instead of retrying forever.
+            try:
+                bundle_keyid = envelope["signatures"][0]["keyid"]
+            except (KeyError, IndexError, TypeError):
+                warnings.warn(
+                    f"Claim {cid} signature_bundle has no keyid; skipping.",
+                    stacklevel=2,
+                )
+                still_unlogged += 1
+                continue
+            if bundle_keyid != current_keyid:
+                warnings.warn(
+                    f"Claim {cid} was signed by keyid {bundle_keyid[:12]}… "
+                    f"but the current signer is {current_keyid[:12]}…. The "
+                    "old key must be restored to re-log this claim. Skipping.",
+                    stacklevel=2,
+                )
+                still_unlogged += 1
+                continue
+
+            # Drift guard. If the row was tampered after assert_claim, the
+            # envelope's signed payload no longer matches the live row.
+            # Submitting it to Rekor would create a permanent public record
+            # of a claim text that no longer exists locally. Compare the
+            # canonical re-derivation of the live row against the envelope
+            # payload bytes.
+            try:
+                payload_bytes = base64.standard_b64decode(envelope["payload"])
+            except (KeyError, TypeError, ValueError):
+                warnings.warn(
+                    f"Claim {cid} signature_bundle payload could not be "
+                    "decoded; skipping during refresh_unsigned.",
+                    stacklevel=2,
+                )
+                still_unlogged += 1
+                continue
+            live_payload = _signing.canonical_payload({
+                "claim_id": cid,
+                "text": claim["text"],
+                "classification": claim["classification"],
+                "generated_by": claim["generated_by"],
+                "supports": json.loads(claim.get("supports_json") or "[]"),
+                "contradicts": json.loads(claim.get("contradicts_json") or "[]"),
+                "source_name": claim.get("source_name"),
+                "created_at": claim["created_at"],
+            })
+            if live_payload != payload_bytes:
+                warnings.warn(
+                    f"Claim {cid} row drifted from its signed payload; "
+                    "refusing to log a stale signature to Rekor. "
+                    "Investigate the row vs signature_bundle mismatch.",
                     stacklevel=2,
                 )
                 still_unlogged += 1

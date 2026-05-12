@@ -17,6 +17,7 @@ def open(  # noqa: A001
     require_signed: bool = False,
     rekor_url: "str | None" = None,
     require_rekor: bool = False,
+    trust_insecure_rekor: bool = False,
 ) -> "EpistemicGraph":
     """Open the epistemic graph at *path* and return an EpistemicGraph.
 
@@ -51,6 +52,11 @@ def open(  # noqa: A001
         When True, ``rekor_url`` must be set and the initial submission must
         succeed; otherwise :class:`mareforma.signing.SigningError` is
         raised. Use for production-grade high-assurance flows.
+    trust_insecure_rekor:
+        Skip the SSRF-defense URL validation that otherwise rejects
+        non-https schemes and loopback / private / link-local IP literals.
+        Only use this when intentionally pointing at a private Rekor
+        instance on an internal network.
 
     Returns
     -------
@@ -96,6 +102,13 @@ def open(  # noqa: A001
             "require_rekor=True needs an explicit rekor_url. Pass "
             "mareforma.signing.PUBLIC_REKOR_URL or your private Rekor "
             "instance URL."
+        )
+
+    if rekor_url is not None:
+        # Fail fast: validate before anyone calls assert_claim. Internal
+        # Rekor instances on private networks need the explicit opt-in.
+        _signing.validate_rekor_url(
+            rekor_url, allow_insecure=trust_insecure_rekor,
         )
 
     return EpistemicGraph(

@@ -24,15 +24,16 @@ def _reset_doi_client():
 
 
 @pytest.fixture(autouse=True)
-def _isolate_xdg_config(tmp_path_factory, monkeypatch):
-    """Scope XDG_CONFIG_HOME to a per-session tmpdir so tests never observe
+def _isolate_xdg_config(tmp_path, monkeypatch):
+    """Scope XDG_CONFIG_HOME to a per-TEST tmpdir so tests never observe
     (or write to) the real user's ~/.config/mareforma/key.
 
-    Without this, ``mareforma.open(tmp_path)`` on a developer machine that
-    has run ``mareforma bootstrap`` would auto-sign every test claim with
-    the developer's key, while CI would not — flaky difference.
+    Function-scoped tmp_path (not session-scoped tmp_path_factory) so two
+    tests that both bootstrap the default key path don't collide on the
+    second run — bootstrap_key now uses O_CREAT|O_EXCL and would fail the
+    loser with a SigningError.
     """
-    sandbox = tmp_path_factory.mktemp("xdg")
+    sandbox = tmp_path / "xdg"
     monkeypatch.setenv("XDG_CONFIG_HOME", str(sandbox))
     yield
 
