@@ -16,12 +16,15 @@ fresh. Claims are backed up in `claims.toml`.
 - `EpistemicGraph.validate()` — human gate to ESTABLISHED
 - `mareforma claim validate` — CLI command to promote REPLICATED → ESTABLISHED; `--validated-by` optional
 - DOI resolution: every DOI in `supports[]`/`contradicts[]` is HEAD-checked against Crossref and DataCite at assert time. Unresolved DOIs mark the claim `unresolved=True` and block REPLICATED promotion. `EpistemicGraph.refresh_unresolved()` retries previously-failed resolutions.
-- `doi_cache` table: persistent cache of DOI resolution results to avoid repeated network calls.
+- DOI resolver hardening: DOI suffix URL-encoded before interpolation (prevents host injection via `#`/`@`); `follow_redirects=False` (registry must answer directly); pooled `httpx.Client` with `User-Agent` (Crossref polite-pool); HTTP 429 falls through to DataCite without caching as unresolved.
+- `doi_cache` table: persistent cache of DOI resolution results to avoid repeated network calls. TTLs: 30 days for resolved entries, 24 hours for unresolved (so retractions and registry blips self-correct).
 - `httpx` is now a required dependency (was `paper` extra)
 - `EpistemicGraph.get_tools()` — returns `[query_graph, assert_finding]` as plain Python callables; `generated_by` baked into closure; wraps in one line for any framework
 - `mareforma.schema()` — runtime introspection of valid values and state transitions
 - Claims schema v1: `classification`, `support_level`, `idempotency_key`, `validated_by`, `validated_at`, `branch_id`, `unresolved`; CHECK constraints on `classification`, `support_level`, `status`, `unresolved`
-- Schema validation: `open_db()` uses column-presence check (claims table must have every column in `_CLAIM_COLUMNS`). Replaces the version-number compare. Schema drift errors instruct the user to delete `graph.db`.
+- Schema validation: `open_db()` enforces an exact column-set match against `_CLAIM_COLUMNS`. Replaces the version-number compare. Missing **or unexpected** columns raise `DatabaseError` instructing the user to delete `graph.db`.
+- `mark_claim_resolved()` is atomic: the unresolved-flag clear and the REPLICATED re-evaluation run in the same SQLite transaction.
+- `update_claim()` only re-resolves DOIs when `supports`/`contradicts` actually change (diff-check against prior JSON).
 - REPLICATED auto-trigger: fires automatically when ≥2 claims share the same upstream in `supports[]` with different `generated_by`
 - Framework integrations: AGENTS.md table covering Anthropic SDK, OpenAI SDK, LangChain, LangGraph, CrewAI, AutoGen, LlamaIndex, PydanticAI, Smol Agents
 - Mintlify docs at `docs.mareforma.com`

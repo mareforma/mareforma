@@ -504,3 +504,53 @@ class TestDoiResolution:
 
             claim = graph.get_claim(claim_id)
             assert claim["unresolved"] == 0
+
+    def test_update_claim_re_resolves_dois(self, tmp_path, httpx_mock):
+        """update_claim must re-resolve DOIs when supports/contradicts change.
+
+        Otherwise a stale unresolved=0 flag could let a claim with a newly-added
+        fake DOI reach REPLICATED, or a claim could be pinned unresolved=1 after
+        its bad DOI is removed.
+        """
+        from mareforma.db import open_db, add_claim, update_claim, get_claim
+
+        # Resolved DOI on initial assert.
+        httpx_mock.add_response(
+            method="HEAD",
+            url=_CROSSREF.format(doi="10.1038/good"),
+            status_code=200,
+        )
+        # Fake DOI fails on both registries after update.
+        httpx_mock.add_response(
+            method="HEAD",
+            url=_CROSSREF.format(doi="10.9999/fake"),
+            status_code=404,
+        )
+        httpx_mock.add_response(
+            method="HEAD",
+            url=_DATACITE.format(doi="10.9999/fake"),
+            status_code=404,
+        )
+
+        conn = open_db(tmp_path)
+        try:
+            claim_id = add_claim(
+                conn, tmp_path, "initial finding",
+                supports=["10.1038/good"],
+            )
+            # _graph.py would mark unresolved correctly; here we resolve manually
+            # via update_claim to exercise that path.
+            from mareforma import doi_resolver as _doi
+            _doi.resolve_dois_with_cache(conn, ["10.1038/good"])
+            update_claim(conn, tmp_path, claim_id, supports=["10.1038/good"])
+            assert get_claim(conn, claim_id)["unresolved"] == 0
+
+            # Update to add a fake DOI → unresolved should flip to 1.
+            update_claim(conn, tmp_path, claim_id, supports=["10.1038/good", "10.9999/fake"])
+            assert get_claim(conn, claim_id)["unresolved"] == 1
+
+            # Remove the fake DOI → unresolved should clear back to 0.
+            update_claim(conn, tmp_path, claim_id, supports=["10.1038/good"])
+            assert get_claim(conn, claim_id)["unresolved"] == 0
+        finally:
+            conn.close()

@@ -82,6 +82,22 @@ class TestOpenDb:
         with pytest.raises(DatabaseError, match="schema mismatch"):
             open_db(tmp_path)
 
+    def test_extra_columns_raises(self, tmp_path: Path) -> None:
+        """A claims table with an unexpected extra column is rejected.
+
+        Hand-edited or partially-migrated schemas should fail loudly. A
+        permissive ``_CLAIM_COLUMNS ⊆ existing_cols`` check would let stale
+        columns drift forever — and code that does ``INSERT INTO claims``
+        without an explicit column list would silently misalign.
+        """
+        # Initialise normally, then sneak an extra column in.
+        conn = open_db(tmp_path)
+        conn.execute("ALTER TABLE claims ADD COLUMN sneaky_field TEXT")
+        conn.commit()
+        conn.close()
+        with pytest.raises(DatabaseError, match="unexpected"):
+            open_db(tmp_path)
+
 
 # ---------------------------------------------------------------------------
 # Claims CRUD

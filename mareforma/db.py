@@ -175,15 +175,25 @@ def open_db(root: Path) -> sqlite3.Connection:
             conn.commit()
             return conn
 
-        # Initialised db — validate the schema by column presence.
+        # Initialised db — validate the schema by exact column-set match.
+        # Catching extras as well as missing columns means a partially-migrated
+        # or hand-edited claims table fails loudly instead of silently passing
+        # through code that assumes _CLAIM_COLUMNS is exhaustive.
         existing_cols = {
             row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()
         }
-        missing = set(_CLAIM_COLUMNS) - existing_cols
-        if missing:
+        expected_cols = set(_CLAIM_COLUMNS)
+        if existing_cols != expected_cols:
+            missing = expected_cols - existing_cols
+            extra = existing_cols - expected_cols
+            parts: list[str] = []
+            if missing:
+                parts.append(f"missing: {sorted(missing)}")
+            if extra:
+                parts.append(f"unexpected: {sorted(extra)}")
             conn.close()
             raise DatabaseError(
-                f"graph.db schema mismatch — missing columns: {sorted(missing)}. "
+                f"graph.db schema mismatch ({'; '.join(parts)}). "
                 "Delete .mareforma/graph.db to start fresh — "
                 "your claims are backed up in claims.toml."
             )
@@ -312,6 +322,45 @@ def add_claim(
     return claim_id
 
 
+def _maybe_update_replicated_unlocked(
+    conn: sqlite3.Connection,
+    new_claim_id: str,
+    supports: list[str],
+    generated_by: str,
+) -> None:
+    """REPLICATED-detection SQL without a commit — caller controls the txn.
+
+    Used by ``mark_claim_resolved`` so the unresolved-flag clear and the
+    REPLICATED promotion land in the same SQLite transaction.
+    """
+    if not supports:
+        return
+    placeholders = ",".join("?" * len(supports))
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT c.claim_id, c.generated_by
+        FROM claims c, json_each(c.supports_json) j
+        WHERE j.value IN ({placeholders})
+          AND c.claim_id != ?
+          AND c.generated_by != ?
+          AND c.support_level != 'ESTABLISHED'
+          AND c.unresolved = 0
+        """,
+        (*supports, new_claim_id, generated_by),
+    ).fetchall()
+
+    if not rows:
+        return
+
+    peer_ids = [r["claim_id"] for r in rows] + [new_claim_id]
+    peer_placeholders = ",".join("?" * len(peer_ids))
+    conn.execute(
+        f"UPDATE claims SET support_level = 'REPLICATED', updated_at = ? "
+        f"WHERE claim_id IN ({peer_placeholders})",
+        (_now(), *peer_ids),
+    )
+
+
 def _maybe_update_replicated(
     conn: sqlite3.Connection,
     new_claim_id: str,
@@ -327,33 +376,8 @@ def _maybe_update_replicated(
     Called immediately after a successful INSERT in add_claim().
     Failures are swallowed — convergence detection must not crash writes.
     """
-    if not supports:
-        return
     try:
-        placeholders = ",".join("?" * len(supports))
-        rows = conn.execute(
-            f"""
-            SELECT DISTINCT c.claim_id, c.generated_by
-            FROM claims c, json_each(c.supports_json) j
-            WHERE j.value IN ({placeholders})
-              AND c.claim_id != ?
-              AND c.generated_by != ?
-              AND c.support_level != 'ESTABLISHED'
-              AND c.unresolved = 0
-            """,
-            (*supports, new_claim_id, generated_by),
-        ).fetchall()
-
-        if not rows:
-            return
-
-        peer_ids = [r["claim_id"] for r in rows] + [new_claim_id]
-        peer_placeholders = ",".join("?" * len(peer_ids))
-        conn.execute(
-            f"UPDATE claims SET support_level = 'REPLICATED', updated_at = ? "
-            f"WHERE claim_id IN ({peer_placeholders})",
-            (_now(), *peer_ids),
-        )
+        _maybe_update_replicated_unlocked(conn, new_claim_id, supports, generated_by)
         conn.commit()
     except sqlite3.OperationalError:
         pass  # Convergence detection is best-effort — never crash a write.
@@ -420,6 +444,11 @@ def mark_claim_resolved(
 ) -> None:
     """Clear the unresolved flag on a claim and re-check REPLICATED eligibility.
 
+    The flag-clear and the REPLICATED promotion happen in the same SQLite
+    transaction. A crash between them would otherwise leave the claim with
+    ``unresolved=0`` but stuck at PRELIMINARY, even though a sibling claim
+    is waiting on it for convergence.
+
     Raises
     ------
     ClaimNotFoundError
@@ -432,19 +461,22 @@ def mark_claim_resolved(
     if row is None:
         raise ClaimNotFoundError(f"Claim '{claim_id}' not found.")
 
+    supports = json.loads(row["supports_json"] or "[]")
+    generated_by = row["generated_by"]
     now = _now()
+
     try:
-        conn.execute(
-            "UPDATE claims SET unresolved = 0, updated_at = ? WHERE claim_id = ?",
-            (now, claim_id),
-        )
-        conn.commit()
+        # ``with conn`` opens a transaction and commits on exit; on exception
+        # it rolls back, leaving the claim in its prior unresolved=1 state.
+        with conn:
+            conn.execute(
+                "UPDATE claims SET unresolved = 0, updated_at = ? WHERE claim_id = ?",
+                (now, claim_id),
+            )
+            _maybe_update_replicated_unlocked(conn, claim_id, supports, generated_by)
     except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
         raise DatabaseError(f"Failed to mark claim resolved: {exc}") from exc
 
-    # Re-check REPLICATED eligibility now that the claim is resolved.
-    supports = json.loads(row["supports_json"] or "[]")
-    _maybe_update_replicated(conn, claim_id, supports, row["generated_by"])
     _backup_claims_toml(conn, root)
 
 
@@ -477,6 +509,7 @@ def update_claim(
     new_supports_json = existing.get("supports_json", "[]")
     new_contradicts_json = existing.get("contradicts_json", "[]")
     new_comparison_summary = existing.get("comparison_summary")
+    new_unresolved = int(existing.get("unresolved") or 0)
 
     if status is not None:
         validate_status(status)
@@ -492,18 +525,39 @@ def update_claim(
     if comparison_summary is not None:
         new_comparison_summary = comparison_summary
 
+    # Re-resolve DOIs only when supports/contradicts actually change. Stale
+    # `unresolved` flags would let a claim with a newly-added fake DOI reach
+    # REPLICATED, or pin a claim as unresolved after its bad DOI is removed.
+    # Diff-check against the prior JSON skips the hot path when callers pass
+    # identical lists (e.g. when only `text` or `status` is being edited).
+    old_supports_json = existing.get("supports_json") or "[]"
+    old_contradicts_json = existing.get("contradicts_json") or "[]"
+    supports_changed = supports is not None and new_supports_json != old_supports_json
+    contradicts_changed = (
+        contradicts is not None and new_contradicts_json != old_contradicts_json
+    )
+    if supports_changed or contradicts_changed:
+        from mareforma import doi_resolver as _doi
+        all_refs = json.loads(new_supports_json) + json.loads(new_contradicts_json)
+        dois = _doi.extract_dois(all_refs)
+        if dois:
+            results = _doi.resolve_dois_with_cache(conn, dois)
+            new_unresolved = 0 if all(results.values()) else 1
+        else:
+            new_unresolved = 0
+
     try:
         conn.execute(
             """
             UPDATE claims
             SET text = ?, status = ?, supports_json = ?, contradicts_json = ?,
-                comparison_summary = ?, updated_at = ?
+                comparison_summary = ?, unresolved = ?, updated_at = ?
             WHERE claim_id = ?
             """,
             (
                 new_text, new_status,
                 new_supports_json, new_contradicts_json,
-                new_comparison_summary, _now(), claim_id,
+                new_comparison_summary, new_unresolved, _now(), claim_id,
             ),
         )
         conn.commit()

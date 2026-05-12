@@ -8,14 +8,24 @@ public registries at assertion time. Unresolved DOIs mark the claim as
 Cache
 -----
 Results are persisted to the ``doi_cache`` table to avoid repeated network
-calls. Resolved DOIs cache permanently; unresolved entries can be re-checked
-via ``EpistemicGraph.refresh_unresolved()``.
+calls. Resolved DOIs are cached for 30 days; unresolved entries for 24 hours.
+Entries past their TTL are silently re-resolved. The TTL exists so that
+retractions and registry outages eventually self-correct without operator
+intervention.
+
+Network compliance
+------------------
+- All requests carry a User-Agent identifying the project (Crossref polite-pool).
+- Redirects are NOT followed: a DOI MUST resolve at the registry host itself.
+- The DOI is URL-encoded before interpolation: a suffix containing ``#`` or
+  ``@`` would otherwise let the caller redirect the resolver to another host.
+- HTTP 429 falls through as unresolved; the caller retries after TTL.
 
 Behavior
 --------
-- DOI format check (``10.\\d+/...``) before any network call.
+- DOI format check (``10.\\d+/...``) before any network call; whitespace stripped.
 - Try Crossref first, fall back to DataCite.
-- On any HTTP error or timeout, the DOI is treated as unresolved.
+- On any HTTP error, timeout, or non-2xx, the DOI is treated as unresolved.
 - Resolution is fail-closed at the claim level: any unresolved DOI in
   ``supports[]`` or ``contradicts[]`` sets ``claim.unresolved=True``.
 """
@@ -24,7 +34,8 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from datetime import datetime, timezone
+import urllib.parse
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 try:
@@ -41,19 +52,79 @@ _DATACITE_URL = "https://api.datacite.org/dois/{doi}"
 
 _DEFAULT_TIMEOUT = 5.0
 
+# Cache TTLs. Positive: a paper survives for years, but retractions do happen;
+# 30 days bounds the staleness. Negative: registry blips heal quickly, 24 h
+# lets a temporarily-unreachable DOI promote on its own.
+_TTL_RESOLVED = timedelta(days=30)
+_TTL_UNRESOLVED = timedelta(hours=24)
+
+_USER_AGENT = (
+    "mareforma/0.3.0 (+https://github.com/mareforma/mareforma; "
+    "mailto:hello@mareforma.com)"
+)
+
+
+_client: Optional["httpx.Client"] = None
+
+
+def _get_client() -> "httpx.Client":
+    """Return the module-level httpx.Client, lazily constructing it.
+
+    A single pooled client across the process amortises TCP+TLS setup across
+    many DOI resolutions. ``follow_redirects=False`` is enforced here so a
+    poisoned DOI cannot redirect the resolver off-registry.
+    """
+    global _client
+    if _client is None:
+        _client = httpx.Client(
+            headers={"User-Agent": _USER_AGENT},
+            timeout=_DEFAULT_TIMEOUT,
+            follow_redirects=False,
+        )
+    return _client
+
+
+def _reset_client_for_testing() -> None:
+    """Drop the cached client so a test fixture can install fresh mocks."""
+    global _client
+    if _client is not None:
+        try:
+            _client.close()
+        except Exception:  # noqa: BLE001
+            pass
+        _client = None
+
 
 def is_doi(s: str) -> bool:
     """Return True if string matches DOI format ``10.<registrant>/<suffix>``."""
-    return bool(_DOI_PATTERN.match(s))
+    return bool(_DOI_PATTERN.match(s.strip()))
 
 
 def extract_dois(values: list[str]) -> list[str]:
-    """Filter a list to only DOIs."""
-    return [v for v in values if is_doi(v)]
+    """Filter a list to only DOIs, stripping surrounding whitespace."""
+    return [v.strip() for v in values if is_doi(v)]
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return _utcnow().isoformat()
+
+
+def _encode_doi(doi: str) -> str:
+    """Percent-encode the DOI so the suffix cannot escape the URL path.
+
+    A DOI is ``<prefix>/<suffix>``. The suffix may contain almost any
+    Unicode codepoint; an unencoded ``#`` or ``?`` would terminate the URL
+    path and let a poisoned DOI redirect the resolver elsewhere. We encode
+    prefix and suffix separately and rejoin with a literal ``/``.
+    """
+    if "/" not in doi:
+        return urllib.parse.quote(doi, safe="")
+    prefix, _, suffix = doi.partition("/")
+    return f"{urllib.parse.quote(prefix, safe='')}/{urllib.parse.quote(suffix, safe='')}"
 
 
 def resolve_doi(
@@ -66,25 +137,43 @@ def resolve_doi(
     Returns
     -------
     (resolved, registry)
-        ``resolved`` is True if the DOI returned 200 from either registry.
-        ``registry`` is ``"crossref"`` or ``"datacite"`` on success, ``None``
-        on failure.
+        ``resolved`` is True iff the DOI returned 2xx from either registry
+        (no redirects followed). ``registry`` is ``"crossref"`` or
+        ``"datacite"`` on success, ``None`` on failure.
     """
     if not HAS_HTTPX:
         return (False, None)
 
-    for registry, url in [
-        ("crossref", _CROSSREF_URL.format(doi=doi)),
-        ("datacite", _DATACITE_URL.format(doi=doi)),
-    ]:
+    encoded = _encode_doi(doi.strip())
+    client = _get_client()
+
+    for registry, url_template in (
+        ("crossref", _CROSSREF_URL),
+        ("datacite", _DATACITE_URL),
+    ):
+        url = url_template.format(doi=encoded)
         try:
-            r = httpx.head(url, timeout=timeout, follow_redirects=True)
-            if r.status_code == 200:
-                return (True, registry)
-        except httpx.HTTPError:
+            r = client.head(url, timeout=timeout)
+        except Exception:  # noqa: BLE001 — network failures of any kind
+            continue
+        if 200 <= r.status_code < 300:
+            return (True, registry)
+        # 429 = rate-limited. Do not cache as unresolved; let the next
+        # refresh retry after the TTL expires.
+        if r.status_code == 429:
             continue
 
     return (False, None)
+
+
+def _is_fresh(last_checked_at: str, resolved: bool) -> bool:
+    """Return True if a cache entry is still within its TTL."""
+    try:
+        ts = datetime.fromisoformat(last_checked_at)
+    except (ValueError, TypeError):
+        return False
+    ttl = _TTL_RESOLVED if resolved else _TTL_UNRESOLVED
+    return (_utcnow() - ts) < ttl
 
 
 def resolve_dois_with_cache(
@@ -92,23 +181,34 @@ def resolve_dois_with_cache(
     dois: list[str],
     *,
     timeout: float = _DEFAULT_TIMEOUT,
+    force: bool = False,
 ) -> dict[str, bool]:
     """Resolve a list of DOIs using the ``doi_cache`` table.
 
     Returns a dict mapping each DOI to its resolved status. Cache hits
-    avoid network calls. Misses trigger a resolution and update the cache.
+    within TTL avoid network calls; expired entries or ``force=True``
+    re-resolve and overwrite the cache.
+
+    Parameters
+    ----------
+    force:
+        If True, ignore cache and re-resolve every DOI. Used by
+        ``refresh_unresolved()`` for explicit retry semantics.
 
     Best-effort: cache failures do not crash; resolution still proceeds.
     """
     results: dict[str, bool] = {}
     for doi in dois:
-        cached = conn.execute(
-            "SELECT resolved FROM doi_cache WHERE doi = ?",
-            (doi,),
-        ).fetchone()
-        if cached is not None:
-            results[doi] = bool(cached["resolved"])
-            continue
+        if not force:
+            cached = conn.execute(
+                "SELECT resolved, last_checked_at FROM doi_cache WHERE doi = ?",
+                (doi,),
+            ).fetchone()
+            if cached is not None and _is_fresh(
+                cached["last_checked_at"], bool(cached["resolved"])
+            ):
+                results[doi] = bool(cached["resolved"])
+                continue
 
         resolved, registry = resolve_doi(doi, timeout=timeout)
 
@@ -120,7 +220,7 @@ def resolve_dois_with_cache(
                 (doi, 1 if resolved else 0, registry, _utcnow_iso()),
             )
             conn.commit()
-        except sqlite3.OperationalError:
+        except (sqlite3.OperationalError, sqlite3.IntegrityError):
             pass  # Caching is best-effort.
 
         results[doi] = resolved
@@ -129,7 +229,12 @@ def resolve_dois_with_cache(
 
 
 def clear_unresolved_cache(conn: sqlite3.Connection) -> list[str]:
-    """Delete cache entries for unresolved DOIs. Returns the list cleared."""
+    """Delete cache entries for unresolved DOIs. Returns the list cleared.
+
+    Retained for callers that want explicit cache invalidation. The
+    ``refresh_unresolved()`` path no longer uses it (``force=True`` on
+    ``resolve_dois_with_cache`` is per-DOI and avoids the thundering herd).
+    """
     try:
         rows = conn.execute(
             "SELECT doi FROM doi_cache WHERE resolved = 0"

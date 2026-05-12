@@ -2,22 +2,27 @@
 tests/test_doi_resolver.py — DOI resolution and cache.
 
 Covers:
-  - is_doi format detection
-  - extract_dois filter
-  - resolve_doi: Crossref hit, DataCite fallback, both miss, timeout
-  - resolve_dois_with_cache: cache hit avoids network, cache miss populates
+  - is_doi format detection (with trailing whitespace tolerance)
+  - extract_dois filter (strips whitespace)
+  - resolve_doi: Crossref hit, DataCite fallback, both miss, timeout, 429,
+    URL-encoded suffix (no host injection), no redirect follow
+  - resolve_dois_with_cache: cache hit avoids network, cache miss populates,
+    TTL expiry forces re-resolution, force=True bypasses cache,
+    DataCite-fallback result is cached against its registry
   - clear_unresolved_cache: removes only resolved=0 entries
 """
 
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
 import pytest
 
 from mareforma.db import open_db
+from mareforma import doi_resolver
 from mareforma.doi_resolver import (
     clear_unresolved_cache,
     extract_dois,
@@ -56,6 +61,14 @@ class TestIsDoi:
             "upstream-X",
         ]
         assert extract_dois(mixed) == ["10.1038/foo", "10.1234/bar"]
+
+    def test_extract_dois_strips_surrounding_whitespace(self) -> None:
+        mixed = ["10.1038/foo ", "  10.1234/bar", "\t10.5061/baz\n"]
+        assert extract_dois(mixed) == ["10.1038/foo", "10.1234/bar", "10.5061/baz"]
+
+    def test_is_doi_tolerates_surrounding_whitespace(self) -> None:
+        assert is_doi(" 10.1038/foo ")
+        assert is_doi("\t10.1234/bar\n")
 
 
 # ---------------------------------------------------------------------------
@@ -170,3 +183,176 @@ class TestResolveDoisWithCache:
         }
         assert remaining == {"10.1038/ok"}
         conn.close()
+
+    def test_datacite_fallback_result_is_cached_against_registry(
+        self, tmp_path: Path, httpx_mock,
+    ) -> None:
+        """A Crossref-404 → DataCite-200 resolution must persist with registry='datacite'.
+
+        Without this regression: the cache write would lose the source-of-truth
+        signal, and a later trust audit could not tell where a DOI was verified.
+        """
+        conn = open_db(tmp_path)
+        httpx_mock.add_response(
+            method="HEAD",
+            url=CROSSREF.format(doi="10.5061/dryad.fallback"),
+            status_code=404,
+        )
+        httpx_mock.add_response(
+            method="HEAD",
+            url=DATACITE.format(doi="10.5061/dryad.fallback"),
+            status_code=200,
+        )
+
+        results = resolve_dois_with_cache(conn, ["10.5061/dryad.fallback"])
+        assert results == {"10.5061/dryad.fallback": True}
+
+        cached = conn.execute(
+            "SELECT resolved, registry FROM doi_cache WHERE doi = ?",
+            ("10.5061/dryad.fallback",),
+        ).fetchone()
+        assert cached["resolved"] == 1
+        assert cached["registry"] == "datacite"
+        conn.close()
+
+    def test_expired_negative_cache_entry_re_resolves(
+        self, tmp_path: Path, httpx_mock,
+    ) -> None:
+        """A 25-hour-old unresolved entry must be re-checked, not trusted."""
+        conn = open_db(tmp_path)
+        stale = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+        conn.execute(
+            "INSERT INTO doi_cache (doi, resolved, registry, last_checked_at) "
+            "VALUES (?, 0, NULL, ?)",
+            ("10.1038/stale-neg", stale),
+        )
+        conn.commit()
+
+        httpx_mock.add_response(
+            method="HEAD",
+            url=CROSSREF.format(doi="10.1038/stale-neg"),
+            status_code=200,
+        )
+        results = resolve_dois_with_cache(conn, ["10.1038/stale-neg"])
+        assert results == {"10.1038/stale-neg": True}
+
+        cached = conn.execute(
+            "SELECT resolved FROM doi_cache WHERE doi = ?", ("10.1038/stale-neg",),
+        ).fetchone()
+        assert cached["resolved"] == 1
+        conn.close()
+
+    def test_fresh_positive_cache_is_trusted_within_ttl(
+        self, tmp_path: Path, httpx_mock,
+    ) -> None:
+        """A 1-day-old resolved entry is well within the 30-day TTL."""
+        conn = open_db(tmp_path)
+        fresh = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        conn.execute(
+            "INSERT INTO doi_cache (doi, resolved, registry, last_checked_at) "
+            "VALUES (?, 1, 'crossref', ?)",
+            ("10.1038/fresh", fresh),
+        )
+        conn.commit()
+
+        # No httpx_mock registrations — a network call here would fail the test.
+        results = resolve_dois_with_cache(conn, ["10.1038/fresh"])
+        assert results == {"10.1038/fresh": True}
+        conn.close()
+
+    def test_force_bypasses_cache(self, tmp_path: Path, httpx_mock) -> None:
+        """``force=True`` must trigger a fresh HEAD even on a hot cache entry."""
+        conn = open_db(tmp_path)
+        fresh = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        conn.execute(
+            "INSERT INTO doi_cache (doi, resolved, registry, last_checked_at) "
+            "VALUES (?, 0, NULL, ?)",
+            ("10.1038/retry-me", fresh),
+        )
+        conn.commit()
+
+        httpx_mock.add_response(
+            method="HEAD",
+            url=CROSSREF.format(doi="10.1038/retry-me"),
+            status_code=200,
+        )
+        results = resolve_dois_with_cache(conn, ["10.1038/retry-me"], force=True)
+        assert results == {"10.1038/retry-me": True}
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Hardening: URL encoding, redirect-blocking, rate-limit handling
+# ---------------------------------------------------------------------------
+
+class TestResolveDoiHardening:
+    def test_doi_suffix_is_url_encoded(self, httpx_mock) -> None:
+        """A DOI suffix with ``#``/``@`` must be percent-encoded into the URL.
+
+        Without encoding, an attacker-controlled suffix like ``foo#@evil.com``
+        would let the resolver redirect off-registry. The mock matches only
+        the encoded URL — if the resolver issued the unencoded variant,
+        pytest-httpx would raise.
+        """
+        httpx_mock.add_response(
+            method="HEAD",
+            url="https://api.crossref.org/works/10.1234/foo%23bar%40evil.com",
+            status_code=200,
+        )
+        resolved, registry = resolve_doi("10.1234/foo#bar@evil.com")
+        assert resolved is True
+        assert registry == "crossref"
+
+    def test_429_does_not_count_as_resolved(self, httpx_mock) -> None:
+        """A Crossref 429 must fall through to DataCite, not be cached as resolved."""
+        httpx_mock.add_response(
+            method="HEAD",
+            url=CROSSREF.format(doi="10.1038/rate-limited"),
+            status_code=429,
+        )
+        httpx_mock.add_response(
+            method="HEAD",
+            url=DATACITE.format(doi="10.1038/rate-limited"),
+            status_code=200,
+        )
+        resolved, registry = resolve_doi("10.1038/rate-limited")
+        assert resolved is True
+        assert registry == "datacite"
+
+    def test_redirect_is_not_followed(self, httpx_mock) -> None:
+        """A registry 301 must NOT be followed; it counts as unresolved.
+
+        If the resolver followed redirects, a registry could (or be coerced to)
+        301 us to an arbitrary host whose 200 we would trust as authoritative.
+        """
+        httpx_mock.add_response(
+            method="HEAD",
+            url=CROSSREF.format(doi="10.1038/redirect"),
+            status_code=301,
+            headers={"Location": "https://attacker.example.com/"},
+        )
+        httpx_mock.add_response(
+            method="HEAD",
+            url=DATACITE.format(doi="10.1038/redirect"),
+            status_code=404,
+        )
+        resolved, registry = resolve_doi("10.1038/redirect")
+        assert resolved is False
+        assert registry is None
+
+    def test_request_carries_user_agent(self, httpx_mock) -> None:
+        """Crossref polite-pool: the request must identify itself.
+
+        We don't assert the exact UA string, only that one is present and
+        mentions mareforma.
+        """
+        httpx_mock.add_response(
+            method="HEAD",
+            url=CROSSREF.format(doi="10.1038/ua-check"),
+            status_code=200,
+        )
+        resolve_doi("10.1038/ua-check")
+        sent = httpx_mock.get_requests()
+        assert sent, "resolver did not issue an HTTP request"
+        ua = sent[0].headers.get("user-agent", "")
+        assert "mareforma" in ua.lower()

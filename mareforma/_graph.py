@@ -198,8 +198,19 @@ class EpistemicGraph:
         and ``contradicts[]``. If every DOI now resolves, the claim's
         unresolved flag is cleared and REPLICATED eligibility is re-evaluated.
 
-        Network calls bypass the doi_cache for entries that previously failed
-        (those cache rows are deleted before re-resolution).
+        Network behavior
+        ----------------
+        DOIs are deduped across all unresolved claims and resolved exactly
+        once per call, bypassing the cache (``force=True``). The cache is
+        then overwritten with the fresh result. Shared DOIs across many
+        claims therefore generate one HTTP request, not N — and the negative
+        cache is never wiped wholesale.
+
+        No-DOI claims
+        -------------
+        A claim flagged unresolved with no DOIs in supports/contradicts is
+        a stale-flag artefact. The flag is cleared and a warning is emitted
+        so the operator notices the data shape was unexpected.
 
         Returns
         -------
@@ -207,34 +218,51 @@ class EpistemicGraph:
             ``{"checked": N, "resolved": M, "still_unresolved": K}`` — counts
             of claims processed and outcomes.
         """
-        _doi.clear_unresolved_cache(self._conn)
+        import warnings
 
         unresolved_claims = _db.list_unresolved_claims(self._conn)
-        resolved = 0
-        still_unresolved = 0
 
+        # Pass 1: dedupe DOIs across all unresolved claims and resolve once.
+        claim_dois: dict[str, list[str]] = {}
+        all_dois: set[str] = set()
         for claim in unresolved_claims:
-            import json
             supports = json.loads(claim.get("supports_json") or "[]")
             contradicts = json.loads(claim.get("contradicts_json") or "[]")
             dois = _doi.extract_dois(supports + contradicts)
+            claim_dois[claim["claim_id"]] = dois
+            all_dois.update(dois)
 
+        results = (
+            _doi.resolve_dois_with_cache(self._conn, list(all_dois), force=True)
+            if all_dois
+            else {}
+        )
+
+        # Pass 2: decide per-claim using the shared results.
+        resolved_count = 0
+        still_unresolved = 0
+        for claim in unresolved_claims:
+            cid = claim["claim_id"]
+            dois = claim_dois[cid]
             if not dois:
-                # Claim has unresolved=True but no DOIs — clear the flag.
-                _db.mark_claim_resolved(self._conn, self._root, claim["claim_id"])
-                resolved += 1
+                warnings.warn(
+                    f"Claim {cid} was flagged unresolved but contains no DOIs "
+                    "in supports/contradicts. Clearing flag.",
+                    stacklevel=2,
+                )
+                _db.mark_claim_resolved(self._conn, self._root, cid)
+                resolved_count += 1
                 continue
 
-            results = _doi.resolve_dois_with_cache(self._conn, dois)
-            if all(results.values()):
-                _db.mark_claim_resolved(self._conn, self._root, claim["claim_id"])
-                resolved += 1
+            if all(results.get(d, False) for d in dois):
+                _db.mark_claim_resolved(self._conn, self._root, cid)
+                resolved_count += 1
             else:
                 still_unresolved += 1
 
         return {
             "checked": len(unresolved_claims),
-            "resolved": resolved,
+            "resolved": resolved_count,
             "still_unresolved": still_unresolved,
         }
 
