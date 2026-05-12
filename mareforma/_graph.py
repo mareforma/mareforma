@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mareforma import db as _db
+from mareforma import doi_resolver as _doi
 
 if TYPE_CHECKING:
     import sqlite3
@@ -94,7 +95,22 @@ class EpistemicGraph:
         ------
         ValueError
             If ``classification`` is not a valid value or ``text`` is empty.
+
+        Notes
+        -----
+        Any DOI in ``supports[]`` or ``contradicts[]`` is HEAD-checked against
+        Crossref and DataCite at assertion time. If any DOI fails to resolve,
+        the claim is stored with ``unresolved=True`` and is ineligible for
+        REPLICATED promotion. Call :meth:`refresh_unresolved` later to retry.
         """
+        # Resolve any DOIs in supports/contradicts. Strings that don't match
+        # DOI format are treated as claim_id references and pass through.
+        dois = _doi.extract_dois((supports or []) + (contradicts or []))
+        unresolved = False
+        if dois:
+            results = _doi.resolve_dois_with_cache(self._conn, dois)
+            unresolved = any(not r for r in results.values())
+
         return _db.add_claim(
             self._conn,
             self._root,
@@ -105,6 +121,7 @@ class EpistemicGraph:
             idempotency_key=idempotency_key,
             generated_by=generated_by or "agent",
             source_name=source_name,
+            unresolved=unresolved,
         )
 
     def query(
@@ -173,6 +190,53 @@ class EpistemicGraph:
             If support_level is not 'REPLICATED'.
         """
         _db.validate_claim(self._conn, self._root, claim_id, validated_by=validated_by)
+
+    def refresh_unresolved(self) -> dict[str, int]:
+        """Retry DOI resolution for all claims currently marked unresolved.
+
+        For each unresolved claim, re-checks every DOI in its ``supports[]``
+        and ``contradicts[]``. If every DOI now resolves, the claim's
+        unresolved flag is cleared and REPLICATED eligibility is re-evaluated.
+
+        Network calls bypass the doi_cache for entries that previously failed
+        (those cache rows are deleted before re-resolution).
+
+        Returns
+        -------
+        dict
+            ``{"checked": N, "resolved": M, "still_unresolved": K}`` — counts
+            of claims processed and outcomes.
+        """
+        _doi.clear_unresolved_cache(self._conn)
+
+        unresolved_claims = _db.list_unresolved_claims(self._conn)
+        resolved = 0
+        still_unresolved = 0
+
+        for claim in unresolved_claims:
+            import json
+            supports = json.loads(claim.get("supports_json") or "[]")
+            contradicts = json.loads(claim.get("contradicts_json") or "[]")
+            dois = _doi.extract_dois(supports + contradicts)
+
+            if not dois:
+                # Claim has unresolved=True but no DOIs — clear the flag.
+                _db.mark_claim_resolved(self._conn, self._root, claim["claim_id"])
+                resolved += 1
+                continue
+
+            results = _doi.resolve_dois_with_cache(self._conn, dois)
+            if all(results.values()):
+                _db.mark_claim_resolved(self._conn, self._root, claim["claim_id"])
+                resolved += 1
+            else:
+                still_unresolved += 1
+
+        return {
+            "checked": len(unresolved_claims),
+            "resolved": resolved,
+            "still_unresolved": still_unresolved,
+        }
 
     def get_tools(self, *, generated_by: str = "agent") -> list:
         """Return agent tool callables pre-bound to this graph.

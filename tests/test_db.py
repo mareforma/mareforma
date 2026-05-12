@@ -70,13 +70,16 @@ class TestOpenDb:
         conn2 = _open(tmp_path)
         conn2.close()
 
-    def test_wrong_schema_version_raises(self, tmp_path: Path) -> None:
+    def test_missing_columns_raises(self, tmp_path: Path) -> None:
+        """A db with user_version=1 but missing claims columns is rejected."""
         (tmp_path / ".mareforma").mkdir(parents=True, exist_ok=True)
         db_path = tmp_path / ".mareforma" / "graph.db"
         raw = sqlite3.connect(str(db_path))
-        raw.execute("PRAGMA user_version = 99")
+        # Initialised marker but no tables created — simulates schema drift.
+        raw.execute("PRAGMA user_version = 1")
+        raw.commit()
         raw.close()
-        with pytest.raises(DatabaseError, match="schema v"):
+        with pytest.raises(DatabaseError, match="schema mismatch"):
             open_db(tmp_path)
 
 

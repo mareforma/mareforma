@@ -23,6 +23,7 @@ dependencies = [
     "click>=8.1",
     "tomli-w>=1.0",
     "tomli>=2.0; python_version < '3.11'",
+    "httpx>=0.27",
 ]
 
 [project.urls]
@@ -35,15 +36,11 @@ Issues = "https://github.com/mareforma/mareforma/issues"
 git = [
     "gitpython>=3.1",
 ]
-paper = [
-    "httpx>=0.27",
-]
 dev = [
     "pytest>=7.4",
     "pytest-cov",
     "pytest-httpx>=0.30",
     "gitpython>=3.1",
-    "httpx>=0.27",
 ]
 docs = []
 

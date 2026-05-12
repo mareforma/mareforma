@@ -383,3 +383,124 @@ def test_get_tools_supports_none_is_valid(tmp_path):
         _, assert_finding = graph.get_tools()
         claim_id = assert_finding("Simple finding", supports=None)
     assert claim_id is not None
+
+
+# ---------------------------------------------------------------------------
+# DOI resolution (P0.4)
+# ---------------------------------------------------------------------------
+
+_CROSSREF = "https://api.crossref.org/works/{doi}"
+_DATACITE = "https://api.datacite.org/dois/{doi}"
+
+
+class TestDoiResolution:
+    def test_assert_with_resolved_doi_is_not_unresolved(self, tmp_path, httpx_mock):
+        httpx_mock.add_response(
+            method="HEAD",
+            url=_CROSSREF.format(doi="10.1038/real"),
+            status_code=200,
+        )
+        with mareforma.open(tmp_path) as graph:
+            claim_id = graph.assert_claim(
+                "Finding cites a real paper",
+                supports=["10.1038/real"],
+                generated_by="agent/a",
+            )
+            claim = graph.get_claim(claim_id)
+        assert claim["unresolved"] == 0
+
+    def test_assert_with_unresolved_doi_is_marked_unresolved(self, tmp_path, httpx_mock):
+        httpx_mock.add_response(
+            method="HEAD",
+            url=_CROSSREF.format(doi="10.9999/fake"),
+            status_code=404,
+        )
+        httpx_mock.add_response(
+            method="HEAD",
+            url=_DATACITE.format(doi="10.9999/fake"),
+            status_code=404,
+        )
+        with mareforma.open(tmp_path) as graph:
+            claim_id = graph.assert_claim(
+                "Finding cites a fake DOI",
+                supports=["10.9999/fake"],
+                generated_by="agent/a",
+            )
+            claim = graph.get_claim(claim_id)
+        assert claim["unresolved"] == 1
+
+    def test_unresolved_claim_does_not_trigger_replicated(self, tmp_path, httpx_mock):
+        # Both fork attempts cite a DOI that doesn't resolve.
+        httpx_mock.add_response(
+            method="HEAD",
+            url=_CROSSREF.format(doi="10.9999/missing"),
+            status_code=404,
+        )
+        httpx_mock.add_response(
+            method="HEAD",
+            url=_DATACITE.format(doi="10.9999/missing"),
+            status_code=404,
+        )
+        with mareforma.open(tmp_path) as graph:
+            id_a = graph.assert_claim(
+                "finding A",
+                supports=["10.9999/missing"],
+                generated_by="agent/a",
+            )
+            id_b = graph.assert_claim(
+                "finding B",
+                supports=["10.9999/missing"],
+                generated_by="agent/b",
+            )
+            claim_a = graph.get_claim(id_a)
+            claim_b = graph.get_claim(id_b)
+        # Both stay PRELIMINARY because unresolved=1 makes them ineligible.
+        assert claim_a["support_level"] == "PRELIMINARY"
+        assert claim_b["support_level"] == "PRELIMINARY"
+
+    def test_claim_id_supports_pass_through_no_network(self, tmp_path, httpx_mock):
+        # Bare claim_ids in supports[] should not trigger any DOI resolution
+        # (no httpx mocks registered — pytest-httpx fails if any HTTP call is made).
+        with mareforma.open(tmp_path) as graph:
+            prior = graph.assert_claim("upstream", generated_by="seed")
+            child = graph.assert_claim(
+                "downstream finding",
+                supports=[prior],
+                generated_by="agent/a",
+            )
+            claim = graph.get_claim(child)
+        assert claim["unresolved"] == 0
+
+    def test_refresh_unresolved_promotes_when_doi_now_resolves(self, tmp_path, httpx_mock):
+        # First attempt: DOI fails to resolve.
+        httpx_mock.add_response(
+            method="HEAD",
+            url=_CROSSREF.format(doi="10.1038/temp"),
+            status_code=503,
+        )
+        httpx_mock.add_response(
+            method="HEAD",
+            url=_DATACITE.format(doi="10.1038/temp"),
+            status_code=503,
+        )
+
+        with mareforma.open(tmp_path) as graph:
+            claim_id = graph.assert_claim(
+                "finding pending DOI",
+                supports=["10.1038/temp"],
+                generated_by="agent/a",
+            )
+            claim = graph.get_claim(claim_id)
+            assert claim["unresolved"] == 1
+
+            # Refresh: now Crossref returns 200.
+            httpx_mock.add_response(
+                method="HEAD",
+                url=_CROSSREF.format(doi="10.1038/temp"),
+                status_code=200,
+            )
+            result = graph.refresh_unresolved()
+            assert result == {"checked": 1, "resolved": 1, "still_unresolved": 0}
+
+            claim = graph.get_claim(claim_id)
+            assert claim["unresolved"] == 0

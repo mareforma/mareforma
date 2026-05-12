@@ -75,6 +75,8 @@ CREATE TABLE IF NOT EXISTS claims (
     contradicts_json TEXT NOT NULL DEFAULT '[]',
     comparison_summary TEXT,
     branch_id       TEXT NOT NULL DEFAULT 'main',
+    unresolved      INTEGER NOT NULL DEFAULT 0
+                        CHECK (unresolved IN (0, 1)),
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );
@@ -87,18 +89,29 @@ CREATE INDEX IF NOT EXISTS idx_claims_generated_by
     ON claims(generated_by);
 CREATE INDEX IF NOT EXISTS idx_claims_support_level
     ON claims(support_level);
+CREATE INDEX IF NOT EXISTS idx_claims_unresolved
+    ON claims(unresolved);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_claims_idempotency_key
     ON claims(idempotency_key) WHERE idempotency_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS doi_cache (
+    doi              TEXT PRIMARY KEY,
+    resolved         INTEGER NOT NULL CHECK (resolved IN (0, 1)),
+    registry         TEXT,
+    last_checked_at  TEXT NOT NULL
+);
 """
 
 
 # Explicit column list — avoids SELECT * coupling to schema changes.
+# Source of truth for the column-presence check in open_db().
 _CLAIM_COLUMNS = (
     "claim_id", "text", "classification", "support_level",
     "idempotency_key", "validated_by", "validated_at",
     "status", "source_name", "generated_by",
     "supports_json", "contradicts_json",
-    "comparison_summary", "branch_id", "created_at", "updated_at",
+    "comparison_summary", "branch_id", "unresolved",
+    "created_at", "updated_at",
 )
 _CLAIM_SELECT = ", ".join(_CLAIM_COLUMNS)
 
@@ -133,16 +146,19 @@ def open_db(root: Path) -> sqlite3.Connection:
     Returns an open sqlite3.Connection with row_factory set to
     sqlite3.Row for dict-like access.
 
-    Schema version
-    --------------
-    - version 0 : fresh db — full schema applied, user_version set to 1
-    - version 1 : ready to use
-    - any other : DatabaseError — delete graph.db to start fresh
+    Schema validation
+    -----------------
+    Fresh db (user_version=0): full schema applied, user_version set to 1.
+
+    Initialised db (user_version=1): claims table must have every column
+    in ``_CLAIM_COLUMNS``. Missing columns raise DatabaseError instructing
+    the user to delete graph.db. ``_CLAIM_COLUMNS`` is the source of truth
+    for what the schema must contain.
 
     Raises
     ------
     DatabaseError
-        On SQLite errors or unsupported schema version.
+        On SQLite errors or schema drift (missing columns).
     """
     path = _db_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -157,12 +173,17 @@ def open_db(root: Path) -> sqlite3.Connection:
             conn.executescript(_SCHEMA_SQL)
             conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             conn.commit()
-        elif version == _SCHEMA_VERSION:
-            pass  # Current version — ready to use.
-        else:
+            return conn
+
+        # Initialised db — validate the schema by column presence.
+        existing_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()
+        }
+        missing = set(_CLAIM_COLUMNS) - existing_cols
+        if missing:
             conn.close()
             raise DatabaseError(
-                f"graph.db schema v{version} is not compatible with mareforma v0.3.0. "
+                f"graph.db schema mismatch — missing columns: {sorted(missing)}. "
                 "Delete .mareforma/graph.db to start fresh — "
                 "your claims are backed up in claims.toml."
             )
@@ -201,6 +222,7 @@ def add_claim(
     generated_by: str = "agent",
     source_name: str | None = None,
     status: str = "open",
+    unresolved: bool = False,
 ) -> str:
     """Insert a new claim and return its claim_id.
 
@@ -225,6 +247,9 @@ def add_claim(
         Data source this claim derives from.
     status:
         Editorial status: 'open' | 'contested' | 'retracted'
+    unresolved:
+        True if any DOI in supports[]/contradicts[] failed to resolve.
+        Unresolved claims are ineligible for REPLICATED promotion.
 
     Raises
     ------
@@ -263,13 +288,15 @@ def add_claim(
             INSERT INTO claims
                 (claim_id, text, classification, support_level, idempotency_key,
                  status, source_name, generated_by,
-                 supports_json, contradicts_json, created_at, updated_at)
-            VALUES (?, ?, ?, 'PRELIMINARY', ?, ?, ?, ?, ?, ?, ?, ?)
+                 supports_json, contradicts_json, unresolved,
+                 created_at, updated_at)
+            VALUES (?, ?, ?, 'PRELIMINARY', ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 claim_id, text.strip(), classification, idempotency_key,
                 status, source_name, generated_by,
-                supports_json, contradicts_json, now, now,
+                supports_json, contradicts_json, 1 if unresolved else 0,
+                now, now,
             ),
         )
         conn.commit()
@@ -277,7 +304,9 @@ def add_claim(
         raise DatabaseError(f"Failed to add claim: {exc}") from exc
 
     # Check whether this claim triggers REPLICATED status on shared upstreams.
-    _maybe_update_replicated(conn, claim_id, supports or [], generated_by)
+    # Unresolved claims are ineligible — promotion would anchor on unverified DOIs.
+    if not unresolved:
+        _maybe_update_replicated(conn, claim_id, supports or [], generated_by)
 
     _backup_claims_toml(conn, root)
     return claim_id
@@ -310,6 +339,7 @@ def _maybe_update_replicated(
               AND c.claim_id != ?
               AND c.generated_by != ?
               AND c.support_level != 'ESTABLISHED'
+              AND c.unresolved = 0
             """,
             (*supports, new_claim_id, generated_by),
         ).fetchall()
@@ -372,6 +402,49 @@ def validate_claim(
         conn.commit()
     except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
         raise DatabaseError(f"Failed to validate claim '{claim_id}': {exc}") from exc
+    _backup_claims_toml(conn, root)
+
+
+def list_unresolved_claims(conn: sqlite3.Connection) -> list[dict]:
+    """Return all claims currently marked unresolved=True."""
+    rows = conn.execute(
+        f"SELECT {_CLAIM_SELECT} FROM claims WHERE unresolved = 1 ORDER BY created_at"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_claim_resolved(
+    conn: sqlite3.Connection,
+    root: Path,
+    claim_id: str,
+) -> None:
+    """Clear the unresolved flag on a claim and re-check REPLICATED eligibility.
+
+    Raises
+    ------
+    ClaimNotFoundError
+        If no claim with claim_id exists.
+    """
+    row = conn.execute(
+        "SELECT supports_json, generated_by FROM claims WHERE claim_id = ?",
+        (claim_id,),
+    ).fetchone()
+    if row is None:
+        raise ClaimNotFoundError(f"Claim '{claim_id}' not found.")
+
+    now = _now()
+    try:
+        conn.execute(
+            "UPDATE claims SET unresolved = 0, updated_at = ? WHERE claim_id = ?",
+            (now, claim_id),
+        )
+        conn.commit()
+    except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
+        raise DatabaseError(f"Failed to mark claim resolved: {exc}") from exc
+
+    # Re-check REPLICATED eligibility now that the claim is resolved.
+    supports = json.loads(row["supports_json"] or "[]")
+    _maybe_update_replicated(conn, claim_id, supports, row["generated_by"])
     _backup_claims_toml(conn, root)
 
 
@@ -638,6 +711,8 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
                 entry["validated_by"] = c["validated_by"]
             if c.get("validated_at"):
                 entry["validated_at"] = c["validated_at"]
+            if c.get("unresolved"):
+                entry["unresolved"] = True
             data["claims"][c["claim_id"]] = entry
 
         out = root / "claims.toml"

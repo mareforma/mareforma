@@ -15,9 +15,13 @@ fresh. Claims are backed up in `claims.toml`.
 - `EpistemicGraph.get_claim()` — fetch a single claim by ID
 - `EpistemicGraph.validate()` — human gate to ESTABLISHED
 - `mareforma claim validate` — CLI command to promote REPLICATED → ESTABLISHED; `--validated-by` optional
+- DOI resolution: every DOI in `supports[]`/`contradicts[]` is HEAD-checked against Crossref and DataCite at assert time. Unresolved DOIs mark the claim `unresolved=True` and block REPLICATED promotion. `EpistemicGraph.refresh_unresolved()` retries previously-failed resolutions.
+- `doi_cache` table: persistent cache of DOI resolution results to avoid repeated network calls.
+- `httpx` is now a required dependency (was `paper` extra)
 - `EpistemicGraph.get_tools()` — returns `[query_graph, assert_finding]` as plain Python callables; `generated_by` baked into closure; wraps in one line for any framework
 - `mareforma.schema()` — runtime introspection of valid values and state transitions
-- Claims schema v1: `classification`, `support_level`, `idempotency_key`, `validated_by`, `validated_at`, `branch_id`; CHECK constraints on `classification`, `support_level`, `status`
+- Claims schema v1: `classification`, `support_level`, `idempotency_key`, `validated_by`, `validated_at`, `branch_id`, `unresolved`; CHECK constraints on `classification`, `support_level`, `status`, `unresolved`
+- Schema validation: `open_db()` uses column-presence check (claims table must have every column in `_CLAIM_COLUMNS`). Replaces the version-number compare. Schema drift errors instruct the user to delete `graph.db`.
 - REPLICATED auto-trigger: fires automatically when ≥2 claims share the same upstream in `supports[]` with different `generated_by`
 - Framework integrations: AGENTS.md table covering Anthropic SDK, OpenAI SDK, LangChain, LangGraph, CrewAI, AutoGen, LlamaIndex, PydanticAI, Smol Agents
 - Mintlify docs at `docs.mareforma.com`
