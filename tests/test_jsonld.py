@@ -23,8 +23,18 @@ class TestContextAndStructure:
         assert "@context" in doc
         ctx = doc["@context"]
         assert "schema" in ctx
-        assert "prov" in ctx
         assert "mare" in ctx
+        # PROV-O references removed in v0.3.0 P1.8: the prior export
+        # name-dropped prov: without populating the full PROV graph.
+        # Honest scoping — the export is mareforma-native, not PROV-O.
+        assert "prov" not in ctx
+
+    def test_export_media_type(self, tmp_path: Path) -> None:
+        from mareforma.exporters.jsonld import EXPORT_MEDIA_TYPE
+        doc = JSONLDExporter(tmp_path).export()
+        assert doc["@type"] == "mare:Graph"
+        assert doc["mare:mediaType"] == EXPORT_MEDIA_TYPE
+        assert EXPORT_MEDIA_TYPE == "application/x-mareforma-graph+json"
 
     def test_context_has_claim_vocabulary(self, tmp_path: Path) -> None:
         doc = JSONLDExporter(tmp_path).export()
@@ -76,7 +86,10 @@ class TestClaimNodes:
         node = next(n for n in doc["@graph"] if n.get("@type") == "mare:Claim")
         assert node["@id"] == f"mare:claim/{claim_id}"
 
-    def test_claim_with_source_has_used_link(self, tmp_path: Path) -> None:
+    def test_claim_with_source_has_usedsource_link(self, tmp_path: Path) -> None:
+        # P1.8: ``used`` (formerly aliased to prov:used) → ``usedSource``
+        # (now aliased to mare:usedSource) so the export stays inside
+        # the mareforma-native vocabulary.
         conn = _open(tmp_path)
         try:
             add_claim(conn, tmp_path, "Finding about dataset", source_name="dataset_alpha")
@@ -84,7 +97,8 @@ class TestClaimNodes:
             conn.close()
         doc = JSONLDExporter(tmp_path).export()
         node = next(n for n in doc["@graph"] if n.get("@type") == "mare:Claim")
-        assert node.get("used") == "mare:source/dataset_alpha"
+        assert node.get("usedSource") == "mare:source/dataset_alpha"
+        assert "used" not in node  # the PROV-flavored key is gone
 
     def test_multiple_claims_all_present(self, tmp_path: Path) -> None:
         conn = _open(tmp_path)
