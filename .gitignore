@@ -210,3 +210,6 @@ __marimo__/
 SPEC.md
 TODOS.md
 docs/_build/
+
+# Security reports and gstack artifacts
+.gstack/
