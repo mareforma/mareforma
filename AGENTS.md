@@ -137,9 +137,9 @@ s["schema_version"]    # 1
 
 ---
 
-## Classification
+## Origin (`classification`)
 
-Classification encodes how knowledge was derived — the epistemic origin.
+The `classification` field encodes a claim's origin — how knowledge was derived.
 It is separate from trust level, which is graph-derived.
 
 | Value | Use when |

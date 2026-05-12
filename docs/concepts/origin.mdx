@@ -1,15 +1,17 @@
 ---
-title: "Classification"
-description: "How Mareforma records the epistemic origin of a claim: how knowledge was derived, independently of how much to trust it."
+title: "Origin"
+description: "How Mareforma records where a claim came from: LLM reasoning, real analysis, or built on the graph. Distinct from how much to trust it."
 ---
 
-Classification is orthogonal to trust. It records how knowledge was derived —
-the **epistemic origin** — not how much it should be trusted.
+Origin is orthogonal to trust. It records where a claim came from —
+**how it was derived** — not how much it should be trusted.
 
 An ANALYTICAL claim can be PRELIMINARY. An INFERRED claim can be ESTABLISHED.
 They measure different things.
 
-## The three classifications
+The API field is `classification`. This page explains what its values mean.
+
+## The three origins
 
 <AccordionGroup>
   <Accordion title="INFERRED (default)">
@@ -38,7 +40,7 @@ They measure different things.
 
 ## Why this matters
 
-The classification captures the difference between two claims that look
+The origin captures the difference between two claims that look
 identical as text but represent fundamentally different epistemic situations:
 
 ```python
@@ -56,7 +58,7 @@ graph.assert_claim(
 )
 ```
 
-Both claims assert the same text. Only the classification reveals that one
+Both claims assert the same text. Only the origin reveals that one
 is grounded in data and one is not.
 
 ## The ANALYTICAL lie
