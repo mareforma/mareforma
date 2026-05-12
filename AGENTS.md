@@ -215,8 +215,34 @@ claim without `supports=` is unverifiable — the chain is broken.
 | `ESTABLISHED` | Human-validated | `graph.validate()` only — requires REPLICATED first |
 
 `REPLICATED` fires automatically when ≥2 claims share the same upstream
-claim_id in `supports[]` and have different `generated_by` values.
-No agent can self-promote to `ESTABLISHED`.
+claim_id in `supports[]` and have different `generated_by` values **AND**
+at least one of those upstreams is itself `ESTABLISHED`. No agent can
+self-promote to `ESTABLISHED`.
+
+**ESTABLISHED-upstream rule.** REPLICATED requires an ESTABLISHED claim
+in the converging supports[]. Matches Cochrane / GRADE evidence chains —
+replication-of-noise is not replication. Strict by default. To bootstrap
+a fresh graph, an enrolled validator asserts a *seed claim*:
+
+```python
+# Bootstrap the trust chain on a fresh project. Only enrolled
+# validators can produce a seed envelope.
+root = graph.assert_claim(
+    "established prior literature reference",
+    classification="DERIVED",
+    generated_by="agent/seed",
+    seed=True,          # ← inserts directly as ESTABLISHED with a signed envelope
+)
+# Downstream peers now have an ESTABLISHED upstream to converge on.
+graph.assert_claim("finding A", supports=[root], generated_by="agent-A")
+graph.assert_claim("finding B", supports=[root], generated_by="agent-B")
+# → both promote to REPLICATED.
+```
+
+**Cycle / self-loop detection.** Asserting or updating a claim whose
+`supports[]` would create a cycle (`A → ... → A`) raises
+`CycleDetectedError`. Walk is depth-capped at 1024 hops. DOI strings
+in supports[] are not graph nodes and skipped.
 
 **Artifact-hash gate.** When two converging peers BOTH supply
 `artifact_hash` (a SHA256 hex digest of the output bytes — figure, CSV,
@@ -320,11 +346,29 @@ the pending queue, then rotate.
 
 ## Validators (who can promote ESTABLISHED)
 
-`graph.validate()` is the only path to `ESTABLISHED` and is identity-
+`graph.validate()` is the only path to `ESTABLISHED` (other than the
+seed-claim bootstrap, which is itself identity-gated) and is identity-
 gated. Only keys enrolled in the project's per-graph `validators` table
 can validate. Mareforma is local-trust: the table is just the set of
 public keys the project's operator has chosen to trust, not a cross-org
 PKI.
+
+State-transition guarantees move from the Python layer into the
+storage layer in v0.3.0 P1.5. SQLite triggers enforce:
+PRELIMINARY → REPLICATED → ESTABLISHED is the only legal progression;
+direct PRELIMINARY → ESTABLISHED is rejected at the DB; ESTABLISHED
+rows must carry a `validation_signature` (CHECK constraint + INSERT
+trigger). Illegal transitions raise `IllegalStateTransitionError`
+with a parsed `<from>-><to>` string instead of an opaque
+`CHECK CONSTRAINT FAILED` message.
+
+The `claims` table also carries a `prev_hash` append-only hash chain
+(`sha256(prev_chain_link || canonical_payload)`) with a UNIQUE
+constraint. `BEGIN IMMEDIATE` wraps the chain-extend INSERT so two
+concurrent writers cannot branch the chain. The chain is independent
+of per-claim signatures — it attests row ordering, not claim
+authenticity. Verifying the chain locally requires walking rows in
+`rowid` order and recomputing each link.
 
 **Root of trust.** The first key opened against a fresh `graph.db`
 auto-enrolls as the root with a self-signed enrollment envelope. This
@@ -389,6 +433,38 @@ as claim_id references and pass through without a network call.
 Results are cached in the `doi_cache` table (30-day TTL for resolved
 entries, 24-hour TTL for unresolved) so repeated assertions of the same
 DOI don't hit the registries.
+
+---
+
+## Export and signed bundles
+
+The graph exports to two formats. Plain JSON-LD is for everyday
+inspection; the signed bundle is for archival and cross-environment
+verification.
+
+**Plain JSON-LD.** `mareforma export` writes `ontology.jsonld` in the
+mareforma-native vocabulary (`@type=mare:Graph`, media type
+`application/x-mareforma-graph+json`). The export is NOT
+PROV-O-conformant; the schema lives in
+[`docs/reference/export-format.md`](docs/reference/export-format.md).
+
+**SCITT-style signed bundle.** `mareforma export --bundle` wraps the
+JSON-LD export in an in-toto Statement v1 envelope and signs it with
+the local Ed25519 key. The bundle includes one subject entry per
+claim (`urn:mareforma:claim:<uuid>`) with a SHA-256 of the claim's
+canonical_payload, plus a bundle-level DSSE signature. Verify with
+`mareforma verify <bundle.json>`:
+
+```bash
+mareforma export --bundle              # writes mareforma-bundle.json
+mareforma verify mareforma-bundle.json # → "verified: N claim subjects match"
+```
+
+`predicateType` is `urn:mareforma:predicate:epistemic-graph:v1`. URN
+namespacing means schema evolution to v2 carries a new predicate type
+without breaking v1 verifiers. Tampered claim text — or even a
+re-signed bundle whose predicate was edited — fails the per-claim
+subject digest check.
 
 ---
 
