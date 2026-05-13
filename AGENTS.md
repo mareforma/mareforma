@@ -353,14 +353,16 @@ can validate. Mareforma is local-trust: the table is just the set of
 public keys the project's operator has chosen to trust, not a cross-org
 PKI.
 
-State-transition guarantees move from the Python layer into the
-storage layer in v0.3.0 P1.5. SQLite triggers enforce:
-PRELIMINARY → REPLICATED → ESTABLISHED is the only legal progression;
-direct PRELIMINARY → ESTABLISHED is rejected at the DB; ESTABLISHED
-rows must carry a `validation_signature` (CHECK constraint + INSERT
-trigger). Illegal transitions raise `IllegalStateTransitionError`
-with a parsed `<from>-><to>` string instead of an opaque
-`CHECK CONSTRAINT FAILED` message.
+State-transition guarantees live in the storage layer. SQLite
+triggers enforce: PRELIMINARY → REPLICATED → ESTABLISHED is the only
+legal progression; direct PRELIMINARY → ESTABLISHED is rejected at
+the DB; ESTABLISHED rows must carry a `validation_signature` (CHECK
+constraint + INSERT trigger). A separate trigger on `status` makes
+`retracted` terminal — transitions out of retracted are refused, so
+the only way to resurrect a withdrawn finding is to assert a new
+claim citing the old via `contradicts=`. Illegal transitions raise
+`IllegalStateTransitionError` with a parsed `<from>-><to>` string
+instead of an opaque `CHECK CONSTRAINT FAILED` message.
 
 The `claims` table also carries a `prev_hash` append-only hash chain
 (`sha256(prev_chain_link || canonical_payload)`) with a UNIQUE

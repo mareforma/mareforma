@@ -8,10 +8,9 @@ This page mirrors it.
 
 ## v0.3.0 — 2026-05-13
 
-Breaking change from v0.2.x. Schema migrates in place from v1 → v2 (the
-`prev_hash` append-only hash chain is populated retroactively); fresh
-`graph.db` files start at v2 directly. Claims are backed up in
-`claims.toml`.
+Breaking change from v0.2.x. Schema does not migrate from older
+versions; delete `.mareforma/graph.db` to start fresh. Claims are
+backed up in `claims.toml` for restoration.
 
 v0.3.0 ships the full P0+P1 security substrate per the 2026-05-12
 security-substrate decision:

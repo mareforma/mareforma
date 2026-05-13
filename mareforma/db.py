@@ -43,7 +43,7 @@ _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 # ---------------------------------------------------------------------------
 
 DB_FILENAME = "graph.db"
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 1
 
 # Hard cap on a single claim's ``text`` field. 100k chars covers any
 # realistic scientific finding (≈ a 15k-word paragraph) and matches the
@@ -309,18 +309,18 @@ def open_db(root: Path) -> sqlite3.Connection:
     Fresh db (user_version=0): full schema applied, user_version set to
     ``_SCHEMA_VERSION``.
 
-    Older but compatible db (user_version < ``_SCHEMA_VERSION``): a
-    migration is applied in place. Currently only v1 → v2 is supported,
-    which adds ``prev_hash`` and the state-transition triggers. The
-    migration walks every row in ``rowid`` order to populate the chain
-    retroactively. Idempotent — re-running on a partly-migrated db
-    completes the work.
-
     Initialised db (user_version equals ``_SCHEMA_VERSION``): claims
     table must have every column in ``_CLAIM_COLUMNS``. Missing columns
     raise DatabaseError instructing the user to delete graph.db.
     ``_CLAIM_COLUMNS`` is the source of truth for what the schema must
     contain.
+
+    No in-place schema migrations during v0.3.0 development. Adding a
+    column or trigger means updating ``_SCHEMA_SQL`` in place; existing
+    dev-branch databases get the schema-validation error and the user
+    deletes graph.db (``claims.toml`` is the human-readable backup).
+    Versioned migrations become relevant only after a 1.0 release
+    establishes a stable schema with real users on it.
 
     Raises
     ------
@@ -341,14 +341,6 @@ def open_db(root: Path) -> sqlite3.Connection:
             conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             conn.commit()
             return conn
-
-        if version == 1 and _SCHEMA_VERSION >= 2:
-            _migrate_v1_to_v2(conn)
-            version = 2
-
-        if version == 2 and _SCHEMA_VERSION >= 3:
-            _migrate_v2_to_v3(conn)
-            version = 3
 
         # Initialised db — validate the schema by exact column-set match.
         # Catching extras as well as missing columns means a partially-migrated
@@ -423,86 +415,6 @@ def _compute_prev_hash(conn: sqlite3.Connection, claim_fields: dict) -> str:
     prev = (row["prev_hash"] or "").encode("ascii") if row else b""
     chain_input = _chain_input_for_claim(claim_fields)
     return hashlib.sha256(prev + chain_input).hexdigest()
-
-
-def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
-    """In-place migration: add ``prev_hash`` column, populate it
-    retroactively in ``rowid`` order, add the UNIQUE index, install
-    the state-machine triggers, bump ``user_version``.
-
-    Idempotent: re-running on a partly-migrated db completes the work
-    without re-hashing rows that already have ``prev_hash`` populated.
-    """
-    # Defensive: if the claims table doesn't exist, this isn't a real
-    # v1 graph — it's a hand-edited db with user_version=1 but no
-    # schema. Fall through to the schema-validation path which raises
-    # the right error.
-    has_table = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='claims'"
-    ).fetchone()
-    if not has_table:
-        return
-
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()}
-    if "prev_hash" not in cols:
-        conn.execute("ALTER TABLE claims ADD COLUMN prev_hash TEXT")
-
-    # Populate prev_hash for rows that still have it NULL, in rowid order.
-    # The chain starts from the highest already-populated prev_hash so
-    # idempotent re-runs do not re-hash the prefix.
-    rows = conn.execute(
-        f"SELECT {_CLAIM_SELECT} FROM claims ORDER BY rowid"
-    ).fetchall()
-    # Find the latest populated prev_hash (so re-runs are cheap)
-    prev_link = b""
-    for row in rows:
-        if row["prev_hash"] is not None:
-            prev_link = row["prev_hash"].encode("ascii")
-            continue
-        chain_input = _chain_input_for_claim({
-            "claim_id": row["claim_id"],
-            "text": row["text"],
-            "classification": row["classification"],
-            "generated_by": row["generated_by"],
-            "supports": json.loads(row["supports_json"] or "[]"),
-            "contradicts": json.loads(row["contradicts_json"] or "[]"),
-            "source_name": row["source_name"],
-            "artifact_hash": row["artifact_hash"],
-            "created_at": row["created_at"],
-        })
-        new_hash = hashlib.sha256(prev_link + chain_input).hexdigest()
-        conn.execute(
-            "UPDATE claims SET prev_hash = ? WHERE claim_id = ?",
-            (new_hash, row["claim_id"]),
-        )
-        prev_link = new_hash.encode("ascii")
-
-    # Re-apply the schema script. CREATE INDEX/TRIGGER IF NOT EXISTS
-    # makes this safe on re-run; ALTER TABLE was handled above.
-    conn.executescript(_SCHEMA_SQL)
-    conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
-    conn.commit()
-
-
-def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
-    """In-place migration: install the ``claims_update_status_terminal``
-    trigger so existing v0.3.0 dev-branch graphs pick up the
-    retracted-is-terminal invariant without rebuilding.
-
-    Idempotent: the trigger CREATE uses IF NOT EXISTS. No claim data is
-    rewritten — only DDL.
-    """
-    has_table = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='claims'"
-    ).fetchone()
-    if not has_table:
-        return
-
-    # Re-apply the schema script. CREATE TRIGGER IF NOT EXISTS handles
-    # idempotency; existing triggers are untouched.
-    conn.executescript(_SCHEMA_SQL)
-    conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
-    conn.commit()
 
 
 # ---------------------------------------------------------------------------

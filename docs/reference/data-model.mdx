@@ -4,7 +4,7 @@ description: "All claim fields, indexes, triggers, and supporting tables in grap
 ---
 
 All persistent state lives in a single SQLite file at `<project_root>/.mareforma/graph.db`
-(WAL mode, ACID). Schema version: `2`.
+(WAL mode, ACID). Schema version: `1`.
 
 ## Claims table
 
@@ -119,9 +119,15 @@ The schema version is stored in SQLite's `user_version` pragma.
 | Version | State |
 |---|---|
 | `0` | Fresh database — full schema applied on first `open_db()` |
-| `1` | v0.3.0 pre-P1.5 schema. Auto-migrates in place to v2 (adds `prev_hash` column + populates retroactively) |
-| `2` | v0.3.0 current schema |
+| `1` | v0.3.0 schema |
 | Any other | `DatabaseError` — delete `graph.db` to start fresh; `claims.toml` is the backup |
+
+No in-place migrations during v0.3.x. Adding a column, index, or
+trigger means updating the schema in place; existing development
+databases get the schema-validation error and the operator deletes
+`graph.db` (`claims.toml` is the restore artifact). Versioned
+migrations become relevant only after a 1.0 release establishes a
+stable schema with real users on it.
 
 ## Storage
 

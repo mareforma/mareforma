@@ -4,10 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [0.3.0] - 2026-05-13
 
-Breaking change from v0.2.x. Schema migrates in place from v1 → v3
-(prev_hash chain populated retroactively in v2; retracted-is-terminal
-trigger installed in v3); fresh graph.db files start at v3 directly.
-Claims are backed up in `claims.toml`.
+Breaking change from v0.2.x. Schema does not migrate from older
+versions; delete `.mareforma/graph.db` to start fresh. Claims are
+backed up in `claims.toml` for restoration.
 
 Full P0+P1 substrate per the 2026-05-12 security-substrate decision:
 - **P0.1** Ed25519 signing + Sigstore-Rekor
@@ -102,7 +101,7 @@ Full P0+P1 substrate per the 2026-05-12 security-substrate decision:
 - Framework integrations: AGENTS.md table covering Anthropic SDK, OpenAI SDK, LangChain, LangGraph, CrewAI, AutoGen, LlamaIndex, PydanticAI, Smol Agents
 - Mintlify docs at `docs.mareforma.com`
 - 5 runnable examples (API walkthrough, compounding agents, documented contestation, private data / public findings, MEDEA drug target)
-- **P1.5 — DB-layer state-machine + append-only hash chain.** Schema bumped to v2 with in-place migration from v1. `claims.prev_hash TEXT UNIQUE` column carries a SHA-256 chain (`sha256(prev_chain_link || canonical_payload)`); BEGIN IMMEDIATE + UNIQUE constraint together prevent branched chains. Two `BEFORE` triggers enforce state transitions at the storage layer: insert trigger refuses ESTABLISHED-without-validation, update trigger refuses illegal transitions with translatable `mareforma:state:<from>-><to>` error codes. New CHECK constraint requires `validation_signature` on every ESTABLISHED row. New exceptions `IllegalStateTransitionError` and `ChainIntegrityError`. Defense in depth: a tampered Python interpreter cannot relax the rules.
+- **P1.5 — DB-layer state-machine + append-only hash chain.** `claims.prev_hash TEXT UNIQUE` column carries a SHA-256 chain (`sha256(prev_chain_link || canonical_payload)`); BEGIN IMMEDIATE + UNIQUE constraint together prevent branched chains. Two `BEFORE` triggers enforce state transitions at the storage layer: insert trigger refuses ESTABLISHED-without-validation, update trigger refuses illegal transitions with translatable `mareforma:state:<from>-><to>` error codes. A separate `BEFORE UPDATE OF status` trigger makes `retracted` terminal (transitions out of retracted are refused — to resurrect a withdrawn finding, assert a new claim citing the old). New CHECK constraint requires `validation_signature` on every ESTABLISHED row. New exceptions `IllegalStateTransitionError` and `ChainIntegrityError`. Defense in depth: a tampered Python interpreter cannot relax the rules.
 - **P1.6 — Simple-DFS cycle detection on supports[].** A claim that supports itself (directly or via a chain) is rejected at INSERT (`add_claim`) and at UPDATE (`update_claim` on unsigned claims — signed claims refuse supports mutation upstream of this check via `SignedClaimImmutableError`). Forward-walk DFS with a visited set, depth-capped at 1024 hops. DOI strings in supports[] are not graph nodes and skipped. New `CycleDetectedError` exception. Closes MF-007.
 - **P1.7 — ESTABLISHED-upstream requirement for REPLICATED + seed-claim bootstrap.** REPLICATED promotion now requires at least one ESTABLISHED claim in the peer's supports[]. Matches Cochrane/GRADE evidence-chain methodology — stops replication-of-noise. Bootstrap path: `assert_claim(text=..., seed=True)` inserts the claim directly at ESTABLISHED with a signed seed envelope (payload type `application/vnd.mareforma.seed+json`, binds `claim_id + validator_keyid + seeded_at`). Only enrolled validators can produce seed envelopes. Strict by default — no opt-in flag. Closes MF-013.
 - **P1.8 Path A — JSON-LD export renamed to mareforma-native vocabulary.** Removed PROV-O references (`prov:wasGeneratedBy`, `prov:used`) from the JSON-LD `@context` — the previous export name-dropped the vocabulary without populating the full PROV-O graph (no `prov:Activity`, no `prov:wasAssociatedWith`, no model identity or prompt/response hashes). The export now declares `@type='mare:Graph'` and `mare:mediaType='application/x-mareforma-graph+json'`. The `used` key on source-bearing claims was renamed to `usedSource` (aliased to `mare:usedSource`). Every `SIGNED_FIELDS` member is always emitted on each claim node so downstream consumers (e.g. P1.9 bundle verification) can re-derive `canonical_payload` from a node alone. Closes MF-008 via honest scoping.

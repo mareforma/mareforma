@@ -1,4 +1,4 @@
-"""tests/test_state_machine.py — P1.5: DB-layer state-machine + prev_hash chain.
+"""tests/test_state_machine.py — DB-layer state-machine + prev_hash chain.
 
 Covers:
   - SQLite triggers reject illegal state transitions with translated
@@ -6,8 +6,6 @@ Covers:
   - CHECK constraint enforces validation_signature on ESTABLISHED rows
   - ``prev_hash`` chain is built linearly across claims
   - ``prev_hash`` UNIQUE catches branched chains
-  - Schema v1 → v2 migration is idempotent and populates the chain
-    retroactively
   - Status-only edits on signed claims still work (status transition
     legal without support_level change)
 """
@@ -30,7 +28,6 @@ from mareforma.db import (
     IllegalStateTransitionError,
     _CLAIM_COLUMNS,
     _compute_prev_hash,
-    _migrate_v1_to_v2,
     add_claim,
     open_db,
     update_claim,
@@ -287,127 +284,6 @@ class TestPrevHashChain:
                 )
         finally:
             conn.close()
-
-
-# ---------------------------------------------------------------------------
-# v1 → v2 migration
-# ---------------------------------------------------------------------------
-
-
-class TestV1ToV2Migration:
-    def _make_v1_db(self, tmp_path: Path, n_claims: int = 3) -> Path:
-        """Build a v1-shape db (no prev_hash, no triggers) with seed claims."""
-        (tmp_path / ".mareforma").mkdir(parents=True, exist_ok=True)
-        db_path = tmp_path / ".mareforma" / "graph.db"
-        raw = sqlite3.connect(str(db_path))
-        # Approximate v1 schema (no prev_hash column, no triggers, no CHECK).
-        raw.executescript("""
-            PRAGMA journal_mode=WAL;
-            CREATE TABLE claims (
-                claim_id TEXT PRIMARY KEY,
-                text TEXT NOT NULL,
-                classification TEXT NOT NULL DEFAULT 'INFERRED'
-                    CHECK (classification IN ('INFERRED', 'ANALYTICAL', 'DERIVED')),
-                support_level TEXT NOT NULL DEFAULT 'PRELIMINARY'
-                    CHECK (support_level IN ('PRELIMINARY', 'REPLICATED', 'ESTABLISHED')),
-                idempotency_key TEXT,
-                validated_by TEXT,
-                validated_at TEXT,
-                status TEXT NOT NULL DEFAULT 'open'
-                    CHECK (status IN ('open', 'contested', 'retracted')),
-                source_name TEXT,
-                generated_by TEXT NOT NULL DEFAULT 'agent',
-                supports_json TEXT NOT NULL DEFAULT '[]',
-                contradicts_json TEXT NOT NULL DEFAULT '[]',
-                comparison_summary TEXT,
-                branch_id TEXT NOT NULL DEFAULT 'main',
-                unresolved INTEGER NOT NULL DEFAULT 0
-                    CHECK (unresolved IN (0, 1)),
-                signature_bundle TEXT,
-                transparency_logged INTEGER NOT NULL DEFAULT 1
-                    CHECK (transparency_logged IN (0, 1)),
-                validation_signature TEXT,
-                artifact_hash TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            CREATE TABLE doi_cache (
-                doi TEXT PRIMARY KEY,
-                resolved INTEGER NOT NULL CHECK (resolved IN (0, 1)),
-                registry TEXT,
-                last_checked_at TEXT NOT NULL
-            );
-            CREATE TABLE validators (
-                keyid TEXT PRIMARY KEY,
-                pubkey_pem TEXT NOT NULL,
-                identity TEXT NOT NULL,
-                enrolled_at TEXT NOT NULL,
-                enrolled_by_keyid TEXT NOT NULL,
-                enrollment_envelope TEXT NOT NULL
-            );
-        """)
-        for i in range(n_claims):
-            raw.execute(
-                "INSERT INTO claims (claim_id, text, generated_by, "
-                "created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-                (str(uuid.uuid4()), f"v1 claim {i}", "v1-agent",
-                 _now_iso(), _now_iso()),
-            )
-        raw.execute("PRAGMA user_version = 1")
-        raw.commit()
-        raw.close()
-        return db_path
-
-    def test_migration_adds_prev_hash_column(self, tmp_path: Path) -> None:
-        self._make_v1_db(tmp_path)
-        conn = open_db(tmp_path)
-        try:
-            cols = {row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()}
-            assert "prev_hash" in cols
-            version = conn.execute("PRAGMA user_version").fetchone()[0]
-            # Opening a v1 db walks all migrations up to the current
-            # _SCHEMA_VERSION (currently 3 after v0.3.0 added the
-            # retracted-is-terminal trigger). Pin to the constant so
-            # future bumps don't require touching this test.
-            from mareforma.db import _SCHEMA_VERSION
-            assert version == _SCHEMA_VERSION
-        finally:
-            conn.close()
-
-    def test_migration_populates_chain_retroactively(
-        self, tmp_path: Path,
-    ) -> None:
-        self._make_v1_db(tmp_path, n_claims=4)
-        conn = open_db(tmp_path)
-        try:
-            rows = conn.execute(
-                "SELECT prev_hash FROM claims ORDER BY rowid"
-            ).fetchall()
-            prevs = [r["prev_hash"] for r in rows]
-            assert all(p is not None for p in prevs)
-            assert len(set(prevs)) == 4
-        finally:
-            conn.close()
-
-    def test_migration_is_idempotent(self, tmp_path: Path) -> None:
-        self._make_v1_db(tmp_path)
-        conn1 = open_db(tmp_path)
-        first_prevs = [
-            r["prev_hash"]
-            for r in conn1.execute("SELECT prev_hash FROM claims ORDER BY rowid").fetchall()
-        ]
-        conn1.close()
-        # Re-run migration explicitly.
-        raw = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
-        raw.row_factory = sqlite3.Row
-        _migrate_v1_to_v2(raw)
-        raw.row_factory = sqlite3.Row
-        second_prevs = [
-            r["prev_hash"]
-            for r in raw.execute("SELECT prev_hash FROM claims ORDER BY rowid").fetchall()
-        ]
-        raw.close()
-        assert first_prevs == second_prevs
 
 
 # ---------------------------------------------------------------------------
