@@ -508,3 +508,304 @@ class TestVerdictListingFiltersInvalidated:
             audit_reps = g.replication_verdicts(include_invalidated=True)
         assert default_reps == []  # both claims invalidated
         assert len(audit_reps) == 1
+
+
+# ---------------------------------------------------------------------------
+# /review hardening pass (security + testing specialist findings)
+# ---------------------------------------------------------------------------
+
+
+class TestInvalidatedClaimRefusesValidation:
+    """validate_claim must refuse to promote a claim that's already
+    been invalidated by a signed contradiction verdict. Without this,
+    an enrolled human validator could lift an already-refuted claim
+    REPLICATED → ESTABLISHED — riding past the terminal evidence of
+    the signed contradiction."""
+
+    def test_validate_refuses_t_invalid_claim(self, tmp_path: Path) -> None:
+        from mareforma import db as _db
+        root_key, issuer_key, a, b, _, _ = _seed_two_claims(tmp_path)
+        # Promote (a, b) to REPLICATED via a replication verdict.
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            g.record_replication_verdict(
+                verdict_id="rv_v1", cluster_id="cl",
+                member_claim_id=a, other_claim_id=b,
+                method="semantic-cluster", confidence={},
+            )
+        # Then invalidate `a` via a contradiction verdict.
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            g.record_contradiction_verdict(
+                verdict_id="cv_v1",
+                member_claim_id=a, other_claim_id=b,
+                confidence={},
+            )
+        # Now an enrolled human validator (issuer_key, validator_type
+        # defaults to 'human') tries to validate `a` → REFUSED.
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            with pytest.raises(ValueError, match="invalidated by a signed contradiction"):
+                g.validate(a)
+
+
+class TestReplicationDoesNotRePromoteInvalidated:
+    """A replication verdict landing AFTER a contradiction must not
+    re-promote the invalidated claim. The promotion UPDATE has a
+    t_invalid IS NULL filter."""
+
+    def test_replication_after_contradiction_skips_invalidated(
+        self, tmp_path: Path,
+    ) -> None:
+        root_key, issuer_key, a, b, _, _ = _seed_two_claims(tmp_path)
+        # Step 1: invalidate `a` via contradiction.
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            g.record_contradiction_verdict(
+                verdict_id="cv_pre",
+                member_claim_id=a, other_claim_id=b,
+                confidence={},
+            )
+            assert g.get_claim(a)["t_invalid"] is not None
+            assert g.get_claim(a)["support_level"] == "PRELIMINARY"
+        # Step 2: a replication verdict tries to promote (a, b).
+        # `b` is still PRELIMINARY and not invalidated → promotes.
+        # `a` is invalidated → MUST NOT promote.
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            g.record_replication_verdict(
+                verdict_id="rv_post", cluster_id="cl",
+                member_claim_id=a, other_claim_id=b,
+                method="semantic-cluster", confidence={},
+            )
+            assert g.get_claim(a)["support_level"] == "PRELIMINARY"
+            assert g.get_claim(a)["t_invalid"] is not None
+            assert g.get_claim(b)["support_level"] == "REPLICATED"
+
+
+class TestRestoreRefusesTransparencyWithoutRekor:
+    """Hand-edited claims.toml that flips transparency_logged=true on a
+    claim whose signature_bundle has no rekor block must be refused
+    silently downgraded — otherwise the row satisfies REPLICATED's
+    transparency_logged=1 gate without ever having been witnessed."""
+
+    def test_transparency_flag_requires_rekor_block(
+        self, tmp_path: Path,
+    ) -> None:
+        import tomli, tomli_w
+        root_key = _bootstrap(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            cid = g.assert_claim("anchor")
+        toml_path = tmp_path / "claims.toml"
+        data = tomli.loads(toml_path.read_text(encoding="utf-8"))
+        # Force-set transparency_logged=true even though no rekor block
+        # was ever attached (no rekor_url was configured).
+        data["claims"][cid]["transparency_logged"] = True
+        toml_path.write_bytes(tomli_w.dumps(data).encode("utf-8"))
+        # Wipe + restore.
+        for fname in ("graph.db", "graph.db-wal", "graph.db-shm"):
+            p = tmp_path / ".mareforma" / fname
+            if p.exists():
+                p.unlink()
+        mareforma.restore(tmp_path)
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            row = g.get_claim(cid)
+        # The flag must be downgraded to 0 — bundle has no rekor uuid.
+        assert row["transparency_logged"] == 0
+
+
+class TestVerdictPayloadNoNanInf:
+    """confidence_json must canonicalize via _canonical.canonicalize,
+    which rejects NaN/Inf. A third-party verdict-issuer sneaking a
+    non-finite float into confidence would otherwise produce a
+    payload some verifiers refuse."""
+
+    def test_nan_in_confidence_rejected_at_sign_time(
+        self, tmp_path: Path,
+    ) -> None:
+        import math
+        from mareforma._canonical import canonicalize
+        _, issuer_key, a, b, _, _ = _seed_two_claims(tmp_path)
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            with pytest.raises(ValueError):
+                g.record_replication_verdict(
+                    verdict_id="rv_nan", cluster_id="cl",
+                    member_claim_id=a, other_claim_id=b,
+                    method="semantic-cluster",
+                    confidence={"cosine": float("nan")},
+                )
+
+
+class TestVerdictChainWalkEnforced:
+    """_require_enrolled_issuer must walk the enrollment chain via
+    validators.is_enrolled — same gate as seed and validate. A tampered
+    DB row whose enrollment chain breaks must be rejected even though
+    its keyid still exists in the validators table."""
+
+    def test_broken_chain_rejected_for_verdict_path(
+        self, tmp_path: Path,
+    ) -> None:
+        from mareforma import db as _db
+        root_key, issuer_key, a, b, _, issuer_keyid = _seed_two_claims(tmp_path)
+        # Tamper: clobber the issuer's enrollment_envelope so its
+        # chain breaks. is_enrolled walks the chain, finds the
+        # tampered envelope, returns False.
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            g._conn.execute(
+                "UPDATE validators SET enrollment_envelope = ? WHERE keyid = ?",
+                ('{"payloadType":"x","payload":"","signatures":[]}', issuer_keyid),
+            )
+            g._conn.commit()
+        # Now the issuer (whose row still exists) tries to write a
+        # verdict — chain walk fails, verdict refused.
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            with pytest.raises(_db.VerdictIssuerError,
+                               match="chain does not verify|not enrolled"):
+                g.record_replication_verdict(
+                    verdict_id="rv_brk", cluster_id="cl",
+                    member_claim_id=a, other_claim_id=b,
+                    method="semantic-cluster", confidence={},
+                )
+
+
+class TestUnsignedModeRefusesVerdict:
+    """A graph opened without a signing key cannot record verdicts —
+    the wrapper raises VerdictIssuerError before touching the DB."""
+
+    def test_unsigned_graph_refuses_record_replication(
+        self, tmp_path: Path,
+    ) -> None:
+        from mareforma import db as _db
+        with mareforma.open(tmp_path) as g:  # no key_path
+            a = g.assert_claim("alpha")
+            b = g.assert_claim("beta")
+            with pytest.raises(_db.VerdictIssuerError, match="without a signer"):
+                g.record_replication_verdict(
+                    verdict_id="rv_u", cluster_id="cl",
+                    member_claim_id=a, other_claim_id=b,
+                    method="semantic-cluster", confidence={},
+                )
+
+    def test_unsigned_graph_refuses_record_contradiction(
+        self, tmp_path: Path,
+    ) -> None:
+        from mareforma import db as _db
+        with mareforma.open(tmp_path) as g:
+            a = g.assert_claim("alpha")
+            b = g.assert_claim("beta")
+            with pytest.raises(_db.VerdictIssuerError, match="without a signer"):
+                g.record_contradiction_verdict(
+                    verdict_id="cv_u",
+                    member_claim_id=a, other_claim_id=b, confidence={},
+                )
+
+
+class TestVerdictFieldTamperOnRestore:
+    """Every field in _REPLICATION_VERDICT_FIELDS / _CONTRADICTION_VERDICT_FIELDS
+    is bound by the DSSE PAE signature. Tamper with any of them in
+    claims.toml without re-signing → restore raises RestoreError."""
+
+    def _setup_and_tamper(self, tmp_path: Path, field: str, new_value):
+        import tomli, tomli_w
+        _, issuer_key, a, b, _, _ = _seed_two_claims(tmp_path)
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            g.record_replication_verdict(
+                verdict_id="rv_t", cluster_id="cl_orig",
+                member_claim_id=a, other_claim_id=b,
+                method="semantic-cluster",
+                confidence={"cosine": 0.9},
+            )
+        toml_path = tmp_path / "claims.toml"
+        data = tomli.loads(toml_path.read_text(encoding="utf-8"))
+        data["replication_verdicts"]["rv_t"][field] = new_value
+        toml_path.write_bytes(tomli_w.dumps(data).encode("utf-8"))
+        # Wipe + try restore.
+        for fname in ("graph.db", "graph.db-wal", "graph.db-shm"):
+            p = tmp_path / ".mareforma" / fname
+            if p.exists():
+                p.unlink()
+
+    def test_tampered_cluster_id_rejected(self, tmp_path: Path) -> None:
+        from mareforma import db as _db
+        self._setup_and_tamper(tmp_path, "cluster_id", "forged-cluster")
+        with pytest.raises(_db.RestoreError) as exc:
+            mareforma.restore(tmp_path)
+        assert exc.value.kind == "claim_unverified"
+
+    def test_tampered_method_rejected(self, tmp_path: Path) -> None:
+        from mareforma import db as _db
+        self._setup_and_tamper(tmp_path, "method", "cross-method")
+        with pytest.raises(_db.RestoreError) as exc:
+            mareforma.restore(tmp_path)
+        assert exc.value.kind == "claim_unverified"
+
+
+class TestDSSEPAETypeConfusion:
+    """The DSSE PAE prefix makes signatures type-bound: a signature on
+    (typeA, body) MUST NOT verify under typeB even when body is
+    identical. The most security-critical property of the envelope."""
+
+    def test_signature_does_not_cross_payload_types(self) -> None:
+        import base64
+        from cryptography.exceptions import InvalidSignature
+        from mareforma.signing import (
+            PAYLOAD_TYPE_CLAIM, PAYLOAD_TYPE_VALIDATION,
+            _build_envelope, dsse_pae, generate_keypair,
+        )
+        key = generate_keypair()
+        body = b'{"foo":"bar"}'
+        env_claim = _build_envelope(body, key, payload_type=PAYLOAD_TYPE_CLAIM)
+        env_validation = _build_envelope(
+            body, key, payload_type=PAYLOAD_TYPE_VALIDATION,
+        )
+        sig_claim = base64.standard_b64decode(env_claim["signatures"][0]["sig"])
+        sig_validation = base64.standard_b64decode(
+            env_validation["signatures"][0]["sig"],
+        )
+        # Signatures over the same body but different types must differ.
+        assert sig_claim != sig_validation
+        # And a claim-typed signature must NOT verify under the validation PAE.
+        with pytest.raises(InvalidSignature):
+            key.public_key().verify(
+                sig_claim, dsse_pae(PAYLOAD_TYPE_VALIDATION, body),
+            )
+
+    def test_dsse_pae_literal_byte_format(self) -> None:
+        """Spec: DSSEv1 <SP> <len(type)> <SP> <type> <SP> <len(body)> <SP> <body>"""
+        from mareforma.signing import dsse_pae
+        assert dsse_pae("app/x", b"BODY") == b"DSSEv1 5 app/x 4 BODY"
+        # multi-byte UTF-8 in payloadType counts bytes, not chars.
+        assert dsse_pae("é", b"x") == b"DSSEv1 2 \xc3\xa9 1 x"
+
+
+class TestChainInputEqualsSignedPayload:
+    """canonical_statement(fields, evidence) bytes MUST be byte-equal
+    to the base64-decoded payload of the envelope produced by
+    sign_claim(fields, key, evidence=evidence). Chain integrity and
+    signature integrity bind to the SAME bytes."""
+
+    def test_chain_input_byte_equals_signed_payload(self) -> None:
+        import base64
+        from mareforma.signing import (
+            canonical_statement, sign_claim, generate_keypair,
+        )
+        key = generate_keypair()
+        fields = {
+            "claim_id": "11111111-1111-1111-1111-111111111111",
+            "text": "anchor finding for binding test",
+            "classification": "ANALYTICAL",
+            "generated_by": "agent/test",
+            "supports": ["upstream-id-1"],
+            "contradicts": [],
+            "source_name": "exp-2026",
+            "artifact_hash": None,
+            "created_at": "2026-05-13T10:00:00+00:00",
+        }
+        evidence = {
+            "risk_of_bias": -1,
+            "rationale": {"risk_of_bias": "blinding broken"},
+            "inconsistency": 0, "indirectness": 0,
+            "imprecision": 0, "publication_bias": 0,
+            "large_effect": False, "dose_response": False,
+            "opposing_confounding": False,
+            "reporting_compliance": [],
+        }
+        chain_bytes = canonical_statement(fields, evidence)
+        envelope = sign_claim(fields, key, evidence=evidence)
+        signed_bytes = base64.standard_b64decode(envelope["payload"])
+        assert chain_bytes == signed_bytes

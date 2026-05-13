@@ -1567,7 +1567,7 @@ def validate_claim(
         ``signature_bundle`` signing keyid.
     """
     row = conn.execute(
-        "SELECT support_level, status, signature_bundle "
+        "SELECT support_level, status, signature_bundle, t_invalid "
         "FROM claims WHERE claim_id = ?",
         (claim_id,),
     ).fetchone()
@@ -1584,6 +1584,16 @@ def validate_claim(
             "Only claims with status='open' can be promoted to ESTABLISHED. "
             "Reset the status via update_claim if the editorial flag no "
             "longer applies."
+        )
+    if row["t_invalid"] is not None:
+        # A signed contradiction verdict from an enrolled validator has
+        # marked this claim invalid. Promotion would ride past the
+        # terminal evidence and let validate() lift an already-refuted
+        # claim back into the trust ladder.
+        raise ValueError(
+            f"Claim '{claim_id}' was invalidated by a signed contradiction "
+            f"verdict at t_invalid={row['t_invalid']!r}. Refuse to promote "
+            "an invalidated claim to ESTABLISHED."
         )
 
     # Substrate gates: parse the validation envelope, look up the
@@ -2082,15 +2092,17 @@ def _verdict_canonical_payload(
 ) -> bytes:
     """Canonical JSON of a verdict record under a fixed field set.
 
-    Same shape rules as :func:`mareforma.signing._canonical_record` —
-    sorted keys, no whitespace. The verdict's signature covers these
-    bytes wrapped in DSSE PAE so a verdict signature cannot be
-    re-attributed to a different verdict_id or member.
+    Uses :func:`mareforma._canonical.canonicalize` so verdicts and
+    claims share one canonicalization contract (sorted keys, NFC
+    Unicode normalization, no whitespace, ``allow_nan=False``).
+    A third-party verdict-issuer implementing against the same
+    canonical-JSON contract produces signatures the OSS substrate
+    verifies; a confidence dict containing NaN / Inf is rejected at
+    sign time rather than producing a payload some verifiers refuse.
     """
+    from ._canonical import canonicalize
     payload = {name: record.get(name) for name in fields}
-    return json.dumps(
-        payload, sort_keys=True, separators=(",", ":"),
-    ).encode("utf-8")
+    return canonicalize(payload)
 
 
 def _require_enrolled_issuer(
@@ -2098,20 +2110,21 @@ def _require_enrolled_issuer(
 ) -> None:
     """Refuse the verdict if issuer_keyid is not an enrolled validator.
 
-    Verdict-issuer protocol: only enrolled identities can write to
-    ``replication_verdicts`` or ``contradiction_verdicts``. Enrollment
-    is the gate; the predicates that produce verdicts live outside the
-    OSS and can be implemented by anyone, but they must register their
-    signing identity in ``validators`` first.
+    Walks the enrollment chain back to a self-signed root via
+    ``validators.is_enrolled`` — same gate the seed-claim path and
+    ``graph.validate()`` use. A row that exists in the validators
+    table but whose enrollment_envelope does not verify against its
+    parent (e.g. a tampered DB or a partial restore) is rejected.
+    Without the chain walk, the verdict path would be strictly more
+    permissive than every other trust-bearing path.
     """
-    row = conn.execute(
-        "SELECT 1 FROM validators WHERE keyid = ?", (issuer_keyid,),
-    ).fetchone()
-    if row is None:
+    from mareforma import validators as _validators
+    if not _validators.is_enrolled(conn, issuer_keyid):
         raise VerdictIssuerError(
-            f"Verdict-issuer keyid {issuer_keyid!r} is not enrolled. "
-            "Issuers must be in the validators table — call "
-            "graph.enroll_validator() first."
+            f"Verdict-issuer keyid {issuer_keyid!r} is not enrolled "
+            "(or its enrollment chain does not verify). Issuers must "
+            "be in the validators table with a verifiable chain — "
+            "call graph.enroll_validator() under a verified parent."
         )
 
 
@@ -2170,9 +2183,11 @@ def record_replication_verdict(
         _require_claim_exists(conn, other_claim_id, "other_claim_id")
 
     confidence_dict = confidence or {}
-    confidence_json = json.dumps(
-        confidence_dict, sort_keys=True, separators=(",", ":"),
-    )
+    # canonicalize() (NFC + sorted keys + no whitespace + allow_nan=False)
+    # for stored confidence_json so restore round-trips byte-equally
+    # AND callers can't sneak a NaN/Inf into a signed payload.
+    from ._canonical import canonicalize as _canonicalize
+    confidence_json = _canonicalize(confidence_dict).decode("utf-8")
     record = {
         "verdict_id": verdict_id,
         "cluster_id": cluster_id,
@@ -2187,7 +2202,18 @@ def record_replication_verdict(
     )
     signature = signer.sign(pae)
     created_at = _now()
+    # Verdict INSERT + promotion UPDATE run in one BEGIN IMMEDIATE
+    # transaction so a concurrent contradiction verdict cannot land
+    # between the two commits and leave the claim in the contradictory
+    # state (support_level=REPLICATED AND t_invalid IS NOT NULL).
+    members = [member_claim_id]
+    if other_claim_id is not None:
+        members.append(other_claim_id)
+    placeholders = ",".join("?" * len(members))
+    _own_txn = not conn.in_transaction
     try:
+        if _own_txn:
+            conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             """
             INSERT INTO replication_verdicts(
@@ -2200,33 +2226,31 @@ def record_replication_verdict(
                 method, confidence_json, issuer_keyid, signature, created_at,
             ),
         )
-        conn.commit()
-    except sqlite3.IntegrityError as exc:
-        raise VerdictIssuerError(
-            f"Replication verdict {verdict_id!r} INSERT refused: {exc}"
-        ) from exc
-
-    # Promote referenced claims to REPLICATED. The state-machine trigger
-    # rejects PRELIMINARY → ESTABLISHED but accepts PRELIMINARY → REPLICATED
-    # and REPLICATED → REPLICATED (idempotent). Update only when the row
-    # is still PRELIMINARY so we don't downgrade an ESTABLISHED claim.
-    members = [member_claim_id]
-    if other_claim_id is not None:
-        members.append(other_claim_id)
-    placeholders = ",".join("?" * len(members))
-    try:
+        # Promote referenced claims to REPLICATED. The state-machine
+        # trigger rejects PRELIMINARY → ESTABLISHED but accepts
+        # PRELIMINARY → REPLICATED. Update only when the row is still
+        # PRELIMINARY (do not downgrade an ESTABLISHED claim) AND not
+        # invalidated (a signed contradiction verdict is terminal —
+        # a later replication verdict must not silently re-promote).
         conn.execute(
             f"UPDATE claims SET support_level = 'REPLICATED', updated_at = ? "
             f"WHERE claim_id IN ({placeholders}) "
-            f"AND support_level = 'PRELIMINARY' AND status = 'open'",
+            f"AND support_level = 'PRELIMINARY' "
+            f"AND status = 'open' "
+            f"AND t_invalid IS NULL",
             (created_at, *members),
         )
-        conn.commit()
-    except sqlite3.IntegrityError:
-        # Trigger refusal is non-fatal — the verdict still stands; the
-        # state didn't promote, which is documented behavior for any
-        # claim that can't reach REPLICATED at this moment.
-        pass
+        if _own_txn:
+            conn.commit()
+    except sqlite3.IntegrityError as exc:
+        if _own_txn:
+            conn.rollback()
+        # The INSERT itself failing is a verdict-issuer error; a
+        # promotion-trigger refusal would surface here too but at this
+        # point everything either committed atomically or rolled back.
+        raise VerdictIssuerError(
+            f"Replication verdict {verdict_id!r} INSERT refused: {exc}"
+        ) from exc
 
     _backup_claims_toml(conn, root)
 
@@ -2268,9 +2292,11 @@ def record_contradiction_verdict(
     _require_claim_exists(conn, other_claim_id, "other_claim_id")
 
     confidence_dict = confidence or {}
-    confidence_json = json.dumps(
-        confidence_dict, sort_keys=True, separators=(",", ":"),
-    )
+    # canonicalize() (NFC + sorted keys + no whitespace + allow_nan=False)
+    # for stored confidence_json so restore round-trips byte-equally
+    # AND callers can't sneak a NaN/Inf into a signed payload.
+    from ._canonical import canonicalize as _canonicalize
+    confidence_json = _canonicalize(confidence_dict).decode("utf-8")
     record = {
         "verdict_id": verdict_id,
         "member_claim_id": member_claim_id,
@@ -2984,6 +3010,25 @@ def restore(
                         evidence=evidence_dict,
                     )
                 ) if c.get("signature_bundle") else None
+                # transparency_logged: trust the TOML flag ONLY when the
+                # bundle actually carries a rekor block with a uuid.
+                # Otherwise a hand-edited claims.toml could flip the
+                # flag to true and the row would then satisfy the
+                # REPLICATED-detection gate (transparency_logged=1)
+                # without ever having been witnessed by the log.
+                toml_logged = c.get("transparency_logged")
+                bundle_has_rekor = False
+                if c.get("signature_bundle"):
+                    try:
+                        _env = json.loads(c["signature_bundle"])
+                        _rekor = _env.get("rekor") or {}
+                        bundle_has_rekor = bool(_rekor.get("uuid"))
+                    except (json.JSONDecodeError, AttributeError, TypeError):
+                        bundle_has_rekor = False
+                resolved_transparency = (
+                    1 if (toml_logged is not False and bundle_has_rekor)
+                    else 0
+                )
                 try:
                     conn.execute(
                         """
@@ -3018,8 +3063,7 @@ def restore(
                             c.get("comparison_summary") or "",
                             1 if c.get("unresolved") else 0,
                             c.get("signature_bundle"),
-                            0 if c.get("transparency_logged") is False
-                            else 1,
+                            resolved_transparency,
                             insert_validation_signature,
                             insert_validator_keyid,
                             c.get("artifact_hash"), prev_hash,
@@ -3067,13 +3111,29 @@ def restore(
             # contradiction trigger fires on the contradiction INSERT
             # and re-derives t_invalid — restore doesn't need to
             # round-trip t_invalid separately.
+            #
+            # Sort by created_at before replay so the contradiction
+            # trigger (WHERE t_invalid IS NULL) sets t_invalid to the
+            # earliest contradiction's timestamp, preserving the
+            # truthful first-invalidation moment. Without sorting,
+            # tomli's insertion-order iteration lets a hand-edited
+            # TOML reorder contradictions to backdate or postdate the
+            # invalidation timestamp.
             rep_section = data.get("replication_verdicts") or {}
-            for verdict_id, v in rep_section.items():
+            rep_ordered = sorted(
+                rep_section.items(),
+                key=lambda kv: kv[1].get("created_at") or "",
+            )
+            for verdict_id, v in rep_ordered:
                 _verify_and_insert_replication_verdict(
                     conn, verdict_id, v, validators_section,
                 )
             con_section = data.get("contradiction_verdicts") or {}
-            for verdict_id, v in con_section.items():
+            con_ordered = sorted(
+                con_section.items(),
+                key=lambda kv: kv[1].get("created_at") or "",
+            )
+            for verdict_id, v in con_ordered:
                 _verify_and_insert_contradiction_verdict(
                     conn, verdict_id, v, validators_section,
                 )
