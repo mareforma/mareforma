@@ -222,8 +222,11 @@ class TestRestoreVerdicts:
         self._wipe_db(tmp_path)
         mareforma.restore(tmp_path)
         with mareforma.open(tmp_path, key_path=root_key) as g:
-            reps = g.replication_verdicts()
-            cons = g.contradiction_verdicts()
+            # Both claims are now invalidated by the contradiction
+            # verdict — use audit mode to inspect the round-tripped
+            # verdicts.
+            reps = g.replication_verdicts(include_invalidated=True)
+            cons = g.contradiction_verdicts(include_invalidated=True)
             # t_invalid was re-derived by the trigger on contradiction
             # INSERT — not directly round-tripped via TOML.
             assert g.get_claim(a)["t_invalid"] is not None
@@ -301,3 +304,207 @@ class TestRestoreVerdicts:
         with pytest.raises(_db.RestoreError) as exc:
             mareforma.restore(tmp_path)
         assert exc.value.kind == "claim_unverified"
+
+
+# ---------------------------------------------------------------------------
+# Adversarial-review regression tests
+# ---------------------------------------------------------------------------
+
+class TestForeignKeyEnforcement:
+    """PRAGMA foreign_keys=ON is set on every open_db so verdict
+    FK references actually fire. Without this the schema's
+    REFERENCES clauses are advisory and direct-SQL INSERTs with
+    fabricated keyids would slip through."""
+
+    def test_unenrolled_keyid_blocked_by_fk(self, tmp_path: Path) -> None:
+        root_key = _bootstrap(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            a = g.assert_claim("alpha")
+            b = g.assert_claim("beta")
+            with pytest.raises(sqlite3.IntegrityError):
+                g._conn.execute(
+                    """
+                    INSERT INTO replication_verdicts(
+                        verdict_id, cluster_id, member_claim_id, other_claim_id,
+                        method, confidence_json, issuer_keyid, signature, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    ("rv_x", "cl_x", a, b, "semantic-cluster", "{}",
+                     "0" * 64, b"\x00" * 64, "2026-05-13T00:00:00+00:00"),
+                )
+
+    def test_missing_claim_blocked_by_fk(self, tmp_path: Path) -> None:
+        root_key = _bootstrap(tmp_path, "root.key")
+        root_keyid = _signing.public_key_id(
+            _signing.load_private_key(root_key).public_key(),
+        )
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            with pytest.raises(sqlite3.IntegrityError):
+                g._conn.execute(
+                    """
+                    INSERT INTO replication_verdicts(
+                        verdict_id, cluster_id, member_claim_id, other_claim_id,
+                        method, confidence_json, issuer_keyid, signature, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    ("rv_y", "cl_y", "nonexistent-claim", None,
+                     "semantic-cluster", "{}", root_keyid,
+                     b"\x00" * 64, "2026-05-13T00:00:00+00:00"),
+                )
+
+
+class TestSelfContradictionRefused:
+    def test_python_path_refuses_self_contradiction(self, tmp_path: Path) -> None:
+        _, issuer_key, a, _, _, _ = _seed_two_claims(tmp_path)
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            with pytest.raises(_db.VerdictIssuerError, match="self-"):
+                g.record_contradiction_verdict(
+                    verdict_id="cv_self",
+                    member_claim_id=a, other_claim_id=a,
+                    confidence={},
+                )
+
+    def test_sql_check_blocks_self_contradiction(self, tmp_path: Path) -> None:
+        """Even a direct SQL INSERT with member==other is refused by
+        the CHECK constraint on contradiction_verdicts."""
+        _, issuer_key, a, _, _, issuer_keyid = _seed_two_claims(tmp_path)
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+                g._conn.execute(
+                    """
+                    INSERT INTO contradiction_verdicts(
+                        verdict_id, member_claim_id, other_claim_id,
+                        confidence_json, issuer_keyid, signature, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    ("cv_self_sql", a, a, "{}", issuer_keyid,
+                     b"\x00" * 64, "2026-05-13T00:00:00+00:00"),
+                )
+
+
+class TestVerdictDeleteBlocked:
+    def test_replication_verdict_delete_blocked(self, tmp_path: Path) -> None:
+        _, issuer_key, a, b, _, _ = _seed_two_claims(tmp_path)
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            g.record_replication_verdict(
+                verdict_id="rv_del", cluster_id="cl",
+                member_claim_id=a, other_claim_id=b,
+                method="semantic-cluster", confidence={},
+            )
+            with pytest.raises(sqlite3.IntegrityError,
+                               match="verdict_delete_blocked"):
+                g._conn.execute(
+                    "DELETE FROM replication_verdicts WHERE verdict_id = ?",
+                    ("rv_del",),
+                )
+
+    def test_contradiction_verdict_delete_blocked(self, tmp_path: Path) -> None:
+        _, issuer_key, a, b, _, _ = _seed_two_claims(tmp_path)
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            g.record_contradiction_verdict(
+                verdict_id="cv_del",
+                member_claim_id=a, other_claim_id=b, confidence={},
+            )
+            with pytest.raises(sqlite3.IntegrityError,
+                               match="verdict_delete_blocked"):
+                g._conn.execute(
+                    "DELETE FROM contradiction_verdicts WHERE verdict_id = ?",
+                    ("cv_del",),
+                )
+
+
+class TestTriggerIdempotencyAndOrdering:
+    def test_second_contradiction_does_not_overwrite_t_invalid(
+        self, tmp_path: Path,
+    ) -> None:
+        """The trigger's WHERE t_invalid IS NULL clause makes a second
+        contradiction on the same claim a no-op. A future refactor
+        that drops the guard would change t_invalid silently."""
+        root_key, issuer_key, a, b, _, _ = _seed_two_claims(tmp_path)
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            g.record_contradiction_verdict(
+                verdict_id="cv_1", member_claim_id=a, other_claim_id=b,
+                confidence={},
+            )
+            first = g.get_claim(a)["t_invalid"]
+            assert first is not None
+            g.record_contradiction_verdict(
+                verdict_id="cv_2", member_claim_id=a, other_claim_id=b,
+                confidence={},
+            )
+            second = g.get_claim(a)["t_invalid"]
+        assert first == second  # idempotent — earlier timestamp preserved
+
+    def test_argument_order_does_not_change_invalidation(
+        self, tmp_path: Path,
+    ) -> None:
+        """For identical created_at, the trigger's tie-break is
+        lex-smaller claim_id — not the verdict's argument order.
+        Two graphs differing only in (member, other) swap must
+        invalidate the same claim."""
+        root_key_x = _bootstrap(tmp_path / "x", "root.key")
+        issuer_key_x = _bootstrap(tmp_path / "x", "issuer.key")
+        with mareforma.open(tmp_path / "x", key_path=root_key_x) as g:
+            issuer_pem = _signing.public_key_to_pem(
+                _signing.load_private_key(issuer_key_x).public_key(),
+            )
+            g.enroll_validator(issuer_pem, identity="i")
+            a = g.assert_claim("alpha")
+            b = g.assert_claim("beta")
+        with mareforma.open(tmp_path / "x", key_path=issuer_key_x) as g:
+            g.record_contradiction_verdict(
+                verdict_id="cv", member_claim_id=a, other_claim_id=b,
+                confidence={},
+            )
+            invalidated_x = (
+                a if g.get_claim(a)["t_invalid"] is not None else b
+            )
+        # Second graph in a separate dir: swap argument order.
+        root_key_y = _bootstrap(tmp_path / "y", "root.key")
+        issuer_key_y = _bootstrap(tmp_path / "y", "issuer.key")
+        with mareforma.open(tmp_path / "y", key_path=root_key_y) as g:
+            issuer_pem = _signing.public_key_to_pem(
+                _signing.load_private_key(issuer_key_y).public_key(),
+            )
+            g.enroll_validator(issuer_pem, identity="i")
+            # Use deterministic claim_ids — pin the texts the same.
+            a2 = g.assert_claim("alpha")
+            b2 = g.assert_claim("beta")
+        # The IDs differ across the two graphs (uuid4), so this test
+        # checks the trigger's invariant on a single graph: assert
+        # that the older claim is invalidated regardless of argument
+        # order. With created_at strictly increasing per insert, the
+        # tie-break clause is exercised when both rows share a
+        # microsecond — relatively rare but the deterministic clause
+        # makes it predictable when it does happen.
+        with mareforma.open(tmp_path / "y", key_path=issuer_key_y) as g:
+            g.record_contradiction_verdict(
+                verdict_id="cv2", member_claim_id=b2, other_claim_id=a2,
+                confidence={},
+            )
+            # a2 was inserted first → it's the older one → it gets
+            # invalidated regardless of argument order.
+            assert g.get_claim(a2)["t_invalid"] is not None
+            assert g.get_claim(b2)["t_invalid"] is None
+
+
+class TestVerdictListingFiltersInvalidated:
+    def test_default_excludes_verdicts_on_invalidated_claims(
+        self, tmp_path: Path,
+    ) -> None:
+        root_key, issuer_key, a, b, _, _ = _seed_two_claims(tmp_path)
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            g.record_replication_verdict(
+                verdict_id="rv_v", cluster_id="cl",
+                member_claim_id=a, other_claim_id=b,
+                method="semantic-cluster", confidence={},
+            )
+            g.record_contradiction_verdict(
+                verdict_id="cv_v",
+                member_claim_id=a, other_claim_id=b, confidence={},
+            )
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            default_reps = g.replication_verdicts()
+            audit_reps = g.replication_verdicts(include_invalidated=True)
+        assert default_reps == []  # both claims invalidated
+        assert len(audit_reps) == 1

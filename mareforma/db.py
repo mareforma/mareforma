@@ -321,7 +321,10 @@ CREATE TABLE IF NOT EXISTS contradiction_verdicts (
     confidence_json TEXT NOT NULL DEFAULT '{}',
     issuer_keyid    TEXT NOT NULL REFERENCES validators(keyid),
     signature       BLOB NOT NULL,
-    created_at      TEXT NOT NULL
+    created_at      TEXT NOT NULL,
+    -- Self-contradiction is meaningless and would let a single
+    -- validator unilaterally invalidate any claim. Reject at SQL.
+    CHECK (member_claim_id != other_claim_id)
 );
 CREATE INDEX IF NOT EXISTS idx_contradiction_member
     ON contradiction_verdicts(member_claim_id);
@@ -338,6 +341,11 @@ ON replication_verdicts
 BEGIN
     SELECT RAISE(ABORT, 'mareforma:append_only:verdict_locked');
 END;
+CREATE TRIGGER IF NOT EXISTS replication_verdicts_no_delete
+BEFORE DELETE ON replication_verdicts
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:verdict_delete_blocked');
+END;
 
 CREATE TRIGGER IF NOT EXISTS contradiction_verdicts_append_only
 BEFORE UPDATE OF
@@ -346,6 +354,11 @@ BEFORE UPDATE OF
 ON contradiction_verdicts
 BEGIN
     SELECT RAISE(ABORT, 'mareforma:append_only:verdict_locked');
+END;
+CREATE TRIGGER IF NOT EXISTS contradiction_verdicts_no_delete
+BEFORE DELETE ON contradiction_verdicts
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:verdict_delete_blocked');
 END;
 
 -- Contradiction verdicts invalidate the OLDER of the two referenced
@@ -363,8 +376,13 @@ BEGIN
     UPDATE claims
     SET t_invalid = NEW.created_at
     WHERE claim_id = (
+        -- Tie-break on identical created_at by lex-smaller claim_id
+        -- so the verdict's argument order does NOT determine which
+        -- claim gets invalidated when timestamps collide.
         SELECT CASE
-            WHEN c1.created_at <= c2.created_at THEN c1.claim_id
+            WHEN c1.created_at < c2.created_at THEN c1.claim_id
+            WHEN c2.created_at < c1.created_at THEN c2.claim_id
+            WHEN c1.claim_id < c2.claim_id THEN c1.claim_id
             ELSE c2.claim_id
         END
         FROM claims c1, claims c2
@@ -608,6 +626,11 @@ def open_db(root: Path) -> sqlite3.Connection:
     try:
         conn = sqlite3.connect(str(path), check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        # SQLite default is foreign_keys = OFF. Every REFERENCES clause
+        # in the schema is advisory without this PRAGMA. Verdict-issuer
+        # tables FK to validators(keyid) and claims(claim_id); the
+        # adversarial review found these were unenforced. Turn on now.
+        conn.execute("PRAGMA foreign_keys = ON")
 
         version = conn.execute("PRAGMA user_version").fetchone()[0]
 
@@ -2230,6 +2253,15 @@ def record_contradiction_verdict(
     """
     from mareforma import signing as _signing
 
+    if member_claim_id == other_claim_id:
+        # Self-contradiction is meaningless and would let a single
+        # validator invalidate any claim unilaterally. The table CHECK
+        # also blocks it, but raising here gives a clean Python error.
+        raise VerdictIssuerError(
+            f"Contradiction verdict {verdict_id!r} references the same "
+            f"claim_id on both sides ({member_claim_id!r}) — self-"
+            "contradiction is not a valid verdict."
+        )
     issuer_keyid = _signing.public_key_id(signer.public_key())
     _require_enrolled_issuer(conn, issuer_keyid)
     _require_claim_exists(conn, member_claim_id, "member_claim_id")
@@ -2278,24 +2310,38 @@ def list_replication_verdicts(
     *,
     member_claim_id: str | None = None,
     cluster_id: str | None = None,
+    include_invalidated: bool = False,
 ) -> list[dict]:
-    """List signed replication verdicts, optionally filtered."""
+    """List signed replication verdicts, optionally filtered.
+
+    By default, verdicts whose member or other claim has been
+    invalidated (``claims.t_invalid IS NOT NULL``) are excluded — same
+    surface as :func:`query_claims`. Pass ``include_invalidated=True``
+    for audit-mode listings.
+    """
     conditions: list[str] = []
     params: list[Any] = []
     if member_claim_id is not None:
-        conditions.append("member_claim_id = ? OR other_claim_id = ?")
+        conditions.append("(v.member_claim_id = ? OR v.other_claim_id = ?)")
         params.extend([member_claim_id, member_claim_id])
     if cluster_id is not None:
-        conditions.append("cluster_id = ?")
+        conditions.append("v.cluster_id = ?")
         params.append(cluster_id)
-    where = (
-        "WHERE " + " AND ".join(f"({c})" for c in conditions)
-        if conditions else ""
-    )
+    if not include_invalidated:
+        conditions.append(
+            "NOT EXISTS ("
+            "SELECT 1 FROM claims c "
+            "WHERE (c.claim_id = v.member_claim_id OR c.claim_id = v.other_claim_id) "
+            "AND c.t_invalid IS NOT NULL"
+            ")"
+        )
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     rows = conn.execute(
-        f"SELECT verdict_id, cluster_id, member_claim_id, other_claim_id, "
-        f"method, confidence_json, issuer_keyid, signature, created_at "
-        f"FROM replication_verdicts {where} ORDER BY created_at ASC, verdict_id ASC",
+        f"SELECT v.verdict_id, v.cluster_id, v.member_claim_id, "
+        f"v.other_claim_id, v.method, v.confidence_json, v.issuer_keyid, "
+        f"v.signature, v.created_at "
+        f"FROM replication_verdicts v {where} "
+        f"ORDER BY v.created_at ASC, v.verdict_id ASC",
         params,
     ).fetchall()
     return [dict(r) for r in rows]
@@ -2305,24 +2351,37 @@ def list_contradiction_verdicts(
     conn: sqlite3.Connection,
     *,
     claim_id: str | None = None,
+    include_invalidated: bool = False,
 ) -> list[dict]:
-    """List signed contradiction verdicts, optionally filtered."""
+    """List signed contradiction verdicts, optionally filtered.
+
+    By default, contradiction verdicts whose claims have been
+    invalidated are excluded. Pass ``include_invalidated=True`` for
+    audit-mode listings (the typical use — a contradiction verdict
+    is the EVIDENCE for invalidation, so callers inspecting "why was
+    this invalidated" need audit mode).
+    """
+    conditions: list[str] = []
+    params: list[Any] = []
     if claim_id is not None:
-        rows = conn.execute(
-            "SELECT verdict_id, member_claim_id, other_claim_id, "
-            "confidence_json, issuer_keyid, signature, created_at "
-            "FROM contradiction_verdicts "
-            "WHERE member_claim_id = ? OR other_claim_id = ? "
-            "ORDER BY created_at ASC, verdict_id ASC",
-            (claim_id, claim_id),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT verdict_id, member_claim_id, other_claim_id, "
-            "confidence_json, issuer_keyid, signature, created_at "
-            "FROM contradiction_verdicts "
-            "ORDER BY created_at ASC, verdict_id ASC"
-        ).fetchall()
+        conditions.append("(v.member_claim_id = ? OR v.other_claim_id = ?)")
+        params.extend([claim_id, claim_id])
+    if not include_invalidated:
+        conditions.append(
+            "NOT EXISTS ("
+            "SELECT 1 FROM claims c "
+            "WHERE (c.claim_id = v.member_claim_id OR c.claim_id = v.other_claim_id) "
+            "AND c.t_invalid IS NOT NULL"
+            ")"
+        )
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    rows = conn.execute(
+        f"SELECT v.verdict_id, v.member_claim_id, v.other_claim_id, "
+        f"v.confidence_json, v.issuer_keyid, v.signature, v.created_at "
+        f"FROM contradiction_verdicts v {where} "
+        f"ORDER BY v.created_at ASC, v.verdict_id ASC",
+        params,
+    ).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -3613,7 +3672,12 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
         # sets t_invalid fires on the re-INSERT, restoring the
         # invalidation state without needing a separate t_invalid
         # round-trip.
-        rep_rows = list_replication_verdicts(conn)
+        #
+        # include_invalidated=True because backup MUST capture every
+        # signed verdict regardless of whether its referenced claim
+        # has been invalidated. The default-filter is for user-facing
+        # query semantics; backup is audit-mode by definition.
+        rep_rows = list_replication_verdicts(conn, include_invalidated=True)
         if rep_rows:
             data["replication_verdicts"] = {}
             for v in rep_rows:
@@ -3628,7 +3692,7 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
                     "signature": base64.b64encode(v["signature"]).decode("ascii"),
                     "created_at": v["created_at"],
                 }
-        con_rows = list_contradiction_verdicts(conn)
+        con_rows = list_contradiction_verdicts(conn, include_invalidated=True)
         if con_rows:
             data["contradiction_verdicts"] = {}
             for v in con_rows:

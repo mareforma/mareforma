@@ -450,22 +450,38 @@ class EpistemicGraph:
         *,
         member_claim_id: str | None = None,
         cluster_id: str | None = None,
+        include_invalidated: bool = False,
     ) -> list[dict]:
-        """List signed replication verdicts, optionally filtered."""
+        """List signed replication verdicts, optionally filtered.
+
+        By default, verdicts whose member or other claim has been
+        invalidated by a signed contradiction verdict are excluded —
+        same surface as :meth:`query`. Pass ``include_invalidated=True``
+        for audit / history queries.
+        """
         self._check_open()
         return _db.list_replication_verdicts(
             self._conn,
             member_claim_id=member_claim_id,
             cluster_id=cluster_id,
+            include_invalidated=include_invalidated,
         )
 
     def contradiction_verdicts(
         self, *, claim_id: str | None = None,
+        include_invalidated: bool = False,
     ) -> list[dict]:
-        """List signed contradiction verdicts, optionally filtered."""
+        """List signed contradiction verdicts, optionally filtered.
+
+        By default, verdicts on invalidated claims are excluded; pass
+        ``include_invalidated=True`` for audit-mode listings — the
+        typical use, since a contradiction verdict IS the evidence
+        for invalidation.
+        """
         self._check_open()
         return _db.list_contradiction_verdicts(
             self._conn, claim_id=claim_id,
+            include_invalidated=include_invalidated,
         )
 
     def get_validator_reputation(self) -> dict[str, int]:
