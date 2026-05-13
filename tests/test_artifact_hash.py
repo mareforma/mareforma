@@ -370,3 +370,191 @@ class TestCLIArtifactHash:
             )
         assert result.exit_code == 1
         assert "64-character" in result.output or "artifact_hash" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Strict idempotency contract — every semantic field must match
+# ---------------------------------------------------------------------------
+#
+# Tightened in v0.3.0 to refuse the silent-merge anti-pattern. Prior
+# behavior matched only on artifact_hash; this let two callers using the
+# same key with different text + generated_by collapse into one row,
+# destroying the second author's content and breaking the REPLICATED
+# story (different generated_by converging on shared upstream). For
+# cross-lab convergence, callers must assert two separate claims that
+# share a supports[] entry — the actual REPLICATED path.
+
+
+class TestIdempotencyStrictContract:
+    def test_same_key_different_text_raises(self, open_graph) -> None:
+        open_graph.assert_claim("Lab A text", idempotency_key="k1",
+                                generated_by="lab/a")
+        with pytest.raises(_db.IdempotencyConflictError, match="text"):
+            open_graph.assert_claim(
+                "Lab B text", idempotency_key="k1", generated_by="lab/a",
+            )
+
+    def test_same_key_different_generated_by_raises(self, open_graph) -> None:
+        open_graph.assert_claim("x", idempotency_key="k1",
+                                generated_by="lab/a")
+        with pytest.raises(_db.IdempotencyConflictError,
+                           match="generated_by"):
+            open_graph.assert_claim(
+                "x", idempotency_key="k1", generated_by="lab/b",
+            )
+
+    def test_same_key_different_classification_raises(self, open_graph) -> None:
+        open_graph.assert_claim("x", idempotency_key="k1",
+                                classification="INFERRED")
+        with pytest.raises(_db.IdempotencyConflictError,
+                           match="classification"):
+            open_graph.assert_claim(
+                "x", idempotency_key="k1", classification="ANALYTICAL",
+            )
+
+    def test_same_key_different_supports_raises(self, open_graph) -> None:
+        open_graph.assert_claim("x", idempotency_key="k1",
+                                supports=["upstream_A"])
+        with pytest.raises(_db.IdempotencyConflictError, match="supports"):
+            open_graph.assert_claim(
+                "x", idempotency_key="k1", supports=["upstream_B"],
+            )
+
+    def test_same_key_different_source_name_raises(self, open_graph) -> None:
+        open_graph.assert_claim("x", idempotency_key="k1",
+                                source_name="dataset_alpha")
+        with pytest.raises(_db.IdempotencyConflictError, match="source_name"):
+            open_graph.assert_claim(
+                "x", idempotency_key="k1", source_name="dataset_beta",
+            )
+
+    def test_true_retry_passes_silently(self, open_graph) -> None:
+        """Every field identical → true retry. Returns the same claim_id,
+        no INSERT."""
+        a = open_graph.assert_claim(
+            "x", classification="ANALYTICAL", generated_by="lab/a",
+            supports=["upstream_A"], source_name="dataset_alpha",
+            idempotency_key="k1",
+        )
+        b = open_graph.assert_claim(
+            "x", classification="ANALYTICAL", generated_by="lab/a",
+            supports=["upstream_A"], source_name="dataset_alpha",
+            idempotency_key="k1",
+        )
+        assert a == b
+
+    def test_multiple_mismatches_named_in_error(self, open_graph) -> None:
+        """Conflict message names every mismatching field, not just the
+        first one."""
+        open_graph.assert_claim("Lab A text", idempotency_key="k1",
+                                generated_by="lab/a")
+        with pytest.raises(_db.IdempotencyConflictError) as exc:
+            open_graph.assert_claim(
+                "Lab B text", idempotency_key="k1", generated_by="lab/b",
+            )
+        msg = str(exc.value)
+        assert "text" in msg and "generated_by" in msg
+
+    def test_race_loss_translates_unique_violation(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Two writers race past the pre-INSERT SELECT with the same
+        idempotency_key. The loser must surface IdempotencyConflictError
+        with the field-mismatch list, not a raw sqlite3.IntegrityError
+        from idx_claims_idempotency_key.
+
+        Simulated deterministically by wrapping the connection so the
+        first idempotency SELECT returns None (as if the other writer
+        hadn't committed yet), letting the INSERT trip the UNIQUE index
+        and routing through the race-recovery branch.
+        """
+        # Land a real row that occupies idempotency_key="k1".
+        with mareforma.open(tmp_path) as g:
+            g.assert_claim(
+                "Lab A text", idempotency_key="k1",
+                classification="ANALYTICAL", generated_by="lab/a",
+            )
+
+        # Re-open and force the FIRST idempotency SELECT to miss, then
+        # let the INSERT proceed to trip UNIQUE.
+        class _MissingFirstSelect:
+            def __init__(self, real):
+                self._real = real
+                self._missed = False
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+            def execute(self, sql, params=()):
+                if (
+                    not self._missed
+                    and "WHERE idempotency_key = ?" in sql
+                    and "FROM claims" in sql
+                ):
+                    self._missed = True
+                    class _Empty:
+                        def fetchone(_self):
+                            return None
+                    return _Empty()
+                return self._real.execute(sql, params)
+
+            @property
+            def in_transaction(self):
+                return self._real.in_transaction
+
+        with mareforma.open(tmp_path) as g:
+            real_conn = g._conn
+            wrapped = _MissingFirstSelect(real_conn)
+            monkeypatch.setattr(g, "_conn", wrapped)
+            with pytest.raises(_db.IdempotencyConflictError, match="text"):
+                g.assert_claim(
+                    "Lab B text", idempotency_key="k1",
+                    classification="ANALYTICAL", generated_by="lab/a",
+                )
+
+    def test_race_loss_true_retry_returns_existing_id(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Race-recovery happy path: if every field matches the row
+        committed by the race winner, the loser gets the winner's
+        claim_id back (idempotent retry), not an exception."""
+        with mareforma.open(tmp_path) as g:
+            winner_id = g.assert_claim(
+                "shared text", idempotency_key="k1",
+                classification="ANALYTICAL", generated_by="lab/a",
+                source_name="dataset_alpha",
+            )
+
+        class _MissingFirstSelect:
+            def __init__(self, real):
+                self._real = real
+                self._missed = False
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+            def execute(self, sql, params=()):
+                if (
+                    not self._missed
+                    and "WHERE idempotency_key = ?" in sql
+                    and "FROM claims" in sql
+                ):
+                    self._missed = True
+                    class _Empty:
+                        def fetchone(_self):
+                            return None
+                    return _Empty()
+                return self._real.execute(sql, params)
+
+            @property
+            def in_transaction(self):
+                return self._real.in_transaction
+
+        with mareforma.open(tmp_path) as g:
+            monkeypatch.setattr(g, "_conn", _MissingFirstSelect(g._conn))
+            loser_id = g.assert_claim(
+                "shared text", idempotency_key="k1",
+                classification="ANALYTICAL", generated_by="lab/a",
+                source_name="dataset_alpha",
+            )
+            assert loser_id == winner_id

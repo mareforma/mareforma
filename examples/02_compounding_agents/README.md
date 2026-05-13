@@ -6,8 +6,9 @@ Knowledge accumulates in the graph instead of evaporating between runs.
 ## Story
 
 Agent A (Analyst) runs analysis on two independent datasets, citing the same
-upstream evidence. Two independent agents, shared upstream → REPLICATED fires
-automatically.
+`ESTABLISHED` upstream claim (seeded once with `seed=True` at the top of the
+script). Two independent agents, shared `ESTABLISHED` upstream → `REPLICATED`
+fires automatically.
 
 Agent B (Synthesizer) queries the graph before asserting anything. It finds
 the REPLICATED findings and builds a DERIVED synthesis on top — traceable

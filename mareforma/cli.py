@@ -104,6 +104,95 @@ def bootstrap_cmd(key_path: str | None, overwrite: bool) -> None:
     _ok(f"Generated signing key at {path}")
     _info(f"Public key id: {keyid}")
     _info("Share the keyid with collaborators so they can verify your claims.")
+    _info("")
+    _info("Next steps:")
+    _info("  • The first key opened against a project's graph auto-enrolls")
+    _info("    as the root validator on that project.")
+    _info("  • To promote a claim to ESTABLISHED you need a SECOND enrolled")
+    _info("    key (the substrate refuses self-validation). Have a")
+    _info("    collaborator run `mareforma bootstrap`, then run")
+    _info("    `mareforma key show --pem > pubkey.pem` and send it to you;")
+    _info("    enroll them with `mareforma validator add --pubkey pubkey.pem")
+    _info("    --identity <label>`.")
+
+
+# ---------------------------------------------------------------------------
+# key — inspect the locally-configured signing key
+# ---------------------------------------------------------------------------
+
+@cli.group()
+def key() -> None:
+    """Inspect the locally-configured signing key."""
+
+
+@key.command("show")
+@click.option(
+    "--key-path", default=None,
+    help="Override the default key path (~/.config/mareforma/key).",
+)
+@click.option(
+    "--pem", "as_pem", is_flag=True, default=False,
+    help="Emit ONLY the PEM-encoded public key to stdout (no other output). "
+         "Pipe to a file when sending to a project admin who will enroll you "
+         "as a validator: `mareforma key show --pem > pubkey.pem`.",
+)
+@click.option(
+    "--keyid", "as_keyid", is_flag=True, default=False,
+    help="Emit ONLY the keyid (SHA-256 hex of the raw pubkey bytes) to stdout. "
+         "Useful for scripting and for confirming which key is loaded.",
+)
+def key_show(key_path: str | None, as_pem: bool, as_keyid: bool) -> None:
+    """Print the locally-configured public key.
+
+    The private key never leaves the file at ``--key-path`` (or
+    ``~/.config/mareforma/key``). What this command emits is the
+    PUBLIC half — safe to email, paste, or pipe.
+
+    \b
+    Examples:
+        mareforma key show                    # human-readable identity card
+        mareforma key show --pem > pub.pem    # for `validator add --pubkey`
+        mareforma key show --keyid            # short hash for scripts
+    """
+    from mareforma import signing as _signing
+
+    if as_pem and as_keyid:
+        _err("--pem and --keyid are mutually exclusive.")
+        sys.exit(1)
+
+    target = Path(key_path) if key_path else _signing.default_key_path()
+    if not target.exists():
+        _err(
+            f"No signing key at {target}. Run `mareforma bootstrap` to "
+            "create one."
+        )
+        sys.exit(1)
+
+    try:
+        private = _signing.load_private_key(target)
+    except _signing.SigningError as exc:
+        _err(f"Could not load key at {target}: {exc}")
+        sys.exit(1)
+
+    public = private.public_key()
+    keyid = _signing.public_key_id(public)
+    pem_bytes = _signing.public_key_to_pem(public)
+
+    if as_pem:
+        # Raw PEM to stdout — no styling, no trailing newline added beyond
+        # the PEM's own. Designed for `> pub.pem` redirection.
+        click.echo(pem_bytes.decode("ascii"), nl=False)
+        return
+
+    if as_keyid:
+        click.echo(keyid)
+        return
+
+    _ok(f"Signing key at {target}")
+    _info(f"keyid: {keyid}")
+    _info("")
+    _info("Public PEM (safe to share):")
+    click.echo(pem_bytes.decode("ascii"), nl=False)
 
 
 # ---------------------------------------------------------------------------
@@ -617,7 +706,10 @@ def claim_validate(claim_id, validated_by):
         mareforma claim validate <ID> --validated-by reviewer@example.org
     """
     import mareforma
-    from mareforma.db import DatabaseError, ClaimNotFoundError
+    from mareforma.db import (
+        DatabaseError, ClaimNotFoundError, SelfValidationError,
+        LLMValidatorPromotionError, MareformaError,
+    )
 
     try:
         with mareforma.open(_root()) as graph:
@@ -625,11 +717,32 @@ def claim_validate(claim_id, validated_by):
     except ClaimNotFoundError as exc:
         _err(str(exc))
         sys.exit(1)
+    except SelfValidationError as exc:
+        # Common first-run trip-up — the user opened the graph with the
+        # same key that signed the claim. Surface the substrate's
+        # explanation and the exact remediation command.
+        _err(str(exc))
+        _info("")
+        _info("Resolution: enroll a second validator (a different key) and")
+        _info("run `mareforma claim validate` while that key is loaded.")
+        _info("See `mareforma validator add --help` and `mareforma key show --help`.")
+        sys.exit(1)
+    except LLMValidatorPromotionError as exc:
+        _err(str(exc))
+        sys.exit(1)
     except ValueError as exc:
+        # Substrate ValueErrors carry actionable text (wrong support_level,
+        # signer not enrolled, no signer loaded). Pass through verbatim.
         _err(str(exc))
         sys.exit(1)
     except DatabaseError as exc:
         _err(f"Failed to validate claim: {exc}")
+        sys.exit(1)
+    except MareformaError as exc:
+        # Belt-and-suspenders for any future MareformaError subclass we
+        # forget to enumerate here. Better a generic message than a
+        # traceback.
+        _err(str(exc))
         sys.exit(1)
 
     _ok(f"Claim '{claim_id}' promoted to ESTABLISHED.")

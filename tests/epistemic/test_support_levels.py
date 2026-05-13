@@ -324,28 +324,39 @@ class TestGraphFragmentation:
         assert c_a["support_level"] == "PRELIMINARY"
         assert c_b["support_level"] == "PRELIMINARY"
 
-    def test_shared_idempotency_key_prevents_fragmentation(
+    def test_shared_idempotency_key_with_conflicting_fields_refused(
         self, tmp_path: Path
     ) -> None:
-        """A shared structured key routes both agents to the same claim_id."""
+        """Same idempotency_key with different text + generated_by raises.
+
+        The "convergence convention" historically documented around this
+        primitive was anti-epistemic: collapsing two labs' content into
+        one row destroyed the second author's text + generated_by and
+        broke REPLICATED detection (REPLICATED requires two distinct
+        rows with different generated_by). The substrate now refuses
+        the silent merge. The legitimate cross-lab convergence path is
+        two separate claims that share an entry in ``supports[]`` —
+        that fires REPLICATED honestly. See ``TestCrossLabConvergence``
+        below for that pattern.
+        """
+        from mareforma.db import IdempotencyConflictError
         KEY = "target_T_elevated_condition_C"
 
         with open_graph(tmp_path) as graph:
-            id_a = graph.assert_claim(
+            graph.assert_claim(
                 "Target T is elevated in condition C",
                 generated_by="agent/model-a/lab_a",
                 idempotency_key=KEY,
             )
-            id_b = graph.assert_claim(
-                "Target T shows increased expression under condition C",
-                generated_by="agent/model-b/lab_b",
-                idempotency_key=KEY,            # same key → same claim
-            )
-
-            all_claims = graph.query("Target T")
-
-        assert id_a == id_b
-        assert len(all_claims) == 1
+            with pytest.raises(
+                IdempotencyConflictError,
+                match="text|generated_by",
+            ):
+                graph.assert_claim(
+                    "Target T shows increased expression under condition C",
+                    generated_by="agent/model-b/lab_b",
+                    idempotency_key=KEY,
+                )
 
 
 # ---------------------------------------------------------------------------

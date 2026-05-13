@@ -175,12 +175,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_claims_prev_hash
 -- prefixed messages so Python can translate sqlite3.IntegrityError to
 -- IllegalStateTransitionError without parsing English.
 
+-- RAISE() takes a string literal in SQLite < 3.46; the previous
+-- `'prefix:' || NEW.x` form rejected as a syntax error on Ubuntu
+-- 24.04 LTS (SQLite 3.45.1) and many current distros. Static prefixes
+-- here keep the schema portable across SQLite ≥ 3.16 (our actual
+-- FTS5-driven minimum). The Python translator at
+-- `_state_error_from_integrity` keys off the suffix shape; downstream
+-- callers that need to know "what NEW value was rejected" can inspect
+-- the row's pre-image directly.
 CREATE TRIGGER IF NOT EXISTS claims_insert_state_check
 BEFORE INSERT ON claims
 BEGIN
     SELECT CASE
         WHEN NEW.support_level NOT IN ('PRELIMINARY', 'ESTABLISHED') THEN
-            RAISE(ABORT, 'mareforma:state:insert_invalid_level:' || NEW.support_level)
+            RAISE(ABORT, 'mareforma:state:insert_invalid_level')
         WHEN NEW.support_level = 'ESTABLISHED' AND
              NEW.validation_signature IS NULL THEN
             RAISE(ABORT, 'mareforma:state:insert_established_without_validation')
@@ -196,13 +204,13 @@ BEGIN
     SELECT CASE
         WHEN OLD.support_level = 'PRELIMINARY' AND
              NEW.support_level NOT IN ('PRELIMINARY', 'REPLICATED') THEN
-            RAISE(ABORT, 'mareforma:state:illegal_transition:PRELIMINARY->' || NEW.support_level)
+            RAISE(ABORT, 'mareforma:state:illegal_transition:from_preliminary')
         WHEN OLD.support_level = 'REPLICATED' AND
              NEW.support_level NOT IN ('REPLICATED', 'ESTABLISHED') THEN
-            RAISE(ABORT, 'mareforma:state:illegal_transition:REPLICATED->' || NEW.support_level)
+            RAISE(ABORT, 'mareforma:state:illegal_transition:from_replicated')
         WHEN OLD.support_level = 'ESTABLISHED' AND
              NEW.support_level != 'ESTABLISHED' THEN
-            RAISE(ABORT, 'mareforma:state:illegal_transition:ESTABLISHED->' || NEW.support_level)
+            RAISE(ABORT, 'mareforma:state:illegal_transition:from_established')
         WHEN NEW.support_level = 'ESTABLISHED' AND
              NEW.validation_signature IS NULL THEN
             RAISE(ABORT, 'mareforma:state:established_without_validation')
@@ -221,7 +229,7 @@ BEFORE UPDATE OF status ON claims
 BEGIN
     SELECT CASE
         WHEN OLD.status = 'retracted' AND NEW.status != 'retracted' THEN
-            RAISE(ABORT, 'mareforma:state:retracted_is_terminal:' || NEW.status)
+            RAISE(ABORT, 'mareforma:state:retracted_is_terminal')
     END;
 END;
 
@@ -623,6 +631,25 @@ def open_db(root: Path) -> sqlite3.Connection:
     path = _db_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Minimum SQLite version. FTS5 with `remove_diacritics 2` (used by
+    # claims_fts) requires ≥ 3.27 (released 2019-02). We pick 3.30 as a
+    # comfortable floor that gives us window functions + UPSERT + the
+    # `||` operator parsing fixes that have shaken out over the years.
+    # Common LTS distros that ship below this floor (Ubuntu 18.04 EOL,
+    # CentOS 7 EOL) are well outside the support window. Fail loudly
+    # with a concrete remediation rather than a cryptic SQL syntax
+    # error deep in trigger creation.
+    _MIN_SQLITE = (3, 30, 0)
+    _have = tuple(int(p) for p in sqlite3.sqlite_version.split("."))
+    if _have < _MIN_SQLITE:
+        raise DatabaseError(
+            f"mareforma requires SQLite >= "
+            f"{'.'.join(str(p) for p in _MIN_SQLITE)}, "
+            f"this Python build links {sqlite3.sqlite_version}. "
+            "Upgrade your system SQLite (apt / brew / etc.) or install "
+            "`pysqlite3-binary` and import it as the `sqlite3` module."
+        )
+
     try:
         conn = sqlite3.connect(str(path), check_same_thread=False)
         conn.row_factory = sqlite3.Row
@@ -848,7 +875,9 @@ def _state_error_from_integrity(
     if "mareforma:state:" in msg:
         # Extract the suffix after the prefix for callers that want to
         # pattern-match. The full SQLite message looks like:
-        #   IntegrityError: mareforma:state:illegal_transition:PRELIMINARY->ESTABLISHED
+        #   IntegrityError: mareforma:state:illegal_transition:from_preliminary
+        # (Static suffixes only — SQLite < 3.46 rejects `'prefix:' || NEW.x`
+        # in RAISE() as a syntax error. See the schema preamble.)
         marker = "mareforma:state:"
         suffix = msg[msg.index(marker) + len(marker):]
         return IllegalStateTransitionError(f"State transition refused: {suffix}")
@@ -908,6 +937,67 @@ def normalize_artifact_hash(value: str | None) -> str | None:
 # Claims
 # ---------------------------------------------------------------------------
 
+def _reconcile_idempotency_row(
+    row: sqlite3.Row,
+    idempotency_key: str,
+    text: str,
+    classification: str,
+    generated_by: str | None,
+    supports: list[str] | None,
+    contradicts: list[str] | None,
+    source_name: str | None,
+    artifact_hash: str | None,
+) -> str:
+    """Compare a found row against the current call's semantic fields.
+
+    Same key + every semantic field matching → return the existing
+    ``claim_id`` (true retry). Any divergence → raise
+    :class:`IdempotencyConflictError` listing every mismatched field.
+
+    Called from two places:
+
+    1. The pre-INSERT idempotency SELECT — the happy path. Catches the
+       common case where a deterministic agent retries an in-flight
+       assertion after a crash.
+    2. The post-INSERT race-recovery path. The pre-SELECT runs outside
+       BEGIN IMMEDIATE, so two concurrent writers with the same key
+       both see "no existing row" and both proceed to INSERT. SQLite's
+       ``idx_claims_idempotency_key`` UNIQUE index makes the second
+       INSERT fail; the loser re-SELECTs and routes through this
+       helper to deliver the same epistemic error as the happy path,
+       not a bare ``sqlite3.IntegrityError``.
+    """
+    expected_supports = json.dumps(supports or [])
+    expected_contradicts = json.dumps(contradicts or [])
+    mismatches: list[str] = []
+    if row["text"] != text.strip():
+        mismatches.append("text")
+    if row["classification"] != classification:
+        mismatches.append("classification")
+    if row["generated_by"] != generated_by:
+        mismatches.append("generated_by")
+    if row["supports_json"] != expected_supports:
+        mismatches.append("supports")
+    if row["contradicts_json"] != expected_contradicts:
+        mismatches.append("contradicts")
+    if row["source_name"] != source_name:
+        mismatches.append("source_name")
+    if row["artifact_hash"] != artifact_hash:
+        mismatches.append("artifact_hash")
+    if mismatches:
+        raise IdempotencyConflictError(
+            f"idempotency_key={idempotency_key!r} already exists "
+            f"with different {', '.join(mismatches)}. Use a "
+            "different idempotency_key — silently merging two "
+            "different claims into one row would discard the "
+            "second author's content and break REPLICATED "
+            "detection. For cross-lab convergence assert two "
+            "separate claims that share an entry in supports[] "
+            "with different generated_by values."
+        )
+    return row["claim_id"]
+
+
 def add_claim(
     conn: sqlite3.Connection,
     root: Path,
@@ -922,6 +1012,7 @@ def add_claim(
     status: str = "open",
     unresolved: bool = False,
     artifact_hash: str | None = None,
+    evidence: "object | None" = None,
     seed: bool = False,
     signer: "object | None" = None,
     rekor_url: str | None = None,
@@ -1011,25 +1102,33 @@ def add_claim(
     artifact_hash = normalize_artifact_hash(artifact_hash)
 
     # Idempotency check — return existing claim_id if key already present.
-    # Replays must agree on artifact_hash: a retry that supplies a different
-    # hash is a different claim, not the same op. Silently keeping the first
-    # hash would let the caller think their new hash was registered.
+    # Strict contract: same key MUST match on every semantic field. True
+    # retries pass silently; anything else raises IdempotencyConflictError.
+    #
+    # Prior behavior — match on artifact_hash only and silently return the
+    # existing claim_id — was anti-epistemic: a second caller's text and
+    # generated_by were discarded into the first caller's row, collapsing
+    # what should have been two independent claims into one. The
+    # "convergence convention" documented around this primitive actively
+    # destroyed what REPLICATED is supposed to detect (different
+    # generated_by values converging on shared upstream). The correct path
+    # for cross-lab convergence is two separate claims that share an entry
+    # in supports[] with different generated_by — that fires REPLICATED.
+    # Idempotency_key is retry-safety only.
     if idempotency_key is not None:
         try:
             row = conn.execute(
-                "SELECT claim_id, artifact_hash FROM claims WHERE idempotency_key = ?",
+                "SELECT claim_id, text, classification, generated_by, "
+                "supports_json, contradicts_json, source_name, artifact_hash "
+                "FROM claims WHERE idempotency_key = ?",
                 (idempotency_key,),
             ).fetchone()
             if row:
-                existing_hash = row["artifact_hash"]
-                if existing_hash != artifact_hash:
-                    raise IdempotencyConflictError(
-                        f"idempotency_key={idempotency_key!r} already exists "
-                        f"with artifact_hash={existing_hash!r}, but this call "
-                        f"supplied {artifact_hash!r}. Use a different "
-                        "idempotency_key or omit the conflicting field."
-                    )
-                return row["claim_id"]
+                existing_id = _reconcile_idempotency_row(
+                    row, idempotency_key, text, classification, generated_by,
+                    supports, contradicts, source_name, artifact_hash,
+                )
+                return existing_id
         except sqlite3.OperationalError as exc:
             raise DatabaseError(f"Idempotency check failed: {exc}") from exc
 
@@ -1107,12 +1206,24 @@ def add_claim(
     # any later tamper (text edit, support reattribution, evidence override)
     # breaks verification.
     #
-    # In v0.3.0 Phase 1 every claim carries a default-zero EvidenceVector
-    # (no quality concerns flagged by the asserter). Future API revisions
-    # will let callers supply a populated vector; the envelope and chain
-    # already bind whatever vector ends up in the row.
+    # Callers can supply a populated GRADE EvidenceVector via the
+    # ``evidence`` parameter — the asserter's confidence in the evidence
+    # backing this claim. Default all-zeros means the asserter flagged
+    # no quality concerns; downstream readers should interpret a
+    # default-zero vector as "asserter made no claim about quality,"
+    # not as "evidence is high-quality."
     from mareforma._evidence import EvidenceVector
-    evidence_obj = EvidenceVector()
+    if evidence is None:
+        evidence_obj = EvidenceVector()
+    elif isinstance(evidence, EvidenceVector):
+        evidence_obj = evidence
+    elif isinstance(evidence, dict):
+        evidence_obj = EvidenceVector.from_dict(evidence)
+    else:
+        raise TypeError(
+            f"evidence must be EvidenceVector | dict | None; "
+            f"got {type(evidence).__name__}"
+        )
     evidence_dict = evidence_obj.to_dict()
     evidence_json = json.dumps(
         evidence_dict, sort_keys=True, separators=(",", ":"),
@@ -1235,6 +1346,38 @@ def add_claim(
     except sqlite3.IntegrityError as exc:
         if _own_transaction:
             conn.rollback()
+        # Race-loss recovery: two concurrent writers with the same
+        # idempotency_key both passed the pre-INSERT SELECT (it runs
+        # outside BEGIN IMMEDIATE), and the second INSERT tripped the
+        # UNIQUE index on claims.idempotency_key. Re-SELECT and route
+        # through the same comparison helper as the happy path so the
+        # loser gets IdempotencyConflictError-with-field-list (true
+        # retry) or a clean return (everything matched), not a bare
+        # IntegrityError. SQLite reports the failure as
+        # "UNIQUE constraint failed: claims.idempotency_key" — match on
+        # the qualified column name rather than the index name.
+        exc_msg = str(exc)
+        if (
+            idempotency_key is not None
+            and "UNIQUE constraint failed" in exc_msg
+            and "claims.idempotency_key" in exc_msg
+        ):
+            try:
+                row = conn.execute(
+                    "SELECT claim_id, text, classification, generated_by, "
+                    "supports_json, contradicts_json, source_name, "
+                    "artifact_hash FROM claims WHERE idempotency_key = ?",
+                    (idempotency_key,),
+                ).fetchone()
+            except sqlite3.OperationalError as fetch_exc:
+                raise DatabaseError(
+                    f"Idempotency race recovery failed: {fetch_exc}",
+                ) from fetch_exc
+            if row is not None:
+                return _reconcile_idempotency_row(
+                    row, idempotency_key, text, classification, generated_by,
+                    supports, contradicts, source_name, artifact_hash,
+                )
         translated = _state_error_from_integrity(exc)
         if translated is not None:
             raise translated from exc
@@ -1431,12 +1574,19 @@ def _maybe_update_replicated(
             conn, new_claim_id, supports, generated_by, artifact_hash,
         )
         conn.commit()
-    except (sqlite3.OperationalError, sqlite3.IntegrityError):
+    except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
         # Convergence detection is best-effort — never crash a write.
         # A trigger-raised IntegrityError here would mean a state transition
         # we asked for is illegal (e.g. ESTABLISHED peer being downgraded);
-        # the underlying invariant should remain — log the warning.
-        pass
+        # the underlying invariant remains intact. Surface a WARNING so
+        # silently-swallowed failures are debuggable — without it, a
+        # mis-configured trigger or contention pattern would let claims sit
+        # at PRELIMINARY with no record of why.
+        import logging
+        logging.getLogger("mareforma").warning(
+            "Convergence detection swallowed %s for claim %s: %s",
+            type(exc).__name__, new_claim_id, exc,
+        )
 
 
 def _extract_validation_signer_keyid(validation_signature: str) -> str | None:

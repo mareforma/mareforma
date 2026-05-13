@@ -42,6 +42,7 @@ import tempfile
 from pathlib import Path
 
 import mareforma
+from mareforma import signing as _signing
 from langchain_core.tools import tool
 
 
@@ -60,7 +61,14 @@ def show(label: str, value: object) -> None:
 # ---------------------------------------------------------------------------
 
 tmp = Path(tempfile.mkdtemp())
-graph = mareforma.open(tmp)
+# Self-contained signing key for this example. In real use, run
+# `mareforma bootstrap` once and mareforma.open() picks the key up
+# from ~/.config/mareforma/key automatically. The first key opened
+# against a fresh graph auto-enrolls as the root validator, which is
+# required to bootstrap the ESTABLISHED upstream with seed=True below.
+key_path = tmp / "_example_key"
+_signing.bootstrap_key(key_path)
+graph = mareforma.open(tmp, key_path=key_path)
 
 
 # ---------------------------------------------------------------------------
@@ -90,8 +98,17 @@ _, assert_finding_synth = [tool(fn) for fn in graph.get_tools(
 
 sep("Agent A — Analyst (two independent runs)")
 
-# Shared upstream anchor — a prior claim both analyses build on.
-prior_ref = "upstream_finding_X"
+# Shared upstream anchor — a prior claim both analyses build on. Under the
+# ESTABLISHED-upstream rule, REPLICATED requires an upstream claim with
+# support_level='ESTABLISHED' in supports[]; seed=True asserts directly at
+# ESTABLISHED with a signed seed envelope, only available to enrolled
+# validators (the loaded key auto-enrolled as root on first open).
+prior_ref = graph.assert_claim(
+    "Prior literature: cell type A → cell type B inhibitory connectivity",
+    classification="DERIVED",
+    generated_by="agent_seed/literature",
+    seed=True,
+)
 
 # Run 1: Lab A, dataset alpha
 finding_a = assert_finding_a.invoke({

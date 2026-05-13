@@ -229,10 +229,14 @@ def restore(
     return _restore(project_root, claims_toml=claims_toml)
 
 
+from mareforma._evidence import EvidenceVector
+
+
 __all__ = [
     "open",
     "schema",
     "restore",
+    "EvidenceVector",
     "safe_for_llm",
     "sanitize_for_llm",
     "wrap_untrusted",

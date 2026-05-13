@@ -123,7 +123,7 @@ class TestUpdateTrigger:
         conn = open_db(tmp_path)
         try:
             cid = add_claim(conn, tmp_path, "x", generated_by="agent")
-            with pytest.raises(sqlite3.IntegrityError, match="PRELIMINARY->ESTABLISHED"):
+            with pytest.raises(sqlite3.IntegrityError, match="illegal_transition:from_preliminary"):
                 conn.execute(
                     "UPDATE claims SET support_level = 'ESTABLISHED', "
                     "validation_signature = ? WHERE claim_id = ?",
@@ -152,7 +152,7 @@ class TestUpdateTrigger:
             g.validate(id_a)
             # Now id_a is ESTABLISHED. Attempt a direct UPDATE to PRELIMINARY.
             conn = g._conn
-            with pytest.raises(IllegalStateTransitionError, match="ESTABLISHED"):
+            with pytest.raises(IllegalStateTransitionError, match="from_established"):
                 try:
                     conn.execute(
                         "UPDATE claims SET support_level = 'PRELIMINARY' "

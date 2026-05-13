@@ -313,3 +313,164 @@ class TestClaimValidate:
         assert data["validated_by"] == "reviewer@example.org"
         # CLI now produces a signed envelope persisted to the row.
         assert data["validation_signature"] is not None
+
+
+# ---------------------------------------------------------------------------
+# key show
+# ---------------------------------------------------------------------------
+
+class TestKeyShow:
+    def test_key_show_no_key_exits_1(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            result = runner.invoke(cli, ["key", "show"])
+        assert result.exit_code == 1
+        assert "No signing key" in result.output
+        assert "mareforma bootstrap" in result.output
+
+    def test_key_show_default_emits_keyid_and_pem(self, tmp_path: Path) -> None:
+        from mareforma import signing as _signing
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            _signing.bootstrap_key(_signing.default_key_path())
+            result = runner.invoke(cli, ["key", "show"],
+                                   catch_exceptions=False)
+        assert result.exit_code == 0
+        assert "keyid:" in result.output
+        assert "-----BEGIN PUBLIC KEY-----" in result.output
+        assert "-----END PUBLIC KEY-----" in result.output
+
+    def test_key_show_pem_flag_emits_only_pem(self, tmp_path: Path) -> None:
+        from mareforma import signing as _signing
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            _signing.bootstrap_key(_signing.default_key_path())
+            result = runner.invoke(cli, ["key", "show", "--pem"],
+                                   catch_exceptions=False)
+        assert result.exit_code == 0
+        # First non-empty line must be the PEM header — pipe-able to a file.
+        first_nonempty = next(
+            line for line in result.output.splitlines() if line.strip()
+        )
+        assert first_nonempty == "-----BEGIN PUBLIC KEY-----"
+        assert "-----END PUBLIC KEY-----" in result.output
+        # No human-readable framing leaked in.
+        assert "keyid:" not in result.output
+        assert "Signing key at" not in result.output
+
+    def test_key_show_keyid_flag_emits_only_hex(self, tmp_path: Path) -> None:
+        from mareforma import signing as _signing
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            _signing.bootstrap_key(_signing.default_key_path())
+            result = runner.invoke(cli, ["key", "show", "--keyid"],
+                                   catch_exceptions=False)
+        assert result.exit_code == 0
+        line = result.output.strip()
+        # SHA-256 hex digest: 64 lowercase hex chars, nothing else.
+        assert len(line) == 64
+        assert all(c in "0123456789abcdef" for c in line)
+
+    def test_key_show_pem_and_keyid_mutually_exclusive(
+        self, tmp_path: Path,
+    ) -> None:
+        from mareforma import signing as _signing
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            _signing.bootstrap_key(_signing.default_key_path())
+            result = runner.invoke(cli, ["key", "show", "--pem", "--keyid"])
+        assert result.exit_code == 1
+        assert "mutually exclusive" in result.output
+
+    def test_key_show_explicit_path(self, tmp_path: Path) -> None:
+        from mareforma import signing as _signing
+        custom = tmp_path / "custom.key"
+        _signing.bootstrap_key(custom)
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ["key", "show", "--key-path", str(custom), "--keyid"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0
+        assert len(result.output.strip()) == 64
+
+    def test_key_show_pem_matches_loaded_key(self, tmp_path: Path) -> None:
+        """The CLI must emit the SAME PEM the substrate computes for the
+        same private key. Without this, `key show --pem | validator add
+        --pubkey -` would silently enroll the wrong identity."""
+        from mareforma import signing as _signing
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            _signing.bootstrap_key(_signing.default_key_path())
+            result = runner.invoke(cli, ["key", "show", "--pem"],
+                                   catch_exceptions=False)
+            expected = _signing.public_key_to_pem(
+                _signing.load_private_key(
+                    _signing.default_key_path(),
+                ).public_key(),
+            ).decode("ascii")
+        assert result.output == expected
+
+
+# ---------------------------------------------------------------------------
+# bootstrap output — next-step hint
+# ---------------------------------------------------------------------------
+
+class TestBootstrapHint:
+    def test_bootstrap_prints_enrollment_next_steps(
+        self, tmp_path: Path,
+    ) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            result = runner.invoke(cli, ["bootstrap"],
+                                   catch_exceptions=False)
+        assert result.exit_code == 0
+        assert "Next steps:" in result.output
+        # Names the rule that traps first-time users.
+        assert "self-validation" in result.output
+        # Points at the exact commands needed to unblock it.
+        assert "mareforma key show" in result.output
+        assert "mareforma validator add" in result.output
+
+
+# ---------------------------------------------------------------------------
+# claim validate — error-translation paths
+# ---------------------------------------------------------------------------
+
+class TestClaimValidateErrors:
+    def test_self_validation_surfaces_resolution_hint(
+        self, tmp_path: Path,
+    ) -> None:
+        """When the loaded validator key is the same key that signed the
+        claim, the CLI must surface SelfValidationError text + a
+        concrete resolution pointing at validator add / key show.
+        Without it, a first-time user gets a Python traceback because
+        SelfValidationError doesn't inherit from ValueError."""
+        from mareforma import signing as _signing
+        import mareforma
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            _signing.bootstrap_key(_signing.default_key_path())
+            # Build a REPLICATED claim signed by the XDG key (the same
+            # key the CLI will load when we invoke `claim validate`).
+            with mareforma.open() as g:
+                prior = g.assert_claim(
+                    "upstream", generated_by="seed", seed=True,
+                )
+                a = g.assert_claim(
+                    "shared finding", supports=[prior],
+                    generated_by="agent-A",
+                )
+                g.assert_claim(
+                    "shared finding restated", supports=[prior],
+                    generated_by="agent-B",
+                )
+                assert g.get_claim(a)["support_level"] == "REPLICATED"
+            result = runner.invoke(cli, ["claim", "validate", a])
+        assert result.exit_code == 1
+        # Substrate's own message comes through (no traceback).
+        assert "self-promotion is refused" in result.output
+        # CLI adds the resolution pointing at the relevant commands.
+        assert "Resolution:" in result.output
+        assert "mareforma validator add" in result.output
+        assert "mareforma key show" in result.output

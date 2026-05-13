@@ -29,18 +29,24 @@ with mareforma.open() as graph:
 
 ```mermaid
 graph LR
-    P([prior_ref]) --> A["ANALYTICAL · lab_a"]
+    P(["ESTABLISHED upstream<br/>(prior literature)"]) --> A["ANALYTICAL · lab_a"]
     P --> B["ANALYTICAL · lab_b"]
     A --> R(["REPLICATED ✓"])
     B --> R
     R -->|"graph.validate()"| E(["ESTABLISHED ✓"])
 
-    style P fill:#334155,stroke:#475569,color:#cbd5e1
+    style P fill:#713f12,stroke:#f59e0b,color:#fde68a
     style A fill:#1e3a5f,stroke:#3b82f6,color:#93c5fd
     style B fill:#1e3a5f,stroke:#3b82f6,color:#93c5fd
     style R fill:#14532d,stroke:#22c55e,color:#86efac
     style E fill:#713f12,stroke:#f59e0b,color:#fde68a
 ```
+
+`REPLICATED` requires that the converging claims share an `ESTABLISHED`
+upstream in `supports[]` — matches Cochrane/GRADE evidence-chain methodology.
+On a fresh graph, bootstrap an `ESTABLISHED` anchor with `seed=True`
+(enrolled validator only); see [Example 03](examples/03_documented_contestation)
+for the full seed-then-converge pattern.
 
 ## Findings contradict — both stay in the graph
 
@@ -123,6 +129,41 @@ graph.get_tools(generated_by="agent/model-a/lab_a")  # framework-ready callables
 | `DERIVED` | Explicitly built on ESTABLISHED or REPLICATED claims |
 
 Storage: local SQLite, WAL mode, ACID guarantees. Network calls only for opt-in external verification: DOI lookups (Crossref + DataCite) and Sigstore-Rekor transparency log.
+
+## What mareforma is NOT
+
+Honest scope, so the design choices land in the right frame:
+
+- **Not a global trust system.** Trust is local to a project's enrolled
+  validators. Two projects' `ESTABLISHED` claims are not comparable across
+  installations — there is no federation layer, no cross-project key
+  directory, no shared ground truth.
+- **Classification is self-declared.** `ANALYTICAL`, `INFERRED`, `DERIVED`
+  are the asserter's claims about epistemic origin. The substrate signs
+  them tamper-evidently but does not verify them against the actual code
+  path. A misclassified claim is a trust failure of the asserter, not the
+  substrate.
+- **Rekor inclusion is logged, not proof-verified.** When `rekor_url=` is
+  configured, signed claims are submitted and the entry uuid + logIndex
+  are recorded. The substrate does not (yet) re-fetch and verify the
+  Merkle inclusion proof; trust the log operator for now.
+- **DOIs are HEAD-checked, not content-verified.** External references
+  resolve to a 200 response; the substrate does not parse, sign, or
+  archive the referenced content. A DOI that resolves today may resolve
+  to different content tomorrow.
+- **No semantic deduplication.** Two claims with different `text` but
+  identical meaning are distinct rows. Convergence detection runs on
+  `supports[]` topology, not on text similarity.
+- **No automated fraud detection.** The substrate refuses self-validation
+  and gates LLM-typed validators below `ESTABLISHED`, but it cannot
+  detect colluding human validators, manufactured datasets, or
+  fabricated DOIs.
+
+Related work mareforma does not replace: W3C PROV-O / PROV-AGENT
+(richer provenance vocabulary), W3C EVI (research-evidence ontology),
+SCITT (federated supply-chain transparency). Mareforma is a runtime
+substrate for an agent's working graph, not a publication-grade
+provenance record.
 
 ## Get started
 

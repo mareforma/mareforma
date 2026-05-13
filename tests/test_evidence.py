@@ -155,3 +155,121 @@ class TestRoundTrip:
         # Bad dict — nonzero domain without rationale
         with pytest.raises(EvidenceVectorError):
             EvidenceVector.from_dict({"risk_of_bias": -1})
+
+
+# ---------------------------------------------------------------------------
+# assert_claim(evidence=...) — end-to-end through the Graph API
+# ---------------------------------------------------------------------------
+#
+# Before v0.3.0 launch tightening, EvidenceVector was plumbed through the
+# entire signing stack but had no user-facing parameter — every signed
+# claim carried the default all-zeros vector. The substrate signed a
+# story it didn't let callers tell. These tests cover the new parameter
+# surface end-to-end: caller-supplied vectors land in the signed
+# predicate, the ev_* columns, and survive restore round-trip.
+
+
+class TestAssertClaimEvidenceParameter:
+    def _key(self, tmp_path):
+        from mareforma import signing as _sig
+        p = tmp_path / "k"
+        _sig.bootstrap_key(p)
+        return p
+
+    def test_no_evidence_arg_defaults_to_zeros(self, tmp_path) -> None:
+        import mareforma
+        with mareforma.open(tmp_path, key_path=self._key(tmp_path)) as g:
+            cid = g.assert_claim("baseline")
+            row = g.get_claim(cid)
+        assert row["ev_risk_of_bias"] == 0
+        assert row["ev_inconsistency"] == 0
+        import json
+        ev = json.loads(row["evidence_json"])
+        assert ev["rationale"] == {}
+        assert ev["reporting_compliance"] == []
+
+    def test_dict_evidence_lands_in_row_and_predicate(self, tmp_path) -> None:
+        import mareforma, json
+        from mareforma import signing as _sig
+        with mareforma.open(tmp_path, key_path=self._key(tmp_path)) as g:
+            cid = g.assert_claim(
+                "downgraded analysis",
+                evidence={
+                    "risk_of_bias": -1,
+                    "inconsistency": -2,
+                    "rationale": {
+                        "risk_of_bias": "single-blind only",
+                        "inconsistency": "I^2 = 0.82 across studies",
+                    },
+                    "reporting_compliance": ["CONSORT"],
+                },
+            )
+            row = g.get_claim(cid)
+            envelope = json.loads(row["signature_bundle"])
+            predicate = _sig.claim_predicate_from_envelope(envelope)
+        assert row["ev_risk_of_bias"] == -1
+        assert row["ev_inconsistency"] == -2
+        ev = predicate["evidence"]
+        assert ev["risk_of_bias"] == -1
+        assert ev["inconsistency"] == -2
+        assert ev["rationale"]["risk_of_bias"] == "single-blind only"
+        assert ev["reporting_compliance"] == ["CONSORT"]
+
+    def test_vector_instance_evidence_accepted(self, tmp_path) -> None:
+        import mareforma
+        ev = mareforma.EvidenceVector(
+            risk_of_bias=-1,
+            rationale={"risk_of_bias": "attrition not reported"},
+            large_effect=True,
+        )
+        with mareforma.open(tmp_path, key_path=self._key(tmp_path)) as g:
+            cid = g.assert_claim("with upgrade flag", evidence=ev)
+            row = g.get_claim(cid)
+        assert row["ev_risk_of_bias"] == -1
+        import json
+        stored = json.loads(row["evidence_json"])
+        assert stored["large_effect"] is True
+
+    def test_invalid_evidence_dict_raises_at_construction(
+        self, tmp_path,
+    ) -> None:
+        """Nonzero domain without a rationale fails before any row lands."""
+        import mareforma
+        from mareforma._evidence import EvidenceVectorError
+        with mareforma.open(tmp_path, key_path=self._key(tmp_path)) as g:
+            with pytest.raises(EvidenceVectorError, match="rationale"):
+                g.assert_claim(
+                    "bad",
+                    evidence={"risk_of_bias": -1},  # no rationale
+                )
+
+    def test_evidence_wrong_type_raises(self, tmp_path) -> None:
+        import mareforma
+        with mareforma.open(tmp_path, key_path=self._key(tmp_path)) as g:
+            with pytest.raises(TypeError, match="evidence must be"):
+                g.assert_claim("bad", evidence="not a dict")  # type: ignore[arg-type]
+
+    def test_evidence_round_trips_through_restore(self, tmp_path) -> None:
+        """Caller-supplied evidence survives claims.toml round-trip
+        with byte-equal signed bytes (and statement_cid cross-check)."""
+        import mareforma, json
+        key_path = self._key(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as g:
+            cid = g.assert_claim(
+                "round-trip test",
+                evidence={
+                    "imprecision": -1,
+                    "rationale": {"imprecision": "n=12, CI wide"},
+                },
+            )
+        # Wipe and restore.
+        for fname in ("graph.db", "graph.db-wal", "graph.db-shm"):
+            p = tmp_path / ".mareforma" / fname
+            if p.exists():
+                p.unlink()
+        mareforma.restore(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as g:
+            row = g.get_claim(cid)
+        assert row["ev_imprecision"] == -1
+        ev = json.loads(row["evidence_json"])
+        assert ev["rationale"]["imprecision"] == "n=12, CI wide"

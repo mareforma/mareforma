@@ -48,8 +48,11 @@ graph for prior `REPLICATED` findings. If they exist, MEDEA can build on them
 rather than starting from scratch.
 
 **Independent replication.** The two forks run with different `generated_by`
-values (`ra_cd4` vs `sle_cd4`). If both reach the same conclusion through the
-same upstream evidence, `REPLICATED` fires automatically — no extra step.
+values (`ra_cd4` vs `sle_cd4`). If both cite the same `ESTABLISHED` upstream
+claim in their `supports[]` and reach the same conclusion, `REPLICATED`
+fires automatically — no extra step. (`REPLICATED` requires an `ESTABLISHED`
+upstream, matching Cochrane/GRADE evidence-chain methodology. Bootstrap one
+with `seed=True` on a fresh graph; see Example 03 for the full pattern.)
 
 ## What we found when we ran this
 
@@ -97,6 +100,9 @@ If `classification = "ANALYTICAL"` — MEDEA queried MedeaDB and produced
 output. The finding is grounded in omics data and the provenance chain
 is complete.
 
-To upgrade a finding to `REPLICATED`, run an additional fork (different
-disease or cell type) that reaches the same conclusion through the same
-upstream evidence. Mareforma detects this automatically.
+To upgrade a finding to `REPLICATED`, two conditions must both hold:
+(1) a different `generated_by` fork reaches the same conclusion, and
+(2) both forks cite the same `ESTABLISHED` upstream claim in `supports[]`.
+Without an `ESTABLISHED` anchor, the substrate keeps both findings at
+`PRELIMINARY` rather than promoting noise. See Example 03 for the
+seed-then-converge pattern.

@@ -488,6 +488,42 @@ with mareforma.open() as graph:
         print(row["identity"], row["validator_type"], row["keyid"])
 ```
 
+**Two-machine quickstart — first ESTABLISHED promotion, CLI only.**
+The substrate refuses self-validation (a validator cannot promote a
+claim it signed itself), so promoting any claim to ESTABLISHED needs
+two keys on two operators. Both run the same install; the orchestration
+is four CLI commands plus one file exchange.
+
+```bash
+# --- Bob's machine ---------------------------------------------------------
+bob$ mareforma bootstrap                       # one-time, creates Bob's key
+bob$ mareforma key show --pem > bob.pub.pem    # safe to email/paste
+# Bob sends bob.pub.pem to Alice (Slack, email, S3, anything).
+
+# --- Alice's machine -------------------------------------------------------
+alice$ mareforma bootstrap                     # one-time, creates Alice's key
+alice$ cd ~/my-project
+alice$ # First call against a fresh project auto-enrolls Alice as root.
+alice$ mareforma status                        # opens the graph; auto-enrolls
+alice$ mareforma validator add \
+           --pubkey ./bob.pub.pem \
+           --identity bob@lab.example
+alice$ mareforma validator list                # confirms both enrolled
+# Alice asserts a claim and gets it to REPLICATED through the usual
+# convergence path (different generated_by, shared ESTABLISHED upstream).
+
+# --- Back on Bob's machine -------------------------------------------------
+bob$ cd ~/shared/my-project                    # same project root
+bob$ mareforma claim list --status open
+bob$ mareforma claim validate <claim_id> --validated-by bob@lab.example
+# ✓ Claim '<claim_id>' promoted to ESTABLISHED.
+```
+
+If Alice (the signer of the claim) tries `mareforma claim validate`
+herself, the CLI surfaces `SelfValidationError` with a one-line
+resolution hint pointing at `validator add` and `key show`. The
+substrate path is the source of truth; the CLI just translates.
+
 Each enrollment is signed by the parent validator (root for the first
 additions, then any already-enrolled key thereafter). On read,
 `graph.validate()` walks the chain back to a self-signed root and
@@ -797,44 +833,32 @@ are also public.
 
 ## Idempotency
 
-`idempotency_key` solves two distinct problems.
-
-**Retry safety.** Same key → same `claim_id` returned, no duplicate inserted.
-Use this whenever an agent run may be interrupted and retried:
+`idempotency_key` is **retry safety only**. Same key + matching semantic
+fields → same `claim_id` returned, no duplicate inserted. Use this whenever
+an agent run may be interrupted and retried:
 
 ```python
 claim_id = graph.assert_claim("...", idempotency_key="run_abc_claim_1")
-# Crash and retry — same claim_id returned, graph unchanged
+# Crash and retry with the same fields — same claim_id returned, graph unchanged.
 claim_id = graph.assert_claim("...", idempotency_key="run_abc_claim_1")
 ```
 
-**Convergence convention.** Agents running the same conceptual query should
-use a structured key that encodes the semantic content of the claim — not a
-random run ID. Two agents using the same key converge on the same `claim_id`
-even with different text phrasing, without needing explicit `supports=` links:
+**Strict contract.** A replay that supplies the same key with any
+divergent semantic field (`text`, `classification`, `generated_by`,
+`supports`, `contradicts`, `source_name`, `artifact_hash`) is not a retry
+— it is a different claim trying to ride someone else's key.
+`assert_claim` raises `IdempotencyConflictError` and lists every
+mismatched field, so a caller cannot believe their new state was
+registered when it was not. Use a different `idempotency_key` or
+reconcile the conflict.
 
-```python
-# Lab A
-graph.assert_claim(
-    "Target T is elevated in condition C (cohort_1, n=620)",
-    idempotency_key="target_T_elevated_condition_C",
-    generated_by="agent/model-a/lab_a",
-)
-
-# Lab B — same key, different text, different agent → same claim_id
-graph.assert_claim(
-    "Target T shows increased expression under condition C (cohort_2, n=580)",
-    idempotency_key="target_T_elevated_condition_C",
-    generated_by="agent/model-b/lab_b",
-)
-```
-
-**Hash conflicts raise.** A replay that supplies a different `artifact_hash`
-than the original is not a retry — it is a different claim that happens to
-share a key. `assert_claim` raises `IdempotencyConflictError` rather than
-silently dropping the new hash, so a caller cannot believe their new hash
-was registered when it was not. Use a different `idempotency_key` or
-re-assert without the conflicting field.
+**Not a convergence mechanism.** Two agents reaching the same conclusion
+must converge through the substrate's epistemic ladder, not by sharing a
+key. The supported pattern: both cite the same `ESTABLISHED` upstream in
+`supports[]` with different `generated_by` values → `REPLICATED` fires
+automatically. `idempotency_key` collapsing two distinct findings into
+one row would erase the second agent's independent contribution; the
+substrate refuses that path on purpose.
 
 ---
 

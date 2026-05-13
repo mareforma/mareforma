@@ -58,6 +58,7 @@ import tempfile
 from pathlib import Path
 
 import mareforma
+from mareforma import signing as _signing
 from langchain_core.tools import tool
 
 
@@ -77,7 +78,14 @@ def show(label: str, value: object) -> None:
 # ---------------------------------------------------------------------------
 
 tmp = Path(tempfile.mkdtemp())
-graph = mareforma.open(tmp)
+# Self-contained signing key for this example. In real use, run
+# `mareforma bootstrap` once and mareforma.open() picks the key up
+# automatically. The first key opened against a fresh graph auto-enrolls
+# as the root validator, which is required to bootstrap the ESTABLISHED
+# upstream with seed=True below.
+key_path = tmp / "_example_key"
+_signing.bootstrap_key(key_path)
+graph = mareforma.open(tmp, key_path=key_path)
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +130,16 @@ def get_provenance_trace(claim_id: str) -> dict:
 
 sep("Lab A — discovery and trace publication")
 
-upstream_ref = "upstream_ref_A"
+# Bootstrap an ESTABLISHED upstream both labs cite. Under the ESTABLISHED-upstream
+# rule, REPLICATED requires at least one ESTABLISHED claim in supports[] — matches
+# Cochrane/GRADE evidence-chain methodology. seed=True asserts directly at
+# ESTABLISHED via a signed seed envelope (enrolled validators only).
+upstream_ref = graph.assert_claim(
+    "Prior literature on Target T in condition C",
+    classification="DERIVED",
+    generated_by="agent_seed/literature",
+    seed=True,
+)
 
 # Lab A runs a multi-step analysis on its private dataset.
 # Each intermediate step is published as a claim with provenance.

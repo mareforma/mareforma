@@ -41,15 +41,22 @@ tmp = Path(tempfile.mkdtemp())
 # ---------------------------------------------------------------------------
 sep("1. Open")
 
-# Generate a signing key in the temp dir so this example is self-contained.
+# Generate signing keys in the temp dir so this example is self-contained.
 # In real use you would run `mareforma bootstrap` once to create
 # ~/.config/mareforma/key, then mareforma.open() picks it up automatically.
 # Passing key_path= here also auto-enrolls the key as root validator on
-# this fresh graph — required for section 6's validate() call below.
-key_path = tmp / "_example_key"
-_signing.bootstrap_key(key_path)
+# this fresh graph. The substrate refuses self-validation, so section 6
+# uses a separate enrolled reviewer key for the validate() call.
+agent_key_path = tmp / "_agent_key"
+reviewer_key_path = tmp / "_reviewer_key"
+_signing.bootstrap_key(agent_key_path)
+_signing.bootstrap_key(reviewer_key_path)
 
-graph = mareforma.open(tmp, key_path=key_path)
+graph = mareforma.open(tmp, key_path=agent_key_path)
+# Enroll the reviewer as a second validator (signed by the loaded agent key).
+reviewer_priv = _signing.load_private_key(reviewer_key_path)
+reviewer_pem = _signing.public_key_to_pem(reviewer_priv.public_key())
+graph.enroll_validator(reviewer_pem, identity="jane@lab.org")
 # graph.db is created automatically on first call.
 # No init, no TOML, no project directory required.
 
@@ -202,7 +209,13 @@ try:
 except ValueError as exc:
     show("validate(PRELIMINARY)", f"ValueError: {exc}")
 
-graph.validate(rep_a, validated_by="jane@lab.org")
+# Close and re-open under the reviewer key so the validator differs from the
+# signer of rep_a. The substrate refuses self-validation: a validator cannot
+# promote a claim signed by its own key.
+graph.close()
+with mareforma.open(tmp, key_path=reviewer_key_path) as reviewer_graph:
+    reviewer_graph.validate(rep_a, validated_by="jane@lab.org")
+graph = mareforma.open(tmp, key_path=agent_key_path)
 established = graph.get_claim(rep_a)
 if established:
     show("support_level", established["support_level"])

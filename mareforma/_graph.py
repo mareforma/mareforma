@@ -43,6 +43,7 @@ from mareforma import doi_resolver as _doi
 
 if TYPE_CHECKING:
     import sqlite3
+    from mareforma._evidence import EvidenceVector
 
 
 # Fields that get sanitize-and-wrap for LLM consumption. Free-form text
@@ -141,6 +142,7 @@ class EpistemicGraph:
         source_name: str | None = None,
         status: str = "open",
         artifact_hash: str | None = None,
+        evidence: "EvidenceVector | dict | None" = None,
         seed: bool = False,
     ) -> str:
         """Assert a claim into the epistemic graph. Returns claim_id.
@@ -156,7 +158,17 @@ class EpistemicGraph:
         contradicts:
             List of claim_ids or DOIs this claim contests.
         idempotency_key:
-            Stable key for retry-safe writes. Same key → same claim_id returned.
+            Stable key for retry-safe writes. Same key returns the same
+            ``claim_id`` only when EVERY semantic field also matches
+            (text, classification, generated_by, supports, contradicts,
+            source_name, artifact_hash). Any mismatch raises
+            :class:`mareforma.db.IdempotencyConflictError` — silent
+            merging two different claims would discard the second
+            author's content and break REPLICATED detection. For
+            cross-lab convergence, assert two separate claims that
+            share an entry in ``supports[]`` with different
+            ``generated_by`` values — that's the path that fires
+            REPLICATED honestly.
         generated_by:
             Agent identifier. Use ``"model/version/context"`` format.
             Defaults to ``'agent'``.
@@ -176,6 +188,21 @@ class EpistemicGraph:
             citing the same upstream that BOTH supply a hash must agree
             on the hash before they converge. Compute with
             ``hashlib.sha256(bytes).hexdigest()``.
+        evidence:
+            Optional GRADE 5-domain ``EvidenceVector`` declaring the
+            asserter's confidence in the evidence backing this claim.
+            Accepts either a populated
+            :class:`mareforma.EvidenceVector` instance or a dict in the
+            same shape as :meth:`EvidenceVector.to_dict`. Five downgrade
+            domains in ``[-2, 0]`` (``risk_of_bias``, ``inconsistency``,
+            ``indirectness``, ``imprecision``, ``publication_bias``),
+            three upgrade flags (``large_effect``, ``dose_response``,
+            ``opposing_confounding``), a ``rationale`` dict (required for
+            any nonzero domain — the GRADE anti-handwaving rule), and a
+            ``reporting_compliance`` list. Bound into the signed
+            predicate and denormalized into the ``ev_*`` columns for
+            queryable filters. Defaults to all-zeros (the asserter
+            flagged no quality concerns).
 
         Returns
         -------
@@ -187,6 +214,12 @@ class EpistemicGraph:
         ValueError
             If ``classification`` is not a valid value, ``text`` is empty,
             or ``artifact_hash`` is not a 64-character lowercase hex SHA256.
+        mareforma._evidence.EvidenceVectorError
+            If ``evidence`` violates a GRADE invariant (out-of-range domain,
+            nonzero domain without a rationale, malformed structure).
+        mareforma.db.IdempotencyConflictError
+            If ``idempotency_key`` is set and any semantic field differs
+            from the existing row.
 
         Notes
         -----
@@ -204,6 +237,22 @@ class EpistemicGraph:
             results = _doi.resolve_dois_with_cache(self._conn, dois)
             unresolved = any(not r for r in results.values())
 
+        # Normalize evidence into an EvidenceVector instance. None →
+        # default all-zeros. dict → validated reconstruction. Existing
+        # EvidenceVector → pass through. Anything else raises.
+        from mareforma._evidence import EvidenceVector
+        if evidence is None:
+            ev = EvidenceVector()
+        elif isinstance(evidence, EvidenceVector):
+            ev = evidence
+        elif isinstance(evidence, dict):
+            ev = EvidenceVector.from_dict(evidence)
+        else:
+            raise TypeError(
+                f"evidence must be EvidenceVector | dict | None; "
+                f"got {type(evidence).__name__}"
+            )
+
         return _db.add_claim(
             self._conn,
             self._root,
@@ -217,6 +266,7 @@ class EpistemicGraph:
             status=status,
             unresolved=unresolved,
             artifact_hash=artifact_hash,
+            evidence=ev,
             seed=seed,
             signer=self._signer,
             rekor_url=self._rekor_url,

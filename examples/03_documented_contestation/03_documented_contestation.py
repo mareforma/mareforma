@@ -58,14 +58,23 @@ def show(label: str, value: object) -> None:
 
 
 tmp = Path(tempfile.mkdtemp())
-# Self-contained signing key for this example. In real use, run
+# Self-contained signing keys for this example. In real use, run
 # `mareforma bootstrap` once and mareforma.open() picks the key up
 # from ~/.config/mareforma/key automatically. The first key opened
-# against a fresh graph auto-enrolls as the root validator, which is
-# required for the validate() call below.
-key_path = tmp / "_example_key"
-_signing.bootstrap_key(key_path)
-graph = mareforma.open(tmp, key_path=key_path)
+# against a fresh graph auto-enrolls as the root validator. The
+# substrate refuses self-validation (a validator cannot promote a
+# claim it signed itself), so the reviewer is a separate enrolled key.
+agent_key_path = tmp / "_agent_key"
+reviewer_key_path = tmp / "_reviewer_key"
+_signing.bootstrap_key(agent_key_path)
+_signing.bootstrap_key(reviewer_key_path)
+graph = mareforma.open(tmp, key_path=agent_key_path)
+
+# Enroll the reviewer as a second validator. The current signer (auto-enrolled
+# as root on first open) signs the enrollment envelope.
+reviewer_priv = _signing.load_private_key(reviewer_key_path)
+reviewer_pem = _signing.public_key_to_pem(reviewer_priv.public_key())
+graph.enroll_validator(reviewer_pem, identity="reviewer@lab.org")
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +129,23 @@ consensus_b = assert_finding_b.invoke({
 c_a = graph.get_claim(consensus_a)
 show("consensus_a support_level", c_a["support_level"] if c_a else "—")
 
-graph.validate(consensus_a, validated_by="reviewer@lab.org")
+# Close and re-open under the reviewer key so the validator's signing identity
+# differs from the agent that signed consensus_a. The substrate refuses
+# self-validation: a validator cannot promote a claim signed by its own key.
+graph.close()
+with mareforma.open(tmp, key_path=reviewer_key_path) as reviewer_graph:
+    reviewer_graph.validate(consensus_a, validated_by="reviewer@lab.org")
+graph = mareforma.open(tmp, key_path=agent_key_path)
+# Re-bind agent tools to the reopened graph.
+query_graph, assert_finding_a = [tool(fn) for fn in graph.get_tools(
+    generated_by="agent_lab_a/model-a"
+)]
+_, assert_finding_b = [tool(fn) for fn in graph.get_tools(
+    generated_by="agent_lab_b/model-b"
+)]
+_, assert_finding_c = [tool(fn) for fn in graph.get_tools(
+    generated_by="agent_lab_c/model-c"
+)]
 established = graph.get_claim(consensus_a)
 show("after validate()", established["support_level"] if established else "—")
 
