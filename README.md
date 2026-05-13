@@ -9,6 +9,8 @@ AI scientists are being deployed on real research problems before any infrastruc
 
 Mareforma is a local epistemic graph that accumulates findings across agent runs, detects convergence automatically when independent agents reach the same conclusion through different data paths, and exposes the full provenance chain so trust can be derived from structure rather than from self-reported confidence.
 
+Every individual capability mareforma uses — Ed25519 signing, DSSE envelopes, Sigstore-Rekor transparency, GRADE-shaped evidence vectors, local SQLite — exists in mature form elsewhere. What's missing in the OSS landscape is the combination: a runtime, opt-in Python library that bundles them as the place an agent writes claims to. See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the lane.
+
 **Trust in a finding should come from the graph, not from the agent that made it.**
 
 ```python
@@ -143,6 +145,25 @@ Honest scope, so the design choices land in the right frame:
   them tamper-evidently but does not verify them against the actual code
   path. A misclassified claim is a trust failure of the asserter, not the
   substrate.
+- **`generated_by` is self-declared too.** It is the substrate's primary
+  independence signal — `REPLICATED` fires only when two claims sharing
+  an upstream have different `generated_by` values. But the substrate
+  cannot verify that `agent/claude/lab_a` and `agent/claude/lab_b`
+  correspond to different physical agents; both are free-form strings
+  supplied by the caller. An adversary running both labs can produce
+  `REPLICATED` at will. Honest agents produce a useful signal; the
+  signal is no stronger than the discipline of the agents writing to
+  the graph.
+- **GRADE EvidenceVector is GRADE-shaped storage, not GRADE evaluation.**
+  Each claim carries a 5-domain vector (`risk_of_bias`, `inconsistency`,
+  `indirectness`, `imprecision`, `publication_bias`) plus three upgrade
+  flags, bound into the signed predicate. The substrate stores and
+  round-trips these values; it does not derive a single GRADE certainty
+  rating (high/moderate/low/very-low), does not gate upgrade flags on
+  study design (RCT vs. observational), and does not integrate the
+  vector into the `PRELIMINARY → REPLICATED → ESTABLISHED` ladder.
+  Full GRADE-style certainty derivation is out of scope for v0.3.0;
+  see primario item 208 for the v0.4 plan.
 - **Rekor inclusion is logged, not proof-verified.** When `rekor_url=` is
   configured, signed claims are submitted and the entry uuid + logIndex
   are recorded. The substrate does not (yet) re-fetch and verify the
@@ -154,16 +175,22 @@ Honest scope, so the design choices land in the right frame:
 - **No semantic deduplication.** Two claims with different `text` but
   identical meaning are distinct rows. Convergence detection runs on
   `supports[]` topology, not on text similarity.
+- **Contradiction is per-claim, not propagated downstream.** A signed
+  contradiction marks the older of two referenced claims; claims that
+  cited the now-invalidated one via `supports[]` are unaffected.
+  Deliberate boundary — see ARCHITECTURE.md.
 - **No automated fraud detection.** The substrate refuses self-validation
-  and gates LLM-typed validators below `ESTABLISHED`, but it cannot
-  detect colluding human validators, manufactured datasets, or
-  fabricated DOIs.
+  and gates LLM-typed validators on both promotion and contradiction
+  paths, but it cannot detect colluding human validators, manufactured
+  datasets, or fabricated DOIs.
 
 Related work mareforma does not replace: W3C PROV-O / PROV-AGENT
-(richer provenance vocabulary), W3C EVI (research-evidence ontology),
-SCITT (federated supply-chain transparency). Mareforma is a runtime
-substrate for an agent's working graph, not a publication-grade
-provenance record.
+(W3C-recommended provenance vocabulary), FAIRSCAPE's Evidence Graph
+Ontology (EVI — research-evidence ontology at `w3id.org/EVI`, MIT-
+licensed, not a W3C deliverable), IETF SCITT (signed supply-chain
+transparency architecture, currently `draft-ietf-scitt-architecture-22`).
+Mareforma is a runtime substrate for an agent's working graph, not a
+publication-grade provenance record.
 
 ## Get started
 

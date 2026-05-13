@@ -1,6 +1,6 @@
-"""Mareforma — The epistemic layer AI scientists run on."""
+"""Mareforma — local epistemic substrate for AI-assisted research."""
 
-__description__ = "Mareforma — The epistemic layer AI scientists run on."
+__description__ = "Mareforma — local epistemic substrate for AI-assisted research."
 __version__ = "0.3.0"
 
 from pathlib import Path
