@@ -1092,9 +1092,16 @@ def _maybe_update_replicated_unlocked(
     # new claim doesn't satisfy the rule, no promotion fires — saves
     # an unnecessary SQL roundtrip and makes the semantics explicit.
     sup_placeholders = ",".join("?" * len(supports))
+    # An ESTABLISHED upstream that is retracted or contested is
+    # editorially tainted and must not anchor REPLICATED. Without the
+    # status='open' filter, a hand-edited claims.toml could plant a
+    # born-retracted ESTABLISHED seed (the seed envelope binds claim_id
+    # + validator_keyid + seeded_at, NOT status), then have downstream
+    # peers ride it into REPLICATED. The substrate gate closes that
+    # injection vector at the canonical layer.
     has_established_upstream = conn.execute(
         f"SELECT 1 FROM claims WHERE claim_id IN ({sup_placeholders}) "
-        f"AND support_level = 'ESTABLISHED' LIMIT 1",
+        f"AND support_level = 'ESTABLISHED' AND status = 'open' LIMIT 1",
         supports,
     ).fetchone()
     if has_established_upstream is None:
@@ -1127,6 +1134,7 @@ def _maybe_update_replicated_unlocked(
               FROM claims sup, json_each(c.supports_json) j2
               WHERE sup.claim_id = j2.value
                 AND sup.support_level = 'ESTABLISHED'
+                AND sup.status = 'open'
           )
         """,
         (*supports, new_claim_id, generated_by, artifact_hash, artifact_hash),
@@ -2302,40 +2310,55 @@ def restore(
                     validator_keyid if insert_level == "ESTABLISHED"
                     else None
                 )
-                conn.execute(
-                    """
-                    INSERT INTO claims
-                        (claim_id, text, classification, support_level,
-                         idempotency_key, validated_by, validated_at,
-                         status, source_name, generated_by,
-                         supports_json, contradicts_json,
-                         comparison_summary, unresolved,
-                         signature_bundle, transparency_logged,
-                         validation_signature, validator_keyid,
-                         artifact_hash, prev_hash,
-                         created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        claim_id, c["text"], c["classification"],
-                        insert_level,
-                        None,  # idempotency_key — TOML doesn't carry it
-                        insert_validated_by, insert_validated_at,
-                        c["status"], c.get("source_name"), c["generated_by"],
-                        json.dumps(supports_list, sort_keys=True,
-                                   separators=(",", ":")),
-                        json.dumps(contradicts_list, sort_keys=True,
-                                   separators=(",", ":")),
-                        c.get("comparison_summary") or "",
-                        1 if c.get("unresolved") else 0,
-                        c.get("signature_bundle"),
-                        0 if c.get("transparency_logged") is False else 1,
-                        insert_validation_signature, insert_validator_keyid,
-                        c.get("artifact_hash"), prev_hash,
-                        c["created_at"], c["updated_at"],
-                    ),
-                )
+                try:
+                    conn.execute(
+                        """
+                        INSERT INTO claims
+                            (claim_id, text, classification, support_level,
+                             idempotency_key, validated_by, validated_at,
+                             status, source_name, generated_by,
+                             supports_json, contradicts_json,
+                             comparison_summary, unresolved,
+                             signature_bundle, transparency_logged,
+                             validation_signature, validator_keyid,
+                             artifact_hash, prev_hash,
+                             created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            claim_id, c["text"], c["classification"],
+                            insert_level,
+                            None,  # idempotency_key — TOML doesn't carry it
+                            insert_validated_by, insert_validated_at,
+                            c["status"], c.get("source_name"),
+                            c["generated_by"],
+                            json.dumps(supports_list, sort_keys=True,
+                                       separators=(",", ":")),
+                            json.dumps(contradicts_list, sort_keys=True,
+                                       separators=(",", ":")),
+                            c.get("comparison_summary") or "",
+                            1 if c.get("unresolved") else 0,
+                            c.get("signature_bundle"),
+                            0 if c.get("transparency_logged") is False
+                            else 1,
+                            insert_validation_signature,
+                            insert_validator_keyid,
+                            c.get("artifact_hash"), prev_hash,
+                            c["created_at"], c["updated_at"],
+                        ),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    # Trigger refusals (illegal initial support_level,
+                    # ESTABLISHED without validation_signature) and CHECK
+                    # violations (bad classification / support_level /
+                    # status enum, duplicate prev_hash) all surface here.
+                    # Translate to RestoreError so callers honour the
+                    # documented contract.
+                    raise RestoreError(
+                        f"Claim {claim_id} could not be restored: {exc}",
+                        kind="claim_unverified",
+                    ) from exc
                 if target_level == "REPLICATED":
                     # PRELIMINARY → REPLICATED — the UPDATE trigger
                     # accepts the transition. No validation_signature
@@ -2405,7 +2428,20 @@ def _verify_claim_signatures_on_restore(
                 "a valid PEM.",
                 kind="claim_unverified",
             ) from exc
-        if not _signing.verify_envelope(bundle, signer_pub):
+        # verify_envelope returns False on signature mismatch but raises
+        # InvalidEnvelopeError on payloadType/structural mismatch (e.g.
+        # a tampered TOML that swaps a validation envelope into the
+        # claim-bundle slot). Wrap both into the documented RestoreError
+        # contract so callers don't have to catch SigningError too.
+        try:
+            envelope_ok = _signing.verify_envelope(bundle, signer_pub)
+        except _signing.InvalidEnvelopeError as exc:
+            raise RestoreError(
+                f"Claim {claim_id} signature_bundle is structurally "
+                f"invalid: {exc}",
+                kind="claim_unverified",
+            ) from exc
+        if not envelope_ok:
             raise RestoreError(
                 f"Claim {claim_id} signature_bundle failed verification.",
                 kind="claim_unverified",
@@ -2488,10 +2524,18 @@ def _verify_claim_signatures_on_restore(
                 "is not a valid PEM.",
                 kind="claim_unverified",
             ) from exc
-        if not _signing.verify_envelope(
-            val_env, val_signer_pub,
-            expected_payload_type=declared_type,
-        ):
+        try:
+            val_ok = _signing.verify_envelope(
+                val_env, val_signer_pub,
+                expected_payload_type=declared_type,
+            )
+        except _signing.InvalidEnvelopeError as exc:
+            raise RestoreError(
+                f"Claim {claim_id} validation_signature is structurally "
+                f"invalid: {exc}",
+                kind="claim_unverified",
+            ) from exc
+        if not val_ok:
             raise RestoreError(
                 f"Claim {claim_id} validation_signature failed "
                 "verification.",

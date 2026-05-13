@@ -329,6 +329,73 @@ class TestRestoreAdversarial:
             mareforma.restore(tmp_path)
         assert exc_info.value.kind == "enrollment_unverified"
 
+    def test_tampered_payload_type_raises_restore_error(
+        self, tmp_path: Path,
+    ) -> None:
+        """A claim's signature_bundle with a swapped payloadType (e.g.
+        validation envelope shoved into the claim-bundle slot) used to
+        leak InvalidEnvelopeError past the restore contract. The
+        verify_envelope call must be wrapped so RestoreError fires."""
+        ctx = self._setup_and_wipe(tmp_path)
+        data = self._read_toml(tmp_path)
+        signed_ids = [
+            cid for cid, c in data["claims"].items()
+            if c.get("signature_bundle")
+        ]
+        victim = signed_ids[0]
+        bundle = json.loads(data["claims"][victim]["signature_bundle"])
+        # Swap payloadType to the validation envelope type.
+        bundle["payloadType"] = _signing.PAYLOAD_TYPE_VALIDATION
+        data["claims"][victim]["signature_bundle"] = json.dumps(
+            bundle, sort_keys=True, separators=(",", ":"),
+        )
+        self._write_toml(tmp_path, data)
+
+        with pytest.raises(_db.RestoreError) as exc_info:
+            mareforma.restore(tmp_path)
+        assert exc_info.value.kind == "claim_unverified"
+
+    def test_tampered_status_on_seed_blocked_at_replicated_gate(
+        self, tmp_path: Path,
+    ) -> None:
+        """A born-retracted ESTABLISHED seed (planted via a hand-edited
+        claims.toml) is restorable — the seed envelope binds claim_id +
+        validator_keyid + seeded_at but NOT status. The substrate gate
+        at _maybe_update_replicated_unlocked must refuse the retracted
+        seed as an upstream anchor, blocking downstream REPLICATED."""
+        ctx = self._setup_and_wipe(tmp_path)
+        data = self._read_toml(tmp_path)
+        # Find the seed (ESTABLISHED + has validation_signature with
+        # PAYLOAD_TYPE_SEED). Set its status to 'retracted' in TOML.
+        for cid, c in data["claims"].items():
+            if c.get("support_level") == "ESTABLISHED" and c.get(
+                "validation_signature"
+            ):
+                env = json.loads(c["validation_signature"])
+                if env.get("payloadType") == _signing.PAYLOAD_TYPE_SEED:
+                    c["status"] = "retracted"
+                    seed_id = cid
+                    break
+        self._write_toml(tmp_path, data)
+
+        # Restore admits the row (it carries a valid envelope and the
+        # status column has no envelope binding to fail against).
+        result = mareforma.restore(tmp_path)
+        assert result["claims_restored"] >= 1
+
+        # Now try to plant a REPLICATED-via-retracted-seed convergence.
+        # Two new agent claims cite the retracted seed; the convergence
+        # check must refuse to promote them.
+        with mareforma.open(tmp_path, key_path=ctx["root_key"]) as g:
+            a = g.assert_claim(
+                "downstream A", supports=[seed_id], generated_by="A",
+            )
+            g.assert_claim(
+                "downstream B", supports=[seed_id], generated_by="B",
+            )
+            # Without the gate, both would be REPLICATED.
+            assert g.get_claim(a)["support_level"] == "PRELIMINARY"
+
     def test_adversarial_text_round_trips(self, tmp_path: Path) -> None:
         """Newlines, quotes, control-like chars in source_name and text
         must round-trip through TOML and reload identically."""
