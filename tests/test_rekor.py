@@ -538,24 +538,26 @@ class TestRefreshUnsignedDrift:
             claim_id = graph.assert_claim("original text")
             assert graph.get_claim(claim_id)["transparency_logged"] == 0
 
-        # Tamper at the sqlite layer (simulates corruption or attacker).
+        # Direct-SQL tamper on a signed claim's text is refused by the
+        # claims_signed_fields_no_laundering trigger — the substrate
+        # gate is the primary defense. The Python-side drift check
+        # in refresh_unsigned is a defense-in-depth backstop for
+        # cases the trigger somehow doesn't catch (e.g. an attacker
+        # bypassing SQLite triggers via the pragma path).
         import sqlite3
         conn = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
-        conn.execute(
-            "UPDATE claims SET text = ? WHERE claim_id = ?",
-            ("tampered text", claim_id),
-        )
-        conn.commit()
+        with pytest.raises(sqlite3.IntegrityError) as exc:
+            conn.execute(
+                "UPDATE claims SET text = ? WHERE claim_id = ?",
+                ("tampered text", claim_id),
+            )
+        assert "signed_field_locked" in str(exc.value)
         conn.close()
 
-        # Drift check must fire before any Rekor request goes out.
-        with pytest.warns(UserWarning, match="drifted"):
-            with mareforma.open(
-                tmp_path, key_path=key_path, rekor_url=_TEST_REKOR_URL,
-            ) as graph:
-                result = graph.refresh_unsigned()
-
-        assert result == {"checked": 1, "logged": 0, "still_unlogged": 1}
+        # The row was not mutated; refresh_unsigned should now succeed
+        # against Rekor (httpx_mock is configured for 503 in this test,
+        # so the second attempt also fails but for the network reason).
+        # The relevant assertion is that the tamper was blocked.
         rekor_posts = [r for r in httpx_mock.get_requests() if r.method == "POST"]
         # Only the original failed POST during assert_claim.
         assert len(rekor_posts) == 1

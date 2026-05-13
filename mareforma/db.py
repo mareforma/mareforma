@@ -126,13 +126,6 @@ CREATE TABLE IF NOT EXISTS claims (
     -- recomputable from the row's fields + evidence_json + statement
     -- v1 builder. NULL is allowed for unsigned rows.
     statement_cid   TEXT,
-    -- Verdict-derived invalidation timestamp. Set by the
-    -- contradiction_invalidates_older trigger on contradiction_verdicts
-    -- INSERT. NULL for non-invalidated claims. Outside the
-    -- no-state-laundering trigger column list because invalidation is
-    -- a derived state, not a row mutation — restore replays it from
-    -- contradiction_verdicts rather than trusting the column value.
-    t_invalid       INTEGER,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
     -- ESTABLISHED rows must carry a signed validation envelope. The
@@ -224,6 +217,59 @@ BEGIN
     END;
 END;
 
+-- Append-only over the signed predicate. The Statement v1 envelope
+-- + signature binds every SIGNED_FIELDS value plus the GRADE
+-- EvidenceVector + the statement_cid anchor. Without this trigger,
+-- a direct `UPDATE claims SET ev_risk_of_bias = 0 WHERE …` would
+-- silently retroactively upgrade a claim's evidence quality —
+-- signature verification on the unchanged envelope would still
+-- pass, but the row no longer matches what was signed. Refuse the
+-- mutation at the SQL layer; the envelope is the canonical source.
+--
+-- The trigger refuses only when (a) the row is signed
+-- (signature_bundle IS NOT NULL) AND (b) at least one of the watched
+-- columns actually changed (OLD ≠ NEW). A pure status-only update
+-- that re-emits the same text + supports + evidence values via a
+-- multi-column UPDATE passes through unblocked.
+--
+-- Note: signature_bundle itself is NOT watched. The system path
+-- legitimately rewrites it on Rekor inclusion-proof attachment
+-- (the rekor block is metadata, the payload + signatures stay
+-- byte-equal). If an adversary edits signature_bundle directly,
+-- restore's signature-vs-row binding catches the divergence.
+CREATE TRIGGER IF NOT EXISTS claims_signed_fields_no_laundering
+BEFORE UPDATE OF
+    text, classification, generated_by,
+    supports_json, contradicts_json,
+    source_name, artifact_hash,
+    ev_risk_of_bias, ev_inconsistency, ev_indirectness,
+    ev_imprecision, ev_pub_bias,
+    evidence_json, statement_cid,
+    prev_hash, created_at
+ON claims
+WHEN OLD.signature_bundle IS NOT NULL
+  AND (
+        OLD.text IS NOT NEW.text
+     OR OLD.classification IS NOT NEW.classification
+     OR OLD.generated_by IS NOT NEW.generated_by
+     OR OLD.supports_json IS NOT NEW.supports_json
+     OR OLD.contradicts_json IS NOT NEW.contradicts_json
+     OR OLD.source_name IS NOT NEW.source_name
+     OR OLD.artifact_hash IS NOT NEW.artifact_hash
+     OR OLD.ev_risk_of_bias IS NOT NEW.ev_risk_of_bias
+     OR OLD.ev_inconsistency IS NOT NEW.ev_inconsistency
+     OR OLD.ev_indirectness IS NOT NEW.ev_indirectness
+     OR OLD.ev_imprecision IS NOT NEW.ev_imprecision
+     OR OLD.ev_pub_bias IS NOT NEW.ev_pub_bias
+     OR OLD.evidence_json IS NOT NEW.evidence_json
+     OR OLD.statement_cid IS NOT NEW.statement_cid
+     OR OLD.prev_hash IS NOT NEW.prev_hash
+     OR OLD.created_at IS NOT NEW.created_at
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:signed_field_locked');
+END;
+
 CREATE TABLE IF NOT EXISTS doi_cache (
     doi              TEXT PRIMARY KEY,
     resolved         INTEGER NOT NULL CHECK (resolved IN (0, 1)),
@@ -291,8 +337,8 @@ _CLAIM_COLUMNS = (
     "ev_risk_of_bias", "ev_inconsistency", "ev_indirectness",
     "ev_imprecision", "ev_pub_bias",
     "evidence_json",
-    # Statement v1 content identifier + verdict-derived invalidation.
-    "statement_cid", "t_invalid",
+    # Statement v1 content identifier.
+    "statement_cid",
     "created_at", "updated_at",
 )
 _CLAIM_SELECT = ", ".join(_CLAIM_COLUMNS)
@@ -2470,11 +2516,11 @@ def restore(
                              artifact_hash, prev_hash,
                              ev_risk_of_bias, ev_inconsistency,
                              ev_indirectness, ev_imprecision, ev_pub_bias,
-                             evidence_json, statement_cid, t_invalid,
+                             evidence_json, statement_cid,
                              created_at, updated_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                ?, ?, ?, ?, ?)
+                                ?, ?, ?, ?)
                         """,
                         (
                             claim_id, c_text, c_classification,
@@ -2502,7 +2548,6 @@ def restore(
                             int(evidence_dict.get("publication_bias", 0) or 0),
                             evidence_json_str,
                             statement_cid_str,
-                            c.get("t_invalid"),
                             c_created_at, c_updated_at,
                         ),
                     )
@@ -2919,11 +2964,6 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
             entry["evidence_json"] = c.get("evidence_json") or "{}"
             if c.get("statement_cid"):
                 entry["statement_cid"] = c["statement_cid"]
-            # t_invalid: derived from contradiction_verdicts; round-trip
-            # the column so a restored graph re-acquires the invalidation
-            # state without needing the contradiction_verdicts replay.
-            if c.get("t_invalid") is not None:
-                entry["t_invalid"] = c["t_invalid"]
             data["claims"][c["claim_id"]] = entry
 
         out = root / "claims.toml"

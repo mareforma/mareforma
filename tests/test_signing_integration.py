@@ -101,9 +101,15 @@ class TestOpenWithSigning:
             envelope = json.loads(graph.get_claim(claim_id)["signature_bundle"])
         assert envelope["signatures"][0]["keyid"] == expected_keyid
 
-    def test_tampering_with_text_invalidates_signature(self, tmp_path):
-        """Bind-check: edit the claim's text directly in sqlite and the
-        previously-valid signature must no longer verify against the row."""
+    def test_tampering_with_text_blocked_by_trigger(self, tmp_path):
+        """Direct-SQL text tamper on a signed claim is refused by the
+        claims_signed_fields_no_laundering BEFORE UPDATE trigger.
+
+        Substrate-over-surface: a tampered Python interpreter that
+        bypasses update_claim's signed-field check would otherwise be
+        able to retroactively flip text under the original signature.
+        The trigger closes the substrate-level gap.
+        """
         import sqlite3
 
         key_path = _bootstrap_key(tmp_path)
@@ -111,23 +117,20 @@ class TestOpenWithSigning:
             claim_id = graph.assert_claim("original text")
             envelope_before = json.loads(graph.get_claim(claim_id)["signature_bundle"])
 
-        # Tamper.
+        # Direct-SQL tamper must be refused by the SQL trigger.
         db = tmp_path / ".mareforma" / "graph.db"
         raw = sqlite3.connect(str(db))
-        raw.execute("UPDATE claims SET text = ? WHERE claim_id = ?",
-                    ("tampered text", claim_id))
-        raw.commit()
+        with pytest.raises(sqlite3.IntegrityError) as exc:
+            raw.execute("UPDATE claims SET text = ? WHERE claim_id = ?",
+                        ("tampered text", claim_id))
         raw.close()
+        assert "signed_field_locked" in str(exc.value)
 
-        # Signature stored on the row still cryptographically verifies (the
-        # signature was over the ORIGINAL payload), but the payload no longer
-        # matches the live row. A verifier comparing predicate.text vs
-        # row.text sees the mismatch.
+        # Signature envelope still verifies; the row remains untouched.
         predicate = _signing.claim_predicate_from_envelope(envelope_before)
         assert predicate["text"] == "original text"
-
         with mareforma.open(tmp_path, key_path=key_path) as graph:
-            assert graph.get_claim(claim_id)["text"] == "tampered text"
+            assert graph.get_claim(claim_id)["text"] == "original text"
 
 
 # ---------------------------------------------------------------------------

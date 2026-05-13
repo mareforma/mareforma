@@ -52,6 +52,7 @@ def _claim_fields(**overrides):
         "supports": ["upstream-id-1"],
         "contradicts": [],
         "source_name": "experiment-2026-05",
+        "artifact_hash": None,
         "created_at": "2026-05-12T10:00:00+00:00",
     }
     base.update(overrides)
@@ -239,6 +240,121 @@ class TestSignVerify:
         env_a = sign_claim(_claim_fields(), key)
         env_b = sign_claim(_claim_fields(), key)
         assert env_a == env_b
+
+
+# ---------------------------------------------------------------------------
+# claim_predicate_from_envelope — subject/predicate consistency
+# ---------------------------------------------------------------------------
+
+class TestSubjectPredicateConsistency:
+    """claim_predicate_from_envelope refuses envelopes whose subject
+    name or digest disagree with the predicate. Without this guard
+    a signer could issue a Statement v1 where the subject names a
+    different claim_id (or carries a different text digest) than the
+    predicate asserts. The bytes verify but the two halves of the
+    envelope point at different things — an in-toto consumer keying
+    off subject sees a different identity than mareforma's predicate.
+    """
+
+    def test_subject_name_must_match_predicate_claim_id(self):
+        import base64
+        from mareforma._canonical import canonicalize
+        from mareforma._statement import (
+            PREDICATE_TYPE, STATEMENT_TYPE, text_sha256,
+        )
+        from mareforma.signing import (
+            PAYLOAD_TYPE_CLAIM, claim_predicate_from_envelope, dsse_pae,
+            public_key_id, InvalidEnvelopeError,
+        )
+
+        key = generate_keypair()
+        fields = _claim_fields()
+        # Build a Statement whose subject names a DIFFERENT claim_id
+        # than the predicate carries.
+        stmt = {
+            "_type": STATEMENT_TYPE,
+            "subject": [{
+                "name": "mareforma:claim:WRONG-ID",
+                "digest": {"sha256": text_sha256(fields["text"])},
+            }],
+            "predicateType": PREDICATE_TYPE,
+            "predicate": {
+                "claim_id": fields["claim_id"],
+                "text": fields["text"],
+                "classification": fields["classification"],
+                "generated_by": fields["generated_by"],
+                "supports": fields["supports"],
+                "contradicts": fields["contradicts"],
+                "source_name": fields["source_name"],
+                "artifact_hash": fields["artifact_hash"],
+                "created_at": fields["created_at"],
+                "evidence": {},
+            },
+        }
+        body = canonicalize(stmt)
+        sig = key.sign(dsse_pae(PAYLOAD_TYPE_CLAIM, body))
+        envelope = {
+            "payloadType": PAYLOAD_TYPE_CLAIM,
+            "payload": base64.standard_b64encode(body).decode("ascii"),
+            "signatures": [{
+                "keyid": public_key_id(key.public_key()),
+                "sig": base64.standard_b64encode(sig).decode("ascii"),
+            }],
+        }
+        # Cryptographically valid envelope — verify succeeds.
+        assert verify_envelope(envelope, key.public_key()) is True
+        # But the consistency check refuses it.
+        with pytest.raises(InvalidEnvelopeError, match="subject.name"):
+            claim_predicate_from_envelope(envelope)
+
+    def test_subject_digest_must_match_predicate_text(self):
+        import base64
+        from mareforma._canonical import canonicalize
+        from mareforma._statement import PREDICATE_TYPE, STATEMENT_TYPE
+        from mareforma.signing import (
+            PAYLOAD_TYPE_CLAIM, claim_predicate_from_envelope, dsse_pae,
+            public_key_id, InvalidEnvelopeError,
+        )
+
+        key = generate_keypair()
+        fields = _claim_fields()
+        # Subject digest is sha256 of "other text"; predicate.text is
+        # the actual claim text. Consistency check must reject.
+        import hashlib
+        wrong_digest = hashlib.sha256(b"other text").hexdigest()
+        stmt = {
+            "_type": STATEMENT_TYPE,
+            "subject": [{
+                "name": f"mareforma:claim:{fields['claim_id']}",
+                "digest": {"sha256": wrong_digest},
+            }],
+            "predicateType": PREDICATE_TYPE,
+            "predicate": {
+                "claim_id": fields["claim_id"],
+                "text": fields["text"],
+                "classification": fields["classification"],
+                "generated_by": fields["generated_by"],
+                "supports": fields["supports"],
+                "contradicts": fields["contradicts"],
+                "source_name": fields["source_name"],
+                "artifact_hash": fields["artifact_hash"],
+                "created_at": fields["created_at"],
+                "evidence": {},
+            },
+        }
+        body = canonicalize(stmt)
+        sig = key.sign(dsse_pae(PAYLOAD_TYPE_CLAIM, body))
+        envelope = {
+            "payloadType": PAYLOAD_TYPE_CLAIM,
+            "payload": base64.standard_b64encode(body).decode("ascii"),
+            "signatures": [{
+                "keyid": public_key_id(key.public_key()),
+                "sig": base64.standard_b64encode(sig).decode("ascii"),
+            }],
+        }
+        assert verify_envelope(envelope, key.public_key()) is True
+        with pytest.raises(InvalidEnvelopeError, match="subject.digest"):
+            claim_predicate_from_envelope(envelope)
 
 
 # ---------------------------------------------------------------------------

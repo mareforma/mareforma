@@ -542,20 +542,6 @@ def canonical_statement(
     return canonicalize(stmt)
 
 
-def canonical_payload(claim_fields: dict[str, Any]) -> bytes:
-    """Backward-compat shim: returns canonical Statement v1 bytes with
-    an empty evidence vector.
-
-    Retained for callers that don't yet thread EvidenceVector through.
-    New code should call :func:`canonical_statement` directly with the
-    actual evidence dict so chain_hash + signature match.
-    """
-    return canonical_statement(claim_fields, evidence={})
-
-
-def _canonical_payload(claim_fields: dict[str, Any]) -> bytes:
-    """Legacy private alias retained for internal callers."""
-    return canonical_payload(claim_fields)
 
 
 def sign_claim(
@@ -802,12 +788,27 @@ def claim_predicate_from_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
     on a claim envelope — after Statement v1 the keys live one level
     deeper.
 
+    Also enforces subject-vs-predicate consistency:
+
+    - ``subject[0].name`` MUST equal ``"mareforma:claim:" + predicate.claim_id``
+    - ``subject[0].digest.sha256`` MUST equal :func:`text_sha256(predicate.text)`
+
+    Without these checks, a signer could issue an envelope whose
+    in-toto ``subject`` (the part standard tooling like ``cosign``
+    and GUAC keys off) names a different claim than the predicate
+    asserts — the bytes verify but the two halves of the envelope
+    disagree about what is being attested. Catching it here makes
+    every claim envelope structurally honest before any downstream
+    consumer sees it.
+
     Raises
     ------
     InvalidEnvelopeError
         If the envelope is not a claim envelope, or the Statement v1
-        shape is malformed.
+        shape is malformed, or subject and predicate disagree.
     """
+    from . import _statement as _stmt
+
     payload = envelope_payload(envelope)
     pt = envelope.get("payloadType")
     if pt != PAYLOAD_TYPE_CLAIM:
@@ -815,14 +816,43 @@ def claim_predicate_from_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
             f"not a claim envelope: payloadType={pt!r} "
             f"(expected {PAYLOAD_TYPE_CLAIM!r})"
         )
-    if payload.get("_type") != "https://in-toto.io/Statement/v1":
+    if payload.get("_type") != _stmt.STATEMENT_TYPE:
         raise InvalidEnvelopeError(
             f"unexpected _type: {payload.get('_type')!r}"
+        )
+    if payload.get("predicateType") != _stmt.PREDICATE_TYPE:
+        raise InvalidEnvelopeError(
+            f"unexpected predicateType: {payload.get('predicateType')!r}"
         )
     predicate = payload.get("predicate")
     if not isinstance(predicate, dict):
         raise InvalidEnvelopeError(
             "Statement v1 predicate missing or not a JSON object"
+        )
+    subjects = payload.get("subject")
+    if not isinstance(subjects, list) or len(subjects) != 1:
+        raise InvalidEnvelopeError(
+            "Statement v1 subject must be a single-entry list"
+        )
+    subj = subjects[0]
+    if not isinstance(subj, dict):
+        raise InvalidEnvelopeError(
+            "Statement v1 subject[0] must be a JSON object"
+        )
+    expected_name = f"{_stmt.SUBJECT_NAME_PREFIX}{predicate.get('claim_id')}"
+    if subj.get("name") != expected_name:
+        raise InvalidEnvelopeError(
+            f"subject.name {subj.get('name')!r} does not match "
+            f"predicate.claim_id (expected {expected_name!r})"
+        )
+    digest = subj.get("digest")
+    if not isinstance(digest, dict) or "sha256" not in digest:
+        raise InvalidEnvelopeError("subject.digest.sha256 missing")
+    expected_digest = _stmt.text_sha256(predicate.get("text") or "")
+    if digest["sha256"] != expected_digest:
+        raise InvalidEnvelopeError(
+            "subject.digest.sha256 does not match predicate.text — "
+            "envelope subject and predicate disagree"
         )
     return predicate
 

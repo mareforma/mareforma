@@ -327,3 +327,81 @@ class TestStatusOnlyEditsBypassTrigger:
             row = g.get_claim(a)
             assert row["status"] == "retracted"
             assert row["support_level"] == "REPLICATED"
+
+
+# ---------------------------------------------------------------------------
+# Append-only signed-fields trigger
+# ---------------------------------------------------------------------------
+
+
+class TestSignedFieldsAppendOnly:
+    """claims_signed_fields_no_laundering refuses direct-SQL mutation
+    of any signed predicate column on a signed claim. The envelope is
+    the canonical source; the row must always match what was signed.
+    """
+
+    def _signed_claim(self, tmp_path: Path) -> tuple[str, "object"]:
+        from mareforma import signing as _sig
+        key_path = tmp_path / "key"
+        _sig.bootstrap_key(key_path)
+        g = mareforma.open(tmp_path, key_path=key_path)
+        cid = g.assert_claim("anchor", artifact_hash="a" * 64)
+        return cid, g
+
+    def test_direct_text_update_blocked(self, tmp_path: Path) -> None:
+        cid, g = self._signed_claim(tmp_path)
+        try:
+            with pytest.raises(sqlite3.IntegrityError, match="signed_field_locked"):
+                g._conn.execute(
+                    "UPDATE claims SET text = ? WHERE claim_id = ?",
+                    ("tampered", cid),
+                )
+        finally:
+            g.close()
+
+    def test_direct_evidence_update_blocked(self, tmp_path: Path) -> None:
+        cid, g = self._signed_claim(tmp_path)
+        try:
+            with pytest.raises(sqlite3.IntegrityError, match="signed_field_locked"):
+                g._conn.execute(
+                    "UPDATE claims SET ev_risk_of_bias = -1 WHERE claim_id = ?",
+                    (cid,),
+                )
+        finally:
+            g.close()
+
+    def test_direct_statement_cid_update_blocked(self, tmp_path: Path) -> None:
+        cid, g = self._signed_claim(tmp_path)
+        try:
+            with pytest.raises(sqlite3.IntegrityError, match="signed_field_locked"):
+                g._conn.execute(
+                    "UPDATE claims SET statement_cid = ? WHERE claim_id = ?",
+                    ("0" * 64, cid),
+                )
+        finally:
+            g.close()
+
+    def test_unsigned_row_allows_text_update(self, tmp_path: Path) -> None:
+        """Unsigned claims (no key configured) are not under append-only
+        protection — the trigger gates on OLD.signature_bundle IS NOT NULL."""
+        with mareforma.open(tmp_path) as g:
+            cid = g.assert_claim("draft")
+            # No signature → trigger does not fire.
+            g._conn.execute(
+                "UPDATE claims SET text = ? WHERE claim_id = ?",
+                ("revised", cid),
+            )
+            g._conn.commit()
+
+    def test_status_only_update_passes_on_signed_row(
+        self, tmp_path: Path,
+    ) -> None:
+        """update_claim writes the full SET clause (text/supports/etc.)
+        but with unchanged values when only status is being changed.
+        The trigger's value-comparison clause lets this pass."""
+        cid, g = self._signed_claim(tmp_path)
+        try:
+            update_claim(g._conn, tmp_path, cid, status="retracted")
+            assert g.get_claim(cid)["status"] == "retracted"
+        finally:
+            g.close()
