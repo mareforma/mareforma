@@ -193,3 +193,13 @@ __all__ = [
     "wrap_untrusted",
     "__version__",
 ]
+
+
+def __dir__() -> list[str]:
+    """Filter ``dir(mareforma)`` to the public API.
+
+    ``Path`` and ``TYPE_CHECKING`` are imported at module scope because
+    ``open()`` uses them at runtime, but they should not surface in
+    tab-completion or be confused for public mareforma surface.
+    """
+    return sorted(__all__)

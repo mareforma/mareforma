@@ -52,9 +52,28 @@ def test_open_creates_db_if_missing(tmp_path):
 def test_open_context_manager_closes_connection(tmp_path):
     with mareforma.open(tmp_path) as graph:
         claim_id = graph.assert_claim("test claim")
-    # Connection is closed — further use should raise
-    with pytest.raises(sqlite3.ProgrammingError):
-        graph.query()
+    # After the context manager exits, every public method raises
+    # RuntimeError with an actionable message pointing back at
+    # mareforma.open(). The earlier behaviour leaked a raw
+    # sqlite3.ProgrammingError that did not tell agents what to do.
+    # Exercise every public method that goes through _check_open() so
+    # a future refactor that drops the guard from any of them gets
+    # caught by this regression.
+    closed_calls = [
+        ("query", lambda: graph.query()),
+        ("query_for_llm", lambda: graph.query_for_llm()),
+        ("get_claim", lambda: graph.get_claim(claim_id)),
+        ("assert_claim", lambda: graph.assert_claim("after close")),
+        ("validate", lambda: graph.validate(claim_id)),
+        ("enroll_validator", lambda: graph.enroll_validator(b"pem", identity="x")),
+        ("list_validators", lambda: graph.list_validators()),
+        ("refresh_unresolved", lambda: graph.refresh_unresolved()),
+        ("refresh_unsigned", lambda: graph.refresh_unsigned()),
+        ("get_tools", lambda: graph.get_tools()),
+    ]
+    for name, op in closed_calls:
+        with pytest.raises(RuntimeError, match="EpistemicGraph is closed"):
+            op()
 
 
 def test_open_default_path_uses_cwd(tmp_path, monkeypatch):

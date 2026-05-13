@@ -43,6 +43,7 @@ import tempfile
 from pathlib import Path
 
 import mareforma
+from mareforma import signing as _signing
 from langchain_core.tools import tool
 
 
@@ -57,7 +58,14 @@ def show(label: str, value: object) -> None:
 
 
 tmp = Path(tempfile.mkdtemp())
-graph = mareforma.open(tmp)
+# Self-contained signing key for this example. In real use, run
+# `mareforma bootstrap` once and mareforma.open() picks the key up
+# from ~/.config/mareforma/key automatically. The first key opened
+# against a fresh graph auto-enrolls as the root validator, which is
+# required for the validate() call below.
+key_path = tmp / "_example_key"
+_signing.bootstrap_key(key_path)
+graph = mareforma.open(tmp, key_path=key_path)
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +90,18 @@ _, assert_finding_c = [tool(fn) for fn in graph.get_tools(
 
 sep("Setup — prior consensus (ESTABLISHED)")
 
-upstream_ref = "upstream_ref_A"
+# Bootstrap an ESTABLISHED upstream the two lab agents can converge on.
+# Under the ESTABLISHED-upstream rule, REPLICATED requires at least one
+# upstream claim with support_level='ESTABLISHED' in supports[] —
+# matches Cochrane/GRADE evidence chains. seed=True asserts directly
+# at ESTABLISHED with a signed seed envelope; only the loaded key
+# (auto-enrolled as root above) can produce one.
+upstream_ref = graph.assert_claim(
+    "Prior literature: Treatment X is studied in population P",
+    classification="DERIVED",
+    generated_by="agent_seed/literature",
+    seed=True,
+)
 
 consensus_a = assert_finding_a.invoke({
     "text": "Treatment X reduces outcome Y in population P (cohort_1, n=500, p=0.003)",

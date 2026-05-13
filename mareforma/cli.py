@@ -237,10 +237,9 @@ def status_cmd(as_json: bool) -> None:
     Traffic light: GREEN (≥1 replicated/established), YELLOW (all preliminary),
     RED (no claims).
 
+    \b
     Examples:
-
         mareforma status
-
         mareforma status --json
     """
     import dataclasses
@@ -305,8 +304,8 @@ def status_cmd(as_json: bool) -> None:
 def export(output: str | None, as_json: bool, bundle: bool) -> None:
     """Export all claims as a JSON-LD document, optionally as a signed bundle.
 
+    \b
     Examples:
-
         mareforma export
         mareforma export --bundle
         cat ontology.jsonld | jq '.["@graph"][]'
@@ -359,8 +358,8 @@ def export(output: str | None, as_json: bool, bundle: bool) -> None:
 def verify(bundle_path: str) -> None:
     """Verify a SCITT-style signed bundle against the local signing key.
 
+    \b
     Examples:
-
         mareforma verify mareforma-bundle.json
     """
     from mareforma import signing as _signing
@@ -398,13 +397,11 @@ def claim() -> None:
     ANALYTICAL | DERIVED) and a graph-derived support level (PRELIMINARY →
     REPLICATED → ESTABLISHED).
 
+    \b
     Examples:
-
-        mareforma claim add "Target T is elevated in condition C"
+        mareforma claim add "Target T is elevated in condition C" \\
             --classification ANALYTICAL --source dataset_alpha
-
         mareforma claim list --status open
-
         mareforma claim update <ID> --status contested
     """
 
@@ -591,10 +588,9 @@ def claim_validate(claim_id, validated_by):
     must be enrolled as a validator on this project. The validation
     event is signed and the signed envelope is persisted to the row.
 
+    \b
     Examples:
-
         mareforma claim validate <ID>
-
         mareforma claim validate <ID> --validated-by reviewer@example.org
     """
     import mareforma

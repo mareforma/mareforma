@@ -21,6 +21,7 @@ import tempfile
 from pathlib import Path
 
 import mareforma
+from mareforma import signing as _signing
 
 
 def sep(title: str) -> None:
@@ -40,7 +41,15 @@ tmp = Path(tempfile.mkdtemp())
 # ---------------------------------------------------------------------------
 sep("1. Open")
 
-graph = mareforma.open(tmp)
+# Generate a signing key in the temp dir so this example is self-contained.
+# In real use you would run `mareforma bootstrap` once to create
+# ~/.config/mareforma/key, then mareforma.open() picks it up automatically.
+# Passing key_path= here also auto-enrolls the key as root validator on
+# this fresh graph — required for section 6's validate() call below.
+key_path = tmp / "_example_key"
+_signing.bootstrap_key(key_path)
+
+graph = mareforma.open(tmp, key_path=key_path)
 # graph.db is created automatically on first call.
 # No init, no TOML, no project directory required.
 
@@ -144,14 +153,17 @@ show("same id?", id_a == id_b)
 sep("5. REPLICATED (automatic)")
 
 # REPLICATED fires when ≥2 claims share the same upstream in supports[]
-# AND have different generated_by values.
-# This is the signal that two independent agents reached the same conclusion.
+# AND have different generated_by values AND the shared upstream is
+# itself ESTABLISHED. The third condition (Cochrane/GRADE methodology —
+# replication-of-noise is not replication) is satisfied here by asserting
+# the upstream as a seed claim, which inserts it directly at ESTABLISHED
+# with a signed seed envelope.
 
 upstream = graph.assert_claim(
     "Property X is elevated in compartment Y",
-    classification="ANALYTICAL",
+    classification="DERIVED",
     generated_by="agent_seed/model-a",
-    source_name="dataset_alpha",
+    seed=True,                    # ← directly ESTABLISHED, anchors the chain
 )
 
 rep_a = graph.assert_claim(

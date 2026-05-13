@@ -91,6 +91,7 @@ class EpistemicGraph:
         self._signer = signer
         self._rekor_url = rekor_url
         self._require_rekor = require_rekor
+        self._closed = False
 
         # Bootstrap-of-trust: the first key opened against a fresh project's
         # graph.db auto-enrolls as the root validator. This is silent and
@@ -194,6 +195,7 @@ class EpistemicGraph:
         the claim is stored with ``unresolved=True`` and is ineligible for
         REPLICATED promotion. Call :meth:`refresh_unresolved` later to retry.
         """
+        self._check_open()
         # Resolve any DOIs in supports/contradicts. Strings that don't match
         # DOI format are treated as claim_id references and pass through.
         dois = _doi.extract_dois((supports or []) + (contradicts or []))
@@ -257,6 +259,7 @@ class EpistemicGraph:
         ValueError
             If ``min_support`` or ``classification`` is not a valid value.
         """
+        self._check_open()
         return _db.query_claims(
             self._conn,
             text=text,
@@ -267,6 +270,7 @@ class EpistemicGraph:
 
     def get_claim(self, claim_id: str) -> dict | None:
         """Return a single claim dict by ID, or None if not found."""
+        self._check_open()
         return _db.get_claim(self._conn, claim_id)
 
     def query_for_llm(
@@ -341,6 +345,7 @@ class EpistemicGraph:
             loaded signer, or the loaded signer is not enrolled as a
             validator on this project.
         """
+        self._check_open()
         from mareforma import signing as _signing
         from mareforma import validators as _validators
 
@@ -420,6 +425,7 @@ class EpistemicGraph:
             If ``identity`` is empty, too long, or contains control
             characters.
         """
+        self._check_open()
         from mareforma import validators as _validators
         if self._signer is None:
             raise ValueError(
@@ -432,6 +438,7 @@ class EpistemicGraph:
 
     def list_validators(self) -> list[dict]:
         """Return all enrolled validators ordered by enrollment time."""
+        self._check_open()
         from mareforma import validators as _validators
         return _validators.list_validators(self._conn)
 
@@ -462,6 +469,7 @@ class EpistemicGraph:
             ``{"checked": N, "resolved": M, "still_unresolved": K}`` — counts
             of claims processed and outcomes.
         """
+        self._check_open()
         import warnings
 
         unresolved_claims = _db.list_unresolved_claims(self._conn)
@@ -548,6 +556,7 @@ class EpistemicGraph:
         dict
             ``{"checked": N, "logged": M, "still_unlogged": K}``.
         """
+        self._check_open()
         if self._rekor_url is None:
             return {"checked": 0, "logged": 0, "still_unlogged": 0}
 
@@ -691,8 +700,9 @@ class EpistemicGraph:
 
         Note
         ----
-        The returned callables are bound to this graph instance.
-        Using them after ``graph.close()`` raises a SQLite error.
+        The returned callables are bound to this graph instance. Using
+        them after ``graph.close()`` raises ``RuntimeError`` with a
+        message pointing back at ``mareforma.open(...)``.
 
         Example
         -------
@@ -701,6 +711,7 @@ class EpistemicGraph:
         >>> lc_tools = [tool(fn) for fn in tools]
         >>> # Anthropic SDK — pass to tools= in client.messages.create()
         """
+        self._check_open()
 
         def query_graph(topic: str, min_support: str = "PRELIMINARY") -> str:
             """Query the epistemic graph for what is already established about a topic.
@@ -789,8 +800,24 @@ class EpistemicGraph:
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        """Close the underlying database connection."""
-        self._conn.close()
+        """Close the underlying database connection.
+
+        Subsequent calls on this graph raise ``RuntimeError`` with an
+        actionable message instead of leaking a raw
+        ``sqlite3.ProgrammingError``.
+        """
+        if not self._closed:
+            self._conn.close()
+            self._closed = True
+
+    def _check_open(self) -> None:
+        """Guard against use after close. Public methods call this first."""
+        if self._closed:
+            raise RuntimeError(
+                "EpistemicGraph is closed. The context manager exited "
+                "or .close() was called explicitly. Re-open the graph "
+                "with mareforma.open(...) before calling this method."
+            )
 
     def __enter__(self) -> "EpistemicGraph":
         return self
