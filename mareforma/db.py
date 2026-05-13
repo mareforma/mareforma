@@ -43,7 +43,7 @@ _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 # ---------------------------------------------------------------------------
 
 DB_FILENAME = "graph.db"
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 # Hard cap on a single claim's ``text`` field. 100k chars covers any
 # realistic scientific finding (≈ a 15k-word paragraph) and matches the
@@ -163,6 +163,22 @@ BEGIN
         WHEN NEW.support_level = 'ESTABLISHED' AND
              NEW.validation_signature IS NULL THEN
             RAISE(ABORT, 'mareforma:state:established_without_validation')
+    END;
+END;
+
+-- Retracted is terminal. Without this, an adversary could assert a
+-- born-retracted claim, flip it back to 'open' via update_claim (a pure
+-- status mutation never triggers a REPLICATED re-check), and then ride
+-- an honest peer's INSERT into REPLICATED. The signed envelope does not
+-- bind status, so the resurrection carries no signature evidence. Make
+-- retraction one-way at the storage layer: to resurrect a withdrawn
+-- finding, assert a new claim citing the old via contradicts=[<old>].
+CREATE TRIGGER IF NOT EXISTS claims_update_status_terminal
+BEFORE UPDATE OF status ON claims
+BEGIN
+    SELECT CASE
+        WHEN OLD.status = 'retracted' AND NEW.status != 'retracted' THEN
+            RAISE(ABORT, 'mareforma:state:retracted_is_terminal:' || NEW.status)
     END;
 END;
 
@@ -330,6 +346,10 @@ def open_db(root: Path) -> sqlite3.Connection:
             _migrate_v1_to_v2(conn)
             version = 2
 
+        if version == 2 and _SCHEMA_VERSION >= 3:
+            _migrate_v2_to_v3(conn)
+            version = 3
+
         # Initialised db — validate the schema by exact column-set match.
         # Catching extras as well as missing columns means a partially-migrated
         # or hand-edited claims table fails loudly instead of silently passing
@@ -459,6 +479,27 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
 
     # Re-apply the schema script. CREATE INDEX/TRIGGER IF NOT EXISTS
     # makes this safe on re-run; ALTER TABLE was handled above.
+    conn.executescript(_SCHEMA_SQL)
+    conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+    conn.commit()
+
+
+def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
+    """In-place migration: install the ``claims_update_status_terminal``
+    trigger so existing v0.3.0 dev-branch graphs pick up the
+    retracted-is-terminal invariant without rebuilding.
+
+    Idempotent: the trigger CREATE uses IF NOT EXISTS. No claim data is
+    rewritten — only DDL.
+    """
+    has_table = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='claims'"
+    ).fetchone()
+    if not has_table:
+        return
+
+    # Re-apply the schema script. CREATE TRIGGER IF NOT EXISTS handles
+    # idempotency; existing triggers are untouched.
     conn.executescript(_SCHEMA_SQL)
     conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
     conn.commit()
@@ -996,6 +1037,19 @@ def _maybe_update_replicated_unlocked(
     if not supports:
         return
 
+    # A tainted new claim (status != 'open') must not enter the trust
+    # ladder. The candidate-peer SQL filter below blocks an existing
+    # tainted row from acting as a partner, but the new row itself
+    # would otherwise still ride an honest peer's INSERT into REPLICATED
+    # (peer_ids appends new_claim_id unconditionally at the UPDATE
+    # below). Short-circuit before the SELECT so neither the new row
+    # nor any open peer is promoted.
+    new_status_row = conn.execute(
+        "SELECT status FROM claims WHERE claim_id = ?", (new_claim_id,),
+    ).fetchone()
+    if new_status_row is None or new_status_row["status"] != "open":
+        return
+
     # P1.7: the NEW claim's supports[] must include at least one
     # ESTABLISHED claim. The SQL clause below applies the same rule
     # to candidate peers (their supports[] is checked there). If the
@@ -1047,9 +1101,14 @@ def _maybe_update_replicated_unlocked(
 
     peer_ids = [r["claim_id"] for r in rows] + [new_claim_id]
     peer_placeholders = ",".join("?" * len(peer_ids))
+    # status='open' folded into the UPDATE's WHERE closes the TOCTOU
+    # window between the SELECT above and this UPDATE: another writer
+    # could flip a peer (or the new row) to contested/retracted between
+    # the two statements. The row-level lock SQLite acquires during
+    # UPDATE is the actual gate; the pre-SELECT is a cheap fast-path.
     conn.execute(
         f"UPDATE claims SET support_level = 'REPLICATED', updated_at = ? "
-        f"WHERE claim_id IN ({peer_placeholders})",
+        f"WHERE claim_id IN ({peer_placeholders}) AND status = 'open'",
         (_now(), *peer_ids),
     )
 
@@ -1470,7 +1529,12 @@ def update_claim(
                 except sqlite3.OperationalError:
                     # Convergence detection is best-effort — never crash an update.
                     pass
-    except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
+    except sqlite3.IntegrityError as exc:
+        translated = _state_error_from_integrity(exc)
+        if translated is not None:
+            raise translated from exc
+        raise DatabaseError(f"Failed to update claim '{claim_id}': {exc}") from exc
+    except sqlite3.OperationalError as exc:
         raise DatabaseError(f"Failed to update claim '{claim_id}': {exc}") from exc
 
     _backup_claims_toml(conn, root)

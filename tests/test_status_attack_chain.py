@@ -98,6 +98,29 @@ class TestReplicatedFiltersStatus:
             assert g.get_claim(a)["support_level"] == "REPLICATED"
             assert g.get_claim(b)["support_level"] == "REPLICATED"
 
+    def test_tainted_new_claim_does_not_replicate_off_existing_honest_peer(
+        self, tmp_path: Path,
+    ) -> None:
+        """Reverse-order attack: honest peer is inserted FIRST (and sits at
+        PRELIMINARY since it has no partner yet), then an adversary INSERTs a
+        retracted claim citing the same upstream. Without the new-claim
+        status guard, the adversary's INSERT would find the honest peer in
+        the SELECT and the UPDATE (which appends new_claim_id to peer_ids
+        unconditionally) would co-promote BOTH rows to REPLICATED."""
+        with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
+            seed = _seeded_upstream(g)
+            honest = g.assert_claim(
+                "Z", supports=[seed], generated_by="agent/honest",
+            )
+            tainted = g.assert_claim(
+                "Z",
+                supports=[seed],
+                generated_by="agent/adversary",
+                status="retracted",
+            )
+            assert g.get_claim(honest)["support_level"] == "PRELIMINARY"
+            assert g.get_claim(tainted)["support_level"] == "PRELIMINARY"
+
 
 class TestValidateRefusesNonOpen:
     def test_validate_refused_on_contested(self, tmp_path: Path) -> None:
@@ -140,6 +163,77 @@ class TestSeedRefusesNonOpen:
                     seed=True,
                     status="contested",
                 )
+
+
+class TestRetractedIsTerminal:
+    """A BEFORE UPDATE trigger refuses any transition out of
+    status='retracted'. Without this, an adversary could insert a
+    born-retracted claim and then flip it back to 'open' via
+    update_claim (a pure status mutation doesn't trigger a REPLICATED
+    re-check). The flipped row would then ride an honest peer's INSERT
+    into REPLICATED, with no audit trail since the signed envelope
+    doesn't bind status."""
+
+    def test_retracted_to_open_refused(self, tmp_path: Path) -> None:
+        from mareforma.db import update_claim, IllegalStateTransitionError
+        with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
+            seed = _seeded_upstream(g)
+            c = g.assert_claim(
+                "X", supports=[seed], generated_by="agent/a", status="retracted",
+            )
+            with pytest.raises(IllegalStateTransitionError, match="retracted_is_terminal"):
+                update_claim(g._conn, g._root, c, status="open")
+
+    def test_retracted_to_contested_refused(self, tmp_path: Path) -> None:
+        from mareforma.db import update_claim, IllegalStateTransitionError
+        with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
+            seed = _seeded_upstream(g)
+            c = g.assert_claim(
+                "X", supports=[seed], generated_by="agent/a", status="retracted",
+            )
+            with pytest.raises(IllegalStateTransitionError, match="retracted_is_terminal"):
+                update_claim(g._conn, g._root, c, status="contested")
+
+    def test_open_to_retracted_still_allowed(self, tmp_path: Path) -> None:
+        from mareforma.db import update_claim
+        with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
+            seed = _seeded_upstream(g)
+            c = g.assert_claim("X", supports=[seed], generated_by="agent/a")
+            update_claim(g._conn, g._root, c, status="retracted")
+            assert g.get_claim(c)["status"] == "retracted"
+
+    def test_open_contested_open_round_trip(self, tmp_path: Path) -> None:
+        """Non-terminal transitions still work freely."""
+        from mareforma.db import update_claim
+        with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
+            seed = _seeded_upstream(g)
+            c = g.assert_claim("X", supports=[seed], generated_by="agent/a")
+            update_claim(g._conn, g._root, c, status="contested")
+            assert g.get_claim(c)["status"] == "contested"
+            update_claim(g._conn, g._root, c, status="open")
+            assert g.get_claim(c)["status"] == "open"
+
+    def test_full_flip_back_attack_chain_blocked(self, tmp_path: Path) -> None:
+        """The full attack chain Q5 surfaced: born-retracted, flip to open,
+        ride an honest peer's INSERT into REPLICATED. The trigger refuses
+        the flip, so the chain stops at step 2."""
+        from mareforma.db import update_claim, IllegalStateTransitionError
+        with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
+            seed = _seeded_upstream(g)
+            adv = g.assert_claim(
+                "Z", supports=[seed], generated_by="agent/adversary",
+                status="retracted",
+            )
+            with pytest.raises(IllegalStateTransitionError):
+                update_claim(g._conn, g._root, adv, status="open")
+            # Honest peer can still REPLICATE with another honest peer —
+            # the adversary's retracted claim is invisible to convergence.
+            honest_a = g.assert_claim("Z", supports=[seed], generated_by="agent/h1")
+            honest_b = g.assert_claim("Z", supports=[seed], generated_by="agent/h2")
+            assert g.get_claim(adv)["support_level"] == "PRELIMINARY"
+            assert g.get_claim(adv)["status"] == "retracted"
+            assert g.get_claim(honest_a)["support_level"] == "REPLICATED"
+            assert g.get_claim(honest_b)["support_level"] == "REPLICATED"
 
 
 class TestLLMToolSurfacesStatus:

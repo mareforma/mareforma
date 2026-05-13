@@ -4,10 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [0.3.0] - 2026-05-13
 
-Breaking change from v0.2.x. Schema migrates in place from v1 → v2 (the
-prev_hash append-only hash chain is populated retroactively); fresh
-graph.db files start at v2 directly. Claims are backed up in
-`claims.toml`.
+Breaking change from v0.2.x. Schema migrates in place from v1 → v3
+(prev_hash chain populated retroactively in v2; retracted-is-terminal
+trigger installed in v3); fresh graph.db files start at v3 directly.
+Claims are backed up in `claims.toml`.
 
 Full P0+P1 substrate per the 2026-05-12 security-substrate decision:
 - **P0.1** Ed25519 signing + Sigstore-Rekor

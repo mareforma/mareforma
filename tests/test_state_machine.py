@@ -365,7 +365,12 @@ class TestV1ToV2Migration:
             cols = {row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()}
             assert "prev_hash" in cols
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-            assert version == 2
+            # Opening a v1 db walks all migrations up to the current
+            # _SCHEMA_VERSION (currently 3 after v0.3.0 added the
+            # retracted-is-terminal trigger). Pin to the constant so
+            # future bumps don't require touching this test.
+            from mareforma.db import _SCHEMA_VERSION
+            assert version == _SCHEMA_VERSION
         finally:
             conn.close()
 

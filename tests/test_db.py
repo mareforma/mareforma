@@ -62,7 +62,7 @@ class TestOpenDb:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
         finally:
             conn.close()
-        assert version == 2
+        assert version == 3
 
     def test_idempotent_second_open(self, tmp_path: Path) -> None:
         conn1 = _open(tmp_path)
