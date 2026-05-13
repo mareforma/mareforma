@@ -286,6 +286,22 @@ BEGIN
     SELECT RAISE(ABORT, 'mareforma:append_only:signed_field_locked');
 END;
 
+-- A signed claim cannot be deleted. The signature + Rekor entry + chain
+-- hash collectively attest "this claim was asserted by this signer at
+-- this time"; allowing a delete would let a process with DB access wipe
+-- a Rekor-logged ESTABLISHED claim and rewrite claims.toml as if it never
+-- existed (the Rekor entry persists, but the local graph forgets the
+-- context that points to it). The whole "append-only over the signed
+-- predicate" framing requires this trigger as the twin of
+-- claims_signed_fields_no_laundering. Unsigned claims (legacy / no-key
+-- mode) remain deletable — they carry no cryptographic commitment.
+CREATE TRIGGER IF NOT EXISTS claims_signed_no_delete
+BEFORE DELETE ON claims
+WHEN OLD.signature_bundle IS NOT NULL
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:signed_claim_no_delete');
+END;
+
 -- Verdict-issuer protocol.
 --
 -- Every replication verdict and every contradiction verdict is a
@@ -378,6 +394,16 @@ END;
 -- ``t_invalid IS NULL`` guard makes the trigger idempotent: a second
 -- contradiction on an already-invalidated claim is a no-op rather
 -- than overwriting the earlier invalidation timestamp.
+--
+-- DESIGN RULE — DO NOT PROPAGATE DOWNSTREAM. The trigger marks only the
+-- directly-contradicted claim. Claims that cited the now-invalidated one
+-- via ``supports[]`` are unaffected. This is a deliberate boundary, not
+-- an oversight: transitive falsification would change the substrate's
+-- semantics, require an attorney FTO opinion, and conflict with the
+-- ``per-claim contradiction`` model documented in AGENTS.md. Any future
+-- attempt to add downstream propagation needs a separate design review
+-- before the commit. (See dossier operations/legal.md, "Patent landscape
+-- — Mareforma v0.3.0 FTO scan" for context.)
 CREATE TRIGGER IF NOT EXISTS contradiction_invalidates_older
 AFTER INSERT ON contradiction_verdicts
 BEGIN
@@ -1630,6 +1656,44 @@ def _refuse_llm_validator(conn: sqlite3.Connection, validator_keyid: str) -> Non
         )
 
 
+def _refuse_llm_contradiction_issuer(
+    conn: sqlite3.Connection, validator_keyid: str,
+) -> None:
+    """Raise :class:`LLMValidatorPromotionError` if *validator_keyid* is an
+    enrolled LLM-typed validator attempting to issue a contradiction.
+
+    Symmetric to :func:`_refuse_llm_validator`. A signed contradiction
+    sets ``t_invalid`` on the older of two claims via the
+    ``contradiction_invalidates_older`` trigger — that is equivalent in
+    blast radius to demoting a human-validated ESTABLISHED claim (it
+    drops from default ``query()`` results). The human-only rule must
+    apply to both directions of the trust ladder: humans-only-to-promote
+    AND humans-only-to-demote. Without this gate an enrolled LLM key
+    could mark down any ESTABLISHED claim by signing a contradiction —
+    breaking the README's "promotion requires a human" framing in the
+    opposite direction.
+
+    A keyid that is not enrolled (no row in validators) does not trip
+    this gate; the enrollment check in :func:`_require_enrolled_issuer`
+    handles that case.
+    """
+    row = conn.execute(
+        "SELECT validator_type FROM validators WHERE keyid = ?",
+        (validator_keyid,),
+    ).fetchone()
+    if row is None:
+        return
+    if row["validator_type"] == "llm":
+        raise LLMValidatorPromotionError(
+            f"Validator {validator_keyid[:12]}… is enrolled with "
+            "validator_type='llm'. LLM validators may sign validation "
+            "envelopes but cannot issue contradictions that invalidate "
+            "human-validated claims — the human-only rule applies to "
+            "both promotion AND demotion. Have a human-typed validator "
+            "sign the contradiction instead."
+        )
+
+
 def _refuse_self_validation(
     claim_id: str,
     claim_signature_bundle: str | None,
@@ -2444,6 +2508,13 @@ def record_contradiction_verdict(
     # Symmetric atomic-txn treatment would be a no-op.
     issuer_keyid = _signing.public_key_id(signer.public_key())
     _require_enrolled_issuer(conn, issuer_keyid)
+    # Symmetric to validate_claim's LLM-validator gate: an LLM-typed
+    # validator cannot issue a contradiction, because a contradiction
+    # invalidates the older claim and effectively demotes it from default
+    # query() results. Promotion-requires-human and demotion-requires-
+    # human must move together; otherwise an enrolled LLM key can mark
+    # down any ESTABLISHED claim with a signed contradiction.
+    _refuse_llm_contradiction_issuer(conn, issuer_keyid)
     _require_claim_exists(conn, member_claim_id, "member_claim_id")
     _require_claim_exists(conn, other_claim_id, "other_claim_id")
 
@@ -2929,14 +3000,16 @@ def restore(
     RestoreError
         With a ``.kind`` field. See :class:`RestoreError`.
     """
+    # TOML parser: stdlib `tomllib` on Python 3.11+, PyPI `tomli` on 3.10.
+    # Both share the same `loads` + `TOMLDecodeError` API. The previous
+    # code imported `tomli` unconditionally; pyproject only declares it
+    # for Python < 3.11, so a 3.11+ install hit ModuleNotFoundError the
+    # moment restore() ran — silently breaking the catastrophic-loss
+    # recovery path on the most common modern Python.
     try:
-        import tomli
-    except ImportError as exc:  # pragma: no cover
-        raise RestoreError(
-            "tomli is required for restore() (it is a hard dependency "
-            "of mareforma; re-install the package).",
-            kind="toml_malformed",
-        ) from exc
+        import tomllib  # Python 3.11+ stdlib
+    except ImportError:  # pragma: no cover  -- Python 3.10 path
+        import tomli as tomllib  # type: ignore[no-redef]
     from mareforma import signing as _signing
     from mareforma import validators as _validators
 
@@ -2951,8 +3024,8 @@ def restore(
         )
 
     try:
-        data = tomli.loads(toml_path.read_text(encoding="utf-8"))
-    except tomli.TOMLDecodeError as exc:
+        data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as exc:
         raise RestoreError(
             f"claims.toml at {toml_path} is malformed: {exc}",
             kind="toml_malformed",
@@ -3302,6 +3375,14 @@ def restore(
                 pass
             raise
 
+        # Restore inserted many validator rows; drop any per-connection
+        # chain-verification cache so the next is_enrolled walk operates
+        # against the fresh state. (Restore opens its own connection and
+        # closes it on the next line, so this is technically belt-and-
+        # suspenders, but the symmetric treatment is the right invariant
+        # for any future restore caller that reuses the connection.)
+        from mareforma.validators import invalidate_conn_cache
+        invalidate_conn_cache(conn)
         return {
             "validators_restored": len(ordered_validators),
             "claims_restored": len(ordered_claims),

@@ -77,16 +77,16 @@ class TestBytestableAcrossRuns:
         }
         in_process = canonicalize(payload)
 
+        # The subprocess runs the same interpreter (`sys.executable`), so
+        # `mareforma` is on its sys.path via whatever install method the
+        # test runner used — no cwd or sys.path manipulation needed.
         script = (
-            "import sys, json; "
-            "sys.path.insert(0, 'mareforma'); "
+            "import sys; "
             "from mareforma._canonical import canonicalize; "
-            "import json as _j; "
             f"sys.stdout.buffer.write(canonicalize({payload!r}))"
         )
         result = subprocess.run(
             [sys.executable, "-c", script],
-            cwd="/home/pipe/Bitacora/Mareforma/mareforma",
             capture_output=True,
             check=True,
         )

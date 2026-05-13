@@ -536,15 +536,21 @@ def claim() -> None:
               help="SHA256 hex digest of the artifact backing this claim.")
 def claim_add(text, classification, status, source_name, supports, contradicts,
               generated_by, artifact_hash):
-    """Add a new scientific claim TEXT."""
-    from mareforma.db import open_db, add_claim, DatabaseError
+    """Add a new scientific claim TEXT.
+
+    Routes through ``mareforma.open()`` so the XDG-default signing key
+    is auto-loaded. A bootstrapped key produces a signed claim; an
+    unsigned graph (no key) produces an unsigned claim. The substrate
+    decides — the CLI does not bypass signing.
+    """
+    import mareforma
+    from mareforma.db import DatabaseError, MareformaError
 
     root = _root()
     try:
-        conn = open_db(root)
-        try:
-            claim_id = add_claim(
-                conn, root, text,
+        with mareforma.open(root) as graph:
+            claim_id = graph.assert_claim(
+                text,
                 classification=classification,
                 status=status,
                 source_name=source_name,
@@ -553,12 +559,16 @@ def claim_add(text, classification, status, source_name, supports, contradicts,
                 contradicts=list(contradicts) or None,
                 artifact_hash=artifact_hash,
             )
-        finally:
-            conn.close()
     except ValueError as exc:
         _err(str(exc))
         sys.exit(1)
     except DatabaseError as exc:
+        _err(str(exc))
+        sys.exit(1)
+    except MareformaError as exc:
+        # Belt-and-suspenders for any future MareformaError subclass we
+        # haven't enumerated here — better a generic message than a
+        # traceback.
         _err(str(exc))
         sys.exit(1)
 
@@ -660,22 +670,30 @@ def claim_show(claim_id, as_json):
 @click.option("--supports", "supports", multiple=True, metavar="ID_OR_DOI")
 @click.option("--contradicts", "contradicts", multiple=True, metavar="ID_OR_DOI")
 def claim_update(claim_id, status, text, supports, contradicts):
-    """Update fields on an existing claim by ID."""
-    from mareforma.db import open_db, update_claim, DatabaseError, ClaimNotFoundError
+    """Update fields on an existing claim by ID.
+
+    Routes through ``mareforma.open()`` so the loaded-graph context
+    (XDG key, signer enrollment) is consistent with the Python API.
+    The substrate's append-only triggers (claims_signed_fields_no_laundering)
+    block any update that would mutate signed predicate fields on a
+    signed row — status-only updates remain allowed.
+    """
+    import mareforma
+    from mareforma.db import (
+        DatabaseError, ClaimNotFoundError, MareformaError,
+        update_claim as _update,
+    )
 
     root = _root()
     try:
-        conn = open_db(root)
-        try:
-            update_claim(
-                conn, root, claim_id,
+        with mareforma.open(root) as graph:
+            _update(
+                graph._conn, root, claim_id,
                 status=status,
                 text=text,
                 supports=list(supports) if supports else None,
                 contradicts=list(contradicts) if contradicts else None,
             )
-        finally:
-            conn.close()
     except ClaimNotFoundError as exc:
         _err(str(exc))
         sys.exit(1)
@@ -684,6 +702,9 @@ def claim_update(claim_id, status, text, supports, contradicts):
         sys.exit(1)
     except DatabaseError as exc:
         _err(f"Failed to update claim: {exc}")
+        sys.exit(1)
+    except MareformaError as exc:
+        _err(str(exc))
         sys.exit(1)
 
     _ok(f"Claim '{claim_id}' updated.")

@@ -180,6 +180,52 @@ def _conn_cache(conn: sqlite3.Connection) -> set[str]:
     return cache
 
 
+def invalidate_conn_cache(conn: sqlite3.Connection) -> None:
+    """Drop the per-connection chain-verification cache.
+
+    Any mutation of the ``validators`` table that goes through our Python
+    API must invalidate the cache before returning. Without this, an
+    ``is_enrolled`` call that returned True caches the keyid; a
+    subsequent mutation (chain break, alternate-root insertion that
+    violates the singleton-root invariant, identity sanitization edit)
+    would leave the cache pointing at a True that no longer reflects
+    ground truth until the connection is reopened.
+
+    Public (no leading underscore) because the canonical write paths
+    live outside this module — the restore path in ``db.py`` and any
+    future validator-management surface need to call it directly.
+
+    Where this matters
+    ------------------
+    Stdlib ``sqlite3.Connection`` does NOT allow arbitrary attributes,
+    so :func:`_conn_cache` falls through to its "fresh set every call"
+    safe-but-slow branch. On stdlib this function is therefore a no-op
+    — there is nothing to drop, and nothing was cached in the first
+    place. The invalidation is **load-bearing** for any Connection
+    wrapper (apsw, certain SQLAlchemy adapters, future subclasses) that
+    DOES accept attribute writes — there, the cache persists across
+    calls and stale entries are a real consistency hazard.
+
+    Raw-SQL mutations from outside our Python paths (e.g. a sqlite
+    shell ``UPDATE``) bypass this — there is no SQLite-side trigger we
+    can attach that flips a Python-process attribute. The cache's
+    correctness boundary is "we trust our own writes"; raw-SQL
+    attackers are already inside the trust model and the
+    singleton-root + chain-walk invariants are the defenses against
+    that case, not this cache.
+    """
+    try:
+        # Drop the attribute entirely so the next _conn_cache() call
+        # re-creates an empty set. Faster than .clear() on a large set
+        # and equivalent for correctness.
+        delattr(conn, _CACHE_ATTR)
+    except AttributeError:
+        # Either the cache attribute was never set (stdlib sqlite3,
+        # which rejects setattr in _conn_cache; or no is_enrolled call
+        # had populated it yet) — nothing to drop, no-op.
+        pass
+
+
 def _count_self_signed_rows(conn: sqlite3.Connection) -> int:
     """Return how many rows have ``keyid == enrolled_by_keyid``.
 
@@ -403,6 +449,10 @@ def auto_enroll_root(
              keyid, envelope_json),
         )
         conn.execute("COMMIT")
+        # Cache invalidation: a fresh root row changes the singleton-root
+        # count and breaks the previous "no validator anywhere → cache
+        # empty" invariant the cache implicitly relied on.
+        invalidate_conn_cache(conn)
     except sqlite3.IntegrityError:
         try:
             conn.execute("ROLLBACK")
@@ -509,6 +559,11 @@ def enroll_validator(
          parent_keyid, envelope_json),
     )
     conn.commit()
+    # Drop the chain-verification cache: a fresh row changed the
+    # singleton-root count's adjacency and the new keyid's chain has
+    # never been walked. Re-walks on next is_enrolled call are O(chain
+    # depth) which is single-digit in any realistic local-trust setup.
+    invalidate_conn_cache(conn)
 
     row = get_validator(conn, new_keyid)
     assert row is not None  # we just inserted it

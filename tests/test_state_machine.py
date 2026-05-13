@@ -405,3 +405,80 @@ class TestSignedFieldsAppendOnly:
             assert g.get_claim(cid)["status"] == "retracted"
         finally:
             g.close()
+
+
+class TestSignedDeleteAppendOnly:
+    """claims_signed_no_delete refuses DELETE on a signed claim.
+
+    Without this trigger, a process with DB access could wipe a Rekor-
+    logged ESTABLISHED claim, _backup_claims_toml would rewrite the
+    TOML as if the claim never existed, and the entire "append-only
+    over the signed predicate" framing would be half-implemented
+    (UPDATE-of-signed-fields was already locked; DELETE was not).
+    Unsigned claims remain deletable — they carry no cryptographic
+    commitment and the trust ladder does not extend to them.
+    """
+
+    def _signed_claim(self, tmp_path: Path) -> tuple[str, "object"]:
+        from mareforma import signing as _sig
+        key_path = tmp_path / "key"
+        _sig.bootstrap_key(key_path)
+        g = mareforma.open(tmp_path, key_path=key_path)
+        cid = g.assert_claim("signed anchor", artifact_hash="a" * 64)
+        return cid, g
+
+    def test_direct_delete_of_signed_claim_blocked(
+        self, tmp_path: Path,
+    ) -> None:
+        cid, g = self._signed_claim(tmp_path)
+        try:
+            with pytest.raises(
+                sqlite3.IntegrityError, match="signed_claim_no_delete",
+            ):
+                g._conn.execute("DELETE FROM claims WHERE claim_id = ?", (cid,))
+        finally:
+            g.close()
+
+    def test_delete_claim_helper_blocked_on_signed_row(
+        self, tmp_path: Path,
+    ) -> None:
+        """The user-facing ``db.delete_claim`` helper must surface the
+        trigger's refusal, not swallow it. Without this, a caller who
+        only uses the public API would still be able to wipe signed
+        claims via a typed exception that callers can catch."""
+        from mareforma.db import delete_claim as _delete
+        cid, g = self._signed_claim(tmp_path)
+        try:
+            with pytest.raises(sqlite3.IntegrityError, match="signed_claim_no_delete"):
+                _delete(g._conn, tmp_path, cid)
+        finally:
+            g.close()
+
+    def test_unsigned_claim_remains_deletable(self, tmp_path: Path) -> None:
+        """Unsigned mode (no key, no signature_bundle) is not under
+        append-only protection. The trigger gates on
+        OLD.signature_bundle IS NOT NULL — unsigned rows pass through."""
+        from mareforma.db import delete_claim as _delete
+        with mareforma.open(tmp_path) as g:
+            cid = g.assert_claim("draft unsigned")
+            assert g.get_claim(cid) is not None
+            _delete(g._conn, tmp_path, cid)
+            assert g.get_claim(cid) is None
+
+    def test_delete_claims_by_generated_by_blocked_on_signed_rows(
+        self, tmp_path: Path,
+    ) -> None:
+        """The bulk-delete helper must also refuse when any matched row
+        is signed. Without this gate, an adversary could wipe an entire
+        agent's signed history by ``delete_claims_by_generated_by``."""
+        from mareforma.db import delete_claims_by_generated_by as _bulk
+        cid, g = self._signed_claim(tmp_path)
+        try:
+            with pytest.raises(
+                sqlite3.IntegrityError, match="signed_claim_no_delete",
+            ):
+                _bulk(g._conn, tmp_path, generated_by=g.get_claim(cid)["generated_by"])
+            # Row still present after the failed bulk delete.
+            assert g.get_claim(cid) is not None
+        finally:
+            g.close()

@@ -1003,3 +1003,124 @@ class TestVerifyEnrollmentFullBinding:
             # After tamper: the row's identity diverges from the envelope's
             # signed identity → verify must fail.
             assert _validators.verify_enrollment(row_after, pubkey_pem) is False
+
+
+# ---------------------------------------------------------------------------
+# _conn_cache invalidation on validator writes
+# ---------------------------------------------------------------------------
+
+class TestConnCacheInvalidation:
+    """The per-connection chain-verification cache is dropped whenever a
+    validator-mutation path runs through our Python API. Without this,
+    on Connection wrappers that DO accept arbitrary attributes (apsw,
+    certain SQLAlchemy adapters, future subclasses), an
+    ``is_enrolled(K) → True`` call caches the keyid; a subsequent
+    mutation would leave the cache pointing at a True that no longer
+    reflects ground truth until the connection is reopened.
+
+    Stdlib ``sqlite3.Connection`` refuses ``setattr``, so on stdlib
+    ``_conn_cache`` falls into its per-call fresh-set safe branch and
+    the cache never persists. To exercise the invalidation logic
+    independently of stdlib behavior, the tests below use a tiny
+    ``_AttrConn`` wrapper that allows attribute writes — same surface
+    the cache code actually targets.
+
+    Raw-SQL mutations from outside our Python paths are explicitly out
+    of scope for this gate — see ``invalidate_conn_cache`` docstring.
+    """
+
+    class _AttrConn:
+        """Minimal sqlite3.Connection-like shim that accepts arbitrary
+        attribute writes (which stdlib sqlite3.Connection refuses).
+        Lets us exercise the cache + invalidation logic in isolation
+        from whether the running stdlib is one of the wrappers that
+        happens to accept attrs."""
+
+        def __init__(self, real_conn):
+            self._real = real_conn
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    def test_cache_persists_when_attrs_allowed(
+        self, tmp_path: Path,
+    ) -> None:
+        """On a Connection wrapper that accepts attrs, _conn_cache
+        actually persists across calls — establishing the baseline the
+        invalidation has to clear."""
+        conn = open_db(tmp_path)
+        try:
+            attr_conn = self._AttrConn(conn)
+            cache_a = _validators._conn_cache(attr_conn)
+            cache_a.add("test-keyid-deadbeef")
+            cache_b = _validators._conn_cache(attr_conn)
+            # Same set object returned across calls — cache really does
+            # persist on this wrapper.
+            assert cache_b is cache_a
+            assert "test-keyid-deadbeef" in cache_b
+        finally:
+            conn.close()
+
+    def test_invalidate_clears_persistent_cache(
+        self, tmp_path: Path,
+    ) -> None:
+        """invalidate_conn_cache must drop the persisted cache so the
+        next _conn_cache call returns a fresh empty set."""
+        conn = open_db(tmp_path)
+        try:
+            attr_conn = self._AttrConn(conn)
+            cache = _validators._conn_cache(attr_conn)
+            cache.add("test-keyid-cafebabe")
+            assert "test-keyid-cafebabe" in _validators._conn_cache(attr_conn)
+
+            _validators.invalidate_conn_cache(attr_conn)
+
+            after = _validators._conn_cache(attr_conn)
+            assert "test-keyid-cafebabe" not in after
+            assert after == set()
+        finally:
+            conn.close()
+
+    def test_invalidate_on_unattributed_conn_is_noop(
+        self, tmp_path: Path,
+    ) -> None:
+        """On a connection that never built a cache (e.g. stdlib
+        sqlite3.Connection where setattr is refused), invalidation
+        must not raise. Idempotent."""
+        conn = open_db(tmp_path)
+        try:
+            _validators.invalidate_conn_cache(conn)  # never cached → no-op
+            _validators.invalidate_conn_cache(conn)  # twice still no-op
+        finally:
+            conn.close()
+
+    def test_enroll_validator_calls_invalidate(self, tmp_path: Path) -> None:
+        """The enroll_validator path must invoke invalidate_conn_cache
+        on exit. We monkey-patch the helper to count calls — this is
+        the load-bearing assertion: any future refactor that drops the
+        invalidation call regresses this test."""
+        from mareforma import validators as _v
+        calls: list[None] = []
+        original = _v.invalidate_conn_cache
+
+        def counting(conn) -> None:
+            calls.append(None)
+            original(conn)
+
+        _v.invalidate_conn_cache = counting
+        try:
+            key_path = _bootstrap_key(tmp_path, "root.key")
+            child_key = _bootstrap_key(tmp_path, "child.key")
+            with mareforma.open(tmp_path, key_path=key_path) as g:
+                child_pem = _signing.public_key_to_pem(
+                    _signing.load_private_key(child_key).public_key(),
+                )
+                calls_before = len(calls)
+                g.enroll_validator(child_pem, identity="child")
+                calls_after = len(calls)
+            # At least one call landed during enroll_validator. (The
+            # auto_enroll_root + restore paths also call invalidate;
+            # this test is about the enroll_validator path specifically.)
+            assert calls_after > calls_before
+        finally:
+            _v.invalidate_conn_cache = original

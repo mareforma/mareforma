@@ -474,3 +474,137 @@ class TestClaimValidateErrors:
         assert "Resolution:" in result.output
         assert "mareforma validator add" in result.output
         assert "mareforma key show" in result.output
+
+
+# ---------------------------------------------------------------------------
+# CLI claim add/update — signing path consistency with the Python API
+# ---------------------------------------------------------------------------
+
+class TestClaimCLISigningParity:
+    """The CLI's write paths must produce the same trust posture as the
+    Python API. Before this fix, ``mareforma claim add`` and
+    ``mareforma claim update`` went through ``open_db`` + raw helpers
+    with no signer loaded, so a project that had run ``mareforma
+    bootstrap`` would still get unsigned claims from the CLI while the
+    Python API auto-signed them. README claimed "every claim auto-signs
+    once bootstrap runs." Now it does, regardless of entry point.
+    """
+
+    def _ensure_xdg_key(self) -> None:
+        from mareforma import signing as _signing
+        key_path = _signing.default_key_path()
+        if not key_path.exists():
+            _signing.bootstrap_key(key_path)
+
+    def test_claim_add_via_cli_produces_signed_claim_when_key_present(
+        self, tmp_path: Path,
+    ) -> None:
+        """After ``mareforma bootstrap``, ``mareforma claim add`` must
+        produce a row whose ``signature_bundle`` is non-NULL — same as
+        what ``mareforma.open().assert_claim()`` does."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            self._ensure_xdg_key()
+            result = runner.invoke(
+                cli, ["claim", "add", "signed via CLI"],
+                catch_exceptions=False,
+            )
+            assert result.exit_code == 0
+            claim_id = next(
+                line.split("ID:")[-1].strip()
+                for line in result.output.splitlines()
+                if "ID:" in line
+            )
+            show = runner.invoke(
+                cli, ["claim", "show", claim_id, "--json"],
+                catch_exceptions=False,
+            )
+            data = json.loads(show.output)
+        assert data["signature_bundle"] is not None, (
+            "CLI claim add MUST sign when an XDG key is present. "
+            "Got NULL signature_bundle — the CLI is bypassing signing again."
+        )
+
+    def test_claim_add_via_cli_unsigned_when_no_key(
+        self, tmp_path: Path,
+    ) -> None:
+        """Without ``mareforma bootstrap`` (no XDG key on disk), the
+        CLI produces an unsigned claim. The substrate decides; the CLI
+        does not force signing."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            # No _ensure_xdg_key — default path does not exist.
+            result = runner.invoke(
+                cli, ["claim", "add", "unsigned via CLI"],
+                catch_exceptions=False,
+            )
+            assert result.exit_code == 0
+            claim_id = next(
+                line.split("ID:")[-1].strip()
+                for line in result.output.splitlines()
+                if "ID:" in line
+            )
+            show = runner.invoke(
+                cli, ["claim", "show", claim_id, "--json"],
+                catch_exceptions=False,
+            )
+            data = json.loads(show.output)
+        assert data["signature_bundle"] is None
+
+    def test_claim_update_status_via_cli_on_signed_row(
+        self, tmp_path: Path,
+    ) -> None:
+        """``mareforma claim update --status`` on a signed row must
+        succeed — status is not in the locked signed-field set."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            self._ensure_xdg_key()
+            add = runner.invoke(
+                cli, ["claim", "add", "signed row"],
+                catch_exceptions=False,
+            )
+            claim_id = next(
+                line.split("ID:")[-1].strip()
+                for line in add.output.splitlines()
+                if "ID:" in line
+            )
+            result = runner.invoke(
+                cli, ["claim", "update", claim_id, "--status", "contested"],
+                catch_exceptions=False,
+            )
+            assert result.exit_code == 0
+            show = runner.invoke(
+                cli, ["claim", "show", claim_id, "--json"],
+                catch_exceptions=False,
+            )
+            data = json.loads(show.output)
+        assert data["status"] == "contested"
+        # And the signature is unchanged.
+        assert data["signature_bundle"] is not None
+
+    def test_claim_update_text_via_cli_on_signed_row_refused(
+        self, tmp_path: Path,
+    ) -> None:
+        """Mutating signed predicate fields on a signed row via the CLI
+        must surface the substrate's refusal cleanly, not a traceback."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            self._ensure_xdg_key()
+            add = runner.invoke(
+                cli, ["claim", "add", "signed row"],
+                catch_exceptions=False,
+            )
+            claim_id = next(
+                line.split("ID:")[-1].strip()
+                for line in add.output.splitlines()
+                if "ID:" in line
+            )
+            result = runner.invoke(
+                cli, ["claim", "update", claim_id, "--text", "tampered"],
+            )
+        assert result.exit_code == 1
+        # Substrate's typed refusal comes through (not a Python traceback).
+        # The Python-layer SignedClaimImmutableError fires before the SQL
+        # trigger, with a precise field-list message.
+        assert "is signed" in result.output
+        assert "refused to mutate" in result.output

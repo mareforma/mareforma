@@ -160,6 +160,76 @@ class TestContradictionInvalidatesOlder:
 
 
 # ---------------------------------------------------------------------------
+# LLM-typed validators cannot issue contradictions
+# ---------------------------------------------------------------------------
+
+class TestLLMContradictionGate:
+    """Symmetric to the LLM-promotion gate on validate_claim.
+
+    A signed contradiction sets ``t_invalid`` on the older claim via the
+    ``contradiction_invalidates_older`` trigger — effectively demoting
+    it from default ``query()`` results. The human-only rule must apply
+    in BOTH directions: humans-only-to-promote AND humans-only-to-demote.
+    Without this gate, an enrolled LLM key could mark down any
+    human-validated ESTABLISHED claim by signing a contradiction —
+    breaking the README's promotion-requires-human framing on the
+    demotion side.
+    """
+
+    def _seed_with_llm_issuer(
+        self, tmp_path: Path,
+    ) -> tuple[Path, Path, str, str]:
+        from mareforma.db import LLMValidatorPromotionError  # noqa: F401
+        root_key = _bootstrap(tmp_path, "root.key")
+        llm_key = _bootstrap(tmp_path, "llm-issuer.key")
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            llm_pem = _signing.public_key_to_pem(
+                _signing.load_private_key(llm_key).public_key(),
+            )
+            g.enroll_validator(
+                llm_pem, identity="llm-issuer", validator_type="llm",
+            )
+            a = g.assert_claim("alpha", generated_by="A")
+            b = g.assert_claim("beta", generated_by="B")
+        return root_key, llm_key, a, b
+
+    def test_llm_typed_contradiction_refused(self, tmp_path: Path) -> None:
+        from mareforma.db import LLMValidatorPromotionError
+        root_key, llm_key, a, b = self._seed_with_llm_issuer(tmp_path)
+        with mareforma.open(tmp_path, key_path=llm_key) as g:
+            with pytest.raises(
+                LLMValidatorPromotionError,
+                match="contradictions that invalidate human-validated",
+            ):
+                g.record_contradiction_verdict(
+                    verdict_id="cv_llm_blocked",
+                    member_claim_id=a, other_claim_id=b,
+                    confidence={"stance": "refutes"},
+                )
+        # And the older claim's t_invalid is still NULL — the gate
+        # fired BEFORE the INSERT, not after.
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            assert g.get_claim(a)["t_invalid"] is None
+            assert g.get_claim(b)["t_invalid"] is None
+
+    def test_human_typed_contradiction_still_succeeds(
+        self, tmp_path: Path,
+    ) -> None:
+        """Regression: the new gate must not break the existing
+        human-typed-issuer path."""
+        root_key, issuer_key, a, b, _, _ = _seed_two_claims(tmp_path)
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            g.record_contradiction_verdict(
+                verdict_id="cv_human_ok",
+                member_claim_id=a, other_claim_id=b,
+                confidence={"stance": "refutes"},
+            )
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            assert g.get_claim(a)["t_invalid"] is not None  # older invalidated
+            assert g.get_claim(b)["t_invalid"] is None
+
+
+# ---------------------------------------------------------------------------
 # Append-only triggers on verdict tables
 # ---------------------------------------------------------------------------
 
