@@ -235,3 +235,193 @@ class TestContradictAndSupport:
 
         assert upstream in json.loads(claim["supports_json"])
         assert upstream in json.loads(claim["contradicts_json"])
+
+
+# ---------------------------------------------------------------------------
+# Launch ship-gate: substrate end-to-end story
+# ---------------------------------------------------------------------------
+#
+# These tests are the OSS substrate's ship gate. They exercise the
+# complete v0.3.0 launch story end-to-end:
+#
+#   - in-toto Statement v1 + DSSE envelope on every signed claim
+#   - GRADE EvidenceVector inside the signed predicate
+#   - Verdict-issuer protocol: signed verdicts from enrolled validators
+#     promote claims to REPLICATED and invalidate via t_invalid
+#   - Restore round-trips claims + validators + verdicts
+#
+# The launch story DOES NOT include the inference layer (embedder, NLI,
+# semantic-cluster predicate). Those live outside the OSS — see primario
+# blueprints/mareforma/spec.md items 101-116. Any external verdict-issuer
+# (or the future mareforma-platform) calls the verdict-issuer protocol
+# below; the OSS substrate accepts the signed verdicts and gates the
+# trust ladder accordingly.
+
+
+class TestLaunchSubstrateShipGate:
+    """The substrate's launch ship gate. If everything here passes,
+    the substrate is launch-ready. Deeper coverage of each piece
+    lives in test_signing*.py, test_evidence.py, test_canonical.py,
+    test_statement.py, test_verdict_issuer.py, test_restore.py,
+    test_reputation.py, test_validator_type.py, test_search_fts5.py.
+    """
+
+    def test_signed_claim_carries_in_toto_statement_v1_envelope(
+        self, tmp_path: Path,
+    ) -> None:
+        """Every signed claim's envelope is a DSSE v1 wrapping an
+        in-toto Statement v1 with predicateType
+        https://mareforma.dev/claim/v1. Subject digest binds the
+        text; predicate carries SIGNED_FIELDS + EvidenceVector."""
+        from mareforma import signing as _signing
+        with open_signed_graph(tmp_path) as g:
+            cid = g.assert_claim("anchor finding")
+            claim = g.get_claim(cid)
+        envelope = json.loads(claim["signature_bundle"])
+        assert envelope["payloadType"] == "application/vnd.in-toto+json"
+        predicate = _signing.claim_predicate_from_envelope(envelope)
+        assert predicate["claim_id"] == cid
+        assert predicate["text"] == "anchor finding"
+        assert "evidence" in predicate
+
+    def test_grade_evidence_vector_on_every_claim(
+        self, tmp_path: Path,
+    ) -> None:
+        """Every claim row carries an ev_* + evidence_json column set.
+        The signed predicate binds them; restore catches tampering."""
+        with open_signed_graph(tmp_path) as g:
+            cid = g.assert_claim("evidence-bearing claim")
+            row = g.get_claim(cid)
+        for col in (
+            "ev_risk_of_bias", "ev_inconsistency", "ev_indirectness",
+            "ev_imprecision", "ev_pub_bias",
+        ):
+            assert col in row
+            assert row[col] == 0  # default
+        ev = json.loads(row["evidence_json"])
+        assert "rationale" in ev
+        assert "reporting_compliance" in ev
+
+    def test_verdict_issuer_promotes_to_replicated_end_to_end(
+        self, tmp_path: Path,
+    ) -> None:
+        """An enrolled validator's signed replication verdict promotes
+        the referenced pair of claims from PRELIMINARY to REPLICATED.
+        The OSS substrate accepts the verdict; the predicate that
+        generates it (semantic-cluster, cross-method, hash-match,
+        shared-resolved-upstream) lives outside the OSS."""
+        from mareforma import signing as _signing
+        root_key = tmp_path / "root.key"
+        issuer_key = tmp_path / "issuer.key"
+        _signing.bootstrap_key(root_key)
+        _signing.bootstrap_key(issuer_key)
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            pem = _signing.public_key_to_pem(
+                _signing.load_private_key(issuer_key).public_key(),
+            )
+            g.enroll_validator(pem, identity="external-issuer")
+            a = g.assert_claim("alpha finding", generated_by="lab-A")
+            b = g.assert_claim("beta finding", generated_by="lab-B")
+            assert g.get_claim(a)["support_level"] == "PRELIMINARY"
+            assert g.get_claim(b)["support_level"] == "PRELIMINARY"
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            g.record_replication_verdict(
+                verdict_id="rv_launch",
+                cluster_id="cl_launch",
+                member_claim_id=a, other_claim_id=b,
+                method="semantic-cluster",
+                confidence={"cosine": 0.94, "nli_forward": 0.87,
+                            "nli_backward": 0.89},
+            )
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            assert g.get_claim(a)["support_level"] == "REPLICATED"
+            assert g.get_claim(b)["support_level"] == "REPLICATED"
+
+    def test_contradiction_verdict_invalidates_and_query_default_excludes(
+        self, tmp_path: Path,
+    ) -> None:
+        """A signed contradiction verdict from an enrolled validator
+        invalidates the older referenced claim. Default query mode
+        excludes invalidated claims; audit mode surfaces them."""
+        from mareforma import signing as _signing
+        root_key = tmp_path / "root.key"
+        issuer_key = tmp_path / "issuer.key"
+        _signing.bootstrap_key(root_key)
+        _signing.bootstrap_key(issuer_key)
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            pem = _signing.public_key_to_pem(
+                _signing.load_private_key(issuer_key).public_key(),
+            )
+            g.enroll_validator(pem, identity="external-issuer")
+            a = g.assert_claim("alpha finding", generated_by="lab-A")
+            b = g.assert_claim("beta finding", generated_by="lab-B")
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            g.record_contradiction_verdict(
+                verdict_id="cv_launch",
+                member_claim_id=a, other_claim_id=b,
+                confidence={"stance_forward": "refutes",
+                            "stance_backward": "refutes"},
+            )
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            visible_ids = {
+                r["claim_id"]
+                for r in g.query(include_unverified=True)
+            }
+            audit_ids = {
+                r["claim_id"]
+                for r in g.query(include_unverified=True,
+                                 include_invalidated=True)
+            }
+        assert a not in visible_ids  # invalidated by signed verdict
+        assert a in audit_ids
+        assert b in visible_ids  # still valid
+
+    def test_restore_round_trips_claims_validators_and_verdicts(
+        self, tmp_path: Path,
+    ) -> None:
+        """Substrate restore reconstructs the full graph from claims.toml:
+        validators, claims (with EvidenceVector + statement_cid),
+        replication verdicts, contradiction verdicts. The trigger
+        re-derives t_invalid from the replayed contradictions."""
+        from mareforma import signing as _signing
+        root_key = tmp_path / "root.key"
+        issuer_key = tmp_path / "issuer.key"
+        _signing.bootstrap_key(root_key)
+        _signing.bootstrap_key(issuer_key)
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            pem = _signing.public_key_to_pem(
+                _signing.load_private_key(issuer_key).public_key(),
+            )
+            g.enroll_validator(pem, identity="external-issuer")
+            a = g.assert_claim("alpha", generated_by="lab-A")
+            b = g.assert_claim("beta", generated_by="lab-B")
+            c = g.assert_claim("gamma", generated_by="lab-C")
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            g.record_replication_verdict(
+                verdict_id="rv_e2e", cluster_id="cl",
+                member_claim_id=a, other_claim_id=b,
+                method="semantic-cluster", confidence={"cosine": 0.91},
+            )
+            g.record_contradiction_verdict(
+                verdict_id="cv_e2e",
+                member_claim_id=a, other_claim_id=c,
+                confidence={"stance": "refutes"},
+            )
+        # Wipe graph.db; restore from claims.toml.
+        for fname in ("graph.db", "graph.db-wal", "graph.db-shm"):
+            p = tmp_path / ".mareforma" / fname
+            if p.exists():
+                p.unlink()
+        result = mareforma.restore(tmp_path)
+        assert result["claims_restored"] == 3
+        assert result["validators_restored"] >= 2
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            # b promoted via the replication verdict.
+            assert g.get_claim(b)["support_level"] == "REPLICATED"
+            # a was the older of (a, c), so the trigger invalidated it.
+            assert g.get_claim(a)["t_invalid"] is not None
+            # The replication and contradiction verdicts both round-tripped.
+            reps = g.replication_verdicts(include_invalidated=True)
+            cons = g.contradiction_verdicts(include_invalidated=True)
+            assert {v["verdict_id"] for v in reps} == {"rv_e2e"}
+            assert {v["verdict_id"] for v in cons} == {"cv_e2e"}
