@@ -231,6 +231,7 @@ class EpistemicGraph:
         classification: str | None = None,
         limit: int = 20,
         include_unverified: bool = False,
+        include_invalidated: bool = False,
     ) -> list[dict]:
         """Query claims from the epistemic graph.
 
@@ -251,6 +252,10 @@ class EpistemicGraph:
             claims (e.g. inspection of pending work). REPLICATED and
             ESTABLISHED rows already require an enrolled chain and are
             never filtered by this flag.
+        include_invalidated:
+            When ``False`` (default), claims marked invalid by a signed
+            contradiction verdict (``t_invalid IS NOT NULL``) are
+            excluded. Pass ``True`` for audit / history queries.
 
         Returns
         -------
@@ -278,6 +283,7 @@ class EpistemicGraph:
             classification=classification,
             limit=limit,
             include_unverified=include_unverified,
+            include_invalidated=include_invalidated,
         )
 
     def search(
@@ -288,6 +294,7 @@ class EpistemicGraph:
         classification: str | None = None,
         limit: int = 20,
         include_unverified: bool = False,
+        include_invalidated: bool = False,
     ) -> list[dict]:
         """FTS5 full-text search over claim text.
 
@@ -330,6 +337,135 @@ class EpistemicGraph:
             classification=classification,
             limit=limit,
             include_unverified=include_unverified,
+            include_invalidated=include_invalidated,
+        )
+
+    # ------------------------------------------------------------------
+    # Verdict-issuer protocol
+    # ------------------------------------------------------------------
+
+    def record_replication_verdict(
+        self,
+        *,
+        verdict_id: str,
+        cluster_id: str,
+        member_claim_id: str,
+        other_claim_id: str | None = None,
+        method: str,
+        confidence: dict | None = None,
+    ) -> None:
+        """Insert a signed replication verdict.
+
+        The signing key is the graph's own loaded key (the same one
+        used by :meth:`assert_claim`); its keyid must be enrolled in
+        the project's ``validators`` table.
+
+        The OSS substrate accepts verdicts from any enrolled identity.
+        The predicates that GENERATE verdicts (semantic-cluster,
+        cross-method, contradiction-detection) live outside the OSS
+        (primario spec items 106–108) and call this method to write
+        their output.
+
+        Parameters
+        ----------
+        verdict_id
+            Caller-supplied unique id for the verdict row.
+        cluster_id
+            Caller-supplied cluster identifier shared across all
+            verdicts in one replication cluster.
+        member_claim_id
+            The claim being asserted as replicated.
+        other_claim_id
+            Optional second member of the replication pair (None for
+            single-row cross-method verdicts).
+        method
+            One of ``hash-match``, ``semantic-cluster``,
+            ``shared-resolved-upstream``, ``cross-method``.
+        confidence
+            Optional dict of confidence values (e.g.
+            ``{"cosine": 0.92, "nli_forward": 0.88}``) — never fused
+            into a single score per the report.
+
+        Raises
+        ------
+        VerdictIssuerError
+            If the graph has no signer (unsigned mode), the signer's
+            keyid is not enrolled, the method is invalid, or any
+            referenced claim_id is missing.
+        """
+        self._check_open()
+        if self._signer is None:
+            from mareforma.db import VerdictIssuerError
+            raise VerdictIssuerError(
+                "Cannot record a verdict without a signer. Open the "
+                "graph with key_path= or run `mareforma bootstrap`."
+            )
+        _db.record_replication_verdict(
+            self._conn, self._root,
+            verdict_id=verdict_id,
+            cluster_id=cluster_id,
+            member_claim_id=member_claim_id,
+            other_claim_id=other_claim_id,
+            method=method,
+            confidence=confidence,
+            signer=self._signer,
+        )
+
+    def record_contradiction_verdict(
+        self,
+        *,
+        verdict_id: str,
+        member_claim_id: str,
+        other_claim_id: str,
+        confidence: dict | None = None,
+    ) -> None:
+        """Insert a signed contradiction verdict.
+
+        The trigger ``contradiction_invalidates_older`` sets
+        ``t_invalid`` on the older of the two referenced claims.
+        Default queries (``include_invalidated=False``) will then
+        exclude the invalidated claim.
+
+        Same enrollment + claim-existence + signature-binding contract
+        as :meth:`record_replication_verdict`.
+        """
+        self._check_open()
+        if self._signer is None:
+            from mareforma.db import VerdictIssuerError
+            raise VerdictIssuerError(
+                "Cannot record a verdict without a signer. Open the "
+                "graph with key_path= or run `mareforma bootstrap`."
+            )
+        _db.record_contradiction_verdict(
+            self._conn, self._root,
+            verdict_id=verdict_id,
+            member_claim_id=member_claim_id,
+            other_claim_id=other_claim_id,
+            confidence=confidence,
+            signer=self._signer,
+        )
+
+    def replication_verdicts(
+        self,
+        *,
+        member_claim_id: str | None = None,
+        cluster_id: str | None = None,
+    ) -> list[dict]:
+        """List signed replication verdicts, optionally filtered."""
+        self._check_open()
+        return _db.list_replication_verdicts(
+            self._conn,
+            member_claim_id=member_claim_id,
+            cluster_id=cluster_id,
+        )
+
+    def contradiction_verdicts(
+        self, *, claim_id: str | None = None,
+    ) -> list[dict]:
+        """List signed contradiction verdicts, optionally filtered."""
+        self._check_open()
+        return _db.list_contradiction_verdicts(
+            self._conn, claim_id=claim_id,
         )
 
     def get_validator_reputation(self) -> dict[str, int]:

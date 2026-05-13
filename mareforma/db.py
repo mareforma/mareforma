@@ -126,6 +126,14 @@ CREATE TABLE IF NOT EXISTS claims (
     -- recomputable from the row's fields + evidence_json + statement
     -- v1 builder. NULL is allowed for unsigned rows.
     statement_cid   TEXT,
+    -- Verdict-derived invalidation timestamp. Set by the
+    -- contradiction_invalidates_older trigger when a signed
+    -- contradiction_verdicts row references this claim. NULL for
+    -- non-invalidated claims. The column is intentionally OUTSIDE
+    -- the claims_signed_fields_no_laundering watch list — invalidation
+    -- IS a legitimate mutation, gated by the trigger that only fires
+    -- on a signed verdict INSERT from an enrolled validator.
+    t_invalid       INTEGER,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
     -- ESTABLISHED rows must carry a signed validation envelope. The
@@ -270,6 +278,102 @@ BEGIN
     SELECT RAISE(ABORT, 'mareforma:append_only:signed_field_locked');
 END;
 
+-- Verdict-issuer protocol.
+--
+-- Every replication verdict and every contradiction verdict is a
+-- signed row written by an enrolled validator. The OSS substrate
+-- accepts verdicts from any party in the ``validators`` table; the
+-- predicates that PRODUCE these verdicts (semantic-cluster,
+-- cross-method, contradiction-detection) live outside the OSS
+-- (primario spec items 106–108, future platform layer). Any
+-- third-party verdict-issuer can write to these tables via the
+-- Graph.record_*_verdict APIs.
+--
+-- The signed payload bound to ``signature`` is the canonical JSON
+-- of the verdict record minus the signature itself; the
+-- verdict-issuer's keyid is the FK reference to validators(keyid).
+CREATE TABLE IF NOT EXISTS replication_verdicts (
+    verdict_id      TEXT PRIMARY KEY,
+    cluster_id      TEXT NOT NULL,
+    member_claim_id TEXT NOT NULL REFERENCES claims(claim_id),
+    other_claim_id  TEXT REFERENCES claims(claim_id),
+    method          TEXT NOT NULL
+                        CHECK (method IN (
+                            'hash-match',
+                            'semantic-cluster',
+                            'shared-resolved-upstream',
+                            'cross-method'
+                        )),
+    confidence_json TEXT NOT NULL DEFAULT '{}',
+    issuer_keyid    TEXT NOT NULL REFERENCES validators(keyid),
+    signature       BLOB NOT NULL,
+    created_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_replication_cluster
+    ON replication_verdicts(cluster_id);
+CREATE INDEX IF NOT EXISTS idx_replication_member
+    ON replication_verdicts(member_claim_id);
+
+CREATE TABLE IF NOT EXISTS contradiction_verdicts (
+    verdict_id      TEXT PRIMARY KEY,
+    member_claim_id TEXT NOT NULL REFERENCES claims(claim_id),
+    other_claim_id  TEXT NOT NULL REFERENCES claims(claim_id),
+    confidence_json TEXT NOT NULL DEFAULT '{}',
+    issuer_keyid    TEXT NOT NULL REFERENCES validators(keyid),
+    signature       BLOB NOT NULL,
+    created_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_contradiction_member
+    ON contradiction_verdicts(member_claim_id);
+
+-- Append-only verdicts. Any UPDATE on the immutable columns of an
+-- existing row is refused — the envelope is the source of truth,
+-- and a forged UPDATE would put the row out of sync with what was
+-- signed. The only mutation on these tables is INSERT.
+CREATE TRIGGER IF NOT EXISTS replication_verdicts_append_only
+BEFORE UPDATE OF
+    cluster_id, member_claim_id, other_claim_id, method,
+    confidence_json, issuer_keyid, signature, created_at
+ON replication_verdicts
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:verdict_locked');
+END;
+
+CREATE TRIGGER IF NOT EXISTS contradiction_verdicts_append_only
+BEFORE UPDATE OF
+    member_claim_id, other_claim_id, confidence_json,
+    issuer_keyid, signature, created_at
+ON contradiction_verdicts
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:verdict_locked');
+END;
+
+-- Contradiction verdicts invalidate the OLDER of the two referenced
+-- claims by setting ``claims.t_invalid`` to the verdict's created_at.
+-- This is the verdict-derived invalidation pattern: t_invalid is
+-- never directly written by user code, only set by this trigger in
+-- response to a signed contradiction_verdicts INSERT.
+--
+-- ``t_invalid IS NULL`` guard makes the trigger idempotent: a second
+-- contradiction on an already-invalidated claim is a no-op rather
+-- than overwriting the earlier invalidation timestamp.
+CREATE TRIGGER IF NOT EXISTS contradiction_invalidates_older
+AFTER INSERT ON contradiction_verdicts
+BEGIN
+    UPDATE claims
+    SET t_invalid = NEW.created_at
+    WHERE claim_id = (
+        SELECT CASE
+            WHEN c1.created_at <= c2.created_at THEN c1.claim_id
+            ELSE c2.claim_id
+        END
+        FROM claims c1, claims c2
+        WHERE c1.claim_id = NEW.member_claim_id
+          AND c2.claim_id = NEW.other_claim_id
+    )
+      AND t_invalid IS NULL;
+END;
+
 CREATE TABLE IF NOT EXISTS doi_cache (
     doi              TEXT PRIMARY KEY,
     resolved         INTEGER NOT NULL CHECK (resolved IN (0, 1)),
@@ -337,8 +441,8 @@ _CLAIM_COLUMNS = (
     "ev_risk_of_bias", "ev_inconsistency", "ev_indirectness",
     "ev_imprecision", "ev_pub_bias",
     "evidence_json",
-    # Statement v1 content identifier.
-    "statement_cid",
+    # Statement v1 content identifier + verdict-derived invalidation.
+    "statement_cid", "t_invalid",
     "created_at", "updated_at",
 )
 _CLAIM_SELECT = ", ".join(_CLAIM_COLUMNS)
@@ -1917,6 +2021,311 @@ def delete_claims_by_generated_by(
     return len(claim_ids)
 
 
+_VALID_REPLICATION_METHODS = (
+    "hash-match",
+    "semantic-cluster",
+    "shared-resolved-upstream",
+    "cross-method",
+)
+
+
+_REPLICATION_VERDICT_FIELDS = (
+    "verdict_id",
+    "cluster_id",
+    "member_claim_id",
+    "other_claim_id",
+    "method",
+    "confidence",
+)
+
+_CONTRADICTION_VERDICT_FIELDS = (
+    "verdict_id",
+    "member_claim_id",
+    "other_claim_id",
+    "confidence",
+)
+
+
+class VerdictIssuerError(MareformaError):
+    """Raised when a verdict-issuer write is refused.
+
+    Reasons: issuer not enrolled, referenced claim_id missing, method
+    not in the allowed enum, or the signature payload binding fails.
+    """
+
+
+def _verdict_canonical_payload(
+    fields: tuple[str, ...], record: dict,
+) -> bytes:
+    """Canonical JSON of a verdict record under a fixed field set.
+
+    Same shape rules as :func:`mareforma.signing._canonical_record` —
+    sorted keys, no whitespace. The verdict's signature covers these
+    bytes wrapped in DSSE PAE so a verdict signature cannot be
+    re-attributed to a different verdict_id or member.
+    """
+    payload = {name: record.get(name) for name in fields}
+    return json.dumps(
+        payload, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _require_enrolled_issuer(
+    conn: sqlite3.Connection, issuer_keyid: str,
+) -> None:
+    """Refuse the verdict if issuer_keyid is not an enrolled validator.
+
+    Verdict-issuer protocol: only enrolled identities can write to
+    ``replication_verdicts`` or ``contradiction_verdicts``. Enrollment
+    is the gate; the predicates that produce verdicts live outside the
+    OSS and can be implemented by anyone, but they must register their
+    signing identity in ``validators`` first.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM validators WHERE keyid = ?", (issuer_keyid,),
+    ).fetchone()
+    if row is None:
+        raise VerdictIssuerError(
+            f"Verdict-issuer keyid {issuer_keyid!r} is not enrolled. "
+            "Issuers must be in the validators table — call "
+            "graph.enroll_validator() first."
+        )
+
+
+def _require_claim_exists(
+    conn: sqlite3.Connection, claim_id: str, role: str,
+) -> None:
+    row = conn.execute(
+        "SELECT 1 FROM claims WHERE claim_id = ?", (claim_id,),
+    ).fetchone()
+    if row is None:
+        raise VerdictIssuerError(
+            f"Verdict references missing claim_id {claim_id!r} ({role})."
+        )
+
+
+def record_replication_verdict(
+    conn: sqlite3.Connection,
+    root: Path,
+    *,
+    verdict_id: str,
+    cluster_id: str,
+    member_claim_id: str,
+    other_claim_id: str | None,
+    method: str,
+    confidence: dict[str, Any] | None,
+    signer: "object",
+) -> None:
+    """Insert a signed replication verdict written by an enrolled validator.
+
+    *signer* is an Ed25519 private key (the verdict-issuer's key).
+    The issuer_keyid (sha256-hex of the signer's public key) must be
+    present in the ``validators`` table; otherwise the call raises
+    :class:`VerdictIssuerError`.
+
+    The DSSE-PAE signature covers the canonical JSON of
+    ``(verdict_id, cluster_id, member_claim_id, other_claim_id,
+    method, confidence)``. Restore re-derives this binding to catch
+    TOML tampering of verdict rows.
+
+    The OSS doesn't fire replication predicates itself — third-party
+    verdict-issuers (or a future mareforma-platform) call this method
+    after running their predicate logic. The substrate just accepts
+    the signed verdict and triggers the support_level promotion.
+    """
+    from mareforma import signing as _signing
+
+    if method not in _VALID_REPLICATION_METHODS:
+        raise VerdictIssuerError(
+            f"Unknown verdict method {method!r}. "
+            f"Use one of: {', '.join(_VALID_REPLICATION_METHODS)}"
+        )
+    issuer_keyid = _signing.public_key_id(signer.public_key())
+    _require_enrolled_issuer(conn, issuer_keyid)
+    _require_claim_exists(conn, member_claim_id, "member_claim_id")
+    if other_claim_id is not None:
+        _require_claim_exists(conn, other_claim_id, "other_claim_id")
+
+    confidence_dict = confidence or {}
+    confidence_json = json.dumps(
+        confidence_dict, sort_keys=True, separators=(",", ":"),
+    )
+    record = {
+        "verdict_id": verdict_id,
+        "cluster_id": cluster_id,
+        "member_claim_id": member_claim_id,
+        "other_claim_id": other_claim_id,
+        "method": method,
+        "confidence": confidence_dict,
+    }
+    payload = _verdict_canonical_payload(_REPLICATION_VERDICT_FIELDS, record)
+    pae = _signing.dsse_pae(
+        "application/vnd.mareforma.replication-verdict+json", payload,
+    )
+    signature = signer.sign(pae)
+    created_at = _now()
+    try:
+        conn.execute(
+            """
+            INSERT INTO replication_verdicts(
+                verdict_id, cluster_id, member_claim_id, other_claim_id,
+                method, confidence_json, issuer_keyid, signature, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                verdict_id, cluster_id, member_claim_id, other_claim_id,
+                method, confidence_json, issuer_keyid, signature, created_at,
+            ),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError as exc:
+        raise VerdictIssuerError(
+            f"Replication verdict {verdict_id!r} INSERT refused: {exc}"
+        ) from exc
+
+    # Promote referenced claims to REPLICATED. The state-machine trigger
+    # rejects PRELIMINARY → ESTABLISHED but accepts PRELIMINARY → REPLICATED
+    # and REPLICATED → REPLICATED (idempotent). Update only when the row
+    # is still PRELIMINARY so we don't downgrade an ESTABLISHED claim.
+    members = [member_claim_id]
+    if other_claim_id is not None:
+        members.append(other_claim_id)
+    placeholders = ",".join("?" * len(members))
+    try:
+        conn.execute(
+            f"UPDATE claims SET support_level = 'REPLICATED', updated_at = ? "
+            f"WHERE claim_id IN ({placeholders}) "
+            f"AND support_level = 'PRELIMINARY' AND status = 'open'",
+            (created_at, *members),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        # Trigger refusal is non-fatal — the verdict still stands; the
+        # state didn't promote, which is documented behavior for any
+        # claim that can't reach REPLICATED at this moment.
+        pass
+
+    _backup_claims_toml(conn, root)
+
+
+def record_contradiction_verdict(
+    conn: sqlite3.Connection,
+    root: Path,
+    *,
+    verdict_id: str,
+    member_claim_id: str,
+    other_claim_id: str,
+    confidence: dict[str, Any] | None,
+    signer: "object",
+) -> None:
+    """Insert a signed contradiction verdict from an enrolled validator.
+
+    Sets ``claims.t_invalid`` on the older of the two referenced
+    claims via the ``contradiction_invalidates_older`` AFTER INSERT
+    trigger. ``include_invalidated=False`` queries (the default) then
+    exclude the invalidated claim from results.
+
+    Same enrollment / claim-existence / signature-binding contract as
+    :func:`record_replication_verdict`.
+    """
+    from mareforma import signing as _signing
+
+    issuer_keyid = _signing.public_key_id(signer.public_key())
+    _require_enrolled_issuer(conn, issuer_keyid)
+    _require_claim_exists(conn, member_claim_id, "member_claim_id")
+    _require_claim_exists(conn, other_claim_id, "other_claim_id")
+
+    confidence_dict = confidence or {}
+    confidence_json = json.dumps(
+        confidence_dict, sort_keys=True, separators=(",", ":"),
+    )
+    record = {
+        "verdict_id": verdict_id,
+        "member_claim_id": member_claim_id,
+        "other_claim_id": other_claim_id,
+        "confidence": confidence_dict,
+    }
+    payload = _verdict_canonical_payload(_CONTRADICTION_VERDICT_FIELDS, record)
+    pae = _signing.dsse_pae(
+        "application/vnd.mareforma.contradiction-verdict+json", payload,
+    )
+    signature = signer.sign(pae)
+    created_at = _now()
+    try:
+        conn.execute(
+            """
+            INSERT INTO contradiction_verdicts(
+                verdict_id, member_claim_id, other_claim_id,
+                confidence_json, issuer_keyid, signature, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                verdict_id, member_claim_id, other_claim_id,
+                confidence_json, issuer_keyid, signature, created_at,
+            ),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError as exc:
+        raise VerdictIssuerError(
+            f"Contradiction verdict {verdict_id!r} INSERT refused: {exc}"
+        ) from exc
+
+    _backup_claims_toml(conn, root)
+
+
+def list_replication_verdicts(
+    conn: sqlite3.Connection,
+    *,
+    member_claim_id: str | None = None,
+    cluster_id: str | None = None,
+) -> list[dict]:
+    """List signed replication verdicts, optionally filtered."""
+    conditions: list[str] = []
+    params: list[Any] = []
+    if member_claim_id is not None:
+        conditions.append("member_claim_id = ? OR other_claim_id = ?")
+        params.extend([member_claim_id, member_claim_id])
+    if cluster_id is not None:
+        conditions.append("cluster_id = ?")
+        params.append(cluster_id)
+    where = (
+        "WHERE " + " AND ".join(f"({c})" for c in conditions)
+        if conditions else ""
+    )
+    rows = conn.execute(
+        f"SELECT verdict_id, cluster_id, member_claim_id, other_claim_id, "
+        f"method, confidence_json, issuer_keyid, signature, created_at "
+        f"FROM replication_verdicts {where} ORDER BY created_at ASC, verdict_id ASC",
+        params,
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_contradiction_verdicts(
+    conn: sqlite3.Connection,
+    *,
+    claim_id: str | None = None,
+) -> list[dict]:
+    """List signed contradiction verdicts, optionally filtered."""
+    if claim_id is not None:
+        rows = conn.execute(
+            "SELECT verdict_id, member_claim_id, other_claim_id, "
+            "confidence_json, issuer_keyid, signature, created_at "
+            "FROM contradiction_verdicts "
+            "WHERE member_claim_id = ? OR other_claim_id = ? "
+            "ORDER BY created_at ASC, verdict_id ASC",
+            (claim_id, claim_id),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT verdict_id, member_claim_id, other_claim_id, "
+            "confidence_json, issuer_keyid, signature, created_at "
+            "FROM contradiction_verdicts "
+            "ORDER BY created_at ASC, verdict_id ASC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def query_claims(
     conn: sqlite3.Connection,
     *,
@@ -1925,6 +2334,7 @@ def query_claims(
     min_support: str | None = None,
     classification: str | None = None,
     include_unverified: bool = False,
+    include_invalidated: bool = False,
 ) -> list[dict]:
     """Return claims ordered by support_level (desc) then recency (desc).
 
@@ -1945,6 +2355,11 @@ def query_claims(
         ESTABLISHED rows already require an enrolled validator chain and
         are never filtered by this flag. Pass ``True`` to surface
         unverified preliminary claims (e.g. inspection of pending work).
+    include_invalidated:
+        When False (default), claims with non-NULL ``t_invalid`` are
+        excluded — a contradiction_verdicts row from an enrolled
+        validator has marked them invalid. Pass ``True`` for audit /
+        history queries where you want to see contradicted claims too.
 
     Each returned dict carries the standard claim columns plus two
     reputation projections computed at query time:
@@ -1962,6 +2377,9 @@ def query_claims(
     if text is not None:
         conditions.append("text LIKE ?")
         params.append(f"%{text}%")
+
+    if not include_invalidated:
+        conditions.append("t_invalid IS NULL")
 
     if min_support is not None:
         if min_support not in VALID_SUPPORT_LEVELS:
@@ -2122,13 +2540,15 @@ def search_claims(
     min_support: str | None = None,
     classification: str | None = None,
     include_unverified: bool = False,
+    include_invalidated: bool = False,
 ) -> list[dict]:
     """FTS5-ranked search over claim text.
 
     Returns claim dicts ordered by FTS5 rank (best match first). Each
     dict carries the same projection as :func:`query_claims`:
     ``validator_reputation`` and ``generator_enrolled`` are attached
-    per row, and the ``include_unverified`` filter applies identically.
+    per row, and ``include_unverified`` / ``include_invalidated``
+    filters apply identically.
 
     The ``query`` string is passed through to SQLite's FTS5 MATCH
     operator. FTS5 syntax — phrase matching with double quotes, prefix
@@ -2151,6 +2571,9 @@ def search_claims(
 
     conditions: list[str] = ["claims_fts MATCH ?"]
     params: list = [fts_query]
+
+    if not include_invalidated:
+        conditions.append("c.t_invalid IS NULL")
 
     if min_support is not None:
         tiers = _SUPPORT_LEVEL_TIERS[min_support]
@@ -2580,6 +3003,22 @@ def restore(
                             kind="claim_unverified",
                         ) from exc
 
+            # Verdict-table replay. Each verdict envelope carries its
+            # own signature binding; we verify before INSERT. The
+            # contradiction trigger fires on the contradiction INSERT
+            # and re-derives t_invalid — restore doesn't need to
+            # round-trip t_invalid separately.
+            rep_section = data.get("replication_verdicts") or {}
+            for verdict_id, v in rep_section.items():
+                _verify_and_insert_replication_verdict(
+                    conn, verdict_id, v, validators_section,
+                )
+            con_section = data.get("contradiction_verdicts") or {}
+            for verdict_id, v in con_section.items():
+                _verify_and_insert_contradiction_verdict(
+                    conn, verdict_id, v, validators_section,
+                )
+
             conn.execute("COMMIT")
         except Exception:
             try:
@@ -2594,6 +3033,202 @@ def restore(
         }
     finally:
         conn.close()
+
+
+def _verify_and_insert_replication_verdict(
+    conn: sqlite3.Connection,
+    verdict_id: str,
+    v: dict,
+    validators_section: dict,
+) -> None:
+    """Cryptographically verify + INSERT a replication verdict from TOML.
+
+    The signed payload binds (verdict_id, cluster_id, member_claim_id,
+    other_claim_id, method, confidence) under DSSE PAE with
+    payloadType ``application/vnd.mareforma.replication-verdict+json``.
+    The issuer_keyid is looked up in the restored validators_section;
+    forged keyids without a matching enrollment fail verification.
+    """
+    from mareforma import signing as _signing
+
+    ctx = f"Replication verdict {verdict_id}"
+    cluster_id = _required_field(v, "cluster_id", ctx)
+    member_claim_id = _required_field(v, "member_claim_id", ctx)
+    other_claim_id = v.get("other_claim_id")
+    method = _required_field(v, "method", ctx)
+    confidence_json = _required_field(v, "confidence_json", ctx)
+    issuer_keyid = _required_field(v, "issuer_keyid", ctx)
+    signature_b64 = _required_field(v, "signature", ctx)
+    created_at = _required_field(v, "created_at", ctx)
+
+    try:
+        signature_bytes = base64.b64decode(signature_b64)
+    except (ValueError, TypeError) as exc:
+        raise RestoreError(
+            f"{ctx} signature is not valid base64.",
+            kind="claim_unverified",
+        ) from exc
+
+    enrollment = validators_section.get(issuer_keyid)
+    if enrollment is None:
+        raise RestoreError(
+            f"{ctx} issuer_keyid {issuer_keyid!r} is not in the validators "
+            "section — verdict signer is not enrolled.",
+            kind="claim_unverified",
+        )
+    try:
+        pem_bytes = base64.standard_b64decode(enrollment["pubkey_pem"])
+        pubkey = _signing.public_key_from_pem(pem_bytes)
+    except (KeyError, ValueError, TypeError, _signing.SigningError) as exc:
+        raise RestoreError(
+            f"{ctx} validator PEM unparseable: {exc}",
+            kind="claim_unverified",
+        ) from exc
+
+    try:
+        confidence_dict = json.loads(confidence_json or "{}")
+    except (ValueError, TypeError) as exc:
+        raise RestoreError(
+            f"{ctx} confidence_json unparseable: {exc}",
+            kind="claim_unverified",
+        ) from exc
+
+    record = {
+        "verdict_id": verdict_id,
+        "cluster_id": cluster_id,
+        "member_claim_id": member_claim_id,
+        "other_claim_id": other_claim_id,
+        "method": method,
+        "confidence": confidence_dict,
+    }
+    payload = _verdict_canonical_payload(_REPLICATION_VERDICT_FIELDS, record)
+    pae = _signing.dsse_pae(
+        "application/vnd.mareforma.replication-verdict+json", payload,
+    )
+    from cryptography.exceptions import InvalidSignature
+    try:
+        pubkey.verify(signature_bytes, pae)
+    except InvalidSignature as exc:
+        raise RestoreError(
+            f"{ctx} signature verification failed — TOML tampered or "
+            "signature forged.",
+            kind="claim_unverified",
+        ) from exc
+
+    try:
+        conn.execute(
+            """
+            INSERT INTO replication_verdicts(
+                verdict_id, cluster_id, member_claim_id, other_claim_id,
+                method, confidence_json, issuer_keyid, signature, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                verdict_id, cluster_id, member_claim_id, other_claim_id,
+                method, confidence_json, issuer_keyid, signature_bytes,
+                created_at,
+            ),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise RestoreError(
+            f"{ctx} INSERT refused: {exc}",
+            kind="claim_unverified",
+        ) from exc
+
+
+def _verify_and_insert_contradiction_verdict(
+    conn: sqlite3.Connection,
+    verdict_id: str,
+    v: dict,
+    validators_section: dict,
+) -> None:
+    """Cryptographically verify + INSERT a contradiction verdict from TOML.
+
+    Same shape as the replication verdict path. The
+    ``contradiction_invalidates_older`` trigger fires on this INSERT
+    and re-derives ``claims.t_invalid`` automatically.
+    """
+    from mareforma import signing as _signing
+
+    ctx = f"Contradiction verdict {verdict_id}"
+    member_claim_id = _required_field(v, "member_claim_id", ctx)
+    other_claim_id = _required_field(v, "other_claim_id", ctx)
+    confidence_json = _required_field(v, "confidence_json", ctx)
+    issuer_keyid = _required_field(v, "issuer_keyid", ctx)
+    signature_b64 = _required_field(v, "signature", ctx)
+    created_at = _required_field(v, "created_at", ctx)
+
+    try:
+        signature_bytes = base64.b64decode(signature_b64)
+    except (ValueError, TypeError) as exc:
+        raise RestoreError(
+            f"{ctx} signature is not valid base64.",
+            kind="claim_unverified",
+        ) from exc
+
+    enrollment = validators_section.get(issuer_keyid)
+    if enrollment is None:
+        raise RestoreError(
+            f"{ctx} issuer_keyid {issuer_keyid!r} is not in the validators "
+            "section — verdict signer is not enrolled.",
+            kind="claim_unverified",
+        )
+    try:
+        pem_bytes = base64.standard_b64decode(enrollment["pubkey_pem"])
+        pubkey = _signing.public_key_from_pem(pem_bytes)
+    except (KeyError, ValueError, TypeError, _signing.SigningError) as exc:
+        raise RestoreError(
+            f"{ctx} validator PEM unparseable: {exc}",
+            kind="claim_unverified",
+        ) from exc
+
+    try:
+        confidence_dict = json.loads(confidence_json or "{}")
+    except (ValueError, TypeError) as exc:
+        raise RestoreError(
+            f"{ctx} confidence_json unparseable: {exc}",
+            kind="claim_unverified",
+        ) from exc
+
+    record = {
+        "verdict_id": verdict_id,
+        "member_claim_id": member_claim_id,
+        "other_claim_id": other_claim_id,
+        "confidence": confidence_dict,
+    }
+    payload = _verdict_canonical_payload(_CONTRADICTION_VERDICT_FIELDS, record)
+    pae = _signing.dsse_pae(
+        "application/vnd.mareforma.contradiction-verdict+json", payload,
+    )
+    from cryptography.exceptions import InvalidSignature
+    try:
+        pubkey.verify(signature_bytes, pae)
+    except InvalidSignature as exc:
+        raise RestoreError(
+            f"{ctx} signature verification failed — TOML tampered or "
+            "signature forged.",
+            kind="claim_unverified",
+        ) from exc
+
+    try:
+        conn.execute(
+            """
+            INSERT INTO contradiction_verdicts(
+                verdict_id, member_claim_id, other_claim_id,
+                confidence_json, issuer_keyid, signature, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                verdict_id, member_claim_id, other_claim_id,
+                confidence_json, issuer_keyid, signature_bytes,
+                created_at,
+            ),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise RestoreError(
+            f"{ctx} INSERT refused: {exc}",
+            kind="claim_unverified",
+        ) from exc
 
 
 def _required_field(d: dict, key: str, context: str) -> Any:
@@ -2964,7 +3599,48 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
             entry["evidence_json"] = c.get("evidence_json") or "{}"
             if c.get("statement_cid"):
                 entry["statement_cid"] = c["statement_cid"]
+            # t_invalid is derived (set by the contradiction trigger
+            # on signed verdict INSERT). Restore replays the verdict
+            # table; the trigger fires again and re-sets t_invalid.
+            # We do NOT round-trip the column directly — that would
+            # accept a TOML-tampered t_invalid value without verifying
+            # it against a signed contradiction envelope.
             data["claims"][c["claim_id"]] = entry
+
+        # Verdict tables. Each verdict carries its own signature
+        # binding (issuer_keyid, payload bytes) so restore can
+        # cryptographically verify before re-INSERT. The trigger that
+        # sets t_invalid fires on the re-INSERT, restoring the
+        # invalidation state without needing a separate t_invalid
+        # round-trip.
+        rep_rows = list_replication_verdicts(conn)
+        if rep_rows:
+            data["replication_verdicts"] = {}
+            for v in rep_rows:
+                vid = v["verdict_id"]
+                data["replication_verdicts"][vid] = {
+                    "cluster_id": v["cluster_id"],
+                    "member_claim_id": v["member_claim_id"],
+                    "other_claim_id": v["other_claim_id"],
+                    "method": v["method"],
+                    "confidence_json": v["confidence_json"],
+                    "issuer_keyid": v["issuer_keyid"],
+                    "signature": base64.b64encode(v["signature"]).decode("ascii"),
+                    "created_at": v["created_at"],
+                }
+        con_rows = list_contradiction_verdicts(conn)
+        if con_rows:
+            data["contradiction_verdicts"] = {}
+            for v in con_rows:
+                vid = v["verdict_id"]
+                data["contradiction_verdicts"][vid] = {
+                    "member_claim_id": v["member_claim_id"],
+                    "other_claim_id": v["other_claim_id"],
+                    "confidence_json": v["confidence_json"],
+                    "issuer_keyid": v["issuer_keyid"],
+                    "signature": base64.b64encode(v["signature"]).decode("ascii"),
+                    "created_at": v["created_at"],
+                }
 
         out = root / "claims.toml"
         out.write_bytes(tomli_w.dumps(data).encode("utf-8"))
