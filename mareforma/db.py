@@ -2286,6 +2286,12 @@ def record_contradiction_verdict(
             f"claim_id on both sides ({member_claim_id!r}) — self-"
             "contradiction is not a valid verdict."
         )
+    # Asymmetry with record_replication_verdict (which wraps INSERT +
+    # promotion UPDATE in one BEGIN IMMEDIATE): contradiction is a
+    # single INSERT + one AFTER-INSERT trigger that fires inside the
+    # same auto-statement transaction. No second write follows, so no
+    # race window opens between INSERT and the trigger's UPDATE.
+    # Symmetric atomic-txn treatment would be a no-op.
     issuer_keyid = _signing.public_key_id(signer.public_key())
     _require_enrolled_issuer(conn, issuer_keyid)
     _require_claim_exists(conn, member_claim_id, "member_claim_id")

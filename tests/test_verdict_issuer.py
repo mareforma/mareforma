@@ -578,11 +578,12 @@ class TestReplicationDoesNotRePromoteInvalidated:
             assert g.get_claim(b)["support_level"] == "REPLICATED"
 
 
-class TestRestoreRefusesTransparencyWithoutRekor:
+class TestRestoreDowngradesTransparencyWithoutRekor:
     """Hand-edited claims.toml that flips transparency_logged=true on a
-    claim whose signature_bundle has no rekor block must be refused
-    silently downgraded — otherwise the row satisfies REPLICATED's
-    transparency_logged=1 gate without ever having been witnessed."""
+    claim whose signature_bundle has no rekor block must be silently
+    downgraded to transparency_logged=0 — otherwise the row would
+    satisfy REPLICATED's transparency_logged=1 gate without ever
+    having been witnessed by the log."""
 
     def test_transparency_flag_requires_rekor_block(
         self, tmp_path: Path,
