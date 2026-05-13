@@ -49,7 +49,7 @@ Return the epistemic schema — valid values, defaults, and state transitions.
 
 ```python
 s = mareforma.schema()
-s["schema_version"]    # 2
+s["schema_version"]    # 1
 s["classifications"]   # ['INFERRED', 'ANALYTICAL', 'DERIVED']
 s["support_levels"]    # ['PRELIMINARY', 'REPLICATED', 'ESTABLISHED']
 s["statuses"]          # ['open', 'contested', 'retracted']
@@ -188,14 +188,17 @@ for r in results:
 | `classification` | `str \| None` | `None` | `INFERRED` \| `ANALYTICAL` \| `DERIVED` |
 | `limit` | `int` | `20` | Maximum number of results. |
 | `include_unverified` | `bool` | `False` | When `False`, PRELIMINARY claims whose signing key is not in the validators table are excluded. Pass `True` to surface unverified preliminary claims. |
+| `include_invalidated` | `bool` | `False` | When `False`, claims marked invalid by a signed `contradiction_verdicts` row (`t_invalid IS NOT NULL`) are excluded. Pass `True` for audit / history queries. |
 
 **Returns** `list[dict]` — each dict contains:
 `claim_id`, `text`, `classification`, `support_level`, `idempotency_key`,
 `validated_by`, `validated_at`, `status`, `source_name`, `generated_by`,
 `supports_json`, `contradicts_json`, `comparison_summary`, `branch_id`,
 `unresolved`, `signature_bundle`, `transparency_logged`, `artifact_hash`,
-`validation_signature`, `validator_keyid`, `prev_hash`, `created_at`,
-`updated_at`. Plus two reputation projections computed at query time:
+`validation_signature`, `validator_keyid`, `prev_hash`,
+`ev_risk_of_bias`, `ev_inconsistency`, `ev_indirectness`,
+`ev_imprecision`, `ev_pub_bias`, `evidence_json`, `statement_cid`,
+`t_invalid`, `created_at`, `updated_at`. Plus two reputation projections computed at query time:
 
 - `validator_reputation: int` — for ESTABLISHED rows, the count of
   ESTABLISHED claims signed by the same validator. `0` otherwise.
@@ -224,9 +227,124 @@ Pure-wildcard queries (`"*"`, `"**"`) are refused — they would scan
 the whole table.
 
 **Parameters** — same as `query()` except `text` becomes `query` and is
-required (must be a non-empty FTS5 MATCH expression).
+required (must be a non-empty FTS5 MATCH expression). `include_invalidated`
+applies identically.
 
 **Raises** `ValueError` on empty / pure-wildcard / malformed FTS5 syntax.
+
+---
+
+### `record_replication_verdict(*, verdict_id, cluster_id, member_claim_id, other_claim_id, method, confidence)`
+
+Insert a signed replication verdict. The graph's loaded signer signs the
+verdict; its keyid must be enrolled in the project's `validators` table
+(chain walk back to a self-signed root, same gate as `validate()`).
+
+The OSS substrate accepts verdicts; the predicates that *generate* them
+(semantic-cluster, cross-method, hash-match, shared-resolved-upstream)
+live outside the OSS and call this method to write their output. Any
+third-party verdict-issuer can integrate against this protocol.
+
+```python
+graph.record_replication_verdict(
+    verdict_id="rv_abc",
+    cluster_id="cl_xyz",
+    member_claim_id=a,
+    other_claim_id=b,
+    method="semantic-cluster",
+    confidence={"cosine": 0.92, "nli_forward": 0.88, "nli_backward": 0.89},
+)
+```
+
+**Parameters**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `verdict_id` | `str` | required | Caller-supplied unique id. |
+| `cluster_id` | `str` | required | Shared across all verdicts in one replication cluster. |
+| `member_claim_id` | `str` | required | The claim being asserted as replicated. |
+| `other_claim_id` | `str \| None` | `None` | Optional second member of the pair (None for single-row cross-method verdicts). |
+| `method` | `str` | required | One of `hash-match` / `semantic-cluster` / `shared-resolved-upstream` / `cross-method`. |
+| `confidence` | `dict \| None` | `None` | Confidence values keyed by guard (e.g. `cosine`, `nli_forward`). Never fused into a single score. |
+
+**Side effect** — promotes the referenced claims from `PRELIMINARY` to
+`REPLICATED` (only when still `PRELIMINARY AND status='open' AND
+t_invalid IS NULL`). INSERT + promotion run in one `BEGIN IMMEDIATE`
+transaction so a concurrent contradiction cannot land between the writes.
+
+**Raises** `VerdictIssuerError` — no signer loaded, signer's keyid not
+enrolled (or chain broken), method not in the allowed enum, referenced
+`claim_id` missing.
+
+---
+
+### `record_contradiction_verdict(*, verdict_id, member_claim_id, other_claim_id, confidence)`
+
+Insert a signed contradiction verdict. Sets `t_invalid` on the older of
+the two referenced claims via the `contradiction_invalidates_older` AFTER
+INSERT trigger; default `query()` / `search()` then excludes the
+invalidated claim.
+
+```python
+graph.record_contradiction_verdict(
+    verdict_id="cv_def",
+    member_claim_id=a,
+    other_claim_id=b,
+    confidence={"stance_forward": "refutes", "stance_backward": "refutes"},
+)
+```
+
+**Parameters**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `verdict_id` | `str` | required | Caller-supplied unique id. |
+| `member_claim_id` | `str` | required | First claim in the contradiction. |
+| `other_claim_id` | `str` | required | Second claim. Must differ — self-contradiction (`member == other`) is refused at the Python layer AND by a SQL CHECK constraint. |
+| `confidence` | `dict \| None` | `None` | Confidence values describing the contradiction. |
+
+**Raises** `VerdictIssuerError` — same gates as `record_replication_verdict`,
+plus self-contradiction.
+
+---
+
+### `replication_verdicts(*, member_claim_id=None, cluster_id=None, include_invalidated=False)`
+
+List signed replication verdicts, optionally filtered.
+
+```python
+for v in graph.replication_verdicts(member_claim_id=claim_id):
+    print(v["method"], v["confidence_json"])
+```
+
+By default, verdicts referencing an invalidated claim are excluded — same
+visibility surface as `query()`. Pass `include_invalidated=True` for
+audit-mode listings.
+
+**Returns** `list[dict]` — each dict carries `verdict_id`, `cluster_id`,
+`member_claim_id`, `other_claim_id`, `method`, `confidence_json`,
+`issuer_keyid`, `signature` (raw bytes), `created_at`.
+
+---
+
+### `contradiction_verdicts(*, claim_id=None, include_invalidated=False)`
+
+List signed contradiction verdicts, optionally filtered by either side
+of the pair.
+
+```python
+for v in graph.contradiction_verdicts(claim_id=cid):
+    print(v["other_claim_id"], v["confidence_json"])
+```
+
+By default, contradiction verdicts referencing an invalidated claim are
+excluded. Most callers want `include_invalidated=True` since the
+contradiction verdict IS the evidence for invalidation — auditing "why
+was this invalidated" requires audit mode.
+
+**Returns** `list[dict]` — each dict carries `verdict_id`,
+`member_claim_id`, `other_claim_id`, `confidence_json`, `issuer_keyid`,
+`signature`, `created_at`.
 
 ---
 
@@ -431,7 +549,7 @@ submodule shown in the table.
 from mareforma.db import (
     DatabaseError, ClaimNotFoundError, SignedClaimImmutableError,
     IdempotencyConflictError, IllegalStateTransitionError,
-    ChainIntegrityError, CycleDetectedError,
+    ChainIntegrityError, CycleDetectedError, VerdictIssuerError,
 )
 from mareforma.signing import KeyNotFoundError, SigningError, InvalidEnvelopeError
 from mareforma.validators import InvalidIdentityError, ValidatorAlreadyEnrolledError
@@ -447,9 +565,10 @@ from mareforma.export_bundle import BundleVerificationError
 | `IllegalStateTransitionError` | `mareforma.db` | DB triggers | Transition violates the state-machine (e.g. PRELIMINARY → ESTABLISHED) |
 | `ChainIntegrityError` | `mareforma.db` | DB write | `prev_hash` append-only chain check failed |
 | `CycleDetectedError` | `mareforma.db` | `assert_claim()`, `update_claim()` | `supports[]` would form a cycle |
+| `VerdictIssuerError` | `mareforma.db` | `record_replication_verdict()`, `record_contradiction_verdict()` | No signer loaded, signer not enrolled (chain walk fails), invalid method enum, referenced claim missing, or self-contradiction (`member == other`) |
 | `KeyNotFoundError` | `mareforma.signing` | `open(require_signed=True)` | No private key at `key_path` |
 | `SigningError` | `mareforma.signing` | Rekor submission | Rekor URL unset / unreachable / invalid |
-| `InvalidEnvelopeError` | `mareforma.signing` | `verify_envelope` | Envelope payload is malformed or wrong `payloadType` |
+| `InvalidEnvelopeError` | `mareforma.signing` | `verify_envelope`, `claim_predicate_from_envelope` | Envelope payload is malformed, wrong `payloadType`, or subject and predicate disagree on `claim_id` / text digest |
 | `InvalidIdentityError` | `mareforma.validators` | `enroll_validator()` | Identity contains rejected characters |
 | `ValidatorAlreadyEnrolledError` | `mareforma.validators` | `enroll_validator()` | Validator row already exists |
 | `BundleVerificationError` | `mareforma.export_bundle` | `mareforma verify` | Signed export bundle failed DSSE or per-claim subject digest |

@@ -107,12 +107,16 @@ support level (descending) then recency (descending).
 | `classification` | `str \| None` | `None` | Filter by classification. |
 | `limit` | `int` | `20` | Maximum results. |
 | `include_unverified` | `bool` | `False` | When `False`, PRELIMINARY claims whose signing key is not in the validators table are excluded. Pass `True` to surface unverified preliminary claims. |
+| `include_invalidated` | `bool` | `False` | When `False`, claims invalidated by a signed `contradiction_verdicts` row (`t_invalid IS NOT NULL`) are excluded. Pass `True` for audit / history queries. |
 
 Each dict contains: `claim_id`, `text`, `classification`, `support_level`,
 `idempotency_key`, `validated_by`, `validated_at`, `status`, `source_name`,
 `generated_by`, `supports_json`, `contradicts_json`, `comparison_summary`,
 `branch_id`, `unresolved`, `signature_bundle`, `transparency_logged`,
-`validation_signature`, `validator_keyid`, `created_at`, `updated_at`.
+`validation_signature`, `validator_keyid`, `artifact_hash`, `prev_hash`,
+`ev_risk_of_bias`, `ev_inconsistency`, `ev_indirectness`,
+`ev_imprecision`, `ev_pub_bias`, `evidence_json`, `statement_cid`,
+`t_invalid`, `created_at`, `updated_at`.
 
 Plus two reputation projections computed at query time:
 
@@ -137,6 +141,7 @@ diacritics folded). Returns claim dicts ordered by FTS5 rank.
 | `classification` | `str \| None` | `None` | Same as `query()`. |
 | `limit` | `int` | `20` | Maximum results. |
 | `include_unverified` | `bool` | `False` | Same as `query()`. |
+| `include_invalidated` | `bool` | `False` | Same as `query()`. |
 
 Same result shape and projection as `query()`. Difference: `query()` uses
 LIKE substring matching; `search()` uses FTS5 ranked match.
@@ -348,10 +353,38 @@ features — agents that don't need them keep the default behavior.
 **Local signing.** Run `mareforma bootstrap` once to generate an Ed25519
 keypair at `~/.config/mareforma/key` (mode 0600). After that, every
 `assert_claim` auto-signs and persists the signature envelope to the
-`signature_bundle` field on the claim. The signed payload binds
-`claim_id`, `text`, `classification`, `generated_by`, `supports`,
-`contradicts`, `source_name`, `artifact_hash`, and `created_at` — any
-tamper on the row breaks verification.
+`signature_bundle` field on the claim.
+
+**Envelope shape — in-toto Statement v1 + DSSE v1.** The envelope is a
+DSSE v1 envelope (`payloadType=application/vnd.in-toto+json`) whose
+payload is an in-toto Statement v1
+(`predicateType=https://mareforma.dev/claim/v1`). The signed predicate
+binds `claim_id`, `text`, `classification`, `generated_by`, `supports`,
+`contradicts`, `source_name`, `artifact_hash`, `created_at`, and the
+GRADE `evidence` vector (see below). The subject digest is
+`sha256(NFC(text))`; the subject name is `mareforma:claim:<claim_id>`.
+Any tamper on the row breaks verification.
+
+DSSE Pre-Authentication Encoding means the signature covers
+`b"DSSEv1 " + len(payloadType) + " " + payloadType + " " + len(payload) + " " + payload`
+— not the payload bytes alone. A signature on `(typeA, payload)`
+cannot be replayed as a signature on `(typeB, payload)` even when
+the bytes are otherwise identical. Standards-aligned; `cosign`, GUAC,
+and any in-toto-aware tool can introspect a mareforma envelope without
+a mareforma-specific verifier.
+
+**GRADE EvidenceVector** travels inside the signed predicate as the
+`evidence` dict. Five downgrade domains in `[-2, 0]` (`risk_of_bias`,
+`inconsistency`, `indirectness`, `imprecision`, `publication_bias`),
+three upgrade flags (`large_effect`, `dose_response`,
+`opposing_confounding`), a `rationale` dict (required for any nonzero
+domain), and a `reporting_compliance` list. Defaults to all-zeros (no
+quality concerns flagged by the asserter). Denormalized into `ev_*`
+columns on the claim row for queryable filters; the signed predicate
+is the authoritative copy. Cannot be retroactively edited — a
+`UPDATE claims SET ev_risk_of_bias = 0 …` direct-SQL tamper is refused
+by the `claims_signed_fields_no_laundering` BEFORE UPDATE trigger when
+the new value differs from the signed one.
 
 **Append-only invariant.** Signed claims refuse mutation of any
 signed-surface field. `update_claim(text=...)` /
@@ -360,6 +393,9 @@ signed row raise `SignedClaimImmutableError`. `status` and
 `comparison_summary` remain editable since neither is part of the signed
 payload. To revise a signed claim, retract it (`status='retracted'`) and
 assert a new one citing the old via `contradicts=[<old_claim_id>]`.
+The SQL trigger above is a defense-in-depth backstop — a tampered
+Python interpreter that bypasses `update_claim` cannot relax the
+invariant.
 
 **Transparency log (Rekor).** Pass `rekor_url=mareforma.signing.PUBLIC_REKOR_URL`
 to `mareforma.open()` and every signed claim is submitted to the public
@@ -506,6 +542,85 @@ keyid prefix against the one you intended before any further
 
 ---
 
+## Verdict-issuer protocol
+
+The OSS substrate accepts **signed verdicts** from any enrolled
+validator. Verdicts come in two shapes:
+
+- `replication_verdicts` — asserts that two claims replicate one
+  another (or that one claim is part of a multi-method replication
+  cluster). Method enum: `hash-match`, `semantic-cluster`,
+  `shared-resolved-upstream`, `cross-method`. Recording a replication
+  verdict promotes the referenced claims from PRELIMINARY to
+  REPLICATED.
+- `contradiction_verdicts` — asserts that two claims refute one
+  another. The `contradiction_invalidates_older` trigger sets
+  `t_invalid` on the older referenced claim; default `query()` /
+  `search()` then excludes the invalidated claim.
+
+The substrate ratifies what enrolled identities sign. The predicates
+that PRODUCE verdicts (semantic-cluster on BGE-M3 embeddings,
+contradiction-detection via bidirectional NLI, etc.) live outside the
+OSS — see the v0.4+ inference layer roadmap. Any third-party
+verdict-issuer can integrate against this protocol by calling
+`Graph.record_replication_verdict()` / `Graph.record_contradiction_verdict()`.
+
+```python
+# An enrolled validator records that two claims replicate.
+graph.record_replication_verdict(
+    verdict_id="rv_abc",
+    cluster_id="cl_xyz",
+    member_claim_id=a,
+    other_claim_id=b,
+    method="semantic-cluster",
+    confidence={"cosine": 0.92, "nli_forward": 0.88, "nli_backward": 0.89},
+)
+# Both a and b are now support_level=REPLICATED (if they were PRELIMINARY).
+
+# Another validator records a contradiction.
+graph.record_contradiction_verdict(
+    verdict_id="cv_def",
+    member_claim_id=a,
+    other_claim_id=c,
+    confidence={"stance_forward": "refutes", "stance_backward": "refutes"},
+)
+# `a` is the older of (a, c) → its t_invalid is set.
+# graph.query() excludes `a` by default; pass include_invalidated=True for audit mode.
+```
+
+**Gates.** `record_*_verdict` raises `VerdictIssuerError` when:
+
+- No signer is loaded (graph opened without a key).
+- The signer's keyid is not enrolled in `validators` (chain walk back
+  to a self-signed root, same gate as `validate()`).
+- A referenced `claim_id` does not exist.
+- `method` is not in the allowed enum.
+- Self-contradiction (`member_claim_id == other_claim_id`).
+
+**Append-only at the SQL layer.** Both verdict tables refuse UPDATE
+(except a no-op same-value pass) and DELETE via triggers
+(`*_append_only` + `*_no_delete`). A direct-SQL tamper raises
+`mareforma:append_only:verdict_locked` / `verdict_delete_blocked`.
+
+**FK enforcement.** `open_db()` sets `PRAGMA foreign_keys = ON`, so a
+direct INSERT with a fabricated `issuer_keyid` or `member_claim_id`
+fails at the SQL layer.
+
+**`t_invalid` is terminal.** `validate_claim` refuses to promote a
+claim with `t_invalid IS NOT NULL` — a signed contradiction verdict
+is terminal evidence; the trust ladder will not lift an already-refuted
+claim. Likewise the promotion UPDATE inside `record_replication_verdict`
+filters `AND t_invalid IS NULL`, so a replication verdict landing after
+a contradiction cannot silently re-promote the invalidated claim.
+
+```python
+# Listing verdicts. Default excludes verdicts on invalidated claims.
+graph.replication_verdicts(member_claim_id=cid)
+graph.contradiction_verdicts(claim_id=cid, include_invalidated=True)
+```
+
+---
+
 ## DOI verification
 
 DOIs anywhere in `supports[]` or `contradicts[]` are HEAD-checked against
@@ -531,14 +646,14 @@ verification.
 mareforma-native vocabulary (`@type=mare:Graph`, media type
 `application/x-mareforma-graph+json`). The export is NOT
 PROV-O-conformant. Each claim node carries every `SIGNED_FIELDS`
-member so the bundle verifier (below) can re-derive
-`canonical_payload` from a node alone.
+member plus the GRADE `evidence` vector so the bundle verifier
+(below) can re-derive `canonical_statement` bytes from a node alone.
 
 **SCITT-style signed bundle.** `mareforma export --bundle` wraps the
 JSON-LD export in an in-toto Statement v1 envelope and signs it with
 the local Ed25519 key. The bundle includes one subject entry per
 claim (`urn:mareforma:claim:<uuid>`) with a SHA-256 of the claim's
-canonical_payload, plus a bundle-level DSSE signature. Verify with
+canonical Statement v1 bytes, plus a bundle-level DSSE signature. Verify with
 `mareforma verify <bundle.json>`:
 
 ```bash

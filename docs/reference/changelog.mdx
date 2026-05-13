@@ -14,18 +14,100 @@ at the project root is a human-readable record of the prior state —
 the prev_hash chain and per-claim signatures cannot be reconstructed
 from it, so it is a reference not a backup.
 
-v0.3.0 ships the full P0+P1 security substrate per the 2026-05-12
-security-substrate decision:
+What ships in v0.3.0:
 
-- **P0.1** Ed25519 signing + Sigstore-Rekor
-- **P0.2** Artifact-hash gate on REPLICATED
-- **P0.3** Identity-gated `validate()` with validator enrollment
-- **P0.4** DOI resolution + cache
-- **P1.5** DB-layer state-machine triggers + append-only hash chain
-- **P1.6** Simple-DFS cycle / self-loop detection on `supports[]`
-- **P1.7** ESTABLISHED-upstream requirement for REPLICATED + seed-claim bootstrap
-- **P1.8** JSON-LD export renamed to mareforma-native vocabulary
-- **P1.9** SCITT-style signed export bundle + verify CLI
+- **Ed25519 claim signing** with optional Sigstore-Rekor transparency log
+- **Artifact-hash gate** on REPLICATED — converging peers that both supply a SHA-256 must agree
+- **Identity-gated `graph.validate()`** with a per-project validators table and signed enrollment chain
+- **DOI resolution** against Crossref + DataCite with a persistent cache
+- **DB-layer state-machine triggers** + append-only `prev_hash` chain — the storage layer rejects illegal transitions
+- **Cycle / self-loop detection** on `supports[]` at INSERT and UPDATE
+- **ESTABLISHED-upstream requirement** for REPLICATED + signed seed-claim bootstrap (Cochrane / GRADE evidence chains; no replication-of-noise)
+- **JSON-LD export** in a mareforma-native vocabulary
+- **SCITT-style signed export bundle** + `mareforma verify` CLI
+- **In-toto Statement v1 + DSSE v1 PAE envelope** on every signed claim, GRADE 5-domain `EvidenceVector` inside every signed predicate, signed verdict-issuer protocol that any third party can integrate against (see below)
+
+Envelope upgrade + verdict-issuer protocol (substrate-launch additions):
+
+- **In-toto Statement v1 + DSSE v1 PAE envelope.** Every signed claim
+  is now a DSSE envelope (`payloadType=application/vnd.in-toto+json`)
+  wrapping an in-toto Statement v1
+  (`predicateType=https://mareforma.dev/claim/v1`). Standards-aligned;
+  introspectable by `cosign`, GUAC, and any in-toto-aware tool without
+  a mareforma-specific verifier. The signature covers the DSSE
+  Pre-Authentication Encoding (PAE), not the payload bytes alone —
+  a signature on `(typeA, payload)` cannot be replayed as a signature
+  on `(typeB, payload)`.
+- **GRADE 5-domain EvidenceVector** carried inside every signed claim's
+  predicate. Five downgrade domains (`risk_of_bias`, `inconsistency`,
+  `indirectness`, `imprecision`, `publication_bias`) each in
+  `[-2, 0]`, three upgrade flags (`large_effect`, `dose_response`,
+  `opposing_confounding`), `rationale` dict (required for any nonzero
+  domain), and `reporting_compliance` list. Bound into the signature;
+  denormalized into `ev_*` columns for queryable filters; restore
+  re-derives the canonical bytes and refuses any TOML-tampered upgrade.
+- **Verdict-issuer protocol.** Two new tables —
+  `replication_verdicts` and `contradiction_verdicts` — accept signed
+  verdicts from any enrolled validator. The OSS substrate ratifies
+  what enrolled identities sign; the predicates that PRODUCE verdicts
+  (semantic-cluster, cross-method, hash-match, shared-resolved-upstream,
+  contradiction-detection) live outside the OSS and call
+  `Graph.record_replication_verdict()` /
+  `Graph.record_contradiction_verdict()`. New `VerdictIssuerError`
+  exception covers the gates: signer must be enrolled (chain walk back
+  to a self-signed root), referenced claim must exist, method must be
+  in the allowed enum, contradiction `member != other`.
+- **`t_invalid` derived state.** New nullable column on `claims`. The
+  `contradiction_invalidates_older` AFTER INSERT trigger on
+  `contradiction_verdicts` sets `t_invalid` on the older of the two
+  referenced claims (lex-smaller `claim_id` as deterministic tie-break
+  when timestamps collide; idempotent via `WHERE t_invalid IS NULL`).
+  `validate_claim` refuses to promote a `t_invalid` claim — a signed
+  contradiction is terminal evidence.
+- **`include_invalidated` kwarg** on `graph.query()`, `graph.search()`,
+  `graph.replication_verdicts()`, `graph.contradiction_verdicts()`.
+  Defaults to `False` — invalidated claims and the verdicts that
+  reference them are excluded from default reads. Pass `True` for
+  audit / history queries.
+- **Append-only over the signed predicate.** New
+  `claims_signed_fields_no_laundering` BEFORE UPDATE trigger refuses
+  direct-SQL mutation of any signed-predicate column on rows whose
+  `signature_bundle IS NOT NULL`. Value-comparison fires only when
+  something actually changed, so multi-column UPDATEs that re-emit
+  unchanged values pass through. A tampered Python interpreter cannot
+  relax this.
+- **Append-only verdicts.** `*_append_only` + `*_no_delete` triggers
+  refuse UPDATE on signed columns and any DELETE on both verdict
+  tables. The envelope is the source of truth.
+- **PRAGMA foreign_keys = ON.** Set on every `open_db()`. The verdict
+  tables' FK references to `validators(keyid)` and `claims(claim_id)`
+  are now enforced — direct-SQL INSERTs with fabricated keyids fail
+  at the SQL layer, not just in Python.
+- **Subject ↔ predicate consistency.** `claim_predicate_from_envelope()`
+  refuses envelopes where `subject[0].name` or `subject[0].digest.sha256`
+  disagree with the predicate's `claim_id` or `text`. Caught at the
+  envelope-decode layer.
+- **Restore extensions.** `claims.toml` round-trip now covers both
+  verdict tables (signatures base64-encoded). Each verdict's signature
+  is cryptographically verified against the enrolled issuer's pubkey
+  before INSERT. Verdicts are replayed in `created_at` order so the
+  trigger's `WHERE t_invalid IS NULL` guard preserves the truthful
+  first-invalidation moment. `transparency_logged=true` in TOML is
+  downgraded to `0` when the bundle has no `rekor` block — hand-edited
+  TOML cannot fake a Rekor inclusion. New adversarial tests for
+  tampered `EvidenceVector`, swapped `statement_cid`, tampered verdict
+  fields, and forged `issuer_keyid`.
+- **New modules:** `mareforma._canonical` (NFC + sorted-keys +
+  no-whitespace + `allow_nan=False` canonical JSON),
+  `mareforma._statement` (in-toto Statement v1 builder +
+  `statement_cid` computation), `mareforma._evidence` (stdlib-dataclass
+  `EvidenceVector` with `__post_init__` validator). No pydantic
+  dependency added; mareforma stays at 5 runtime deps.
+- **`mareforma.signing.dsse_pae()`** is public so external verifiers
+  can independently re-derive the bytes the signature covers.
+  `canonical_statement(claim_fields, evidence)` replaces the legacy
+  `canonical_payload` for chain-hash + signature inputs; the old shim
+  is removed because it silently desynced from production bytes.
 
 ### Identity, signing, transparency
 
@@ -61,27 +143,27 @@ security-substrate decision:
 
 ### Storage-layer state machine
 
-- **DB-layer state-machine triggers (P1.5).** Two `BEFORE` triggers
+- **DB-layer state-machine triggers.** Two `BEFORE` triggers
   enforce `PRELIMINARY → REPLICATED → ESTABLISHED` at the storage
   layer; direct `PRELIMINARY → ESTABLISHED` is rejected; ESTABLISHED
   rows require `validation_signature`. Illegal transitions surface as
   `IllegalStateTransitionError` with a parsed `<from>-><to>` string
   instead of an opaque `CHECK CONSTRAINT FAILED`.
-- **Append-only hash chain (P1.5).** New `claims.prev_hash` column
+- **Append-only hash chain.** New `claims.prev_hash` column
   carries `sha256(prev_chain_link || canonical_payload)`. UNIQUE
   partial index + `BEGIN IMMEDIATE` together prevent branched chains
   from concurrent writers or manual SQL tamper. New
   `ChainIntegrityError`.
-- **Cycle / self-loop detection (P1.6).** A claim whose `supports[]`
+- **Cycle / self-loop detection.** A claim whose `supports[]`
   would create a cycle (directly or via a chain) raises
   `CycleDetectedError` at INSERT and at UPDATE. Forward-walk DFS,
   depth-capped at 1024 hops. DOI strings in `supports[]` are not
   graph nodes and skipped.
-- **ESTABLISHED-upstream requirement for REPLICATED (P1.7).**
+- **ESTABLISHED-upstream requirement for REPLICATED.**
   REPLICATED promotion now requires at least one ESTABLISHED claim in
   the peer's `supports[]`. Matches Cochrane / GRADE evidence-chain
   methodology — stops replication-of-noise. Strict by default.
-- **Seed-claim bootstrap (P1.7).**
+- **Seed-claim bootstrap.**
   `graph.assert_claim(text=..., seed=True)` inserts a claim directly
   at `ESTABLISHED` with a signed seed envelope (payload type
   `application/vnd.mareforma.seed+json`, binds
@@ -131,7 +213,7 @@ security-substrate decision:
 
 ### Export
 
-- **JSON-LD export (P1.8).** Removed PROV-O references
+- **JSON-LD export — mareforma-native vocabulary.** Removed PROV-O references
   (`prov:wasGeneratedBy`, `prov:used`) from the JSON-LD `@context` —
   the previous export name-dropped the vocabulary without populating
   the full PROV-O graph. The export now declares `@type='mare:Graph'`
@@ -141,7 +223,7 @@ security-substrate decision:
   always emitted on each claim node so downstream consumers (e.g.
   the bundle verifier below) can re-derive `canonical_payload` from a
   node alone.
-- **SCITT-style signed bundle (P1.9).** New `mareforma export
+- **SCITT-style signed bundle.** New `mareforma export
   --bundle` produces an in-toto Statement v1 wrapper around the
   JSON-LD export, with `predicateType='urn:mareforma:predicate:epistemic-graph:v1'`
   and a DSSE-style signature over the whole bundle. Subject names use
@@ -210,7 +292,7 @@ security-substrate decision:
   `mareforma status`, `mareforma export [--bundle]`,
   `mareforma verify <bundle>`, `mareforma restore [<toml-path>]`.
 
-### Validator type and reputation (MF-016 / MF-017)
+### Validator type and reputation
 
 - **Validator type signal.** `validators.validator_type TEXT
   CHECK IN ('human','llm')`, bound into the signed enrollment
@@ -227,7 +309,7 @@ security-substrate decision:
   `graph.get_validator_reputation()` returns the bulk
   `{keyid: count}` map.
 
-### Full-text search (MF-009)
+### Full-text search
 
 - **FTS5 over claim text.** New `claims_fts` virtual table
   (`unicode61` tokenizer, diacritics folded) synced with `claims` via
