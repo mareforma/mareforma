@@ -2198,27 +2198,37 @@ def restore(
                     kind="graph_not_empty",
                 )
             for keyid, v in ordered_validators:
+                ctx_v = f"Validator {keyid[:12]}…"
                 row = {
                     "keyid": keyid,
-                    "pubkey_pem": v["pubkey_pem"],
-                    "identity": v["identity"],
-                    "validator_type": v["validator_type"],
-                    "enrolled_at": v["enrolled_at"],
-                    "enrolled_by_keyid": v["enrolled_by_keyid"],
-                    "enrollment_envelope": v["enrollment_envelope"],
+                    "pubkey_pem": _required_field(v, "pubkey_pem", ctx_v),
+                    "identity": _required_field(v, "identity", ctx_v),
+                    "validator_type": _required_field(
+                        v, "validator_type", ctx_v,
+                    ),
+                    "enrolled_at": _required_field(v, "enrolled_at", ctx_v),
+                    "enrolled_by_keyid": _required_field(
+                        v, "enrolled_by_keyid", ctx_v,
+                    ),
+                    "enrollment_envelope": _required_field(
+                        v, "enrollment_envelope", ctx_v,
+                    ),
                 }
-                if v["enrolled_by_keyid"] == keyid:
-                    parent_pem_b64 = v["pubkey_pem"]
+                if row["enrolled_by_keyid"] == keyid:
+                    parent_pem_b64 = row["pubkey_pem"]
                 else:
-                    parent_v = validators_section.get(v["enrolled_by_keyid"])
+                    parent_v = validators_section.get(row["enrolled_by_keyid"])
                     if parent_v is None:
                         raise RestoreError(
                             f"Validator {keyid[:12]}… claims to be enrolled "
-                            f"by {v['enrolled_by_keyid'][:12]}… but that "
+                            f"by {row['enrolled_by_keyid'][:12]}… but that "
                             "parent is missing from claims.toml.",
                             kind="enrollment_unverified",
                         )
-                    parent_pem_b64 = parent_v["pubkey_pem"]
+                    parent_pem_b64 = _required_field(
+                        parent_v, "pubkey_pem",
+                        f"Parent validator {row['enrolled_by_keyid'][:12]}…",
+                    )
                 try:
                     parent_pem = base64.standard_b64decode(parent_pem_b64)
                 except (ValueError, TypeError) as exc:
@@ -2233,17 +2243,30 @@ def restore(
                         f"{keyid[:12]}… failed verification.",
                         kind="enrollment_unverified",
                     )
-                conn.execute(
-                    "INSERT INTO validators "
-                    "(keyid, pubkey_pem, identity, validator_type, "
-                    " enrolled_at, enrolled_by_keyid, enrollment_envelope) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        keyid, v["pubkey_pem"], v["identity"],
-                        v["validator_type"], v["enrolled_at"],
-                        v["enrolled_by_keyid"], v["enrollment_envelope"],
-                    ),
-                )
+                try:
+                    conn.execute(
+                        "INSERT INTO validators "
+                        "(keyid, pubkey_pem, identity, validator_type, "
+                        " enrolled_at, enrolled_by_keyid, "
+                        " enrollment_envelope) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            keyid, row["pubkey_pem"], row["identity"],
+                            row["validator_type"], row["enrolled_at"],
+                            row["enrolled_by_keyid"],
+                            row["enrollment_envelope"],
+                        ),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    # Duplicate keyid PK, bad validator_type CHECK, or any
+                    # other validator-table integrity violation. Translate
+                    # to RestoreError so callers honour the documented
+                    # contract.
+                    raise RestoreError(
+                        f"Validator {keyid[:12]}… could not be restored: "
+                        f"{exc}",
+                        kind="enrollment_unverified",
+                    ) from exc
 
             # Order claims by created_at so prev_hash reconstruction
             # matches the original chain. SHA256 is deterministic — same
@@ -2254,6 +2277,17 @@ def restore(
             )
 
             for claim_id, c in ordered_claims:
+                ctx_c = f"Claim {claim_id}"
+                # Pull required fields up-front via the helper so any
+                # missing key surfaces as RestoreError(kind="toml_malformed")
+                # instead of a bare KeyError past the contract.
+                c_text = _required_field(c, "text", ctx_c)
+                c_classification = _required_field(c, "classification", ctx_c)
+                c_generated_by = _required_field(c, "generated_by", ctx_c)
+                c_created_at = _required_field(c, "created_at", ctx_c)
+                c_updated_at = _required_field(c, "updated_at", ctx_c)
+                c_status = _required_field(c, "status", ctx_c)
+                target_level = _required_field(c, "support_level", ctx_c)
                 _verify_claim_signatures_on_restore(
                     claim_id, c, validators_section, signed_mode,
                     _signing,
@@ -2263,14 +2297,14 @@ def restore(
                 contradicts_list = c.get("contradicts", []) or []
                 chain_fields = {
                     "claim_id": claim_id,
-                    "text": c["text"],
-                    "classification": c["classification"],
-                    "generated_by": c["generated_by"],
+                    "text": c_text,
+                    "classification": c_classification,
+                    "generated_by": c_generated_by,
                     "supports": supports_list,
                     "contradicts": contradicts_list,
                     "source_name": c.get("source_name"),
                     "artifact_hash": c.get("artifact_hash"),
-                    "created_at": c["created_at"],
+                    "created_at": c_created_at,
                 }
                 prev_hash = _compute_prev_hash(conn, chain_fields)
                 val_sig = c.get("validation_signature")
@@ -2278,7 +2312,6 @@ def restore(
                     _extract_validation_signer_keyid(val_sig)
                     if val_sig else None
                 )
-                target_level = c["support_level"]
                 # The INSERT trigger only accepts PRELIMINARY or
                 # ESTABLISHED as initial values — REPLICATED is reached
                 # via the convergence detection path inside add_claim,
@@ -2327,12 +2360,12 @@ def restore(
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
-                            claim_id, c["text"], c["classification"],
+                            claim_id, c_text, c_classification,
                             insert_level,
                             None,  # idempotency_key — TOML doesn't carry it
                             insert_validated_by, insert_validated_at,
-                            c["status"], c.get("source_name"),
-                            c["generated_by"],
+                            c_status, c.get("source_name"),
+                            c_generated_by,
                             json.dumps(supports_list, sort_keys=True,
                                        separators=(",", ":")),
                             json.dumps(contradicts_list, sort_keys=True,
@@ -2345,7 +2378,7 @@ def restore(
                             insert_validation_signature,
                             insert_validator_keyid,
                             c.get("artifact_hash"), prev_hash,
-                            c["created_at"], c["updated_at"],
+                            c_created_at, c_updated_at,
                         ),
                     )
                 except sqlite3.IntegrityError as exc:
@@ -2362,12 +2395,20 @@ def restore(
                 if target_level == "REPLICATED":
                     # PRELIMINARY → REPLICATED — the UPDATE trigger
                     # accepts the transition. No validation_signature
-                    # required on REPLICATED rows.
-                    conn.execute(
-                        "UPDATE claims SET support_level = 'REPLICATED' "
-                        "WHERE claim_id = ?",
-                        (claim_id,),
-                    )
+                    # required on REPLICATED rows. Wrap the UPDATE so
+                    # any trigger refusal surfaces as RestoreError.
+                    try:
+                        conn.execute(
+                            "UPDATE claims SET support_level = 'REPLICATED' "
+                            "WHERE claim_id = ?",
+                            (claim_id,),
+                        )
+                    except sqlite3.IntegrityError as exc:
+                        raise RestoreError(
+                            f"Claim {claim_id} promote-to-REPLICATED "
+                            f"refused: {exc}",
+                            kind="claim_unverified",
+                        ) from exc
 
             conn.execute("COMMIT")
         except Exception:
@@ -2383,6 +2424,22 @@ def restore(
         }
     finally:
         conn.close()
+
+
+def _required_field(d: dict, key: str, context: str) -> Any:
+    """Look up a required field on a TOML-deserialized row.
+
+    Raises :class:`RestoreError` with ``kind='toml_malformed'`` when the
+    field is missing. Direct ``d[key]`` would raise ``KeyError`` past
+    the documented ``RestoreError`` contract.
+    """
+    if key not in d:
+        raise RestoreError(
+            f"{context}: required field {key!r} is missing from "
+            "claims.toml.",
+            kind="toml_malformed",
+        )
+    return d[key]
 
 
 def _verify_claim_signatures_on_restore(
@@ -2456,16 +2513,17 @@ def _verify_claim_signatures_on_restore(
                 f"Claim {claim_id} envelope payload is unparseable.",
                 kind="claim_unverified",
             ) from exc
+        ctx_c = f"Claim {claim_id}"
         expected = {
             "claim_id": claim_id,
-            "text": c["text"],
-            "classification": c["classification"],
-            "generated_by": c["generated_by"],
+            "text": _required_field(c, "text", ctx_c),
+            "classification": _required_field(c, "classification", ctx_c),
+            "generated_by": _required_field(c, "generated_by", ctx_c),
             "supports": c.get("supports") or [],
             "contradicts": c.get("contradicts") or [],
             "source_name": c.get("source_name"),
             "artifact_hash": c.get("artifact_hash"),
-            "created_at": c["created_at"],
+            "created_at": _required_field(c, "created_at", ctx_c),
         }
         for field in _signing.SIGNED_FIELDS:
             if embedded.get(field) != expected[field]:

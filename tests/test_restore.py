@@ -396,6 +396,36 @@ class TestRestoreAdversarial:
             # Without the gate, both would be REPLICATED.
             assert g.get_claim(a)["support_level"] == "PRELIMINARY"
 
+    def test_missing_required_field_raises_restore_error(
+        self, tmp_path: Path,
+    ) -> None:
+        """A hand-edited claims.toml that drops a required key (e.g.
+        c['text']) used to leak KeyError past the documented RestoreError
+        contract. The _required_field helper must translate it."""
+        ctx = self._setup_and_wipe(tmp_path)
+        data = self._read_toml(tmp_path)
+        victim = next(iter(data["claims"]))
+        del data["claims"][victim]["text"]
+        self._write_toml(tmp_path, data)
+
+        with pytest.raises(_db.RestoreError) as exc_info:
+            mareforma.restore(tmp_path)
+        assert exc_info.value.kind == "toml_malformed"
+
+    def test_missing_validator_required_field_raises_restore_error(
+        self, tmp_path: Path,
+    ) -> None:
+        """Same for the validators section."""
+        ctx = self._setup_and_wipe(tmp_path)
+        data = self._read_toml(tmp_path)
+        victim = next(iter(data["validators"]))
+        del data["validators"][victim]["identity"]
+        self._write_toml(tmp_path, data)
+
+        with pytest.raises(_db.RestoreError) as exc_info:
+            mareforma.restore(tmp_path)
+        assert exc_info.value.kind == "toml_malformed"
+
     def test_adversarial_text_round_trips(self, tmp_path: Path) -> None:
         """Newlines, quotes, control-like chars in source_name and text
         must round-trip through TOML and reload identically."""
