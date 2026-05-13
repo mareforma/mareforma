@@ -426,6 +426,44 @@ class TestRestoreAdversarial:
             mareforma.restore(tmp_path)
         assert exc_info.value.kind == "toml_malformed"
 
+    def test_validation_envelope_swap_rejected(self, tmp_path: Path) -> None:
+        """Copy a legitimate validation envelope from one ESTABLISHED
+        claim onto a different (REPLICATED) row, set support_level to
+        ESTABLISHED. The envelope verifies cryptographically (the bytes
+        are unchanged), but its embedded claim_id no longer matches the
+        new row. Restore must catch the row-vs-envelope divergence."""
+        ctx = self._setup_and_wipe(tmp_path)
+        data = self._read_toml(tmp_path)
+
+        # Find a legitimate ESTABLISHED claim with a validation envelope.
+        donor_id, donor = next(
+            (cid, c) for cid, c in data["claims"].items()
+            if c.get("support_level") == "ESTABLISHED"
+            and c.get("validation_signature")
+        )
+        legitimate_env_json = donor["validation_signature"]
+        legitimate_validated_at = donor.get("validated_at")
+
+        # Pick a different non-ESTABLISHED row as the victim. The fixture
+        # has REPLICATED claims that lack validation_signature.
+        victim_id, victim = next(
+            (cid, c) for cid, c in data["claims"].items()
+            if c.get("support_level") != "ESTABLISHED"
+            and cid != donor_id
+        )
+        # Forge: copy envelope onto victim, flip to ESTABLISHED. Match
+        # validated_at to the donor's so the timestamp check would
+        # otherwise pass — the claim_id mismatch must be what trips us.
+        victim["support_level"] = "ESTABLISHED"
+        victim["validation_signature"] = legitimate_env_json
+        victim["validated_at"] = legitimate_validated_at
+        self._write_toml(tmp_path, data)
+
+        with pytest.raises(_db.RestoreError) as exc_info:
+            mareforma.restore(tmp_path)
+        assert exc_info.value.kind == "claim_unverified"
+        assert "different claim_id" in str(exc_info.value)
+
     def test_adversarial_text_round_trips(self, tmp_path: Path) -> None:
         """Newlines, quotes, control-like chars in source_name and text
         must round-trip through TOML and reload identically."""

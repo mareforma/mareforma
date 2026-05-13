@@ -2599,6 +2599,52 @@ def _verify_claim_signatures_on_restore(
                 "verification.",
                 kind="claim_unverified",
             )
+        # Cryptographic verify_envelope only proves the validator signed
+        # the embedded payload — it does NOT prove the embedded payload
+        # is about THIS row. A hand-edited claims.toml could copy a
+        # legitimate validation/seed envelope onto a different row;
+        # without the field-equality check the row would inherit a
+        # forged ESTABLISHED stamp anchored by a real validator
+        # signature it never authorized for that claim. Mirror the
+        # SIGNED_FIELDS cross-check the signature_bundle branch does.
+        try:
+            val_payload = _signing.envelope_payload(val_env)
+        except _signing.InvalidEnvelopeError as exc:
+            raise RestoreError(
+                f"Claim {claim_id} validation envelope payload is "
+                "unparseable.",
+                kind="claim_unverified",
+            ) from exc
+        if val_payload.get("claim_id") != claim_id:
+            raise RestoreError(
+                f"Claim {claim_id} validation envelope binds a different "
+                f"claim_id ({val_payload.get('claim_id')!r}); TOML "
+                "tampered or envelope copy-pasted from another row.",
+                kind="claim_unverified",
+            )
+        if val_payload.get("validator_keyid") != val_keyid:
+            raise RestoreError(
+                f"Claim {claim_id} validation envelope binds a different "
+                "validator_keyid than the signing keyid; TOML tampered.",
+                kind="claim_unverified",
+            )
+        # Validation envelopes bind validated_at; seed envelopes bind
+        # seeded_at. Both must match the row's validated_at column —
+        # the seed path writes seeded_at INTO validated_at at INSERT
+        # time, so the comparison is uniform across envelope types.
+        timestamp_field = (
+            "validated_at"
+            if declared_type == _signing.PAYLOAD_TYPE_VALIDATION
+            else "seeded_at"
+        )
+        if val_payload.get(timestamp_field) != c.get("validated_at"):
+            raise RestoreError(
+                f"Claim {claim_id} validation envelope timestamp "
+                f"({timestamp_field}={val_payload.get(timestamp_field)!r}) "
+                f"does not match the row's validated_at "
+                f"({c.get('validated_at')!r}); TOML tampered.",
+                kind="claim_unverified",
+            )
 
 
 def get_validator_reputation(conn: sqlite3.Connection) -> dict[str, int]:
