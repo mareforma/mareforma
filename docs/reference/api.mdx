@@ -338,22 +338,37 @@ Not required when using the context manager — `__exit__` calls `close()` autom
 
 ## Exceptions
 
-All exceptions are importable from `mareforma` directly.
+Each exception lives in the submodule that raises it. Import from the
+submodule shown in the table.
 
-| Exception | Raised by | Meaning |
-|---|---|---|
-| `DatabaseError` | `open()` and any write | SQLite error or unmigratable schema |
-| `ClaimNotFoundError` | `validate()`, `get_claim()` callers | The claim does not exist |
-| `KeyNotFoundError` | `open(require_signed=True)` | No private key at `key_path` |
-| `SigningError` | Rekor submission | Rekor URL unset / unreachable / invalid |
-| `SignedClaimImmutableError` | `update_claim()` | Tried to mutate a signed-payload field on a signed row |
-| `IdempotencyConflictError` | `assert_claim()` | Idempotency-key replay with a conflicting `artifact_hash` |
-| `IllegalStateTransitionError` | DB triggers | Transition violates the state-machine (e.g. PRELIMINARY → ESTABLISHED) |
-| `ChainIntegrityError` | DB write | `prev_hash` append-only chain check failed |
-| `CycleDetectedError` | `assert_claim()`, `update_claim()` | `supports[]` would form a cycle |
-| `BundleVerificationError` | `mareforma verify` | Signed export bundle failed DSSE or per-claim subject digest |
-| `InvalidEnvelopeError` | `mareforma.signing.verify_envelope` | Envelope payload is malformed or wrong `payloadType` |
-| `InvalidIdentityError` | `enroll_validator()` | Identity contains rejected characters |
-| `ValidatorAlreadyEnrolledError` | `enroll_validator()` | Validator row already exists |
+```python
+from mareforma.db import (
+    DatabaseError, ClaimNotFoundError, SignedClaimImmutableError,
+    IdempotencyConflictError, IllegalStateTransitionError,
+    ChainIntegrityError, CycleDetectedError,
+)
+from mareforma.signing import KeyNotFoundError, SigningError, InvalidEnvelopeError
+from mareforma.validators import InvalidIdentityError, ValidatorAlreadyEnrolledError
+from mareforma.export_bundle import BundleVerificationError
+```
+
+| Exception | Module | Raised by | Meaning |
+|---|---|---|---|
+| `DatabaseError` | `mareforma.db` | `open()` and any write | SQLite error or unmigratable schema |
+| `ClaimNotFoundError` | `mareforma.db` | `validate()`, `get_claim()` callers | The claim does not exist |
+| `SignedClaimImmutableError` | `mareforma.db` | `update_claim()` | Tried to mutate a signed-payload field on a signed row |
+| `IdempotencyConflictError` | `mareforma.db` | `assert_claim()` | Idempotency-key replay with a conflicting `artifact_hash` |
+| `IllegalStateTransitionError` | `mareforma.db` | DB triggers | Transition violates the state-machine (e.g. PRELIMINARY → ESTABLISHED) |
+| `ChainIntegrityError` | `mareforma.db` | DB write | `prev_hash` append-only chain check failed |
+| `CycleDetectedError` | `mareforma.db` | `assert_claim()`, `update_claim()` | `supports[]` would form a cycle |
+| `KeyNotFoundError` | `mareforma.signing` | `open(require_signed=True)` | No private key at `key_path` |
+| `SigningError` | `mareforma.signing` | Rekor submission | Rekor URL unset / unreachable / invalid |
+| `InvalidEnvelopeError` | `mareforma.signing` | `verify_envelope` | Envelope payload is malformed or wrong `payloadType` |
+| `InvalidIdentityError` | `mareforma.validators` | `enroll_validator()` | Identity contains rejected characters |
+| `ValidatorAlreadyEnrolledError` | `mareforma.validators` | `enroll_validator()` | Validator row already exists |
+| `BundleVerificationError` | `mareforma.export_bundle` | `mareforma verify` | Signed export bundle failed DSSE or per-claim subject digest |
+
+Only the top-level helpers are re-exported from `mareforma` directly:
+`open`, `schema`, `safe_for_llm`, `sanitize_for_llm`, `wrap_untrusted`.
 
 Schema-mismatch message (raised when `open_db()` cannot migrate the file in place): `"graph.db schema vN is not compatible with mareforma v0.3.0. Delete .mareforma/graph.db to start fresh — your claims are backed up in claims.toml."`

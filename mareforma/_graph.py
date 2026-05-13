@@ -138,6 +138,7 @@ class EpistemicGraph:
         idempotency_key: str | None = None,
         generated_by: str | None = None,
         source_name: str | None = None,
+        status: str = "open",
         artifact_hash: str | None = None,
         seed: bool = False,
     ) -> str:
@@ -161,6 +162,12 @@ class EpistemicGraph:
         source_name:
             Data source this claim derives from. Required for ANALYTICAL
             classification to be meaningful.
+        status:
+            Editorial status at insert time: 'open' (default) | 'contested'
+            | 'retracted'. Use 'contested' to flag a dispute at assertion
+            time instead of asserting 'open' then updating. Status is not
+            part of the signed payload and remains mutable via
+            ``update_claim`` even on signed rows.
         artifact_hash:
             SHA256 hex digest of the output artifact (figure, CSV, model)
             backing this claim. When supplied it is bound into the signed
@@ -205,6 +212,7 @@ class EpistemicGraph:
             idempotency_key=idempotency_key,
             generated_by=generated_by or "agent",
             source_name=source_name,
+            status=status,
             unresolved=unresolved,
             artifact_hash=artifact_hash,
             seed=seed,
@@ -712,10 +720,13 @@ class EpistemicGraph:
             -------
             str
                 JSON array of claim dicts with keys: text, support_level,
-                classification, claim_id. The ``text`` field is sanitized
-                and wrapped in ``<untrusted_data>...</untrusted_data>`` —
-                this tool is consumed by an LLM, so it routes through the
-                same prompt-safety layer as :meth:`query_for_llm`.
+                classification, status, claim_id. The ``text`` field is
+                sanitized and wrapped in
+                ``<untrusted_data>...</untrusted_data>`` — this tool is
+                consumed by an LLM, so it routes through the same
+                prompt-safety layer as :meth:`query_for_llm`. ``status``
+                is surfaced so the LLM can spot editorial taint
+                (``contested`` / ``retracted``) even on REPLICATED rows.
             """
             results = self.query_for_llm(topic, min_support=min_support)
             return json.dumps([
@@ -723,6 +734,7 @@ class EpistemicGraph:
                     "text": r["text"],
                     "support_level": r["support_level"],
                     "classification": r["classification"],
+                    "status": r["status"],
                     "claim_id": r["claim_id"],
                 }
                 for r in results

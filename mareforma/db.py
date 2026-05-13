@@ -779,6 +779,16 @@ def add_claim(
     # ESTABLISHED-upstream rule blocks the first REPLICATED forever).
     seed_envelope_json: str | None = None
     if seed:
+        # Seed envelopes sign claim_id + validator_keyid + seeded_at —
+        # NOT status. A non-open seed could be flipped back to 'open'
+        # via update_claim later (status is mutable on signed rows) and
+        # the resurrection would carry no envelope evidence. Refuse the
+        # mismatched-status seed up-front to preserve seed-as-anchor.
+        if status != "open":
+            raise ValueError(
+                f"seed=True refused with status='{status}'. Seed claims "
+                "bootstrap the trust chain and must be born open."
+            )
         if signer is None:
             raise ValueError(
                 "seed=True requires a signing key (open the graph with "
@@ -1001,6 +1011,11 @@ def _maybe_update_replicated_unlocked(
         return
 
     placeholders = ",".join("?" * len(supports))
+    # status='open' filter: a contested or retracted peer is editorially
+    # tainted and must not participate in REPLICATED convergence. Without
+    # this, an adversary could plant a born-retracted claim and ride an
+    # honest peer's INSERT into REPLICATED (and from there, via validate(),
+    # into ESTABLISHED — usable as a fake upstream for further chains).
     rows = conn.execute(
         f"""
         SELECT DISTINCT c.claim_id, c.generated_by
@@ -1009,6 +1024,7 @@ def _maybe_update_replicated_unlocked(
           AND c.claim_id != ?
           AND c.generated_by != ?
           AND c.support_level != 'ESTABLISHED'
+          AND c.status = 'open'
           AND c.unresolved = 0
           AND c.transparency_logged = 1
           AND (
@@ -1100,10 +1116,13 @@ def validate_claim(
     ClaimNotFoundError
         If no claim with claim_id exists.
     ValueError
-        If the claim's support_level is not 'REPLICATED'.
+        If the claim's support_level is not 'REPLICATED', or its
+        status is not 'open' (contested/retracted claims are editorially
+        tainted and must not be promoted; revisit the editorial flag via
+        update_claim before validating).
     """
     row = conn.execute(
-        "SELECT support_level FROM claims WHERE claim_id = ?",
+        "SELECT support_level, status FROM claims WHERE claim_id = ?",
         (claim_id,),
     ).fetchone()
     if row is None:
@@ -1112,6 +1131,13 @@ def validate_claim(
         raise ValueError(
             f"Claim '{claim_id}' has support_level='{row['support_level']}'. "
             "Only REPLICATED claims can be promoted to ESTABLISHED."
+        )
+    if row["status"] != "open":
+        raise ValueError(
+            f"Claim '{claim_id}' has status='{row['status']}'. "
+            "Only claims with status='open' can be promoted to ESTABLISHED. "
+            "Reset the status via update_claim if the editorial flag no "
+            "longer applies."
         )
     now = validated_at if validated_at is not None else _now()
     try:
