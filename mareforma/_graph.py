@@ -230,6 +230,7 @@ class EpistemicGraph:
         min_support: str | None = None,
         classification: str | None = None,
         limit: int = 20,
+        include_unverified: bool = False,
     ) -> list[dict]:
         """Query claims from the epistemic graph.
 
@@ -243,16 +244,26 @@ class EpistemicGraph:
             Filter by classification: 'INFERRED' | 'ANALYTICAL' | 'DERIVED'.
         limit:
             Maximum number of results. Default 20.
+        include_unverified:
+            When ``False`` (default), PRELIMINARY claims whose signing key
+            is not enrolled in the project's ``validators`` table are
+            excluded. Pass ``True`` to surface unverified preliminary
+            claims (e.g. inspection of pending work). REPLICATED and
+            ESTABLISHED rows already require an enrolled chain and are
+            never filtered by this flag.
 
         Returns
         -------
         list[dict]
             Claim dicts ordered by support_level (desc) then created_at (desc).
-            Each dict contains: ``claim_id``, ``text``, ``classification``,
-            ``support_level``, ``idempotency_key``, ``validated_by``,
-            ``validated_at``, ``status``, ``source_name``, ``generated_by``,
-            ``supports_json``, ``contradicts_json``, ``comparison_summary``,
-            ``created_at``, ``updated_at``.
+            Each dict contains the standard claim columns plus two
+            reputation projections computed at query time:
+
+              - ``validator_reputation`` (int): for ESTABLISHED rows, the
+                number of ESTABLISHED claims signed by the same
+                validator. ``0`` for non-ESTABLISHED rows.
+              - ``generator_enrolled`` (bool): True iff the claim's
+                signing keyid is in the validators table.
 
         Raises
         ------
@@ -266,7 +277,71 @@ class EpistemicGraph:
             min_support=min_support,
             classification=classification,
             limit=limit,
+            include_unverified=include_unverified,
         )
+
+    def search(
+        self,
+        query: str,
+        *,
+        min_support: str | None = None,
+        classification: str | None = None,
+        limit: int = 20,
+        include_unverified: bool = False,
+    ) -> list[dict]:
+        """FTS5 full-text search over claim text.
+
+        Returns claim dicts ordered by FTS5 rank (best match first).
+        Parameters mirror :meth:`query` — same filters, same per-row
+        projection (``validator_reputation``, ``generator_enrolled``),
+        same ``include_unverified`` semantics. The difference is the
+        underlying engine: :meth:`query` uses LIKE substring matching;
+        :meth:`search` uses FTS5 with the unicode61 tokenizer (diacritics
+        folded) and supports the FTS5 query grammar.
+
+        Parameters
+        ----------
+        query:
+            FTS5 MATCH expression. Examples:
+
+            - ``"gene"`` — single token
+            - ``"\\"epistemic graph\\""`` — phrase (note: escape quotes
+              in Python source)
+            - ``"gene*"`` — prefix
+            - ``"gene OR pathway"`` — boolean
+            - ``"gene NEAR pathway"`` — proximity
+
+            Pure-wildcard queries (``"*"``) are refused — they would
+            scan the entire table.
+        min_support, classification, limit, include_unverified:
+            See :meth:`query`.
+
+        Raises
+        ------
+        ValueError
+            If ``query`` is empty or pure wildcards, or fails FTS5
+            parsing. Also for invalid ``min_support`` / ``classification``.
+        """
+        self._check_open()
+        return _db.search_claims(
+            self._conn,
+            query,
+            min_support=min_support,
+            classification=classification,
+            limit=limit,
+            include_unverified=include_unverified,
+        )
+
+    def get_validator_reputation(self) -> dict[str, int]:
+        """Return ``{validator_keyid: count}`` for every enrolled validator.
+
+        Count is the number of ESTABLISHED claims whose validation
+        envelope was signed by that keyid. Validators with zero
+        ESTABLISHED validations appear with ``count=0``. Derived state
+        — recomputed on every call from the claims table; never cached.
+        """
+        self._check_open()
+        return _db.get_validator_reputation(self._conn)
 
     def get_claim(self, claim_id: str) -> dict | None:
         """Return a single claim dict by ID, or None if not found."""
@@ -391,6 +466,7 @@ class EpistemicGraph:
         pubkey_pem: bytes,
         *,
         identity: str,
+        validator_type: str = "human",
     ) -> dict:
         """Enroll a new validator on this project, signed by the loaded key.
 
@@ -412,6 +488,12 @@ class EpistemicGraph:
             Display label (email, lab name). Bound into the signed
             enrollment envelope. Capped at 256 printable characters;
             control characters are rejected.
+        validator_type:
+            ``'human'`` (default) or ``'llm'``. Self-declared honesty
+            signal bound into the signed enrollment envelope. LLM-typed
+            validators may sign validation envelopes but cannot promote
+            a claim past REPLICATED — :meth:`validate` refuses them at
+            the substrate layer.
 
         Raises
         ------
@@ -424,6 +506,8 @@ class EpistemicGraph:
         InvalidIdentityError
             If ``identity`` is empty, too long, or contains control
             characters.
+        InvalidValidatorTypeError
+            If ``validator_type`` is not ``'human'`` or ``'llm'``.
         """
         self._check_open()
         from mareforma import validators as _validators
@@ -433,7 +517,8 @@ class EpistemicGraph:
                 "Run `mareforma bootstrap` once and reopen the graph."
             )
         return _validators.enroll_validator(
-            self._conn, self._signer, pubkey_pem, identity=identity,
+            self._conn, self._signer, pubkey_pem,
+            identity=identity, validator_type=validator_type,
         )
 
     def list_validators(self) -> list[dict]:

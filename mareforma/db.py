@@ -26,6 +26,7 @@ Support levels — graph-derived trust signal
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
@@ -93,6 +94,11 @@ CREATE TABLE IF NOT EXISTS claims (
     transparency_logged INTEGER NOT NULL DEFAULT 1
                         CHECK (transparency_logged IN (0, 1)),
     validation_signature TEXT,
+    -- Denormalized from validation_signature's payload for indexable
+    -- reputation queries. NULL for non-ESTABLISHED rows. The envelope
+    -- remains authoritative; if this column ever drifts from the
+    -- envelope it is the envelope that wins.
+    validator_keyid TEXT,
     artifact_hash   TEXT,
     prev_hash       TEXT,
     created_at      TEXT NOT NULL,
@@ -119,6 +125,10 @@ CREATE INDEX IF NOT EXISTS idx_claims_transparency_logged
     ON claims(transparency_logged);
 CREATE INDEX IF NOT EXISTS idx_claims_artifact_hash
     ON claims(artifact_hash) WHERE artifact_hash IS NOT NULL;
+-- Reputation reads aggregate ESTABLISHED claims per validator. Partial
+-- on NOT NULL keeps index storage proportional to ESTABLISHED-only rows.
+CREATE INDEX IF NOT EXISTS idx_claims_validator_keyid
+    ON claims(validator_keyid) WHERE validator_keyid IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_claims_idempotency_key
     ON claims(idempotency_key) WHERE idempotency_key IS NOT NULL;
 -- UNIQUE on prev_hash catches branched chains (two writers racing past
@@ -189,10 +199,42 @@ CREATE TABLE IF NOT EXISTS doi_cache (
     last_checked_at  TEXT NOT NULL
 );
 
+-- Full-text search over claim text. Independent FTS5 virtual table
+-- (not content=claims) so the storage cost is the only price of the
+-- search feature and the sync triggers below stay readable.
+-- ``claim_id`` is UNINDEXED — stored for join-back but not tokenized.
+-- The unicode61 tokenizer is locale-agnostic; remove_diacritics=2 folds
+-- accented characters so "gene" matches "géné".
+CREATE VIRTUAL TABLE IF NOT EXISTS claims_fts USING fts5(
+    claim_id UNINDEXED,
+    text,
+    tokenize='unicode61 remove_diacritics 2'
+);
+
+-- Keep claims_fts in lockstep with claims. The trigger fires AFTER the
+-- INSERT/UPDATE/DELETE so any IntegrityError on the wrapping write
+-- rolls back both the claims row and the FTS sync atomically.
+CREATE TRIGGER IF NOT EXISTS claims_fts_ai AFTER INSERT ON claims BEGIN
+    INSERT INTO claims_fts(claim_id, text) VALUES (NEW.claim_id, NEW.text);
+END;
+
+CREATE TRIGGER IF NOT EXISTS claims_fts_ad AFTER DELETE ON claims BEGIN
+    DELETE FROM claims_fts WHERE claim_id = OLD.claim_id;
+END;
+
+-- text is in SIGNED_FIELDS, so update_claim refuses text mutation on a
+-- signed claim. This trigger handles the unsigned-edit-text path AND
+-- the legacy path before claim signing was the default.
+CREATE TRIGGER IF NOT EXISTS claims_fts_au AFTER UPDATE OF text ON claims BEGIN
+    UPDATE claims_fts SET text = NEW.text WHERE claim_id = OLD.claim_id;
+END;
+
 CREATE TABLE IF NOT EXISTS validators (
     keyid                TEXT PRIMARY KEY,
     pubkey_pem           TEXT NOT NULL,
     identity             TEXT NOT NULL,
+    validator_type       TEXT NOT NULL DEFAULT 'human'
+                             CHECK (validator_type IN ('human', 'llm')),
     enrolled_at          TEXT NOT NULL,
     enrolled_by_keyid    TEXT NOT NULL,
     enrollment_envelope  TEXT NOT NULL
@@ -210,6 +252,7 @@ _CLAIM_COLUMNS = (
     "comparison_summary", "branch_id", "unresolved",
     "signature_bundle", "transparency_logged",
     "validation_signature",
+    "validator_keyid",
     "artifact_hash",
     "prev_hash",
     "created_at", "updated_at",
@@ -276,6 +319,50 @@ class ChainIntegrityError(MareformaError):
     re-uses an existing chain link — the UNIQUE violation surfaces
     here. Treat it as a corruption signal, not a retry.
     """
+
+
+class LLMValidatorPromotionError(MareformaError):
+    """Raised when a validator with ``validator_type='llm'`` attempts
+    a promotion past REPLICATED.
+
+    The trust ladder treats human validators as the only path to
+    ESTABLISHED. An LLM-typed validator may enroll and may sign
+    validation envelopes, but those envelopes cannot promote a claim
+    past REPLICATED. To promote, the claim must be co-signed (or
+    re-signed) by an enrolled human validator.
+    """
+
+
+class SelfValidationError(MareformaError):
+    """Raised when a validator attempts to promote a claim it signed itself.
+
+    Self-validation is the trivial-loop attack: an agent asserts a claim
+    under its own key, then promotes that same claim to ESTABLISHED under
+    the same key. The trust ladder rests on the principle that promotion
+    is an *external* witnessing event. ``validate_claim`` compares the
+    signing keyid of the validation envelope with the keyid recorded in
+    the claim's ``signature_bundle`` and refuses when they match.
+    """
+
+
+class RestoreError(MareformaError):
+    """Raised by :func:`restore` when the rebuild refuses or fails.
+
+    The ``kind`` attribute lets callers pattern-match on the failure
+    mode without parsing the message string:
+
+      - ``'graph_not_empty'``        — existing graph.db has claims
+      - ``'toml_not_found'``         — claims.toml does not exist
+      - ``'toml_malformed'``         — TOML parse error
+      - ``'enrollment_unverified'``  — enrollment envelope fails verify
+      - ``'claim_unverified'``       — claim signature fails verify
+      - ``'mode_inconsistent'``      — signed-mode graph with unsigned claim
+      - ``'orphan_signer'``          — claim signed by an unenrolled keyid
+    """
+
+    def __init__(self, message: str, *, kind: str) -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 class CycleDetectedError(MareformaError):
@@ -773,6 +860,19 @@ def add_claim(
                 "enrolled validator on this project. Only enrolled "
                 "validators can bootstrap the trust chain."
             )
+        # Seed produces a born-ESTABLISHED row. Without the same
+        # validator_type gate validate_claim applies, an LLM-typed
+        # validator could route around the ESTABLISHED ceiling via
+        # the seed path. Apply the gate here so all paths to
+        # ESTABLISHED enforce the same human-witnessed rule.
+        signer_row = _validators.get_validator(conn, signer_keyid)
+        if signer_row is not None and signer_row["validator_type"] == "llm":
+            raise LLMValidatorPromotionError(
+                f"seed=True refused: validator {signer_keyid[:12]}… is "
+                "enrolled with validator_type='llm'. Seed claims bootstrap "
+                "the ESTABLISHED tier; only human-typed validators can "
+                "produce them."
+            )
         seed_envelope = _signing.sign_seed_claim(
             {
                 "claim_id": claim_id,
@@ -844,6 +944,12 @@ def add_claim(
     initial_level = "ESTABLISHED" if seed else "PRELIMINARY"
     initial_validation_signature = seed_envelope_json
     initial_validated_at = now if seed else None
+    # Seed claims carry their signer's keyid in validator_keyid so the
+    # reputation aggregation counts the bootstrap event. Non-seed rows
+    # acquire validator_keyid later at validate_claim time.
+    initial_validator_keyid = (
+        signer_keyid if seed and signer is not None else None
+    )
     try:
         if _own_transaction:
             conn.execute("BEGIN IMMEDIATE")
@@ -855,17 +961,18 @@ def add_claim(
                  status, source_name, generated_by,
                  supports_json, contradicts_json, unresolved,
                  signature_bundle, transparency_logged,
-                 validation_signature, validated_at,
+                 validation_signature, validator_keyid, validated_at,
                  artifact_hash, prev_hash,
                  created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 claim_id, text, classification, initial_level, idempotency_key,
                 status, source_name, generated_by,
                 supports_json, contradicts_json, 1 if unresolved else 0,
                 signature_bundle, transparency_logged,
-                initial_validation_signature, initial_validated_at,
+                initial_validation_signature, initial_validator_keyid,
+                initial_validated_at,
                 artifact_hash, prev_hash,
                 now, now,
             ),
@@ -1071,6 +1178,76 @@ def _maybe_update_replicated(
         pass
 
 
+def _extract_validation_signer_keyid(validation_signature: str) -> str | None:
+    """Return the signing keyid from a validation envelope, or None if the
+    envelope is malformed.
+
+    The envelope's ``signatures[0].keyid`` is the authoritative signer.
+    Malformed envelopes return None — the substrate gates short-circuit
+    rather than failing closed on top of the (already-failing) signing
+    layer; the underlying UPDATE will then proceed via the legacy path
+    and the row's ``validation_signature`` column will carry the broken
+    envelope for later forensic inspection.
+    """
+    try:
+        envelope = json.loads(validation_signature)
+        return envelope["signatures"][0]["keyid"]
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+        return None
+
+
+def _refuse_llm_validator(conn: sqlite3.Connection, validator_keyid: str) -> None:
+    """Raise :class:`LLMValidatorPromotionError` if *validator_keyid* is an
+    enrolled validator whose ``validator_type`` is ``'llm'``.
+
+    A keyid that is not enrolled (no row in validators) does not trip
+    this gate — that case is the enrollment check in
+    ``_graph.validate`` and need not be re-litigated here.
+    """
+    row = conn.execute(
+        "SELECT validator_type FROM validators WHERE keyid = ?",
+        (validator_keyid,),
+    ).fetchone()
+    if row is None:
+        return
+    if row["validator_type"] == "llm":
+        raise LLMValidatorPromotionError(
+            f"Validator {validator_keyid[:12]}… is enrolled with "
+            "validator_type='llm'. LLM validators may sign validation "
+            "envelopes but cannot promote a claim past REPLICATED. "
+            "Have a human-typed validator co-sign or re-sign to promote."
+        )
+
+
+def _refuse_self_validation(
+    claim_id: str,
+    claim_signature_bundle: str | None,
+    validator_keyid: str,
+) -> None:
+    """Raise :class:`SelfValidationError` if the claim's signing keyid
+    equals the validator's keyid.
+
+    Unsigned claims (``signature_bundle IS NULL``) carry no signer
+    identity to compare against and pass this gate. A malformed bundle
+    is treated as absent (the substrate cannot decide self-equality
+    against a corrupted envelope).
+    """
+    if claim_signature_bundle is None:
+        return
+    try:
+        bundle = json.loads(claim_signature_bundle)
+        claim_signer_keyid = bundle["signatures"][0]["keyid"]
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+        return
+    if claim_signer_keyid == validator_keyid:
+        raise SelfValidationError(
+            f"Validator {validator_keyid[:12]}… signed claim "
+            f"'{claim_id}' itself; self-promotion is refused. "
+            "Promotion requires an external witnessing validator. "
+            "Have a different enrolled key call graph.validate(...)."
+        )
+
+
 def validate_claim(
     conn: sqlite3.Connection,
     root: Path,
@@ -1099,6 +1276,20 @@ def validate_claim(
         ``validated_at`` byte-for-byte. If ``None``, a fresh timestamp
         is generated — appropriate only for the legacy unsigned path.
 
+    Substrate gates
+    ---------------
+    When ``validation_signature`` is supplied, two substrate-level checks
+    fire before the row is updated. Both decode the envelope's payload
+    and consult the ``validators`` table directly — wrapping code in
+    ``_graph.validate`` cannot bypass them:
+
+    1. The signing validator's ``validator_type`` must be ``'human'``.
+       An ``'llm'``-typed validator can sign a validation envelope but
+       cannot promote past REPLICATED (raises :class:`LLMValidatorPromotionError`).
+    2. The validator's keyid must NOT match the claim's
+       ``signature_bundle`` signing keyid. Self-validation is the
+       trivial-loop attack (raises :class:`SelfValidationError`).
+
     Raises
     ------
     ClaimNotFoundError
@@ -1108,9 +1299,15 @@ def validate_claim(
         status is not 'open' (contested/retracted claims are editorially
         tainted and must not be promoted; revisit the editorial flag via
         update_claim before validating).
+    LLMValidatorPromotionError
+        If the validation envelope is signed by an LLM-typed validator.
+    SelfValidationError
+        If the validation envelope's signing keyid equals the claim's
+        ``signature_bundle`` signing keyid.
     """
     row = conn.execute(
-        "SELECT support_level, status FROM claims WHERE claim_id = ?",
+        "SELECT support_level, status, signature_bundle "
+        "FROM claims WHERE claim_id = ?",
         (claim_id,),
     ).fetchone()
     if row is None:
@@ -1127,8 +1324,28 @@ def validate_claim(
             "Reset the status via update_claim if the editorial flag no "
             "longer applies."
         )
+
+    # Substrate gates: parse the validation envelope, look up the
+    # signer's validator_type, refuse LLM signers and self-validation.
+    # Skipped on the legacy unsigned path (validation_signature=None) —
+    # there is no envelope to inspect, and the legacy path is being
+    # phased out by mareforma.open(require_signed=True) downstream.
+    validator_keyid: str | None = None
+    if validation_signature is not None:
+        validator_keyid = _extract_validation_signer_keyid(validation_signature)
+        if validator_keyid is not None:
+            _refuse_llm_validator(conn, validator_keyid)
+            _refuse_self_validation(
+                claim_id, row["signature_bundle"], validator_keyid,
+            )
+
     now = validated_at if validated_at is not None else _now()
     try:
+        # COALESCE on validator_keyid: a legacy unsigned re-validate
+        # (validation_signature=None) must NOT wipe a previously-set
+        # validator_keyid. The state-check trigger permits
+        # ESTABLISHED → ESTABLISHED, so a second call would otherwise
+        # NULL the column and tank the validator's reputation count.
         conn.execute(
             """
             UPDATE claims
@@ -1136,10 +1353,12 @@ def validate_claim(
                 validated_by = ?,
                 validated_at = ?,
                 validation_signature = ?,
+                validator_keyid = COALESCE(?, validator_keyid),
                 updated_at   = ?
             WHERE claim_id = ?
             """,
-            (validated_by, now, validation_signature, now, claim_id),
+            (validated_by, now, validation_signature, validator_keyid,
+             now, claim_id),
         )
         conn.commit()
     except sqlite3.IntegrityError as exc:
@@ -1570,6 +1789,7 @@ def query_claims(
     text: str | None = None,
     min_support: str | None = None,
     classification: str | None = None,
+    include_unverified: bool = False,
 ) -> list[dict]:
     """Return claims ordered by support_level (desc) then recency (desc).
 
@@ -1583,6 +1803,23 @@ def query_claims(
         Minimum support level: 'PRELIMINARY' | 'REPLICATED' | 'ESTABLISHED'.
     classification:
         Filter by classification: 'INFERRED' | 'ANALYTICAL' | 'DERIVED'.
+    include_unverified:
+        When False (default), PRELIMINARY claims whose ``signature_bundle``
+        is unsigned or signed by a keyid not present in the ``validators``
+        table are excluded — the spec.md #96 default. REPLICATED and
+        ESTABLISHED rows already require an enrolled validator chain and
+        are never filtered by this flag. Pass ``True`` to surface
+        unverified preliminary claims (e.g. inspection of pending work).
+
+    Each returned dict carries the standard claim columns plus two
+    reputation projections computed at query time:
+
+      - ``validator_reputation`` (int): for ESTABLISHED rows, the number
+        of ESTABLISHED claims signed by the same validator (≥ 1). For
+        other rows, ``0``.
+      - ``generator_enrolled`` (bool): True iff the claim's
+        ``signature_bundle`` is signed by an enrolled validator. False
+        for unsigned claims and for signatures by unenrolled keys.
     """
     conditions: list[str] = []
     params: list = []
@@ -1612,19 +1849,667 @@ def query_claims(
         params.append(classification)
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-    params.append(limit)
 
+    # When include_unverified is False, the substrate-filter runs in
+    # Python after the SQL fetch. A flat `LIMIT N` could return zero
+    # results when the top-N rows are all unverified PRELIMINARY,
+    # silently under-returning. Pull rows in batches and keep going
+    # until either we have `limit` survivors or the table is exhausted.
+    # When include_unverified is True there is no filter, so one fetch
+    # at the exact limit is enough.
+    reputation = _compute_validator_reputation(conn)
+    enrolled_keyids = _enrolled_validator_keyids(conn)
+
+    base_sql = (
+        f"SELECT {_CLAIM_SELECT} FROM claims {where} "
+        f"ORDER BY CASE support_level "
+        f"WHEN 'ESTABLISHED' THEN 3 WHEN 'REPLICATED' THEN 2 ELSE 1 END DESC, "
+        f"created_at DESC LIMIT ? OFFSET ?"
+    )
+
+    results: list[dict] = []
+    offset = 0
+    # Fetch in batches sized to the caller's limit. For verified-heavy
+    # projects the first batch is usually enough; for projects with
+    # heavy unverified PRELIMINARY traffic the loop keeps pulling
+    # until it has `limit` survivors or hits the end.
+    batch_size = max(limit, 1)
     try:
-        rows = conn.execute(
-            f"SELECT {_CLAIM_SELECT} FROM claims {where} "
-            f"ORDER BY CASE support_level "
-            f"WHEN 'ESTABLISHED' THEN 3 WHEN 'REPLICATED' THEN 2 ELSE 1 END DESC, "
-            f"created_at DESC LIMIT ?",
-            params,
-        ).fetchall()
+        while len(results) < limit:
+            rows = conn.execute(
+                base_sql, params + [batch_size, offset],
+            ).fetchall()
+            if not rows:
+                break
+            offset += len(rows)
+            for row in rows:
+                d = dict(row)
+                gen_keyid = _extract_signature_bundle_keyid(
+                    d.get("signature_bundle"),
+                )
+                d["generator_enrolled"] = (
+                    gen_keyid is not None and gen_keyid in enrolled_keyids
+                )
+                validator_kid = d.get("validator_keyid")
+                d["validator_reputation"] = (
+                    reputation.get(validator_kid, 0)
+                    if validator_kid else 0
+                )
+                if not include_unverified:
+                    if (d["support_level"] == "PRELIMINARY"
+                            and not d["generator_enrolled"]):
+                        continue
+                results.append(d)
+                if len(results) >= limit:
+                    break
+            if include_unverified:
+                break  # one batch suffices; no filter dropping rows
     except sqlite3.OperationalError as exc:
         raise DatabaseError(f"Failed to query claims: {exc}") from exc
-    return [dict(row) for row in rows]
+    return results
+
+
+def _extract_signature_bundle_keyid(bundle_json: str | None) -> str | None:
+    """Return the signing keyid embedded in a claim's signature_bundle,
+    or None if the bundle is absent or malformed."""
+    if bundle_json is None:
+        return None
+    try:
+        bundle = json.loads(bundle_json)
+        return bundle["signatures"][0]["keyid"]
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+        return None
+
+
+def _enrolled_validator_keyids(conn: sqlite3.Connection) -> set[str]:
+    """Return the set of keyids currently in the validators table.
+
+    Membership only — does NOT walk the enrollment chain. The chain
+    walk in :func:`mareforma.validators.is_enrolled` is the
+    authoritative check for individual validations; this set is a
+    cheap pre-filter used by :func:`query_claims` to decide whether a
+    PRELIMINARY claim's generator is "enrolled enough" to surface
+    without ``include_unverified=True``.
+    """
+    rows = conn.execute("SELECT keyid FROM validators").fetchall()
+    return {r["keyid"] for r in rows}
+
+
+def _compute_validator_reputation(
+    conn: sqlite3.Connection,
+) -> dict[str, int]:
+    """Return ``{validator_keyid: count}`` for ESTABLISHED claims.
+
+    Count is the number of ESTABLISHED rows whose ``validator_keyid``
+    equals the key. Validators with zero ESTABLISHED rows are omitted
+    from the dict (caller defaults to 0). Derived state — recomputed
+    on every call, never cached.
+    """
+    rows = conn.execute(
+        "SELECT validator_keyid, COUNT(*) AS n FROM claims "
+        "WHERE support_level = 'ESTABLISHED' "
+        "  AND validator_keyid IS NOT NULL "
+        "GROUP BY validator_keyid"
+    ).fetchall()
+    return {r["validator_keyid"]: int(r["n"]) for r in rows}
+
+
+def _validate_fts5_query(query: str) -> str:
+    """Sanity-check an FTS5 MATCH expression.
+
+    Refuses empty strings and queries consisting entirely of wildcards
+    (e.g. ``"*"``, ``"* **"``). FTS5 prefix syntax is ``term*`` and the
+    leading-``*`` form is not valid syntax anyway — but a user who
+    expects shell-glob semantics deserves a clear error instead of
+    SQLite's terse ``fts5: syntax error near "*"``.
+    """
+    stripped = query.strip()
+    if not stripped:
+        raise ValueError(
+            "Empty search query. Pass at least one term, optionally "
+            "with FTS5 prefix syntax: graph.search('gene*')."
+        )
+    tokens = stripped.split()
+    if all(t.strip("*") == "" for t in tokens):
+        raise ValueError(
+            f"Search query {query!r} is just wildcards. FTS5 prefix "
+            "search requires at least one term (e.g. 'gene*'). A pure "
+            "wildcard would scan the whole table and is refused."
+        )
+    return stripped
+
+
+def search_claims(
+    conn: sqlite3.Connection,
+    query: str,
+    *,
+    limit: int = 20,
+    min_support: str | None = None,
+    classification: str | None = None,
+    include_unverified: bool = False,
+) -> list[dict]:
+    """FTS5-ranked search over claim text.
+
+    Returns claim dicts ordered by FTS5 rank (best match first). Each
+    dict carries the same projection as :func:`query_claims`:
+    ``validator_reputation`` and ``generator_enrolled`` are attached
+    per row, and the ``include_unverified`` filter applies identically.
+
+    The ``query`` string is passed through to SQLite's FTS5 MATCH
+    operator. FTS5 syntax — phrase matching with double quotes, prefix
+    search with trailing ``*``, ``AND``/``OR``/``NOT`` operators, and
+    parentheses — works as documented in SQLite. Pure-wildcard queries
+    are refused (see :func:`_validate_fts5_query`).
+    """
+    fts_query = _validate_fts5_query(query)
+
+    if min_support is not None and min_support not in VALID_SUPPORT_LEVELS:
+        raise ValueError(
+            f"Unknown min_support '{min_support}'. "
+            f"Use one of: {', '.join(VALID_SUPPORT_LEVELS)}"
+        )
+    if classification is not None and classification not in VALID_CLASSIFICATIONS:
+        raise ValueError(
+            f"Unknown classification '{classification}'. "
+            f"Use one of: {', '.join(VALID_CLASSIFICATIONS)}"
+        )
+
+    conditions: list[str] = ["claims_fts MATCH ?"]
+    params: list = [fts_query]
+
+    if min_support is not None:
+        tiers = _SUPPORT_LEVEL_TIERS[min_support]
+        placeholders = ",".join("?" * len(tiers))
+        conditions.append(f"c.support_level IN ({placeholders})")
+        params.extend(tiers)
+    if classification is not None:
+        conditions.append("c.classification = ?")
+        params.append(classification)
+
+    where = " AND ".join(conditions)
+    select_cols = ", ".join(f"c.{col}" for col in _CLAIM_COLUMNS)
+    base_sql = (
+        f"SELECT {select_cols} FROM claims_fts f "
+        f"JOIN claims c ON c.claim_id = f.claim_id "
+        f"WHERE {where} "
+        f"ORDER BY rank LIMIT ? OFFSET ?"
+    )
+
+    reputation = _compute_validator_reputation(conn)
+    enrolled_keyids = _enrolled_validator_keyids(conn)
+
+    # Same batched-pull pattern as query_claims — keep pulling until
+    # we have `limit` survivors of the include_unverified filter, or
+    # the FTS5 match-set is exhausted. include_unverified=True needs
+    # no filter, so one batch covers it.
+    results: list[dict] = []
+    offset = 0
+    batch_size = max(limit, 1)
+    try:
+        while len(results) < limit:
+            rows = conn.execute(
+                base_sql, params + [batch_size, offset],
+            ).fetchall()
+            if not rows:
+                break
+            offset += len(rows)
+            for row in rows:
+                d = dict(row)
+                gen_keyid = _extract_signature_bundle_keyid(
+                    d.get("signature_bundle"),
+                )
+                d["generator_enrolled"] = (
+                    gen_keyid is not None and gen_keyid in enrolled_keyids
+                )
+                validator_kid = d.get("validator_keyid")
+                d["validator_reputation"] = (
+                    reputation.get(validator_kid, 0)
+                    if validator_kid else 0
+                )
+                if not include_unverified:
+                    if (d["support_level"] == "PRELIMINARY"
+                            and not d["generator_enrolled"]):
+                        continue
+                results.append(d)
+                if len(results) >= limit:
+                    break
+            if include_unverified:
+                break
+    except sqlite3.OperationalError as exc:
+        # FTS5 raises OperationalError on malformed MATCH syntax.
+        # Wrap so callers don't have to import sqlite3 to pattern-match.
+        msg = str(exc)
+        if "fts5" in msg or "syntax error" in msg:
+            raise ValueError(
+                f"Search query {query!r} is not valid FTS5 syntax: {msg}"
+            ) from exc
+        raise DatabaseError(f"Failed to search claims: {exc}") from exc
+    return results
+
+
+def restore(
+    project_root: Path | str,
+    *,
+    claims_toml: Path | str | None = None,
+) -> dict:
+    """Rebuild a fresh graph.db from claims.toml.
+
+    Reverse of :func:`_backup_claims_toml`. Intended for catastrophic-
+    loss recovery: ``graph.db`` is missing or corrupt, the operator
+    has a recent ``claims.toml``, the project must be reconstructable.
+
+    The rebuild is **fresh-only**. ``restore`` refuses to run if
+    ``.mareforma/graph.db`` already contains claims — merge semantics
+    are out of scope for v0.3.0 (status drift, supports[] divergence,
+    and validator chain conflicts have no clean answers). Wipe
+    ``graph.db`` first if you really mean to overwrite.
+
+    Signature verification is fail-all-or-nothing. Every enrollment
+    envelope is verified against its parent key; every claim
+    ``signature_bundle`` is verified against the enrolled signer key;
+    every ``validation_signature`` is verified against its signer key.
+    The first failure rolls back the entire transaction — the project
+    stays in its pre-restore state.
+
+    Parameters
+    ----------
+    project_root:
+        Project directory. ``graph.db`` is reconstructed under
+        ``<project_root>/.mareforma/``.
+    claims_toml:
+        Path to the source TOML. Defaults to
+        ``<project_root>/claims.toml``.
+
+    Returns
+    -------
+    dict
+        ``{"validators_restored": N, "claims_restored": M}``.
+
+    Raises
+    ------
+    RestoreError
+        With a ``.kind`` field. See :class:`RestoreError`.
+    """
+    try:
+        import tomli
+    except ImportError as exc:  # pragma: no cover
+        raise RestoreError(
+            "tomli is required for restore() (it is a hard dependency "
+            "of mareforma; re-install the package).",
+            kind="toml_malformed",
+        ) from exc
+    from mareforma import signing as _signing
+    from mareforma import validators as _validators
+
+    root = Path(project_root)
+    toml_path = (
+        Path(claims_toml) if claims_toml is not None else root / "claims.toml"
+    )
+    if not toml_path.exists():
+        raise RestoreError(
+            f"claims.toml not found at {toml_path}",
+            kind="toml_not_found",
+        )
+
+    try:
+        data = tomli.loads(toml_path.read_text(encoding="utf-8"))
+    except tomli.TOMLDecodeError as exc:
+        raise RestoreError(
+            f"claims.toml at {toml_path} is malformed: {exc}",
+            kind="toml_malformed",
+        ) from exc
+
+    validators_section: dict = data.get("validators", {}) or {}
+    claims_section: dict = data.get("claims", {}) or {}
+
+    conn = open_db(root)
+    try:
+        signed_mode = bool(validators_section)
+
+        # Order validators by enrolled_at so the root (earliest) lands
+        # first and chain-walk parent lookups always succeed in-table.
+        ordered_validators = sorted(
+            validators_section.items(),
+            key=lambda kv: kv[1].get("enrolled_at", ""),
+        )
+
+        # BEGIN IMMEDIATE first, THEN re-check emptiness. The write lock
+        # closes the window between "check" and "act" — a concurrent
+        # writer cannot slip a row in between the SELECT and the
+        # restore INSERTs.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            existing = conn.execute(
+                "SELECT COUNT(*) AS n FROM claims"
+            ).fetchone()
+            if existing["n"] > 0:
+                raise RestoreError(
+                    f"graph.db at {root}/.mareforma/graph.db already has "
+                    f"{existing['n']} claim(s). restore() refuses to merge — "
+                    "wipe graph.db first, or use a fresh project root.",
+                    kind="graph_not_empty",
+                )
+            for keyid, v in ordered_validators:
+                row = {
+                    "keyid": keyid,
+                    "pubkey_pem": v["pubkey_pem"],
+                    "identity": v["identity"],
+                    "validator_type": v["validator_type"],
+                    "enrolled_at": v["enrolled_at"],
+                    "enrolled_by_keyid": v["enrolled_by_keyid"],
+                    "enrollment_envelope": v["enrollment_envelope"],
+                }
+                if v["enrolled_by_keyid"] == keyid:
+                    parent_pem_b64 = v["pubkey_pem"]
+                else:
+                    parent_v = validators_section.get(v["enrolled_by_keyid"])
+                    if parent_v is None:
+                        raise RestoreError(
+                            f"Validator {keyid[:12]}… claims to be enrolled "
+                            f"by {v['enrolled_by_keyid'][:12]}… but that "
+                            "parent is missing from claims.toml.",
+                            kind="enrollment_unverified",
+                        )
+                    parent_pem_b64 = parent_v["pubkey_pem"]
+                try:
+                    parent_pem = base64.standard_b64decode(parent_pem_b64)
+                except (ValueError, TypeError) as exc:
+                    raise RestoreError(
+                        f"Parent pubkey_pem for validator "
+                        f"{keyid[:12]}… is not valid base64.",
+                        kind="enrollment_unverified",
+                    ) from exc
+                if not _validators.verify_enrollment(row, parent_pem):
+                    raise RestoreError(
+                        f"Enrollment envelope for validator "
+                        f"{keyid[:12]}… failed verification.",
+                        kind="enrollment_unverified",
+                    )
+                conn.execute(
+                    "INSERT INTO validators "
+                    "(keyid, pubkey_pem, identity, validator_type, "
+                    " enrolled_at, enrolled_by_keyid, enrollment_envelope) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        keyid, v["pubkey_pem"], v["identity"],
+                        v["validator_type"], v["enrolled_at"],
+                        v["enrolled_by_keyid"], v["enrollment_envelope"],
+                    ),
+                )
+
+            # Order claims by created_at so prev_hash reconstruction
+            # matches the original chain. SHA256 is deterministic — same
+            # inputs in the same order produce the same chain.
+            ordered_claims = sorted(
+                claims_section.items(),
+                key=lambda kv: kv[1].get("created_at", ""),
+            )
+
+            for claim_id, c in ordered_claims:
+                _verify_claim_signatures_on_restore(
+                    claim_id, c, validators_section, signed_mode,
+                    _signing,
+                )
+                # Reconstruct supports/contradicts JSON.
+                supports_list = c.get("supports", []) or []
+                contradicts_list = c.get("contradicts", []) or []
+                chain_fields = {
+                    "claim_id": claim_id,
+                    "text": c["text"],
+                    "classification": c["classification"],
+                    "generated_by": c["generated_by"],
+                    "supports": supports_list,
+                    "contradicts": contradicts_list,
+                    "source_name": c.get("source_name"),
+                    "artifact_hash": c.get("artifact_hash"),
+                    "created_at": c["created_at"],
+                }
+                prev_hash = _compute_prev_hash(conn, chain_fields)
+                val_sig = c.get("validation_signature")
+                validator_keyid = (
+                    _extract_validation_signer_keyid(val_sig)
+                    if val_sig else None
+                )
+                target_level = c["support_level"]
+                # The INSERT trigger only accepts PRELIMINARY or
+                # ESTABLISHED as initial values — REPLICATED is reached
+                # via the convergence detection path inside add_claim,
+                # never as a born state. Restore inserts REPLICATED rows
+                # as PRELIMINARY first, then UPDATEs into REPLICATED.
+                # The UPDATE trigger accepts PRELIMINARY → REPLICATED.
+                insert_level = (
+                    "PRELIMINARY" if target_level == "REPLICATED"
+                    else target_level
+                )
+                # ESTABLISHED rows born here carry validation_signature
+                # (the CHECK constraint and the INSERT trigger both
+                # require it). PRELIMINARY-during-promotion rows must
+                # NOT carry validated_by / validated_at — the INSERT
+                # trigger refuses that combination. We hold those
+                # back to the UPDATE phase below for REPLICATED.
+                insert_validated_by = (
+                    c.get("validated_by") if insert_level == "ESTABLISHED"
+                    else None
+                )
+                insert_validated_at = (
+                    c.get("validated_at") if insert_level == "ESTABLISHED"
+                    else None
+                )
+                insert_validation_signature = (
+                    val_sig if insert_level == "ESTABLISHED" else None
+                )
+                insert_validator_keyid = (
+                    validator_keyid if insert_level == "ESTABLISHED"
+                    else None
+                )
+                conn.execute(
+                    """
+                    INSERT INTO claims
+                        (claim_id, text, classification, support_level,
+                         idempotency_key, validated_by, validated_at,
+                         status, source_name, generated_by,
+                         supports_json, contradicts_json,
+                         comparison_summary, unresolved,
+                         signature_bundle, transparency_logged,
+                         validation_signature, validator_keyid,
+                         artifact_hash, prev_hash,
+                         created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        claim_id, c["text"], c["classification"],
+                        insert_level,
+                        None,  # idempotency_key — TOML doesn't carry it
+                        insert_validated_by, insert_validated_at,
+                        c["status"], c.get("source_name"), c["generated_by"],
+                        json.dumps(supports_list, sort_keys=True,
+                                   separators=(",", ":")),
+                        json.dumps(contradicts_list, sort_keys=True,
+                                   separators=(",", ":")),
+                        c.get("comparison_summary") or "",
+                        1 if c.get("unresolved") else 0,
+                        c.get("signature_bundle"),
+                        0 if c.get("transparency_logged") is False else 1,
+                        insert_validation_signature, insert_validator_keyid,
+                        c.get("artifact_hash"), prev_hash,
+                        c["created_at"], c["updated_at"],
+                    ),
+                )
+                if target_level == "REPLICATED":
+                    # PRELIMINARY → REPLICATED — the UPDATE trigger
+                    # accepts the transition. No validation_signature
+                    # required on REPLICATED rows.
+                    conn.execute(
+                        "UPDATE claims SET support_level = 'REPLICATED' "
+                        "WHERE claim_id = ?",
+                        (claim_id,),
+                    )
+
+            conn.execute("COMMIT")
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.OperationalError:
+                pass
+            raise
+
+        return {
+            "validators_restored": len(ordered_validators),
+            "claims_restored": len(ordered_claims),
+        }
+    finally:
+        conn.close()
+
+
+def _verify_claim_signatures_on_restore(
+    claim_id: str,
+    c: dict,
+    validators_section: dict,
+    signed_mode: bool,
+    _signing,
+) -> None:
+    """Verify a single claim's signatures during restore.
+
+    Raises :class:`RestoreError` with the appropriate ``kind`` on
+    any of: orphan signer keyid, signature_bundle verification
+    failure, validation_signature verification failure, or
+    mixed-mode (signed-mode graph with an unsigned claim that
+    isn't a benign PRELIMINARY-from-pre-signing-era row).
+    """
+    sig_bundle_json = c.get("signature_bundle")
+    if sig_bundle_json:
+        try:
+            bundle = json.loads(sig_bundle_json)
+            bundle_keyid = bundle["signatures"][0]["keyid"]
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+            raise RestoreError(
+                f"Claim {claim_id} signature_bundle is malformed.",
+                kind="claim_unverified",
+            ) from exc
+        if bundle_keyid not in validators_section:
+            raise RestoreError(
+                f"Claim {claim_id} is signed by keyid "
+                f"{bundle_keyid[:12]}… which is not in the validators "
+                "section. Restore refuses orphan signers.",
+                kind="orphan_signer",
+            )
+        try:
+            signer_pem = base64.standard_b64decode(
+                validators_section[bundle_keyid]["pubkey_pem"],
+            )
+            signer_pub = _signing.public_key_from_pem(signer_pem)
+        except (ValueError, TypeError, _signing.SigningError) as exc:
+            raise RestoreError(
+                f"Signer pubkey for keyid {bundle_keyid[:12]}… is not "
+                "a valid PEM.",
+                kind="claim_unverified",
+            ) from exc
+        if not _signing.verify_envelope(bundle, signer_pub):
+            raise RestoreError(
+                f"Claim {claim_id} signature_bundle failed verification.",
+                kind="claim_unverified",
+            )
+        # Defense in depth: every signed-payload field must equal the
+        # claim's restored field. Tampering with the row but reusing a
+        # legitimate envelope is caught here.
+        try:
+            embedded = _signing.envelope_payload(bundle)
+        except _signing.InvalidEnvelopeError as exc:
+            raise RestoreError(
+                f"Claim {claim_id} envelope payload is unparseable.",
+                kind="claim_unverified",
+            ) from exc
+        expected = {
+            "claim_id": claim_id,
+            "text": c["text"],
+            "classification": c["classification"],
+            "generated_by": c["generated_by"],
+            "supports": c.get("supports") or [],
+            "contradicts": c.get("contradicts") or [],
+            "source_name": c.get("source_name"),
+            "artifact_hash": c.get("artifact_hash"),
+            "created_at": c["created_at"],
+        }
+        for field in _signing.SIGNED_FIELDS:
+            if embedded.get(field) != expected[field]:
+                raise RestoreError(
+                    f"Claim {claim_id} signed-payload field {field!r} "
+                    "does not match the row — TOML tampered.",
+                    kind="claim_unverified",
+                )
+    elif signed_mode:
+        raise RestoreError(
+            f"Claim {claim_id} has no signature_bundle but the graph "
+            "is in signed mode (validators are enrolled). Restore "
+            "refuses mixed-mode reconstruction.",
+            kind="mode_inconsistent",
+        )
+
+    val_sig = c.get("validation_signature")
+    if val_sig:
+        try:
+            val_env = json.loads(val_sig)
+            val_keyid = val_env["signatures"][0]["keyid"]
+            declared_type = val_env["payloadType"]
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+            raise RestoreError(
+                f"Claim {claim_id} validation_signature is malformed.",
+                kind="claim_unverified",
+            ) from exc
+        # The validation_signature column carries either a validation
+        # envelope (REPLICATED→ESTABLISHED promotion) or a seed envelope
+        # (born-ESTABLISHED bootstrap). Both are legitimate; pass the
+        # declared type back to verify_envelope so a mismatch surfaces
+        # any tampering between row and column.
+        if declared_type not in (
+            _signing.PAYLOAD_TYPE_VALIDATION,
+            _signing.PAYLOAD_TYPE_SEED,
+        ):
+            raise RestoreError(
+                f"Claim {claim_id} validation_signature has unexpected "
+                f"payloadType {declared_type!r}.",
+                kind="claim_unverified",
+            )
+        if val_keyid not in validators_section:
+            raise RestoreError(
+                f"Claim {claim_id} validation envelope is signed by "
+                f"keyid {val_keyid[:12]}… which is not enrolled.",
+                kind="orphan_signer",
+            )
+        try:
+            val_signer_pem = base64.standard_b64decode(
+                validators_section[val_keyid]["pubkey_pem"],
+            )
+            val_signer_pub = _signing.public_key_from_pem(val_signer_pem)
+        except (ValueError, TypeError, _signing.SigningError) as exc:
+            raise RestoreError(
+                f"Validation signer pubkey for keyid {val_keyid[:12]}… "
+                "is not a valid PEM.",
+                kind="claim_unverified",
+            ) from exc
+        if not _signing.verify_envelope(
+            val_env, val_signer_pub,
+            expected_payload_type=declared_type,
+        ):
+            raise RestoreError(
+                f"Claim {claim_id} validation_signature failed "
+                "verification.",
+                kind="claim_unverified",
+            )
+
+
+def get_validator_reputation(conn: sqlite3.Connection) -> dict[str, int]:
+    """Public wrapper around :func:`_compute_validator_reputation`.
+
+    Returns a dict mapping every enrolled validator keyid to its
+    ESTABLISHED-claim count. Validators with zero validations are
+    included with ``count=0`` (the bulk map use case wants the full
+    enrollment list, not just the active validators).
+    """
+    counts = _compute_validator_reputation(conn)
+    enrolled = _enrolled_validator_keyids(conn)
+    return {keyid: counts.get(keyid, 0) for keyid in enrolled}
 
 
 # ---------------------------------------------------------------------------
@@ -1636,16 +2521,40 @@ def _now() -> str:
 
 
 def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
-    """Write all claims to claims.toml in the project root.
+    """Write all claims AND validators to claims.toml in the project root.
 
-    Called after every claim mutation (add, update, delete).
-    Failure is non-fatal: a warning is printed but the exception is not raised.
+    Called after every claim or validator mutation. The TOML file is
+    the source of truth for ``mareforma restore`` after catastrophic
+    loss of ``graph.db``. Failure is non-fatal: an error line is
+    printed to stderr but the exception is not raised — graph.db is
+    still authoritative and the next successful mutation will rewrite
+    the file. Stderr-ERROR (not ``warnings.warn``, which production
+    callers often suppress) so divergence is visible by default.
     """
     try:
         import tomli_w
 
+        data: dict[str, Any] = {}
+
+        # Validators first so a restore pass can verify enrollment
+        # signatures before trying to verify the claims that reference
+        # those keys.
+        from mareforma import validators as _validators
+        validator_rows = _validators.list_validators(conn)
+        if validator_rows:
+            data["validators"] = {}
+            for v in validator_rows:
+                data["validators"][v["keyid"]] = {
+                    "pubkey_pem": v["pubkey_pem"],
+                    "identity": v["identity"],
+                    "validator_type": v["validator_type"],
+                    "enrolled_at": v["enrolled_at"],
+                    "enrolled_by_keyid": v["enrolled_by_keyid"],
+                    "enrollment_envelope": v["enrollment_envelope"],
+                }
+
         claims = list_claims(conn)
-        data: dict[str, Any] = {"claims": {}}
+        data["claims"] = {}
         for c in claims:
             supports = json.loads(c.get("supports_json", "[]") or "[]")
             contradicts = json.loads(c.get("contradicts_json", "[]") or "[]")
@@ -1671,6 +2580,8 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
                 entry["unresolved"] = True
             if c.get("signature_bundle"):
                 entry["signature_bundle"] = c["signature_bundle"]
+            if c.get("validation_signature"):
+                entry["validation_signature"] = c["validation_signature"]
             # transparency_logged: only record when it deviates from the
             # default (1). A 0 means "signed but awaiting Rekor inclusion".
             if c.get("transparency_logged") == 0:
@@ -1683,5 +2594,13 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
         out.write_bytes(tomli_w.dumps(data).encode("utf-8"))
 
     except Exception as exc:  # noqa: BLE001
-        import warnings
-        warnings.warn(f"claims.toml backup failed (claim is saved in graph.db): {exc}")
+        import sys
+        # stderr at an ERROR-line prefix is harder for production to
+        # silently swallow than warnings.warn (which downstream code
+        # routinely filters out). graph.db remains authoritative;
+        # this line surfaces the divergence so an operator notices.
+        print(
+            f"ERROR: claims.toml backup failed; graph.db is "
+            f"authoritative — {exc}",
+            file=sys.stderr,
+        )

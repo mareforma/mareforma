@@ -59,6 +59,29 @@ class InvalidIdentityError(ValidatorError):
     """Raised when an enrollment identity fails the format check."""
 
 
+class InvalidValidatorTypeError(ValidatorError):
+    """Raised when an enrollment receives an unknown validator_type.
+
+    The validator_type field is a self-declared honesty signal — 'human'
+    or 'llm' — bound into the signed enrollment envelope. Unknown values
+    are refused at enroll time so a malformed type never reaches the
+    persisted row (and the chain walk that consults it).
+    """
+
+
+VALID_VALIDATOR_TYPES = ("human", "llm")
+_DEFAULT_VALIDATOR_TYPE = "human"
+
+
+def _validate_validator_type(validator_type: str) -> str:
+    if validator_type not in VALID_VALIDATOR_TYPES:
+        raise InvalidValidatorTypeError(
+            f"validator_type must be one of {VALID_VALIDATOR_TYPES!r}, "
+            f"got {validator_type!r}"
+        )
+    return validator_type
+
+
 _MAX_IDENTITY_LEN = 256
 
 # Unicode display-spoofing characters we refuse on top of C0/C1 controls.
@@ -267,8 +290,8 @@ def is_enrolled(conn: sqlite3.Connection, keyid: str) -> bool:
 def get_validator(conn: sqlite3.Connection, keyid: str) -> Optional[dict]:
     """Return the validator row for *keyid*, or None if not enrolled."""
     row = conn.execute(
-        "SELECT keyid, pubkey_pem, identity, enrolled_at, "
-        "enrolled_by_keyid, enrollment_envelope "
+        "SELECT keyid, pubkey_pem, identity, validator_type, "
+        "enrolled_at, enrolled_by_keyid, enrollment_envelope "
         "FROM validators WHERE keyid = ?",
         (keyid,),
     ).fetchone()
@@ -278,8 +301,8 @@ def get_validator(conn: sqlite3.Connection, keyid: str) -> Optional[dict]:
 def list_validators(conn: sqlite3.Connection) -> list[dict]:
     """Return all enrolled validators ordered by enrollment time (asc)."""
     rows = conn.execute(
-        "SELECT keyid, pubkey_pem, identity, enrolled_at, "
-        "enrolled_by_keyid, enrollment_envelope "
+        "SELECT keyid, pubkey_pem, identity, validator_type, "
+        "enrolled_at, enrolled_by_keyid, enrollment_envelope "
         "FROM validators ORDER BY enrolled_at"
     ).fetchall()
     return [dict(r) for r in rows]
@@ -303,6 +326,8 @@ def auto_enroll_root(
     conn: sqlite3.Connection,
     signer,
     identity: str,
+    *,
+    validator_type: str = _DEFAULT_VALIDATOR_TYPE,
 ) -> Optional[dict]:
     """Enroll *signer* as the root validator if no validators exist yet.
 
@@ -331,6 +356,7 @@ def auto_enroll_root(
         return None
 
     identity = _validate_identity(identity)
+    validator_type = _validate_validator_type(validator_type)
     keyid = _signing.public_key_id(signer.public_key())
 
     # Fast path: already enrolled or root exists under a different keyid.
@@ -348,6 +374,7 @@ def auto_enroll_root(
         "keyid": keyid,
         "pubkey_pem": pem_b64,
         "identity": identity,
+        "validator_type": validator_type,
         "enrolled_at": now,
         "enrolled_by_keyid": keyid,  # self-signed root
     }
@@ -369,10 +396,11 @@ def auto_enroll_root(
             return None
         conn.execute(
             "INSERT INTO validators "
-            "(keyid, pubkey_pem, identity, enrolled_at, "
+            "(keyid, pubkey_pem, identity, validator_type, enrolled_at, "
             " enrolled_by_keyid, enrollment_envelope) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (keyid, pem_b64, identity, now, keyid, envelope_json),
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (keyid, pem_b64, identity, validator_type, now,
+             keyid, envelope_json),
         )
         conn.execute("COMMIT")
     except sqlite3.IntegrityError:
@@ -408,10 +436,19 @@ def enroll_validator(
     parent_signer,
     new_pubkey_pem: bytes,
     identity: str,
+    *,
+    validator_type: str = _DEFAULT_VALIDATOR_TYPE,
 ) -> dict:
     """Add a new validator, signed by *parent_signer*.
 
     The parent must already be enrolled. Returns the new validator row.
+
+    ``validator_type`` is a self-declared honesty signal — ``'human'``
+    or ``'llm'`` — bound into the signed enrollment envelope. There is
+    no external verification; the value reflects what the parent signed
+    off on at enroll time. ``'llm'`` validators are subject to the
+    promotion ceiling enforced by :func:`mareforma.db.validate_claim`
+    (LLM validators cannot promote past REPLICATED).
 
     Raises
     ------
@@ -419,8 +456,11 @@ def enroll_validator(
         If the parent signer is not currently enrolled as a validator.
     ValidatorAlreadyEnrolledError
         If the new key is already enrolled.
+    InvalidValidatorTypeError
+        If ``validator_type`` is not one of ``VALID_VALIDATOR_TYPES``.
     """
     identity = _validate_identity(identity)
+    validator_type = _validate_validator_type(validator_type)
     parent_keyid = _signing.public_key_id(parent_signer.public_key())
     if not is_enrolled(conn, parent_keyid):
         raise ValidatorNotEnrolledError(
@@ -453,6 +493,7 @@ def enroll_validator(
         "keyid": new_keyid,
         "pubkey_pem": pem_b64,
         "identity": identity,
+        "validator_type": validator_type,
         "enrolled_at": now,
         "enrolled_by_keyid": parent_keyid,
     }
@@ -461,10 +502,11 @@ def enroll_validator(
 
     conn.execute(
         "INSERT INTO validators "
-        "(keyid, pubkey_pem, identity, enrolled_at, "
+        "(keyid, pubkey_pem, identity, validator_type, enrolled_at, "
         " enrolled_by_keyid, enrollment_envelope) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (new_keyid, pem_b64, identity, now, parent_keyid, envelope_json),
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (new_keyid, pem_b64, identity, validator_type, now,
+         parent_keyid, envelope_json),
     )
     conn.commit()
 
@@ -509,7 +551,7 @@ def verify_enrollment(validator_row: dict, parent_pubkey_pem: bytes) -> bool:
     except _signing.InvalidEnvelopeError:
         return False
 
-    for field in ("keyid", "pubkey_pem", "identity",
+    for field in ("keyid", "pubkey_pem", "identity", "validator_type",
                   "enrolled_at", "enrolled_by_keyid"):
         if payload.get(field) != validator_row.get(field):
             return False

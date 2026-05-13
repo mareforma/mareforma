@@ -230,9 +230,22 @@ class TestValidateIdentityCheck:
                 graph.validate(id_a)
 
     def test_validate_persists_signed_envelope(self, tmp_path: Path) -> None:
-        key_path = _bootstrap_key(tmp_path)
-        with mareforma.open(tmp_path, key_path=key_path) as graph:
+        # Generator key signs the REPLICATED claim; a separately-enrolled
+        # validator key is the only one allowed to promote it. Same-key
+        # validation is refused by the substrate as self-promotion.
+        root_key_path = _bootstrap_key(tmp_path, "root.key")
+        validator_key_path = _bootstrap_key(tmp_path, "validator.key")
+        validator_pubkey_pem = _signing.public_key_to_pem(
+            _signing.load_private_key(validator_key_path).public_key(),
+        )
+
+        with mareforma.open(tmp_path, key_path=root_key_path) as graph:
             id_a = self._setup_replicated(graph)
+            graph.enroll_validator(
+                validator_pubkey_pem, identity="validator@lab.example",
+            )
+
+        with mareforma.open(tmp_path, key_path=validator_key_path) as graph:
             graph.validate(id_a, validated_by="display@lab.example")
             claim = graph.get_claim(id_a)
 
@@ -241,8 +254,8 @@ class TestValidateIdentityCheck:
         assert claim["validation_signature"] is not None
 
         envelope = json.loads(claim["validation_signature"])
-        # The envelope verifies against the loaded key.
-        verifier_key = _signing.load_private_key(key_path).public_key()
+        # The envelope verifies against the VALIDATOR key (not the root).
+        verifier_key = _signing.load_private_key(validator_key_path).public_key()
         assert _signing.verify_envelope(
             envelope, verifier_key,
             expected_payload_type=_signing._PAYLOAD_TYPE_VALIDATION,
@@ -517,11 +530,19 @@ class TestValidationTimestampParity:
         """The signed envelope and the row's validated_at must be the
         SAME ISO string. Computing _now() twice would diverge by
         microseconds and defeat the tamper-evidence claim."""
-        key_path = _bootstrap_key(tmp_path)
-        with mareforma.open(tmp_path, key_path=key_path) as graph:
+        root_key_path = _bootstrap_key(tmp_path, "root.key")
+        validator_key_path = _bootstrap_key(tmp_path, "validator.key")
+        validator_pubkey_pem = _signing.public_key_to_pem(
+            _signing.load_private_key(validator_key_path).public_key(),
+        )
+
+        with mareforma.open(tmp_path, key_path=root_key_path) as graph:
             upstream = graph.assert_claim("u", generated_by="seed", seed=True)
             id_a = graph.assert_claim("f", supports=[upstream], generated_by="A")
             graph.assert_claim("f", supports=[upstream], generated_by="B")
+            graph.enroll_validator(validator_pubkey_pem, identity="v@lab")
+
+        with mareforma.open(tmp_path, key_path=validator_key_path) as graph:
             graph.validate(id_a)
             claim = graph.get_claim(id_a)
 
@@ -837,20 +858,31 @@ class TestCLIValidateProducesSignedEnvelope:
         identity check and signature. It now routes through
         graph.validate(), which signs the validation event."""
         monkeypatch.chdir(tmp_path)
-        # Bootstrap the XDG default key so the CLI's mareforma.open()
-        # finds a signer.
-        root_key_path = _bootstrap_key(tmp_path, "root.key")
-        xdg_key = _signing.default_key_path()
-        xdg_key.parent.mkdir(parents=True, exist_ok=True)
-        xdg_key.write_bytes(root_key_path.read_bytes())
-        import os
-        os.chmod(xdg_key, 0o600)
 
-        # Build a REPLICATED claim via the library.
-        with mareforma.open(tmp_path) as graph:
+        # Root key signs the REPLICATED claim. Validator key (which lands
+        # in XDG so the CLI picks it up) is enrolled separately and is
+        # the one allowed to promote — same-key validation is refused by
+        # the substrate as self-promotion.
+        root_key_path = _bootstrap_key(tmp_path, "root.key")
+        validator_key_path = _bootstrap_key(tmp_path, "validator.key")
+        validator_pubkey_pem = _signing.public_key_to_pem(
+            _signing.load_private_key(validator_key_path).public_key(),
+        )
+
+        # Build the REPLICATED claim using the root key, then enroll the
+        # validator key under root.
+        with mareforma.open(tmp_path, key_path=root_key_path) as graph:
             upstream = graph.assert_claim("u", generated_by="seed", seed=True)
             rep_id = graph.assert_claim("f", supports=[upstream], generated_by="A")
             graph.assert_claim("f", supports=[upstream], generated_by="B")
+            graph.enroll_validator(validator_pubkey_pem, identity="cli-validator")
+
+        # Stage the validator key as the XDG default so the CLI finds it.
+        xdg_key = _signing.default_key_path()
+        xdg_key.parent.mkdir(parents=True, exist_ok=True)
+        xdg_key.write_bytes(validator_key_path.read_bytes())
+        import os
+        os.chmod(xdg_key, 0o600)
 
         # Validate via CLI.
         runner = CliRunner()
@@ -860,7 +892,7 @@ class TestCLIValidateProducesSignedEnvelope:
         assert result.exit_code == 0, result.output
 
         # The row now carries a signed envelope.
-        with mareforma.open(tmp_path) as graph:
+        with mareforma.open(tmp_path, key_path=root_key_path) as graph:
             claim = graph.get_claim(rep_id)
         assert claim["validation_signature"] is not None
 

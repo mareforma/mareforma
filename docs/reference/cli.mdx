@@ -3,6 +3,21 @@ title: "CLI Reference"
 description: "The Mareforma command-line interface: identity setup, claim management, validator enrollment, epistemic health, export, and bundle verification."
 ---
 
+| Command | Purpose |
+|---|---|
+| `mareforma bootstrap` | Generate Ed25519 signing key |
+| `mareforma validator add` | Enroll a validator (`--type human\|llm`) |
+| `mareforma validator list` | List enrolled validators |
+| `mareforma claim add` | Assert a scientific claim |
+| `mareforma claim list` | List claims |
+| `mareforma claim show` | Show one claim |
+| `mareforma claim update` | Update a claim |
+| `mareforma claim validate` | Promote REPLICATED → ESTABLISHED |
+| `mareforma status` | Epistemic health dashboard |
+| `mareforma export` | Write `ontology.jsonld` (or signed bundle) |
+| `mareforma verify` | Verify a signed bundle |
+| `mareforma restore` | Rebuild graph.db from claims.toml |
+
 ## Overview
 
 ```bash
@@ -57,7 +72,7 @@ The first key opened against a fresh `graph.db` auto-enrolls as the root validat
 Enroll a new validator on the current project. The currently loaded signing key signs the enrollment and becomes the parent of the new validator. The signer must already be enrolled.
 
 ```bash
-mareforma validator add --pubkey PATH_OR_PEM --identity LABEL
+mareforma validator add --pubkey PATH_OR_PEM --identity LABEL [--type human|llm]
 ```
 
 **Options**
@@ -66,11 +81,13 @@ mareforma validator add --pubkey PATH_OR_PEM --identity LABEL
 |---|---|
 | `--pubkey TEXT` | PEM-encoded public key. Pass a file path or paste the PEM text. File reads capped at 64 KB |
 | `--identity TEXT` | Display label (email, lab name, etc.). 256-char cap; control characters and Unicode display-spoofing forms are rejected |
+| `--type human\|llm` | Self-declared validator type. Default `human`. `llm` validators may sign validation envelopes but cannot promote a claim past `REPLICATED` |
 
 **Examples**
 
 ```bash
 mareforma validator add --pubkey ./alice.pub.pem --identity alice@lab.example
+mareforma validator add --pubkey ./bot.pub.pem --identity reviewer-bot --type llm
 ```
 
 ### validator list
@@ -316,3 +333,31 @@ mareforma export --bundle
 mareforma verify mareforma-bundle.json
 # → Bundle verified: 12 claim subject(s) match.
 ```
+
+---
+
+## restore
+
+Rebuild `graph.db` from `claims.toml` for catastrophic-loss recovery. Refuses to run if the project's `graph.db` already contains claims — fresh-only, not merge. Every signature is verified before any row is inserted; fail-all-or-nothing.
+
+```bash
+mareforma restore [CLAIMS_TOML_PATH]
+```
+
+**Arguments**
+
+| Argument | Description |
+|---|---|
+| `CLAIMS_TOML_PATH` | Optional. Path to the source TOML. Defaults to `./claims.toml`. |
+
+**Examples**
+
+```bash
+# Standard case — claims.toml in the project root:
+mareforma restore
+
+# Explicit source (e.g. recovered from a backup):
+mareforma restore backups/state.toml
+```
+
+The output reports `validators_restored` and `claims_restored` counts. Failure exits `1` with a `RestoreError` message naming the failure mode: `graph_not_empty`, `toml_not_found`, `toml_malformed`, `enrollment_unverified`, `claim_unverified`, `mode_inconsistent`, or `orphan_signer`.

@@ -22,10 +22,25 @@ from mareforma import signing as _signing
 
 
 def _key(tmp_path: Path) -> Path:
-    key_path = tmp_path / "_p17_key"
+    key_path = tmp_path / "_root_key"
     if not key_path.exists():
         _signing.bootstrap_key(key_path)
     return key_path
+
+
+def _validator_key(tmp_path: Path) -> Path:
+    """A second key for validation — the substrate refuses self-validation,
+    so promotion tests need a key distinct from the one signing claims."""
+    key_path = tmp_path / "_validator_key"
+    if not key_path.exists():
+        _signing.bootstrap_key(key_path)
+    return key_path
+
+
+def _validator_pem(tmp_path: Path) -> bytes:
+    return _signing.public_key_to_pem(
+        _signing.load_private_key(_validator_key(tmp_path)).public_key(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -142,11 +157,18 @@ class TestBootstrapIntegration:
             a = g.assert_claim("finding", supports=[root], generated_by="A")
             b = g.assert_claim("finding", supports=[root], generated_by="B")
             assert g.get_claim(a)["support_level"] == "REPLICATED"
-            # Promote A to ESTABLISHED via validate()
+            g.enroll_validator(_validator_pem(tmp_path), identity="v")
+
+        # Promote A to ESTABLISHED via validate() — under the validator key
+        # (the substrate refuses self-validation).
+        with mareforma.open(tmp_path, key_path=_validator_key(tmp_path)) as g:
             g.validate(a)
             assert g.get_claim(a)["support_level"] == "ESTABLISHED"
-            # The validated claim is itself an ESTABLISHED upstream
-            # for downstream peers — REPLICATED chain continues from it.
+
+        # The validated claim is itself an ESTABLISHED upstream for
+        # downstream peers — REPLICATED chain continues from it. New
+        # claims are asserted by the root key again.
+        with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
             d = g.assert_claim("downstream", supports=[a], generated_by="D")
             e = g.assert_claim("downstream", supports=[a], generated_by="E")
             assert g.get_claim(d)["support_level"] == "REPLICATED"

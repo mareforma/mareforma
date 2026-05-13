@@ -61,6 +61,41 @@ s["transitions"]       # list of state transition dicts
 
 ---
 
+## `mareforma.restore(project_root, *, claims_toml=None)`
+
+Rebuild a fresh `graph.db` from `claims.toml` for catastrophic-loss
+recovery. Fresh-only — refuses to run if `graph.db` already has any
+claims. Every signature is verified before any row is inserted;
+fail-all-or-nothing.
+
+```python
+result = mareforma.restore("/path/to/project")
+# {'validators_restored': 3, 'claims_restored': 47}
+```
+
+**Parameters**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `project_root` | `str \| Path` | required | Project directory. `graph.db` is reconstructed under `<root>/.mareforma/`. |
+| `claims_toml` | `str \| Path \| None` | `None` | Path to source TOML. Defaults to `<project_root>/claims.toml`. |
+
+**Returns** `dict` with `validators_restored` and `claims_restored` counts.
+
+**Raises** `mareforma.db.RestoreError` with `.kind` field:
+
+| `.kind` | Meaning |
+|---|---|
+| `graph_not_empty` | Target `graph.db` already has claims. |
+| `toml_not_found` | claims.toml does not exist. |
+| `toml_malformed` | TOML parse error. |
+| `enrollment_unverified` | A validator's enrollment envelope failed verification. |
+| `claim_unverified` | A claim's `signature_bundle` or `validation_signature` failed verification. |
+| `mode_inconsistent` | Signed-mode graph (validators enrolled) contains a claim with no signature. |
+| `orphan_signer` | A claim is signed by a keyid not present in the validators section. |
+
+---
+
 ## EpistemicGraph
 
 Returned by `mareforma.open()`. Do not instantiate directly.
@@ -134,14 +169,14 @@ A replay that supplies a different `artifact_hash` than the original raises `Ide
 
 ---
 
-### `query(text=None, *, min_support=None, classification=None, limit=20)`
+### `query(text=None, *, min_support=None, classification=None, limit=20, include_unverified=False)`
 
 Query claims ordered by support level (descending) then recency (descending).
 
 ```python
 results = graph.query("cell type A", min_support="REPLICATED")
 for r in results:
-    print(r["text"], r["support_level"], r["classification"])
+    print(r["text"], r["support_level"], r["validator_reputation"])
 ```
 
 **Parameters**
@@ -152,15 +187,60 @@ for r in results:
 | `min_support` | `str \| None` | `None` | `PRELIMINARY` \| `REPLICATED` \| `ESTABLISHED` |
 | `classification` | `str \| None` | `None` | `INFERRED` \| `ANALYTICAL` \| `DERIVED` |
 | `limit` | `int` | `20` | Maximum number of results. |
+| `include_unverified` | `bool` | `False` | When `False`, PRELIMINARY claims whose signing key is not in the validators table are excluded. Pass `True` to surface unverified preliminary claims. |
 
 **Returns** `list[dict]` — each dict contains:
 `claim_id`, `text`, `classification`, `support_level`, `idempotency_key`,
 `validated_by`, `validated_at`, `status`, `source_name`, `generated_by`,
 `supports_json`, `contradicts_json`, `comparison_summary`, `branch_id`,
 `unresolved`, `signature_bundle`, `transparency_logged`, `artifact_hash`,
-`validation_signature`, `prev_hash`, `created_at`, `updated_at`.
+`validation_signature`, `validator_keyid`, `prev_hash`, `created_at`,
+`updated_at`. Plus two reputation projections computed at query time:
+
+- `validator_reputation: int` — for ESTABLISHED rows, the count of
+  ESTABLISHED claims signed by the same validator. `0` otherwise.
+- `generator_enrolled: bool` — `True` iff the claim's signing keyid
+  is in the validators table.
 
 **Raises** `ValueError` if `min_support` or `classification` is invalid.
+
+---
+
+### `search(query, *, min_support=None, classification=None, limit=20, include_unverified=False)`
+
+Full-text search over claim text using SQLite FTS5 (`unicode61` tokenizer,
+diacritics folded). Returns claim dicts ordered by FTS5 rank (best
+match first). Same projection as `query()`.
+
+```python
+hits = graph.search("dopaminergic", min_support="REPLICATED")
+# Phrase, prefix, boolean, proximity all supported.
+hits = graph.search('"dopamine receptor"')
+hits = graph.search("gene*")
+hits = graph.search("dopamine NEAR receptor")
+```
+
+Pure-wildcard queries (`"*"`, `"**"`) are refused — they would scan
+the whole table.
+
+**Parameters** — same as `query()` except `text` becomes `query` and is
+required (must be a non-empty FTS5 MATCH expression).
+
+**Raises** `ValueError` on empty / pure-wildcard / malformed FTS5 syntax.
+
+---
+
+### `get_validator_reputation()`
+
+Returns `{validator_keyid: count}` for every enrolled validator. Count
+is the number of ESTABLISHED claims whose validation envelope was
+signed by that keyid. Validators with zero promotions appear with
+`count=0`. Derived state — recomputed on every call.
+
+```python
+reputation = graph.get_validator_reputation()
+top = sorted(reputation.items(), key=lambda kv: -kv[1])[:5]
+```
 
 ---
 
@@ -261,25 +341,31 @@ Each retry compares the envelope's signed payload against the live row before re
 
 ---
 
-### `enroll_validator(pubkey_pem, *, identity)`
+### `enroll_validator(pubkey_pem, *, identity, validator_type="human")`
 
 Enroll an additional validator on this project. The currently loaded signer (which must itself be enrolled) signs the enrollment envelope.
 
 ```python
 alice_pem = open("./alice.pub.pem", "rb").read()
 graph.enroll_validator(alice_pem, identity="alice@lab.example")
+
+# Or enroll an LLM-typed reviewer bot:
+bot_pem = open("./bot.pub.pem", "rb").read()
+graph.enroll_validator(bot_pem, identity="reviewer-bot", validator_type="llm")
 ```
 
 **Parameters**
 
-| Name | Type | Description |
-|---|---|---|
-| `pubkey_pem` | `bytes` | Ed25519 public key in PEM form. |
-| `identity` | `str` | Human-readable label. Capped at 256 chars; control characters and Unicode display-spoofing forms are rejected. |
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `pubkey_pem` | `bytes` | required | Ed25519 public key in PEM form. |
+| `identity` | `str` | required | Human-readable label. Capped at 256 chars; control characters and Unicode display-spoofing forms are rejected. |
+| `validator_type` | `str` | `"human"` | `"human"` or `"llm"`. Self-declared honesty signal, bound into the signed enrollment envelope. LLM-typed validators may sign validation envelopes but cannot promote a claim past REPLICATED — `validate()` refuses at the substrate. |
 
 **Raises**
 - `ValueError` — no signer loaded, or the loaded signer is not enrolled
 - `InvalidIdentityError` — identity contains rejected characters
+- `InvalidValidatorTypeError` — `validator_type` is not `'human'` or `'llm'`
 - `ValidatorAlreadyEnrolledError` — key already enrolled (the message distinguishes a normal duplicate from a chain-broken row)
 
 ---
@@ -290,10 +376,10 @@ Return all enrolled validators for this project, ordered by `enrolled_at`.
 
 ```python
 for row in graph.list_validators():
-    print(row["identity"], row["keyid"])
+    print(row["identity"], row["validator_type"], row["keyid"])
 ```
 
-**Returns** `list[dict]` — each dict carries `keyid`, `pubkey_pem`, `identity`, `enrolled_at`, `enrolled_by_keyid`, `enrollment_envelope`.
+**Returns** `list[dict]` — each dict carries `keyid`, `pubkey_pem`, `identity`, `validator_type`, `enrolled_at`, `enrolled_by_keyid`, `enrollment_envelope`.
 
 ---
 

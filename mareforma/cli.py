@@ -13,6 +13,7 @@ Commands
     mareforma claim validate ID [options]      promote REPLICATED → ESTABLISHED
     mareforma status                           epistemic health dashboard
     mareforma export [--output path]           write ontology.jsonld
+    mareforma restore [path]                   rebuild graph.db from claims.toml
 """
 
 from __future__ import annotations
@@ -123,7 +124,16 @@ def validator() -> None:
     "--identity", required=True,
     help="Display label for the validator (email, lab name, etc.).",
 )
-def validator_add(pubkey_arg: str, identity: str) -> None:
+@click.option(
+    "--type", "validator_type",
+    type=click.Choice(["human", "llm"]), default="human", show_default=True,
+    help=(
+        "Self-declared validator type. 'human' may promote claims to "
+        "ESTABLISHED; 'llm' may sign validations but cannot promote "
+        "past REPLICATED."
+    ),
+)
+def validator_add(pubkey_arg: str, identity: str, validator_type: str) -> None:
     """Enroll a new validator on the current project.
 
     The currently loaded signing key (from ``~/.config/mareforma/key`` or
@@ -131,6 +141,11 @@ def validator_add(pubkey_arg: str, identity: str) -> None:
     enrollment and becomes the parent of the new validator. The signer
     must already be enrolled — typically because they were the first key
     opened against this project's graph.db and auto-enrolled as the root.
+
+    \b
+    Examples:
+        mareforma validator add --pubkey alice.pem --identity alice@lab.org
+        mareforma validator add --pubkey bot.pem --identity reviewer-bot --type llm
     """
     import mareforma
     from mareforma import signing as _signing
@@ -177,7 +192,8 @@ def validator_add(pubkey_arg: str, identity: str) -> None:
                 sys.exit(1)
             try:
                 row = _validators.enroll_validator(
-                    graph._conn, graph._signer, pem_bytes, identity=identity,
+                    graph._conn, graph._signer, pem_bytes,
+                    identity=identity, validator_type=validator_type,
                 )
             except _validators.ValidatorNotEnrolledError as exc:
                 _err(str(exc))
@@ -185,12 +201,16 @@ def validator_add(pubkey_arg: str, identity: str) -> None:
             except _validators.ValidatorAlreadyEnrolledError as exc:
                 _err(str(exc))
                 sys.exit(1)
+            except _validators.InvalidValidatorTypeError as exc:
+                _err(str(exc))
+                sys.exit(1)
     except _signing.SigningError as exc:
         _err(str(exc))
         sys.exit(1)
 
-    _ok(f"Enrolled validator {row['identity']}")
+    _ok(f"Enrolled validator {row['identity']} ({row['validator_type']})")
     _info(f"keyid:            {row['keyid']}")
+    _info(f"validator_type:   {row['validator_type']}")
     _info(f"enrolled_by:      {row['enrolled_by_keyid']}")
     _info(f"enrolled_at:      {row['enrolled_at']}")
 
@@ -218,7 +238,10 @@ def validator_list(as_json: bool) -> None:
     for row in rows:
         is_root = row["enrolled_by_keyid"] == row["keyid"]
         marker = " (root)" if is_root else ""
-        click.echo(click.style(f"  {row['identity']}{marker}", bold=True))
+        type_tag = f" [{row['validator_type']}]"
+        click.echo(click.style(
+            f"  {row['identity']}{type_tag}{marker}", bold=True,
+        ))
         click.echo(f"    keyid:       {row['keyid']}")
         click.echo(f"    enrolled_by: {row['enrolled_by_keyid']}")
         click.echo(f"    enrolled_at: {row['enrolled_at']}")
@@ -612,3 +635,45 @@ def claim_validate(claim_id, validated_by):
     _ok(f"Claim '{claim_id}' promoted to ESTABLISHED.")
     if validated_by:
         _info(f"validated_by: {validated_by}")
+
+
+# ---------------------------------------------------------------------------
+# restore
+# ---------------------------------------------------------------------------
+
+@cli.command("restore")
+@click.argument(
+    "claims_toml_path",
+    type=click.Path(exists=False, dir_okay=False, path_type=Path),
+    required=False,
+)
+def restore_cmd(claims_toml_path: Path | None) -> None:
+    """Rebuild graph.db from claims.toml (catastrophic-loss recovery).
+
+    Reads the TOML state file written by every claim/validator mutation
+    and rebuilds the project's graph.db from scratch. The command
+    refuses to run if graph.db already contains claims — restore is
+    fresh-only, not merge.
+
+    Every signature is verified before any row is inserted: enrollment
+    envelopes against parent keys, claim bundles against enrolled
+    signers, validation envelopes against validator keys. The first
+    failure rolls back the entire transaction.
+
+    \b
+    Examples:
+        mareforma restore                    # uses ./claims.toml
+        mareforma restore backups/state.toml # explicit source
+    """
+    import mareforma
+    from mareforma.db import RestoreError
+
+    try:
+        result = mareforma.restore(_root(), claims_toml=claims_toml_path)
+    except RestoreError as exc:
+        _err(str(exc))
+        sys.exit(1)
+
+    _ok(f"Restored graph.db from claims.toml ({_root()}/.mareforma/graph.db).")
+    _info(f"validators_restored: {result['validators_restored']}")
+    _info(f"claims_restored:     {result['claims_restored']}")

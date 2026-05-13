@@ -191,19 +191,68 @@ security-substrate decision:
 - **`mareforma.open()` returns an `EpistemicGraph`** — no `@transform`
   required. New parameters: `key_path`, `require_signed`, `rekor_url`,
   `require_rekor`, `trust_insecure_rekor`.
-- **EpistemicGraph methods:** `assert_claim`, `query`, `query_for_llm`,
-  `get_claim`, `validate`, `refresh_unresolved`, `refresh_unsigned`,
-  `enroll_validator`, `list_validators`, `get_tools`, `close`.
+- **EpistemicGraph methods:** `assert_claim`, `query`, `search`,
+  `query_for_llm`, `get_claim`, `validate`, `refresh_unresolved`,
+  `refresh_unsigned`, `enroll_validator`, `list_validators`,
+  `get_validator_reputation`, `get_tools`, `close`.
 - **`get_tools(generated_by="agent/...")`** returns
   `[query_graph, assert_finding]` as plain Python callables. One-line
   wrap for Anthropic SDK, OpenAI SDK, LangChain, LangGraph, CrewAI,
   AutoGen, LlamaIndex, PydanticAI, Smol Agents.
 - **`mareforma.schema()`** — runtime introspection of valid values,
   defaults, state transitions, and schema version.
+- **`mareforma.restore(project_root)`** — rebuild a fresh `graph.db`
+  from `claims.toml` for catastrophic-loss recovery. Fresh-only,
+  fail-all-or-nothing on signature verification.
 - **CLI:** `mareforma bootstrap`, `mareforma validator add` /
-  `validator list`, `mareforma claim add/list/show/update/validate`,
+  `validator list` (with `--type human|llm`),
+  `mareforma claim add/list/show/update/validate`,
   `mareforma status`, `mareforma export [--bundle]`,
-  `mareforma verify <bundle>`.
+  `mareforma verify <bundle>`, `mareforma restore [<toml-path>]`.
+
+### Validator type and reputation (MF-016 / MF-017)
+
+- **Validator type signal.** `validators.validator_type TEXT
+  CHECK IN ('human','llm')`, bound into the signed enrollment
+  envelope. Default `'human'`. The substrate refuses promotion past
+  REPLICATED on an LLM-typed validator's signature alone
+  (`LLMValidatorPromotionError`); a human-typed co-signer is required.
+  Self-validation (claim signer == validation signer) is also refused
+  (`SelfValidationError`).
+- **Reputation-aware retrieval.** `query()` and `search()` gain
+  `include_unverified: bool = False`. PRELIMINARY claims whose signing
+  key is not in the validators table are excluded by default. Result
+  dicts carry derived `validator_reputation` (count of ESTABLISHED
+  claims signed by the same validator) and `generator_enrolled` (bool).
+  `graph.get_validator_reputation()` returns the bulk
+  `{keyid: count}` map.
+
+### Full-text search (MF-009)
+
+- **FTS5 over claim text.** New `claims_fts` virtual table
+  (`unicode61` tokenizer, diacritics folded) synced with `claims` via
+  three INSERT/DELETE/UPDATE-of-text triggers. New `graph.search()`
+  method exposes FTS5 ranked match. Phrase, prefix, boolean, and
+  proximity operators all supported. Pure-wildcard queries refused.
+
+### claims.toml round-trip + restore
+
+- **claims.toml format extended.** A `[validators]` section now
+  travels alongside `[claims]`, carrying signed enrollment envelopes
+  so the restore path can verify the chain. Old files with no
+  `[validators]` section continue to work as unsigned-mode.
+- **`mareforma restore` (CLI + Python API).** Fresh-only rebuild from
+  claims.toml. Refuses non-empty `graph.db`. Verifies every signature
+  before any row is inserted. New `RestoreError` with `.kind` field
+  naming the failure mode (`graph_not_empty`, `toml_not_found`,
+  `toml_malformed`, `enrollment_unverified`, `claim_unverified`,
+  `mode_inconsistent`, `orphan_signer`). Adversarial test class
+  proves the round-trip catches tampered text, mutated signature
+  bytes, missing signatures in signed-mode graphs, orphan signers,
+  and validator-row tampering.
+- **`_backup_claims_toml` failure to stderr at ERROR-level** (was
+  `warnings.warn`, which production loggers routinely suppress).
+  graph.db remains authoritative.
 
 ### Removed
 

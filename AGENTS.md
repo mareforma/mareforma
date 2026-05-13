@@ -106,20 +106,72 @@ support level (descending) then recency (descending).
 | `min_support` | `str \| None` | `None` | Minimum support level: `PRELIMINARY` \| `REPLICATED` \| `ESTABLISHED` |
 | `classification` | `str \| None` | `None` | Filter by classification. |
 | `limit` | `int` | `20` | Maximum results. |
+| `include_unverified` | `bool` | `False` | When `False`, PRELIMINARY claims whose signing key is not in the validators table are excluded. Pass `True` to surface unverified preliminary claims. |
 
 Each dict contains: `claim_id`, `text`, `classification`, `support_level`,
 `idempotency_key`, `validated_by`, `validated_at`, `status`, `source_name`,
 `generated_by`, `supports_json`, `contradicts_json`, `comparison_summary`,
 `branch_id`, `unresolved`, `signature_bundle`, `transparency_logged`,
-`created_at`, `updated_at`.
+`validation_signature`, `validator_keyid`, `created_at`, `updated_at`.
+
+Plus two reputation projections computed at query time:
+
+- `validator_reputation: int` — for ESTABLISHED rows, the count of
+  ESTABLISHED claims signed by the same validator. `0` for non-ESTABLISHED.
+- `generator_enrolled: bool` — `True` iff the claim's signing keyid is
+  in the validators table.
 
 **Raises:** `ValueError` if `min_support` or `classification` is invalid.
+
+---
+
+### `graph.search(query, *, ...) → list[dict]`
+
+Full-text search over claim text using SQLite FTS5 (`unicode61` tokenizer,
+diacritics folded). Returns claim dicts ordered by FTS5 rank.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `query` | `str` | required | FTS5 MATCH expression. Supports phrase (`"epistemic graph"`), prefix (`gene*`), boolean (`A OR B`), proximity (`A NEAR B`). Pure-wildcard queries refused. |
+| `min_support` | `str \| None` | `None` | Same as `query()`. |
+| `classification` | `str \| None` | `None` | Same as `query()`. |
+| `limit` | `int` | `20` | Maximum results. |
+| `include_unverified` | `bool` | `False` | Same as `query()`. |
+
+Same result shape and projection as `query()`. Difference: `query()` uses
+LIKE substring matching; `search()` uses FTS5 ranked match.
+
+**Raises:** `ValueError` on empty / pure-wildcard / malformed FTS5 syntax.
+
+---
+
+### `graph.get_validator_reputation() → dict[str, int]`
+
+Returns `{validator_keyid: count}` for every enrolled validator. Count is
+the number of ESTABLISHED claims whose validation envelope was signed by
+that keyid. Validators with zero promotions appear with `count=0`. Derived
+state — recomputed on every call; never cached.
 
 ---
 
 ### `graph.get_claim(claim_id) → dict | None`
 
 Return a single claim dict by ID, or `None` if not found.
+
+---
+
+### `mareforma.restore(project_root, *, claims_toml=None) → dict`
+
+Rebuild a fresh `graph.db` from `claims.toml` (catastrophic-loss recovery).
+Refuses to run if the target `graph.db` already contains claims —
+fresh-only, never merge. Every signature is verified before any row is
+inserted; fail-all-or-nothing.
+
+Returns `{"validators_restored": N, "claims_restored": M}`.
+
+**Raises:** `mareforma.db.RestoreError` with a `.kind` field: `graph_not_empty`,
+`toml_not_found`, `toml_malformed`, `enrollment_unverified`,
+`claim_unverified`, `mode_inconsistent`, `orphan_signer`.
 
 ---
 
@@ -382,6 +434,7 @@ enrolled key loaded:
 
 ```bash
 mareforma validator add --pubkey ./alice.pub.pem --identity alice@lab.example
+mareforma validator add --pubkey ./bot.pub.pem --identity reviewer-bot --type llm
 mareforma validator list
 ```
 
@@ -391,8 +444,12 @@ Or programmatically:
 with mareforma.open() as graph:
     alice_pem = open("./alice.pub.pem", "rb").read()
     graph.enroll_validator(alice_pem, identity="alice@lab.example")
+    bot_pem = open("./bot.pub.pem", "rb").read()
+    graph.enroll_validator(
+        bot_pem, identity="reviewer-bot", validator_type="llm",
+    )
     for row in graph.list_validators():
-        print(row["identity"], row["keyid"])
+        print(row["identity"], row["validator_type"], row["keyid"])
 ```
 
 Each enrollment is signed by the parent validator (root for the first
@@ -401,6 +458,32 @@ additions, then any already-enrolled key thereafter). On read,
 verifies every link's enrollment envelope against the parent's pubkey
 before accepting the validator — a row planted via direct sqlite
 INSERT with a fabricated parent does not pass.
+
+**Validator type — `human` vs `llm`.** Every validator carries a
+self-declared `validator_type` field (`'human'` default, or `'llm'`),
+bound into the signed enrollment envelope. This is an honesty signal,
+not a security gate — there is no external attestation of whether a
+key is "really" a human or "really" a bot. The substrate uses it for
+one rule: a validator with `validator_type='llm'` may sign validation
+envelopes, but the substrate refuses to promote a claim to ESTABLISHED
+on its signature alone — both via `graph.validate()` (raises
+`LLMValidatorPromotionError`) and via the seed-claim bootstrap (same
+exception). To promote, an enrolled `human` validator must co-sign
+or re-sign. The substrate also refuses self-validation when the
+calling signer's keyid equals the claim's `signature_bundle` signing
+keyid (raises `SelfValidationError`) — promotion is always an
+external-witnessing event, regardless of validator type.
+
+The signal is **self-declared by each validator about itself**. The
+parent's type does not constrain the child's type — an LLM-typed root
+could enroll a self-declared 'human' child, and that child would have
+full ESTABLISHED-promotion authority. Mareforma's honesty signal is
+load-bearing only when the bootstrap operator types themselves
+correctly. If the project root is a person, the human-witnessed
+guarantee holds for everyone the root enrolls. If the project root
+is a bot lying about being a human, the guarantee is moot — but so
+is the entire trust chain, because the root is the local-trust
+anchor by design.
 
 **Local-trust scope.** The chain anchors at a self-signed row inside
 the project's own `graph.db`. A verifier who trusts that file's
@@ -468,6 +551,46 @@ namespacing means schema evolution to v2 carries a new predicate type
 without breaking v1 verifiers. Tampered claim text — or even a
 re-signed bundle whose predicate was edited — fails the per-claim
 subject digest check.
+
+---
+
+## Restoring from claims.toml
+
+Every claim or validator mutation rewrites the project's `claims.toml`
+to a complete snapshot of the trust ladder. This file is the source
+of truth for *catastrophic-loss recovery* — if `graph.db` is corrupt
+or missing and the `claims.toml` survives, the project can be rebuilt.
+`claims.toml` is **not a backup** of the prev_hash chain (the chain
+recomputes from the same inputs in the same order, so it matches if
+the file is intact, but the file itself doesn't carry the chain
+values).
+
+```bash
+# Catastrophic-loss recovery — graph.db is gone, claims.toml survives:
+mareforma restore                     # uses ./claims.toml
+mareforma restore backups/state.toml  # explicit source
+```
+
+Restore is **fresh-only** — it refuses to run if the target
+`graph.db` already contains claims. Merge semantics are out of scope
+(status drift, supports[] divergence, and validator chain conflicts
+have no clean answers in v0.3.0). Wipe `graph.db` first if you really
+mean to overwrite.
+
+Every signature is verified before any row is inserted: enrollment
+envelopes against parent keys, claim bundles against enrolled signers,
+validation envelopes against validator keys. The first failure rolls
+back the entire transaction. The Python API is `mareforma.restore()`:
+
+```python
+result = mareforma.restore("/path/to/project")
+# {'validators_restored': 3, 'claims_restored': 47}
+```
+
+`RestoreError` has a `.kind` field naming the failure mode:
+`graph_not_empty`, `toml_not_found`, `toml_malformed`,
+`enrollment_unverified`, `claim_unverified`, `mode_inconsistent`,
+`orphan_signer`.
 
 ---
 

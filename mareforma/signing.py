@@ -97,9 +97,15 @@ _MAX_REKOR_RESPONSE_SIZE = 64 * 1024
 
 
 _PAYLOAD_TYPE = "application/vnd.mareforma.claim+json"
-_PAYLOAD_TYPE_VALIDATOR_ENROLLMENT = "application/vnd.mareforma.validator-enrollment+json"
-_PAYLOAD_TYPE_VALIDATION = "application/vnd.mareforma.validation+json"
-_PAYLOAD_TYPE_SEED = "application/vnd.mareforma.seed+json"
+PAYLOAD_TYPE_VALIDATOR_ENROLLMENT = "application/vnd.mareforma.validator-enrollment+json"
+PAYLOAD_TYPE_VALIDATION = "application/vnd.mareforma.validation+json"
+PAYLOAD_TYPE_SEED = "application/vnd.mareforma.seed+json"
+
+# Private aliases retained so existing callers don't break in this
+# release cycle. New code should import the public names above.
+_PAYLOAD_TYPE_VALIDATOR_ENROLLMENT = PAYLOAD_TYPE_VALIDATOR_ENROLLMENT
+_PAYLOAD_TYPE_VALIDATION = PAYLOAD_TYPE_VALIDATION
+_PAYLOAD_TYPE_SEED = PAYLOAD_TYPE_SEED
 
 # Fields included in the signed payload of a claim. Sorted at envelope build
 # time so the signature is order-stable across writers. Public so
@@ -118,10 +124,14 @@ SIGNED_FIELDS = (
 )
 
 # Fields included in the signed payload of a validator enrollment.
+# ``validator_type`` is bound here so a verifier can detect post-hoc
+# tampering of a row from 'llm' to 'human' (or vice versa) — the value
+# is part of what the parent signed off on at enroll time.
 _ENROLLMENT_FIELDS = (
     "keyid",
     "pubkey_pem",
     "identity",
+    "validator_type",
     "enrolled_at",
     "enrolled_by_keyid",
 )

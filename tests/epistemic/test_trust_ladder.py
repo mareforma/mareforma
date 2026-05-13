@@ -60,6 +60,23 @@ def open_signed_graph(tmp_path: Path):
     return mareforma.open(tmp_path, key_path=key_path)
 
 
+def _bootstrap_validator_key(tmp_path: Path) -> Path:
+    """Bootstrap a second signing key — the substrate refuses self-validation,
+    so promoting a REPLICATED claim needs a key distinct from the signer."""
+    from mareforma import signing as _signing
+    key_path = tmp_path / "validator.key"
+    if not key_path.exists():
+        _signing.bootstrap_key(key_path)
+    return key_path
+
+
+def _validator_pubkey_pem(key_path: Path) -> bytes:
+    from mareforma import signing as _signing
+    return _signing.public_key_to_pem(
+        _signing.load_private_key(key_path).public_key(),
+    )
+
+
 # ---------------------------------------------------------------------------
 # validated_by is a cosmetic label (the keyid in validation_signature is truth)
 # ---------------------------------------------------------------------------
@@ -75,6 +92,7 @@ class TestTrustLaundering:
         check ``validation_signature``'s keyid against the validators
         table if they want to know who actually validated.
         """
+        validator_key_path = _bootstrap_validator_key(tmp_path)
         with open_signed_graph(tmp_path) as g:
             upstream = g.assert_claim("upstream reference", generated_by="seed", seed=True)
             id_a = g.assert_claim(
@@ -89,10 +107,14 @@ class TestTrustLaundering:
             )
             claim = g.get_claim(id_a)
             assert claim["support_level"] == "REPLICATED"
+            g.enroll_validator(
+                _validator_pubkey_pem(validator_key_path), identity="v",
+            )
 
-            # The label "attacker@example.org" is stored verbatim in
-            # validated_by, but the validator's real keyid lives in
-            # validation_signature.
+        # The label "attacker@example.org" is stored verbatim in
+        # validated_by, but the validator's real keyid lives in
+        # validation_signature.
+        with mareforma.open(tmp_path, key_path=validator_key_path) as g:
             g.validate(id_a, validated_by="attacker@example.org")
 
             claim = g.get_claim(id_a)
@@ -102,11 +124,16 @@ class TestTrustLaundering:
 
     def test_validate_accepts_any_validated_by_string(self, tmp_path: Path) -> None:
         """validate() stores whatever display string is passed."""
+        validator_key_path = _bootstrap_validator_key(tmp_path)
         with open_signed_graph(tmp_path) as g:
             upstream = g.assert_claim("prior", generated_by="seed", seed=True)
             rep_id = g.assert_claim("finding", supports=[upstream], generated_by="A")
             g.assert_claim("finding", supports=[upstream], generated_by="B")
+            g.enroll_validator(
+                _validator_pubkey_pem(validator_key_path), identity="v",
+            )
 
+        with mareforma.open(tmp_path, key_path=validator_key_path) as g:
             g.validate(rep_id, validated_by="NOT_A_REAL_PERSON_12345")
 
             claim = g.get_claim(rep_id)

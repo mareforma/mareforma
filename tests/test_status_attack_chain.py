@@ -36,6 +36,22 @@ def _key(tmp_path: Path) -> Path:
     return key_path
 
 
+def _validator_key(tmp_path: Path) -> Path:
+    """Second key used for validation — the substrate refuses self-validation,
+    so promotion tests need a key distinct from the one signing claims."""
+    key_path = tmp_path / "_status_validator_key"
+    if not key_path.exists():
+        _signing.bootstrap_key(key_path)
+    return key_path
+
+
+def _enroll_validator(graph, validator_key_path: Path, identity: str = "v") -> None:
+    pem = _signing.public_key_to_pem(
+        _signing.load_private_key(validator_key_path).public_key(),
+    )
+    graph.enroll_validator(pem, identity=identity)
+
+
 def _seeded_upstream(graph) -> str:
     return graph.assert_claim(
         "seeded prior literature",
@@ -134,6 +150,10 @@ class TestValidateRefusesNonOpen:
             # Flip a to contested via the editorial update path.
             from mareforma.db import update_claim
             update_claim(g._conn, g._root, a, status="contested")
+            _enroll_validator(g, _validator_key(tmp_path))
+
+        # Validator re-opens and tries to promote.
+        with mareforma.open(tmp_path, key_path=_validator_key(tmp_path)) as g:
             with pytest.raises(ValueError, match="status='contested'"):
                 g.validate(a, validated_by="reviewer")
             # b is still open and still validatable.

@@ -241,12 +241,28 @@ class TestClaimValidate:
             _signing.bootstrap_key(key_path)
 
     def _make_replicated_claim_id(self) -> tuple[str, str]:
-        """Return (prior_id, replicated_id) using the Python API in cwd."""
+        """Return (prior_id, replicated_id).
+
+        Claims are asserted under a generator key distinct from the XDG
+        validator key, then XDG is enrolled as a second validator. The
+        substrate refuses self-validation; the CLI must run as a
+        different signer from the one that signed the claim.
+        """
         import mareforma
-        with mareforma.open() as g:
+        from mareforma import signing as _signing
+
+        gen_key_path = Path("generator.key")
+        if not gen_key_path.exists():
+            _signing.bootstrap_key(gen_key_path)
+
+        with mareforma.open(key_path=gen_key_path) as g:
             prior = g.assert_claim("upstream reference", generated_by="seed", seed=True)
             rep_id = g.assert_claim("finding A", supports=[prior], generated_by="agent-A")
             g.assert_claim("finding B", supports=[prior], generated_by="agent-B")
+            xdg_pem = _signing.public_key_to_pem(
+                _signing.load_private_key(_signing.default_key_path()).public_key(),
+            )
+            g.enroll_validator(xdg_pem, identity="xdg-validator")
         return prior, rep_id
 
     def test_validate_success(self, tmp_path: Path) -> None:

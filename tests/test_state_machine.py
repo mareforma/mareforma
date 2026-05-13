@@ -133,16 +133,22 @@ class TestUpdateTrigger:
             conn.close()
 
     def test_established_downgrade_rejected(self, tmp_path: Path) -> None:
-        with mareforma.open(tmp_path, key_path=tmp_path / "k") as g:
-            from mareforma import signing as _sig
-            _sig.bootstrap_key(tmp_path / "k") if not (tmp_path / "k").exists() else None
         from mareforma import signing as _sig
-        if not (tmp_path / "k").exists():
-            _sig.bootstrap_key(tmp_path / "k")
-        with mareforma.open(tmp_path, key_path=tmp_path / "k") as g:
+        gen_key = tmp_path / "gen.key"
+        val_key = tmp_path / "val.key"
+        if not gen_key.exists():
+            _sig.bootstrap_key(gen_key)
+        if not val_key.exists():
+            _sig.bootstrap_key(val_key)
+        val_pem = _sig.public_key_to_pem(
+            _sig.load_private_key(val_key).public_key(),
+        )
+        with mareforma.open(tmp_path, key_path=gen_key) as g:
             upstream = g.assert_claim("upstream", generated_by="seed", seed=True)
             id_a = g.assert_claim("a", supports=[upstream], generated_by="A")
             g.assert_claim("b", supports=[upstream], generated_by="B")
+            g.enroll_validator(val_pem, identity="v")
+        with mareforma.open(tmp_path, key_path=val_key) as g:
             g.validate(id_a)
             # Now id_a is ESTABLISHED. Attempt a direct UPDATE to PRELIMINARY.
             conn = g._conn
@@ -188,12 +194,21 @@ class TestCheckConstraint:
         suspenders. A direct UPDATE that tries to NULL validation_signature
         on an ESTABLISHED row violates CHECK."""
         from mareforma import signing as _sig
-        if not (tmp_path / "k").exists():
-            _sig.bootstrap_key(tmp_path / "k")
-        with mareforma.open(tmp_path, key_path=tmp_path / "k") as g:
+        gen_key = tmp_path / "gen.key"
+        val_key = tmp_path / "val.key"
+        if not gen_key.exists():
+            _sig.bootstrap_key(gen_key)
+        if not val_key.exists():
+            _sig.bootstrap_key(val_key)
+        val_pem = _sig.public_key_to_pem(
+            _sig.load_private_key(val_key).public_key(),
+        )
+        with mareforma.open(tmp_path, key_path=gen_key) as g:
             upstream = g.assert_claim("upstream", generated_by="seed", seed=True)
             id_a = g.assert_claim("a", supports=[upstream], generated_by="A")
             g.assert_claim("b", supports=[upstream], generated_by="B")
+            g.enroll_validator(val_pem, identity="v")
+        with mareforma.open(tmp_path, key_path=val_key) as g:
             g.validate(id_a)
             with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint"):
                 g._conn.execute(

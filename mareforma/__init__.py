@@ -185,9 +185,54 @@ def schema() -> dict:
 from mareforma.prompt_safety import safe_for_llm, sanitize_for_llm, wrap_untrusted
 
 
+def restore(
+    project_root: "str | Path",
+    *,
+    claims_toml: "str | Path | None" = None,
+) -> dict:
+    """Rebuild a fresh graph.db from claims.toml.
+
+    Catastrophic-loss recovery: the project's ``graph.db`` is missing
+    or corrupt, the operator has a recent ``claims.toml``, and the
+    graph must be reconstructed. Restore is **fresh-only** — it
+    refuses to run when the target ``graph.db`` already contains
+    claims. Wipe ``graph.db`` first if overwriting is the intent.
+
+    Every signature is verified: validator enrollment envelopes
+    against their parent keys, claim signature bundles against the
+    enrolled signer keys, and validation envelopes against the
+    validator keys. Any failure rolls back the entire transaction —
+    fail-all-or-nothing.
+
+    Parameters
+    ----------
+    project_root:
+        Project directory. ``graph.db`` is reconstructed under
+        ``<project_root>/.mareforma/``.
+    claims_toml:
+        Path to the source TOML. Defaults to
+        ``<project_root>/claims.toml``.
+
+    Returns
+    -------
+    dict
+        ``{"validators_restored": N, "claims_restored": M}``.
+
+    Raises
+    ------
+    mareforma.db.RestoreError
+        With a ``.kind`` field naming the failure mode: graph_not_empty,
+        toml_not_found, toml_malformed, enrollment_unverified,
+        claim_unverified, mode_inconsistent, or orphan_signer.
+    """
+    from mareforma.db import restore as _restore
+    return _restore(project_root, claims_toml=claims_toml)
+
+
 __all__ = [
     "open",
     "schema",
+    "restore",
     "safe_for_llm",
     "sanitize_for_llm",
     "wrap_untrusted",

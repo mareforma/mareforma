@@ -70,6 +70,27 @@ def open_signed_graph(tmp_path: Path):
     return mareforma.open(tmp_path, key_path=key_path)
 
 
+def _bootstrap_validator_key(tmp_path: Path) -> Path:
+    """Bootstrap a second signing key and return its path.
+
+    The substrate refuses self-validation, so tests that need to promote
+    a REPLICATED claim under a key distinct from the one that signed the
+    claim use this helper plus an explicit ``enroll_validator`` call.
+    """
+    from mareforma import signing as _signing
+    key_path = tmp_path / "validator.key"
+    if not key_path.exists():
+        _signing.bootstrap_key(key_path)
+    return key_path
+
+
+def _validator_pubkey_pem(key_path: Path) -> bytes:
+    from mareforma import signing as _signing
+    return _signing.public_key_to_pem(
+        _signing.load_private_key(key_path).public_key(),
+    )
+
+
 # ---------------------------------------------------------------------------
 # REPLICATED — genuine independent convergence
 # ---------------------------------------------------------------------------
@@ -392,6 +413,7 @@ class TestEstablishedGate:
                 graph.validate(claim_id)
 
     def test_validate_on_replicated_succeeds(self, tmp_path: Path) -> None:
+        validator_key_path = _bootstrap_validator_key(tmp_path)
         with open_signed_graph(tmp_path) as graph:
             upstream = graph.assert_claim("upstream", generated_by="seed", seed=True)
             id_a = graph.assert_claim(
@@ -401,6 +423,11 @@ class TestEstablishedGate:
                 "claim B", generated_by="agent/model-b/lab_b", supports=[upstream]
             )
             # id_a is now REPLICATED
+            graph.enroll_validator(
+                _validator_pubkey_pem(validator_key_path), identity="v",
+            )
+
+        with mareforma.open(tmp_path, key_path=validator_key_path) as graph:
             graph.validate(id_a, validated_by="reviewer@example.org")
             c = graph.get_claim(id_a)
 
