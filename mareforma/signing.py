@@ -33,31 +33,54 @@ Rekor submission is synchronous and blocks ``assert_claim`` for up to
 unsigned (no key) or signed-without-Rekor (``rekor_url=None``) and call
 ``EpistemicGraph.refresh_unsigned()`` later.
 
-Envelope format
----------------
-A simplified DSSE shape. The payload is canonical JSON of the signed claim
-fields; the signature covers the payload bytes directly. (No PAE wrapping
-yet — that switch lands when full sigstore-bundle compatibility ships.)
-
-::
+Envelope format — DSSE v1 with in-toto Statement v1
+----------------------------------------------------
+Every claim envelope is a DSSE v1 envelope whose payload is a
+canonical in-toto Statement v1::
 
     {
-      "payloadType": "application/vnd.mareforma.claim+json",
-      "payload":     "<base64 of canonical JSON>",
-      "signatures": [
+      "payloadType": "application/vnd.in-toto+json",
+      "payload":     "<base64 of canonicalize(Statement v1)>",
+      "signatures":  [
         {"keyid": "<hex sha256 of pubkey bytes>", "sig": "<base64 sig>"}
       ],
-      "rekor": {"uuid": ..., "logIndex": ..., "integratedTime": ...}
+      "rekor":       {"uuid": ..., "logIndex": ..., "integratedTime": ...}
     }
 
-The ``rekor`` block is added by :func:`attach_rekor_entry` after a successful
-transparency-log submission; it does not affect signature verification.
+The Statement v1 payload is::
 
-The signed payload always contains exactly these fields (sorted, no nulls):
-``claim_id``, ``text``, ``classification``, ``generated_by``, ``supports``,
-``contradicts``, ``source_name``, ``created_at``. Including ``created_at``
-binds the signature to an authorial timestamp; the Rekor entry contributes
-an independent witnessed time.
+    {
+      "_type":         "https://in-toto.io/Statement/v1",
+      "subject":       [{"name": "mareforma:claim:<id>",
+                         "digest": {"sha256": "<text_sha256>"}}],
+      "predicateType": "https://mareforma.dev/claim/v1",
+      "predicate":     { <claim fields + GRADE EvidenceVector> }
+    }
+
+The signature covers the DSSE Pre-Authentication Encoding (PAE) of
+the payload, not the payload bytes alone. PAE is::
+
+    b"DSSEv1 " + len(payloadType) + b" " + payloadType
+              + b" " + len(body)  + b" " + body
+
+so a signature on (typeA, payload) cannot be replayed as a signature
+on (typeB, payload) even when the bytes are otherwise identical.
+
+The signed predicate carries exactly: ``claim_id``, ``text``,
+``classification``, ``generated_by``, ``supports``, ``contradicts``,
+``source_name``, ``artifact_hash``, ``created_at`` (the contract in
+:data:`SIGNED_FIELDS`) plus ``evidence`` (a GRADE EvidenceVector
+serialized via :meth:`mareforma._evidence.EvidenceVector.to_dict`).
+
+The ``rekor`` block is added by :func:`attach_rekor_entry` after a
+successful transparency-log submission; it does not affect signature
+verification. Including ``created_at`` binds the signature to an
+authorial timestamp; the Rekor entry contributes an independent
+witnessed time.
+
+Auxiliary envelopes (validator enrollment, validation events, seed
+attestations) reuse the DSSE PAE envelope but with mareforma-specific
+payload types and flat record payloads — they are not in-toto Statements.
 """
 
 from __future__ import annotations
@@ -96,21 +119,26 @@ _REKOR_USER_AGENT = (
 _MAX_REKOR_RESPONSE_SIZE = 64 * 1024
 
 
-_PAYLOAD_TYPE = "application/vnd.mareforma.claim+json"
+# Claim envelopes carry an in-toto Statement v1 as the signed payload.
+# payloadType is the IANA-style media type used by Sigstore / SLSA /
+# GUAC, so off-the-shelf in-toto tooling can introspect a mareforma
+# claim envelope without a mareforma-specific verifier.
+PAYLOAD_TYPE_CLAIM = "application/vnd.in-toto+json"
 PAYLOAD_TYPE_VALIDATOR_ENROLLMENT = "application/vnd.mareforma.validator-enrollment+json"
 PAYLOAD_TYPE_VALIDATION = "application/vnd.mareforma.validation+json"
 PAYLOAD_TYPE_SEED = "application/vnd.mareforma.seed+json"
 
-# Private aliases retained so existing callers don't break in this
-# release cycle. New code should import the public names above.
+# Private aliases retained so existing internal callers don't break.
+# ``_PAYLOAD_TYPE`` was the old name for the claim payload type.
+_PAYLOAD_TYPE = PAYLOAD_TYPE_CLAIM
 _PAYLOAD_TYPE_VALIDATOR_ENROLLMENT = PAYLOAD_TYPE_VALIDATOR_ENROLLMENT
 _PAYLOAD_TYPE_VALIDATION = PAYLOAD_TYPE_VALIDATION
 _PAYLOAD_TYPE_SEED = PAYLOAD_TYPE_SEED
 
-# Fields included in the signed payload of a claim. Sorted at envelope build
-# time so the signature is order-stable across writers. Public so
-# db.update_claim can refuse mutations on these fields when the row already
-# carries a signature.
+# Predicate fields bound by a claim signature. After Statement v1 these
+# live inside ``statement.predicate``; the tuple is the contract restore
+# uses to cross-check signature-vs-row consistency. Public so callers
+# (db.update_claim, restore, exporters) all share one source of truth.
 SIGNED_FIELDS = (
     "claim_id",
     "text",
@@ -466,66 +494,114 @@ def public_key_from_pem(pem: bytes) -> Ed25519PublicKey:
 # Envelope build / verify
 # ---------------------------------------------------------------------------
 
-def canonical_payload(claim_fields: dict[str, Any]) -> bytes:
-    """Canonicalise a claim into the bytes that get signed.
+def dsse_pae(payload_type: str, body: bytes) -> bytes:
+    """Pre-Authentication Encoding per DSSE v1 spec.
 
-    Only keys in :data:`SIGNED_FIELDS` are included. ``supports``/``contradicts``
-    default to ``[]``; ``source_name`` defaults to ``None``. Output is JSON
-    with sorted keys and no whitespace — same input → same bytes → same
-    signature. Public so verifiers can independently re-derive the bytes
-    that should be signed.
+    Returns ``b"DSSEv1 <len(type)> <type> <len(body)> <body>"``. The
+    signature covers these bytes — never the payload alone — so an
+    attacker cannot take a valid signature on (typeA, payload) and
+    re-attribute it as a signature on (typeB, payload).
+
+    Reference: https://github.com/secure-systems-lab/dsse/blob/master/protocol.md
     """
-    payload = {
-        "claim_id": claim_fields["claim_id"],
-        "text": claim_fields["text"],
-        "classification": claim_fields["classification"],
-        "generated_by": claim_fields["generated_by"],
-        "supports": list(claim_fields.get("supports") or []),
-        "contradicts": list(claim_fields.get("contradicts") or []),
-        "source_name": claim_fields.get("source_name"),
-        "artifact_hash": claim_fields.get("artifact_hash"),
-        "created_at": claim_fields["created_at"],
-    }
-    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    pt_bytes = payload_type.encode("utf-8")
+    return (
+        b"DSSEv1 "
+        + str(len(pt_bytes)).encode("ascii") + b" " + pt_bytes
+        + b" " + str(len(body)).encode("ascii") + b" " + body
+    )
+
+
+def canonical_statement(
+    claim_fields: dict[str, Any],
+    evidence: dict[str, Any],
+) -> bytes:
+    """Canonical bytes of the in-toto Statement v1 for a claim.
+
+    These bytes are what gets signed (after DSSE PAE wrap) and what
+    chain_hash binds. Same input → same bytes — across Python versions,
+    dict orderings, and Unicode normalization forms.
+
+    Callers: ``sign_claim`` for envelope construction; ``db._chain_input_for_claim``
+    for chain integrity; restore for adversarial re-derivation.
+    """
+    from . import _statement
+    stmt = _statement.build_statement(
+        claim_id=claim_fields["claim_id"],
+        text=claim_fields["text"],
+        classification=claim_fields["classification"],
+        generated_by=claim_fields["generated_by"],
+        supports=claim_fields.get("supports") or [],
+        contradicts=claim_fields.get("contradicts") or [],
+        source_name=claim_fields.get("source_name"),
+        artifact_hash=claim_fields.get("artifact_hash"),
+        created_at=claim_fields["created_at"],
+        evidence=evidence,
+    )
+    from ._canonical import canonicalize
+    return canonicalize(stmt)
+
+
+def canonical_payload(claim_fields: dict[str, Any]) -> bytes:
+    """Backward-compat shim: returns canonical Statement v1 bytes with
+    an empty evidence vector.
+
+    Retained for callers that don't yet thread EvidenceVector through.
+    New code should call :func:`canonical_statement` directly with the
+    actual evidence dict so chain_hash + signature match.
+    """
+    return canonical_statement(claim_fields, evidence={})
 
 
 def _canonical_payload(claim_fields: dict[str, Any]) -> bytes:
-    """Legacy private alias retained for internal callers; use canonical_payload."""
+    """Legacy private alias retained for internal callers."""
     return canonical_payload(claim_fields)
 
 
 def sign_claim(
     claim_fields: dict[str, Any],
     private_key: Ed25519PrivateKey,
+    *,
+    evidence: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    """Build a signed envelope for a claim. Returns the envelope dict.
+    """Build a DSSE-signed in-toto Statement v1 envelope for a claim.
 
-    The caller is responsible for JSON-encoding the returned dict before
-    persisting to the ``signature_bundle`` column.
+    Returns a DSSE envelope dict::
+
+        {"payloadType": "application/vnd.in-toto+json",
+         "payload":     "<base64 of canonicalize(statement)>",
+         "signatures":  [{"keyid": "...", "sig": "<base64 of sign(PAE)>"}]}
+
+    where ``statement`` is the in-toto Statement v1 produced by
+    :func:`mareforma._statement.build_statement` and the signature
+    covers the DSSE Pre-Authentication Encoding (not the payload alone).
+
+    Parameters
+    ----------
+    claim_fields
+        Must contain every key in :data:`SIGNED_FIELDS`.
+    private_key
+        Ed25519 private key.
+    evidence
+        Optional GRADE EvidenceVector serialized via ``EvidenceVector.to_dict()``.
+        Defaults to ``{}`` (an empty vector that decodes back into the
+        all-zeros default).
     """
-    payload_bytes = _canonical_payload(claim_fields)
-    sig = private_key.sign(payload_bytes)
-    keyid = public_key_id(private_key.public_key())
-    return {
-        "payloadType": _PAYLOAD_TYPE,
-        "payload": base64.standard_b64encode(payload_bytes).decode("ascii"),
-        "signatures": [
-            {
-                "keyid": keyid,
-                "sig": base64.standard_b64encode(sig).decode("ascii"),
-            }
-        ],
-    }
+    body = canonical_statement(claim_fields, evidence or {})
+    return _build_envelope(body, private_key, payload_type=PAYLOAD_TYPE_CLAIM)
 
 
 def _canonical_record(fields: tuple[str, ...], record: dict[str, Any]) -> bytes:
     """Canonicalise an arbitrary record using a fixed field list.
 
-    Sorted keys, no whitespace. Generalises :func:`canonical_payload` for
-    envelope kinds other than claim (validator enrollment, validation).
+    Sorted keys, no whitespace. Used for non-claim envelope payloads
+    (validator enrollment, validation, seed) which are not in-toto
+    Statements but still get DSSE-PAE-signed.
     """
     payload = {name: record.get(name) for name in fields}
-    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return json.dumps(
+        payload, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
 
 
 def _build_envelope(
@@ -534,8 +610,15 @@ def _build_envelope(
     *,
     payload_type: str,
 ) -> dict[str, Any]:
-    """Sign *payload_bytes* and wrap into the standard envelope shape."""
-    sig = private_key.sign(payload_bytes)
+    """Sign *payload_bytes* via DSSE PAE and wrap into the standard envelope.
+
+    The signature covers ``dsse_pae(payload_type, payload_bytes)``, NOT
+    the payload bytes alone. This is the type-safety property of DSSE:
+    a signature on (typeA, payload) cannot be reused as a signature on
+    (typeB, payload) even when the payload bytes are identical.
+    """
+    pae = dsse_pae(payload_type, payload_bytes)
+    sig = private_key.sign(pae)
     keyid = public_key_id(private_key.public_key())
     return {
         "payloadType": payload_type,
@@ -665,27 +748,37 @@ def verify_envelope(
     if keyid != public_key_id(public_key):
         return False
 
+    # DSSE v1: signature covers PAE(payload_type, payload_bytes), not
+    # payload_bytes alone. Using the wrong message during verify would
+    # accept malformed envelopes that signed the raw payload.
+    pae = dsse_pae(declared, payload_bytes)
     try:
-        public_key.verify(sig_bytes, payload_bytes)
+        public_key.verify(sig_bytes, pae)
     except InvalidSignature:
         return False
     return True
 
 
 def envelope_payload(envelope: dict[str, Any]) -> dict[str, Any]:
-    """Decode an envelope's payload back into the claim-fields dict.
+    """Decode an envelope's payload into a dict.
+
+    For claim envelopes (``payloadType == application/vnd.in-toto+json``)
+    the result is an in-toto Statement v1 dict with ``_type``, ``subject``,
+    ``predicateType``, and ``predicate`` keys. Use
+    :func:`claim_predicate_from_envelope` to extract the predicate
+    (which contains the claim fields) in one call.
+
+    For validation / enrollment / seed envelopes the result is the flat
+    record (claim_id, validator_keyid, ...).
 
     Does NOT verify the signature — that is :func:`verify_envelope`'s job.
-    Use this only after a successful verify, or when you only need to
-    inspect the payload structure.
+    Use after a successful verify, or for structural inspection only.
 
     Raises
     ------
     InvalidEnvelopeError
         If the envelope shape is wrong, the payload cannot be decoded,
-        or the decoded JSON is not a top-level object. The dict-only
-        contract matters: callers downstream do ``payload.get(...)`` and
-        a bare JSON string would otherwise raise AttributeError.
+        or the decoded JSON is not a top-level object.
     """
     if not isinstance(envelope, dict) or "payload" not in envelope:
         raise InvalidEnvelopeError("envelope is missing 'payload'")
@@ -699,6 +792,39 @@ def envelope_payload(envelope: dict[str, Any]) -> dict[str, Any]:
             f"payload must decode to a JSON object, got {type(parsed).__name__}"
         )
     return parsed
+
+
+def claim_predicate_from_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
+    """Decode a claim envelope's Statement v1 payload and return the predicate.
+
+    The predicate carries the SIGNED_FIELDS values + ``evidence``. Use
+    this whenever a caller previously did ``envelope_payload(env)[key]``
+    on a claim envelope — after Statement v1 the keys live one level
+    deeper.
+
+    Raises
+    ------
+    InvalidEnvelopeError
+        If the envelope is not a claim envelope, or the Statement v1
+        shape is malformed.
+    """
+    payload = envelope_payload(envelope)
+    pt = envelope.get("payloadType")
+    if pt != PAYLOAD_TYPE_CLAIM:
+        raise InvalidEnvelopeError(
+            f"not a claim envelope: payloadType={pt!r} "
+            f"(expected {PAYLOAD_TYPE_CLAIM!r})"
+        )
+    if payload.get("_type") != "https://in-toto.io/Statement/v1":
+        raise InvalidEnvelopeError(
+            f"unexpected _type: {payload.get('_type')!r}"
+        )
+    predicate = payload.get("predicate")
+    if not isinstance(predicate, dict):
+        raise InvalidEnvelopeError(
+            "Statement v1 predicate missing or not a JSON object"
+        )
+    return predicate
 
 
 # ---------------------------------------------------------------------------

@@ -83,12 +83,13 @@ class TestOpenWithSigning:
             claim = graph.get_claim(claim_id)
 
         envelope = json.loads(claim["signature_bundle"])
-        payload = _signing.envelope_payload(envelope)
-        assert payload["claim_id"] == claim_id
-        assert payload["text"] == "anchor finding"
-        assert payload["supports"] == ["upstream-A", "upstream-B"]
-        assert payload["source_name"] == "experiment-42"
-        assert payload["generated_by"] == "agent/test"
+        # Statement v1 envelope — claim fields live in payload.predicate.
+        predicate = _signing.claim_predicate_from_envelope(envelope)
+        assert predicate["claim_id"] == claim_id
+        assert predicate["text"] == "anchor finding"
+        assert predicate["supports"] == ["upstream-A", "upstream-B"]
+        assert predicate["source_name"] == "experiment-42"
+        assert predicate["generated_by"] == "agent/test"
 
     def test_envelope_keyid_matches_signer_keyid(self, tmp_path):
         key_path = _bootstrap_key(tmp_path)
@@ -120,10 +121,10 @@ class TestOpenWithSigning:
 
         # Signature stored on the row still cryptographically verifies (the
         # signature was over the ORIGINAL payload), but the payload no longer
-        # matches the live row. A verifier comparing payload.text vs row.text
-        # would see the mismatch.
-        payload = _signing.envelope_payload(envelope_before)
-        assert payload["text"] == "original text"
+        # matches the live row. A verifier comparing predicate.text vs
+        # row.text sees the mismatch.
+        predicate = _signing.claim_predicate_from_envelope(envelope_before)
+        assert predicate["text"] == "original text"
 
         with mareforma.open(tmp_path, key_path=key_path) as graph:
             assert graph.get_claim(claim_id)["text"] == "tampered text"

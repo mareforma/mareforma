@@ -93,8 +93,9 @@ class TestArtifactHashSigned:
             cid = g.assert_claim("with hash", artifact_hash=HASH_A)
         row = self._load(tmp_path, cid)
         envelope = json.loads(row["signature_bundle"])
-        payload = _signing.envelope_payload(envelope)
-        assert payload["artifact_hash"] == HASH_A
+        # Statement v1: artifact_hash lives inside the predicate.
+        predicate = _signing.claim_predicate_from_envelope(envelope)
+        assert predicate["artifact_hash"] == HASH_A
 
     def test_hash_none_serialises_as_null(self, tmp_path: Path) -> None:
         key_path = tmp_path / "key"
@@ -103,20 +104,19 @@ class TestArtifactHashSigned:
             cid = g.assert_claim("no hash")
         row = self._load(tmp_path, cid)
         envelope = json.loads(row["signature_bundle"])
-        payload = _signing.envelope_payload(envelope)
-        assert "artifact_hash" in payload
-        assert payload["artifact_hash"] is None
+        predicate = _signing.claim_predicate_from_envelope(envelope)
+        assert "artifact_hash" in predicate
+        assert predicate["artifact_hash"] is None
 
     def test_tampered_hash_in_db_fails_signature_verify(self, tmp_path: Path) -> None:
         """Mutating the column without re-signing breaks the envelope check."""
+        import sqlite3
         key_path = tmp_path / "key"
         _signing.bootstrap_key(key_path)
         with mareforma.open(tmp_path, key_path=key_path) as g:
             cid = g.assert_claim("with hash", artifact_hash=HASH_A)
             signer = g._signer
             public_key = signer.public_key()
-            # Tamper: rewrite the column to a different hash. The bundle
-            # is unchanged so verification against the live row must fail.
             g._conn.execute(
                 "UPDATE claims SET artifact_hash = ? WHERE claim_id = ?",
                 (HASH_B, cid),
@@ -124,25 +124,24 @@ class TestArtifactHashSigned:
             g._conn.commit()
             row = _db.get_claim(g._conn, cid)
         envelope = json.loads(row["signature_bundle"])
-        # The envelope itself still verifies (signed bytes unchanged) — what
-        # changed is the live row. Re-derive the canonical payload from the
-        # tampered row and check it does NOT equal the envelope's payload.
-        live = _signing.canonical_payload({
+        # The envelope still verifies (signed bytes unchanged). What
+        # changed is the live row. Re-derive the canonical Statement v1
+        # bytes from the tampered row and check they do NOT equal the
+        # envelope's payload bytes.
+        import json as _json, base64 as _b64
+        evidence_dict = _json.loads(row.get("evidence_json") or "{}")
+        live = _signing.canonical_statement({
             "claim_id": cid,
             "text": row["text"],
             "classification": row["classification"],
             "generated_by": row["generated_by"],
-            "supports": json.loads(row["supports_json"] or "[]"),
-            "contradicts": json.loads(row["contradicts_json"] or "[]"),
+            "supports": _json.loads(row["supports_json"] or "[]"),
+            "contradicts": _json.loads(row["contradicts_json"] or "[]"),
             "source_name": row["source_name"],
             "artifact_hash": row["artifact_hash"],
             "created_at": row["created_at"],
-        })
-        envelope_payload_bytes = _signing.envelope_payload(envelope)
-        # Encode the envelope's payload the same way for byte-equality compare.
-        envelope_bytes = json.dumps(
-            envelope_payload_bytes, sort_keys=True, separators=(",", ":"),
-        ).encode("utf-8")
+        }, evidence_dict)
+        envelope_bytes = _b64.standard_b64decode(envelope["payload"])
         assert live != envelope_bytes, (
             "tampered live row must not match the originally-signed payload"
         )

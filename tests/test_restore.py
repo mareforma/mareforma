@@ -485,6 +485,70 @@ class TestRestoreAdversarial:
         assert restored["text"] == adversarial_text
         assert restored["source_name"] == adversarial_source
 
+    def test_tampered_evidence_vector_rejected(self, tmp_path: Path) -> None:
+        """Flip a domain in evidence_json without re-signing. The
+        envelope binds the original evidence; restore must catch the
+        signed-evidence vs row-evidence divergence."""
+        ctx = self._setup_and_wipe(tmp_path)
+        data = self._read_toml(tmp_path)
+        # Pick a signed claim whose evidence is the all-zero default
+        # and flip one domain to -1. Signature_bundle stays unchanged.
+        signed_ids = [
+            cid for cid, c in data["claims"].items()
+            if c.get("signature_bundle")
+        ]
+        assert signed_ids
+        victim = signed_ids[0]
+        # Build a tampered evidence dict — flip risk_of_bias to -1
+        # with a fabricated rationale.
+        tampered_evidence = {
+            "risk_of_bias": -1,
+            "inconsistency": 0,
+            "indirectness": 0,
+            "imprecision": 0,
+            "publication_bias": 0,
+            "large_effect": False,
+            "dose_response": False,
+            "opposing_confounding": False,
+            "rationale": {"risk_of_bias": "tampered"},
+            "reporting_compliance": [],
+        }
+        data["claims"][victim]["evidence_json"] = json.dumps(
+            tampered_evidence, sort_keys=True, separators=(",", ":"),
+        )
+        self._write_toml(tmp_path, data)
+
+        with pytest.raises(_db.RestoreError) as exc_info:
+            mareforma.restore(tmp_path)
+        assert exc_info.value.kind == "claim_unverified"
+        # Either the evidence-vector binding catches it directly, or
+        # the statement_cid cross-check does. Both messages are valid.
+        msg = str(exc_info.value).lower()
+        assert "evidence" in msg or "statement_cid" in msg
+
+    def test_swapped_statement_cid_rejected(self, tmp_path: Path) -> None:
+        """Forge statement_cid on a row. Restore re-derives the cid
+        from the row's fields + evidence; the forged value must not
+        match, raising RestoreError."""
+        ctx = self._setup_and_wipe(tmp_path)
+        data = self._read_toml(tmp_path)
+        signed_ids = [
+            cid for cid, c in data["claims"].items()
+            if c.get("signature_bundle")
+        ]
+        assert signed_ids
+        victim = signed_ids[0]
+        # Overwrite statement_cid with all-zeros. The row's other
+        # fields are unchanged, so SIGNED_FIELDS still match; only
+        # the cid re-derivation catches it.
+        data["claims"][victim]["statement_cid"] = "0" * 64
+        self._write_toml(tmp_path, data)
+
+        with pytest.raises(_db.RestoreError) as exc_info:
+            mareforma.restore(tmp_path)
+        assert exc_info.value.kind == "claim_unverified"
+        assert "statement_cid" in str(exc_info.value)
+
 
 # ---------------------------------------------------------------------------
 # CLI

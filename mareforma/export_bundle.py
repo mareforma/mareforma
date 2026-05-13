@@ -54,14 +54,19 @@ BUNDLE_PAYLOAD_TYPE = "application/vnd.in-toto+json"
 def _subject_for_claim(claim: dict) -> dict[str, Any]:
     """Build one in-toto subject entry from a claim row.
 
-    Hash material: the canonical_payload bytes of the claim (the same
-    bytes the per-claim signature is computed over). Reusing
-    ``signing.canonical_payload`` keeps bundle digests aligned with
-    per-claim signatures — a downstream tool that re-derives the
-    digest must agree with the bundle.
+    Hash material: the canonical Statement v1 bytes of the claim (the
+    same bytes the per-claim signature is computed over via DSSE PAE).
+    Reusing ``signing.canonical_statement`` keeps bundle digests
+    aligned with per-claim signatures — a downstream tool that
+    re-derives the digest from the row's fields + evidence_json must
+    agree with the bundle.
     """
     from mareforma import signing as _signing
-    chain_input = _signing.canonical_payload({
+    try:
+        evidence_dict = json.loads(claim.get("evidence_json") or "{}")
+    except (ValueError, TypeError):
+        evidence_dict = {}
+    chain_input = _signing.canonical_statement({
         "claim_id": claim["claim_id"],
         "text": claim["text"],
         "classification": claim["classification"],
@@ -71,7 +76,7 @@ def _subject_for_claim(claim: dict) -> dict[str, Any]:
         "source_name": claim.get("source_name"),
         "artifact_hash": claim.get("artifact_hash"),
         "created_at": claim["created_at"],
-    })
+    }, evidence_dict)
     digest = hashlib.sha256(chain_input).hexdigest()
     return {
         "name": f"{SUBJECT_PREFIX}{claim['claim_id']}",
@@ -243,10 +248,11 @@ def verify_bundle(
             raise BundleVerificationError(
                 f"statement:subject missing for claim {claim_id!r}"
             )
-        # Re-derive the canonical hash from the predicate's @graph
-        # representation. The export-format → canonical-payload
-        # mapping is the same as in build_statement.
-        chain_input = _signing.canonical_payload({
+        # Re-derive the canonical Statement v1 hash from the @graph
+        # node. evidence is part of the signed predicate, so the
+        # JSON-LD node carries it and verify uses the same shape that
+        # the build path used.
+        chain_input = _signing.canonical_statement({
             "claim_id": claim_id,
             "text": node.get("claimText", ""),
             "classification": node.get("classification", "INFERRED"),
@@ -256,7 +262,7 @@ def verify_bundle(
             "source_name": node.get("sourceName"),
             "artifact_hash": node.get("artifactHash"),
             "created_at": node.get("dateCreated", ""),
-        })
+        }, node.get("evidence") or {})
         expected = hashlib.sha256(chain_input).hexdigest()
         if subjects[subject_name] != expected:
             raise BundleVerificationError(

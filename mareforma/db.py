@@ -101,6 +101,38 @@ CREATE TABLE IF NOT EXISTS claims (
     validator_keyid TEXT,
     artifact_hash   TEXT,
     prev_hash       TEXT,
+    -- GRADE 5-domain EvidenceVector. Stored inside the signed Statement
+    -- v1 predicate; denormalised here for queryable filters
+    -- ("WHERE ev_risk_of_bias <= -1"). Bounded [-2, 0] matches the GRADE
+    -- downgrade scale. Default 0 = unflagged. CHECK rejects tamper
+    -- attempts that set out-of-range values directly via SQL.
+    ev_risk_of_bias     INTEGER NOT NULL DEFAULT 0
+                            CHECK (ev_risk_of_bias    BETWEEN -2 AND 0),
+    ev_inconsistency    INTEGER NOT NULL DEFAULT 0
+                            CHECK (ev_inconsistency   BETWEEN -2 AND 0),
+    ev_indirectness     INTEGER NOT NULL DEFAULT 0
+                            CHECK (ev_indirectness    BETWEEN -2 AND 0),
+    ev_imprecision      INTEGER NOT NULL DEFAULT 0
+                            CHECK (ev_imprecision     BETWEEN -2 AND 0),
+    ev_pub_bias         INTEGER NOT NULL DEFAULT 0
+                            CHECK (ev_pub_bias        BETWEEN -2 AND 0),
+    -- Full EvidenceVector serialised as JSON. The denormalised ev_*
+    -- columns above carry the queryable subset; rationale, upgrade
+    -- flags, and reporting_compliance live in this JSON blob. The
+    -- envelope's signed predicate is the authoritative copy.
+    evidence_json   TEXT NOT NULL DEFAULT '{}',
+    -- statement_cid = sha256(canonicalize(statement)). The cross-check
+    -- anchor restore uses to detect envelope-vs-row drift. Always
+    -- recomputable from the row's fields + evidence_json + statement
+    -- v1 builder. NULL is allowed for unsigned rows.
+    statement_cid   TEXT,
+    -- Verdict-derived invalidation timestamp. Set by the
+    -- contradiction_invalidates_older trigger on contradiction_verdicts
+    -- INSERT. NULL for non-invalidated claims. Outside the
+    -- no-state-laundering trigger column list because invalidation is
+    -- a derived state, not a row mutation — restore replays it from
+    -- contradiction_verdicts rather than trusting the column value.
+    t_invalid       INTEGER,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
     -- ESTABLISHED rows must carry a signed validation envelope. The
@@ -255,6 +287,12 @@ _CLAIM_COLUMNS = (
     "validator_keyid",
     "artifact_hash",
     "prev_hash",
+    # GRADE EvidenceVector denormalised columns + full JSON.
+    "ev_risk_of_bias", "ev_inconsistency", "ev_indirectness",
+    "ev_imprecision", "ev_pub_bias",
+    "evidence_json",
+    # Statement v1 content identifier + verdict-derived invalidation.
+    "statement_cid", "t_invalid",
     "created_at", "updated_at",
 )
 _CLAIM_SELECT = ", ".join(_CLAIM_COLUMNS)
@@ -490,23 +528,29 @@ def open_db(root: Path) -> sqlite3.Connection:
 # Append-only hash chain
 # ---------------------------------------------------------------------------
 
-def _chain_input_for_claim(claim_fields: dict) -> bytes:
+def _chain_input_for_claim(
+    claim_fields: dict, evidence: dict | None = None,
+) -> bytes:
     """Canonical bytes for the chain hash on a single claim row.
 
-    Uses the same field set as the signature's canonical_payload — so
-    chain integrity and signature integrity move together. Reusing
-    :func:`mareforma.signing.canonical_payload` keeps the contract in
-    one place. Done lazily because the cryptography import is heavier
-    than the chain caller often needs.
+    Uses the in-toto Statement v1 canonical bytes — the exact same
+    bytes that get signed (after DSSE PAE wrap). Chain integrity and
+    signature integrity bind to one authoritative byte sequence.
+    EvidenceVector is part of the Statement, so it is part of the
+    chain input.
     """
     from mareforma import signing as _signing
-    return _signing.canonical_payload(claim_fields)
+    return _signing.canonical_statement(claim_fields, evidence or {})
 
 
-def _compute_prev_hash(conn: sqlite3.Connection, claim_fields: dict) -> str:
+def _compute_prev_hash(
+    conn: sqlite3.Connection,
+    claim_fields: dict,
+    evidence: dict | None = None,
+) -> str:
     """Compute the new ``prev_hash`` value for a claim about to be inserted.
 
-    The new chain link is ``sha256(prev_chain_link || canonical_payload)``.
+    The new chain link is ``sha256(prev_chain_link || canonical_statement_bytes)``.
     For the genesis row (no prior rows), the prior link is empty bytes.
 
     MUST be called inside ``BEGIN IMMEDIATE`` — the SELECT-then-INSERT
@@ -517,7 +561,7 @@ def _compute_prev_hash(conn: sqlite3.Connection, claim_fields: dict) -> str:
         "SELECT prev_hash FROM claims ORDER BY rowid DESC LIMIT 1"
     ).fetchone()
     prev = (row["prev_hash"] or "").encode("ascii") if row else b""
-    chain_input = _chain_input_for_claim(claim_fields)
+    chain_input = _chain_input_for_claim(claim_fields, evidence)
     return hashlib.sha256(prev + chain_input).hexdigest()
 
 
@@ -886,27 +930,55 @@ def add_claim(
         )
 
     # Sign the claim if a signer was supplied. The signature is bound to the
-    # claim_id + canonical fields + created_at, so any later tamper (text edit,
-    # support reattribution) breaks verification.
+    # in-toto Statement v1 wrapping claim fields + GRADE EvidenceVector, so
+    # any later tamper (text edit, support reattribution, evidence override)
+    # breaks verification.
+    #
+    # In v0.3.0 Phase 1 every claim carries a default-zero EvidenceVector
+    # (no quality concerns flagged by the asserter). Future API revisions
+    # will let callers supply a populated vector; the envelope and chain
+    # already bind whatever vector ends up in the row.
+    from mareforma._evidence import EvidenceVector
+    evidence_obj = EvidenceVector()
+    evidence_dict = evidence_obj.to_dict()
+    evidence_json = json.dumps(
+        evidence_dict, sort_keys=True, separators=(",", ":"),
+    )
     signature_bundle: str | None = None
     envelope: dict | None = None
+    statement_cid: str | None = None
     if signer is not None:
         from mareforma import signing as _signing
+        from mareforma import _statement as _stmt
+        claim_fields = {
+            "claim_id": claim_id,
+            "text": text.strip(),
+            "classification": classification,
+            "generated_by": generated_by,
+            "supports": supports or [],
+            "contradicts": contradicts or [],
+            "source_name": source_name,
+            "artifact_hash": artifact_hash,
+            "created_at": now,
+        }
         envelope = _signing.sign_claim(
-            {
-                "claim_id": claim_id,
-                "text": text.strip(),
-                "classification": classification,
-                "generated_by": generated_by,
-                "supports": supports or [],
-                "contradicts": contradicts or [],
-                "source_name": source_name,
-                "artifact_hash": artifact_hash,
-                "created_at": now,
-            },
-            signer,
+            claim_fields, signer, evidence=evidence_dict,
         )
         signature_bundle = json.dumps(envelope, sort_keys=True, separators=(",", ":"))
+        statement_cid = _stmt.statement_cid(
+            _stmt.build_statement(
+                claim_id=claim_fields["claim_id"],
+                text=claim_fields["text"],
+                classification=claim_fields["classification"],
+                generated_by=claim_fields["generated_by"],
+                supports=claim_fields["supports"],
+                contradicts=claim_fields["contradicts"],
+                source_name=claim_fields["source_name"],
+                artifact_hash=claim_fields["artifact_hash"],
+                created_at=claim_fields["created_at"],
+                evidence=evidence_dict,
+            )
+        )
 
     # ``transparency_logged`` defaults to 1 (ready). We flip it to 0 only when
     # Rekor is enabled AND we have something to submit — the row then waits
@@ -953,7 +1025,7 @@ def add_claim(
     try:
         if _own_transaction:
             conn.execute("BEGIN IMMEDIATE")
-        prev_hash = _compute_prev_hash(conn, chain_fields)
+        prev_hash = _compute_prev_hash(conn, chain_fields, evidence_dict)
         conn.execute(
             """
             INSERT INTO claims
@@ -963,8 +1035,12 @@ def add_claim(
                  signature_bundle, transparency_logged,
                  validation_signature, validator_keyid, validated_at,
                  artifact_hash, prev_hash,
+                 ev_risk_of_bias, ev_inconsistency, ev_indirectness,
+                 ev_imprecision, ev_pub_bias,
+                 evidence_json, statement_cid,
                  created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 claim_id, text, classification, initial_level, idempotency_key,
@@ -974,6 +1050,10 @@ def add_claim(
                 initial_validation_signature, initial_validator_keyid,
                 initial_validated_at,
                 artifact_hash, prev_hash,
+                evidence_obj.risk_of_bias, evidence_obj.inconsistency,
+                evidence_obj.indirectness, evidence_obj.imprecision,
+                evidence_obj.publication_bias,
+                evidence_json, statement_cid,
                 now, now,
             ),
         )
@@ -1439,18 +1519,19 @@ def mark_claim_logged(
         raise ClaimNotFoundError(f"Claim '{claim_id}' not found.")
 
     # Sanity-check that the supplied bundle actually belongs to this claim.
+    # After Statement v1, claim_id lives inside the predicate.
     from mareforma import signing as _signing
     try:
         envelope = json.loads(new_signature_bundle)
-        payload = _signing.envelope_payload(envelope)
+        predicate = _signing.claim_predicate_from_envelope(envelope)
     except (json.JSONDecodeError, _signing.InvalidEnvelopeError) as exc:
         raise DatabaseError(
             f"mark_claim_logged given malformed bundle for {claim_id}: {exc}"
         ) from exc
-    if payload.get("claim_id") != claim_id:
+    if predicate.get("claim_id") != claim_id:
         raise DatabaseError(
-            f"mark_claim_logged bundle's payload.claim_id "
-            f"({payload.get('claim_id')!r}) does not match row {claim_id!r}."
+            f"mark_claim_logged bundle's predicate.claim_id "
+            f"({predicate.get('claim_id')!r}) does not match row {claim_id!r}."
         )
 
     supports = json.loads(row["supports_json"] or "[]")
@@ -2295,6 +2376,14 @@ def restore(
                 # Reconstruct supports/contradicts JSON.
                 supports_list = c.get("supports", []) or []
                 contradicts_list = c.get("contradicts", []) or []
+                # EvidenceVector round-trip. The TOML carries the
+                # canonical JSON; we re-derive ev_* + chain_input from
+                # it so the chain_hash matches the original.
+                evidence_json_str = c.get("evidence_json") or "{}"
+                try:
+                    evidence_dict = json.loads(evidence_json_str)
+                except (ValueError, TypeError):
+                    evidence_dict = {}
                 chain_fields = {
                     "claim_id": claim_id,
                     "text": c_text,
@@ -2306,7 +2395,9 @@ def restore(
                     "artifact_hash": c.get("artifact_hash"),
                     "created_at": c_created_at,
                 }
-                prev_hash = _compute_prev_hash(conn, chain_fields)
+                prev_hash = _compute_prev_hash(
+                    conn, chain_fields, evidence_dict,
+                )
                 val_sig = c.get("validation_signature")
                 validator_keyid = (
                     _extract_validation_signer_keyid(val_sig)
@@ -2343,6 +2434,28 @@ def restore(
                     validator_keyid if insert_level == "ESTABLISHED"
                     else None
                 )
+                # Denormalize ev_* from the canonical evidence_dict so
+                # the row's CHECK constraints + the evidence_json blob
+                # stay aligned. statement_cid is rebuilt from the same
+                # chain_fields + evidence_dict and serves as restore's
+                # adversarial anchor — any TOML tamper of an ev_* field
+                # produces a different statement_cid here than the one
+                # the original signing path computed.
+                from mareforma import _statement as _stmt_mod
+                statement_cid_str = _stmt_mod.statement_cid(
+                    _stmt_mod.build_statement(
+                        claim_id=claim_id,
+                        text=c_text,
+                        classification=c_classification,
+                        generated_by=c_generated_by,
+                        supports=supports_list,
+                        contradicts=contradicts_list,
+                        source_name=c.get("source_name"),
+                        artifact_hash=c.get("artifact_hash"),
+                        created_at=c_created_at,
+                        evidence=evidence_dict,
+                    )
+                ) if c.get("signature_bundle") else None
                 try:
                     conn.execute(
                         """
@@ -2355,9 +2468,13 @@ def restore(
                              signature_bundle, transparency_logged,
                              validation_signature, validator_keyid,
                              artifact_hash, prev_hash,
+                             ev_risk_of_bias, ev_inconsistency,
+                             ev_indirectness, ev_imprecision, ev_pub_bias,
+                             evidence_json, statement_cid, t_invalid,
                              created_at, updated_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                ?, ?, ?, ?, ?)
                         """,
                         (
                             claim_id, c_text, c_classification,
@@ -2378,6 +2495,14 @@ def restore(
                             insert_validation_signature,
                             insert_validator_keyid,
                             c.get("artifact_hash"), prev_hash,
+                            int(evidence_dict.get("risk_of_bias", 0) or 0),
+                            int(evidence_dict.get("inconsistency", 0) or 0),
+                            int(evidence_dict.get("indirectness", 0) or 0),
+                            int(evidence_dict.get("imprecision", 0) or 0),
+                            int(evidence_dict.get("publication_bias", 0) or 0),
+                            evidence_json_str,
+                            statement_cid_str,
+                            c.get("t_invalid"),
                             c_created_at, c_updated_at,
                         ),
                     )
@@ -2503,11 +2628,12 @@ def _verify_claim_signatures_on_restore(
                 f"Claim {claim_id} signature_bundle failed verification.",
                 kind="claim_unverified",
             )
-        # Defense in depth: every signed-payload field must equal the
+        # Defense in depth: every signed-predicate field must equal the
         # claim's restored field. Tampering with the row but reusing a
-        # legitimate envelope is caught here.
+        # legitimate envelope is caught here. Statement v1 puts these
+        # fields one level deeper under ``predicate``.
         try:
-            embedded = _signing.envelope_payload(bundle)
+            predicate = _signing.claim_predicate_from_envelope(bundle)
         except _signing.InvalidEnvelopeError as exc:
             raise RestoreError(
                 f"Claim {claim_id} envelope payload is unparseable.",
@@ -2526,10 +2652,59 @@ def _verify_claim_signatures_on_restore(
             "created_at": _required_field(c, "created_at", ctx_c),
         }
         for field in _signing.SIGNED_FIELDS:
-            if embedded.get(field) != expected[field]:
+            if predicate.get(field) != expected[field]:
                 raise RestoreError(
-                    f"Claim {claim_id} signed-payload field {field!r} "
+                    f"Claim {claim_id} signed-predicate field {field!r} "
                     "does not match the row — TOML tampered.",
+                    kind="claim_unverified",
+                )
+
+        # EvidenceVector binding. The predicate carries the canonical
+        # evidence dict that was signed; restore the row's TOML
+        # evidence_json must round-trip to the same dict. Without this,
+        # a TOML editor could flip ``risk_of_bias`` from -2 to 0 (a
+        # quality upgrade by tamper) and the SIGNED_FIELDS loop above
+        # would not catch it because evidence is not in SIGNED_FIELDS.
+        try:
+            row_evidence = json.loads(c.get("evidence_json") or "{}")
+        except (ValueError, TypeError) as exc:
+            raise RestoreError(
+                f"Claim {claim_id} evidence_json is malformed.",
+                kind="claim_unverified",
+            ) from exc
+        if predicate.get("evidence") != row_evidence:
+            raise RestoreError(
+                f"Claim {claim_id} signed evidence vector does not match "
+                "evidence_json on the row — TOML tampered.",
+                kind="claim_unverified",
+            )
+
+        # statement_cid cross-check. The row carries the cid the
+        # original signing path computed. Restore re-derives the cid
+        # from the row's fields + evidence and compares. A bare TOML
+        # edit that leaves the bundle in place but flips any predicate
+        # field is caught here as a second defense after SIGNED_FIELDS.
+        if c.get("statement_cid"):
+            from mareforma import _statement as _stmt_mod
+            recomputed_cid = _stmt_mod.statement_cid(
+                _stmt_mod.build_statement(
+                    claim_id=claim_id,
+                    text=expected["text"],
+                    classification=expected["classification"],
+                    generated_by=expected["generated_by"],
+                    supports=expected["supports"],
+                    contradicts=expected["contradicts"],
+                    source_name=expected["source_name"],
+                    artifact_hash=expected["artifact_hash"],
+                    created_at=expected["created_at"],
+                    evidence=row_evidence,
+                )
+            )
+            if recomputed_cid != c["statement_cid"]:
+                raise RestoreError(
+                    f"Claim {claim_id} statement_cid mismatch: row stores "
+                    f"{c['statement_cid']!r} but re-derived {recomputed_cid!r}. "
+                    "TOML tampered.",
                     kind="claim_unverified",
                 )
     elif signed_mode:
@@ -2736,6 +2911,19 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
                 entry["transparency_logged"] = False
             if c.get("artifact_hash"):
                 entry["artifact_hash"] = c["artifact_hash"]
+            # GRADE EvidenceVector: always present in v0.3.0 schema.
+            # Round-trip the full JSON so restore can rebuild the
+            # canonical Statement v1 bytes — chain_hash + signature both
+            # bind these values. statement_cid is the cross-check anchor
+            # restore uses to detect envelope-vs-row drift.
+            entry["evidence_json"] = c.get("evidence_json") or "{}"
+            if c.get("statement_cid"):
+                entry["statement_cid"] = c["statement_cid"]
+            # t_invalid: derived from contradiction_verdicts; round-trip
+            # the column so a restored graph re-acquires the invalidation
+            # state without needing the contradiction_verdicts replay.
+            if c.get("t_invalid") is not None:
+                entry["t_invalid"] = c["t_invalid"]
             data["claims"][c["claim_id"]] = entry
 
         out = root / "claims.toml"

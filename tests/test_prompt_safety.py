@@ -392,10 +392,11 @@ class TestSanitizeOnWrite:
             cid = g.assert_claim("hello​world")  # ZWSP in middle
             row = g.get_claim(cid)
         envelope = json.loads(row["signature_bundle"])
-        payload = _signing.envelope_payload(envelope)
-        # Signed payload's text matches the persisted (sanitized) text
+        # Statement v1: text lives inside the predicate.
+        predicate = _signing.claim_predicate_from_envelope(envelope)
+        # Signed predicate's text matches the persisted (sanitized) text
         # exactly — neither carries the zero-width char.
-        assert payload["text"] == "helloworld"
+        assert predicate["text"] == "helloworld"
         assert row["text"] == "helloworld"
 
 

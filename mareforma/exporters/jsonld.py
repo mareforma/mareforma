@@ -117,13 +117,17 @@ class JSONLDExporter:
     # ------------------------------------------------------------------
 
     def _claim_node(self, claim: dict) -> dict:
-        # Always include every SIGNED_FIELDS member so a downstream
-        # consumer (e.g. SCITT bundle verification in P1.9) can
-        # re-derive the canonical_payload from the node alone.
-        # Optional fields use null/[] defaults to match
-        # canonical_payload's expected shape.
+        # Always include every SIGNED_FIELDS member + the GRADE
+        # EvidenceVector so a downstream consumer (e.g. SCITT bundle
+        # verification) can re-derive the canonical Statement v1 bytes
+        # from the node alone. Optional fields use null/[] defaults to
+        # match canonical_statement's expected shape.
         supports = json.loads(claim.get("supports_json", "[]") or "[]")
         contradicts = json.loads(claim.get("contradicts_json", "[]") or "[]")
+        try:
+            evidence_dict = json.loads(claim.get("evidence_json") or "{}")
+        except (ValueError, TypeError):
+            evidence_dict = {}
         node: dict[str, Any] = {
             "@type": "mare:Claim",
             "@id": f"mare:claim/{claim['claim_id']}",
@@ -137,6 +141,7 @@ class JSONLDExporter:
             "contradicts": contradicts,
             "sourceName": claim.get("source_name"),
             "artifactHash": claim.get("artifact_hash"),
+            "evidence": evidence_dict,
         }
         if claim.get("comparison_summary"):
             node["comparisonSummary"] = claim["comparison_summary"]

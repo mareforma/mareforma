@@ -725,7 +725,15 @@ class EpistemicGraph:
                 )
                 still_unlogged += 1
                 continue
-            live_payload = _signing.canonical_payload({
+            # The signed payload is a canonical in-toto Statement v1
+            # whose predicate carries the EvidenceVector. Re-derive
+            # with the row's stored evidence_json so a row+envelope
+            # drift detector compares like-with-like.
+            try:
+                evidence_dict = json.loads(claim.get("evidence_json") or "{}")
+            except (ValueError, TypeError):
+                evidence_dict = {}
+            live_payload = _signing.canonical_statement({
                 "claim_id": cid,
                 "text": claim["text"],
                 "classification": claim["classification"],
@@ -735,7 +743,7 @@ class EpistemicGraph:
                 "source_name": claim.get("source_name"),
                 "artifact_hash": claim.get("artifact_hash"),
                 "created_at": claim["created_at"],
-            })
+            }, evidence_dict)
             if live_payload != payload_bytes:
                 warnings.warn(
                     f"Claim {cid} row drifted from its signed payload; "

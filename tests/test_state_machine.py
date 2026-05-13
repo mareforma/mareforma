@@ -241,7 +241,11 @@ class TestPrevHashChain:
         assert len(set(prevs)) == 3  # all distinct
 
     def test_chain_is_linear_and_verifiable(self, tmp_path: Path) -> None:
-        """Recompute the chain locally and verify each row matches."""
+        """Recompute the chain locally and verify each row matches.
+
+        After Statement v1, chain_input includes the EvidenceVector so
+        the row's stored evidence_json must be threaded through too.
+        """
         with mareforma.open(tmp_path) as g:
             ids = [g.assert_claim(f"claim {i}") for i in range(5)]
         conn = open_db(tmp_path)
@@ -253,6 +257,7 @@ class TestPrevHashChain:
             conn.close()
         prev = b""
         for row in rows:
+            evidence_dict = json.loads(row["evidence_json"] or "{}")
             chain_input = _db._chain_input_for_claim({
                 "claim_id": row["claim_id"],
                 "text": row["text"],
@@ -263,7 +268,7 @@ class TestPrevHashChain:
                 "source_name": row["source_name"],
                 "artifact_hash": row["artifact_hash"],
                 "created_at": row["created_at"],
-            })
+            }, evidence_dict)
             expected = hashlib.sha256(prev + chain_input).hexdigest()
             assert row["prev_hash"] == expected
             prev = expected.encode("ascii")

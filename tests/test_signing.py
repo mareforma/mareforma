@@ -166,18 +166,26 @@ class TestSignVerify:
         assert verify_envelope(envelope, key.public_key()) is True
 
     def test_envelope_payload_decodes_back_to_claim_fields(self):
+        from mareforma.signing import claim_predicate_from_envelope
         key = generate_keypair()
         fields = _claim_fields()
         envelope = sign_claim(fields, key)
-        decoded = envelope_payload(envelope)
+        # envelope_payload now returns the Statement v1 dict; claim
+        # fields live one level deeper under predicate.
+        stmt = envelope_payload(envelope)
+        assert stmt["_type"] == "https://in-toto.io/Statement/v1"
+        assert stmt["predicateType"] == "https://mareforma.dev/claim/v1"
+        predicate = claim_predicate_from_envelope(envelope)
         # Field-by-field check — extras like updated_at must NOT appear in
-        # the signed payload (only the canonical _SIGNED_FIELDS).
-        assert decoded["claim_id"] == fields["claim_id"]
-        assert decoded["text"] == fields["text"]
-        assert decoded["classification"] == fields["classification"]
-        assert decoded["supports"] == fields["supports"]
-        assert decoded["created_at"] == fields["created_at"]
-        assert "updated_at" not in decoded
+        # the signed predicate (only the canonical _SIGNED_FIELDS + evidence).
+        assert predicate["claim_id"] == fields["claim_id"]
+        assert predicate["text"] == fields["text"]
+        assert predicate["classification"] == fields["classification"]
+        assert predicate["supports"] == fields["supports"]
+        assert predicate["created_at"] == fields["created_at"]
+        assert "updated_at" not in predicate
+        # evidence is now part of the signed predicate (defaults to empty)
+        assert "evidence" in predicate
 
     def test_keyid_in_envelope_matches_public_key(self):
         key = generate_keypair()
