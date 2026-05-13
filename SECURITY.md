@@ -83,10 +83,29 @@ report it via the channel above.
 
 ### Typosquat reservation
 
-Common misspellings of the project name will be reserved on PyPI to
-prevent typosquat attacks. If you encounter a `mareforma`-adjacent
-package published by anyone other than this project, it is hostile;
-report it.
+Common misspellings and adjacent names are reserved on PyPI as
+defensive placeholders. Installing any of them raises `ImportError`
+and points the user back to the canonical `mareforma` package.
+
+Reserved names:
+
+- [`maraforma`](https://pypi.org/project/maraforma/)
+- [`mareform`](https://pypi.org/project/mareform/)
+- [`mareforma-cli`](https://pypi.org/project/mareforma-cli/)
+- [`mareforma-py`](https://pypi.org/project/mareforma-py/)
+- [`mareforma-agent`](https://pypi.org/project/mareforma-agent/)
+
+Names too close to `mareforma` to register at all (PyPI rejects new
+registrations with *"too similar to an existing project"*):
+
+- `mare-forma` / `mare_forma` / `mare.forma` — all PEP-503-collapse to
+  `mare-forma`, which PyPI blocks as confusable with `mareforma`. No
+  defensive claim was possible; PyPI's confusable-name check provides
+  the defense automatically.
+
+If you encounter a `mareforma`-adjacent package published by anyone
+other than this project, it is hostile — report it via the channel
+above.
 
 ## Cryptographic substrate
 
