@@ -214,6 +214,9 @@ docs/_build/
 # GStack artifacts
 .gstack/
 
+# Claude Code local session state (scheduled-tasks lock, plan files, etc.)
+.claude/
+
 # Mareforma runtime artifacts
 .mareforma/
 claims.toml
