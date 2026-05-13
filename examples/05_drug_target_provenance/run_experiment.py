@@ -12,10 +12,53 @@ Same model, same panelists, same debate rounds — one variable changed (the dis
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).parent.resolve()
+
+
+# Load .env from the example directory if present. MEDEA's main.py does
+# this on its own, but run_experiment.py calls the MEDEA() agent class
+# directly without going through main.py — so the documented .env
+# config is otherwise silently ignored.
+try:
+    import dotenv
+    dotenv.load_dotenv(HERE / ".env")
+except ImportError:
+    pass  # dotenv is a MEDEA install dependency; if it's missing the
+          # next check will surface the real problem.
+
+
+def _require_llm_key() -> None:
+    """Fail fast with a clear message when no LLM API key is set.
+
+    MEDEA hits an LLM provider on the first agent step — without a key
+    the failure happens deep inside the model client with an
+    unhelpful traceback. Surface the problem here, before the heavy
+    MEDEA import (torch / transformers / etc.) is even paid for.
+    """
+    if any(os.environ.get(k) for k in (
+        "OPENAI_API_KEY",
+        "AZURE_OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+    )):
+        return
+    print(
+        "ERROR: no LLM API key found in the environment.\n\n"
+        "MEDEA needs one of OPENAI_API_KEY, AZURE_OPENAI_API_KEY,\n"
+        "or ANTHROPIC_API_KEY to run. The documented setup is:\n\n"
+        "    cp Medea/env_template.txt .env\n"
+        "    # then edit .env and set OPENAI_API_KEY=sk-...\n\n"
+        f".env path: {HERE / '.env'}\n",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+_require_llm_key()
+
 
 try:
     import mareforma
