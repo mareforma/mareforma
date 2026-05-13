@@ -57,12 +57,13 @@ class TestOpenDb:
         assert "claims" in tables
 
     def test_schema_version_set(self, tmp_path: Path) -> None:
+        from mareforma.db import _SCHEMA_VERSION
         conn = _open(tmp_path)
         try:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
         finally:
             conn.close()
-        assert version == 1
+        assert version == _SCHEMA_VERSION
 
     def test_idempotent_second_open(self, tmp_path: Path) -> None:
         conn1 = _open(tmp_path)
@@ -71,21 +72,39 @@ class TestOpenDb:
         conn2.close()
 
     def test_missing_columns_raises(self, tmp_path: Path) -> None:
-        """A db with user_version=SCHEMA but missing claims columns is rejected.
+        """A db with user_version != 0 but missing claims columns is rejected.
 
-        Using user_version=2 (current) skips the v1→v2 migration path
-        and goes straight to the schema-validation step that we're
-        actually exercising here. The migration is exercised separately
-        in ``TestV1ToV2Migration``.
+        A non-zero user_version short-circuits the fresh-schema branch in
+        open_db and falls through to column-set validation, which is what
+        we're exercising here.
         """
+        from mareforma.db import _SCHEMA_VERSION
         (tmp_path / ".mareforma").mkdir(parents=True, exist_ok=True)
         db_path = tmp_path / ".mareforma" / "graph.db"
         raw = sqlite3.connect(str(db_path))
         # Initialised marker but no tables created — simulates schema drift.
-        raw.execute("PRAGMA user_version = 2")
+        raw.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
         raw.commit()
         raw.close()
         with pytest.raises(DatabaseError, match="schema mismatch"):
+            open_db(tmp_path)
+
+    def test_version_mismatch_rejected(self, tmp_path: Path) -> None:
+        """A graph.db whose user_version differs from _SCHEMA_VERSION is
+        refused — even when the column set happens to match. v0.3.x has
+        no migration code, and accepting an older dev-branch version
+        silently could leave triggers uninstalled (e.g. a v2-stranded db
+        is missing claims_update_status_terminal even though its columns
+        are correct)."""
+        from mareforma.db import _SCHEMA_VERSION
+        # Open once normally so the full schema is in place.
+        open_db(tmp_path).close()
+        # Now flip the version marker to something other than _SCHEMA_VERSION.
+        raw = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
+        raw.execute(f"PRAGMA user_version = {_SCHEMA_VERSION + 1}")
+        raw.commit()
+        raw.close()
+        with pytest.raises(DatabaseError, match="user_version"):
             open_db(tmp_path)
 
     def test_extra_columns_raise_downgrade_error(self, tmp_path: Path) -> None:

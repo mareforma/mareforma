@@ -5,8 +5,10 @@ All notable changes to this project will be documented in this file.
 ## [0.3.0] - 2026-05-13
 
 Breaking change from v0.2.x. Schema does not migrate from older
-versions; delete `.mareforma/graph.db` to start fresh. Claims are
-backed up in `claims.toml` for restoration.
+versions; delete `.mareforma/graph.db` to start fresh. `claims.toml`
+at the project root is a human-readable record of the prior state —
+the prev_hash chain and per-claim signatures cannot be reconstructed
+from it, so it is a reference not a backup.
 
 Full P0+P1 substrate per the 2026-05-12 security-substrate decision:
 - **P0.1** Ed25519 signing + Sigstore-Rekor

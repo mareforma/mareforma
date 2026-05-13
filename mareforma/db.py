@@ -123,8 +123,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_claims_idempotency_key
     ON claims(idempotency_key) WHERE idempotency_key IS NOT NULL;
 -- UNIQUE on prev_hash catches branched chains (two writers racing past
 -- a missing BEGIN IMMEDIATE, or a manual SQL tamper that re-uses an
--- existing chain link). Partial index lets a fresh table have any
--- number of NULL rows during the v1→v2 retroactive populate.
+-- existing chain link). Partial index keeps the constraint scoped to
+-- rows where the chain link is set.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_claims_prev_hash
     ON claims(prev_hash) WHERE prev_hash IS NOT NULL;
 
@@ -341,6 +341,23 @@ def open_db(root: Path) -> sqlite3.Connection:
             conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             conn.commit()
             return conn
+
+        # No in-place migrations during v0.3.x. A db whose user_version
+        # is neither 0 nor _SCHEMA_VERSION was written by a different
+        # build of the dev branch and may carry a partial schema (e.g.
+        # a v2-stranded db is missing the retracted-is-terminal trigger
+        # that the substrate fix relies on, even though its column set
+        # happens to match). Refuse rather than open silently.
+        if version != _SCHEMA_VERSION:
+            conn.close()
+            raise DatabaseError(
+                f"graph.db has user_version={version} but this mareforma "
+                f"expects user_version={_SCHEMA_VERSION}. The dev branch does "
+                "not migrate schemas. Delete .mareforma/graph.db to start "
+                "fresh; claims.toml is a human-readable record of the prior "
+                "state (the chain and signatures cannot be reconstructed "
+                "from it)."
+            )
 
         # Initialised db — validate the schema by exact column-set match.
         # Catching extras as well as missing columns means a partially-migrated
