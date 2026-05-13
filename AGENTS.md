@@ -445,8 +445,9 @@ verification.
 **Plain JSON-LD.** `mareforma export` writes `ontology.jsonld` in the
 mareforma-native vocabulary (`@type=mare:Graph`, media type
 `application/x-mareforma-graph+json`). The export is NOT
-PROV-O-conformant; the schema lives in
-[`docs/reference/export-format.md`](docs/reference/export-format.md).
+PROV-O-conformant. Each claim node carries every `SIGNED_FIELDS`
+member so the bundle verifier (below) can re-derive
+`canonical_payload` from a node alone.
 
 **SCITT-style signed bundle.** `mareforma export --bundle` wraps the
 JSON-LD export in an in-toto Statement v1 envelope and signs it with

@@ -1,30 +1,39 @@
 ---
 title: "Data Model"
-description: "All claim fields: types, defaults, constraints, and semantics."
+description: "All claim fields, indexes, triggers, and supporting tables in graph.db."
 ---
 
-All claims are stored in a single `claims` table in `graph.db` (SQLite, WAL mode).
-Schema version: `1`.
+All persistent state lives in a single SQLite file at `<project_root>/.mareforma/graph.db`
+(WAL mode, ACID). Schema version: `2`.
 
 ## Claims table
 
 | Field | Type | Default | Nullable | Description |
 |---|---|---|---|---|
 | `claim_id` | TEXT | UUID at insert | No | Primary key |
-| `text` | TEXT | required | No | The falsifiable assertion |
-| `classification` | TEXT | `INFERRED` | No | Epistemic origin: INFERRED / ANALYTICAL / DERIVED |
-| `support_level` | TEXT | `PRELIMINARY` | No | Graph-derived trust: PRELIMINARY / REPLICATED / ESTABLISHED |
+| `text` | TEXT | required | No | The falsifiable assertion. Hard cap 100,000 chars. Sanitized on write (zero-width / bidi / control chars stripped) |
+| `classification` | TEXT | `INFERRED` | No | Epistemic origin: `INFERRED` / `ANALYTICAL` / `DERIVED` |
+| `support_level` | TEXT | `PRELIMINARY` | No | Graph-derived trust: `PRELIMINARY` / `REPLICATED` / `ESTABLISHED`. Transitions enforced by BEFORE triggers |
 | `idempotency_key` | TEXT | `NULL` | Yes | UNIQUE — same key → same `claim_id`, no INSERT |
-| `validated_by` | TEXT | `NULL` | Yes | Set by `graph.validate()` only |
+| `validated_by` | TEXT | `NULL` | Yes | Cosmetic display label set by `graph.validate()` (authoritative identity lives in `validation_signature`) |
 | `validated_at` | TEXT | `NULL` | Yes | UTC ISO 8601 timestamp of validation |
-| `status` | TEXT | `open` | No | Editorial: open / contested / retracted |
-| `source_name` | TEXT | `NULL` | Yes | Data source name; required for ANALYTICAL to be meaningful |
+| `status` | TEXT | `open` | No | Editorial: `open` / `contested` / `retracted` |
+| `source_name` | TEXT | `NULL` | Yes | Data source name; required for `ANALYTICAL` to be meaningful |
 | `generated_by` | TEXT | `agent` | No | Agent identifier; independence signal for REPLICATED |
 | `supports_json` | TEXT | `[]` | No | JSON array of upstream claim_ids or DOIs |
 | `contradicts_json` | TEXT | `[]` | No | JSON array of claim_ids this finding contests |
-| `comparison_summary` | TEXT | `NULL` | Yes | Human-readable diff note for contradictions |
+| `comparison_summary` | TEXT | `NULL` | Yes | Human-readable diff note for contradictions. Editable on signed claims (not part of signed payload) |
+| `branch_id` | TEXT | `main` | No | Reserved for future branching; currently always `main` |
+| `unresolved` | INTEGER | `0` | No | `1` when a DOI in `supports[]`/`contradicts[]` could not be HEAD-checked against Crossref/DataCite. Blocks REPLICATED promotion until `refresh_unresolved()` clears it |
+| `signature_bundle` | TEXT | `NULL` | Yes | DSSE-style Ed25519 envelope over `canonical_payload` |
+| `transparency_logged` | INTEGER | `1` | No | `1` when the claim has been (or did not need to be) submitted to Sigstore-Rekor. Blocks REPLICATED until `refresh_unsigned()` flips it |
+| `validation_signature` | TEXT | `NULL` | Yes | Signed `(claim_id, validator_keyid, validated_at)` envelope. CHECK constraint requires this on every `ESTABLISHED` row |
+| `artifact_hash` | TEXT | `NULL` | Yes | SHA-256 hex digest of the output bytes (figure, CSV, model) backing the claim. Bound into the signed payload; gates REPLICATED when both peers supply a hash |
+| `prev_hash` | TEXT | `NULL` | Yes | Append-only chain link `sha256(prev_chain_link \|\| canonical_payload)`. UNIQUE partial index catches branched chains |
 | `created_at` | TEXT | UTC now | No | ISO 8601 UTC timestamp |
 | `updated_at` | TEXT | UTC now | No | ISO 8601 UTC; updated on every mutation |
+
+**Row-level CHECK** — every row whose `support_level = 'ESTABLISHED'` must have a non-NULL `validation_signature`. The CHECK is the row-level belt to the trigger's transition-level suspenders.
 
 ## Indexes
 
@@ -34,7 +43,28 @@ Schema version: `1`.
 | `idx_claims_source` | `source_name` | Non-unique | Filters by data source |
 | `idx_claims_generated_by` | `generated_by` | Non-unique | Filters by agent |
 | `idx_claims_support_level` | `support_level` | Non-unique | Filters by trust tier |
+| `idx_claims_unresolved` | `unresolved` | Non-unique | Accelerates `refresh_unresolved()` |
+| `idx_claims_transparency_logged` | `transparency_logged` | Non-unique | Accelerates `refresh_unsigned()` |
+| `idx_claims_artifact_hash` | `artifact_hash` | Unique (partial) | `WHERE artifact_hash IS NOT NULL` — only rows that opt in to the gate |
 | `idx_claims_idempotency_key` | `idempotency_key` | Unique (partial) | `WHERE idempotency_key IS NOT NULL` |
+| `idx_claims_prev_hash` | `prev_hash` | Unique (partial) | `WHERE prev_hash IS NOT NULL` — catches branched chains from concurrent writers or manual SQL tamper |
+
+## State-machine triggers
+
+Two `BEFORE` triggers enforce the support-level state machine at the storage layer. Defense in depth: a tampered Python interpreter cannot relax these rules.
+
+**`claims_insert_state_check`** — rejects:
+- `support_level` outside `{PRELIMINARY, ESTABLISHED}` (REPLICATED can only be reached via UPDATE)
+- `support_level = 'ESTABLISHED'` without a `validation_signature` (only the seed-claim path satisfies this, since seeds carry a signed seed envelope)
+- `support_level = 'PRELIMINARY'` with `validated_by` or `validated_at` set
+
+**`claims_update_state_check`** — rejects:
+- `PRELIMINARY → ESTABLISHED` (must pass through REPLICATED first)
+- `REPLICATED → PRELIMINARY`
+- Any transition out of `ESTABLISHED`
+- `→ ESTABLISHED` without a `validation_signature`
+
+Trigger errors carry `mareforma:state:<from>-><to>` codes that Python translates to `IllegalStateTransitionError`.
 
 ## Valid values
 
@@ -51,7 +81,36 @@ s = mareforma.schema()
 s["classifications"]  # ['INFERRED', 'ANALYTICAL', 'DERIVED']
 s["support_levels"]   # ['PRELIMINARY', 'REPLICATED', 'ESTABLISHED']
 s["statuses"]         # ['open', 'contested', 'retracted']
+s["schema_version"]   # 2
 ```
+
+## doi_cache table
+
+Persistent cache of DOI resolution results to avoid repeated network calls.
+
+| Field | Type | Description |
+|---|---|---|
+| `doi` | TEXT (PK) | Normalised DOI |
+| `resolved` | INTEGER | `1` if Crossref or DataCite confirmed it |
+| `registry` | TEXT | `crossref` / `datacite` / `NULL` |
+| `last_checked_at` | TEXT | UTC ISO 8601; TTLs are 30 days for resolved, 24 hours for unresolved |
+
+## validators table
+
+The per-project set of public keys allowed to promote claims to `ESTABLISHED`.
+
+| Field | Type | Description |
+|---|---|---|
+| `keyid` | TEXT (PK) | SHA-256 of the Ed25519 raw public bytes |
+| `pubkey_pem` | TEXT | Ed25519 public key in PEM form |
+| `identity` | TEXT | Display label (256-char cap, control characters and display-spoofing forms rejected) |
+| `enrolled_at` | TEXT | UTC ISO 8601 |
+| `enrolled_by_keyid` | TEXT | Parent validator (root rows have `enrolled_by_keyid = keyid`) |
+| `enrollment_envelope` | TEXT | DSSE-style envelope signed by the parent. Verifying `is_enrolled` walks the chain back to a self-signed root |
+
+The first key opened against a fresh `graph.db` auto-enrolls as the root with a self-signed envelope (`BEGIN IMMEDIATE` guards against two simultaneous opens both becoming roots). The chain walk enforces a singleton-root invariant: if two rows have `keyid == enrolled_by_keyid`, neither is trusted. Walk is capped at 64 hops.
+
+Removal is intentionally unsupported in v0.3.x — validator history is append-only.
 
 ## Schema versioning
 
@@ -60,7 +119,8 @@ The schema version is stored in SQLite's `user_version` pragma.
 | Version | State |
 |---|---|
 | `0` | Fresh database — full schema applied on first `open_db()` |
-| `1` | v0.3.0 schema — ready to use |
+| `1` | v0.3.0 pre-P1.5 schema. Auto-migrates in place to v2 (adds `prev_hash` column + populates retroactively) |
+| `2` | v0.3.0 current schema |
 | Any other | `DatabaseError` — delete `graph.db` to start fresh; `claims.toml` is the backup |
 
 ## Storage

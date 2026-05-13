@@ -3,41 +3,213 @@ title: "Changelog"
 description: "Notable changes across Mareforma releases."
 ---
 
-## v0.3.0 — 2026-05-11
+The authoritative changelog lives in [CHANGELOG.md](https://github.com/mareforma/mareforma/blob/main/CHANGELOG.md).
+This page mirrors it.
 
-Breaking change from v0.2.x. No migration path — delete `graph.db` to start
-fresh (claims are backed up in `claims.toml`).
+## v0.3.0 — 2026-05-13
 
-### What changed
+Breaking change from v0.2.x. Schema migrates in place from v1 → v2 (the
+`prev_hash` append-only hash chain is populated retroactively); fresh
+`graph.db` files start at v2 directly. Claims are backed up in
+`claims.toml`.
 
-**New: agent-native EpistemicGraph API**
-- `mareforma.open()` returns an `EpistemicGraph` — no `@transform` required
-- `graph.assert_claim()` — assert claims directly from any agent
-- `graph.query()` — query by text, support level, or classification
-- `graph.get_claim()` — fetch a single claim by ID
-- `graph.validate()` — human gate to ESTABLISHED
-- `mareforma.schema()` — runtime introspection of the state machine
+v0.3.0 ships the full P0+P1 security substrate per the 2026-05-12
+security-substrate decision:
 
-**New: claims schema v1**
-- `classification` — INFERRED / ANALYTICAL / DERIVED
-- `support_level` — PRELIMINARY / REPLICATED / ESTABLISHED (graph-derived)
-- `idempotency_key` — retry-safe writes and convergence convention
-- `validated_by`, `validated_at` — set by `validate()` only
+- **P0.1** Ed25519 signing + Sigstore-Rekor
+- **P0.2** Artifact-hash gate on REPLICATED
+- **P0.3** Identity-gated `validate()` with validator enrollment
+- **P0.4** DOI resolution + cache
+- **P1.5** DB-layer state-machine triggers + append-only hash chain
+- **P1.6** Simple-DFS cycle / self-loop detection on `supports[]`
+- **P1.7** ESTABLISHED-upstream requirement for REPLICATED + seed-claim bootstrap
+- **P1.8** JSON-LD export renamed to mareforma-native vocabulary
+- **P1.9** SCITT-style signed export bundle + verify CLI
 
-**New: REPLICATED auto-trigger**
-Fires automatically when ≥2 claims share the same upstream in `supports[]`
-with different `generated_by`. No extra step required.
+### Identity, signing, transparency
 
-**Removed**
-- `@transform` decorator and `BuildContext` — pipeline layer removed
-- `MareformaObserver`, `LangChainAdapter` — execution tracing removed
-- Pipeline CLI commands: `init`, `add-source`, `explain`, `build`, `log`,
-  `diff`, `cross-diff`, `trace`
+- **Ed25519 claim signing.** `mareforma bootstrap` once to generate a
+  keypair at `~/.config/mareforma/key` (XDG-compliant, mode `0600`).
+  Every `assert_claim` then signs before INSERT. The signed payload
+  binds `claim_id`, `text`, `classification`, `generated_by`,
+  `supports`, `contradicts`, `source_name`, `artifact_hash`, and
+  `created_at` — any tamper breaks verification.
+- **Append-only invariant.** Signed claims refuse mutation of any
+  signed-surface field. `update_claim(text=...)` /
+  `update_claim(supports=...)` / `update_claim(contradicts=...)` on a
+  signed row raise `SignedClaimImmutableError`. `status` and
+  `comparison_summary` remain editable.
+- **Sigstore-Rekor transparency log.**
+  `mareforma.open(rekor_url=mareforma.signing.PUBLIC_REKOR_URL)`
+  submits every signed claim at INSERT time. Submission failure
+  persists the claim with `transparency_logged=0` and blocks
+  REPLICATED until `graph.refresh_unsigned()` succeeds.
+- **Identity-gated `graph.validate()`.** The loaded signer must be
+  enrolled in the project's `validators` table. The first key opened
+  against a fresh graph auto-enrolls as the root validator (silent
+  self-signed enrollment with a `UserWarning`). The validation event
+  itself is signed: a DSSE-style envelope binding
+  `(claim_id, validator_keyid, validated_at)` is persisted to the
+  row's `validation_signature` column.
+- New `mareforma validator add` / `mareforma validator list`
+  subcommands. Each enrollment is signed by the parent validator and
+  `is_enrolled` walks the chain back to a self-signed root before
+  accepting a row — direct sqlite INSERTs with a fabricated parent do
+  not pass. Singleton-root invariant + 64-hop walk cap defend against
+  DoS-by-planted-chain.
 
-**CLI**
-- `mareforma claim` — add, list, show, update
-- `mareforma status` — epistemic health dashboard (red/yellow/green by support level)
-- `mareforma export` — claims-only JSON-LD
+### Storage-layer state machine
+
+- **DB-layer state-machine triggers (P1.5).** Two `BEFORE` triggers
+  enforce `PRELIMINARY → REPLICATED → ESTABLISHED` at the storage
+  layer; direct `PRELIMINARY → ESTABLISHED` is rejected; ESTABLISHED
+  rows require `validation_signature`. Illegal transitions surface as
+  `IllegalStateTransitionError` with a parsed `<from>-><to>` string
+  instead of an opaque `CHECK CONSTRAINT FAILED`.
+- **Append-only hash chain (P1.5).** New `claims.prev_hash` column
+  carries `sha256(prev_chain_link || canonical_payload)`. UNIQUE
+  partial index + `BEGIN IMMEDIATE` together prevent branched chains
+  from concurrent writers or manual SQL tamper. New
+  `ChainIntegrityError`.
+- **Cycle / self-loop detection (P1.6).** A claim whose `supports[]`
+  would create a cycle (directly or via a chain) raises
+  `CycleDetectedError` at INSERT and at UPDATE. Forward-walk DFS,
+  depth-capped at 1024 hops. DOI strings in `supports[]` are not
+  graph nodes and skipped.
+- **ESTABLISHED-upstream requirement for REPLICATED (P1.7).**
+  REPLICATED promotion now requires at least one ESTABLISHED claim in
+  the peer's `supports[]`. Matches Cochrane / GRADE evidence-chain
+  methodology — stops replication-of-noise. Strict by default.
+- **Seed-claim bootstrap (P1.7).**
+  `graph.assert_claim(text=..., seed=True)` inserts a claim directly
+  at `ESTABLISHED` with a signed seed envelope (payload type
+  `application/vnd.mareforma.seed+json`, binds
+  `claim_id + validator_keyid + seeded_at`). Only enrolled validators
+  can produce seeds — bootstraps the trust chain on a fresh graph
+  without a back door.
+
+### Artifact-hash gate
+
+- **`artifact_hash`** parameter on `assert_claim` (Python API) and
+  `--artifact-hash` flag on `mareforma claim add` (CLI). Accepts a
+  SHA-256 hex digest of the output bytes (figure, CSV, model) backing
+  the claim. Normalised to lowercase, validated as 64-char hex,
+  persisted to the new `artifact_hash` column, and bound into the
+  signed payload.
+- **REPLICATED gate.** When two converging peers BOTH supply a hash,
+  the hashes must match for REPLICATED to fire. When either omits
+  the hash, the gate is bypassed and identity-only REPLICATED applies
+  — the signal is opt-in, not retroactive.
+- **Idempotency conflict.** A replay that supplies a different
+  `artifact_hash` than the original raises
+  `IdempotencyConflictError` rather than silently dropping the new
+  hash.
+
+### Prompt-safety substrate
+
+- **`mareforma.prompt_safety` module + `graph.query_for_llm()`.**
+  Sanitize-and-wrap helpers for feeding retrieved claim text into an
+  LLM prompt. Strips zero-width / bidi-override / C0-C1 control
+  characters, Goodside U+E0000 tag plane, variation selectors,
+  interlinear annotation anchors, and the fullwidth `<`/`>`/`/`
+  lookalikes. Caps oversized fields at 100k chars with a visible
+  truncation marker. Free-text fields are wrapped in
+  `<untrusted_data>...</untrusted_data>`; forged delimiter tags inside
+  the content are replaced with `[stripped]`.
+- **`get_tools()` routes through `query_for_llm`.** The `query_graph`
+  tool that ships to LangChain / LangGraph / CrewAI / AutoGen /
+  LlamaIndex / PydanticAI / Smol Agents / OpenAI SDK / Anthropic SDK
+  now returns sanitized + wrapped text. A stored prompt-injection
+  planted by a prior agent is no longer delivered verbatim to the
+  consuming LLM.
+- **Sanitize-on-write.** `assert_claim` runs `sanitize_for_llm(text)`
+  before signing and persisting. Defense in depth — any consumer that
+  reads `claim.text` directly gets a clean string. Hard cap of 100,000
+  characters; claims that consist entirely of zero-width / control
+  characters are rejected with `ValueError`.
+
+### Export
+
+- **JSON-LD export (P1.8).** Removed PROV-O references
+  (`prov:wasGeneratedBy`, `prov:used`) from the JSON-LD `@context` —
+  the previous export name-dropped the vocabulary without populating
+  the full PROV-O graph. The export now declares `@type='mare:Graph'`
+  and `mare:mediaType='application/x-mareforma-graph+json'`. The
+  `used` key on source-bearing claims was renamed to `usedSource`
+  (aliased to `mare:usedSource`). Every `SIGNED_FIELDS` member is
+  always emitted on each claim node so downstream consumers (e.g.
+  the bundle verifier below) can re-derive `canonical_payload` from a
+  node alone.
+- **SCITT-style signed bundle (P1.9).** New `mareforma export
+  --bundle` produces an in-toto Statement v1 wrapper around the
+  JSON-LD export, with `predicateType='urn:mareforma:predicate:epistemic-graph:v1'`
+  and a DSSE-style signature over the whole bundle. Subject names use
+  the `urn:mareforma:claim:<uuid>` namespace; URN (not DNS) avoids a
+  perpetual-ownership commitment on `mareforma.dev`. New
+  `mareforma verify <bundle.json>` checks the DSSE signature AND
+  every per-claim subject digest. New `BundleVerificationError` names
+  the first failing check so callers can route between "corrupt" and
+  "cross-version skew".
+
+### DOI verification
+
+- DOI resolution: every DOI in `supports[]`/`contradicts[]` is
+  HEAD-checked against Crossref and DataCite at assert time.
+  Unresolved DOIs mark the claim `unresolved=True` and block
+  REPLICATED promotion. `EpistemicGraph.refresh_unresolved()` retries
+  previously-failed resolutions.
+- DOI resolver hardening: DOI suffix URL-encoded before interpolation
+  (prevents host injection via `#`/`@`); `follow_redirects=False`
+  (registry must answer directly); pooled `httpx.Client` with
+  threading lock around lazy init (FD-leak-safe under concurrency);
+  HTTP 429 from either registry skips the cache write; tight
+  exception clause so programmer bugs surface in tracebacks.
+- `doi_cache` table: 30-day TTL for resolved entries, 24-hour TTL for
+  unresolved.
+
+### Supply chain
+
+- **PyPI Trusted Publishing.** Releases are published via OIDC-based
+  GitHub Actions, not long-lived API tokens. `pypa/gh-action-pypi-publish`
+  is SHA-pinned. `actions/checkout` and `actions/setup-python` are
+  pinned by commit SHA — closes the tag-squat / maintainer-compromise
+  vector against the Trusted Publishing OIDC token.
+- New `SECURITY.md` documents the disclosure channel (GitHub Private
+  Vulnerability Reporting), supported-versions policy (latest pre-1.0
+  only), PyPI Trusted Publishing setup, cryptographic trust
+  boundaries, and out-of-scope categories.
+- **Typosquat reservations.** `maraforma`, `mareform`, `mareforma-cli`,
+  `mareforma-py`, and `mareforma-agent` are reserved on PyPI as
+  defensive placeholders that raise `ImportError` and point users back
+  to the canonical package. `mare-forma` / `mare_forma` /
+  `mare.forma` are auto-blocked by PyPI's confusable-name check.
+- New `.github/CODEOWNERS` and `.github/dependabot.yml`.
+
+### Agent surface
+
+- **`mareforma.open()` returns an `EpistemicGraph`** — no `@transform`
+  required. New parameters: `key_path`, `require_signed`, `rekor_url`,
+  `require_rekor`, `trust_insecure_rekor`.
+- **EpistemicGraph methods:** `assert_claim`, `query`, `query_for_llm`,
+  `get_claim`, `validate`, `refresh_unresolved`, `refresh_unsigned`,
+  `enroll_validator`, `list_validators`, `get_tools`, `close`.
+- **`get_tools(generated_by="agent/...")`** returns
+  `[query_graph, assert_finding]` as plain Python callables. One-line
+  wrap for Anthropic SDK, OpenAI SDK, LangChain, LangGraph, CrewAI,
+  AutoGen, LlamaIndex, PydanticAI, Smol Agents.
+- **`mareforma.schema()`** — runtime introspection of valid values,
+  defaults, state transitions, and schema version.
+- **CLI:** `mareforma bootstrap`, `mareforma validator add` /
+  `validator list`, `mareforma claim add/list/show/update/validate`,
+  `mareforma status`, `mareforma export [--bundle]`,
+  `mareforma verify <bundle>`.
+
+### Removed
+
+- `@transform` decorator and `BuildContext` — pipeline layer removed.
+- `MareformaObserver`, `LangChainAdapter` — execution tracing removed.
+- Pipeline CLI commands: `init`, `add-source`, `explain`, `build`,
+  `log`, `diff`, `cross-diff`, `trace`.
 
 ---
 

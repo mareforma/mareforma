@@ -19,14 +19,18 @@ can demonstrate.
     Set automatically at INSERT. Every new claim starts here.
   </Accordion>
   <Accordion title="REPLICATED">
-    ≥2 agents with different `generated_by` values share the same upstream in
-    `supports[]`. Set automatically at INSERT. No extra step required.
+    ≥2 agents with different `generated_by` values share the same upstream
+    in `supports[]`, AND at least one of those upstreams is itself
+    `ESTABLISHED`. Set automatically at INSERT. No extra step required.
 
-    This is the minimum bar for treating a finding as non-anecdotal.
+    The ESTABLISHED-upstream rule (added in v0.3.0) matches Cochrane / GRADE
+    evidence-chain methodology — replication-of-noise is not replication. A
+    fresh project bootstraps the chain via a *seed claim* (see below).
   </Accordion>
   <Accordion title="ESTABLISHED">
-    A human reviewed the provenance chain and validated it. Only reachable via
-    `graph.validate()`. No agent can self-promote.
+    A human (an enrolled validator) reviewed the provenance chain and
+    validated it. Only reachable via `graph.validate()`. No agent can
+    self-promote.
 
     This is the gate for consequential actions.
   </Accordion>
@@ -35,31 +39,65 @@ can demonstrate.
 ## How REPLICATED fires
 
 ```
-upstream_ref ──► ANALYTICAL claim (lab_a, generated_by="agent/a")  ──┐
-                                                                      ├──► REPLICATED
-upstream_ref ──► ANALYTICAL claim (lab_b, generated_by="agent/b")  ──┘
+ESTABLISHED upstream ──► ANALYTICAL claim (lab_a, generated_by="agent/a")  ──┐
+                                                                              ├──► REPLICATED
+ESTABLISHED upstream ──► ANALYTICAL claim (lab_b, generated_by="agent/b")  ──┘
 ```
 
-Two conditions must both be true:
+Three conditions must all be true:
 1. Both claims reference the **same upstream** in `supports[]`
 2. Both claims have **different `generated_by`** values
+3. At least one shared upstream is itself **ESTABLISHED**
 
 A single agent asserting the same claim a thousand times is still PRELIMINARY.
 Independence of provenance paths is what matters, not count.
 
+### Bootstrapping a fresh project (seed claim)
+
+On a brand new graph, no claim is yet ESTABLISHED, so the third condition
+above can never be satisfied. An enrolled validator (typically the project's
+root, auto-enrolled on first open) bootstraps the chain by asserting a
+*seed claim* — a claim inserted directly at `ESTABLISHED` with a signed seed
+envelope.
+
 ```python
-prior = graph.assert_claim("upstream evidence", generated_by="seed")
+import mareforma
 
-id_a = graph.assert_claim(
-    "finding A", supports=[prior], generated_by="agent/model-a"
-)
-id_b = graph.assert_claim(
-    "finding B", supports=[prior], generated_by="agent/model-b"
-)
+with mareforma.open() as graph:
+    # Bootstrap the chain. Only an enrolled validator can produce a seed.
+    seed_id = graph.assert_claim(
+        "Prior literature establishes X under condition C",
+        classification="DERIVED",
+        generated_by="agent/seed",
+        seed=True,
+    )
 
-graph.get_claim(id_a)["support_level"]  # → "REPLICATED"
-graph.get_claim(id_b)["support_level"]  # → "REPLICATED"
+    # Downstream peers now have an ESTABLISHED upstream to converge on.
+    id_a = graph.assert_claim(
+        "Finding A consistent with X",
+        supports=[seed_id],
+        generated_by="agent/model-a",
+    )
+    id_b = graph.assert_claim(
+        "Finding B consistent with X",
+        supports=[seed_id],
+        generated_by="agent/model-b",
+    )
+
+    graph.get_claim(id_a)["support_level"]  # → "REPLICATED"
+    graph.get_claim(id_b)["support_level"]  # → "REPLICATED"
 ```
+
+### Artifact-hash gate
+
+When two converging peers BOTH supply `artifact_hash` (a SHA-256 hex digest
+of the output bytes — figure, CSV, model), the hashes must match for
+`REPLICATED` to fire. Identity convergence alone is no longer enough in
+that case. When either peer omits the hash, the gate is bypassed and
+identity-only `REPLICATED` applies — the signal is opt-in, not retroactive.
+
+The hash is part of the signed payload, so an attacker who edits the
+column without the private key breaks verification.
 
 ## How ESTABLISHED is reached
 
@@ -68,9 +106,21 @@ graph.get_claim(id_b)["support_level"]  # → "REPLICATED"
 graph.validate(claim_id, validated_by="reviewer@example.org")
 ```
 
-`validate()` raises `ValueError` if the claim is not yet REPLICATED. The
-human reviews the full provenance chain via `supports[]` links — not
-individual steps.
+`graph.validate()` is **identity-gated**. The graph must have a loaded
+signing key AND that key must be enrolled in the project's `validators`
+table. The first key opened against a fresh graph auto-enrolls as the
+root validator (silent self-signed enrollment with a `UserWarning`).
+Additional validators are added via `mareforma validator add` or
+`graph.enroll_validator()`.
+
+The validation event itself is signed: a DSSE-style envelope binding
+`(claim_id, validator_keyid, validated_at)` is persisted to the claim's
+`validation_signature` column. `validated_by` is a cosmetic display
+label; the authoritative identity is the keyid embedded in the signed
+envelope.
+
+`validate()` raises `ValueError` if the claim is not yet `REPLICATED`,
+if no signer is loaded, or if the loaded signer is not enrolled.
 
 ## What trust is not
 
