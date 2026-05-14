@@ -656,6 +656,27 @@ class EpistemicGraph:
         EvidenceCitationError
             If any ``evidence_seen`` entry is malformed, points to a
             non-existent claim, or post-dates the validation timestamp.
+        InvalidValidationEnvelopeError
+            If the signed envelope produced by the loaded signer fails
+            any substrate-level structural or cryptographic gate
+            (malformed payload, non-enrolled signer, wrong payloadType,
+            signature verification failure, or payload-field mismatch
+            against the row being promoted). Should not fire on the
+            standard wrapper path — the wrapper builds the envelope
+            from the same kwargs it threads through — but is listed
+            for completeness because the underlying
+            :func:`mareforma.db.validate_claim` defends against
+            substrate-bypass at this layer too.
+        LLMValidatorPromotionError
+            If the loaded signer is enrolled with ``validator_type='llm'``.
+            LLM-typed validators can sign validation envelopes but
+            cannot promote past REPLICATED — have a human-typed
+            validator call :meth:`validate` instead.
+        SelfValidationError
+            If the loaded signer's keyid equals the claim's
+            ``signature_bundle`` signing keyid. Promotion requires an
+            external witnessing validator; self-validation is the
+            trivial-loop attack.
         """
         self._check_open()
         from mareforma import signing as _signing

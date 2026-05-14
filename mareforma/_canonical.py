@@ -61,11 +61,40 @@ def _normalize(obj: Any) -> Any:
     lists; mappings become dicts. The caller is responsible for refusing
     non-JSON types (functions, classes, etc.) — ``rfc8785.dumps`` will
     raise a domain-specific error on those, which is the right behavior.
+
+    Dict-key NFC collisions
+    -----------------------
+    A naive ``{_normalize(k): _normalize(v) for k, v in items}`` would
+    silently drop one value when two keys normalize to the same string
+    (e.g. ``é`` U+00E9 and ``é`` U+0065+U+0301). Insertion order would
+    determine which value survives, breaking the "same logical input →
+    same bytes" contract under adversarial-but-shaped input. We
+    explicitly detect the collision and raise ``ValueError`` so the
+    caller fixes the source data instead of producing a non-
+    deterministic envelope.
     """
     if isinstance(obj, str):
         return unicodedata.normalize("NFC", obj)
     if isinstance(obj, dict):
-        return {_normalize(k): _normalize(v) for k, v in obj.items()}
+        out: dict[Any, Any] = {}
+        for k, v in obj.items():
+            nk = _normalize(k)
+            if nk in out:
+                # Show both the normalized form and the original keys
+                # so the caller can pinpoint the collision source.
+                colliding = [
+                    repr(orig) for orig in obj.keys()
+                    if isinstance(orig, str)
+                    and unicodedata.normalize("NFC", orig) == nk
+                ]
+                raise ValueError(
+                    f"Dict keys collide after NFC normalization to "
+                    f"{nk!r}: {', '.join(colliding)}. Canonical JSON "
+                    "requires distinct keys; pre-normalize the source "
+                    "dict so the surviving value is unambiguous."
+                )
+            out[nk] = _normalize(v)
+        return out
     if isinstance(obj, (list, tuple)):
         return [_normalize(v) for v in obj]
     return obj
@@ -90,8 +119,11 @@ def canonicalize(obj: Any) -> bytes:
     ValueError
         If *obj* contains a float that is NaN or Infinity, or an
         integer outside the IEEE-754 double-precision safe-integer
-        range that RFC 8785 forbids in canonical output. JCS verifiers
-        in other languages would reject these too.
+        range that RFC 8785 forbids in canonical output (JCS verifiers
+        in other languages would reject these too), OR if a dict
+        contains two keys that NFC-normalize to the same string —
+        canonical JSON requires distinct keys and the substrate refuses
+        to silently drop one value.
     """
     normalized = _normalize(obj)
     try:

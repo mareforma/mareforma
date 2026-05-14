@@ -190,3 +190,51 @@ class TestRfc8785ByteCompatWithNoFloats:
         # The whole envelope decodes back to the same dict.
         import json as _json
         assert _json.loads(out) == payload
+
+
+class TestNfcKeyCollision:
+    """Two dict keys that NFC-normalize to the same string would silently
+    overwrite each other in a naive dict comprehension. The substrate
+    needs determinism — same logical input → same canonical bytes — so
+    collisions are surfaced as :class:`ValueError`, not papered over.
+    """
+
+    def test_top_level_collision_raises(self) -> None:
+        # Use explicit codepoints so the editor cannot silently
+        # normalize the source file. 'café' as U+00E9 (composed) vs
+        # 'cafe' + U+0301 (decomposed e + combining acute) both
+        # NFC-normalize to the composed form → collision.
+        composed = "café"
+        decomposed = "café"
+        assert composed != decomposed  # different code points
+        payload = {composed: 1, decomposed: 2}
+        # Python preserves both keys (they're distinct strings) but
+        # NFC normalization collapses them; refuse rather than pick.
+        with pytest.raises(ValueError, match="collide after NFC"):
+            canonicalize(payload)
+
+    def test_nested_collision_raises(self) -> None:
+        composed = "café"
+        decomposed = "café"
+        payload = {"outer": {composed: 1, decomposed: 2}}
+        with pytest.raises(ValueError, match="collide after NFC"):
+            canonicalize(payload)
+
+    def test_no_collision_succeeds(self) -> None:
+        # Sanity: a normal dict with NFC-distinct keys still works.
+        payload = {"café": 1, "tea": 2}
+        out = canonicalize(payload)
+        assert b'"caf\xc3\xa9":1' in out
+        assert b'"tea":2' in out
+
+    def test_collision_message_lists_offending_keys(self) -> None:
+        """The error names the colliding original keys so the caller
+        can find the source of the collision in their data."""
+        composed = "café"
+        decomposed = "café"
+        with pytest.raises(ValueError) as exc_info:
+            canonicalize({composed: 1, decomposed: 2})
+        msg = str(exc_info.value)
+        # The NFC-normalized target appears in the message; at least
+        # one of the originals appears in repr form.
+        assert "collide" in msg

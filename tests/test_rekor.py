@@ -591,12 +591,13 @@ class TestMarkClaimLoggedVerification:
             conn.close()
 
     def test_malformed_bundle_is_rejected(self, tmp_path):
-        from mareforma.db import (
-            DatabaseError, add_claim, mark_claim_logged, open_db,
-        )
+        """A signed claim cannot have its bundle replaced by malformed JSON."""
+        from mareforma.db import DatabaseError, mark_claim_logged, open_db
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            claim_id = graph.assert_claim("signed host")
         conn = open_db(tmp_path)
         try:
-            claim_id = add_claim(conn, tmp_path, "unsigned host")
             with pytest.raises(DatabaseError, match="malformed bundle"):
                 mark_claim_logged(conn, tmp_path, claim_id, "{not valid json")
         finally:
@@ -606,9 +607,10 @@ class TestMarkClaimLoggedVerification:
         """End-to-end: envelope_payload's dict-only contract must propagate
         through mark_claim_logged as DatabaseError (not AttributeError)."""
         import base64
-        from mareforma.db import (
-            DatabaseError, add_claim, mark_claim_logged, open_db,
-        )
+        from mareforma.db import DatabaseError, mark_claim_logged, open_db
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            claim_id = graph.assert_claim("host")
         bad_bundle = json.dumps({
             "payloadType": "application/vnd.mareforma.claim+json",
             "payload": base64.standard_b64encode(b'"nope"').decode("ascii"),
@@ -616,8 +618,76 @@ class TestMarkClaimLoggedVerification:
         })
         conn = open_db(tmp_path)
         try:
-            claim_id = add_claim(conn, tmp_path, "host")
             with pytest.raises(DatabaseError, match="malformed bundle"):
+                mark_claim_logged(conn, tmp_path, claim_id, bad_bundle)
+        finally:
+            conn.close()
+
+    def test_unsigned_claim_refuses_rekor_attachment(self, tmp_path):
+        """Rekor inclusion attaches to an already-signed envelope. An
+        unsigned claim (signature_bundle IS NULL) cannot be retroactively
+        log-stamped via mark_claim_logged — the call refuses up-front
+        rather than silently writing a bundle onto an unsigned row.
+        """
+        from mareforma.db import (
+            DatabaseError, add_claim, mark_claim_logged, open_db,
+        )
+        conn = open_db(tmp_path)
+        try:
+            claim_id = add_claim(conn, tmp_path, "unsigned host")
+            with pytest.raises(DatabaseError, match="no existing signature_bundle"):
+                mark_claim_logged(conn, tmp_path, claim_id, "{}")
+        finally:
+            conn.close()
+
+    def test_smuggled_top_level_keys_are_rejected(self, tmp_path):
+        """A bundle whose payload/payloadType/signatures match but which
+        adds unexpected top-level keys (e.g. an opaque 'metadata' blob)
+        is refused. Only payload/payloadType/signatures/rekor are
+        whitelisted — substantive substitution beyond the Rekor block
+        is not allowed, even if the new content is structurally inert."""
+        from mareforma.db import DatabaseError, mark_claim_logged, open_db
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            claim_id = graph.assert_claim("the claim")
+            existing = graph.get_claim(claim_id)["signature_bundle"]
+
+        env = json.loads(existing)
+        env["bonus_metadata"] = {"some": "payload"}
+        smuggled = json.dumps(env, sort_keys=True, separators=(",", ":"))
+
+        conn = open_db(tmp_path)
+        try:
+            with pytest.raises(DatabaseError, match="unexpected top-level keys"):
+                mark_claim_logged(conn, tmp_path, claim_id, smuggled)
+        finally:
+            conn.close()
+
+    def test_substitute_bundle_with_different_signer_is_rejected(self, tmp_path):
+        """A bundle whose predicate.claim_id matches but whose payload +
+        signatures differ from the row's existing bundle is refused —
+        mark_claim_logged is for Rekor attachment, not envelope swap.
+        """
+        from mareforma.db import DatabaseError, mark_claim_logged, open_db
+        # Two different signing keys → two different claim envelopes on
+        # the same claim_id string is impossible to forge organically,
+        # but a hostile caller could hand-craft. Build one with a fresh
+        # key by re-signing the same claim fields and verify rejection.
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            claim_id = graph.assert_claim("the claim")
+            existing = graph.get_claim(claim_id)["signature_bundle"]
+
+        # Hand-craft a syntactically valid bundle that names the same
+        # claim_id but in payload/signatures bytes differs from the
+        # existing one. Easiest: parse, tweak signatures, re-serialize.
+        env = json.loads(existing)
+        env["signatures"] = [{"keyid": "0" * 64, "sig": "AA=="}]
+        bad_bundle = json.dumps(env, sort_keys=True, separators=(",", ":"))
+
+        conn = open_db(tmp_path)
+        try:
+            with pytest.raises(DatabaseError, match="differ from the existing row"):
                 mark_claim_logged(conn, tmp_path, claim_id, bad_bundle)
         finally:
             conn.close()
@@ -666,6 +736,64 @@ class TestRekorResponseSizeCap:
             envelope, key.public_key(), rekor_url=_TEST_REKOR_URL,
         )
         assert logged is False
+
+
+# ---------------------------------------------------------------------------
+# Sidecar parser hostility tolerance
+# ---------------------------------------------------------------------------
+
+class TestRecordRekorInclusionParseTolerance:
+    """A buggy or hostile Rekor response with non-integer logIndex /
+    integratedTime must NOT propagate ValueError out of add_claim. The
+    sidecar write is treated as a miss and the caller's claim INSERT
+    stays committed; the next refresh_unsigned() re-submits.
+    """
+
+    def _make_entry(self, **overrides):
+        entry = {
+            "uuid": "abc",
+            "logIndex": 42,
+            "integratedTime": 1_700_000_000,
+        }
+        entry.update(overrides)
+        return entry
+
+    def test_non_integer_logIndex_treated_as_sidecar_miss(self, tmp_path):
+        from mareforma.db import _record_rekor_inclusion, add_claim, open_db
+        conn = open_db(tmp_path)
+        try:
+            cid = add_claim(conn, tmp_path, "host claim")
+            # Hostile registry returns a string.
+            ok = _record_rekor_inclusion(
+                conn, cid, self._make_entry(logIndex="not-a-number"),
+            )
+            assert ok is False
+            # No sidecar row was written.
+            rows = conn.execute(
+                "SELECT 1 FROM rekor_inclusions WHERE claim_id = ?", (cid,),
+            ).fetchall()
+            assert rows == []
+        finally:
+            conn.close()
+
+    def test_non_integer_integratedTime_falls_back_to_null(self, tmp_path):
+        from mareforma.db import _record_rekor_inclusion, add_claim, open_db
+        conn = open_db(tmp_path)
+        try:
+            cid = add_claim(conn, tmp_path, "host claim 2")
+            ok = _record_rekor_inclusion(
+                conn, cid, self._make_entry(integratedTime="garbage"),
+            )
+            # logIndex is fine → sidecar succeeds with NULL integratedTime.
+            assert ok is True
+            row = conn.execute(
+                "SELECT integrated_time, log_index "
+                "FROM rekor_inclusions WHERE claim_id = ?", (cid,),
+            ).fetchone()
+            assert row["integrated_time"] is None
+            assert row["log_index"] == 42
+        finally:
+            conn.close()
 
 
 # ---------------------------------------------------------------------------

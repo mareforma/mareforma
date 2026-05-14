@@ -128,13 +128,6 @@ PAYLOAD_TYPE_VALIDATOR_ENROLLMENT = "application/vnd.mareforma.validator-enrollm
 PAYLOAD_TYPE_VALIDATION = "application/vnd.mareforma.validation+json"
 PAYLOAD_TYPE_SEED = "application/vnd.mareforma.seed+json"
 
-# Private aliases retained so existing internal callers don't break.
-# ``_PAYLOAD_TYPE`` was the old name for the claim payload type.
-_PAYLOAD_TYPE = PAYLOAD_TYPE_CLAIM
-_PAYLOAD_TYPE_VALIDATOR_ENROLLMENT = PAYLOAD_TYPE_VALIDATOR_ENROLLMENT
-_PAYLOAD_TYPE_VALIDATION = PAYLOAD_TYPE_VALIDATION
-_PAYLOAD_TYPE_SEED = PAYLOAD_TYPE_SEED
-
 # Predicate fields bound by a claim signature. After Statement v1 these
 # live inside ``statement.predicate``; the tuple is the contract restore
 # uses to cross-check signature-vs-row consistency. Public so callers
@@ -644,7 +637,7 @@ def sign_validator_enrollment(
     payload = _canonical_record(_ENROLLMENT_FIELDS, enrollment)
     return _build_envelope(
         payload, private_key,
-        payload_type=_PAYLOAD_TYPE_VALIDATOR_ENROLLMENT,
+        payload_type=PAYLOAD_TYPE_VALIDATOR_ENROLLMENT,
     )
 
 
@@ -663,7 +656,7 @@ def sign_validation(
     payload = _canonical_record(_VALIDATION_FIELDS, validation)
     return _build_envelope(
         payload, private_key,
-        payload_type=_PAYLOAD_TYPE_VALIDATION,
+        payload_type=PAYLOAD_TYPE_VALIDATION,
     )
 
 
@@ -691,7 +684,7 @@ def sign_seed_claim(
     payload = _canonical_record(_SEED_FIELDS, seed)
     return _build_envelope(
         payload, private_key,
-        payload_type=_PAYLOAD_TYPE_SEED,
+        payload_type=PAYLOAD_TYPE_SEED,
     )
 
 
@@ -715,8 +708,8 @@ def verify_envelope(
         The envelope's ``payloadType`` must match this exact value.
         Defaults to the claim payload type — the most common case —
         so callers that omit the kwarg get type-safe behavior. Pass
-        :data:`_PAYLOAD_TYPE_VALIDATOR_ENROLLMENT` or
-        :data:`_PAYLOAD_TYPE_VALIDATION` explicitly when verifying
+        :data:`PAYLOAD_TYPE_VALIDATOR_ENROLLMENT` or
+        :data:`PAYLOAD_TYPE_VALIDATION` explicitly when verifying
         those envelopes. There is no "accept any type" mode by design:
         cross-type acceptance lets an attacker pass a validation or
         enrollment envelope through a verifier expecting a claim.
@@ -724,7 +717,7 @@ def verify_envelope(
     if not isinstance(envelope, dict):
         raise InvalidEnvelopeError("envelope must be a dict")
     if expected_payload_type is None:
-        expected_payload_type = _PAYLOAD_TYPE
+        expected_payload_type = PAYLOAD_TYPE_CLAIM
     declared = envelope.get("payloadType")
     if declared != expected_payload_type:
         raise InvalidEnvelopeError(

@@ -599,7 +599,7 @@ def verify_enrollment(validator_row: dict, parent_pubkey_pem: bytes) -> bool:
     try:
         if not _signing.verify_envelope(
             envelope, parent_pub,
-            expected_payload_type=_signing._PAYLOAD_TYPE_VALIDATOR_ENROLLMENT,
+            expected_payload_type=_signing.PAYLOAD_TYPE_VALIDATOR_ENROLLMENT,
         ):
             return False
         payload = _signing.envelope_payload(envelope)

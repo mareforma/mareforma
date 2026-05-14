@@ -229,7 +229,39 @@ def restore(
     return _restore(project_root, claims_toml=claims_toml)
 
 
-from mareforma._evidence import EvidenceVector
+from mareforma._evidence import EvidenceVector, EvidenceVectorError
+
+# Re-export the user-catchable exception surface. AGENTS.md / docstrings
+# document these as raise paths from the public API (assert_claim,
+# validate, update_claim, restore, refresh_unsigned, etc.), and users
+# previously had to import them from submodules (mareforma.db,
+# mareforma.signing, mareforma.validators, mareforma._evidence) — the
+# last of which is underscore-prefixed and therefore confusing. Make
+# the catch surface match the documented contract by exposing
+# everything at the top level.
+from mareforma.db import (
+    MareformaError,
+    DatabaseError,
+    ClaimNotFoundError,
+    SignedClaimImmutableError,
+    IdempotencyConflictError,
+    IllegalStateTransitionError,
+    ChainIntegrityError,
+    LLMValidatorPromotionError,
+    SelfValidationError,
+    EvidenceCitationError,
+    InvalidValidationEnvelopeError,
+    RestoreError,
+    CycleDetectedError,
+    VerdictIssuerError,
+)
+from mareforma.signing import (
+    SigningError,
+    KeyNotFoundError,
+    KeyPermissionError,
+    InvalidEnvelopeError,
+)
+from mareforma.validators import ValidatorNotEnrolledError
 
 
 __all__ = [
@@ -241,6 +273,27 @@ __all__ = [
     "sanitize_for_llm",
     "wrap_untrusted",
     "__version__",
+    # User-catchable exceptions (alphabetical under MareformaError).
+    "MareformaError",
+    "ChainIntegrityError",
+    "ClaimNotFoundError",
+    "CycleDetectedError",
+    "DatabaseError",
+    "EvidenceCitationError",
+    "EvidenceVectorError",
+    "IdempotencyConflictError",
+    "IllegalStateTransitionError",
+    "InvalidEnvelopeError",
+    "InvalidValidationEnvelopeError",
+    "KeyNotFoundError",
+    "KeyPermissionError",
+    "LLMValidatorPromotionError",
+    "RestoreError",
+    "SelfValidationError",
+    "SignedClaimImmutableError",
+    "SigningError",
+    "ValidatorNotEnrolledError",
+    "VerdictIssuerError",
 ]
 
 

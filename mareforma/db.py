@@ -670,10 +670,44 @@ class EvidenceCitationError(MareformaError):
       * claim_id that does not exist in the graph,
       * claim_id whose ``created_at`` is later than the validation
         timestamp (the validator could not have reviewed a claim that
-        didn't exist yet).
+        didn't exist yet),
+      * envelope's ``evidence_seen`` field does not equal the
+        ``evidence_seen`` kwarg passed alongside (the envelope's signed
+        citations must match the substrate-validated kwarg byte-for-byte).
 
     The error message names the first failing entry so the caller can
     fix it without trial-and-error.
+    """
+
+
+class InvalidValidationEnvelopeError(MareformaError):
+    """Raised when a validation envelope is structurally or cryptographically
+    invalid.
+
+    Distinct from :class:`EvidenceCitationError` (which is specifically
+    about evidence_seen citations failing the substrate's existence /
+    timestamp check). This exception fires when the envelope itself
+    fails any of the substrate's defense-in-depth gates inside
+    :func:`validate_claim`:
+
+      * envelope cannot be parsed as JSON or is missing required fields,
+      * envelope's ``payloadType`` is neither validation nor seed,
+      * envelope's signing keyid is not an enrolled validator,
+      * envelope fails Ed25519 verification against the claimed signer's
+        public key (cryptographic forgery or wrong signer),
+      * envelope's payload binds a different ``claim_id`` than the row
+        being promoted (replay across claims),
+      * envelope's payload binds a ``validator_keyid`` that does not
+        equal the signing keyid (internal inconsistency),
+      * envelope's payload's timestamp (``validated_at`` for validation
+        envelopes, ``seeded_at`` for seed envelopes) does not equal the
+        ``validated_at`` value being written.
+
+    These checks make :func:`validate_claim` safe to call directly:
+    bypassing :meth:`EpistemicGraph.validate` does not relax any
+    substrate-level invariant. A caller that hand-crafts an envelope to
+    impersonate an enrolled human validator will fail one of these
+    gates before any row is mutated.
     """
 
 
@@ -1577,61 +1611,19 @@ def add_claim(
             conn.rollback()
         raise DatabaseError(f"Failed to add claim: {exc}") from exc
 
-    # Attempt Rekor submission. On success, run the two-write saga:
-    # step 3 records the inclusion in the rekor_inclusions sidecar (the
-    # durable record of "Rekor accepted this claim"), step 4 augments
-    # the envelope on the claims row. If step 4 fails, step 3 already
-    # persisted the coords — refresh_unsigned will read the sidecar and
-    # replay step 4 instead of double-submitting to Rekor.
+    # Attempt Rekor submission. The saga (submit → sidecar → row UPDATE)
+    # is its own concern; the helper returns the new transparency_logged
+    # value so the REPLICATED check below can short-circuit when the
+    # log entry failed to attach.
     if rekor_enabled:
-        from mareforma import signing as _signing
-        logged, entry = _signing.submit_to_rekor(
-            envelope, signer.public_key(), rekor_url=rekor_url,
+        transparency_logged = _attempt_rekor_saga(
+            conn,
+            claim_id=claim_id,
+            envelope=envelope,
+            signer=signer,
+            rekor_url=rekor_url,
+            require_rekor=require_rekor,
         )
-        if logged and entry is not None:
-            # Step 3: durable sidecar write. If THIS write fails the
-            # inclusion is silently lost — Rekor knows but we don't.
-            # We let the exception propagate up so the operator sees
-            # the loss; the next refresh_unsigned will re-submit (which
-            # creates a duplicate Rekor entry but that's the only
-            # recovery available when we have no record at all).
-            sidecar_recorded = _record_rekor_inclusion(
-                conn, claim_id, entry,
-            )
-            if sidecar_recorded:
-                augmented = _signing.attach_rekor_entry(envelope, entry)
-                new_bundle = json.dumps(
-                    augmented, sort_keys=True, separators=(",", ":"),
-                )
-                try:
-                    conn.execute(
-                        "UPDATE claims SET signature_bundle = ?, "
-                        "transparency_logged = 1, updated_at = ? "
-                        "WHERE claim_id = ?",
-                        (new_bundle, _now(), claim_id),
-                    )
-                    conn.commit()
-                    transparency_logged = 1
-                except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
-                    # Step 4 failed but step 3 (sidecar) persisted. The
-                    # row stays at transparency_logged=0; refresh_unsigned
-                    # will detect the sidecar/row drift and replay step 4
-                    # using the stored coords — no duplicate Rekor entry.
-                    import warnings as _warnings
-                    _warnings.warn(
-                        f"Claim {claim_id} accepted by Rekor (coords saved "
-                        f"to rekor_inclusions sidecar) but the local UPDATE "
-                        f"failed ({exc}). transparency_logged remains 0; "
-                        "run EpistemicGraph.refresh_unsigned() to reconcile "
-                        "without re-submitting.",
-                        stacklevel=2,
-                    )
-        elif require_rekor:
-            raise _signing.SigningError(
-                f"Rekor submission to {rekor_url} failed and require_rekor=True. "
-                "Claim was persisted with transparency_logged=0; call "
-                "EpistemicGraph.refresh_unsigned() to retry."
-            )
 
     # Check whether this claim triggers REPLICATED status on shared upstreams.
     # Unresolved DOIs OR pending transparency-log inclusion block eligibility.
@@ -2137,20 +2129,37 @@ def validate_claim(
 
     Substrate gates
     ---------------
-    When ``validation_signature`` is supplied, three substrate-level
-    checks fire before the row is updated. All three decode the
-    envelope's payload and consult the substrate directly — wrapping
-    code in ``_graph.validate`` cannot bypass them:
+    When ``validation_signature`` is supplied, the substrate fires the
+    following defense-in-depth gates before the row is updated. All
+    consult the substrate directly — calling :func:`validate_claim`
+    bypassing :meth:`EpistemicGraph.validate` does not relax any of
+    them, so a hostile in-process caller cannot route around them:
 
-    1. The signing validator's ``validator_type`` must be ``'human'``.
+    1. The envelope must parse as JSON and carry a ``payloadType`` in
+       ``{PAYLOAD_TYPE_VALIDATION, PAYLOAD_TYPE_SEED}`` (raises
+       :class:`InvalidValidationEnvelopeError` on either failure).
+    2. The envelope's signing keyid must be an enrolled validator
+       (raises :class:`InvalidValidationEnvelopeError`).
+    3. The envelope must verify cryptographically against the claimed
+       signer's public key via :func:`signing.verify_envelope` (raises
+       :class:`InvalidValidationEnvelopeError`).
+    4. The signing validator's ``validator_type`` must be ``'human'``.
        An ``'llm'``-typed validator can sign a validation envelope but
-       cannot promote past REPLICATED (raises :class:`LLMValidatorPromotionError`).
-    2. The validator's keyid must NOT match the claim's
+       cannot promote past REPLICATED (raises
+       :class:`LLMValidatorPromotionError`).
+    5. The validator's keyid must NOT match the claim's
        ``signature_bundle`` signing keyid. Self-validation is the
        trivial-loop attack (raises :class:`SelfValidationError`).
-    3. Every entry in ``evidence_seen`` must be a strict-v4 UUID
-       matching an existing claim with ``created_at <= validated_at``
-       (raises :class:`EvidenceCitationError`).
+    6. The envelope's signed payload must agree on ``claim_id``,
+       ``validator_keyid``, and the timestamp (``validated_at`` for
+       validation envelopes, ``seeded_at`` for seed envelopes) with the
+       row being promoted and the kwargs being written (raises
+       :class:`InvalidValidationEnvelopeError`).
+    7. The envelope's ``evidence_seen`` field must equal the
+       ``evidence_seen`` kwarg, and every cited entry must be a
+       strict-v4 UUID matching an existing claim with
+       ``created_at <= validated_at`` (raises
+       :class:`EvidenceCitationError`).
 
     Raises
     ------
@@ -2161,6 +2170,11 @@ def validate_claim(
         status is not 'open' (contested/retracted claims are editorially
         tainted and must not be promoted; revisit the editorial flag via
         update_claim before validating).
+    InvalidValidationEnvelopeError
+        If the validation envelope is malformed, wrong-typed, signed
+        by a non-enrolled key, fails cryptographic verification, or
+        its payload disagrees with the row or kwargs on ``claim_id``,
+        ``validator_keyid``, or the timestamp.
     LLMValidatorPromotionError
         If the validation envelope is signed by an LLM-typed validator.
     SelfValidationError
@@ -2201,39 +2215,174 @@ def validate_claim(
             "an invalidated claim to ESTABLISHED."
         )
 
-    # Substrate gates: parse the validation envelope, look up the
-    # signer's validator_type, refuse LLM signers and self-validation.
-    # Skipped on the legacy unsigned path (validation_signature=None) —
-    # there is no envelope to inspect, and the legacy path is being
-    # phased out by mareforma.open(require_signed=True) downstream.
+    # Substrate gates over the validation envelope.
+    #
+    # validate_claim is a public-by-convention function (no leading
+    # underscore) and is callable directly by any in-process code path —
+    # not only :meth:`EpistemicGraph.validate`. The wrapper builds the
+    # envelope with the graph's loaded signer, so the wrapper path is
+    # safe by construction; this function is the defense-in-depth layer
+    # that must also be safe when called with a caller-supplied envelope.
+    #
+    # Without cryptographic verification here, an enrolled LLM-typed
+    # validator (or any in-process caller) could hand-craft an envelope
+    # JSON claiming a human validator's keyid + a garbage signature,
+    # then call ``db.validate_claim`` directly. The substrate would
+    # consult the CLAIMED keyid to enforce the trust-ladder gates
+    # (LLM-type, self-validation), find them satisfied, and persist a
+    # fraudulent ESTABLISHED row anchored by an envelope that does not
+    # verify against the impersonated signer's public key. Restore would
+    # eventually catch it, but the live DB would already have shipped
+    # bad data to whoever queried in the meantime.
+    #
+    # Order of operations:
+    #   1. Decode the envelope structure (refuse malformed JSON).
+    #   2. Restrict ``payloadType`` to validation or seed — same set the
+    #      restore path accepts on this column.
+    #   3. Look up the claimed signer in the validators table.
+    #   4. Cryptographically verify the envelope with the signer's
+    #      pubkey via :func:`signing.verify_envelope`.
+    #   5. Apply the trust-ladder gates (LLM-type ceiling, self-
+    #      validation refusal). These can now safely consult the
+    #      validator_keyid because step 4 proved the signer actually
+    #      holds the private key.
+    #   6. Compare the envelope's payload fields against the row + the
+    #      kwargs the substrate is about to write — claim_id, the
+    #      timestamp, validator_keyid, and evidence_seen all must
+    #      agree byte-for-byte.
+    #
+    # The legacy unsigned path (validation_signature=None) bypasses
+    # this whole block; that path is being phased out by
+    # ``mareforma.open(require_signed=True)`` downstream.
     validator_keyid: str | None = None
+    env: dict | None = None
+    declared_type: str | None = None
     if validation_signature is not None:
-        validator_keyid = _extract_validation_signer_keyid(validation_signature)
-        if validator_keyid is not None:
-            _refuse_llm_validator(conn, validator_keyid)
-            _refuse_self_validation(
-                claim_id, row["signature_bundle"], validator_keyid,
+        from mareforma import signing as _signing
+        from mareforma import validators as _validators
+
+        try:
+            env = json.loads(validation_signature)
+            validator_keyid = env["signatures"][0]["keyid"]
+            declared_type = env["payloadType"]
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+            raise InvalidValidationEnvelopeError(
+                f"validation_signature for claim '{claim_id}' is malformed "
+                f"({exc}); cannot extract signer or payloadType."
+            ) from exc
+
+        # The validation_signature column carries either a validation
+        # envelope (REPLICATED→ESTABLISHED) or a seed envelope (born-
+        # ESTABLISHED). Anything else is a type confusion attempt —
+        # cross-type acceptance lets an attacker pass an enrollment or
+        # claim envelope through a verifier expecting a validation
+        # event. verify_envelope's expected_payload_type is the formal
+        # guard; the early-rejection here gives a clear error message.
+        if declared_type not in (
+            _signing.PAYLOAD_TYPE_VALIDATION,
+            _signing.PAYLOAD_TYPE_SEED,
+        ):
+            raise InvalidValidationEnvelopeError(
+                f"validation_signature payloadType {declared_type!r} for "
+                f"claim '{claim_id}' is neither validation nor seed; "
+                "refusing to persist a wrong-typed envelope as validation."
             )
+
+        signer_row = _validators.get_validator(conn, validator_keyid)
+        if signer_row is None:
+            raise InvalidValidationEnvelopeError(
+                f"validation_signature for claim '{claim_id}' is signed by "
+                f"keyid {validator_keyid[:12]}… which is not an enrolled "
+                "validator on this graph. Enroll the signer first via "
+                "graph.enroll_validator() or call graph.validate() from a "
+                "session whose loaded signer is already enrolled."
+            )
+
+        try:
+            signer_pem = base64.standard_b64decode(signer_row["pubkey_pem"])
+            signer_pub = _signing.public_key_from_pem(signer_pem)
+            sig_ok = _signing.verify_envelope(
+                env, signer_pub, expected_payload_type=declared_type,
+            )
+        except (ValueError, TypeError, _signing.SigningError) as exc:
+            raise InvalidValidationEnvelopeError(
+                f"validation_signature for claim '{claim_id}' did not verify "
+                f"cryptographically against keyid {validator_keyid[:12]}…: "
+                f"{exc}"
+            ) from exc
+        if not sig_ok:
+            raise InvalidValidationEnvelopeError(
+                f"validation_signature for claim '{claim_id}' failed Ed25519 "
+                f"verification against keyid {validator_keyid[:12]}…. The "
+                "envelope is not authorized by the claimed signer."
+            )
+
+        # Trust-ladder gates run AFTER signature verification, so the
+        # validator_keyid is now known to be authentic — not just claimed.
+        _refuse_llm_validator(conn, validator_keyid)
+        _refuse_self_validation(
+            claim_id, row["signature_bundle"], validator_keyid,
+        )
 
     now = validated_at if validated_at is not None else _now()
 
-    # Envelope/kwarg agreement gate. The substrate verifies
-    # ``evidence_seen`` against the kwarg (below), but a caller could
-    # pass an empty kwarg while embedding a fraudulent populated list
-    # in the signed envelope on disk — the envelope would record
-    # citations the substrate never validated. Decode the envelope and
-    # require its payload's ``evidence_seen`` to equal the kwarg
-    # exactly (same items, same order). Closes the gap between "what
-    # the substrate validated" and "what the on-disk envelope claims."
-    if validation_signature is not None:
+    # Envelope/kwarg/row payload-field agreement. verify_envelope above
+    # proved the signer signed THESE BYTES — but it does NOT prove the
+    # signed payload describes the row being updated. Without these
+    # equality checks a caller could replay a legitimate validation
+    # envelope from claim A onto row B (matching signer + matching
+    # cryptography), promoting B to ESTABLISHED with an envelope that
+    # binds a different claim_id and timestamp. Restore would catch the
+    # divergence; this is the live-DB equivalent of the restore-path
+    # checks at ``_verify_claim_signatures_on_restore``.
+    if validation_signature is not None and env is not None:
+        # envelope_payload raises InvalidEnvelopeError when the signed
+        # payload bytes fail to base64-decode or do not parse as a JSON
+        # object. verify_envelope only checks the DSSE PAE signature;
+        # it does NOT enforce that the payload bytes are well-formed.
+        # An enrolled validator with a real key could (intentionally or
+        # by bug) sign non-JSON bytes; without this try/except the
+        # InvalidEnvelopeError would propagate past the substrate's
+        # documented contract.
         try:
-            from mareforma import signing as _signing
-            env = json.loads(validation_signature)
             env_payload = _signing.envelope_payload(env)
-        except (json.JSONDecodeError, KeyError, TypeError,
-                _signing.InvalidEnvelopeError):
-            env_payload = None
-        if env_payload is not None:
+        except _signing.InvalidEnvelopeError as exc:
+            raise InvalidValidationEnvelopeError(
+                f"validation envelope's signed payload is not a JSON "
+                f"object ({exc}); refusing to persist an envelope whose "
+                "payload contract is malformed."
+            ) from exc
+        if env_payload.get("claim_id") != claim_id:
+            raise InvalidValidationEnvelopeError(
+                f"validation envelope binds claim_id "
+                f"{env_payload.get('claim_id')!r} but the row being promoted "
+                f"is {claim_id!r}; envelope replay across claims refused."
+            )
+        if env_payload.get("validator_keyid") != validator_keyid:
+            raise InvalidValidationEnvelopeError(
+                "validation envelope's payload.validator_keyid does not "
+                "match the signing keyid; envelope is internally "
+                "inconsistent and refused."
+            )
+        # Seed envelopes bind ``seeded_at``; validation envelopes bind
+        # ``validated_at``. The row's ``validated_at`` is being written
+        # from ``now`` either way, so the comparison key is uniform on
+        # the row side and varies only on the envelope side.
+        timestamp_field = (
+            "validated_at"
+            if declared_type == _signing.PAYLOAD_TYPE_VALIDATION
+            else "seeded_at"
+        )
+        if env_payload.get(timestamp_field) != now:
+            raise InvalidValidationEnvelopeError(
+                f"validation envelope's {timestamp_field} "
+                f"({env_payload.get(timestamp_field)!r}) does not match the "
+                f"validated_at value being written ({now!r}); envelope "
+                "timestamp must agree with the substrate write."
+            )
+        # evidence_seen is bound only on validation envelopes; seed
+        # envelopes have no analog. Skip the comparison for seeds.
+        if declared_type == _signing.PAYLOAD_TYPE_VALIDATION:
             env_evidence = env_payload.get("evidence_seen")
             kwarg_evidence = evidence_seen if evidence_seen is not None else []
             if env_evidence != kwarg_evidence:
@@ -2292,6 +2441,99 @@ def list_unresolved_claims(conn: sqlite3.Connection) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def _attempt_rekor_saga(
+    conn: sqlite3.Connection,
+    *,
+    claim_id: str,
+    envelope: dict,
+    signer: "object",
+    rekor_url: str,
+    require_rekor: bool,
+) -> int:
+    """Run the Rekor 4-step saga on a freshly-INSERTed signed claim.
+
+    Returns the new ``transparency_logged`` value to write back to the
+    caller's local variable (0 if the saga did not complete, 1 if the
+    row UPDATE succeeded).
+
+    Saga steps
+    ----------
+    1. The claim is already INSERTed with ``transparency_logged=0``
+       (the caller's responsibility, before this helper runs).
+    2. Submit the envelope to Rekor; on failure, return 0.
+    3. Persist the (uuid, logIndex, integratedTime) coords to the
+       ``rekor_inclusions`` sidecar. The sidecar's append-only triggers
+       guarantee no replay can rewrite this row.
+    4. UPDATE the claim row's ``signature_bundle`` with the augmented
+       envelope (Rekor block attached) and set ``transparency_logged=1``.
+
+    If step 4 fails after step 3 succeeded, the sidecar holds the durable
+    record. :meth:`EpistemicGraph.refresh_unsigned` reads the sidecar and
+    replays step 4 instead of double-submitting to Rekor.
+
+    Extracting this helper out of :func:`add_claim` keeps the
+    happy-path read concise: ``add_claim`` is about claim insertion +
+    chain integrity; the saga is a separate concern that lives next to
+    its sidecar helper :func:`_record_rekor_inclusion`.
+
+    Raises
+    ------
+    SigningError
+        If the initial Rekor submission fails and ``require_rekor=True``.
+    """
+    from mareforma import signing as _signing
+
+    logged, entry = _signing.submit_to_rekor(
+        envelope, signer.public_key(), rekor_url=rekor_url,
+    )
+    if not logged or entry is None:
+        if require_rekor:
+            raise _signing.SigningError(
+                f"Rekor submission to {rekor_url} failed and "
+                "require_rekor=True. Claim was persisted with "
+                "transparency_logged=0; call "
+                "EpistemicGraph.refresh_unsigned() to retry."
+            )
+        return 0
+
+    # Step 3: durable sidecar write. Failure here means Rekor saw the
+    # entry but we lost the record locally — the next refresh_unsigned
+    # will re-submit and create a duplicate, which is the only recovery
+    # path when no sidecar exists. _record_rekor_inclusion emits a
+    # warning on that path; we honor its return value.
+    if not _record_rekor_inclusion(conn, claim_id, entry):
+        return 0
+
+    # Step 4: augment the row's bundle with the Rekor coords and flip
+    # the transparency flag. Failure here is benign: the sidecar holds
+    # the truth, refresh_unsigned will replay this UPDATE from the
+    # stored coords without re-submitting to Rekor.
+    augmented = _signing.attach_rekor_entry(envelope, entry)
+    new_bundle = json.dumps(
+        augmented, sort_keys=True, separators=(",", ":"),
+    )
+    try:
+        conn.execute(
+            "UPDATE claims SET signature_bundle = ?, "
+            "transparency_logged = 1, updated_at = ? "
+            "WHERE claim_id = ?",
+            (new_bundle, _now(), claim_id),
+        )
+        conn.commit()
+        return 1
+    except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
+        import warnings as _warnings
+        _warnings.warn(
+            f"Claim {claim_id} accepted by Rekor (coords saved to "
+            f"rekor_inclusions sidecar) but the local UPDATE failed "
+            f"({exc}). transparency_logged remains 0; run "
+            "EpistemicGraph.refresh_unsigned() to reconcile without "
+            "re-submitting.",
+            stacklevel=2,
+        )
+        return 0
+
+
 def _record_rekor_inclusion(
     conn: sqlite3.Connection,
     claim_id: str,
@@ -2323,6 +2565,37 @@ def _record_rekor_inclusion(
         raw_b64 = base64.standard_b64encode(
             raw_json.encode("utf-8"),
         ).decode("ascii")
+        # Defensive numeric parsing. Rekor returns ``logIndex`` and
+        # ``integratedTime`` as JSON numbers, but a buggy or hostile
+        # registry could return strings (``"42"``), floats, or non-
+        # numeric tokens. Without this guard, an int() ValueError would
+        # propagate out of add_claim AFTER the claim has been committed
+        # — the user would see a stack trace instead of the documented
+        # (False, None) sidecar-failure flow. Treat any parse failure
+        # as a sidecar miss; the recovery path then re-submits.
+        try:
+            log_index_int = int(entry.get("logIndex") or 0)
+        except (TypeError, ValueError):
+            import warnings as _warnings
+            _warnings.warn(
+                f"Rekor returned a non-integer logIndex "
+                f"({entry.get('logIndex')!r}) for claim {claim_id}. "
+                "Treating as a sidecar miss; refresh_unsigned() will "
+                "re-submit and create a duplicate Rekor entry — the "
+                "only recovery available without a parseable record.",
+                stacklevel=2,
+            )
+            return False
+        try:
+            integrated_time_int = (
+                int(entry.get("integratedTime") or 0) or None
+            )
+        except (TypeError, ValueError):
+            # integratedTime is informational. A malformed value gets
+            # stored as NULL rather than failing the whole sidecar
+            # write — the uuid and logIndex are sufficient to replay
+            # the saga's step 4.
+            integrated_time_int = None
         # ON CONFLICT DO NOTHING: a successful Rekor inclusion is
         # immutable. If a caller retries the saga and lands here twice
         # for the same claim_id, the original row stays — the
@@ -2338,8 +2611,8 @@ def _record_rekor_inclusion(
             (
                 claim_id,
                 entry.get("uuid"),
-                int(entry.get("logIndex") or 0),
-                int(entry.get("integratedTime") or 0) or None,
+                log_index_int,
+                integrated_time_int,
                 raw_b64,
                 _now(),
             ),
@@ -2419,26 +2692,54 @@ def mark_claim_logged(
 
     Verification
     ------------
-    Before writing, the supplied bundle is decoded and its payload's
-    ``claim_id`` is checked against the row's ``claim_id``. A buggy caller
-    that mixes up claim ids cannot silently write Alice's bundle onto
-    Bob's row.
+    Before writing, FOUR gates apply:
+
+    1. The row must already carry a non-NULL ``signature_bundle``.
+       mark_claim_logged attaches a Rekor block to an existing
+       envelope — it is not a path to sign an unsigned claim.
+    2. The supplied bundle must be JSON.
+    3. The bundle must be a structurally-valid claim envelope and its
+       ``predicate.claim_id`` must equal the row's ``claim_id``. A buggy
+       caller that mixes up claim ids cannot silently write Alice's
+       bundle onto Bob's row.
+    4. The supplied bundle's ``payload``, ``payloadType``, and
+       ``signatures`` fields must be byte-identical to the row's
+       existing ``signature_bundle``. The trigger
+       ``claims_signed_fields_no_laundering`` intentionally does NOT
+       watch ``signature_bundle`` (the Rekor attachment legitimately
+       rewrites it), so this function is the sole defense against a
+       caller substituting a different envelope wholesale (different
+       signer, different payload, different keyid). Only the optional
+       top-level ``rekor`` block may differ between the existing and
+       new bundles.
 
     Raises
     ------
     ClaimNotFoundError
         If no claim with claim_id exists.
     DatabaseError
-        If the supplied bundle is malformed or its payload's claim_id does
-        not match.
+        If the row has no existing signature_bundle, the supplied
+        bundle is malformed, its payload's claim_id does not match,
+        or it substantively differs from the existing bundle.
     """
     row = conn.execute(
-        "SELECT supports_json, generated_by, unresolved, artifact_hash "
+        "SELECT supports_json, generated_by, unresolved, artifact_hash, "
+        "signature_bundle "
         "FROM claims WHERE claim_id = ?",
         (claim_id,),
     ).fetchone()
     if row is None:
         raise ClaimNotFoundError(f"Claim '{claim_id}' not found.")
+
+    existing_bundle_raw = row["signature_bundle"]
+    if existing_bundle_raw is None:
+        raise DatabaseError(
+            f"mark_claim_logged refused for claim '{claim_id}': the row "
+            "carries no existing signature_bundle. Rekor inclusion attaches "
+            "a transparency-log block to an already-signed envelope; an "
+            "unsigned claim cannot be log-stamped retroactively. Sign the "
+            "claim at assert time via mareforma.open(key_path=...)."
+        )
 
     # Sanity-check that the supplied bundle actually belongs to this claim.
     # After Statement v1, claim_id lives inside the predicate.
@@ -2454,6 +2755,61 @@ def mark_claim_logged(
         raise DatabaseError(
             f"mark_claim_logged bundle's predicate.claim_id "
             f"({predicate.get('claim_id')!r}) does not match row {claim_id!r}."
+        )
+
+    # Substitution gate. mark_claim_logged exists to attach a Rekor
+    # inclusion block to the envelope that was already produced + signed
+    # by add_claim. The new bundle must preserve the existing payload
+    # bytes, signatures array, and payloadType — only the optional
+    # top-level ``rekor`` block may differ. Without this check, a caller
+    # could pass any DSSE-shaped envelope (different signer, freshly
+    # forged signatures, same predicate.claim_id) and the substrate
+    # would persist it, since the claims_signed_fields_no_laundering
+    # trigger intentionally does not watch signature_bundle.
+    try:
+        existing_envelope = json.loads(existing_bundle_raw)
+    except json.JSONDecodeError as exc:
+        # Row's bundle column is corrupt — separate failure mode from
+        # caller error. Surface so the operator can investigate.
+        raise DatabaseError(
+            f"mark_claim_logged refused for claim '{claim_id}': the "
+            f"existing signature_bundle on the row is malformed ({exc}). "
+            "Run graph.restore() to surface and recover from the "
+            "corruption."
+        ) from exc
+    if (
+        envelope.get("payload") != existing_envelope.get("payload")
+        or envelope.get("payloadType") != existing_envelope.get("payloadType")
+        or envelope.get("signatures") != existing_envelope.get("signatures")
+    ):
+        raise DatabaseError(
+            f"mark_claim_logged refused for claim '{claim_id}': the new "
+            "bundle's payload, payloadType, or signatures differ from the "
+            "existing row's signature_bundle. This function attaches a "
+            "Rekor inclusion block to an existing envelope; it does not "
+            "substitute one envelope for another. To re-sign, retract the "
+            "claim (status='retracted') and assert a new one citing the "
+            "retracted via contradicts=[<old_claim_id>]."
+        )
+
+    # Whitelist of allowed top-level envelope keys. The field-equality
+    # check above only compares the cryptographically meaningful trio
+    # (payload, payloadType, signatures); extra keys would slip through
+    # and get persisted to signature_bundle. The only legitimate addition
+    # mark_claim_logged exists to enable is the ``rekor`` block. Anything
+    # else is a smuggling vector for opaque metadata that downstream
+    # consumers (jsonld exporter, restore) would have to defend against
+    # individually.
+    _ALLOWED_BUNDLE_KEYS = frozenset(
+        {"payload", "payloadType", "signatures", "rekor"}
+    )
+    extra_keys = set(envelope.keys()) - _ALLOWED_BUNDLE_KEYS
+    if extra_keys:
+        raise DatabaseError(
+            f"mark_claim_logged refused for claim '{claim_id}': the new "
+            f"bundle carries unexpected top-level keys {sorted(extra_keys)!r}. "
+            "Only payload, payloadType, signatures, and rekor are allowed; "
+            "smuggling additional metadata into signature_bundle is refused."
         )
 
     supports = json.loads(row["supports_json"] or "[]")

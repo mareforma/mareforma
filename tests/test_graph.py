@@ -407,11 +407,37 @@ def test_schema_is_stable_across_calls():
 # ---------------------------------------------------------------------------
 
 def test_get_tools_returns_two_callables(tmp_path):
-    with mareforma.open(tmp_path) as graph:
+    """The agent-tool callables must be live when the graph is open AND
+    must refuse to operate after the context manager closes the
+    connection. ``callable()`` alone is True for any function and proves
+    nothing about post-close behavior — exercise both states explicitly.
+    """
+    import json
+    key_path = _bootstrap_key(tmp_path)
+
+    # Inside the context manager: both tools work end-to-end.
+    with mareforma.open(tmp_path, key_path=key_path) as graph:
         tools = graph.get_tools()
-    assert len(tools) == 2
-    assert callable(tools[0])
-    assert callable(tools[1])
+        assert len(tools) == 2
+        query_graph, propose_claim = tools
+
+        # propose_claim writes; query_graph reads.
+        new_id = propose_claim(
+            text="A claim asserted via the agent tool surface",
+            classification="ANALYTICAL",
+        )
+        assert isinstance(new_id, str) and len(new_id) > 0
+
+        rows = json.loads(query_graph("agent tool surface"))
+        assert any(r["claim_id"] == new_id for r in rows)
+
+    # After context-manager exit the underlying conn is closed. The
+    # bound callables must surface a RuntimeError rather than silently
+    # writing to (or reading from) the closed connection.
+    with pytest.raises((RuntimeError, sqlite3.ProgrammingError)):
+        query_graph("anything")
+    with pytest.raises((RuntimeError, sqlite3.ProgrammingError)):
+        propose_claim(text="post-close write attempt")
 
 
 def test_get_tools_query_returns_valid_json(tmp_path):
@@ -1918,3 +1944,287 @@ class TestValidationEnvelopeKwargAgreement:
         with mareforma.open(tmp_path, key_path=other_key) as g:
             g.validate(cid_b, evidence_seen=[seed])
             assert g.get_claim(cid_b)["support_level"] == "ESTABLISHED"
+
+
+class TestValidationEnvelopeCryptographicVerification:
+    """``db.validate_claim`` is a public-by-convention substrate function.
+    A direct caller (e.g. an enrolled LLM-typed agent looking for a way
+    past its ceiling) cannot hand-craft a validation envelope CLAIMING a
+    human validator's keyid and walk it through ``db.validate_claim``:
+    the substrate cryptographically verifies the envelope against the
+    claimed signer's pubkey before applying any trust-ladder gate, and
+    the payload's claim_id / validator_keyid / validated_at fields must
+    agree with the row being promoted.
+
+    These regressions cover the gap prior reviews left open.
+    """
+
+    def _setup_replicated(self, graph):
+        seed = graph.assert_claim("anchor", generated_by="seed", seed=True)
+        graph.assert_claim("a", generated_by="lab_a", supports=[seed])
+        cid_b = graph.assert_claim("b", generated_by="lab_b", supports=[seed])
+        return seed, cid_b
+
+    def test_unverifiable_signature_is_refused(self, tmp_path):
+        """An envelope claiming a real human's keyid but carrying a
+        garbage signature MUST fail Ed25519 verification before any
+        trust-ladder gate fires. Without this, an LLM-typed agent can
+        bypass the LLM-type ceiling by hand-crafting an envelope
+        attributed to a human."""
+        from mareforma import db as _db, signing as _signing
+        from mareforma.db import InvalidValidationEnvelopeError
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        validator_key = _bootstrap_key(tmp_path, "validator.key")
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            seed, cid_b = self._setup_replicated(g)
+            g.enroll_validator(
+                _validator_pubkey_pem(validator_key), identity="reviewer",
+            )
+
+        from mareforma.signing import load_private_key, sign_validation
+        valid_priv = load_private_key(validator_key)
+        validator_keyid = _signing.public_key_id(valid_priv.public_key())
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            now = _db._now()
+            root_priv = load_private_key(root_key)
+            # Sign with ROOT's key but stamp the validator's keyid in
+            # signatures[0]. verify_envelope compares keyid against the
+            # pubkey it was handed and returns False on mismatch.
+            real_env = sign_validation(
+                {
+                    "claim_id": cid_b,
+                    "validator_keyid": validator_keyid,
+                    "validated_at": now,
+                    "evidence_seen": [],
+                },
+                root_priv,
+            )
+            real_env["signatures"][0]["keyid"] = validator_keyid
+            bundle_json = json.dumps(
+                real_env, sort_keys=True, separators=(",", ":"),
+            )
+
+            with pytest.raises(InvalidValidationEnvelopeError, match="failed Ed25519"):
+                _db.validate_claim(
+                    g._conn, g._root, cid_b,
+                    validated_by="forged",
+                    validation_signature=bundle_json,
+                    validated_at=now,
+                    evidence_seen=[],
+                )
+            assert g.get_claim(cid_b)["support_level"] == "REPLICATED"
+
+    def test_non_enrolled_signer_is_refused(self, tmp_path):
+        """A validation envelope signed by a key that is NOT in the
+        validators table is refused before signature verification, with
+        a message naming enrollment as the remediation."""
+        from mareforma import db as _db, signing as _signing
+        from mareforma.db import InvalidValidationEnvelopeError
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        stranger_key = _bootstrap_key(tmp_path, "stranger.key")
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            seed, cid_b = self._setup_replicated(g)
+            # NB: do NOT enroll the stranger.
+
+        from mareforma.signing import load_private_key, sign_validation
+        stranger_priv = load_private_key(stranger_key)
+        stranger_keyid = _signing.public_key_id(stranger_priv.public_key())
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            now = _db._now()
+            env = sign_validation(
+                {
+                    "claim_id": cid_b,
+                    "validator_keyid": stranger_keyid,
+                    "validated_at": now,
+                    "evidence_seen": [],
+                },
+                stranger_priv,
+            )
+            bundle_json = json.dumps(
+                env, sort_keys=True, separators=(",", ":"),
+            )
+
+            with pytest.raises(InvalidValidationEnvelopeError, match="not an enrolled"):
+                _db.validate_claim(
+                    g._conn, g._root, cid_b,
+                    validated_by="stranger",
+                    validation_signature=bundle_json,
+                    validated_at=now,
+                    evidence_seen=[],
+                )
+            assert g.get_claim(cid_b)["support_level"] == "REPLICATED"
+
+    def test_envelope_binding_different_claim_id_is_refused(self, tmp_path):
+        """A validation envelope whose signed payload names a DIFFERENT
+        claim_id than the row being promoted is refused. Catches a
+        replay attempt where a legitimately-signed envelope from claim A
+        is reused to promote claim B."""
+        from mareforma import db as _db, signing as _signing
+        from mareforma.db import InvalidValidationEnvelopeError
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        validator_key = _bootstrap_key(tmp_path, "validator.key")
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            seed, cid_b = self._setup_replicated(g)
+            cid_a = g.assert_claim("a-prime", generated_by="lab_a", supports=[seed])
+            g.enroll_validator(
+                _validator_pubkey_pem(validator_key), identity="reviewer",
+            )
+
+        from mareforma.signing import load_private_key, sign_validation
+        valid_priv = load_private_key(validator_key)
+        validator_keyid = _signing.public_key_id(valid_priv.public_key())
+
+        with mareforma.open(tmp_path, key_path=validator_key) as g:
+            now = _db._now()
+            # Sign an envelope for cid_a but apply it to cid_b.
+            env = sign_validation(
+                {
+                    "claim_id": cid_a,
+                    "validator_keyid": validator_keyid,
+                    "validated_at": now,
+                    "evidence_seen": [],
+                },
+                valid_priv,
+            )
+            bundle_json = json.dumps(
+                env, sort_keys=True, separators=(",", ":"),
+            )
+
+            with pytest.raises(InvalidValidationEnvelopeError, match="envelope replay"):
+                _db.validate_claim(
+                    g._conn, g._root, cid_b,
+                    validated_by="reviewer",
+                    validation_signature=bundle_json,
+                    validated_at=now,
+                    evidence_seen=[],
+                )
+            assert g.get_claim(cid_b)["support_level"] == "REPLICATED"
+
+    def test_wrong_payload_type_envelope_is_refused(self, tmp_path):
+        """Passing a CLAIM envelope (in-toto Statement v1) where a
+        VALIDATION envelope is expected is refused with a payloadType
+        message — cross-type acceptance is exactly what attackers exploit."""
+        from mareforma import db as _db
+        from mareforma.db import InvalidValidationEnvelopeError
+        root_key = _bootstrap_key(tmp_path, "root.key")
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            seed, cid_b = self._setup_replicated(g)
+            # Steal cid_b's own signature_bundle — a claim envelope.
+            claim_bundle = g.get_claim(cid_b)["signature_bundle"]
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            now = _db._now()
+            with pytest.raises(InvalidValidationEnvelopeError, match="neither validation nor seed"):
+                _db.validate_claim(
+                    g._conn, g._root, cid_b,
+                    validated_by="confused",
+                    validation_signature=claim_bundle,
+                    validated_at=now,
+                    evidence_seen=[],
+                )
+            assert g.get_claim(cid_b)["support_level"] == "REPLICATED"
+
+    def test_signed_non_object_payload_is_refused(self, tmp_path):
+        """verify_envelope only checks the DSSE signature, not the
+        payload shape. A validator with a real key could sign non-JSON
+        bytes (or a JSON scalar / array). The substrate must catch the
+        resulting :class:`signing.InvalidEnvelopeError` from
+        envelope_payload and re-raise as
+        :class:`InvalidValidationEnvelopeError` so the documented
+        contract holds."""
+        import base64 as _b64
+        from mareforma import db as _db, signing as _signing
+        from mareforma.db import InvalidValidationEnvelopeError
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        validator_key = _bootstrap_key(tmp_path, "validator.key")
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            seed, cid_b = self._setup_replicated(g)
+            g.enroll_validator(
+                _validator_pubkey_pem(validator_key), identity="reviewer",
+            )
+
+        from mareforma.signing import load_private_key, dsse_pae, public_key_id
+        valid_priv = load_private_key(validator_key)
+        validator_keyid = public_key_id(valid_priv.public_key())
+
+        # Hand-craft an envelope whose payload bytes are valid JSON but
+        # a STRING, not an object. The DSSE PAE signature will verify;
+        # envelope_payload() will reject the shape.
+        with mareforma.open(tmp_path, key_path=validator_key) as g:
+            now = _db._now()
+            scalar_payload = b'"not-an-object"'
+            pae = dsse_pae(
+                _signing.PAYLOAD_TYPE_VALIDATION, scalar_payload,
+            )
+            sig = valid_priv.sign(pae)
+            envelope = {
+                "payloadType": _signing.PAYLOAD_TYPE_VALIDATION,
+                "payload": _b64.standard_b64encode(scalar_payload).decode("ascii"),
+                "signatures": [{
+                    "keyid": validator_keyid,
+                    "sig": _b64.standard_b64encode(sig).decode("ascii"),
+                }],
+            }
+            bundle_json = json.dumps(
+                envelope, sort_keys=True, separators=(",", ":"),
+            )
+
+            with pytest.raises(InvalidValidationEnvelopeError, match="not a JSON object"):
+                _db.validate_claim(
+                    g._conn, g._root, cid_b,
+                    validated_by="reviewer",
+                    validation_signature=bundle_json,
+                    validated_at=now,
+                    evidence_seen=[],
+                )
+
+    def test_timestamp_mismatch_is_refused(self, tmp_path):
+        """The envelope's signed ``validated_at`` must equal the
+        ``validated_at`` kwarg being written. Drift would let a caller
+        sign-once-promote-many with a stale envelope."""
+        from mareforma import db as _db, signing as _signing
+        from mareforma.db import InvalidValidationEnvelopeError
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        validator_key = _bootstrap_key(tmp_path, "validator.key")
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            seed, cid_b = self._setup_replicated(g)
+            g.enroll_validator(
+                _validator_pubkey_pem(validator_key), identity="reviewer",
+            )
+
+        from mareforma.signing import load_private_key, sign_validation
+        valid_priv = load_private_key(validator_key)
+        validator_keyid = _signing.public_key_id(valid_priv.public_key())
+
+        with mareforma.open(tmp_path, key_path=validator_key) as g:
+            envelope_ts = "2020-01-01T00:00:00+00:00"
+            kwarg_ts = _db._now()
+            env = sign_validation(
+                {
+                    "claim_id": cid_b,
+                    "validator_keyid": validator_keyid,
+                    "validated_at": envelope_ts,
+                    "evidence_seen": [],
+                },
+                valid_priv,
+            )
+            bundle_json = json.dumps(
+                env, sort_keys=True, separators=(",", ":"),
+            )
+
+            with pytest.raises(InvalidValidationEnvelopeError, match="timestamp must agree"):
+                _db.validate_claim(
+                    g._conn, g._root, cid_b,
+                    validated_by="reviewer",
+                    validation_signature=bundle_json,
+                    validated_at=kwarg_ts,
+                    evidence_seen=[],
+                )

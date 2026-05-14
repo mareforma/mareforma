@@ -98,3 +98,48 @@ class TestNeverRaises:
             assert isinstance(report, HealthReport)
         finally:
             conn.close()
+
+
+class TestCorruptionVsEmpty:
+    """A corrupted graph.db that cannot be read must surface as
+    traffic_light='error' so an operator running ``mareforma health``
+    sees a different signal than for a fresh, empty project. Before
+    this distinction existed, a SELECT failure was silently swallowed
+    and the resulting empty counters were folded into the standard
+    ``red`` empty-graph branch — operationally indistinguishable.
+    """
+
+    def test_closed_connection_surfaces_as_error(self, tmp_path: Path) -> None:
+        conn = _open(tmp_path)
+        conn.close()
+        # SELECT against a closed connection raises ProgrammingError;
+        # compute_health must catch and surface ``error``.
+        report = compute_health(tmp_path, conn)
+        assert report.traffic_light == "error"
+        assert "Could not read" in report.rationale
+        assert "not the same as an empty graph" in report.rationale
+
+    def test_missing_claims_table_surfaces_as_error(self, tmp_path: Path) -> None:
+        # Open a fresh DB, drop the claims table, then check that
+        # compute_health surfaces the read failure as ``error``.
+        conn = _open(tmp_path)
+        try:
+            conn.execute("DROP TABLE claims_fts")
+            conn.execute("DROP TABLE claims")
+            conn.commit()
+            report = compute_health(tmp_path, conn)
+        finally:
+            conn.close()
+        assert report.traffic_light == "error"
+
+    def test_empty_graph_still_red_not_error(self, tmp_path: Path) -> None:
+        """Sanity: a legitimately-empty graph stays at ``red``, NOT
+        ``error``. The distinction only fires for actual read failures.
+        """
+        conn = _open(tmp_path)
+        try:
+            report = compute_health(tmp_path, conn)
+        finally:
+            conn.close()
+        assert report.traffic_light == "red"
+        assert "No claims recorded" in report.rationale

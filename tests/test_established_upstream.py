@@ -116,11 +116,11 @@ class TestSeedClaimBootstrap:
             cid = g.assert_claim("genesis", generated_by="seed", seed=True)
             row = g.get_claim(cid)
         envelope = json.loads(row["validation_signature"])
-        assert envelope["payloadType"] == _signing._PAYLOAD_TYPE_SEED
+        assert envelope["payloadType"] == _signing.PAYLOAD_TYPE_SEED
         pub = _signing.load_private_key(key_path).public_key()
         assert _signing.verify_envelope(
             envelope, pub,
-            expected_payload_type=_signing._PAYLOAD_TYPE_SEED,
+            expected_payload_type=_signing.PAYLOAD_TYPE_SEED,
         )
 
     def test_seed_envelope_distinct_from_validation_payload_type(
@@ -139,7 +139,7 @@ class TestSeedClaimBootstrap:
         with pytest.raises(_signing.InvalidEnvelopeError, match="payloadType"):
             _signing.verify_envelope(
                 envelope, pub,
-                expected_payload_type=_signing._PAYLOAD_TYPE_VALIDATION,
+                expected_payload_type=_signing.PAYLOAD_TYPE_VALIDATION,
             )
 
 

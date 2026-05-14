@@ -258,7 +258,7 @@ class TestValidateIdentityCheck:
         verifier_key = _signing.load_private_key(validator_key_path).public_key()
         assert _signing.verify_envelope(
             envelope, verifier_key,
-            expected_payload_type=_signing._PAYLOAD_TYPE_VALIDATION,
+            expected_payload_type=_signing.PAYLOAD_TYPE_VALIDATION,
         ) is True
 
         # And the payload binds the claim_id + validator's real keyid.
@@ -517,7 +517,7 @@ class TestVerifyEnvelopeStrictDefault:
         )
         assert _signing.verify_envelope(
             validation_env, key.public_key(),
-            expected_payload_type=_signing._PAYLOAD_TYPE_VALIDATION,
+            expected_payload_type=_signing.PAYLOAD_TYPE_VALIDATION,
         ) is True
 
 
@@ -900,7 +900,7 @@ class TestCLIValidateProducesSignedEnvelope:
         verifier_key = _signing.load_private_key(xdg_key).public_key()
         assert _signing.verify_envelope(
             envelope, verifier_key,
-            expected_payload_type=_signing._PAYLOAD_TYPE_VALIDATION,
+            expected_payload_type=_signing.PAYLOAD_TYPE_VALIDATION,
         ) is True
 
 
