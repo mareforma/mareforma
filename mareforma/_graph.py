@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import base64
 import json
+import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -596,7 +597,13 @@ class EpistemicGraph:
         )
         return [_format_row_for_llm(row, _ps) for row in rows]
 
-    def validate(self, claim_id: str, *, validated_by: str | None = None) -> None:
+    def validate(
+        self,
+        claim_id: str,
+        *,
+        validated_by: str | None = None,
+        evidence_seen: list[str] | None = None,
+    ) -> None:
         """Promote a REPLICATED claim to ESTABLISHED (human validation).
 
         Identity check
@@ -609,9 +616,9 @@ class EpistemicGraph:
         :func:`mareforma.validators.enroll_validator`.
 
         The validation event is itself signed (binding claim_id +
-        validator_keyid + validated_at). The signed envelope is stored
-        on the row's ``validation_signature`` column so the promotion is
-        independently verifiable.
+        validator_keyid + validated_at + evidence_seen). The signed
+        envelope is stored on the row's ``validation_signature`` column
+        so the promotion is independently verifiable.
 
         Parameters
         ----------
@@ -621,6 +628,22 @@ class EpistemicGraph:
             Optional human-readable label stored alongside the keyid.
             The validator's keyid is the real identity; this string is
             for display only.
+        evidence_seen:
+            Optional list of claim_ids the validator declares to have
+            reviewed before signing. ``None`` is normalized to ``[]``
+            (the explicit "I reviewed nothing" admission) and bound
+            into the signed envelope. Every non-empty entry must be a
+            strict-v4 UUID matching an existing claim with
+            ``created_at <= validated_at``; otherwise
+            :class:`mareforma.db.EvidenceCitationError` is raised before
+            any state change.
+
+            The validator's enumeration is self-declared — the substrate
+            cannot prove the validator actually opened the cited claims —
+            but the field shifts "a human pressed a button" to "a human
+            pressed a button AND named the evidence they consulted." A
+            validator who consistently signs ``evidence_seen=[]`` leaves
+            an audit-visible trail of unreviewed promotions.
 
         Raises
         ------
@@ -630,6 +653,9 @@ class EpistemicGraph:
             If support_level is not 'REPLICATED', or the graph has no
             loaded signer, or the loaded signer is not enrolled as a
             validator on this project.
+        EvidenceCitationError
+            If any ``evidence_seen`` entry is malformed, points to a
+            non-existent claim, or post-dates the validation timestamp.
         """
         self._check_open()
         from mareforma import signing as _signing
@@ -655,11 +681,16 @@ class EpistemicGraph:
         # and again inside db.validate_claim) would diverge by microseconds
         # and silently defeat the tamper-evidence claim.
         now = _db._now()
+        # Normalize evidence_seen — None → []. Always present in the
+        # signed envelope so an empty list is an *explicit* statement
+        # (the validator reviewed nothing) rather than an absent field.
+        evidence_seen_normalized = list(evidence_seen) if evidence_seen else []
         envelope = _signing.sign_validation(
             {
                 "claim_id": claim_id,
                 "validator_keyid": keyid,
                 "validated_at": now,
+                "evidence_seen": evidence_seen_normalized,
             },
             self._signer,
         )
@@ -670,6 +701,7 @@ class EpistemicGraph:
             validated_by=validated_by,
             validation_signature=bundle_json,
             validated_at=now,
+            evidence_seen=evidence_seen_normalized,
         )
 
     def enroll_validator(
@@ -915,6 +947,94 @@ class EpistemicGraph:
             "newly_failed": newly_failed,
         }
 
+    def refresh_convergence(self) -> dict[str, int]:
+        """Retry convergence detection for every flagged claim.
+
+        Convergence detection (PRELIMINARY → REPLICATED promotion) runs
+        after a successful claim INSERT. When a SQLite trigger or
+        contention pattern causes that detection to raise, the substrate
+        swallows the error so the write never crashes, logs a WARNING,
+        increments :attr:`convergence_errors`, and sets
+        ``convergence_retry_needed = 1`` on the affected claim.
+
+        This method walks every flagged row, re-runs detection, and
+        clears the flag on success. Failed retries stay flagged and are
+        eligible for the next call. A single error on retry increments
+        :attr:`convergence_errors` again, mirroring the original
+        swallowed-error semantics.
+
+        Returns
+        -------
+        dict
+            ``{"checked", "promoted", "still_pending"}`` — int counts.
+            ``checked`` is the total rows examined; ``promoted`` is the
+            number that ran detection cleanly this pass (the flag was
+            cleared); ``still_pending`` is the number that errored
+            again and remain flagged.
+
+        Side effects: only the per-claim flag column and (transitively)
+        the convergence-detection promotions themselves are mutated.
+        Signed predicate fields are unchanged.
+        """
+        self._check_open()
+
+        flagged = _db.list_convergence_retry_claims(self._conn)
+
+        checked = len(flagged)
+        promoted = 0
+        still_pending = 0
+
+        for row in flagged:
+            try:
+                supports = json.loads(row.get("supports_json") or "[]")
+            except (json.JSONDecodeError, TypeError):
+                supports = []
+            generated_by = row.get("generated_by") or "agent"
+            artifact_hash = row.get("artifact_hash")
+            claim_id = row["claim_id"]
+
+            def _bump(_exc: Exception) -> None:
+                self._convergence_errors += 1
+
+            ok = _db._maybe_update_replicated(
+                self._conn,
+                claim_id,
+                supports,
+                generated_by,
+                artifact_hash,
+                on_error=_bump,
+            )
+            if ok:
+                _db.clear_convergence_retry_flag(
+                    self._conn, self._root, claim_id,
+                )
+                promoted += 1
+            else:
+                still_pending += 1
+
+        return {
+            "checked": checked,
+            "promoted": promoted,
+            "still_pending": still_pending,
+        }
+
+    def classify_supports(
+        self, values: list[str],
+    ) -> list[dict[str, str]]:
+        """Classify each entry as ``claim`` | ``doi`` | ``external``.
+
+        Thin wrapper over :func:`mareforma.db.classify_supports`. Returns
+        ``[{"value": ..., "type": ...}, ...]`` in input order. The
+        substrate uses this same classification for cycle detection,
+        REPLICATED anchoring, dangling-reference audit, and JSON-LD
+        export. Exposed publicly so callers can introspect what the
+        substrate sees for any candidate list before insertion.
+
+        Pure-function: no network, no database read. Same input always
+        yields the same output.
+        """
+        return _db.classify_supports(values)
+
     def find_dangling_supports(self) -> list[dict]:
         """Return UUID-shaped ``supports[]`` entries that point nowhere.
 
@@ -1073,6 +1193,29 @@ class EpistemicGraph:
                 still_unlogged += 1
                 continue
 
+            # Step-4-replay path. If the Rekor saga's sidecar INSERT
+            # succeeded but the claims-row UPDATE failed (213 design),
+            # rekor_inclusions has the entry for this claim. Replay the
+            # UPDATE from stored coords instead of submitting again to
+            # avoid creating a duplicate Rekor entry.
+            #
+            # Placed AFTER the drift guard so a tampered row cannot ride
+            # the sidecar replay to re-attach valid Rekor coords to
+            # invalid payload bytes. The drift guard refusal is uniform
+            # across both the replay and re-submit paths — there is no
+            # way to launder a stale signature through this method.
+            saved_entry = _db.get_rekor_inclusion(self._conn, cid)
+            if saved_entry is not None:
+                augmented = _signing.attach_rekor_entry(envelope, saved_entry)
+                new_bundle = json.dumps(
+                    augmented, sort_keys=True, separators=(",", ":"),
+                )
+                _db.mark_claim_logged(
+                    self._conn, self._root, cid, new_bundle,
+                )
+                logged_count += 1
+                continue
+
             logged, entry = _signing.submit_to_rekor(
                 envelope, public_key, rekor_url=self._rekor_url,
             )
@@ -1227,6 +1370,80 @@ class EpistemicGraph:
         ``mareforma`` logger for details.
         """
         return self._convergence_errors
+
+    def health(self) -> dict[str, int]:
+        """Single-call audit summary of substrate state.
+
+        Aggregates the counters operators inspect when they want a
+        snapshot of "what's the graph telling me right now?" without
+        having to write multiple queries. Pure observability over
+        existing surfaces — no side effects.
+
+        Returns
+        -------
+        dict[str, int]
+            ``claim_count`` — total claims in the graph (signed and
+            unsigned, all support levels, all statuses).
+            ``validator_count`` — total rows in the validators table
+            (every enrolled identity, including LLM-typed).
+            ``unresolved_claims`` — claims flagged ``unresolved=1``
+            (DOI HEAD-check failed at some point; blocks REPLICATED
+            promotion until ``refresh_unresolved()`` clears them).
+            ``unsigned_claims`` — claims with ``signature_bundle IS
+            NULL`` (no Ed25519 envelope; blocks REPLICATED promotion
+            and any cross-restore verification).
+            ``dangling_supports`` — count of UUID-shaped ``supports[]``
+            entries pointing to claims that do not exist in the graph
+            (returned in detail by :meth:`find_dangling_supports`).
+            ``convergence_errors`` — current value of the swallowed-
+            error counter (see :attr:`convergence_errors`).
+            ``convergence_retry_pending`` — claims with
+            ``convergence_retry_needed=1`` waiting for
+            :meth:`refresh_convergence` to re-run detection.
+
+        A "healthy" graph has zeros across ``unresolved_claims``,
+        ``unsigned_claims``, ``dangling_supports``,
+        ``convergence_errors``, and ``convergence_retry_pending``.
+        Non-zero values do not by themselves indicate a defect — they
+        indicate something the operator should look at.
+        """
+        self._check_open()
+
+        def _count(sql: str) -> int:
+            row = self._conn.execute(sql).fetchone()
+            return int(row[0]) if row is not None else 0
+
+        claim_count = _count("SELECT COUNT(*) FROM claims")
+        validator_count = _count("SELECT COUNT(*) FROM validators")
+        unresolved_claims = _count(
+            "SELECT COUNT(*) FROM claims WHERE unresolved = 1"
+        )
+        unsigned_claims = _count(
+            "SELECT COUNT(*) FROM claims WHERE signature_bundle IS NULL"
+        )
+
+        try:
+            convergence_retry_pending = _count(
+                "SELECT COUNT(*) FROM claims "
+                "WHERE convergence_retry_needed = 1"
+            )
+        except sqlite3.OperationalError:
+            # Column may not exist on graphs created before the v0.3.0
+            # retry-queue column landed. Treat as zero so the rest of the
+            # health snapshot still works.
+            convergence_retry_pending = 0
+
+        dangling_supports = len(_db.find_dangling_supports(self._conn))
+
+        return {
+            "claim_count": claim_count,
+            "validator_count": validator_count,
+            "unresolved_claims": unresolved_claims,
+            "unsigned_claims": unsigned_claims,
+            "dangling_supports": dangling_supports,
+            "convergence_errors": self._convergence_errors,
+            "convergence_retry_pending": convergence_retry_pending,
+        }
 
     # ------------------------------------------------------------------
     # Lifecycle

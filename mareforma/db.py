@@ -134,6 +134,18 @@ CREATE TABLE IF NOT EXISTS claims (
     -- IS a legitimate mutation, gated by the trigger that only fires
     -- on a signed verdict INSERT from an enrolled validator.
     t_invalid       INTEGER,
+    -- Convergence-detection retry flag. Set to 1 by
+    -- _maybe_update_replicated when a SQLite trigger or contention
+    -- pattern causes the post-INSERT promotion check to fail. The
+    -- substrate swallows the error so writes never crash, but a
+    -- swallowed error leaves the claim stuck at PRELIMINARY forever
+    -- unless someone retries. EpistemicGraph.refresh_convergence()
+    -- walks every flagged row, re-runs detection, and clears the flag
+    -- on success. Like ``unresolved``, this column is OUTSIDE the
+    -- claims_signed_fields_no_laundering watch list — flipping it is
+    -- a legitimate operational mutation, not predicate tampering.
+    convergence_retry_needed INTEGER NOT NULL DEFAULT 0
+                            CHECK (convergence_retry_needed IN (0, 1)),
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
     -- ESTABLISHED rows must carry a signed validation envelope. The
@@ -158,6 +170,10 @@ CREATE INDEX IF NOT EXISTS idx_claims_transparency_logged
     ON claims(transparency_logged);
 CREATE INDEX IF NOT EXISTS idx_claims_artifact_hash
     ON claims(artifact_hash) WHERE artifact_hash IS NOT NULL;
+-- Partial index on flagged retries only — refresh_convergence iterates
+-- this set; the index keeps the walk O(retry-pending) rather than O(N).
+CREATE INDEX IF NOT EXISTS idx_claims_convergence_retry
+    ON claims(claim_id) WHERE convergence_retry_needed = 1;
 -- Reputation reads aggregate ESTABLISHED claims per validator. Partial
 -- on NOT NULL keeps index storage proportional to ESTABLISHED-only rows.
 CREATE INDEX IF NOT EXISTS idx_claims_validator_keyid
@@ -352,6 +368,41 @@ CREATE TABLE IF NOT EXISTS contradiction_verdicts (
 CREATE INDEX IF NOT EXISTS idx_contradiction_member
     ON contradiction_verdicts(member_claim_id);
 
+-- Rekor inclusion sidecar. Records every successful Rekor submission
+-- the substrate witnessed, independent of whether the corresponding
+-- claims-row UPDATE that attaches the rekor coords to
+-- ``signature_bundle`` succeeded. The two-write saga (sidecar INSERT
+-- then claim UPDATE) closes the divergence window where Rekor would
+-- have a permanent public record of a claim while the local row still
+-- said transparency_logged=0:
+--
+--   step 1: claims INSERT with transparency_logged=0 (no rekor yet)
+--   step 2: submit envelope to Rekor → receive (uuid, log_index, ts)
+--   step 3: INSERT rekor_inclusions  ← durable record of Rekor's ACK
+--   step 4: UPDATE claims SET transparency_logged=1, signature_bundle+=rekor
+--
+-- If step 4 fails, step 3 already persisted the inclusion. The
+-- recovery path (refresh_unsigned) reads this table BEFORE deciding
+-- to re-submit: a sidecar row means "Rekor already accepted this
+-- claim; replay the local UPDATE instead of double-submitting." A
+-- missing sidecar row means "we never got Rekor's ACK; re-submit is
+-- safe." This eliminates duplicate Rekor entries on recovery.
+--
+-- The raw_response column carries the full Rekor response (base64-
+-- encoded UTF-8 JSON), preserved so the recovery path can reconstruct
+-- the augmented bundle byte-identically to what step 4 would have
+-- written had it succeeded.
+CREATE TABLE IF NOT EXISTS rekor_inclusions (
+    claim_id        TEXT PRIMARY KEY REFERENCES claims(claim_id),
+    uuid            TEXT NOT NULL,
+    log_index       INTEGER NOT NULL,
+    integrated_time INTEGER,
+    raw_response_b64 TEXT NOT NULL,
+    recorded_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rekor_inclusions_uuid
+    ON rekor_inclusions(uuid);
+
 -- Append-only verdicts. Any UPDATE on the immutable columns of an
 -- existing row is refused — the envelope is the source of truth,
 -- and a forged UPDATE would put the row out of sync with what was
@@ -493,6 +544,8 @@ _CLAIM_COLUMNS = (
     "evidence_json",
     # Statement v1 content identifier + verdict-derived invalidation.
     "statement_cid", "t_invalid",
+    # Convergence-detection retry queue.
+    "convergence_retry_needed",
     "created_at", "updated_at",
 )
 _CLAIM_SELECT = ", ".join(_CLAIM_COLUMNS)
@@ -580,6 +633,28 @@ class SelfValidationError(MareformaError):
     is an *external* witnessing event. ``validate_claim`` compares the
     signing keyid of the validation envelope with the keyid recorded in
     the claim's ``signature_bundle`` and refuses when they match.
+    """
+
+
+class EvidenceCitationError(MareformaError):
+    """Raised when ``evidence_seen`` on a validation envelope is malformed.
+
+    ``validate_claim`` accepts an ``evidence_seen`` list of claim_ids the
+    validator declares to have reviewed before signing the promotion. The
+    substrate cannot prove the validator actually opened those claims,
+    but it CAN verify that every cited entry is a strict-v4 UUID pointing
+    at an existing claim with ``created_at <= validated_at``. Any failure
+    in that check raises this exception:
+
+      * non-string entry,
+      * UUID that does not match the strict-v4 pattern,
+      * claim_id that does not exist in the graph,
+      * claim_id whose ``created_at`` is later than the validation
+        timestamp (the validator could not have reviewed a claim that
+        didn't exist yet).
+
+    The error message names the first failing entry so the caller can
+    fix it without trial-and-error.
     """
 
 
@@ -794,11 +869,16 @@ def _compute_prev_hash(
 # Cycle / self-loop detection
 # ---------------------------------------------------------------------------
 
-# Pattern for the UUID format we generate via uuid.uuid4(). Strings in
-# ``supports[]`` that DON'T match are external references (DOIs etc.)
-# and do not participate in cycle checking — they are not graph nodes.
+# Pattern for the UUID format we generate via uuid.uuid4(). Strict
+# UUIDv4 — version nibble is exactly ``4`` and variant nibble is one
+# of {8, 9, a, b} (RFC 4122 §4.1.1, "10xx" binary variant). Tightening
+# from the looser "any hex-shape UUID" rejects v1/v3/v5/zero UUIDs in
+# ``supports[]`` as non-graph-nodes, which makes the shape-vs-version
+# check explicit instead of accidental. Strings in ``supports[]`` that
+# DON'T match are external references (DOIs etc.) and do not
+# participate in cycle checking — they are not graph nodes.
 _CLAIM_ID_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
 
 # Walk depth cap for cycle detection. Same value as the validator-chain
@@ -808,6 +888,71 @@ _CYCLE_MAX_DEPTH = 1024
 
 def _is_claim_id(value: str) -> bool:
     return bool(_CLAIM_ID_RE.match(value))
+
+
+# Three-way classification of ``supports[]`` and ``contradicts[]`` entries.
+# The flat string API stays — the substrate auto-classifies each entry so
+# JSON-LD export, audit helpers, and future query surfaces can distinguish
+# the three semantic types without forcing callers to wrap strings.
+SUPPORT_TYPE_CLAIM = "claim"
+SUPPORT_TYPE_DOI = "doi"
+SUPPORT_TYPE_EXTERNAL = "external"
+
+_VALID_SUPPORT_TYPES = (
+    SUPPORT_TYPE_CLAIM,
+    SUPPORT_TYPE_DOI,
+    SUPPORT_TYPE_EXTERNAL,
+)
+
+
+def classify_support(value: str) -> str:
+    """Return the type tag for a single ``supports[]`` entry.
+
+    Three buckets:
+
+      * ``"claim"`` — strict UUIDv4 shape, candidate graph-node edge.
+        REPLICATED detection and cycle detection walk these.
+      * ``"doi"`` — DOI form (``10.<registrant>/<suffix>``) per Crossref +
+        DataCite syntax. Resolved against the DOI registry at assert
+        time; ineligible as a REPLICATED anchor (the upstream is not a
+        local claim).
+      * ``"external"`` — anything else. Free-form strings (URLs, ORCID
+        ids, lab-internal references). Stored verbatim, not walked, not
+        resolved.
+
+    Classification is deterministic and regex-only — no network, no
+    database lookup. The same string always yields the same tag.
+    """
+    if not isinstance(value, str):
+        return SUPPORT_TYPE_EXTERNAL
+    # Late import — ``doi_resolver`` itself is import-light, but keep
+    # this helper free of network-y modules at module-import time.
+    from mareforma import doi_resolver as _doi
+    if _is_claim_id(value):
+        return SUPPORT_TYPE_CLAIM
+    if _doi.is_doi(value):
+        return SUPPORT_TYPE_DOI
+    return SUPPORT_TYPE_EXTERNAL
+
+
+def classify_supports(values: list[str]) -> list[dict[str, str]]:
+    """Classify every entry in a ``supports[]`` / ``contradicts[]`` list.
+
+    Returns ``[{"value": <original>, "type": <one of SUPPORT_TYPE_*>}, ...]``
+    in input order. Empty list → empty list.
+
+    Used by:
+
+      * the JSON-LD exporter, which emits each entry under a typed
+        predicate (``mare:supportsClaim``, ``mare:supportsDoi``,
+        ``mare:supportsReference``) so consumers can distinguish a
+        local graph edge from an external citation;
+      * operator audits — pair with :func:`find_dangling_supports` for a
+        complete view of which entries are graph nodes, which are
+        external references, and which are dangling claim_ids that point
+        nowhere.
+    """
+    return [{"value": v, "type": classify_support(v)} for v in values]
 
 
 def _check_no_cycle(
@@ -1413,39 +1558,55 @@ def add_claim(
             conn.rollback()
         raise DatabaseError(f"Failed to add claim: {exc}") from exc
 
-    # Attempt Rekor submission. On success, augment the envelope with the
-    # log entry and flip transparency_logged → 1. On failure, leave the row
-    # at transparency_logged=0 — REPLICATED is blocked until refresh_unsigned
-    # succeeds.
+    # Attempt Rekor submission. On success, run the two-write saga:
+    # step 3 records the inclusion in the rekor_inclusions sidecar (the
+    # durable record of "Rekor accepted this claim"), step 4 augments
+    # the envelope on the claims row. If step 4 fails, step 3 already
+    # persisted the coords — refresh_unsigned will read the sidecar and
+    # replay step 4 instead of double-submitting to Rekor.
     if rekor_enabled:
         from mareforma import signing as _signing
         logged, entry = _signing.submit_to_rekor(
             envelope, signer.public_key(), rekor_url=rekor_url,
         )
         if logged and entry is not None:
-            augmented = _signing.attach_rekor_entry(envelope, entry)
-            new_bundle = json.dumps(augmented, sort_keys=True, separators=(",", ":"))
-            try:
-                conn.execute(
-                    "UPDATE claims SET signature_bundle = ?, "
-                    "transparency_logged = 1, updated_at = ? "
-                    "WHERE claim_id = ?",
-                    (new_bundle, _now(), claim_id),
+            # Step 3: durable sidecar write. If THIS write fails the
+            # inclusion is silently lost — Rekor knows but we don't.
+            # We let the exception propagate up so the operator sees
+            # the loss; the next refresh_unsigned will re-submit (which
+            # creates a duplicate Rekor entry but that's the only
+            # recovery available when we have no record at all).
+            sidecar_recorded = _record_rekor_inclusion(
+                conn, claim_id, entry,
+            )
+            if sidecar_recorded:
+                augmented = _signing.attach_rekor_entry(envelope, entry)
+                new_bundle = json.dumps(
+                    augmented, sort_keys=True, separators=(",", ":"),
                 )
-                conn.commit()
-                transparency_logged = 1
-            except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
-                # Rekor succeeded but the local UPDATE failed. The row stays
-                # at transparency_logged=0; refresh_unsigned will re-submit
-                # to Rekor and overwrite the bundle then. Warn loudly so
-                # operators see the inconsistency.
-                import warnings as _warnings
-                _warnings.warn(
-                    f"Claim {claim_id} was accepted by Rekor but the local "
-                    f"UPDATE failed ({exc}). transparency_logged remains 0; "
-                    "run EpistemicGraph.refresh_unsigned() to reconcile.",
-                    stacklevel=2,
-                )
+                try:
+                    conn.execute(
+                        "UPDATE claims SET signature_bundle = ?, "
+                        "transparency_logged = 1, updated_at = ? "
+                        "WHERE claim_id = ?",
+                        (new_bundle, _now(), claim_id),
+                    )
+                    conn.commit()
+                    transparency_logged = 1
+                except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
+                    # Step 4 failed but step 3 (sidecar) persisted. The
+                    # row stays at transparency_logged=0; refresh_unsigned
+                    # will detect the sidecar/row drift and replay step 4
+                    # using the stored coords — no duplicate Rekor entry.
+                    import warnings as _warnings
+                    _warnings.warn(
+                        f"Claim {claim_id} accepted by Rekor (coords saved "
+                        f"to rekor_inclusions sidecar) but the local UPDATE "
+                        f"failed ({exc}). transparency_logged remains 0; "
+                        "run EpistemicGraph.refresh_unsigned() to reconcile "
+                        "without re-submitting.",
+                        stacklevel=2,
+                    )
         elif require_rekor:
             raise _signing.SigningError(
                 f"Rekor submission to {rekor_url} failed and require_rekor=True. "
@@ -1620,18 +1781,69 @@ def _maybe_update_replicated(
         # mis-configured trigger or contention pattern would let claims sit
         # at PRELIMINARY with no record of why. EpistemicGraph wires
         # ``on_error`` to a counter so callers can detect drift without
-        # parsing log records.
+        # parsing log records, and we flip the per-claim retry flag so
+        # :meth:`EpistemicGraph.refresh_convergence` can re-run detection
+        # on demand. The two surfaces are complementary: the counter
+        # reports the live error rate, the flag preserves the work
+        # remaining across restarts.
         if on_error is not None:
             try:
                 on_error(exc)
             except Exception:  # pragma: no cover - defensive
                 pass
+        try:
+            conn.execute(
+                "UPDATE claims SET convergence_retry_needed = 1 "
+                "WHERE claim_id = ?",
+                (new_claim_id,),
+            )
+            conn.commit()
+        except (sqlite3.OperationalError, sqlite3.IntegrityError):
+            # If even the retry-flag UPDATE fails the substrate is in a
+            # worse state than this helper can paper over. Log it, but
+            # do not propagate — the originating write already committed
+            # and the WARNING below makes the failure visible.
+            pass
         import logging
         logging.getLogger("mareforma").warning(
-            "Convergence detection swallowed %s for claim %s: %s",
+            "Convergence detection swallowed %s for claim %s: %s "
+            "(retry flag set; call graph.refresh_convergence() to retry)",
             type(exc).__name__, new_claim_id, exc,
         )
         return False
+
+
+def list_convergence_retry_claims(
+    conn: sqlite3.Connection,
+) -> list[dict]:
+    """Return every claim with ``convergence_retry_needed = 1``.
+
+    Caller-side iteration target for the retry path. Rows are returned
+    in ``created_at`` order so a retry pass that promotes peer claims
+    sees the earlier upstream first.
+    """
+    rows = conn.execute(
+        f"SELECT {_CLAIM_SELECT} FROM claims "
+        "WHERE convergence_retry_needed = 1 "
+        "ORDER BY created_at, claim_id"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def clear_convergence_retry_flag(
+    conn: sqlite3.Connection, root: Path, claim_id: str,
+) -> None:
+    """Clear ``convergence_retry_needed`` on a single claim after retry.
+
+    Mirrors :func:`mark_claim_resolved` — flag-flip + TOML mirror update.
+    """
+    conn.execute(
+        "UPDATE claims SET convergence_retry_needed = 0 "
+        "WHERE claim_id = ?",
+        (claim_id,),
+    )
+    conn.commit()
+    _backup_claims_toml(conn, root)
 
 
 def find_dangling_supports(conn: sqlite3.Connection) -> list[dict]:
@@ -1802,6 +2014,67 @@ def _refuse_self_validation(
         )
 
 
+def _verify_evidence_seen(
+    conn: sqlite3.Connection,
+    promoted_claim_id: str,
+    evidence_seen: list[str],
+    validated_at: str,
+) -> None:
+    """Verify every entry in ``evidence_seen`` is a valid citation.
+
+    Each entry must be:
+      * a string,
+      * a strict-v4 UUID (``_is_claim_id``),
+      * the id of a claim that exists in this graph,
+      * a claim whose ``created_at`` is no later than ``validated_at``.
+
+    Raises :class:`EvidenceCitationError` naming the first failing entry.
+    An empty list is the explicit "I reviewed nothing" admission and
+    passes the gate without inspection.
+
+    The validator's enumeration is self-declared — this gate cannot
+    prove the validator actually opened those claims, only that the
+    claims they cited exist and predate validation. That's the
+    strongest property the substrate can enforce; everything else
+    rests on the validator's honesty.
+    """
+    if not evidence_seen:
+        return
+    for entry in evidence_seen:
+        if not isinstance(entry, str):
+            raise EvidenceCitationError(
+                f"evidence_seen entry {entry!r} is not a string."
+            )
+        if not _is_claim_id(entry):
+            raise EvidenceCitationError(
+                f"evidence_seen entry '{entry}' is not a strict-v4 UUID; "
+                "only local claim_ids can be cited as reviewed evidence."
+            )
+        if entry == promoted_claim_id:
+            raise EvidenceCitationError(
+                f"evidence_seen cites the claim being promoted "
+                f"('{promoted_claim_id}'); the validator cannot count "
+                "the promotion target as evidence for itself."
+            )
+        row = conn.execute(
+            "SELECT created_at FROM claims WHERE claim_id = ?",
+            (entry,),
+        ).fetchone()
+        if row is None:
+            raise EvidenceCitationError(
+                f"evidence_seen entry '{entry}' does not exist in the "
+                "graph; cite only claims the validator actually reviewed."
+            )
+        cited_created_at = row["created_at"]
+        if cited_created_at > validated_at:
+            raise EvidenceCitationError(
+                f"evidence_seen entry '{entry}' was created at "
+                f"{cited_created_at} which is after validated_at "
+                f"{validated_at}; the validator could not have reviewed "
+                "a claim that didn't exist yet."
+            )
+
+
 def validate_claim(
     conn: sqlite3.Connection,
     root: Path,
@@ -1810,18 +2083,20 @@ def validate_claim(
     validated_by: str | None = None,
     validation_signature: str | None = None,
     validated_at: str | None = None,
+    evidence_seen: list[str] | None = None,
 ) -> None:
     """Promote a REPLICATED claim to ESTABLISHED (human validation).
 
     Parameters
     ----------
     validation_signature:
-        Optional JSON-encoded DSSE-style envelope binding (claim_id,
-        validator_keyid, validated_at). Produced by
-        :func:`mareforma.signing.sign_validation` and stored verbatim
-        on the row so the validation event itself is independently
-        verifiable (tampering with ``validated_by``/``validated_at``
-        post-hoc is detectable).
+        Optional JSON-encoded DSSE-style envelope binding
+        ``(claim_id, validator_keyid, validated_at, evidence_seen)``.
+        Produced by :func:`mareforma.signing.sign_validation` and stored
+        verbatim on the row so the validation event itself is
+        independently verifiable (tampering with
+        ``validated_by``/``validated_at``/``evidence_seen`` post-hoc is
+        detectable).
     validated_at:
         Optional ISO 8601 UTC timestamp to write to the row. When the
         caller has already signed a validation envelope binding a
@@ -1829,13 +2104,24 @@ def validate_claim(
         the envelope's ``validated_at`` matches the row's
         ``validated_at`` byte-for-byte. If ``None``, a fresh timestamp
         is generated — appropriate only for the legacy unsigned path.
+    evidence_seen:
+        Optional list of claim_ids the validator declares to have
+        reviewed before signing the promotion. ``None`` is normalized
+        to ``[]`` and bound into the signed envelope — a positive
+        statement that the validator reviewed nothing, which is then
+        visible in the audit trail rather than hidden by absence. Each
+        cited entry must be a strict-v4 UUID matching an existing
+        claim with ``created_at <= validated_at``. The validator's
+        enumeration is self-declared; the substrate cannot prove they
+        actually opened the cited claims, but it CAN verify the cited
+        claims exist and predate validation.
 
     Substrate gates
     ---------------
-    When ``validation_signature`` is supplied, two substrate-level checks
-    fire before the row is updated. Both decode the envelope's payload
-    and consult the ``validators`` table directly — wrapping code in
-    ``_graph.validate`` cannot bypass them:
+    When ``validation_signature`` is supplied, three substrate-level
+    checks fire before the row is updated. All three decode the
+    envelope's payload and consult the substrate directly — wrapping
+    code in ``_graph.validate`` cannot bypass them:
 
     1. The signing validator's ``validator_type`` must be ``'human'``.
        An ``'llm'``-typed validator can sign a validation envelope but
@@ -1843,6 +2129,9 @@ def validate_claim(
     2. The validator's keyid must NOT match the claim's
        ``signature_bundle`` signing keyid. Self-validation is the
        trivial-loop attack (raises :class:`SelfValidationError`).
+    3. Every entry in ``evidence_seen`` must be a strict-v4 UUID
+       matching an existing claim with ``created_at <= validated_at``
+       (raises :class:`EvidenceCitationError`).
 
     Raises
     ------
@@ -1858,6 +2147,10 @@ def validate_claim(
     SelfValidationError
         If the validation envelope's signing keyid equals the claim's
         ``signature_bundle`` signing keyid.
+    EvidenceCitationError
+        If any entry in ``evidence_seen`` is not a strict-v4 UUID, does
+        not point to an existing claim, or points to a claim with
+        ``created_at > validated_at``.
     """
     row = conn.execute(
         "SELECT support_level, status, signature_bundle, t_invalid "
@@ -1904,6 +2197,14 @@ def validate_claim(
             )
 
     now = validated_at if validated_at is not None else _now()
+
+    # Evidence-citation gate. Every entry in evidence_seen must be a
+    # strict-v4 UUID pointing at an existing claim that predates the
+    # validation timestamp. An empty list is the "I reviewed nothing"
+    # admission and passes the gate. None is normalized to [].
+    _verify_evidence_seen(
+        conn, claim_id, evidence_seen or [], now,
+    )
     try:
         # COALESCE on validator_keyid: a legacy unsigned re-validate
         # (validation_signature=None) must NOT wipe a previously-set
@@ -1941,6 +2242,96 @@ def list_unresolved_claims(conn: sqlite3.Connection) -> list[dict]:
         f"SELECT {_CLAIM_SELECT} FROM claims WHERE unresolved = 1 ORDER BY created_at"
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def _record_rekor_inclusion(
+    conn: sqlite3.Connection,
+    claim_id: str,
+    entry: dict,
+) -> bool:
+    """Step 3 of the Rekor saga: persist a successful inclusion.
+
+    Called after Rekor returns a `(logged=True, entry)` response and
+    before the claims-row UPDATE. The sidecar is the durable record of
+    "Rekor witnessed this claim" — when the row UPDATE later fails,
+    :meth:`refresh_unsigned` consults this table to replay the UPDATE
+    instead of re-submitting.
+
+    Stores the full Rekor response (base64-encoded UTF-8 JSON) so the
+    recovery path can reconstruct the augmented signature bundle byte-
+    identically to what the original UPDATE would have written.
+
+    Returns ``True`` on success. On failure, emits a WARNING and returns
+    ``False`` — the caller skips the subsequent UPDATE so we don't end
+    up with `transparency_logged=1` but no sidecar record (the inverse
+    of the gap this saga closes). The Rekor entry exists publicly; the
+    operator must run :meth:`refresh_unsigned` which will detect the
+    missing-sidecar-but-unflagged state and re-submit (creating a
+    duplicate entry — the only recovery available when we have no
+    record of the original inclusion).
+    """
+    try:
+        raw_json = json.dumps(entry, sort_keys=True, separators=(",", ":"))
+        raw_b64 = base64.standard_b64encode(
+            raw_json.encode("utf-8"),
+        ).decode("ascii")
+        conn.execute(
+            "INSERT OR REPLACE INTO rekor_inclusions "
+            "(claim_id, uuid, log_index, integrated_time, "
+            " raw_response_b64, recorded_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                claim_id,
+                entry.get("uuid"),
+                int(entry.get("logIndex") or 0),
+                int(entry.get("integratedTime") or 0) or None,
+                raw_b64,
+                _now(),
+            ),
+        )
+        conn.commit()
+        return True
+    except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
+        import warnings as _warnings
+        _warnings.warn(
+            f"Claim {claim_id} accepted by Rekor but the sidecar INSERT "
+            f"into rekor_inclusions failed ({exc}). The local row stays "
+            "unflagged AND there is no recovery hint — refresh_unsigned() "
+            "will RE-SUBMIT, creating a duplicate Rekor entry. This is "
+            "the only recovery path when no record of the original "
+            "submission exists.",
+            stacklevel=2,
+        )
+        return False
+
+
+def get_rekor_inclusion(
+    conn: sqlite3.Connection,
+    claim_id: str,
+) -> dict | None:
+    """Return the stored Rekor inclusion entry for a claim, if any.
+
+    Used by the recovery path in :meth:`refresh_unsigned` to detect
+    "Rekor ACK persisted, claims-row UPDATE pending" and replay the
+    UPDATE from stored coords instead of re-submitting.
+
+    Returns the original Rekor response dict (uuid, logIndex,
+    integratedTime, etc.) parsed back from the base64 storage form, or
+    ``None`` when no sidecar row exists for this claim.
+    """
+    row = conn.execute(
+        "SELECT raw_response_b64 FROM rekor_inclusions WHERE claim_id = ?",
+        (claim_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        raw_json = base64.standard_b64decode(
+            row["raw_response_b64"],
+        ).decode("utf-8")
+        return json.loads(raw_json)
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None
 
 
 def list_unlogged_claims(conn: sqlite3.Connection) -> list[dict]:
@@ -3232,7 +3623,7 @@ def restore(
                 c_status = _required_field(c, "status", ctx_c)
                 target_level = _required_field(c, "support_level", ctx_c)
                 _verify_claim_signatures_on_restore(
-                    claim_id, c, validators_section, signed_mode,
+                    conn, claim_id, c, validators_section, signed_mode,
                     _signing,
                 )
                 # Reconstruct supports/contradicts JSON.
@@ -3352,10 +3743,11 @@ def restore(
                              ev_risk_of_bias, ev_inconsistency,
                              ev_indirectness, ev_imprecision, ev_pub_bias,
                              evidence_json, statement_cid,
+                             convergence_retry_needed,
                              created_at, updated_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                ?, ?, ?, ?)
+                                ?, ?, ?, ?, ?)
                         """,
                         (
                             claim_id, c_text, c_classification,
@@ -3382,6 +3774,7 @@ def restore(
                             int(evidence_dict.get("publication_bias", 0) or 0),
                             evidence_json_str,
                             statement_cid_str,
+                            1 if c.get("convergence_retry_needed") else 0,
                             c_created_at, c_updated_at,
                         ),
                     )
@@ -3683,6 +4076,7 @@ def _required_field(d: dict, key: str, context: str) -> Any:
 
 
 def _verify_claim_signatures_on_restore(
+    conn: sqlite3.Connection,
     claim_id: str,
     c: dict,
     validators_section: dict,
@@ -3935,6 +4329,56 @@ def _verify_claim_signatures_on_restore(
                 f"({c.get('validated_at')!r}); TOML tampered.",
                 kind="claim_unverified",
             )
+        # evidence_seen verification — only relevant for the
+        # PAYLOAD_TYPE_VALIDATION case (seed envelopes don't carry
+        # evidence_seen). Every cited claim_id must already exist in
+        # the restored graph and predate the validation timestamp.
+        # Since claims are inserted in created_at order and validations
+        # cite earlier claims, the cited entries should be present by
+        # the time this row's validation is checked.
+        if declared_type == _signing.PAYLOAD_TYPE_VALIDATION:
+            cited = val_payload.get("evidence_seen")
+            if cited is None:
+                raise RestoreError(
+                    f"Claim {claim_id} validation envelope is missing "
+                    "the evidence_seen field; v0.3.0 envelopes always "
+                    "bind this field (use [] for the no-review case).",
+                    kind="claim_unverified",
+                )
+            if not isinstance(cited, list):
+                raise RestoreError(
+                    f"Claim {claim_id} validation envelope's "
+                    f"evidence_seen is not a list: {cited!r}.",
+                    kind="claim_unverified",
+                )
+            row_validated_at = c.get("validated_at")
+            for entry in cited:
+                if not isinstance(entry, str) or not _is_claim_id(entry):
+                    raise RestoreError(
+                        f"Claim {claim_id} evidence_seen entry "
+                        f"{entry!r} is not a strict-v4 UUID.",
+                        kind="claim_unverified",
+                    )
+                cited_row = conn.execute(
+                    "SELECT created_at FROM claims WHERE claim_id = ?",
+                    (entry,),
+                ).fetchone()
+                if cited_row is None:
+                    raise RestoreError(
+                        f"Claim {claim_id} evidence_seen cites "
+                        f"'{entry}' which does not exist in the "
+                        "restored graph.",
+                        kind="claim_unverified",
+                    )
+                if cited_row["created_at"] > row_validated_at:
+                    raise RestoreError(
+                        f"Claim {claim_id} evidence_seen cites "
+                        f"'{entry}' (created_at "
+                        f"{cited_row['created_at']!r}) which post-dates "
+                        f"the validation (validated_at "
+                        f"{row_validated_at!r}).",
+                        kind="claim_unverified",
+                    )
 
 
 def get_validator_reputation(conn: sqlite3.Connection) -> dict[str, int]:
@@ -4016,6 +4460,11 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
                 entry["validated_at"] = c["validated_at"]
             if c.get("unresolved"):
                 entry["unresolved"] = True
+            if c.get("convergence_retry_needed"):
+                # Audit flag: preserved across restore so the operator's
+                # TODO list of "claims whose convergence detection still
+                # needs a retry" doesn't reset to empty on a rebuild.
+                entry["convergence_retry_needed"] = True
             if c.get("signature_bundle"):
                 entry["signature_bundle"] = c["signature_bundle"]
             if c.get("validation_signature"):

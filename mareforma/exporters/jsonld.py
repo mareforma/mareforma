@@ -52,8 +52,21 @@ _CONTEXT = {
     "claimStatus":     "mare:claimStatus",
     "sourceName":      "mare:sourceName",
     "generatedBy":     "mare:generatedBy",
+    # Flat list of strings (back-compat): exactly what's stored in
+    # supports_json / contradicts_json. Mixed types — claim_ids, DOIs,
+    # external refs — appear in arbitrary order.
     "supports":        "mare:supports",
     "contradicts":     "mare:contradicts",
+    # Typed buckets: every entry from supports/contradicts also appears
+    # under the matching typed predicate, so a downstream consumer can
+    # distinguish "graph-node edges" from "external citations" without
+    # re-running the classification regex.
+    "supportsClaim":      "mare:supportsClaim",
+    "supportsDoi":        "mare:supportsDoi",
+    "supportsReference":  "mare:supportsReference",
+    "contradictsClaim":      "mare:contradictsClaim",
+    "contradictsDoi":        "mare:contradictsDoi",
+    "contradictsReference":  "mare:contradictsReference",
     "comparisonSummary": "mare:comparisonSummary",
     "validatedBy":     "mare:validatedBy",
     "usedSource":      "mare:usedSource",
@@ -128,6 +141,40 @@ class JSONLDExporter:
             evidence_dict = json.loads(claim.get("evidence_json") or "{}")
         except (ValueError, TypeError):
             evidence_dict = {}
+
+        # 215: emit typed buckets alongside the flat list. The flat
+        # ``supports`` / ``contradicts`` arrays stay byte-identical to
+        # what was signed (and to claims.toml's round-tripped copy), so
+        # the canonical_statement digest still matches. The typed
+        # arrays are derived view: a consumer that knows about the
+        # typed predicates can route on them; a consumer that doesn't
+        # falls back to the flat list and re-classifies if it cares.
+        from mareforma.db import (
+            SUPPORT_TYPE_CLAIM,
+            SUPPORT_TYPE_DOI,
+            SUPPORT_TYPE_EXTERNAL,
+            classify_supports,
+        )
+
+        def _split(entries: list[str]) -> tuple[list[str], list[str], list[str]]:
+            claims_b: list[str] = []
+            dois_b: list[str] = []
+            refs_b: list[str] = []
+            for typed in classify_supports(entries):
+                t = typed["type"]
+                v = typed["value"]
+                if t == SUPPORT_TYPE_CLAIM:
+                    claims_b.append(v)
+                elif t == SUPPORT_TYPE_DOI:
+                    dois_b.append(v)
+                else:
+                    assert t == SUPPORT_TYPE_EXTERNAL
+                    refs_b.append(v)
+            return claims_b, dois_b, refs_b
+
+        sup_claims, sup_dois, sup_refs = _split(supports)
+        con_claims, con_dois, con_refs = _split(contradicts)
+
         node: dict[str, Any] = {
             "@type": "mare:Claim",
             "@id": f"mare:claim/{claim['claim_id']}",
@@ -139,6 +186,12 @@ class JSONLDExporter:
             "dateCreated": claim["created_at"],
             "supports": supports,
             "contradicts": contradicts,
+            "supportsClaim": sup_claims,
+            "supportsDoi": sup_dois,
+            "supportsReference": sup_refs,
+            "contradictsClaim": con_claims,
+            "contradictsDoi": con_dois,
+            "contradictsReference": con_refs,
             "sourceName": claim.get("source_name"),
             "artifactHash": claim.get("artifact_hash"),
             "evidence": evidence_dict,

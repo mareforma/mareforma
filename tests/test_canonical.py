@@ -91,3 +91,102 @@ class TestBytestableAcrossRuns:
             check=True,
         )
         assert result.stdout == in_process
+
+
+class TestRfc8785NumberRules:
+    """Verify the canonicalizer follows RFC 8785 ECMAScript Number rules
+    for floats. The non-float schema in v0.3.0 happens to produce the
+    same bytes as the prior stdlib canonicalizer — these tests guard
+    the case where a future schema introduces a float field."""
+
+    def test_integral_float_drops_decimal(self) -> None:
+        """RFC 8785 §3.2.2.3: 1.0 → "1" (per ECMAScript Number.toString)."""
+        assert canonicalize({"x": 1.0}) == b'{"x":1}'
+
+    def test_non_integral_float_preserves(self) -> None:
+        """Non-integer floats render with the minimum digits needed for
+        round-trip recovery (ES shortest-roundtrip)."""
+        assert canonicalize({"x": 2.5}) == b'{"x":2.5}'
+
+    def test_large_float_no_exponent_in_range(self) -> None:
+        """RFC 8785 §3.2.2.3: 1e10 → 10000000000 (no exponent for values
+        in the ES Number.toString non-exponential range)."""
+        assert canonicalize({"x": 1e10}) == b'{"x":10000000000}'
+
+    def test_negative_zero_normalizes_to_zero(self) -> None:
+        """-0.0 and 0.0 are equal under IEEE-754 but JSON has one zero."""
+        assert canonicalize({"x": -0.0}) == canonicalize({"x": 0.0})
+
+
+class TestRfc8785ByteCompatWithNoFloats:
+    """The current v0.3.0 schema contains no float fields. Byte output
+    for the existing field shapes must match the prior stdlib
+    canonicalization exactly — otherwise every signed claim in any
+    existing graph.db would fail re-verification on this release."""
+
+    def test_int_only_payload_matches_legacy(self) -> None:
+        """Signed ints in the EvidenceVector range round-trip the same way."""
+        payload = {
+            "risk_of_bias": -2,
+            "inconsistency": -1,
+            "indirectness": 0,
+            "imprecision": 0,
+            "publication_bias": -2,
+        }
+        out = canonicalize(payload)
+        # All keys sorted, no whitespace, integer form unchanged.
+        assert out == (
+            b'{"imprecision":0,"inconsistency":-1,"indirectness":0,'
+            b'"publication_bias":-2,"risk_of_bias":-2}'
+        )
+
+    def test_bool_only_payload_matches_legacy(self) -> None:
+        """Upgrade flags (bools) serialize as ``true`` / ``false``."""
+        payload = {
+            "large_effect": True,
+            "dose_response": False,
+            "opposing_confounding": True,
+        }
+        assert canonicalize(payload) == (
+            b'{"dose_response":false,"large_effect":true,'
+            b'"opposing_confounding":true}'
+        )
+
+    def test_claim_envelope_shape_matches_legacy(self) -> None:
+        """A realistic claim payload (text, classification, supports,
+        timestamps, evidence) produces the same bytes the old
+        canonicalizer would have produced."""
+        payload = {
+            "claim_id": "11111111-1111-4111-8111-111111111111",
+            "text": "Cell type A shows property X (n=12, p=0.01)",
+            "classification": "ANALYTICAL",
+            "generated_by": "agent/model-a/lab_a",
+            "supports": ["22222222-2222-4222-8222-222222222222"],
+            "contradicts": [],
+            "source_name": "depmap_24q2",
+            "artifact_hash": None,
+            "created_at": "2026-05-14T10:00:00+00:00",
+            "evidence": {
+                "risk_of_bias": -1,
+                "inconsistency": 0,
+                "indirectness": 0,
+                "imprecision": -1,
+                "publication_bias": 0,
+                "large_effect": False,
+                "dose_response": False,
+                "opposing_confounding": False,
+                "rationale": {"risk_of_bias": "single-lab study"},
+                "reporting_compliance": [],
+            },
+        }
+        out = canonicalize(payload)
+        # Top-level keys are sorted; nested objects are also sorted.
+        # The order below mirrors what the prior canonicalizer produced
+        # and what any RFC 8785-conformant implementation produces.
+        assert out.startswith(b'{"artifact_hash":null,"claim_id":')
+        assert b'"classification":"ANALYTICAL"' in out
+        assert b'"created_at":"2026-05-14T10:00:00+00:00"' in out
+        assert b'"text":"Cell type A shows property X (n=12, p=0.01)"' in out
+        # The whole envelope decodes back to the same dict.
+        import json as _json
+        assert _json.loads(out) == payload

@@ -57,7 +57,7 @@ class TestSelfLoop:
         paths that might call the helper directly."""
         conn = open_db(tmp_path)
         try:
-            fake_id = "00000000-0000-0000-0000-000000000001"
+            fake_id = "00000000-0000-4000-8000-000000000001"
             with pytest.raises(CycleDetectedError, match="self-loop"):
                 _check_no_cycle(conn, fake_id, [fake_id])
         finally:

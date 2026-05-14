@@ -165,10 +165,21 @@ _ENROLLMENT_FIELDS = (
 )
 
 # Fields included in the signed payload of a validation event.
+#
+# ``evidence_seen`` is a list of claim_ids the validator declares to have
+# reviewed before signing the promotion. The field is ALWAYS present in
+# the signed payload — an empty list is a positive statement that the
+# validator reviewed nothing, which is then visible in the audit trail
+# rather than hidden by absence. The validator's enumeration is
+# self-declared (the substrate cannot prove the validator actually
+# opened the cited claims) but every cited entry must exist in the
+# graph and predate the validation timestamp — that part the substrate
+# DOES verify at write and at restore.
 _VALIDATION_FIELDS = (
     "claim_id",
     "validator_keyid",
     "validated_at",
+    "evidence_seen",
 )
 
 # Fields included in the signed payload of a seed-claim attestation.

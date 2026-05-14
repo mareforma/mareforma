@@ -20,6 +20,7 @@ Coverage
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -859,7 +860,7 @@ class TestFindDanglingSupports:
 
     def test_phantom_uuid_surfaced(self, tmp_path):
         """The reviewer's exact counter-example: a UUID that points nowhere."""
-        phantom = "12345678-1234-1234-1234-123456789012"
+        phantom = "12345678-1234-4234-8234-123456789012"
         with mareforma.open(tmp_path) as graph:
             cid = graph.assert_claim(
                 "phantom-citer", generated_by="agent", supports=[phantom],
@@ -886,7 +887,7 @@ class TestFindDanglingSupports:
 
     def test_mixed_dangling_and_valid_surfaces_only_dangling(self, tmp_path):
         """Real anchor + phantom UUID: only the phantom shows up."""
-        phantom = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        phantom = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
         with mareforma.open(tmp_path) as graph:
             anchor = graph.assert_claim("anchor", generated_by="agent")
             cid = graph.assert_claim(
@@ -899,8 +900,8 @@ class TestFindDanglingSupports:
 
     def test_multiple_dangling_sorted_deterministically(self, tmp_path):
         """Output ordered by (claim_id, dangling_ref) for stable audits."""
-        p1 = "11111111-1111-1111-1111-111111111111"
-        p2 = "22222222-2222-2222-2222-222222222222"
+        p1 = "11111111-1111-4111-8111-111111111111"
+        p2 = "22222222-2222-4222-9222-222222222222"
         with mareforma.open(tmp_path) as graph:
             graph.assert_claim(
                 "a", generated_by="agent", supports=[p2, p1],
@@ -982,3 +983,792 @@ class TestRefreshAllDois:
             result = graph.refresh_all_dois()
             assert result["still_resolved"] == 1
             assert result["newly_failed"] == 0
+
+
+# ---------------------------------------------------------------------------
+# health() aggregator
+# ---------------------------------------------------------------------------
+
+
+class TestHealth:
+    """`EpistemicGraph.health()` returns a single-call audit summary.
+
+    No side effects; pure observability over existing surfaces.
+    """
+
+    _EXPECTED_KEYS = {
+        "claim_count",
+        "validator_count",
+        "unresolved_claims",
+        "unsigned_claims",
+        "dangling_supports",
+        "convergence_errors",
+        "convergence_retry_pending",
+    }
+
+    def test_empty_graph_reports_zeros(self, tmp_path):
+        with mareforma.open(tmp_path) as graph:
+            h = graph.health()
+            assert set(h.keys()) == self._EXPECTED_KEYS
+            assert h["claim_count"] == 0
+            assert h["validator_count"] == 0
+            assert h["unresolved_claims"] == 0
+            assert h["unsigned_claims"] == 0
+            assert h["dangling_supports"] == 0
+            assert h["convergence_errors"] == 0
+            assert h["convergence_retry_pending"] == 0
+
+    def test_claim_count_grows_with_inserts(self, tmp_path):
+        with mareforma.open(tmp_path) as graph:
+            graph.assert_claim("first", generated_by="agent")
+            graph.assert_claim("second", generated_by="agent")
+            assert graph.health()["claim_count"] == 2
+
+    def test_unsigned_claims_counts_unsigned_only(self, tmp_path):
+        """Without a key, every claim is unsigned and counted."""
+        with mareforma.open(tmp_path) as graph:
+            graph.assert_claim("u1", generated_by="agent")
+            graph.assert_claim("u2", generated_by="agent")
+            h = graph.health()
+            assert h["claim_count"] == 2
+            assert h["unsigned_claims"] == 2
+
+    def test_signed_claims_not_counted_unsigned(self, tmp_path):
+        """With a key bootstrapped, claims are signed and unsigned=0."""
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            graph.assert_claim("s1", generated_by="agent")
+            h = graph.health()
+            assert h["claim_count"] == 1
+            assert h["unsigned_claims"] == 0
+
+    def test_validator_count_reflects_enrollment(self, tmp_path):
+        """auto_enroll_root on first key open adds one validator row."""
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            assert graph.health()["validator_count"] == 1
+
+    def test_dangling_supports_count_matches_helper(self, tmp_path):
+        phantom = "12345678-1234-4234-8234-123456789012"
+        with mareforma.open(tmp_path) as graph:
+            graph.assert_claim(
+                "danglerefs", generated_by="agent", supports=[phantom],
+            )
+            h = graph.health()
+            assert h["dangling_supports"] == 1
+            assert len(graph.find_dangling_supports()) == 1
+
+    def test_health_is_read_only(self, tmp_path):
+        """Two consecutive calls produce identical results — no side effects."""
+        with mareforma.open(tmp_path) as graph:
+            graph.assert_claim("c", generated_by="agent")
+            h1 = graph.health()
+            h2 = graph.health()
+            assert h1 == h2
+
+    def test_health_after_close_raises(self, tmp_path):
+        graph = mareforma.open(tmp_path)
+        graph.close()
+        with pytest.raises(RuntimeError, match="EpistemicGraph is closed"):
+            graph.health()
+
+
+# ---------------------------------------------------------------------------
+# Convergence retry queue (214)
+# ---------------------------------------------------------------------------
+
+
+class TestConvergenceRetryQueue:
+    """`convergence_retry_needed` flag + `refresh_convergence()` together
+    make swallowed convergence-detection errors recoverable instead of
+    silently stuck at PRELIMINARY forever.
+    """
+
+    def test_flag_starts_zero_for_clean_inserts(self, tmp_path):
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            upstream = graph.assert_claim(
+                "anchor", generated_by="seed", seed=True,
+            )
+            graph.assert_claim(
+                "child", generated_by="lab_a", supports=[upstream],
+            )
+            assert graph.health()["convergence_retry_pending"] == 0
+
+    def test_swallowed_error_sets_retry_flag(self, tmp_path, monkeypatch):
+        """A SQLite failure in detection sets convergence_retry_needed=1."""
+        from mareforma import db as _db
+
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            upstream = graph.assert_claim(
+                "anchor", generated_by="seed", seed=True,
+            )
+
+            def _boom(*_args, **_kwargs):
+                raise sqlite3.OperationalError("forced for test")
+
+            monkeypatch.setattr(_db, "_maybe_update_replicated_unlocked", _boom)
+
+            graph.assert_claim(
+                "child", generated_by="lab_a", supports=[upstream],
+            )
+
+            h = graph.health()
+            assert h["convergence_errors"] >= 1
+            assert h["convergence_retry_pending"] == 1
+
+    def test_refresh_clears_flag_when_retry_succeeds(
+        self, tmp_path, monkeypatch,
+    ):
+        """A flagged claim whose retry runs cleanly has the flag cleared."""
+        from mareforma import db as _db
+
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            upstream = graph.assert_claim(
+                "anchor", generated_by="seed", seed=True,
+            )
+
+            # Phase one: monkeypatch detection to fail so the flag lands.
+            original = _db._maybe_update_replicated_unlocked
+
+            def _boom(*_args, **_kwargs):
+                raise sqlite3.OperationalError("forced for test")
+
+            monkeypatch.setattr(_db, "_maybe_update_replicated_unlocked", _boom)
+
+            graph.assert_claim(
+                "child", generated_by="lab_a", supports=[upstream],
+            )
+            assert graph.health()["convergence_retry_pending"] == 1
+
+            # Phase two: restore the real detection, retry — flag clears.
+            monkeypatch.setattr(_db, "_maybe_update_replicated_unlocked", original)
+            result = graph.refresh_convergence()
+            assert result["checked"] == 1
+            assert result["promoted"] == 1
+            assert result["still_pending"] == 0
+            assert graph.health()["convergence_retry_pending"] == 0
+
+    def test_refresh_keeps_flag_when_retry_fails(self, tmp_path, monkeypatch):
+        """A flagged claim whose retry errors again stays flagged."""
+        from mareforma import db as _db
+
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            upstream = graph.assert_claim(
+                "anchor", generated_by="seed", seed=True,
+            )
+
+            def _boom(*_args, **_kwargs):
+                raise sqlite3.OperationalError("forced for test")
+
+            monkeypatch.setattr(_db, "_maybe_update_replicated_unlocked", _boom)
+
+            graph.assert_claim(
+                "child", generated_by="lab_a", supports=[upstream],
+            )
+            assert graph.health()["convergence_retry_pending"] == 1
+
+            # Still broken. Retry walks but fails again; flag stays.
+            errors_before = graph.convergence_errors
+            result = graph.refresh_convergence()
+            assert result["checked"] == 1
+            assert result["promoted"] == 0
+            assert result["still_pending"] == 1
+            assert graph.convergence_errors > errors_before
+            assert graph.health()["convergence_retry_pending"] == 1
+
+    def test_refresh_on_clean_graph_is_no_op(self, tmp_path):
+        with mareforma.open(tmp_path) as graph:
+            result = graph.refresh_convergence()
+            assert result == {
+                "checked": 0,
+                "promoted": 0,
+                "still_pending": 0,
+            }
+
+
+# ---------------------------------------------------------------------------
+# Strict UUIDv4 in _CLAIM_ID_RE (212)
+# ---------------------------------------------------------------------------
+
+
+class TestClaimIdRegexStrictV4:
+    """The substrate's claim_id pattern is strict UUIDv4 — version=4 in
+    the third group, variant in {8,9,a,b} in the fourth. Non-v4 UUIDs
+    in ``supports[]`` are treated as external references (like DOIs),
+    not as graph-node candidates."""
+
+    def test_v4_uuid_recognized_as_claim_id(self):
+        from mareforma.db import _is_claim_id
+        # Known-valid v4 examples.
+        assert _is_claim_id("11111111-1111-4111-8111-111111111111")
+        assert _is_claim_id("aaaaaaaa-bbbb-4ccc-9ddd-eeeeeeeeeeee")
+        assert _is_claim_id("00000000-0000-4000-b000-000000000001")
+
+    def test_v1_uuid_rejected(self):
+        """Time-based UUIDs (version=1) are not graph-node candidates."""
+        from mareforma.db import _is_claim_id
+        # Version nibble = 1.
+        assert not _is_claim_id("11111111-1111-1111-1111-111111111111")
+        assert not _is_claim_id("12345678-1234-1234-1234-123456789012")
+
+    def test_v3_v5_uuids_rejected(self):
+        """Name-based UUIDs (versions 3, 5) are not graph-node candidates."""
+        from mareforma.db import _is_claim_id
+        assert not _is_claim_id("12345678-1234-3234-8234-123456789012")
+        assert not _is_claim_id("12345678-1234-5234-8234-123456789012")
+
+    def test_zero_uuid_rejected(self):
+        """The all-zeros nil UUID is rejected — version nibble is 0."""
+        from mareforma.db import _is_claim_id
+        assert not _is_claim_id("00000000-0000-0000-0000-000000000000")
+
+    def test_invalid_variant_rejected(self):
+        """Variant nibble must be in {8, 9, a, b} (binary 10xx)."""
+        from mareforma.db import _is_claim_id
+        # Variant 0 (binary 0xxx) — RFC 4122 says NCS reserved, not v4.
+        assert not _is_claim_id("12345678-1234-4234-0234-123456789012")
+        # Variant c (binary 110x) — Microsoft GUID reserved.
+        assert not _is_claim_id("12345678-1234-4234-c234-123456789012")
+
+    def test_substrate_generated_ids_match(self, tmp_path):
+        """Every claim_id mareforma generates via uuid.uuid4() must pass."""
+        from mareforma.db import _is_claim_id
+        with mareforma.open(tmp_path) as graph:
+            for i in range(20):
+                cid = graph.assert_claim(f"claim {i}", generated_by="agent")
+                assert _is_claim_id(cid), f"Generated id {cid} failed v4 check"
+
+    def test_non_v4_in_supports_not_flagged_as_dangling(self, tmp_path):
+        """A non-v4 UUID-shape in supports[] is treated as external, not
+        dangling — find_dangling_supports skips it."""
+        non_v4 = "12345678-1234-1234-1234-123456789012"  # version=1
+        with mareforma.open(tmp_path) as graph:
+            graph.assert_claim(
+                "cites-external",
+                generated_by="agent",
+                supports=[non_v4],
+            )
+            assert graph.find_dangling_supports() == []
+
+    def test_v4_phantom_in_supports_flagged_as_dangling(self, tmp_path):
+        """A strict-v4 UUID that doesn't resolve is still flagged."""
+        phantom_v4 = "12345678-1234-4234-8234-123456789012"
+        with mareforma.open(tmp_path) as graph:
+            cid = graph.assert_claim(
+                "cites-phantom",
+                generated_by="agent",
+                supports=[phantom_v4],
+            )
+            assert graph.find_dangling_supports() == [
+                {"claim_id": cid, "dangling_ref": phantom_v4}
+            ]
+
+
+# ---------------------------------------------------------------------------
+# classify_supports / supports[] type split (215)
+# ---------------------------------------------------------------------------
+
+
+class TestClassifySupports:
+    """`EpistemicGraph.classify_supports()` and the underlying
+    `db.classify_supports()` helper return the three-way type tag for
+    every supports[]/contradicts[] entry."""
+
+    def test_uuid_v4_classified_as_claim(self, tmp_path):
+        v4 = "11111111-1111-4111-8111-111111111111"
+        with mareforma.open(tmp_path) as graph:
+            result = graph.classify_supports([v4])
+            assert result == [{"value": v4, "type": "claim"}]
+
+    def test_doi_classified_as_doi(self, tmp_path):
+        with mareforma.open(tmp_path) as graph:
+            result = graph.classify_supports(["10.1038/cure"])
+            assert result == [{"value": "10.1038/cure", "type": "doi"}]
+
+    def test_arbitrary_string_classified_as_external(self, tmp_path):
+        with mareforma.open(tmp_path) as graph:
+            result = graph.classify_supports(["https://example.org/x"])
+            assert result == [
+                {"value": "https://example.org/x", "type": "external"}
+            ]
+
+    def test_non_v4_uuid_classified_as_external(self, tmp_path):
+        """Non-v4 UUIDs are not graph nodes — they fall to external."""
+        non_v4 = "12345678-1234-1234-1234-123456789012"  # version=1
+        with mareforma.open(tmp_path) as graph:
+            result = graph.classify_supports([non_v4])
+            assert result == [{"value": non_v4, "type": "external"}]
+
+    def test_mixed_preserves_input_order(self, tmp_path):
+        v4 = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        doi = "10.1234/abc"
+        ext = "some-external-thing"
+        with mareforma.open(tmp_path) as graph:
+            result = graph.classify_supports([doi, v4, ext])
+            assert [r["type"] for r in result] == ["doi", "claim", "external"]
+            assert [r["value"] for r in result] == [doi, v4, ext]
+
+    def test_empty_returns_empty(self, tmp_path):
+        with mareforma.open(tmp_path) as graph:
+            assert graph.classify_supports([]) == []
+
+
+class TestJsonldTypedBuckets:
+    """JSON-LD export emits typed buckets alongside the flat ``supports``
+    list. The flat list stays byte-identical to what was signed; the
+    typed buckets are a derived view for downstream routing."""
+
+    def test_typed_buckets_present(self, tmp_path):
+        from mareforma.exporters.jsonld import JSONLDExporter
+
+        with mareforma.open(tmp_path) as graph:
+            anchor = graph.assert_claim("anchor", generated_by="agent")
+            graph.assert_claim(
+                "child",
+                generated_by="agent",
+                supports=[anchor, "10.1038/cure", "external-thing"],
+            )
+
+        doc = JSONLDExporter(tmp_path).export()
+        child = next(
+            n for n in doc["@graph"]
+            if n["claimText"] == "child"
+        )
+        assert child["supports"] == [
+            anchor, "10.1038/cure", "external-thing",
+        ]
+        assert child["supportsClaim"] == [anchor]
+        assert child["supportsDoi"] == ["10.1038/cure"]
+        assert child["supportsReference"] == ["external-thing"]
+
+    def test_typed_buckets_for_contradicts(self, tmp_path):
+        from mareforma.exporters.jsonld import JSONLDExporter
+
+        with mareforma.open(tmp_path) as graph:
+            anchor = graph.assert_claim("anchor", generated_by="agent")
+            graph.assert_claim(
+                "contesting",
+                generated_by="agent",
+                contradicts=[anchor, "10.1234/refuted"],
+            )
+
+        doc = JSONLDExporter(tmp_path).export()
+        contesting = next(
+            n for n in doc["@graph"]
+            if n["claimText"] == "contesting"
+        )
+        assert contesting["contradictsClaim"] == [anchor]
+        assert contesting["contradictsDoi"] == ["10.1234/refuted"]
+        assert contesting["contradictsReference"] == []
+
+    def test_flat_list_unchanged_byte_identical(self, tmp_path):
+        """The flat ``supports`` field carries the exact strings the
+        caller passed, in the order they were passed. The signed
+        canonical bytes bind this list, so any reordering or rewriting
+        here would break signature verification."""
+        from mareforma.exporters.jsonld import JSONLDExporter
+
+        with mareforma.open(tmp_path) as graph:
+            entries = [
+                "10.1234/a",
+                "11111111-1111-4111-8111-111111111111",
+                "ref-x",
+            ]
+            graph.assert_claim(
+                "child", generated_by="agent", supports=entries,
+            )
+
+        doc = JSONLDExporter(tmp_path).export()
+        child = next(
+            n for n in doc["@graph"]
+            if n["claimText"] == "child"
+        )
+        assert child["supports"] == entries
+
+
+# ---------------------------------------------------------------------------
+# ESTABLISHED-by-evidence binding (216)
+# ---------------------------------------------------------------------------
+
+
+class TestEvidenceSeenBinding:
+    """`graph.validate()` accepts an optional ``evidence_seen`` list
+    that names the claim_ids the validator reviewed. The list is bound
+    into the signed validation envelope — empty list is a positive
+    'reviewed nothing' admission, not an absent field."""
+
+    def _setup_replicated(self, graph, root_key):
+        """Build a REPLICATED claim under a different signer than `root_key`."""
+        seed = graph.assert_claim(
+            "anchor", generated_by="seed", seed=True,
+        )
+        graph.assert_claim(
+            "child-a", generated_by="lab_a", supports=[seed],
+        )
+        cid_b = graph.assert_claim(
+            "child-b", generated_by="lab_b", supports=[seed],
+        )
+        assert graph.get_claim(cid_b)["support_level"] == "REPLICATED"
+        return seed, cid_b
+
+    def test_validate_without_evidence_signs_empty_list(self, tmp_path):
+        """Back-compat: graph.validate(cid) with no evidence_seen
+        produces an envelope with evidence_seen=[]."""
+        from mareforma.signing import envelope_payload as _payload
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        other_key = _bootstrap_key(tmp_path, "validator.key")
+
+        # Build REPLICATED chain under root, validate under another key.
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            _, cid_b = self._setup_replicated(g, root_key)
+            g.enroll_validator(
+                _validator_pubkey_pem(other_key),
+                identity="reviewer",
+            )
+
+        with mareforma.open(tmp_path, key_path=other_key) as g:
+            g.validate(cid_b)  # no evidence_seen
+            row = g.get_claim(cid_b)
+
+        envelope = json.loads(row["validation_signature"])
+        payload = _payload(envelope)
+        assert payload["evidence_seen"] == []
+
+    def test_validate_with_evidence_binds_into_envelope(self, tmp_path):
+        from mareforma.signing import envelope_payload as _payload
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        other_key = _bootstrap_key(tmp_path, "validator.key")
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            seed, cid_b = self._setup_replicated(g, root_key)
+            g.enroll_validator(
+                _validator_pubkey_pem(other_key),
+                identity="reviewer",
+            )
+
+        with mareforma.open(tmp_path, key_path=other_key) as g:
+            g.validate(cid_b, evidence_seen=[seed])
+            row = g.get_claim(cid_b)
+
+        envelope = json.loads(row["validation_signature"])
+        payload = _payload(envelope)
+        assert payload["evidence_seen"] == [seed]
+
+    def test_validate_rejects_phantom_evidence(self, tmp_path):
+        """A claim_id that doesn't exist raises EvidenceCitationError."""
+        from mareforma.db import EvidenceCitationError
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        other_key = _bootstrap_key(tmp_path, "validator.key")
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            _, cid_b = self._setup_replicated(g, root_key)
+            g.enroll_validator(
+                _validator_pubkey_pem(other_key),
+                identity="reviewer",
+            )
+
+        phantom = "deadbeef-dead-4eef-8eef-deadbeefdead"
+        with mareforma.open(tmp_path, key_path=other_key) as g:
+            with pytest.raises(EvidenceCitationError, match="does not exist"):
+                g.validate(cid_b, evidence_seen=[phantom])
+
+    def test_validate_rejects_non_v4_evidence(self, tmp_path):
+        """An evidence entry that isn't strict-v4 UUID is refused."""
+        from mareforma.db import EvidenceCitationError
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        other_key = _bootstrap_key(tmp_path, "validator.key")
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            _, cid_b = self._setup_replicated(g, root_key)
+            g.enroll_validator(
+                _validator_pubkey_pem(other_key),
+                identity="reviewer",
+            )
+
+        with mareforma.open(tmp_path, key_path=other_key) as g:
+            with pytest.raises(EvidenceCitationError, match="strict-v4"):
+                g.validate(
+                    cid_b,
+                    evidence_seen=["10.1234/doi-not-a-claim"],
+                )
+
+    def test_validate_rejects_self_citation(self, tmp_path):
+        """The promoted claim cannot count itself as evidence."""
+        from mareforma.db import EvidenceCitationError
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        other_key = _bootstrap_key(tmp_path, "validator.key")
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            _, cid_b = self._setup_replicated(g, root_key)
+            g.enroll_validator(
+                _validator_pubkey_pem(other_key),
+                identity="reviewer",
+            )
+
+        with mareforma.open(tmp_path, key_path=other_key) as g:
+            with pytest.raises(EvidenceCitationError, match="being promoted"):
+                g.validate(cid_b, evidence_seen=[cid_b])
+
+    def test_validation_envelope_field_count(self, tmp_path):
+        """Envelope payload has exactly the four expected fields."""
+        from mareforma.signing import envelope_payload as _payload
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        other_key = _bootstrap_key(tmp_path, "validator.key")
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            _, cid_b = self._setup_replicated(g, root_key)
+            g.enroll_validator(
+                _validator_pubkey_pem(other_key),
+                identity="reviewer",
+            )
+
+        with mareforma.open(tmp_path, key_path=other_key) as g:
+            g.validate(cid_b)
+            row = g.get_claim(cid_b)
+
+        envelope = json.loads(row["validation_signature"])
+        payload = _payload(envelope)
+        assert set(payload.keys()) == {
+            "claim_id", "validator_keyid", "validated_at", "evidence_seen",
+        }
+
+    def test_validate_with_evidence_and_restore_round_trip(self, tmp_path):
+        """A graph validated with evidence_seen restores cleanly."""
+        import mareforma as _m
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        other_key = _bootstrap_key(tmp_path, "validator.key")
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            seed, cid_b = self._setup_replicated(g, root_key)
+            g.enroll_validator(
+                _validator_pubkey_pem(other_key),
+                identity="reviewer",
+            )
+
+        with mareforma.open(tmp_path, key_path=other_key) as g:
+            g.validate(cid_b, evidence_seen=[seed])
+
+        # Wipe graph.db and restore from claims.toml. evidence_seen
+        # citation check runs against the rebuilt graph.
+        (tmp_path / ".mareforma" / "graph.db").unlink()
+        _m.restore(tmp_path)
+
+        with mareforma.open(tmp_path, key_path=other_key) as g:
+            assert g.get_claim(cid_b)["support_level"] == "ESTABLISHED"
+
+
+# ---------------------------------------------------------------------------
+# Rekor + UPDATE atomicity (213)
+# ---------------------------------------------------------------------------
+
+
+class TestRekorSagaAtomicity:
+    """The Rekor saga writes to ``rekor_inclusions`` BEFORE updating the
+    claims row, so a row-UPDATE failure leaves a durable record that
+    refresh_unsigned can replay without re-submitting to Rekor."""
+
+    def _setup(self, tmp_path, monkeypatch):
+        """Open a graph with a key, mocking Rekor to always succeed."""
+        from mareforma import signing as _signing
+
+        def _fake_submit(envelope, public_key, *, rekor_url):
+            return True, {
+                "uuid": "deadbeef" * 4,
+                "logIndex": 12345,
+                "integratedTime": 1700000000,
+                "body": "fake-body",
+            }
+
+        monkeypatch.setattr(_signing, "submit_to_rekor", _fake_submit)
+        key_path = _bootstrap_key(tmp_path)
+        return key_path
+
+    def test_sidecar_recorded_on_rekor_success(self, tmp_path, monkeypatch):
+        """A successful claim insert + Rekor write produces a sidecar row."""
+        from mareforma import signing as _signing
+        key_path = self._setup(tmp_path, monkeypatch)
+
+        with mareforma.open(
+            tmp_path, key_path=key_path,
+            rekor_url=_signing.PUBLIC_REKOR_URL,
+        ) as graph:
+            cid = graph.assert_claim("claim w/ rekor", generated_by="agent")
+            # The sidecar row exists.
+            from mareforma.db import get_rekor_inclusion
+            entry = get_rekor_inclusion(graph._conn, cid)
+            assert entry is not None
+            assert entry["uuid"] == "deadbeef" * 4
+            assert entry["logIndex"] == 12345
+            # The claim row's transparency_logged was flipped to 1.
+            row = graph.get_claim(cid)
+            assert "rekor" in row["signature_bundle"]
+
+    def test_refresh_unsigned_replays_from_sidecar(self, tmp_path, monkeypatch):
+        """Simulate row-UPDATE failure: sidecar persists, refresh_unsigned
+        replays the UPDATE from stored coords without re-submitting."""
+        from mareforma import signing as _signing
+        from mareforma.db import get_rekor_inclusion
+        key_path = self._setup(tmp_path, monkeypatch)
+
+        with mareforma.open(
+            tmp_path, key_path=key_path,
+            rekor_url=_signing.PUBLIC_REKOR_URL,
+        ) as graph:
+            cid = graph.assert_claim("good", generated_by="agent")
+            # Manually simulate the step-4-failed state by undoing the
+            # UPDATE the saga performed. The sidecar row stays.
+            graph._conn.execute(
+                "UPDATE claims SET transparency_logged = 0, "
+                "signature_bundle = ? WHERE claim_id = ?",
+                # Strip the rekor block back out of the bundle.
+                (
+                    json.dumps(
+                        {k: v for k, v in
+                         json.loads(graph.get_claim(cid)["signature_bundle"]).items()
+                         if k != "rekor"},
+                        sort_keys=True, separators=(",", ":"),
+                    ),
+                    cid,
+                ),
+            )
+            graph._conn.commit()
+
+            # Confirm we're in the divergence state.
+            row = graph.get_claim(cid)
+            assert row["transparency_logged"] == 0
+            assert "rekor" not in row["signature_bundle"]
+            assert get_rekor_inclusion(graph._conn, cid) is not None
+
+            # Now monkeypatch submit_to_rekor to FAIL so we know
+            # refresh_unsigned is using the sidecar-replay path, not
+            # re-submitting.
+            def _fail_submit(*_a, **_k):
+                raise AssertionError(
+                    "refresh_unsigned should NOT re-submit when a "
+                    "sidecar row already records the inclusion."
+                )
+            monkeypatch.setattr(_signing, "submit_to_rekor", _fail_submit)
+
+            result = graph.refresh_unsigned()
+            assert result["logged"] == 1
+            assert result["still_unlogged"] == 0
+
+            # Replay applied: row carries rekor again, flag is 1.
+            row = graph.get_claim(cid)
+            assert row["transparency_logged"] == 1
+            assert "rekor" in row["signature_bundle"]
+
+    def test_no_sidecar_means_refresh_submits_normally(
+        self, tmp_path, monkeypatch,
+    ):
+        """When no sidecar row exists, refresh_unsigned still submits to
+        Rekor. This is the original behavior for the case where the very
+        first Rekor submit failed (no inclusion was ever recorded)."""
+        from mareforma import signing as _signing
+
+        # Open with Rekor and immediately fail the submit so the sidecar
+        # row never gets written. refresh_unsigned will then have to
+        # re-submit.
+        def _fail_initial(envelope, public_key, *, rekor_url):
+            return False, None
+
+        monkeypatch.setattr(_signing, "submit_to_rekor", _fail_initial)
+        key_path = _bootstrap_key(tmp_path)
+
+        with mareforma.open(
+            tmp_path, key_path=key_path,
+            rekor_url=_signing.PUBLIC_REKOR_URL,
+        ) as graph:
+            cid = graph.assert_claim("never-logged", generated_by="agent")
+            assert graph.get_claim(cid)["transparency_logged"] == 0
+            from mareforma.db import get_rekor_inclusion
+            assert get_rekor_inclusion(graph._conn, cid) is None
+
+            # Now monkeypatch submit to succeed and confirm
+            # refresh_unsigned actually calls it (no sidecar to replay).
+            submit_calls = {"count": 0}
+
+            def _success_submit(envelope, public_key, *, rekor_url):
+                submit_calls["count"] += 1
+                return True, {
+                    "uuid": "freshcafe" * 4,
+                    "logIndex": 99999,
+                    "integratedTime": 1700001111,
+                }
+
+            monkeypatch.setattr(_signing, "submit_to_rekor", _success_submit)
+            result = graph.refresh_unsigned()
+
+            assert submit_calls["count"] == 1
+            assert result["logged"] == 1
+
+    def test_sidecar_replay_refused_on_drifted_row(self, tmp_path, monkeypatch):
+        """Critical safety property: if the row was tampered after the
+        original Rekor submit, the sidecar-replay path must NOT attach
+        valid Rekor coords to invalid payload bytes. The drift guard
+        applies uniformly to both replay and re-submit."""
+        from mareforma import signing as _signing
+        from mareforma.db import get_rekor_inclusion
+        key_path = self._setup(tmp_path, monkeypatch)
+
+        with mareforma.open(
+            tmp_path, key_path=key_path,
+            rekor_url=_signing.PUBLIC_REKOR_URL,
+        ) as graph:
+            # Two claims so we have two valid envelopes to swap.
+            cid_a = graph.assert_claim("legit text A", generated_by="agent")
+            cid_b = graph.assert_claim("legit text B", generated_by="agent")
+
+            # Read claim B's signature_bundle (valid envelope but for
+            # different payload) and the original A bundle.
+            row_a = graph.get_claim(cid_a)
+            row_b = graph.get_claim(cid_b)
+            bundle_b = json.loads(row_b["signature_bundle"])
+            bundle_b.pop("rekor", None)
+            envelope_b_bytes = json.dumps(
+                bundle_b, sort_keys=True, separators=(",", ":"),
+            )
+
+            # Swap A's bundle to B's (drift) and reset the logged flag.
+            # The signed-field "no laundering" trigger LOCKS signed
+            # columns when signature_bundle is non-NULL, but it permits
+            # mutations to non-signed columns (transparency_logged,
+            # signature_bundle itself), so this swap is allowed.
+            graph._conn.execute(
+                "UPDATE claims SET transparency_logged = 0, "
+                "signature_bundle = ? WHERE claim_id = ?",
+                (envelope_b_bytes, cid_a),
+            )
+            graph._conn.commit()
+
+            # The mocked Rekor flow wrote a sidecar entry for A during
+            # the original assert_claim call. The row now has a
+            # signature_bundle from B but the sidecar still records
+            # Rekor's ACK for A. Without the drift guard, replay would
+            # attach those coords to a bundle whose payload doesn't
+            # match what Rekor witnessed.
+            assert get_rekor_inclusion(graph._conn, cid_a) is not None
+
+            # Re-do submit_to_rekor as failing — confirm refresh_unsigned
+            # takes neither path (replay nor submit) on the drifted row.
+            def _fail(*_a, **_k):
+                return False, None
+            monkeypatch.setattr(_signing, "submit_to_rekor", _fail)
+
+            import warnings as _w
+            with _w.catch_warnings(record=True) as caught:
+                _w.simplefilter("always")
+                graph.refresh_unsigned()
+
+            # Drift guard refused both paths. Claim A stays unlogged.
+            row_a_after = graph.get_claim(cid_a)
+            assert row_a_after["transparency_logged"] == 0
+            assert "rekor" not in row_a_after["signature_bundle"]
+            assert any(
+                "drifted from its signed payload" in str(w.message)
+                for w in caught
+            )
