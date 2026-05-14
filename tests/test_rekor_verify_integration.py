@@ -368,7 +368,7 @@ class TestTOFUPin:
 
 
 # ---------------------------------------------------------------------------
-# Opt-out: no pubkey means the prior (pre-Merkle) behavior is preserved
+# Opt-in vs opt-out — pubkey supplied vs omitted, pin behavior on first use
 # ---------------------------------------------------------------------------
 
 

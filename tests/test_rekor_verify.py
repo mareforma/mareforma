@@ -307,7 +307,7 @@ class TestCheckpointParsing:
 
 
 # ---------------------------------------------------------------------------
-# Checkpoint signature verification
+# Checkpoint signature verification — Ed25519
 # ---------------------------------------------------------------------------
 
 
@@ -367,6 +367,11 @@ class TestCheckpointSignatureEd25519:
                 expected_root_hash=root, expected_tree_size=11,
             )
         assert exc_info.value.reason == "checkpoint_root_mismatch"
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint signature verification — ECDSA-P256
+# ---------------------------------------------------------------------------
 
 
 class TestCheckpointSignatureECDSA:
