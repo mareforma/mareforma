@@ -1082,6 +1082,12 @@ def attach_rekor_entry(
 _RFC6962_LEAF_PREFIX = b"\x00"
 _RFC6962_NODE_PREFIX = b"\x01"
 
+# Rekor entry uuids are hex strings: either a 64-char SHA-256 digest
+# alone or a tree-id-prefixed form ``<treehex>-<entryhex>`` (Rekor
+# emits the latter for shard-aware deployments). The regex permits
+# either: one or two lowercase-hex groups joined by a single hyphen.
+_UUID_HEX_RE = re.compile(r"^[0-9a-f]+(?:-[0-9a-f]+)?$")
+
 
 class RekorInclusionError(SigningError):
     """Raised when a Rekor inclusion proof cannot be verified.
@@ -1262,6 +1268,21 @@ def parse_rekor_checkpoint(checkpoint_text: str) -> dict[str, Any]:
     body_text = checkpoint_text[: sep_idx + 1]  # include trailing \n
     sig_text = checkpoint_text[sep_idx + 2 :]
 
+    # Reject CR characters in the body section. A proxy that rewrote
+    # LF→CRLF would corrupt the bytes the log operator signed, and
+    # signature verification would then fail-closed with
+    # ``checkpoint_bad_sig`` — accurate-but-misleading: the bytes
+    # never were what the operator signed, they were mangled in
+    # transit. Surface that distinction up-front with a clearer
+    # ``checkpoint_malformed`` reason.
+    if "\r" in body_text:
+        raise RekorInclusionError(
+            "checkpoint body contains carriage-return characters; "
+            "the signed-note byte stream must be LF-only (a proxy "
+            "rewriting LF to CRLF will break signature verification)",
+            reason="checkpoint_malformed",
+        )
+
     body_lines = body_text.rstrip("\n").split("\n")
     if len(body_lines) < 3:
         raise RekorInclusionError(
@@ -1356,7 +1377,13 @@ def _verify_with_pubkey(public_key: Any, signed_body: bytes, sig: bytes) -> bool
             return False
     if isinstance(public_key, _ec.EllipticCurvePublicKey):
         # Sigstore Rekor v1 signs over SHA-256(body) with ECDSA P-256
-        # and ASN.1-DER-encoded signatures.
+        # (secp256r1) and ASN.1-DER-encoded signatures. Refuse other
+        # curves explicitly so a swapped-curve key (P-384, P-521,
+        # secp256k1) surfaces as ``unsupported_key`` rather than as
+        # a generic ``checkpoint_bad_sig`` after the verify call
+        # quietly fails.
+        if not isinstance(public_key.curve, _ec.SECP256R1):
+            return False
         try:
             public_key.verify(
                 sig, signed_body, _ec.ECDSA(_hashes.SHA256()),
@@ -1412,10 +1439,22 @@ def verify_rekor_checkpoint(
             f"log_pubkey_pem is not a valid PEM public key: {exc}",
             reason="unsupported_key",
         ) from exc
-    if not isinstance(public_key, (Ed25519PublicKey, _ec.EllipticCurvePublicKey)):
+    if isinstance(public_key, Ed25519PublicKey):
+        pass
+    elif isinstance(public_key, _ec.EllipticCurvePublicKey):
+        # P-256 only — Sigstore Rekor v1 uses secp256r1. Reject other
+        # curves at type-check time with a precise reason instead of
+        # letting them fall through to a generic ``checkpoint_bad_sig``.
+        if not isinstance(public_key.curve, _ec.SECP256R1):
+            raise RekorInclusionError(
+                f"log pubkey curve {public_key.curve.name!r} unsupported; "
+                "Sigstore Rekor v1 uses ECDSA secp256r1 (P-256)",
+                reason="unsupported_key",
+            )
+    else:
         raise RekorInclusionError(
             f"log pubkey type {type(public_key).__name__} unsupported; "
-            "Ed25519 or ECDSA expected",
+            "Ed25519 or ECDSA P-256 expected",
             reason="unsupported_key",
         )
 
@@ -1498,16 +1537,30 @@ def verify_rekor_inclusion(
         )
 
     try:
-        leaf_index = int(proof["logIndex"])
-        tree_size = int(proof["treeSize"])
+        raw_log_index = proof["logIndex"]
+        raw_tree_size = proof["treeSize"]
         hashes_hex = proof["hashes"]
         root_hash_hex = proof["rootHash"]
         checkpoint = proof["checkpoint"]
-    except (KeyError, TypeError, ValueError) as exc:
+    except (KeyError, TypeError) as exc:
         raise RekorInclusionError(
             f"inclusionProof missing required field: {exc}",
             reason="malformed_proof",
         ) from exc
+    # Reject floats and bools: ``int(42.9)`` truncates silently to 42,
+    # and ``int(True)`` is 1. A hostile Rekor returning ``42.5`` would
+    # otherwise surface as ``merkle_root_mismatch`` rather than the
+    # accurate ``malformed_proof``. ``bool`` is a subclass of ``int``,
+    # so the order of checks matters — bool first.
+    for name, raw in (("logIndex", raw_log_index), ("treeSize", raw_tree_size)):
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            raise RekorInclusionError(
+                f"inclusionProof.{name} must be an integer, got "
+                f"{type(raw).__name__} ({raw!r})",
+                reason="malformed_proof",
+            )
+    leaf_index = raw_log_index
+    tree_size = raw_tree_size
 
     if not isinstance(hashes_hex, list) or not all(
         isinstance(h, str) for h in hashes_hex
@@ -1560,10 +1613,16 @@ def verify_rekor_inclusion(
         except RekorInclusionError as exc:
             if exc.reason != "checkpoint_malformed":
                 raise
+            # Fallback: some Rekor versions return the checkpoint
+            # itself base64-encoded. Decode and retry. If the decode
+            # ALSO fails, re-raise the ORIGINAL ``checkpoint_malformed``
+            # — not the raw ValueError/binascii.Error — so callers
+            # relying on the documented RekorInclusionError-only
+            # contract never see a leaked decode exception.
             try:
                 checkpoint_text = base64.standard_b64decode(checkpoint).decode("utf-8")
             except (ValueError, binascii.Error, UnicodeDecodeError):
-                raise
+                raise exc
             verify_rekor_checkpoint(
                 checkpoint_text,
                 log_pubkey_pem,
@@ -1604,9 +1663,33 @@ def fetch_inclusion_proof(
     Raises
     ------
     RekorInclusionError
-        On network errors, non-2xx responses, oversized bodies, or
-        malformed JSON.
+        On invalid uuid, malformed rekor_url, network errors, non-2xx
+        responses, oversized bodies, or malformed JSON.
     """
+    # uuid validation. Rekor entry uuids are hex-encoded SHA-256
+    # digests, optionally prefixed with a tree-id (also hex). A uuid
+    # containing ``?``, ``#``, ``/``, or path-traversal segments
+    # would shift the GET URL — even with a constant host, that's a
+    # query-string smuggling primitive a hostile Rekor could exploit
+    # by returning a crafted uuid in the submit response. Validate
+    # before substitution.
+    if not isinstance(uuid, str) or not _UUID_HEX_RE.match(uuid):
+        raise RekorInclusionError(
+            f"Rekor entry uuid must be a hex string (optionally with a "
+            f"hex tree-id prefix separated by '-'); got {uuid!r}",
+            reason="malformed_proof",
+        )
+    # Re-validate the rekor_url even though mareforma.open() already
+    # did so at session start. Direct callers of this function (tests,
+    # ad-hoc verifier scripts) could otherwise bypass the SSRF /
+    # scheme defenses. Idempotent and cheap.
+    try:
+        validate_rekor_url(rekor_url)
+    except SigningError as exc:
+        raise RekorInclusionError(
+            f"rekor_url failed SSRF / scheme validation: {exc}",
+            reason="malformed_proof",
+        ) from exc
     fetch_url = rekor_url.rstrip("/") + "/" + uuid
     try:
         with httpx.stream(
@@ -1707,9 +1790,14 @@ def fetch_log_pubkey(
     Raises
     ------
     SigningError
-        On network errors, non-2xx response, oversized body, or a
-        response body that does not parse as PEM.
+        On malformed rekor_url, network errors, non-2xx response,
+        oversized body, or a response body that does not parse as PEM.
     """
+    # Re-validate the rekor_url so the SSRF / scheme defense is a
+    # property of this function rather than the call graph that
+    # leads to it. mareforma.open() already validates; direct callers
+    # (tests, scripts) might not. Idempotent and cheap.
+    validate_rekor_url(rekor_url)
     base = rekor_url.rstrip("/")
     # Best-effort: if the URL ends in `/entries`, replace that segment;
     # otherwise just append `/publicKey`.

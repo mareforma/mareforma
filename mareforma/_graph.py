@@ -1286,6 +1286,22 @@ class EpistemicGraph:
                         )
                         still_unlogged += 1
                         continue
+                # Saga step 3 (sidecar write) BEFORE step 4 (row UPDATE),
+                # mirroring _attempt_rekor_saga in db.py. Without this,
+                # a mark_claim_logged failure (drift refusal, transient
+                # IntegrityError, contention) would leave the entry in
+                # Rekor with no local sidecar record; the next
+                # refresh_unsigned would re-submit and create a duplicate
+                # Rekor entry. Writing the sidecar first lets the next
+                # refresh route through the saved_entry replay path
+                # above instead.
+                if not _db._record_rekor_inclusion(self._conn, cid, entry):
+                    # Sidecar write itself failed (rare; emits its own
+                    # warning). Leave the row unlogged — refresh_unsigned
+                    # will retry, accepting the duplicate-Rekor-entry
+                    # risk documented in _record_rekor_inclusion.
+                    still_unlogged += 1
+                    continue
                 augmented = _signing.attach_rekor_entry(envelope, entry)
                 new_bundle = json.dumps(
                     augmented, sort_keys=True, separators=(",", ":"),

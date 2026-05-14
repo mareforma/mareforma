@@ -533,3 +533,223 @@ class TestFullResponseVerification:
         with pytest.raises(_signing.RekorInclusionError) as exc_info:
             _signing.verify_rekor_inclusion(resp, _pubkey_pem(key))
         assert exc_info.value.reason == "malformed_proof"
+
+
+# ---------------------------------------------------------------------------
+# Post-review hardening regressions
+# ---------------------------------------------------------------------------
+
+
+class TestEcCurveRestriction:
+    """M1: ECDSA log keys must be P-256. Other curves surface as
+    unsupported_key with a precise reason, not a generic bad-sig."""
+
+    def test_p384_log_key_refused(self) -> None:
+        key = ec.generate_private_key(ec.SECP384R1())
+        cp = _sign_checkpoint_ecdsa(
+            origin="rekor.test", tree_size=10, root_hash=b"\x55" * 32,
+            signer_name="rekor.test", key=key,
+        )
+        with pytest.raises(_signing.RekorInclusionError) as exc_info:
+            _signing.verify_rekor_checkpoint(
+                cp, _pubkey_pem(key),
+                expected_root_hash=b"\x55" * 32, expected_tree_size=10,
+            )
+        assert exc_info.value.reason == "unsupported_key"
+
+
+class TestL2StrictIntegerParsing:
+    """L2: hostile Rekor responses with float / bool logIndex / treeSize
+    surface as ``malformed_proof``, not as a misleading
+    ``merkle_root_mismatch``."""
+
+    def _build(self, log_key):
+        leaves = [f"e{i}".encode() for i in range(8)]
+        root = _merkle_root(leaves)
+        path = _merkle_inclusion_path(leaves, 3)
+        cp = _sign_checkpoint_ed25519(
+            origin="rekor.test", tree_size=len(leaves),
+            root_hash=root, signer_name="rekor.test", key=log_key,
+        )
+        return {
+            "body": base64.standard_b64encode(leaves[3]).decode("ascii"),
+            "integratedTime": 1700000000,
+            "logIndex": 3,
+            "logID": "deadbeef",
+            "verification": {
+                "inclusionProof": {
+                    "checkpoint": cp,
+                    "hashes": [h.hex() for h in path],
+                    "logIndex": 3,
+                    "rootHash": root.hex(),
+                    "treeSize": len(leaves),
+                },
+            },
+        }
+
+    def test_float_log_index_refused(self) -> None:
+        key = Ed25519PrivateKey.generate()
+        resp = self._build(key)
+        resp["verification"]["inclusionProof"]["logIndex"] = 3.5
+        with pytest.raises(_signing.RekorInclusionError) as exc_info:
+            _signing.verify_rekor_inclusion(resp, _pubkey_pem(key))
+        assert exc_info.value.reason == "malformed_proof"
+
+    def test_bool_log_index_refused(self) -> None:
+        key = Ed25519PrivateKey.generate()
+        resp = self._build(key)
+        resp["verification"]["inclusionProof"]["logIndex"] = True
+        with pytest.raises(_signing.RekorInclusionError) as exc_info:
+            _signing.verify_rekor_inclusion(resp, _pubkey_pem(key))
+        assert exc_info.value.reason == "malformed_proof"
+
+    def test_float_tree_size_refused(self) -> None:
+        key = Ed25519PrivateKey.generate()
+        resp = self._build(key)
+        resp["verification"]["inclusionProof"]["treeSize"] = 8.0
+        with pytest.raises(_signing.RekorInclusionError) as exc_info:
+            _signing.verify_rekor_inclusion(resp, _pubkey_pem(key))
+        assert exc_info.value.reason == "malformed_proof"
+
+
+class TestL3CarriageReturnInCheckpoint:
+    """L3: a checkpoint body containing CR (e.g., proxy that rewrote
+    LF→CRLF) surfaces as ``checkpoint_malformed`` rather than the more
+    misleading ``checkpoint_bad_sig`` after the signed bytes mismatch."""
+
+    def test_cr_in_body_refused(self) -> None:
+        key = Ed25519PrivateKey.generate()
+        text = _sign_checkpoint_ed25519(
+            origin="rekor.test", tree_size=10, root_hash=b"\x22" * 32,
+            signer_name="rekor.test", key=key,
+        )
+        # Inject CR into the body half.
+        idx = text.index("\n\n")
+        body = text[:idx + 1].replace("\n", "\r\n")
+        corrupted = body + text[idx + 1:]
+        with pytest.raises(_signing.RekorInclusionError) as exc_info:
+            _signing.parse_rekor_checkpoint(corrupted)
+        assert exc_info.value.reason == "checkpoint_malformed"
+
+
+class TestM4UuidValidation:
+    """M4: a hostile Rekor returning a uuid with path-traversal /
+    query-string characters cannot smuggle requests via
+    fetch_inclusion_proof's URL substitution."""
+
+    def test_uuid_with_query_string_refused(self) -> None:
+        with pytest.raises(_signing.RekorInclusionError) as exc_info:
+            _signing.fetch_inclusion_proof(
+                "deadbeef?evil=1",
+                "https://rekor.test.example/api/v1/log/entries",
+            )
+        assert exc_info.value.reason == "malformed_proof"
+
+    def test_uuid_with_path_traversal_refused(self) -> None:
+        with pytest.raises(_signing.RekorInclusionError) as exc_info:
+            _signing.fetch_inclusion_proof(
+                "../etc/passwd",
+                "https://rekor.test.example/api/v1/log/entries",
+            )
+        assert exc_info.value.reason == "malformed_proof"
+
+    def test_uuid_non_hex_refused(self) -> None:
+        with pytest.raises(_signing.RekorInclusionError) as exc_info:
+            _signing.fetch_inclusion_proof(
+                "abc-not-hex",
+                "https://rekor.test.example/api/v1/log/entries",
+            )
+        assert exc_info.value.reason == "malformed_proof"
+
+    def test_uuid_hex_with_tree_id_accepted(self) -> None:
+        """The tree-id-prefixed form ``<treehex>-<entryhex>`` is the
+        Rekor shard-aware uuid shape and must NOT be rejected by the
+        validator."""
+        # Construct a valid hex tree-id-prefixed uuid; the actual
+        # network call will fail (no mock) — we only test that it
+        # passes the regex.
+        import httpx as _httpx
+        try:
+            _signing.fetch_inclusion_proof(
+                "1234567890abcdef-fedcba0987654321",
+                "https://rekor.test.example/api/v1/log/entries",
+            )
+        except _signing.RekorInclusionError as exc:
+            # Must be a network failure (missing_proof), not a
+            # malformed_proof from regex refusal.
+            assert exc.reason in ("missing_proof", "malformed_proof"), (
+                f"expected network failure, got reason={exc.reason!r}"
+            )
+            # If it's malformed_proof, it must not be from the uuid
+            # regex — message text should NOT mention uuid format.
+            if exc.reason == "malformed_proof":
+                assert "hex string" not in str(exc), (
+                    f"valid tree-id uuid was rejected by regex: {exc}"
+                )
+
+
+class TestL1RekorUrlRevalidation:
+    """L1: fetch_inclusion_proof + fetch_log_pubkey re-validate
+    rekor_url against the SSRF / scheme defense, not just rely on
+    mareforma.open() having done so. Direct callers (tests, scripts)
+    can't bypass."""
+
+    def test_fetch_inclusion_proof_refuses_http(self) -> None:
+        with pytest.raises(_signing.RekorInclusionError) as exc_info:
+            _signing.fetch_inclusion_proof(
+                "deadbeef" * 8,
+                "http://rekor.test.example/api/v1/log/entries",
+            )
+        assert exc_info.value.reason == "malformed_proof"
+
+    def test_fetch_log_pubkey_refuses_loopback(self) -> None:
+        with pytest.raises(_signing.SigningError):
+            _signing.fetch_log_pubkey("https://127.0.0.1/api/v1/log/entries")
+
+    def test_fetch_inclusion_proof_refuses_loopback(self) -> None:
+        with pytest.raises(_signing.RekorInclusionError) as exc_info:
+            _signing.fetch_inclusion_proof(
+                "deadbeef" * 8,
+                "https://localhost/api/v1/log/entries",
+            )
+        assert exc_info.value.reason == "malformed_proof"
+
+
+class TestH1ExceptionContract:
+    """H1: verify_rekor_inclusion's base64-fallback path must re-raise
+    the documented RekorInclusionError, not the raw decode exception
+    it catches in the inner except."""
+
+    def test_unparseable_checkpoint_surfaces_typed_error(self) -> None:
+        """A checkpoint that fails both direct-parse AND base64-decode
+        re-raises RekorInclusionError, not ValueError/UnicodeDecodeError."""
+        key = Ed25519PrivateKey.generate()
+        leaves = [f"e{i}".encode() for i in range(4)]
+        root = _merkle_root(leaves)
+        path = _merkle_inclusion_path(leaves, 1)
+        # Checkpoint is structurally invalid AND not valid base64
+        # (contains characters outside the b64 alphabet).
+        bad_cp = "garbage that won't parse @@@@ ###"
+        resp = {
+            "body": base64.standard_b64encode(leaves[1]).decode("ascii"),
+            "integratedTime": 1700000000,
+            "logIndex": 1,
+            "logID": "deadbeef",
+            "verification": {
+                "inclusionProof": {
+                    "checkpoint": bad_cp,
+                    "hashes": [h.hex() for h in path],
+                    "logIndex": 1,
+                    "rootHash": root.hex(),
+                    "treeSize": 4,
+                },
+            },
+        }
+        # Must raise RekorInclusionError, never ValueError /
+        # binascii.Error / UnicodeDecodeError leaking from the fallback.
+        with pytest.raises(_signing.RekorInclusionError) as exc_info:
+            _signing.verify_rekor_inclusion(resp, _pubkey_pem(key))
+        # The reason should be checkpoint_malformed (from the inner
+        # parser), preserving the original failure type rather than
+        # masquerading as a decode error.
+        assert exc_info.value.reason == "checkpoint_malformed"

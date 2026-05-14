@@ -54,7 +54,7 @@ def _hash_and_sig(envelope: dict) -> tuple[str, str]:
 
 def _build_rekor_post_response(
     *, payload_hash: str, sig_b64: str,
-    uuid: str = "abc-uuid", log_index: int = 42,
+    uuid: str = "abc01deadbeef02", log_index: int = 42,
     integrated_time: int = 1700000000,
 ) -> dict:
     """The body shape Rekor returns from a POST /log/entries.
@@ -135,7 +135,7 @@ def _wire_rekor_mock(
     httpx_mock, *, log_key,
     sign_fn=_sign_checkpoint_ed25519,
     override_root: bytes | None = None,
-    uuid: str = "abc-uuid", log_index: int = 5,
+    uuid: str = "abc01deadbeef02", log_index: int = 5,
 ) -> None:
     """Register POST + GET callbacks. Each POST mirrors the submission
     in its response (so submit_to_rekor passes), and each GET on the
@@ -444,3 +444,142 @@ class TestOptInAndOptOut:
         assert not pin_path.exists()
         # No HTTP requests issued.
         assert httpx_mock.get_requests() == []
+
+
+# ---------------------------------------------------------------------------
+# Post-review hardening regressions (integration-level)
+# ---------------------------------------------------------------------------
+
+
+class TestM2DerComparison:
+    """M2: TOFU pin comparison uses canonical DER, so the same key with
+    different PEM line-wrap width / line endings still matches."""
+
+    def test_same_key_different_pem_formatting_accepted(self, tmp_path):
+        log_key = Ed25519PrivateKey.generate()
+        canonical_pem = _pubkey_pem(log_key)
+        # Reformat the PEM to 32-char line wrap (instead of cryptography's
+        # default 64). Same DER, different bytes.
+        from cryptography.hazmat.primitives import serialization
+        der = log_key.public_key().public_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        b64 = base64.standard_b64encode(der).decode("ascii")
+        reformatted = "-----BEGIN PUBLIC KEY-----\n"
+        for i in range(0, len(b64), 32):
+            reformatted += b64[i:i + 32] + "\n"
+        reformatted += "-----END PUBLIC KEY-----\n"
+        reformatted_pem = reformatted.encode("ascii")
+        assert reformatted_pem.strip() != canonical_pem.strip()  # bytes differ
+        key_path = _bootstrap_key(tmp_path)
+        # First open: pin the canonical PEM.
+        with mareforma.open(
+            tmp_path, key_path=key_path,
+            rekor_url=_TEST_REKOR_URL, trust_insecure_rekor=True,
+            rekor_log_pubkey_pem=canonical_pem,
+        ):
+            pass
+        # Second open: supply the differently-wrapped PEM. Must NOT
+        # raise — DER bytes match.
+        with mareforma.open(
+            tmp_path, key_path=key_path,
+            rekor_url=_TEST_REKOR_URL, trust_insecure_rekor=True,
+            rekor_log_pubkey_pem=reformatted_pem,
+        ):
+            pass
+
+    def test_different_key_refused_on_second_open(self, tmp_path):
+        """Genuine key rotation IS refused — the operator must delete
+        the pin file to rotate."""
+        key_a = Ed25519PrivateKey.generate()
+        key_b = Ed25519PrivateKey.generate()
+        key_path = _bootstrap_key(tmp_path)
+
+        with mareforma.open(
+            tmp_path, key_path=key_path,
+            rekor_url=_TEST_REKOR_URL, trust_insecure_rekor=True,
+            rekor_log_pubkey_pem=_pubkey_pem(key_a),
+        ):
+            pass
+        with pytest.raises(_signing.SigningError, match="different key"):
+            with mareforma.open(
+                tmp_path, key_path=key_path,
+                rekor_url=_TEST_REKOR_URL, trust_insecure_rekor=True,
+                rekor_log_pubkey_pem=_pubkey_pem(key_b),
+            ):
+                pass
+
+
+class TestM3AtomicPinWrite:
+    """M3: pin write is atomic (O_CREAT|O_EXCL). A pin file that
+    already exists is detected — caller is routed through the
+    mismatch-check branch even on the "first use" code path."""
+
+    def test_pre_existing_pin_file_triggers_mismatch_check(self, tmp_path):
+        """Simulate a race winner: a pin file already exists holding a
+        DIFFERENT key. Our open() with our key must surface as
+        SigningError rather than overwrite the winner's pin."""
+        race_winner_key = Ed25519PrivateKey.generate()
+        our_key = Ed25519PrivateKey.generate()
+        # Pre-write the race winner's pin to the canonical location.
+        pin_path = tmp_path / ".mareforma" / "rekor_log_pubkey.pem"
+        pin_path.parent.mkdir(parents=True, exist_ok=True)
+        pin_path.write_bytes(_pubkey_pem(race_winner_key))
+        key_path = _bootstrap_key(tmp_path)
+        # Our open() with our DIFFERENT key must NOT silently clobber.
+        with pytest.raises(_signing.SigningError, match="different key"):
+            with mareforma.open(
+                tmp_path, key_path=key_path,
+                rekor_url=_TEST_REKOR_URL, trust_insecure_rekor=True,
+                rekor_log_pubkey_pem=_pubkey_pem(our_key),
+            ):
+                pass
+        # Race winner's pin is untouched.
+        assert pin_path.read_bytes() == _pubkey_pem(race_winner_key)
+
+
+class TestH2SidecarBeforeMarkClaim:
+    """H2: refresh_unsigned's re-submit path writes the
+    rekor_inclusions sidecar BEFORE calling mark_claim_logged. Without
+    this, a mark_claim_logged failure (drift refusal, transient
+    IntegrityError, contention) would leave the entry in Rekor with no
+    local sidecar record; the next refresh_unsigned would re-submit
+    and create a duplicate Rekor entry. Writing the sidecar first
+    routes any retry through the saved-entry replay path."""
+
+    def test_resubmit_path_writes_sidecar(self, tmp_path, httpx_mock):
+        """Submit a claim while Rekor is down (claim persisted with
+        transparency_logged=0). Bring Rekor back and run
+        refresh_unsigned. Confirm the sidecar row gets written so a
+        subsequent retry uses the saved-entry replay path."""
+        log_key = Ed25519PrivateKey.generate()
+        key_path = _bootstrap_key(tmp_path)
+        # First open: Rekor 500s, so the claim is persisted unlogged.
+        httpx_mock.add_response(
+            method="POST", url=_TEST_REKOR_URL,
+            status_code=503, is_optional=True,
+        )
+        with mareforma.open(
+            tmp_path, key_path=key_path,
+            rekor_url=_TEST_REKOR_URL, trust_insecure_rekor=True,
+        ) as graph:
+            cid = graph.assert_claim("pending", classification="ANALYTICAL")
+            assert graph.get_claim(cid)["transparency_logged"] == 0
+
+        # Second open: Rekor is back. refresh_unsigned should
+        # re-submit AND write the sidecar.
+        _wire_rekor_mock(httpx_mock, log_key=log_key)
+        with mareforma.open(
+            tmp_path, key_path=key_path,
+            rekor_url=_TEST_REKOR_URL, trust_insecure_rekor=True,
+        ) as graph:
+            result = graph.refresh_unsigned()
+            assert result["logged"] == 1, result
+            from mareforma import db as _db
+            entry = _db.get_rekor_inclusion(graph._conn, cid)
+            assert entry is not None, (
+                "sidecar must be populated after re-submit so a retry "
+                "can route through the saved-entry replay path"
+            )
+            assert "uuid" in entry

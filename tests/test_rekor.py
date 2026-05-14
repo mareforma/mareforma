@@ -44,7 +44,7 @@ def _rekor_response_for(
     *,
     payload_hash: str,
     sig_b64: str,
-    uuid: str = "abc-uuid",
+    uuid: str = "abc01deadbeef02",
     log_index: int = 42,
     integrated_time: int = 1700000000,
 ) -> dict:
@@ -89,7 +89,7 @@ def _hash_and_sig(envelope: dict) -> tuple[str, str]:
 def _rekor_response_for_envelope(
     envelope: dict,
     *,
-    uuid: str = "abc-uuid",
+    uuid: str = "abc01deadbeef02",
     log_index: int = 42,
 ) -> dict:
     payload_hash, sig_b64 = _hash_and_sig(envelope)

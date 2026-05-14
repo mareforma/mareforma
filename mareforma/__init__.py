@@ -10,6 +10,32 @@ if TYPE_CHECKING:
     from mareforma._graph import EpistemicGraph
 
 
+def _pem_canonical_der(pem_bytes: bytes) -> bytes:
+    """Return the DER (SubjectPublicKeyInfo) bytes of a PEM public key.
+
+    Used to compare two PEMs for semantic equality independent of
+    line-wrap width, trailing newlines, or CRLF vs LF encoding —
+    properties that text-level comparison treats as inequality but
+    that don't change the key the bytes represent.
+
+    Raises :class:`mareforma.signing.SigningError` on parse failure so
+    a malformed pinned file or supplied PEM surfaces with a typed
+    error rather than a cryptography-level ValueError.
+    """
+    from cryptography.hazmat.primitives import serialization as _ser
+    from mareforma import signing as _signing
+    try:
+        key = _ser.load_pem_public_key(pem_bytes)
+    except (ValueError, TypeError) as exc:
+        raise _signing.SigningError(
+            f"Rekor log pubkey PEM is not a valid public key: {exc}"
+        ) from exc
+    return key.public_bytes(
+        encoding=_ser.Encoding.DER,
+        format=_ser.PublicFormat.SubjectPublicKeyInfo,
+    )
+
+
 def open(  # noqa: A001
     path: "str | Path | None" = None,
     *,
@@ -147,19 +173,50 @@ def open(  # noqa: A001
         # Continue with the pinned key from a prior session.
         rekor_log_pubkey_pem = _pinned_path.read_bytes()
     elif rekor_log_pubkey_pem is not None and _pinned_path.exists():
-        # TOFU pin enforcement: refuse silent log-key rotation. Any
-        # rotation must be done explicitly (delete the pin file).
+        # TOFU pin enforcement: refuse silent log-key rotation. Compare
+        # the pinned PEM and the supplied PEM by their CANONICAL DER
+        # bytes — line-wrap width (64 vs 76 columns) and trailing
+        # CR/LF differences make two semantically-identical PEMs
+        # byte-unequal, so a literal-bytes ``.strip()`` check would
+        # produce spurious mismatch errors and lock the operator out.
         existing = _pinned_path.read_bytes()
-        if existing.strip() != rekor_log_pubkey_pem.strip():
+        if _pem_canonical_der(existing) != _pem_canonical_der(rekor_log_pubkey_pem):
             raise _signing.SigningError(
                 f"Rekor log pubkey at {_pinned_path} pins a different key "
                 "than the one supplied. Silent key rotation is refused. "
                 "To intentionally rotate, delete the pin file first."
             )
     elif rekor_log_pubkey_pem is not None:
-        # First use: persist the pin.
+        # First use: persist the pin ATOMICALLY. Two concurrent
+        # ``mareforma.open()`` calls with different keys could
+        # otherwise both see ``_pinned_path.exists() == False`` and
+        # race to write — the loser would silently overwrite the
+        # winner's pin. ``O_CREAT|O_EXCL`` makes the creation
+        # mutually-exclusive: the loser gets ``FileExistsError`` and
+        # is routed through the mismatch-check branch instead of
+        # silently clobbering. Mirrors the bootstrap_key pattern.
         _pinned_path.parent.mkdir(parents=True, exist_ok=True)
-        _pinned_path.write_bytes(rekor_log_pubkey_pem)
+        try:
+            import os as _os
+            fd = _os.open(
+                _pinned_path,
+                _os.O_CREAT | _os.O_EXCL | _os.O_WRONLY,
+                0o644,
+            )
+            try:
+                _os.write(fd, rekor_log_pubkey_pem)
+            finally:
+                _os.close(fd)
+        except FileExistsError:
+            # Lost the race. Re-check the just-written file.
+            existing = _pinned_path.read_bytes()
+            if _pem_canonical_der(existing) != _pem_canonical_der(rekor_log_pubkey_pem):
+                raise _signing.SigningError(
+                    f"Rekor log pubkey at {_pinned_path} was pinned to a "
+                    "different key by a concurrent mareforma.open() call. "
+                    "Silent key rotation is refused. Pick one key for the "
+                    "project; delete the pin file to rotate."
+                )
     # NOTE: TOFU auto-fetch is intentionally off by default. Callers
     # who want Merkle inclusion-proof verification must pass
     # ``rekor_log_pubkey_pem`` or ``rekor_log_pubkey_path`` explicitly
