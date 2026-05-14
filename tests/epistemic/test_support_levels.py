@@ -190,6 +190,76 @@ class TestReplicatedGenuine:
             assert graph.get_claim(id_a)["support_level"] == "REPLICATED"
             assert graph.get_claim(id_b)["support_level"] == "REPLICATED"
 
+    def test_replicated_requires_shared_anchor_to_be_established(
+        self, tmp_path: Path
+    ) -> None:
+        """The shared upstream between two converging claims must itself be
+        ESTABLISHED+open. Sharing a PRELIMINARY throwaway plus citing
+        unrelated ESTABLISHED anchors on each side is NOT convergence on
+        the same upstream evidence — the spec demands a single anchor
+        common to both paths.
+
+        Earlier implementations gated on three separate conditions
+        (peer-shares-something + new-has-some-established +
+        peer-has-some-established) which incorrectly admitted this
+        configuration. The fix collapses the gate into a single
+        EXISTS check on the shared element's level.
+        """
+        with open_graph(tmp_path) as graph:
+            # Two UNRELATED ESTABLISHED anchors.
+            e1 = graph.assert_claim("anchor 1: drug X", generated_by="seed", seed=True)
+            e2 = graph.assert_claim("anchor 2: gene Y", generated_by="seed", seed=True)
+            # A PRELIMINARY throwaway both labs cite.
+            p = graph.assert_claim(
+                "preliminary throwaway", generated_by="seed/throwaway",
+            )
+            assert graph.get_claim(p)["support_level"] == "PRELIMINARY"
+
+            # Lab A cites E1 + the throwaway; Lab B cites E2 + the throwaway.
+            # They share only the throwaway, not an ESTABLISHED anchor.
+            id_a = graph.assert_claim(
+                "A finding", supports=[e1, p],
+                generated_by="agent/model-a/lab_a",
+            )
+            id_b = graph.assert_claim(
+                "B finding", supports=[e2, p],
+                generated_by="agent/model-b/lab_b",
+            )
+
+            assert graph.get_claim(id_a)["support_level"] == "PRELIMINARY", (
+                "Lab A promoted on a PRELIMINARY-only shared element — "
+                "this is exactly the spec-implementation gap the fix closes."
+            )
+            assert graph.get_claim(id_b)["support_level"] == "PRELIMINARY", (
+                "Lab B promoted on a PRELIMINARY-only shared element — "
+                "same gap as above."
+            )
+
+    def test_replicated_fires_when_two_anchors_one_shared(
+        self, tmp_path: Path
+    ) -> None:
+        """Citing multiple ESTABLISHED anchors is fine as long as at least
+        one of them is shared between the two converging claims.
+        Regression guard against over-tightening: the SQL fix must not
+        reject legitimate convergence that happens to cite extra anchors."""
+        with open_graph(tmp_path) as graph:
+            shared = graph.assert_claim(
+                "shared anchor", generated_by="seed", seed=True,
+            )
+            other = graph.assert_claim(
+                "lab-A's extra anchor", generated_by="seed", seed=True,
+            )
+            id_a = graph.assert_claim(
+                "A finding", supports=[shared, other],
+                generated_by="agent/model-a/lab_a",
+            )
+            id_b = graph.assert_claim(
+                "B finding", supports=[shared],
+                generated_by="agent/model-b/lab_b",
+            )
+            assert graph.get_claim(id_a)["support_level"] == "REPLICATED"
+            assert graph.get_claim(id_b)["support_level"] == "REPLICATED"
+
 
 # ---------------------------------------------------------------------------
 # REPLICATED — spurious convergence (detectable via classification)

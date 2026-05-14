@@ -5,10 +5,19 @@ All notable changes to this project will be documented in this file.
 ## [0.3.0] - 2026-05-13
 
 Breaking change from v0.2.x. Schema does not migrate from older
-versions; delete `.mareforma/graph.db` to start fresh. `claims.toml`
-at the project root is a human-readable record of the prior state —
-the prev_hash chain and per-claim signatures cannot be reconstructed
-from it, so it is a reference not a backup.
+versions; delete `.mareforma/graph.db` to start fresh.
+
+`claims.toml` at the project root is the canonical source for
+`mareforma.restore()` — it rebuilds `graph.db` and re-verifies every
+per-claim signature against the enrolled signer's pubkey. The
+`prev_hash` chain is **regenerated** during restore (not preserved):
+claims are replayed in `created_at` order, and the chain is rebuilt
+from canonical-statement bytes. Signatures survive because they bind
+the canonical statement, not the chain position. The most recent row
+may lag SQLite commit on a process crash because `_backup_claims_toml`
+runs after `COMMIT`, outside the SQLite transaction; the v0.4
+performance rewrite (primario item 202) moves this off the foreground
+commit path and addresses the crash gap.
 
 What ships in v0.3.0:
 

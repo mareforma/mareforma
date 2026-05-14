@@ -1508,33 +1508,42 @@ def _maybe_update_replicated_unlocked(
     if new_status_row is None or new_status_row["status"] != "open":
         return
 
-    # P1.7: the NEW claim's supports[] must include at least one
-    # ESTABLISHED claim. The SQL clause below applies the same rule
-    # to candidate peers (their supports[] is checked there). If the
-    # new claim doesn't satisfy the rule, no promotion fires — saves
-    # an unnecessary SQL roundtrip and makes the semantics explicit.
+    # Shared-anchor rule: the converged-on-same-upstream contract requires
+    # that there exists a SINGLE upstream X such that
+    #   X ∈ new_claim.supports  ∧  X ∈ peer.supports  ∧  X is ESTABLISHED+open.
+    # Pre-filter the new claim's supports[] to those that are ESTABLISHED
+    # and open; then the shared-element match below (`j.value IN
+    # ({placeholders})`) automatically guarantees the shared element is
+    # itself the anchor. A prior implementation gated on three separate
+    # conditions (peer-shares-something + new-has-some-established +
+    # peer-has-some-established) which let two unrelated established
+    # anchors plus a shared preliminary throwaway promote — strictly
+    # weaker than the spec.
+    #
+    # The status='open' filter on the anchor closes a hand-edited
+    # claims.toml planting a born-retracted ESTABLISHED seed (the seed
+    # envelope binds claim_id + validator_keyid + seeded_at, NOT status)
+    # then having downstream peers ride it into REPLICATED.
     sup_placeholders = ",".join("?" * len(supports))
-    # An ESTABLISHED upstream that is retracted or contested is
-    # editorially tainted and must not anchor REPLICATED. Without the
-    # status='open' filter, a hand-edited claims.toml could plant a
-    # born-retracted ESTABLISHED seed (the seed envelope binds claim_id
-    # + validator_keyid + seeded_at, NOT status), then have downstream
-    # peers ride it into REPLICATED. The substrate gate closes that
-    # injection vector at the canonical layer.
-    has_established_upstream = conn.execute(
-        f"SELECT 1 FROM claims WHERE claim_id IN ({sup_placeholders}) "
-        f"AND support_level = 'ESTABLISHED' AND status = 'open' LIMIT 1",
-        supports,
-    ).fetchone()
-    if has_established_upstream is None:
+    established_anchors = [
+        r["claim_id"] for r in conn.execute(
+            f"SELECT claim_id FROM claims "
+            f"WHERE claim_id IN ({sup_placeholders}) "
+            f"AND support_level = 'ESTABLISHED' "
+            f"AND status = 'open'",
+            supports,
+        ).fetchall()
+    ]
+    if not established_anchors:
         return
 
-    placeholders = ",".join("?" * len(supports))
-    # status='open' filter: a contested or retracted peer is editorially
-    # tainted and must not participate in REPLICATED convergence. Without
-    # this, an adversary could plant a born-retracted claim and ride an
-    # honest peer's INSERT into REPLICATED (and from there, via validate(),
-    # into ESTABLISHED — usable as a fake upstream for further chains).
+    placeholders = ",".join("?" * len(established_anchors))
+    # status='open' filter on the peer: a contested or retracted peer
+    # is editorially tainted and must not participate in REPLICATED
+    # convergence. Without this, an adversary could plant a born-retracted
+    # claim and ride an honest peer's INSERT into REPLICATED (and from
+    # there, via validate(), into ESTABLISHED — usable as a fake upstream
+    # for further chains).
     rows = conn.execute(
         f"""
         SELECT DISTINCT c.claim_id, c.generated_by
@@ -1551,15 +1560,9 @@ def _maybe_update_replicated_unlocked(
               OR ? IS NULL
               OR c.artifact_hash = ?
           )
-          AND EXISTS (
-              SELECT 1
-              FROM claims sup, json_each(c.supports_json) j2
-              WHERE sup.claim_id = j2.value
-                AND sup.support_level = 'ESTABLISHED'
-                AND sup.status = 'open'
-          )
         """,
-        (*supports, new_claim_id, generated_by, artifact_hash, artifact_hash),
+        (*established_anchors, new_claim_id, generated_by,
+         artifact_hash, artifact_hash),
     ).fetchall()
 
     if not rows:

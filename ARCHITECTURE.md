@@ -85,10 +85,13 @@ db.add_claim (mareforma/db.py)
   │ ─ COMMIT
   │ ─ optionally submit to Rekor (if rekor_url= was passed)
   │ ─ _maybe_update_replicated() — detect convergence
-  │ ─ _backup_claims_toml() — write the canonical TOML
+  │ ─ _backup_claims_toml() — write the TOML mirror (post-commit;
+  │                            see "What survives restore" for the
+  │                            crash-window gap)
   ▼
 graph.db (SQLite, WAL, ACID)
-claims.toml (TOML, deterministic, signed-fields-byte-identical)
+claims.toml (TOML, deterministic, signed-fields-byte-identical;
+             canonical for restore, derived for chain integrity)
 ```
 
 The same path runs whether you call `g.assert_claim(...)` from Python
@@ -193,8 +196,11 @@ Python interpreter cannot relax these rules.
 
 ## What survives restore
 
-`claims.toml` is the canonical backup. `mareforma.restore(project_root)`
-rebuilds `graph.db` from it. The restore path:
+`claims.toml` is the canonical source for `mareforma.restore(project_root)` —
+canonical for rebuilding `graph.db` and re-verifying signatures,
+**derived** for the `prev_hash` chain (regenerated, not preserved).
+
+The restore path:
 
 1. Re-verifies every validator's enrollment envelope against its
    parent's pubkey (chain walk back to a self-signed root).
@@ -202,7 +208,8 @@ rebuilds `graph.db` from it. The restore path:
    enrolled pubkey.
 3. Re-derives `statement_cid` from the claim's canonical statement and
    cross-checks against the stored value.
-4. Re-derives `prev_hash` chain in claim order.
+4. Re-derives `prev_hash` chain in claim order. Note: this is regeneration,
+   not preservation — see below.
 5. Replays all verdicts in chronological order so the
    `contradiction_invalidates_older` trigger sets earliest-first.
 
@@ -210,13 +217,24 @@ Failure of ANY check rolls the entire restore back. Restore is
 `fresh-only` and `fail-all-or-nothing` by design; partial-restore mode
 is primario item 209.
 
-What restore does **not** anchor: chain order. A tampered TOML that
+### Two known gaps in what TOML guarantees
+
+**Chain order is not externally anchored.** A tampered TOML that
 reorders claims (swap two `created_at` values) restores to a different
-but internally-consistent chain. The signatures bind canonical
-statement bytes, not chain position. For tamper-evidence across
-restore boundaries, the per-claim Rekor entry is the external anchor
-— though Merkle inclusion proof verification is itself primario item
-200.
+but internally-consistent chain. The signatures bind canonical statement
+bytes, not chain position. For tamper-evidence across restore boundaries,
+the per-claim Rekor entry is the external anchor — though Merkle
+inclusion proof verification is itself primario item 200.
+
+**The TOML write lags the SQLite commit.** `_backup_claims_toml` runs
+**after** the INSERT/UPDATE transaction commits. A process crash between
+`COMMIT` and the TOML write leaves a row in `graph.db` that's missing
+from `claims.toml`. The next mutation rewrites the TOML from current DB
+state, so the crash window closes on the next successful write. For a
+clean recovery snapshot, finish any in-flight writes before snapshotting
+the TOML. Primario item 202 (perf rewrite) addresses both the foreground-
+commit-path cost and the crash gap by moving to an append-only sidecar
++ periodic compaction model.
 
 ## Honest scope
 

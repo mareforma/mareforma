@@ -175,6 +175,14 @@ Honest scope, so the design choices land in the right frame:
 - **No semantic deduplication.** Two claims with different `text` but
   identical meaning are distinct rows. Convergence detection runs on
   `supports[]` topology, not on text similarity.
+- **Dangling references in `supports[]` are accepted.** The substrate
+  does not refuse UUID-shaped strings that don't point to any existing
+  claim — a `supports` entry could legitimately reference a claim from
+  another project, a not-yet-asserted upstream, or a DOI. REPLICATED
+  detection requires the referenced ESTABLISHED claim to actually
+  exist + be open, so a dangling reference cannot trigger spurious
+  promotion. But operators auditing a graph for integrity should run
+  a separate query for dangling entries; a v0.4 helper is planned.
 - **Contradiction is per-claim, not propagated downstream.** A signed
   contradiction marks the older of two referenced claims; claims that
   cited the now-invalidated one via `supports[]` are unaffected.
