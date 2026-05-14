@@ -132,9 +132,17 @@ show("consensus_a support_level", c_a["support_level"] if c_a else "—")
 # Close and re-open under the reviewer key so the validator's signing identity
 # differs from the agent that signed consensus_a. The substrate refuses
 # self-validation: a validator cannot promote a claim signed by its own key.
+# evidence_seen names the upstream claim_ids the reviewer consulted before
+# promoting — the substrate verifies each cited claim exists and predates
+# validation, and binds the list into the signed validation envelope so the
+# review-trail is independently verifiable.
 graph.close()
 with mareforma.open(tmp, key_path=reviewer_key_path) as reviewer_graph:
-    reviewer_graph.validate(consensus_a, validated_by="reviewer@lab.org")
+    reviewer_graph.validate(
+        consensus_a,
+        validated_by="reviewer@lab.org",
+        evidence_seen=[upstream_ref],
+    )
 graph = mareforma.open(tmp, key_path=agent_key_path)
 # Re-bind agent tools to the reopened graph.
 query_graph, assert_finding_a = [tool(fn) for fn in graph.get_tools(

@@ -211,10 +211,18 @@ except ValueError as exc:
 
 # Close and re-open under the reviewer key so the validator differs from the
 # signer of rep_a. The substrate refuses self-validation: a validator cannot
-# promote a claim signed by its own key.
+# promote a claim signed by its own key. Pass evidence_seen=[...] to
+# name the upstream claims the reviewer actually consulted before
+# pressing the validate button — the substrate verifies each cited
+# claim exists and predates validation, and binds the list into the
+# signed validation envelope.
 graph.close()
 with mareforma.open(tmp, key_path=reviewer_key_path) as reviewer_graph:
-    reviewer_graph.validate(rep_a, validated_by="jane@lab.org")
+    reviewer_graph.validate(
+        rep_a,
+        validated_by="jane@lab.org",
+        evidence_seen=[upstream],  # the ESTABLISHED anchor the reviewer read
+    )
 graph = mareforma.open(tmp, key_path=agent_key_path)
 established = graph.get_claim(rep_a)
 if established:
@@ -224,9 +232,37 @@ if established:
 
 
 # ---------------------------------------------------------------------------
-# 7. Anti-patterns
+# 7. Operational surfaces — inspect the graph and audit its integrity
 # ---------------------------------------------------------------------------
-sep("7. Anti-patterns")
+sep("7. Operational surfaces")
+
+# graph.health() — single-call audit summary. Operators inspect this
+# instead of writing N separate queries. Non-zero values flag work to
+# do; the substrate doesn't decide if anything is wrong, it just
+# reports the counters.
+h = graph.health()
+show("claim_count", h["claim_count"])
+show("validator_count", h["validator_count"])
+show("unsigned_claims", h["unsigned_claims"])
+show("unresolved_claims", h["unresolved_claims"])
+show("dangling_supports", h["dangling_supports"])
+show("convergence_errors", h["convergence_errors"])
+show("convergence_retry_pending", h["convergence_retry_pending"])
+
+# graph.classify_supports() — see how the substrate routes each entry
+# in a supports[] / contradicts[] list. Three buckets: claim (strict
+# v4 UUID — a graph-node candidate), doi (Crossref/DataCite syntax —
+# external citation, resolved at assert time), external (anything
+# else — stored verbatim, not walked).
+mixed = [upstream, "10.1038/cure", "https://example.org/preprint"]
+for entry in graph.classify_supports(mixed):
+    show(f"  {entry['value'][:32]:<32}", entry["type"])
+
+
+# ---------------------------------------------------------------------------
+# 8. Anti-patterns — the failure modes the substrate cannot catch for you
+# ---------------------------------------------------------------------------
+sep("8. Anti-patterns")
 
 # ✗  ANALYTICAL on a failed data pipeline
 #    If the pipeline returned null, the finding came from LLM prior knowledge.

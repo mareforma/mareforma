@@ -182,7 +182,7 @@ Returns `{"validators_restored": N, "claims_restored": M}`.
 
 ---
 
-### `graph.validate(claim_id, *, validated_by=None) → None`
+### `graph.validate(claim_id, *, validated_by=None, evidence_seen=None) → None`
 
 Promote a `REPLICATED` claim to `ESTABLISHED`. Identity-gated.
 
@@ -191,17 +191,48 @@ The graph must have a loaded signer (from `mareforma bootstrap` or
 project's `validators` table. The first key opened against a fresh
 graph auto-enrolls as the root validator. The validation event itself
 is signed: a DSSE-style envelope binding `(claim_id, validator_keyid,
-validated_at)` is persisted to the row's `validation_signature`
-column, so the promotion is independently verifiable.
+validated_at, evidence_seen)` is persisted to the row's
+`validation_signature` column, so the promotion is independently
+verifiable.
 
 `validated_by` is a cosmetic display label. The authenticated identity
 is the keyid embedded in the signed envelope; consumers that care about
 who validated must check `validation_signature` against the validators
 table, not the `validated_by` string.
 
+`evidence_seen` is an optional list of claim_ids the validator declares
+to have reviewed before signing. `None` is normalized to `[]` and bound
+into the signed envelope as a positive "I reviewed nothing" admission
+— so an absent field cannot hide the no-review case. Each cited entry
+must be a strict-v4 UUID matching an existing claim with
+`created_at <= validated_at`; otherwise `EvidenceCitationError` is
+raised before any state change. The validator's enumeration is
+self-declared (the substrate cannot prove what was actually read), but
+the envelope shifts "a human pressed a button" to "a human pressed a
+button AND named the evidence they consulted."
+
 **Raises:** `ClaimNotFoundError` if the claim does not exist.
 **Raises:** `ValueError` if `support_level` is not `REPLICATED`, no
 signer is loaded, or the loaded signer is not an enrolled validator.
+**Raises:** `EvidenceCitationError` if any `evidence_seen` entry is
+not a strict-v4 UUID, does not point to an existing claim, or
+post-dates `validated_at`.
+
+---
+
+### `graph.health() → dict`
+
+Single-call audit summary. Returns
+`{"claim_count", "validator_count", "unsigned_claims",
+"unresolved_claims", "dangling_supports", "convergence_errors",
+"convergence_retry_pending"}` — int counts aggregating existing
+substrate surfaces. Pure observability, no side effects.
+
+A "healthy" graph has zeros across the four drift counters
+(`unsigned_claims`, `unresolved_claims`, `dangling_supports`,
+`convergence_errors`, `convergence_retry_pending`). Non-zero values
+do not by themselves indicate a defect — they indicate something
+the operator should look at.
 
 ---
 
@@ -218,6 +249,34 @@ DOIs.
 
 ---
 
+### `graph.refresh_all_dois() → dict`
+
+Force-re-resolve every DOI referenced anywhere in the graph,
+bypassing the 30-day positive cache. Returns
+`{"checked", "still_resolved", "now_unresolved", "newly_failed"}`.
+
+Use when you suspect a referenced DOI has been retracted or its
+registry state has changed since assertion. `newly_failed` counts
+DOIs whose cache state flipped from resolved to unresolved — the
+drift signal operators usually want. Does NOT mutate
+`support_level` or per-claim `unresolved` flags.
+
+---
+
+### `graph.refresh_convergence() → dict`
+
+Retry convergence detection (PRELIMINARY → REPLICATED) for every
+claim flagged `convergence_retry_needed=1`. Returns
+`{"checked", "promoted", "still_pending"}`.
+
+The detection path runs after every successful claim INSERT. When a
+SQLite trigger or contention pattern causes that check to raise, the
+substrate swallows the error so writes never crash, logs a WARNING,
+and flags the claim for retry. Without this method, a swallowed
+error would leave the claim stuck at PRELIMINARY forever.
+
+---
+
 ### `graph.refresh_unsigned() → dict`
 
 Retry transparency-log submission for every signed-but-unlogged claim
@@ -225,11 +284,48 @@ when the graph was opened with `rekor_url=...`. Returns
 `{"checked": N, "logged": M, "still_unlogged": K}`. No-op when `rekor_url`
 is unset.
 
-Each retry compares the envelope's signed payload against the live row
-before re-submitting — a tampered row is quarantined rather than
-cementing a stale signature in the public log. An envelope whose keyid
-no longer matches the current signer (key was rotated since
-`assert_claim`) is skipped with a warning.
+Two recovery paths:
+
+  * **Sidecar replay** — when the original Rekor submission succeeded
+    but the claims-row UPDATE failed (recorded in `rekor_inclusions`),
+    the stored coords are re-attached to the row in a single local
+    UPDATE. No network call, no duplicate Rekor entry.
+  * **Re-submit** — when no sidecar row exists, the envelope is
+    submitted to Rekor again. Idempotent at the registry, but creates
+    a fresh log entry — used only when the original submission has no
+    persisted record.
+
+Each retry first compares the envelope's signed payload against the
+live row — a tampered row is quarantined rather than cementing a stale
+signature in the public log, regardless of which recovery path
+applied. An envelope whose keyid no longer matches the current signer
+(key was rotated since `assert_claim`) is skipped with a warning.
+
+---
+
+### `graph.find_dangling_supports() → list[dict]`
+
+Return UUID-shaped `supports[]` entries pointing to claims that do not
+exist in this graph. DOIs and other free-form strings are external
+references and are NOT flagged. Returns
+`[{"claim_id", "dangling_ref"}, ...]` sorted deterministically.
+
+REPLICATED detection already refuses to promote on a dangling
+reference — this helper is for auditing integrity, not for blocking
+writes.
+
+---
+
+### `graph.classify_supports(values) → list[dict]`
+
+Classify each entry as `claim` | `doi` | `external`. Returns
+`[{"value", "type"}, ...]` in input order. Pure-function (no network,
+no DB read) — same input always yields the same tags.
+
+The substrate uses this same classification for cycle detection,
+REPLICATED anchoring, dangling-reference audit, and JSON-LD export.
+Exposed publicly so callers can introspect what the substrate sees
+for any candidate list before insertion.
 
 ---
 

@@ -402,17 +402,23 @@ if claim:
 
 ---
 
-### `validate(claim_id, *, validated_by=None)`
+### `validate(claim_id, *, validated_by=None, evidence_seen=None)`
 
 Promote a `REPLICATED` claim to `ESTABLISHED`. Identity-gated.
 
 ```python
-graph.validate(claim_id, validated_by="reviewer@example.org")
+graph.validate(
+    claim_id,
+    validated_by="reviewer@example.org",
+    evidence_seen=[upstream_claim_id],  # claims the reviewer actually read
+)
 ```
 
-The graph must have a loaded signer (from `mareforma bootstrap` or `mareforma.open(key_path=...)`) AND that key must be enrolled in the project's `validators` table. The first key opened against a fresh graph auto-enrolls as the root validator. The validation event itself is signed: a DSSE-style envelope binding `(claim_id, validator_keyid, validated_at)` is persisted to the row's `validation_signature` column, so the promotion is independently verifiable.
+The graph must have a loaded signer (from `mareforma bootstrap` or `mareforma.open(key_path=...)`) AND that key must be enrolled in the project's `validators` table. The first key opened against a fresh graph auto-enrolls as the root validator. The validation event itself is signed: a DSSE-style envelope binding `(claim_id, validator_keyid, validated_at, evidence_seen)` is persisted to the row's `validation_signature` column, so the promotion is independently verifiable.
 
 `validated_by` is a cosmetic display label. The authenticated identity is the keyid embedded in the signed envelope.
+
+`evidence_seen` is an optional list of claim_ids the validator declares to have reviewed before signing. `None` is normalized to `[]` and bound into the signed envelope as a positive "I reviewed nothing" admission. Each cited entry must be a strict-v4 UUID matching an existing claim with `created_at <= validated_at`. The validator's enumeration is self-declared — the substrate cannot prove what was actually read — but the envelope shifts "a human pressed a button" to "a human pressed a button AND named the evidence they consulted."
 
 **Parameters**
 
@@ -420,10 +426,35 @@ The graph must have a loaded signer (from `mareforma bootstrap` or `mareforma.op
 |---|---|---|---|
 | `claim_id` | `str` | required | UUID of the claim to validate. |
 | `validated_by` | `str \| None` | `None` | Display label of the human reviewer. The authoritative identity is the keyid in the signed envelope. |
+| `evidence_seen` | `list[str] \| None` | `None` | Claim_ids the reviewer consulted. Normalized to `[]` and always bound into the signed envelope. |
 
 **Raises**
 - `ClaimNotFoundError` — if the claim does not exist
 - `ValueError` — if `support_level` is not `REPLICATED`, no signer is loaded, or the loaded signer is not an enrolled validator
+- `EvidenceCitationError` — if any `evidence_seen` entry is not a strict-v4 UUID, does not point to an existing claim, or post-dates `validated_at`
+
+---
+
+### `health()`
+
+Single-call audit summary aggregating substrate counters. Pure observability over existing surfaces; no side effects.
+
+```python
+h = graph.health()
+# {
+#   "claim_count": int,
+#   "validator_count": int,
+#   "unsigned_claims": int,
+#   "unresolved_claims": int,
+#   "dangling_supports": int,
+#   "convergence_errors": int,
+#   "convergence_retry_pending": int,
+# }
+```
+
+A "healthy" graph has zeros across the four drift counters. Non-zero values don't by themselves indicate a defect — they indicate something the operator should look at.
+
+**Returns** `dict[str, int]` with the seven keys above.
 
 ---
 
@@ -442,6 +473,36 @@ DOIs in `supports[]`/`contradicts[]` are HEAD-checked against Crossref and DataC
 
 ---
 
+### `refresh_all_dois()`
+
+Force-re-resolve every DOI referenced anywhere in the graph, bypassing the 30-day positive cache. Use when you suspect a referenced DOI has been retracted or its registry state has changed since assertion.
+
+```python
+result = graph.refresh_all_dois()
+# {"checked": N, "still_resolved": M, "now_unresolved": K, "newly_failed": F}
+```
+
+`newly_failed` counts DOIs whose cache state flipped from resolved to unresolved (the drift signal operators usually want). Does NOT mutate `support_level` or per-claim `unresolved` flags — re-running a HEAD check is not strong enough evidence to demote across the trust ladder.
+
+**Returns** `dict` with keys `checked`, `still_resolved`, `now_unresolved`, `newly_failed`.
+
+---
+
+### `refresh_convergence()`
+
+Retry convergence detection (PRELIMINARY → REPLICATED) for every claim flagged `convergence_retry_needed=1`. Without this method, a swallowed SQLite error during detection would leave the claim stuck at PRELIMINARY forever.
+
+```python
+result = graph.refresh_convergence()
+# {"checked": N, "promoted": M, "still_pending": K}
+```
+
+The detection path runs after every successful claim INSERT. When a SQLite trigger or contention pattern causes that check to raise, the substrate swallows the error so writes never crash, logs a WARNING, and flags the claim for retry.
+
+**Returns** `dict` with keys `checked`, `promoted`, `still_pending`.
+
+---
+
 ### `refresh_unsigned()`
 
 Retry transparency-log submission for every signed-but-unlogged claim when the graph was opened with `rekor_url=...`.
@@ -453,9 +514,52 @@ result = graph.refresh_unsigned()
 
 No-op when `rekor_url` is unset.
 
-Each retry compares the envelope's signed payload against the live row before re-submitting — a tampered row is quarantined rather than cementing a stale signature in the public log. An envelope whose keyid no longer matches the current signer (key was rotated since `assert_claim`) is skipped with a warning.
+Two recovery paths:
+
+- **Sidecar replay** — when the original Rekor submission succeeded but the claims-row UPDATE failed (recorded in `rekor_inclusions`), the stored coords are re-attached to the row in a single local UPDATE. No network call, no duplicate Rekor entry.
+- **Re-submit** — when no sidecar row exists, the envelope is submitted to Rekor again. Used only when the original submission has no persisted record.
+
+Each retry first compares the envelope's signed payload against the live row — a tampered row is quarantined rather than cementing a stale signature in the public log, regardless of which recovery path applied. An envelope whose keyid no longer matches the current signer (key was rotated since `assert_claim`) is skipped with a warning.
 
 **Returns** `dict` with keys `checked`, `logged`, `still_unlogged`.
+
+---
+
+### `find_dangling_supports()`
+
+Return UUID-shaped `supports[]` entries pointing to claims that do not exist in this graph. DOIs and other free-form strings are external references and are NOT flagged.
+
+```python
+dangling = graph.find_dangling_supports()
+# [{"claim_id": "...", "dangling_ref": "..."}, ...]
+```
+
+REPLICATED detection already refuses to promote on a dangling reference — this helper is for auditing integrity, not for blocking writes.
+
+**Returns** `list[dict]` of `{"claim_id", "dangling_ref"}` dicts sorted deterministically. Empty list when the graph is clean.
+
+---
+
+### `classify_supports(values)`
+
+Classify each entry in a `supports[]` / `contradicts[]` list as `claim` | `doi` | `external`. Pure-function (no network, no DB read).
+
+```python
+result = graph.classify_supports([
+    "11111111-1111-4111-8111-111111111111",
+    "10.1234/example",
+    "https://lab.example.org/preprint",
+])
+# [
+#   {"value": "11111111-...", "type": "claim"},
+#   {"value": "10.1234/example", "type": "doi"},
+#   {"value": "https://...", "type": "external"},
+# ]
+```
+
+The substrate uses this same classification for cycle detection, REPLICATED anchoring, dangling-reference audit, and JSON-LD export. Exposed publicly so callers can introspect what the substrate sees for any candidate list before insertion.
+
+**Returns** `list[dict]` of `{"value", "type"}` dicts in input order.
 
 ---
 
@@ -550,6 +654,7 @@ from mareforma.db import (
     DatabaseError, ClaimNotFoundError, SignedClaimImmutableError,
     IdempotencyConflictError, IllegalStateTransitionError,
     ChainIntegrityError, CycleDetectedError, VerdictIssuerError,
+    EvidenceCitationError,
 )
 from mareforma.signing import KeyNotFoundError, SigningError, InvalidEnvelopeError
 from mareforma.validators import InvalidIdentityError, ValidatorAlreadyEnrolledError
@@ -566,6 +671,7 @@ from mareforma.export_bundle import BundleVerificationError
 | `ChainIntegrityError` | `mareforma.db` | DB write | `prev_hash` append-only chain check failed |
 | `CycleDetectedError` | `mareforma.db` | `assert_claim()`, `update_claim()` | `supports[]` would form a cycle |
 | `VerdictIssuerError` | `mareforma.db` | `record_replication_verdict()`, `record_contradiction_verdict()` | No signer loaded, signer not enrolled (chain walk fails), invalid method enum, referenced claim missing, or self-contradiction (`member == other`) |
+| `EvidenceCitationError` | `mareforma.db` | `validate()` with `evidence_seen=...` | A cited entry isn't a strict-v4 UUID, points to a non-existent claim, or post-dates `validated_at` |
 | `KeyNotFoundError` | `mareforma.signing` | `open(require_signed=True)` | No private key at `key_path` |
 | `SigningError` | `mareforma.signing` | Rekor submission | Rekor URL unset / unreachable / invalid |
 | `InvalidEnvelopeError` | `mareforma.signing` | `verify_envelope`, `claim_predicate_from_envelope` | Envelope payload is malformed, wrong `payloadType`, or subject and predicate disagree on `claim_id` / text digest |

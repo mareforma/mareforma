@@ -155,7 +155,7 @@ body)`) with these payload types:
 |---|---|
 | `application/vnd.in-toto+json` (Statement v1) | Per-claim assertion (text + classification + supports + contradicts + source + artifact_hash + evidence + created_at) |
 | `application/vnd.mareforma.validator-enrollment+json` | Per-validator enrollment (keyid + pubkey + identity + validator_type + parent) |
-| `application/vnd.mareforma.validation+json` | Per-validation event (claim_id + validator_keyid + validated_at) |
+| `application/vnd.mareforma.validation+json` | Per-validation event (claim_id + validator_keyid + validated_at + evidence_seen) |
 | `application/vnd.mareforma.seed-claim+json` | Per-seed bootstrap (claim_id + validator_keyid + seeded_at) |
 | `application/vnd.mareforma.replication-verdict+json` | Per-replication verdict from an issuer |
 | `application/vnd.mareforma.contradiction-verdict+json` | Per-contradiction verdict from an issuer |
@@ -206,12 +206,21 @@ Tables:
 
 - `claims` — every assertion. Includes denormalized `ev_*` columns for
   query, the full `evidence_json` for round-trip, the
-  `signature_bundle` DSSE envelope, and a `prev_hash` chain link.
+  `signature_bundle` DSSE envelope, a `prev_hash` chain link, and the
+  `convergence_retry_needed` flag set by `_maybe_update_replicated`
+  when a swallowed error needs operator follow-up.
 - `validators` — per-project enrolled-validator chain, rooted at a
   self-signed row. Singleton-root invariant: more than one self-signed
   row → entire chain forfeit.
 - `replication_verdicts` / `contradiction_verdicts` — signed verdicts
   from enrolled issuers. Append-only at the trigger level.
+- `rekor_inclusions` — sidecar recording every successful Rekor
+  submission, independent of whether the claims-row UPDATE that
+  attaches the rekor coords to `signature_bundle` succeeded. Closes
+  the divergence window where Rekor would have a permanent public
+  record while the local row still said `transparency_logged=0`:
+  `refresh_unsigned` consults this table to replay the UPDATE
+  instead of re-submitting (no duplicate Rekor entry).
 - `claims_fts` — FTS5 virtual table (independent of `claims`, not
   `content=` linked) for substring + tokenized search.
 - `doi_cache` — 30-day positive / 24-hour negative cache for DOI HEAD

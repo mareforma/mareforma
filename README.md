@@ -11,7 +11,7 @@ Mareforma is a local epistemic graph that accumulates findings across agent runs
 
 Every individual capability mareforma uses — Ed25519 signing, DSSE envelopes, Sigstore-Rekor transparency, GRADE-shaped evidence vectors, local SQLite — exists in mature form elsewhere. What's missing in the OSS landscape is the combination: a runtime, opt-in Python library that bundles them as the place an agent writes claims to. See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the lane.
 
-**Trust in a finding should come from the graph, not from the agent that made it.**
+**Mareforma records *what* the agent claimed and *how* — so silent pipeline failures, prior-knowledge fallbacks, and self-reported convergence become visible.** Trust signals are derived from graph structure (whose key signed what, which upstreams are cited, how many independent agents wrote the same conclusion), not from the agent's own confidence. The substrate is honest about what those signals do and do not prove — see "What mareforma is NOT" below.
 
 ```python
 import mareforma
@@ -93,15 +93,18 @@ assertion time.
 ## Architecture
 
 ```python
-graph = mareforma.open()          # zero setup, no init required
+graph = mareforma.open()                                # zero setup, no init required
 graph.assert_claim(text, classification="ANALYTICAL", supports=[...])
 graph.query(text, min_support="REPLICATED")
-graph.validate(claim_id)          # human promotes to ESTABLISHED
-graph.refresh_unresolved()        # retry DOI verification for offline claims
-graph.refresh_all_dois()          # force-re-check every DOI (retraction drift)
-graph.refresh_unsigned()          # retry Rekor transparency log submission
-graph.find_dangling_supports()    # audit UUID refs that point nowhere
-graph.get_tools(generated_by="agent/model-a/lab_a")  # framework-ready callables
+graph.validate(claim_id, evidence_seen=[...])           # human promotes to ESTABLISHED, citing reviewed claims
+graph.health()                                          # one-call audit: claim/validator counts + drift counters
+graph.refresh_unresolved()                              # retry DOI verification for offline claims
+graph.refresh_all_dois()                                # force-re-check every DOI (retraction drift)
+graph.refresh_unsigned()                                # retry Rekor (replays from rekor_inclusions sidecar if present)
+graph.refresh_convergence()                             # retry detection for claims whose post-INSERT promotion errored
+graph.find_dangling_supports()                          # audit UUID refs that point nowhere
+graph.classify_supports([...])                          # tag each entry as claim/doi/external
+graph.get_tools(generated_by="agent/model-a/lab_a")     # framework-ready callables
 ```
 
 **External verification, opt-in by component:**
@@ -120,9 +123,9 @@ graph.get_tools(generated_by="agent/model-a/lab_a")  # framework-ready callables
 
 | Level | Meaning |
 |---|---|
-| `PRELIMINARY` | One agent claimed it |
-| `REPLICATED` | ≥2 independent agents converged on the same upstream evidence |
-| `ESTABLISHED` | Human-validated — only via `graph.validate()` |
+| `PRELIMINARY` | One agent asserted it. The substrate has cryptographic provenance but no convergence signal yet. |
+| `REPLICATED` | ≥2 enrolled keys signed claims sharing an `ESTABLISHED` upstream with different `generated_by` strings. As strong as the writers' honesty about independence — the substrate detects that two strings differ, not that two physical agents do. |
+| `ESTABLISHED` | An enrolled human-typed key signed a validation envelope. Pass `evidence_seen=[...]` to bind the validator's review citations (every cited claim must exist and predate validation). Without `evidence_seen`, the envelope records that a human pressed a button; with it, the envelope records *what they reviewed*. |
 
 **Classification** — declared by the agent, records epistemic origin:
 
@@ -132,7 +135,49 @@ graph.get_tools(generated_by="agent/model-a/lab_a")  # framework-ready callables
 | `ANALYTICAL` | Deterministic analysis against source data |
 | `DERIVED` | Explicitly built on ESTABLISHED or REPLICATED claims |
 
+> **Trust level and classification are independent axes.** An `INFERRED + ESTABLISHED`
+> claim is possible (a human validated an LLM-prior-knowledge assertion); so is an
+> `ANALYTICAL + PRELIMINARY` claim (a data-grounded finding with no convergence yet).
+> Trust answers "how many parties witnessed this?"; classification answers "what did
+> the agent compute it from?" Use both when querying: `graph.query(text,
+> min_support="REPLICATED", classification="ANALYTICAL")`.
+
 Storage: local SQLite, WAL mode, ACID guarantees. Network calls only for opt-in external verification: DOI lookups (Crossref + DataCite) and Sigstore-Rekor transparency log.
+
+## Silent pipeline failures become visible
+
+The reproduction-worthy use case mareforma was built for. A real AI scientist
+agent runs a multi-step analysis: query a public dataset, regress a gene's
+expression against a phenotype, return the top hit. The data lookup silently
+returns null because of a stale EFO id. The agent's LLM reasoning fills the
+gap with prior knowledge and returns a plausible-sounding answer. The output
+looks identical to a data-driven result.
+
+```python
+finding_text = run_pipeline(target_gene, phenotype)
+
+graph.assert_claim(
+    finding_text,
+    # The one line that breaks the symmetry: classification depends on
+    # whether real data flowed through. The substrate doesn't compute
+    # this — the agent's wrapper inspects the pipeline state and tells
+    # the truth at assertion time.
+    classification="ANALYTICAL" if generated_code_ran else "INFERRED",
+    generated_by="agent/gpt-4o/lab_a",
+    source_name="depmap_24q2" if data_actually_loaded else None,
+)
+```
+
+Now a downstream consumer querying `min_support="REPLICATED",
+classification="ANALYTICAL"` excludes the silent-fallback rows. The hallucinated
+finding is in the graph (auditable, signed), but it's NOT in the trustworthy
+result set. The wrapper that picks `"ANALYTICAL"` vs `"INFERRED"` is doing the
+work — the substrate makes that work visible and tamper-evident.
+
+[Example 05 — Drug Target Provenance](examples/05_drug_target_provenance/)
+wraps MEDEA (a real AI scientist agent published on arXiv), reproduces a real
+silent-failure mode in its EFO id lookup, and shows the classification gate
+catching it.
 
 ## What mareforma is NOT
 
@@ -192,6 +237,15 @@ Honest scope, so the design choices land in the right frame:
   contradiction marks the older of two referenced claims; claims that
   cited the now-invalidated one via `supports[]` are unaffected.
   Deliberate boundary — see ARCHITECTURE.md.
+- **Verdict-issuer method labels are self-declared.** When an enrolled
+  issuer signs a `replication_verdict` with `method="semantic-cluster"`,
+  the substrate stores the label and binds it into the signature. It
+  does not verify that the labeled method was actually run, that two
+  `semantic-cluster` verdicts from different issuers used the same
+  algorithm or threshold, or that the issuer's confidence dict is
+  calibrated. Like `generated_by`, method labels are as strong as the
+  issuer's honesty. The verdict-issuer table is a typed-string registry
+  with cryptographic stapling, not an epistemic primitive on its own.
 - **No automated fraud detection.** The substrate refuses self-validation
   and gates LLM-typed validators on both promotion and contradiction
   paths, but it cannot detect colluding human validators, manufactured
