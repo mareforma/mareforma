@@ -212,8 +212,11 @@ class TestRestoreAdversarial:
         return ctx
 
     def _read_toml(self, tmp_path: Path) -> dict:
-        import tomli
-        return tomli.loads(
+        try:
+            import tomllib  # type: ignore[import-not-found]
+        except ImportError:
+            import tomli as tomllib  # type: ignore[no-redef]
+        return tomllib.loads(
             (tmp_path / "claims.toml").read_text(encoding="utf-8"),
         )
 

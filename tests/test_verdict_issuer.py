@@ -309,7 +309,11 @@ class TestRestoreVerdicts:
     def test_tampered_verdict_confidence_rejected(self, tmp_path: Path) -> None:
         """Edit a verdict's confidence_json in the TOML without re-signing.
         Restore must catch the signature-vs-payload divergence."""
-        import tomli, tomli_w
+        try:
+            import tomllib as tomli  # type: ignore[import-not-found]
+        except ImportError:
+            import tomli  # type: ignore[no-redef]
+        import tomli_w
         root_key, issuer_key, a, b, _, _ = _seed_two_claims(tmp_path)
         with mareforma.open(tmp_path, key_path=issuer_key) as g:
             g.record_replication_verdict(
@@ -332,7 +336,11 @@ class TestRestoreVerdicts:
 
     def test_tampered_verdict_signature_rejected(self, tmp_path: Path) -> None:
         """Replace the verdict signature with garbage. Restore catches it."""
-        import tomli, tomli_w
+        try:
+            import tomllib as tomli  # type: ignore[import-not-found]
+        except ImportError:
+            import tomli  # type: ignore[no-redef]
+        import tomli_w
         root_key, issuer_key, a, b, _, _ = _seed_two_claims(tmp_path)
         with mareforma.open(tmp_path, key_path=issuer_key) as g:
             g.record_replication_verdict(
@@ -356,7 +364,11 @@ class TestRestoreVerdicts:
         """Swap issuer_keyid to a different enrolled validator's keyid.
         The signature was made by the original issuer, so the new
         validator's pubkey fails to verify it."""
-        import tomli, tomli_w
+        try:
+            import tomllib as tomli  # type: ignore[import-not-found]
+        except ImportError:
+            import tomli  # type: ignore[no-redef]
+        import tomli_w
         root_key, issuer_key, a, b, root_keyid, _ = _seed_two_claims(tmp_path)
         with mareforma.open(tmp_path, key_path=issuer_key) as g:
             g.record_replication_verdict(
@@ -658,7 +670,11 @@ class TestRestoreDowngradesTransparencyWithoutRekor:
     def test_transparency_flag_requires_rekor_block(
         self, tmp_path: Path,
     ) -> None:
-        import tomli, tomli_w
+        try:
+            import tomllib as tomli  # type: ignore[import-not-found]
+        except ImportError:
+            import tomli  # type: ignore[no-redef]
+        import tomli_w
         root_key = _bootstrap(tmp_path, "root.key")
         with mareforma.open(tmp_path, key_path=root_key) as g:
             cid = g.assert_claim("anchor")
@@ -772,7 +788,11 @@ class TestVerdictFieldTamperOnRestore:
     claims.toml without re-signing → restore raises RestoreError."""
 
     def _setup_and_tamper(self, tmp_path: Path, field: str, new_value):
-        import tomli, tomli_w
+        try:
+            import tomllib as tomli  # type: ignore[import-not-found]
+        except ImportError:
+            import tomli  # type: ignore[no-redef]
+        import tomli_w
         _, issuer_key, a, b, _, _ = _seed_two_claims(tmp_path)
         with mareforma.open(tmp_path, key_path=issuer_key) as g:
             g.record_replication_verdict(
