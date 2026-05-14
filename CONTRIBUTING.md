@@ -21,7 +21,7 @@ pytest                # full suite must pass before any commit
 ```
 
 Python ≥ 3.10. Dependencies are minimal (`click`, `tomli-w`, `tomli`,
-`httpx`, `cryptography`); we add new runtime deps reluctantly.
+`httpx`, `cryptography`, `rfc8785`); we add new runtime deps reluctantly.
 
 ## What to send a PR for
 
