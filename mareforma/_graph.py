@@ -1422,16 +1422,15 @@ class EpistemicGraph:
             "SELECT COUNT(*) FROM claims WHERE signature_bundle IS NULL"
         )
 
-        try:
-            convergence_retry_pending = _count(
-                "SELECT COUNT(*) FROM claims "
-                "WHERE convergence_retry_needed = 1"
-            )
-        except sqlite3.OperationalError:
-            # Column may not exist on graphs created before the v0.3.0
-            # retry-queue column landed. Treat as zero so the rest of the
-            # health snapshot still works.
-            convergence_retry_pending = 0
+        # The column is part of the v0.3.0 schema and ``open_db``
+        # column-presence-checks every open, so any reachable conn
+        # here has the column. No defensive try/except needed — a
+        # missing column would mean a corrupt graph.db, which is the
+        # operator-level concern open_db already raises for.
+        convergence_retry_pending = _count(
+            "SELECT COUNT(*) FROM claims "
+            "WHERE convergence_retry_needed = 1"
+        )
 
         dangling_supports = len(_db.find_dangling_supports(self._conn))
 

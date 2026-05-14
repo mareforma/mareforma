@@ -1772,3 +1772,149 @@ class TestRekorSagaAtomicity:
                 "drifted from its signed payload" in str(w.message)
                 for w in caught
             )
+
+    def test_sidecar_update_refused(self, tmp_path, monkeypatch):
+        """Append-only invariant: UPDATE on rekor_inclusions is refused
+        at the SQL trigger level, so a SQL-writer cannot launder forged
+        Rekor coords through the sidecar replay path."""
+        from mareforma import signing as _signing
+        key_path = self._setup(tmp_path, monkeypatch)
+
+        with mareforma.open(
+            tmp_path, key_path=key_path,
+            rekor_url=_signing.PUBLIC_REKOR_URL,
+        ) as graph:
+            graph.assert_claim("legit", generated_by="agent")
+            with pytest.raises(
+                sqlite3.IntegrityError,
+                match="rekor_inclusion_locked",
+            ):
+                graph._conn.execute(
+                    "UPDATE rekor_inclusions SET uuid = 'forged' "
+                    "WHERE 1 = 1"
+                )
+
+    def test_sidecar_delete_refused(self, tmp_path, monkeypatch):
+        """No-delete invariant: DELETE on rekor_inclusions is refused
+        at the SQL trigger level. Removing a sidecar row would let a
+        subsequent refresh_unsigned re-submit and create a duplicate
+        Rekor entry; locking down DELETE eliminates that path."""
+        from mareforma import signing as _signing
+        key_path = self._setup(tmp_path, monkeypatch)
+
+        with mareforma.open(
+            tmp_path, key_path=key_path,
+            rekor_url=_signing.PUBLIC_REKOR_URL,
+        ) as graph:
+            graph.assert_claim("legit", generated_by="agent")
+            with pytest.raises(
+                sqlite3.IntegrityError,
+                match="rekor_inclusion_delete_blocked",
+            ):
+                graph._conn.execute("DELETE FROM rekor_inclusions")
+
+    def test_sidecar_double_insert_keeps_original(
+        self, tmp_path, monkeypatch,
+    ):
+        """ON CONFLICT DO NOTHING preserves the original row when a
+        retry lands on the same claim_id. The append-only trigger
+        refuses REPLACE; the conflict clause keeps the path crash-free."""
+        from mareforma import signing as _signing
+        from mareforma.db import _record_rekor_inclusion, get_rekor_inclusion
+        key_path = self._setup(tmp_path, monkeypatch)
+
+        with mareforma.open(
+            tmp_path, key_path=key_path,
+            rekor_url=_signing.PUBLIC_REKOR_URL,
+        ) as graph:
+            cid = graph.assert_claim("legit", generated_by="agent")
+            original = get_rekor_inclusion(graph._conn, cid)
+            assert original is not None
+
+            # Retry the sidecar write with a DIFFERENT entry — should
+            # be a silent no-op, preserving the original.
+            forged_entry = {
+                "uuid": "forged" * 6,
+                "logIndex": 99999,
+                "integratedTime": 9999999999,
+            }
+            ok = _record_rekor_inclusion(graph._conn, cid, forged_entry)
+            assert ok is True  # the INSERT itself succeeds (no-op)
+
+            after = get_rekor_inclusion(graph._conn, cid)
+            assert after == original  # unchanged
+
+
+class TestValidationEnvelopeKwargAgreement:
+    """`db.validate_claim` refuses to persist a validation envelope
+    whose signed payload's ``evidence_seen`` disagrees with the
+    ``evidence_seen`` kwarg. Closes the gap where a direct db.py caller
+    could embed forged citations in the signed envelope while passing
+    an empty kwarg to bypass the substrate's evidence verification."""
+
+    def _setup_replicated(self, graph):
+        seed = graph.assert_claim("anchor", generated_by="seed", seed=True)
+        graph.assert_claim("a", generated_by="lab_a", supports=[seed])
+        cid_b = graph.assert_claim("b", generated_by="lab_b", supports=[seed])
+        return seed, cid_b
+
+    def test_envelope_kwarg_mismatch_refused(self, tmp_path):
+        from mareforma import db as _db, signing as _signing
+        from mareforma.db import EvidenceCitationError
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        other_key = _bootstrap_key(tmp_path, "validator.key")
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            seed, cid_b = self._setup_replicated(g)
+            g.enroll_validator(
+                _validator_pubkey_pem(other_key), identity="reviewer",
+            )
+
+        with mareforma.open(tmp_path, key_path=other_key) as g:
+            # Build a validation envelope that claims evidence_seen=[seed]
+            # but pass evidence_seen=[] to db.validate_claim.
+            from mareforma.signing import load_private_key, sign_validation
+            other_priv = load_private_key(other_key)
+            other_keyid = _signing.public_key_id(other_priv.public_key())
+            now = _db._now()
+            forged_envelope = sign_validation(
+                {
+                    "claim_id": cid_b,
+                    "validator_keyid": other_keyid,
+                    "validated_at": now,
+                    "evidence_seen": [seed],  # populated in envelope
+                },
+                other_priv,
+            )
+            bundle_json = json.dumps(
+                forged_envelope, sort_keys=True, separators=(",", ":"),
+            )
+
+            # kwarg is [], envelope says [seed] → mismatch → refused.
+            with pytest.raises(EvidenceCitationError, match="does not match"):
+                _db.validate_claim(
+                    g._conn, g._root, cid_b,
+                    validated_by="reviewer",
+                    validation_signature=bundle_json,
+                    validated_at=now,
+                    evidence_seen=[],
+                )
+
+            # Confirm the claim was NOT promoted.
+            assert g.get_claim(cid_b)["support_level"] == "REPLICATED"
+
+    def test_envelope_kwarg_match_succeeds(self, tmp_path):
+        """The standard happy path through graph.validate() (which threads
+        both from the same source) stays unaffected."""
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        other_key = _bootstrap_key(tmp_path, "validator.key")
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            seed, cid_b = self._setup_replicated(g)
+            g.enroll_validator(
+                _validator_pubkey_pem(other_key), identity="reviewer",
+            )
+
+        with mareforma.open(tmp_path, key_path=other_key) as g:
+            g.validate(cid_b, evidence_seen=[seed])
+            assert g.get_claim(cid_b)["support_level"] == "ESTABLISHED"

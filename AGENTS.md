@@ -211,12 +211,20 @@ self-declared (the substrate cannot prove what was actually read), but
 the envelope shifts "a human pressed a button" to "a human pressed a
 button AND named the evidence they consulted."
 
+When `validation_signature` is supplied directly to `db.validate_claim`
+(advanced/test path), the substrate also decodes the envelope's signed
+payload and refuses if its `evidence_seen` field disagrees with the
+`evidence_seen` kwarg. The signed envelope and the validated list must
+bind the same citations exactly (same items, same order); a direct
+caller cannot launder fraudulent citations through the on-disk envelope.
+
 **Raises:** `ClaimNotFoundError` if the claim does not exist.
 **Raises:** `ValueError` if `support_level` is not `REPLICATED`, no
 signer is loaded, or the loaded signer is not an enrolled validator.
 **Raises:** `EvidenceCitationError` if any `evidence_seen` entry is
-not a strict-v4 UUID, does not point to an existing claim, or
-post-dates `validated_at`.
+not a strict-v4 UUID, does not point to an existing claim, post-dates
+`validated_at`, or disagrees with the validation envelope's signed
+`evidence_seen` field.
 
 ---
 

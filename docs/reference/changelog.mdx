@@ -26,6 +26,11 @@ What ships in v0.3.0:
 - **JSON-LD export** in a mareforma-native vocabulary
 - **SCITT-style signed export bundle** + `mareforma verify` CLI
 - **In-toto Statement v1 + DSSE v1 PAE envelope** on every signed claim, GRADE 5-domain `EvidenceVector` inside every signed predicate, signed verdict-issuer protocol that any third party can integrate against (see below)
+- **RFC 8785-strict canonical JSON** for every signed payload — cross-language verifiers in Go, Rust, or JS now read byte-identical bytes from a mareforma envelope. Adds `rfc8785>=0.1` runtime dep.
+- **Operator surfaces:** `graph.health()` single-call audit summary, `graph.refresh_convergence()` to retry promotions whose detection swallowed an error, `graph.refresh_all_dois()` to force-re-check DOIs for retraction drift, `graph.find_dangling_supports()` to audit UUID refs that point nowhere, `graph.classify_supports()` to inspect the substrate's claim/doi/external classification.
+- **Validation envelope binds `evidence_seen`** — pass `graph.validate(claim_id, evidence_seen=[upstream_id, ...])` to record which claims the validator reviewed before signing. Bound into the signed payload alongside `(claim_id, validator_keyid, validated_at)`. Empty list is a positive "I reviewed nothing" admission. Substrate verifies each cited claim exists and predates validation.
+- **Rekor saga atomicity** via a new `rekor_inclusions` sidecar table. When a Rekor submission succeeds but the local row-UPDATE fails, the sidecar preserves the coords so `refresh_unsigned()` replays the UPDATE without re-submitting (no duplicate log entries). Append-only at the trigger level.
+- **Strict UUIDv4 in claim_id pattern.** Non-v4 UUID-shapes in `supports[]` are now classified as external references rather than dangling claim_ids.
 
 Envelope upgrade + verdict-issuer protocol (substrate-launch additions):
 

@@ -220,7 +220,10 @@ Tables:
   the divergence window where Rekor would have a permanent public
   record while the local row still said `transparency_logged=0`:
   `refresh_unsigned` consults this table to replay the UPDATE
-  instead of re-submitting (no duplicate Rekor entry).
+  instead of re-submitting (no duplicate Rekor entry). Append-only
+  at the trigger level (UPDATE and DELETE both refused), so a
+  SQL-writer cannot launder forged Rekor coords through the replay
+  path.
 - `claims_fts` — FTS5 virtual table (independent of `claims`, not
   `content=` linked) for substring + tokenized search.
 - `doi_cache` — 30-day positive / 24-hour negative cache for DOI HEAD
@@ -228,9 +231,10 @@ Tables:
 
 SQL triggers enforce the state machine, the append-only invariants on
 signed predicate fields, the no-delete rule on signed claims, the
-verdict tables' append-only-and-no-delete invariants, the
-contradiction-invalidates-older logic, and the FTS sync. A tampered
-Python interpreter cannot relax these rules.
+verdict tables' append-only-and-no-delete invariants, the rekor-
+inclusions sidecar's same invariants, the contradiction-invalidates-
+older logic, and the FTS sync. A tampered Python interpreter cannot
+relax these rules.
 
 ## What survives restore
 

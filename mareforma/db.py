@@ -403,6 +403,25 @@ CREATE TABLE IF NOT EXISTS rekor_inclusions (
 CREATE INDEX IF NOT EXISTS idx_rekor_inclusions_uuid
     ON rekor_inclusions(uuid);
 
+-- Append-only sidecar. Once a Rekor entry is recorded for a claim it
+-- must not change: the replay path in refresh_unsigned attaches
+-- whatever is stored here, and a mutable sidecar would let a SQL-
+-- writer launder forged Rekor coords through the recovery path. UPDATE
+-- and DELETE are both refused; the saga's idempotency requirement is
+-- handled by the caller (which uses INSERT ON CONFLICT DO NOTHING),
+-- so legitimate replays of a successful add_claim never need to
+-- overwrite a row. Mirrors the verdict-table protections.
+CREATE TRIGGER IF NOT EXISTS rekor_inclusions_append_only
+BEFORE UPDATE ON rekor_inclusions
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:rekor_inclusion_locked');
+END;
+CREATE TRIGGER IF NOT EXISTS rekor_inclusions_no_delete
+BEFORE DELETE ON rekor_inclusions
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:rekor_inclusion_delete_blocked');
+END;
+
 -- Append-only verdicts. Any UPDATE on the immutable columns of an
 -- existing row is refused — the envelope is the source of truth,
 -- and a forged UPDATE would put the row out of sync with what was
@@ -2198,6 +2217,35 @@ def validate_claim(
 
     now = validated_at if validated_at is not None else _now()
 
+    # Envelope/kwarg agreement gate. The substrate verifies
+    # ``evidence_seen`` against the kwarg (below), but a caller could
+    # pass an empty kwarg while embedding a fraudulent populated list
+    # in the signed envelope on disk — the envelope would record
+    # citations the substrate never validated. Decode the envelope and
+    # require its payload's ``evidence_seen`` to equal the kwarg
+    # exactly (same items, same order). Closes the gap between "what
+    # the substrate validated" and "what the on-disk envelope claims."
+    if validation_signature is not None:
+        try:
+            from mareforma import signing as _signing
+            env = json.loads(validation_signature)
+            env_payload = _signing.envelope_payload(env)
+        except (json.JSONDecodeError, KeyError, TypeError,
+                _signing.InvalidEnvelopeError):
+            env_payload = None
+        if env_payload is not None:
+            env_evidence = env_payload.get("evidence_seen")
+            kwarg_evidence = evidence_seen if evidence_seen is not None else []
+            if env_evidence != kwarg_evidence:
+                raise EvidenceCitationError(
+                    "validation envelope's evidence_seen "
+                    f"({env_evidence!r}) does not match the evidence_seen "
+                    f"kwarg ({kwarg_evidence!r}); the substrate validates "
+                    "what the caller passed, and the signed envelope must "
+                    "bind the same list — refusing to persist a divergent "
+                    "envelope."
+                )
+
     # Evidence-citation gate. Every entry in evidence_seen must be a
     # strict-v4 UUID pointing at an existing claim that predates the
     # validation timestamp. An empty list is the "I reviewed nothing"
@@ -2275,11 +2323,18 @@ def _record_rekor_inclusion(
         raw_b64 = base64.standard_b64encode(
             raw_json.encode("utf-8"),
         ).decode("ascii")
+        # ON CONFLICT DO NOTHING: a successful Rekor inclusion is
+        # immutable. If a caller retries the saga and lands here twice
+        # for the same claim_id, the original row stays — the
+        # append-only trigger refuses overwrite anyway, but the explicit
+        # conflict clause keeps the path crash-free. The PRIMARY KEY on
+        # claim_id is the conflict target.
         conn.execute(
-            "INSERT OR REPLACE INTO rekor_inclusions "
+            "INSERT INTO rekor_inclusions "
             "(claim_id, uuid, log_index, integrated_time, "
             " raw_response_b64, recorded_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(claim_id) DO NOTHING",
             (
                 claim_id,
                 entry.get("uuid"),

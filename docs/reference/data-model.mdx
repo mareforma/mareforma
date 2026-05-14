@@ -39,6 +39,7 @@ All persistent state lives in a single SQLite file at `<project_root>/.mareforma
 | `evidence_json` | TEXT | `{}` | No | Full GRADE `EvidenceVector` serialized as canonical JSON: the five downgrade domains plus upgrade flags (`large_effect`, `dose_response`, `opposing_confounding`), `rationale` dict (required for any nonzero domain), and `reporting_compliance` list. Bound into the signed Statement; denormalized into the `ev_*` columns for queryable filters |
 | `statement_cid` | TEXT | `NULL` | Yes | Content identifier of the signed in-toto Statement: `sha256(canonicalize(statement))` hex. Restore re-derives this from the row's fields + `evidence_json` and refuses any mismatch with the stored value |
 | `t_invalid` | INTEGER | `NULL` | Yes | Invalidation timestamp set by the `contradiction_invalidates_older` trigger when a signed `contradiction_verdicts` row references this claim. Default `query()` / `search()` excludes invalidated rows; pass `include_invalidated=True` for audit-mode listings |
+| `convergence_retry_needed` | INTEGER | `0` | No | `1` when `_maybe_update_replicated` swallowed a SQLite error during the post-INSERT promotion check. `EpistemicGraph.refresh_convergence()` walks flagged rows to retry detection and clear the flag. Round-trips through `claims.toml` so the operator's audit list survives restore |
 | `created_at` | TEXT | UTC now | No | ISO 8601 UTC timestamp |
 | `updated_at` | TEXT | UTC now | No | ISO 8601 UTC; updated on every mutation |
 
@@ -137,6 +138,21 @@ Signed contradiction verdicts. Same shape as `replication_verdicts` but binds a 
 | `signature` | BLOB | DSSE-PAE Ed25519 signature (`payloadType=application/vnd.mareforma.contradiction-verdict+json`) |
 | `created_at` | TEXT | UTC ISO 8601 |
 
+## rekor_inclusions table
+
+Sidecar recording every successful Sigstore-Rekor submission, written by `_record_rekor_inclusion` as step 3 of the Rekor saga. Step 4 (the claims-row UPDATE that attaches the Rekor coords to `signature_bundle`) reads from this table on retry instead of re-submitting, so a single Rekor submission produces exactly one log entry even when the local UPDATE crashes mid-saga.
+
+Append-only at the SQL layer — both UPDATE and DELETE are refused by triggers, mirroring the verdict-table protections. The saga's write uses `INSERT ON CONFLICT(claim_id) DO NOTHING`, so a legitimate retry on the same claim_id is a silent no-op (the original row is preserved) and a SQL-writer cannot launder forged Rekor coords through the recovery path in `refresh_unsigned()`.
+
+| Field | Type | Description |
+|---|---|---|
+| `claim_id` | TEXT (PK) | FK to `claims(claim_id)`. One Rekor inclusion per claim |
+| `uuid` | TEXT | The Rekor log entry's UUID |
+| `log_index` | INTEGER | The Rekor log entry's sequence index |
+| `integrated_time` | INTEGER | Unix timestamp of inclusion (NULL if Rekor omitted it) |
+| `raw_response_b64` | TEXT | Base64-encoded full Rekor response JSON, preserved so the recovery path can re-attach byte-identical coords to the augmented signature bundle |
+| `recorded_at` | TEXT | UTC ISO 8601 of the local write |
+
 ## doi_cache table
 
 Persistent cache of DOI resolution results to avoid repeated network calls.
@@ -198,4 +214,4 @@ but it survives `graph.db` deletion.
 | PRAGMA | Value | Why |
 |---|---|---|
 | `journal_mode` | `WAL` | Concurrent readers + one writer without blocking |
-| `foreign_keys` | `ON` | SQLite default is OFF. The `replication_verdicts` and `contradiction_verdicts` tables have FK references to `validators(keyid)` and `claims(claim_id)` — without this PRAGMA, those constraints would be advisory and a direct-SQL INSERT with a fabricated keyid would silently succeed |
+| `foreign_keys` | `ON` | SQLite default is OFF. The `replication_verdicts`, `contradiction_verdicts`, and `rekor_inclusions` tables have FK references to `validators(keyid)` and `claims(claim_id)` — without this PRAGMA, those constraints would be advisory and a direct-SQL INSERT with a fabricated keyid would silently succeed |

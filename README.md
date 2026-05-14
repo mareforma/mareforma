@@ -274,6 +274,11 @@ See [AGENTS.md](AGENTS.md) — execution contract, forbidden patterns,
 signing and transparency log, idempotency convention, `generated_by`
 requirements.
 
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the substrate design (rails
+not trains), [CONTRIBUTING.md](CONTRIBUTING.md) for the dev workflow,
+[SECURITY.md](SECURITY.md) for the threat model and disclosure
+channel, [CHANGELOG.md](CHANGELOG.md) for release notes.
+
 Full documentation: **https://docs.mareforma.com**
 
 ## Examples
