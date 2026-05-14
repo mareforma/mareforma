@@ -167,35 +167,52 @@ this key" — it does **not** re-attest the per-claim signatures. To
 verify per-claim signatures end-to-end, use the `claims.toml` backup,
 which preserves each row's `signature_bundle` field.
 
-### Canonicalization — RFC 8785-shaped, not RFC 8785-strict
+### Canonicalization — RFC 8785 strict
 
-`canonical_statement` (in [`mareforma/_canonical.py`](mareforma/_canonical.py))
-normalizes the body to NFC, sorts keys, drops whitespace, and rejects
-NaN/Infinity (`json.dumps(sort_keys=True, separators=(",", ":"),
-ensure_ascii=False, allow_nan=False)`). That is deterministic and
-sufficient for mareforma-internal signing — every signature is produced
-and verified by the same canonicalizer.
+`canonicalize` (in [`mareforma/_canonical.py`](mareforma/_canonical.py))
+normalizes every string in the payload to Unicode NFC, then serializes
+via the `rfc8785` library — a strict implementation of RFC 8785 (JSON
+Canonicalization Scheme, JCS). The dependency was added in v0.3.0;
+prior versions used `json.dumps(sort_keys=True, ...)` and were only
+JCS-shaped, not JCS-strict.
 
-It is **not** RFC 8785 (JCS) strict. RFC 8785 mandates ECMAScript-style
-number serialization (e.g. `1.0` renders as `1`, specific exponential-
-form rules); Python's `json.dumps` does not follow those rules. The
-claim envelope today contains no floats — `text` is a string, the
-EvidenceVector domains are signed ints in `{-2,-1,0,+1}`, the upgrade
-flags are bools, timestamps are ISO-8601 strings — so the current
-on-wire form is byte-identical to what an RFC 8785 verifier would
-produce. The day mareforma adds a float-valued field (a confidence
-score, a p-value, a duration), a cross-language verifier implementing
-RFC 8785 strictly may produce different bytes for the same logical
-payload and refuse to verify mareforma's signatures.
+What strict JCS gets us:
 
-For cross-tool verification today, the in-toto Statement v1 subject
+- Keys sorted lexicographically by UTF-16 code unit at every nesting
+  level (JCS §3.2.3).
+- No whitespace, minimal JSON string escape set, UTF-8 output
+  (JCS §3.2.1–§3.2.2).
+- **Numbers per the ECMAScript `Number.prototype.toString` algorithm**
+  (JCS §3.2.2.3). `1.0` renders as `1`; `1e10` renders as
+  `10000000000`; exponent boundaries follow ES rules. This is the
+  load-bearing difference vs. Python's stdlib `json.dumps`: the day
+  the substrate adds a float-valued field, a Go / Rust / JavaScript
+  verifier re-canonicalizing per RFC 8785 will produce the same bytes
+  and verify the same signature.
+- `NaN` / `±Infinity` are rejected (JSON has no representation; RFC
+  8785 explicitly forbids them).
+- Integers outside the IEEE-754 double-precision safe-integer range
+  are rejected (JCS would otherwise lose precision on round-trip).
+- Dict keys that NFC-normalize to the same string raise `ValueError`
+  rather than silently dropping a value — canonical JSON requires
+  distinct keys, and dropping one would produce a non-deterministic
+  envelope under adversarial input.
+
+NFC normalization is layered above JCS as a mareforma-internal
+discipline. RFC 8785 itself operates on whatever code points the input
+contains; pre-normalizing to NFC means visually-identical text with
+different decomposition (`é` U+00E9 vs `e` + U+0301) produces the same
+canonical bytes. Decoupling NFC from JCS keeps the JCS layer
+interoperable with any other RFC 8785 implementation.
+
+For cross-tool verification: use any RFC 8785 implementation
+(`rfc8785` in Python, `github.com/sigsum/sigsum-go/pkg/jcs` in Go,
+`serde_jcs` in Rust, `canonicalize` in JS) to re-derive the bytes
+mareforma signed, then verify the DSSE envelope's PAE signature with
+the signer's Ed25519 public key. The in-toto Statement v1 subject
 digest (`sha256` over `text`) is canonical without depending on number
-serialization — recompute the digest, compare to the `subject[0].digest.sha256`
-field in the envelope, and verify the DSSE signature over the envelope
-bytes as stored. The subject digest is the same bytes any in-toto
-verifier (`in-toto-golang`, the Sigstore stack) will produce. Future
-schema work that introduces floats should ship the RFC 8785 tightening
-in the same release.
+serialization at all — it's the same bytes any in-toto verifier
+(`in-toto-golang`, the Sigstore stack) will produce.
 
 ## Storage substrate
 
@@ -289,6 +306,45 @@ are HEAD-checked-not-content-verified; contradiction is per-claim;
 `EvidenceVector` is GRADE-shaped storage, not GRADE evaluation; no
 automated fraud detection beyond the structural invariants the
 substrate enforces.
+
+## Engineering discipline — code as audit trail
+
+The substrate carries its own design review forward in time. Three
+conventions, applied consistently:
+
+- **Every defensive measure names the threat it blocks.** Each SQL
+  trigger comment names the attack chain its `RAISE(ABORT, ...)`
+  refuses — e.g. `claims_signed_no_delete` documents that without
+  the trigger "an adversary could wipe a Rekor-logged ESTABLISHED
+  claim and rewrite claims.toml as if it never existed." The
+  contradiction-invalidates trigger carries a `DESIGN RULE — DO NOT
+  PROPAGATE DOWNSTREAM` comment with rationale, so a future
+  contributor adding transitive falsification has to engage with the
+  reasoning rather than discover it from a broken test.
+- **Every invariant names what it does NOT prove.** The
+  `evidence_seen` substrate check verifies that each cited claim
+  exists and predates the validation timestamp; the docstring
+  immediately follows with *"this gate cannot prove the validator
+  actually opened those claims, only that the claims they cited
+  exist and predate validation. That's the strongest property the
+  substrate can enforce; everything else rests on the validator's
+  honesty."* The same pattern recurs in `_refuse_self_validation`,
+  in `_maybe_update_replicated_unlocked`, and in the
+  `claims_signed_fields_no_laundering` trigger.
+- **Substrate over surface.** When a defect is found, the fix lands
+  at the root layer (DB trigger, signed payload field set, state
+  machine) rather than in the wrapper. The public Python API
+  inherits the property; an in-process caller bypassing
+  `EpistemicGraph.validate` and calling `mareforma.db.validate_claim`
+  directly meets the same gates. The trust ladder is not bypassable
+  via a public path the wrapper happens not to expose. See
+  [`CONTRIBUTING.md`](CONTRIBUTING.md#trust-substrate-changes) for
+  the full rule.
+
+The result is that any future contributor reading the code reads the
+reasoning that produced it — including which properties are
+load-bearing and which are intentionally out of scope. This is the
+strongest single signal of how the substrate will age.
 
 ## See also
 

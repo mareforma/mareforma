@@ -97,7 +97,7 @@ graph = mareforma.open()                                # zero setup, no init re
 graph.assert_claim(text, classification="ANALYTICAL", supports=[...])
 graph.query(text, min_support="REPLICATED")
 graph.validate(claim_id, evidence_seen=[...])           # human promotes to ESTABLISHED, citing reviewed claims
-graph.health()                                          # one-call audit: claim/validator counts + drift counters
+graph.health()                                          # HealthReport: per-status + per-support-level counters, traffic light
 graph.refresh_unresolved()                              # retry DOI verification for offline claims
 graph.refresh_all_dois()                                # force-re-check every DOI (retraction drift)
 graph.refresh_unsigned()                                # retry Rekor (replays from rekor_inclusions sidecar if present)
@@ -116,8 +116,12 @@ graph.get_tools(generated_by="agent/model-a/lab_a")     # framework-ready callab
   generate an Ed25519 keypair; every claim is then signed and tamper-evident.
 - **Sigstore-Rekor transparency log** is opt-in via
   `mareforma.open(rekor_url=mareforma.signing.PUBLIC_REKOR_URL)`. Signed
-  claims become publicly verifiable; submission failures are retried by
-  `refresh_unsigned()`.
+  claims are submitted to the log; the entry uuid + logIndex + raw
+  response bytes are persisted to the local `rekor_inclusions` sidecar.
+  Submission failures are retried by `refresh_unsigned()`. **Today the
+  substrate records what Rekor returned; full Merkle inclusion-proof
+  re-verification on load is a follow-up release** — see the Rekor
+  limits below.
 
 **Trust levels** — derived from graph topology, never self-reported:
 
@@ -211,10 +215,22 @@ Honest scope, so the design choices land in the right frame:
   vector into the `PRELIMINARY → REPLICATED → ESTABLISHED` ladder.
   Full GRADE-style certainty derivation is out of scope for v0.3.0
   and on the v0.4 backlog.
-- **Rekor inclusion is logged, not proof-verified.** When `rekor_url=` is
-  configured, signed claims are submitted and the entry uuid + logIndex
-  are recorded. The substrate does not (yet) re-fetch and verify the
-  Merkle inclusion proof; trust the log operator for now.
+- **Rekor inclusion is logged, not proof-verified (yet).** When
+  `rekor_url=` is configured, signed claims are submitted to the log
+  and the response — entry uuid, logIndex, integratedTime, and the
+  raw body bytes — is persisted to the local `rekor_inclusions`
+  sidecar. The submit-time response is cryptographically checked
+  (the returned entry must record OUR hash + OUR signature; mismatch
+  → submission treated as a failure), so a hostile log operator
+  cannot get the substrate to accept an unrelated entry as ours.
+  What the substrate does NOT yet do is re-fetch the Merkle inclusion
+  proof on load and verify it against the log's current signed
+  checkpoint — that step would close the residual "the log forked
+  or rewrote history after we submitted" gap. Today the trust posture
+  for inclusion proofs is: trust the log operator's submit-time
+  response, persisted locally for future re-verification. Merkle
+  inclusion-proof verification is the next-release item on this
+  surface.
 - **DOIs are HEAD-checked, not content-verified.** External references
   resolve to a 200 response; the substrate does not parse, sign, or
   archive the referenced content. A DOI that resolves today may resolve
