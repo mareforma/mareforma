@@ -1241,6 +1241,7 @@ def add_claim(
     rekor_url: str | None = None,
     require_rekor: bool = False,
     on_convergence_error: "Callable[[Exception], None] | None" = None,
+    rekor_log_pubkey_pem: bytes | None = None,
 ) -> str:
     """Insert a new claim and return its claim_id.
 
@@ -1623,6 +1624,7 @@ def add_claim(
             signer=signer,
             rekor_url=rekor_url,
             require_rekor=require_rekor,
+            rekor_log_pubkey_pem=rekor_log_pubkey_pem,
         )
 
     # Check whether this claim triggers REPLICATED status on shared upstreams.
@@ -2449,6 +2451,7 @@ def _attempt_rekor_saga(
     signer: "object",
     rekor_url: str,
     require_rekor: bool,
+    rekor_log_pubkey_pem: bytes | None = None,
 ) -> int:
     """Run the Rekor 4-step saga on a freshly-INSERTed signed claim.
 
@@ -2461,15 +2464,23 @@ def _attempt_rekor_saga(
     1. The claim is already INSERTed with ``transparency_logged=0``
        (the caller's responsibility, before this helper runs).
     2. Submit the envelope to Rekor; on failure, return 0.
-    3. Persist the (uuid, logIndex, integratedTime) coords to the
+    3. **(opt-in) Verify the inclusion proof.** If the caller supplied
+       ``rekor_log_pubkey_pem``, re-fetch the entry via
+       :func:`signing.fetch_inclusion_proof` and pass the full body to
+       :func:`signing.verify_rekor_inclusion`. A verification failure
+       refuses the saga (the row stays at ``transparency_logged=0``);
+       a future ``refresh_unsigned`` will retry. When
+       ``rekor_log_pubkey_pem`` is None, the residual gap is the trust
+       posture documented in README "Limits of the Rekor integration".
+    4. Persist the (uuid, logIndex, integratedTime) coords to the
        ``rekor_inclusions`` sidecar. The sidecar's append-only triggers
        guarantee no replay can rewrite this row.
-    4. UPDATE the claim row's ``signature_bundle`` with the augmented
+    5. UPDATE the claim row's ``signature_bundle`` with the augmented
        envelope (Rekor block attached) and set ``transparency_logged=1``.
 
-    If step 4 fails after step 3 succeeded, the sidecar holds the durable
+    If step 5 fails after step 4 succeeded, the sidecar holds the durable
     record. :meth:`EpistemicGraph.refresh_unsigned` reads the sidecar and
-    replays step 4 instead of double-submitting to Rekor.
+    replays step 5 instead of double-submitting to Rekor.
 
     Extracting this helper out of :func:`add_claim` keeps the
     happy-path read concise: ``add_claim`` is about claim insertion +
@@ -2479,7 +2490,9 @@ def _attempt_rekor_saga(
     Raises
     ------
     SigningError
-        If the initial Rekor submission fails and ``require_rekor=True``.
+        If the initial Rekor submission fails and ``require_rekor=True``,
+        OR if Merkle inclusion-proof verification fails and
+        ``require_rekor=True``.
     """
     from mareforma import signing as _signing
 
@@ -2496,7 +2509,49 @@ def _attempt_rekor_saga(
             )
         return 0
 
-    # Step 3: durable sidecar write. Failure here means Rekor saw the
+    # Step 3 (opt-in): cryptographic inclusion-proof verification. The
+    # submit-time response binding (OUR hash + OUR signature inside the
+    # returned entry) is checked by submit_to_rekor; what's left to
+    # close is "the log committed our entry and didn't tamper with it
+    # afterward." That requires the signed checkpoint + Merkle audit
+    # path, which submit_to_rekor's stripped response doesn't carry.
+    # Re-fetch the entry by uuid (one extra GET) and run the full
+    # verifier. Skipped when the caller hasn't supplied a log pubkey
+    # — current trust posture is "trust submit-time response."
+    if rekor_log_pubkey_pem is not None:
+        uuid = entry.get("uuid")
+        if not isinstance(uuid, str) or not uuid:
+            if require_rekor:
+                raise _signing.SigningError(
+                    "Rekor inclusion-proof verification requested but "
+                    "the submit response had no uuid; cannot re-fetch "
+                    "to obtain the inclusion proof."
+                )
+            return 0
+        try:
+            full_body = _signing.fetch_inclusion_proof(uuid, rekor_url)
+            _signing.verify_rekor_inclusion(full_body, rekor_log_pubkey_pem)
+        except _signing.RekorInclusionError as exc:
+            if require_rekor:
+                raise _signing.SigningError(
+                    f"Rekor inclusion-proof verification failed for "
+                    f"claim {claim_id} (uuid {uuid}): {exc} "
+                    f"[reason={exc.reason}]. require_rekor=True; refusing "
+                    "to advance transparency_logged to 1."
+                ) from exc
+            import warnings as _warnings
+            _warnings.warn(
+                f"Rekor inclusion-proof verification failed for claim "
+                f"{claim_id} (uuid {uuid}, reason={exc.reason}). The "
+                "submit response itself was bound to OUR hash + sig, but "
+                "the log's signed Merkle path did not verify. "
+                "transparency_logged stays 0; refresh_unsigned() will "
+                "retry.",
+                stacklevel=2,
+            )
+            return 0
+
+    # Step 4: durable sidecar write. Failure here means Rekor saw the
     # entry but we lost the record locally — the next refresh_unsigned
     # will re-submit and create a duplicate, which is the only recovery
     # path when no sidecar exists. _record_rekor_inclusion emits a

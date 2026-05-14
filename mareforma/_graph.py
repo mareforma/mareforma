@@ -87,12 +87,22 @@ class EpistemicGraph:
         signer_identity: str | None = None,
         rekor_url: str | None = None,
         require_rekor: bool = False,
+        rekor_log_pubkey_pem: bytes | None = None,
     ) -> None:
         self._conn = conn
         self._root = root
         self._signer = signer
         self._rekor_url = rekor_url
         self._require_rekor = require_rekor
+        # Rekor log operator's public key, used to verify the signed
+        # checkpoint that anchors each inclusion proof. When None, the
+        # substrate trusts only the submit-time response binding (OUR
+        # hash + OUR signature inside the returned entry); the residual
+        # gap is the "trust the log operator's submit-time response"
+        # posture documented in README "Limits of the Rekor integration".
+        # When supplied, every signed-claim submit and every restore
+        # cross-verifies the log's signed Merkle root.
+        self._rekor_log_pubkey_pem = rekor_log_pubkey_pem
         self._closed = False
         # Convergence detection swallows SQLite errors so a misconfigured
         # trigger or contention pattern cannot crash a write. A WARNING is
@@ -282,6 +292,7 @@ class EpistemicGraph:
             rekor_url=self._rekor_url,
             require_rekor=self._require_rekor,
             on_convergence_error=_bump_convergence_errors,
+            rekor_log_pubkey_pem=self._rekor_log_pubkey_pem,
         )
 
     def query(
@@ -1241,6 +1252,40 @@ class EpistemicGraph:
                 envelope, public_key, rekor_url=self._rekor_url,
             )
             if logged and entry is not None:
+                # Merkle inclusion-proof verification (opt-in). Mirrors
+                # the submit-time path in db._attempt_rekor_saga: when
+                # the graph was opened with a log pubkey, re-fetch the
+                # entry and cryptographically verify before persisting.
+                # On verification failure, the entry stays unlogged
+                # (the operator can retry once they investigate).
+                if self._rekor_log_pubkey_pem is not None:
+                    entry_uuid = entry.get("uuid")
+                    if not isinstance(entry_uuid, str) or not entry_uuid:
+                        warnings.warn(
+                            f"Claim {cid} submitted to Rekor but the "
+                            "response had no uuid; cannot verify "
+                            "inclusion proof. Leaving unlogged.",
+                            stacklevel=2,
+                        )
+                        still_unlogged += 1
+                        continue
+                    try:
+                        full_body = _signing.fetch_inclusion_proof(
+                            entry_uuid, self._rekor_url,
+                        )
+                        _signing.verify_rekor_inclusion(
+                            full_body, self._rekor_log_pubkey_pem,
+                        )
+                    except _signing.RekorInclusionError as exc:
+                        warnings.warn(
+                            f"Claim {cid} inclusion-proof verification "
+                            f"failed (uuid {entry_uuid}, reason="
+                            f"{exc.reason}). Leaving unlogged; refresh "
+                            "again after investigating.",
+                            stacklevel=2,
+                        )
+                        still_unlogged += 1
+                        continue
                 augmented = _signing.attach_rekor_entry(envelope, entry)
                 new_bundle = json.dumps(
                     augmented, sort_keys=True, separators=(",", ":"),

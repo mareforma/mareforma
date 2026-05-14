@@ -18,6 +18,8 @@ def open(  # noqa: A001
     rekor_url: "str | None" = None,
     require_rekor: bool = False,
     trust_insecure_rekor: bool = False,
+    rekor_log_pubkey_pem: "bytes | None" = None,
+    rekor_log_pubkey_path: "str | Path | None" = None,
 ) -> "EpistemicGraph":
     """Open the epistemic graph at *path* and return an EpistemicGraph.
 
@@ -57,6 +59,21 @@ def open(  # noqa: A001
         non-https schemes and loopback / private / link-local IP literals.
         Only use this when intentionally pointing at a private Rekor
         instance on an internal network.
+    rekor_log_pubkey_pem:
+        Rekor log operator's public key as PEM bytes. When supplied,
+        every signed-claim submit and every restore cross-verifies the
+        log's signed Merkle root via :func:`mareforma.signing.verify_rekor_inclusion`.
+        Without it, the substrate trusts only the submit-time response
+        binding — see "Limits of the Rekor integration" in the README.
+        Accepts both Ed25519 (private Rekor deployments) and
+        ECDSA-P256 (public Sigstore Rekor). Persisted on first use to
+        ``<root>/.mareforma/rekor_log_pubkey.pem``; a mismatch on
+        subsequent open() raises (TOFU pin).
+    rekor_log_pubkey_path:
+        Alternative to ``rekor_log_pubkey_pem``: filesystem path to a
+        PEM file. The two are mutually exclusive. If neither is
+        supplied AND ``<root>/.mareforma/rekor_log_pubkey.pem`` exists
+        from a prior open(), it is loaded automatically.
 
     Returns
     -------
@@ -111,11 +128,52 @@ def open(  # noqa: A001
             rekor_url, allow_insecure=trust_insecure_rekor,
         )
 
+    # Rekor log-operator pubkey resolution with TOFU pin. The pinned PEM
+    # lives at <root>/.mareforma/rekor_log_pubkey.pem after first use.
+    # Resolution precedence:
+    #   1. rekor_log_pubkey_pem (explicit bytes)        — highest
+    #   2. rekor_log_pubkey_path (explicit filesystem)
+    #   3. pinned file from prior open()                — TOFU continuation
+    #   4. None                                          — verification disabled
+    if rekor_log_pubkey_pem is not None and rekor_log_pubkey_path is not None:
+        raise ValueError(
+            "Pass either rekor_log_pubkey_pem or rekor_log_pubkey_path, "
+            "not both — the two are mutually exclusive."
+        )
+    if rekor_log_pubkey_path is not None:
+        rekor_log_pubkey_pem = Path(rekor_log_pubkey_path).read_bytes()
+    _pinned_path = root / ".mareforma" / "rekor_log_pubkey.pem"
+    if rekor_log_pubkey_pem is None and _pinned_path.exists():
+        # Continue with the pinned key from a prior session.
+        rekor_log_pubkey_pem = _pinned_path.read_bytes()
+    elif rekor_log_pubkey_pem is not None and _pinned_path.exists():
+        # TOFU pin enforcement: refuse silent log-key rotation. Any
+        # rotation must be done explicitly (delete the pin file).
+        existing = _pinned_path.read_bytes()
+        if existing.strip() != rekor_log_pubkey_pem.strip():
+            raise _signing.SigningError(
+                f"Rekor log pubkey at {_pinned_path} pins a different key "
+                "than the one supplied. Silent key rotation is refused. "
+                "To intentionally rotate, delete the pin file first."
+            )
+    elif rekor_log_pubkey_pem is not None:
+        # First use: persist the pin.
+        _pinned_path.parent.mkdir(parents=True, exist_ok=True)
+        _pinned_path.write_bytes(rekor_log_pubkey_pem)
+    # NOTE: TOFU auto-fetch is intentionally off by default. Callers
+    # who want Merkle inclusion-proof verification must pass
+    # ``rekor_log_pubkey_pem`` or ``rekor_log_pubkey_path`` explicitly
+    # (or pre-pin the file at ``.mareforma/rekor_log_pubkey.pem``).
+    # This keeps the open() path I/O-free when no key is configured
+    # and avoids surprise GETs to /api/v1/log/publicKey for every
+    # Rekor-enabled session.
+
     return EpistemicGraph(
         conn, root,
         signer=signer,
         rekor_url=rekor_url,
         require_rekor=require_rekor,
+        rekor_log_pubkey_pem=rekor_log_pubkey_pem,
     )
 
 
@@ -260,6 +318,7 @@ from mareforma.signing import (
     KeyNotFoundError,
     KeyPermissionError,
     InvalidEnvelopeError,
+    RekorInclusionError,
 )
 from mareforma.validators import ValidatorNotEnrolledError
 
@@ -287,6 +346,7 @@ __all__ = [
     "InvalidValidationEnvelopeError",
     "KeyNotFoundError",
     "KeyPermissionError",
+    "RekorInclusionError",
     "LLMValidatorPromotionError",
     "RestoreError",
     "SelfValidationError",

@@ -118,10 +118,17 @@ graph.get_tools(generated_by="agent/model-a/lab_a")     # framework-ready callab
   `mareforma.open(rekor_url=mareforma.signing.PUBLIC_REKOR_URL)`. Signed
   claims are submitted to the log; the entry uuid + logIndex + raw
   response bytes are persisted to the local `rekor_inclusions` sidecar.
-  Submission failures are retried by `refresh_unsigned()`. **Today the
-  substrate records what Rekor returned; full Merkle inclusion-proof
-  re-verification on load is a follow-up release** — see the Rekor
-  limits below.
+  Submission failures are retried by `refresh_unsigned()`.
+- **RFC 6962 inclusion-proof verification** is opt-in via
+  `mareforma.open(rekor_log_pubkey_pem=...)` (or `rekor_log_pubkey_path=`).
+  When the log operator's public key is supplied, every signed-claim
+  submit and every `refresh_unsigned()` re-fetches the entry from
+  Rekor and cryptographically verifies the Merkle audit path against
+  the log's signed checkpoint. Verification failure refuses to mark
+  the row `transparency_logged=1`. The key is persisted to
+  `.mareforma/rekor_log_pubkey.pem` as a TOFU pin — silent rotation
+  is refused on subsequent opens. See the Rekor limits below for
+  what verification does and does not prove.
 
 **Trust levels** — derived from graph topology, never self-reported:
 
@@ -215,7 +222,7 @@ Honest scope, so the design choices land in the right frame:
   vector into the `PRELIMINARY → REPLICATED → ESTABLISHED` ladder.
   Full GRADE-style certainty derivation is out of scope for v0.3.0
   and on the v0.4 backlog.
-- **Rekor inclusion is logged, not proof-verified (yet).** When
+- **Rekor inclusion verification is opt-in, not on by default.** When
   `rekor_url=` is configured, signed claims are submitted to the log
   and the response — entry uuid, logIndex, integratedTime, and the
   raw body bytes — is persisted to the local `rekor_inclusions`
@@ -223,14 +230,18 @@ Honest scope, so the design choices land in the right frame:
   (the returned entry must record OUR hash + OUR signature; mismatch
   → submission treated as a failure), so a hostile log operator
   cannot get the substrate to accept an unrelated entry as ours.
-  What the substrate does NOT yet do is re-fetch the Merkle inclusion
-  proof on load and verify it against the log's current signed
-  checkpoint — that step would close the residual "the log forked
-  or rewrote history after we submitted" gap. Today the trust posture
-  for inclusion proofs is: trust the log operator's submit-time
-  response, persisted locally for future re-verification. Merkle
-  inclusion-proof verification is the next-release item on this
-  surface.
+  When the caller additionally supplies the log operator's public
+  key (`rekor_log_pubkey_pem=` or `rekor_log_pubkey_path=`), the
+  substrate re-fetches the entry and verifies the RFC 6962 Merkle
+  inclusion proof against the log's signed checkpoint — closing the
+  residual "the log forked or rewrote history after we submitted"
+  gap on the submit and `refresh_unsigned()` paths. Without an
+  explicit pubkey, the substrate trusts the log operator's
+  submit-time response (persisted locally for future
+  re-verification); the operator who needs strict transparency must
+  opt in. Restore-time re-verification of stored proofs is on the
+  v0.4 list (it needs the `rekor_inclusions` sidecar round-tripped
+  through `claims.toml`).
 - **DOIs are HEAD-checked, not content-verified.** External references
   resolve to a 200 response; the substrate does not parse, sign, or
   archive the referenced content. A DOI that resolves today may resolve
