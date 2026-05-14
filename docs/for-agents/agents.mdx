@@ -79,11 +79,17 @@ No `mareforma init` required.
 | `rekor_url` | `str \| None` | `None` | Sigstore-Rekor transparency log endpoint. When set, every signed claim is submitted at INSERT time. Use `mareforma.signing.PUBLIC_REKOR_URL` for the public instance. |
 | `require_rekor` | `bool` | `False` | Raise `SigningError` if `rekor_url` is unset or initial submission fails. |
 | `trust_insecure_rekor` | `bool` | `False` | Skip SSRF validation on `rekor_url` (only for private Rekor instances on internal networks). |
+| `rekor_log_pubkey_pem` | `bytes \| None` | `None` | PEM-encoded Rekor log operator public key. Opts into RFC 6962 Merkle inclusion-proof verification on every submit + `refresh_unsigned()`. Persists to `.mareforma/rekor_log_pubkey.pem` as a TOFU pin; silent rotation refused. Mutually exclusive with `rekor_log_pubkey_path`. |
+| `rekor_log_pubkey_path` | `str \| Path \| None` | `None` | Path to a PEM file with the Rekor log operator public key. Equivalent to passing the file bytes via `rekor_log_pubkey_pem`. |
 
 ```python
 graph = mareforma.open()                                              # cwd, unsigned if no key
 graph = mareforma.open(require_signed=True)                           # fail-fast if no key
 graph = mareforma.open(rekor_url=mareforma.signing.PUBLIC_REKOR_URL)  # public transparency log
+graph = mareforma.open(                                               # + Merkle inclusion-proof verification
+    rekor_url=mareforma.signing.PUBLIC_REKOR_URL,
+    rekor_log_pubkey_path="/path/to/rekor-log-pubkey.pem",
+)
 with mareforma.open() as graph: ...                                   # auto-closes
 ```
 
@@ -249,6 +255,36 @@ from mareforma.signing import PUBLIC_REKOR_URL
 with mareforma.open(rekor_url=PUBLIC_REKOR_URL, require_signed=True) as graph:
     claim_id = graph.assert_claim("...", classification="ANALYTICAL")
     # claim is signed + logged to Rekor before this line returns
+```
+
+**RFC 6962 inclusion-proof verification (opt-in).** Submit-time
+response binding alone proves "Rekor returned an entry that records
+OUR hash + OUR signature." It does NOT prove "the log committed our
+entry and didn't tamper with it afterward." Closing that gap needs
+the log operator's public key — pass `rekor_log_pubkey_pem` (or
+`rekor_log_pubkey_path`) to `mareforma.open()` and the substrate
+re-fetches every submitted entry, walks the Merkle audit path from
+the leaf hash to the log's signed checkpoint, and refuses to set
+`transparency_logged=1` on verification failure. The same
+verification fires on `refresh_unsigned()`'s re-submit path. The
+supplied PEM persists to `.mareforma/rekor_log_pubkey.pem` as a
+trust-on-first-use pin; subsequent opens refuse silent rotation
+(delete the pin file to intentionally rotate). Verification failure
+raises `RekorInclusionError` with a stable `.reason` token
+(`missing_proof`, `malformed_proof`, `merkle_root_mismatch`,
+`checkpoint_bad_sig`, `checkpoint_root_mismatch`, `unsupported_key`,
+…) so callers pattern-match on the failure without parsing English.
+
+```python
+log_pem = open("/path/to/rekor-log-pubkey.pem", "rb").read()
+
+with mareforma.open(
+    rekor_url=PUBLIC_REKOR_URL,
+    rekor_log_pubkey_pem=log_pem,
+    require_signed=True,
+) as graph:
+    claim_id = graph.assert_claim("verified inclusion", classification="ANALYTICAL")
+    # claim is signed + logged + Merkle-proof-verified before this returns
 ```
 
 <Warning>

@@ -30,16 +30,21 @@ with mareforma.open() as graph:
 | `rekor_url` | `str \| None` | `None` | Sigstore-Rekor transparency log endpoint. When set, every signed claim is submitted at INSERT time. Use `mareforma.signing.PUBLIC_REKOR_URL` for the public instance. |
 | `require_rekor` | `bool` | `False` | Raise `SigningError` if `rekor_url` is unset or initial submission fails. |
 | `trust_insecure_rekor` | `bool` | `False` | Skip SSRF validation on `rekor_url` (only for private Rekor instances on internal networks). |
+| `rekor_log_pubkey_pem` | `bytes \| None` | `None` | PEM-encoded Rekor log operator public key. Opts the session into RFC 6962 Merkle inclusion-proof verification: every signed-claim submit and every `refresh_unsigned()` re-fetches the entry and cryptographically verifies the audit path against the log's signed checkpoint. Verification failure refuses to mark `transparency_logged=1`. Supports Ed25519 + ECDSA secp256r1; other curves raise `RekorInclusionError(reason="unsupported_key")`. Mutually exclusive with `rekor_log_pubkey_path`. The supplied PEM persists to `.mareforma/rekor_log_pubkey.pem` as a TOFU pin. |
+| `rekor_log_pubkey_path` | `str \| Path \| None` | `None` | Filesystem path to a PEM file holding the Rekor log operator public key. Read once at open() time; equivalent to passing the bytes via `rekor_log_pubkey_pem`. Mutually exclusive with `rekor_log_pubkey_pem`. |
 
 **Returns** `EpistemicGraph`
 
 **Raises**
 - `DatabaseError` — if the database cannot be opened or the schema cannot migrate
 - `KeyNotFoundError` — if `require_signed=True` and no key is found
-- `SigningError` — if `require_rekor=True` and the Rekor URL is unset or unreachable
+- `SigningError` — if `require_rekor=True` and the Rekor URL is unset or unreachable; or if the supplied Rekor log pubkey conflicts with the TOFU pin on `.mareforma/rekor_log_pubkey.pem`
+- `ValueError` — if both `rekor_log_pubkey_pem` and `rekor_log_pubkey_path` are supplied (mutually exclusive)
 
 First-time setup: run `mareforma bootstrap` once to generate an Ed25519 keypair at
 `~/.config/mareforma/key`. After that, every `assert_claim` auto-signs.
+
+**TOFU pin behavior.** When `rekor_log_pubkey_pem` (or `rekor_log_pubkey_path`) is supplied, the canonical DER bytes of the public key are persisted to `.mareforma/rekor_log_pubkey.pem`. Every subsequent `mareforma.open()` on the same project compares the supplied key against the pinned PEM and refuses silent rotation — you must delete the pin file to intentionally rotate. The first-pin write uses `O_CREAT|O_EXCL`, so two concurrent open() calls with different keys cannot race past existence checks and silently overwrite each other; the loser raises `SigningError("...pinned to a different key by a concurrent ... call")`.
 
 ---
 
@@ -656,12 +661,18 @@ from mareforma.db import (
     DatabaseError, ClaimNotFoundError, SignedClaimImmutableError,
     IdempotencyConflictError, IllegalStateTransitionError,
     ChainIntegrityError, CycleDetectedError, VerdictIssuerError,
-    EvidenceCitationError,
+    EvidenceCitationError, InvalidValidationEnvelopeError,
 )
-from mareforma.signing import KeyNotFoundError, SigningError, InvalidEnvelopeError
+from mareforma.signing import (
+    KeyNotFoundError, SigningError, InvalidEnvelopeError,
+    RekorInclusionError,
+)
 from mareforma.validators import InvalidIdentityError, ValidatorAlreadyEnrolledError
 from mareforma.export_bundle import BundleVerificationError
 ```
+
+Every exception is also re-exported at the top level (since v0.3.0) so
+catching looks like `from mareforma import RekorInclusionError`.
 
 | Exception | Module | Raised by | Meaning |
 |---|---|---|---|
@@ -673,15 +684,19 @@ from mareforma.export_bundle import BundleVerificationError
 | `ChainIntegrityError` | `mareforma.db` | DB write | `prev_hash` append-only chain check failed |
 | `CycleDetectedError` | `mareforma.db` | `assert_claim()`, `update_claim()` | `supports[]` would form a cycle |
 | `VerdictIssuerError` | `mareforma.db` | `record_replication_verdict()`, `record_contradiction_verdict()` | No signer loaded, signer not enrolled (chain walk fails), invalid method enum, referenced claim missing, or self-contradiction (`member == other`) |
-| `EvidenceCitationError` | `mareforma.db` | `validate()` with `evidence_seen=...` | A cited entry isn't a strict-v4 UUID, points to a non-existent claim, or post-dates `validated_at` |
+| `EvidenceCitationError` | `mareforma.db` | `validate()` with `evidence_seen=...` | A cited entry isn't a strict-v4 UUID, points to a non-existent claim, post-dates `validated_at`, or disagrees with the envelope's `evidence_seen` field |
+| `InvalidValidationEnvelopeError` | `mareforma.db` | `db.validate_claim()` | Validation envelope is structurally / cryptographically invalid: malformed JSON, wrong `payloadType`, signer not enrolled, signature does not verify against the claimed signer, or payload binds a different `claim_id` / `validator_keyid` / timestamp than the row being promoted |
 | `KeyNotFoundError` | `mareforma.signing` | `open(require_signed=True)` | No private key at `key_path` |
-| `SigningError` | `mareforma.signing` | Rekor submission | Rekor URL unset / unreachable / invalid |
+| `SigningError` | `mareforma.signing` | Rekor submission, TOFU pin conflict | Rekor URL unset / unreachable / invalid; or supplied log pubkey conflicts with the pinned key on `.mareforma/rekor_log_pubkey.pem` |
 | `InvalidEnvelopeError` | `mareforma.signing` | `verify_envelope`, `claim_predicate_from_envelope` | Envelope payload is malformed, wrong `payloadType`, or subject and predicate disagree on `claim_id` / text digest |
+| `RekorInclusionError` | `mareforma.signing` | `verify_rekor_inclusion`, `verify_rekor_checkpoint`, `fetch_inclusion_proof`, `fetch_log_pubkey`, and the submit + refresh paths when `rekor_log_pubkey_pem` is set | RFC 6962 inclusion proof failed cryptographic verification. Stable `.reason` token: `missing_proof`, `malformed_proof`, `bad_root_hex`, `bad_proof_hex`, `merkle_root_mismatch`, `checkpoint_missing`, `checkpoint_malformed`, `checkpoint_root_mismatch`, `checkpoint_unsigned`, `checkpoint_bad_sig`, `unsupported_key`. Callers pattern-match on the reason without parsing English. |
 | `InvalidIdentityError` | `mareforma.validators` | `enroll_validator()` | Identity contains rejected characters |
 | `ValidatorAlreadyEnrolledError` | `mareforma.validators` | `enroll_validator()` | Validator row already exists |
 | `BundleVerificationError` | `mareforma.export_bundle` | `mareforma verify` | Signed export bundle failed DSSE or per-claim subject digest |
 
-Only the top-level helpers are re-exported from `mareforma` directly:
-`open`, `schema`, `safe_for_llm`, `sanitize_for_llm`, `wrap_untrusted`.
+Every exception is re-exported at the top level so a caller can write
+`from mareforma import RekorInclusionError` without remembering the
+submodule. The submodule paths in the table tell you where the source
+lives.
 
 Schema-mismatch message (raised when `open_db()` finds a graph.db whose `user_version` differs from the substrate's `_SCHEMA_VERSION`): `"graph.db has user_version=N but this mareforma expects user_version=M. The dev branch does not migrate schemas. Delete .mareforma/graph.db to start fresh; claims.toml is a human-readable record of the prior state."`
