@@ -98,7 +98,9 @@ graph.assert_claim(text, classification="ANALYTICAL", supports=[...])
 graph.query(text, min_support="REPLICATED")
 graph.validate(claim_id)          # human promotes to ESTABLISHED
 graph.refresh_unresolved()        # retry DOI verification for offline claims
+graph.refresh_all_dois()          # force-re-check every DOI (retraction drift)
 graph.refresh_unsigned()          # retry Rekor transparency log submission
+graph.find_dangling_supports()    # audit UUID refs that point nowhere
 graph.get_tools(generated_by="agent/model-a/lab_a")  # framework-ready callables
 ```
 
@@ -171,7 +173,10 @@ Honest scope, so the design choices land in the right frame:
 - **DOIs are HEAD-checked, not content-verified.** External references
   resolve to a 200 response; the substrate does not parse, sign, or
   archive the referenced content. A DOI that resolves today may resolve
-  to different content tomorrow.
+  to different content tomorrow. The positive cache holds resolved DOIs
+  for 30 days — operators worried about retraction drift can call
+  `graph.refresh_all_dois()` to force-re-check every DOI against the
+  registry and surface the diff.
 - **No semantic deduplication.** Two claims with different `text` but
   identical meaning are distinct rows. Convergence detection runs on
   `supports[]` topology, not on text similarity.
@@ -181,8 +186,8 @@ Honest scope, so the design choices land in the right frame:
   another project, a not-yet-asserted upstream, or a DOI. REPLICATED
   detection requires the referenced ESTABLISHED claim to actually
   exist + be open, so a dangling reference cannot trigger spurious
-  promotion. But operators auditing a graph for integrity should run
-  a separate query for dangling entries; a v0.4 helper is planned.
+  promotion. Operators auditing a graph for integrity can call
+  `graph.find_dangling_supports()` to surface every such hanging arrow.
 - **Contradiction is per-claim, not propagated downstream.** A signed
   contradiction marks the older of two referenced claims; claims that
   cited the now-invalidated one via `supports[]` are unaffected.

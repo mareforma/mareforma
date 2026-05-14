@@ -168,6 +168,36 @@ this key" — it does **not** re-attest the per-claim signatures. To
 verify per-claim signatures end-to-end, use the `claims.toml` backup,
 which preserves each row's `signature_bundle` field.
 
+### Canonicalization — RFC 8785-shaped, not RFC 8785-strict
+
+`canonical_statement` (in [`mareforma/_canonical.py`](mareforma/_canonical.py))
+normalizes the body to NFC, sorts keys, drops whitespace, and rejects
+NaN/Infinity (`json.dumps(sort_keys=True, separators=(",", ":"),
+ensure_ascii=False, allow_nan=False)`). That is deterministic and
+sufficient for mareforma-internal signing — every signature is produced
+and verified by the same canonicalizer.
+
+It is **not** RFC 8785 (JCS) strict. RFC 8785 mandates ECMAScript-style
+number serialization (e.g. `1.0` renders as `1`, specific exponential-
+form rules); Python's `json.dumps` does not follow those rules. The
+claim envelope today contains no floats — `text` is a string, the
+EvidenceVector domains are signed ints in `{-2,-1,0,+1}`, the upgrade
+flags are bools, timestamps are ISO-8601 strings — so the current
+on-wire form is byte-identical to what an RFC 8785 verifier would
+produce. The day mareforma adds a float-valued field (a confidence
+score, a p-value, a duration), a cross-language verifier implementing
+RFC 8785 strictly may produce different bytes for the same logical
+payload and refuse to verify mareforma's signatures.
+
+For cross-tool verification today, the in-toto Statement v1 subject
+digest (`sha256` over `text`) is canonical without depending on number
+serialization — recompute the digest, compare to the `subject[0].digest.sha256`
+field in the envelope, and verify the DSSE signature over the envelope
+bytes as stored. The subject digest is the same bytes any in-toto
+verifier (`in-toto-golang`, the Sigstore stack) will produce. Future
+schema work that introduces floats should ship the RFC 8785 tightening
+in the same release.
+
 ## Storage substrate
 
 SQLite, WAL mode, `check_same_thread=False`, `PRAGMA foreign_keys = ON`,

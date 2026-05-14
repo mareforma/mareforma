@@ -34,7 +34,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -1043,6 +1043,7 @@ def add_claim(
     signer: "object | None" = None,
     rekor_url: str | None = None,
     require_rekor: bool = False,
+    on_convergence_error: "Callable[[Exception], None] | None" = None,
 ) -> str:
     """Insert a new claim and return its claim_id.
 
@@ -1458,6 +1459,7 @@ def add_claim(
     if not unresolved and transparency_logged == 1:
         _maybe_update_replicated(
             conn, claim_id, supports or [], generated_by, artifact_hash,
+            on_error=on_convergence_error,
         )
 
     _backup_claims_toml(conn, root)
@@ -1588,7 +1590,8 @@ def _maybe_update_replicated(
     supports: list[str],
     generated_by: str,
     artifact_hash: str | None = None,
-) -> None:
+    on_error: "Callable[[Exception], None] | None" = None,
+) -> bool:
     """Promote claims to REPLICATED when convergence is detected.
 
     Convergence: ≥2 claims share the same upstream claim_id in their
@@ -1597,12 +1600,18 @@ def _maybe_update_replicated(
 
     Called immediately after a successful INSERT in add_claim().
     Failures are swallowed — convergence detection must not crash writes.
+
+    Returns ``True`` if detection ran cleanly, ``False`` if a SQLite
+    error was swallowed. When ``on_error`` is supplied, the exception is
+    handed to that callback before the WARNING is logged — caller can
+    increment a counter or surface the failure however it sees fit.
     """
     try:
         _maybe_update_replicated_unlocked(
             conn, new_claim_id, supports, generated_by, artifact_hash,
         )
         conn.commit()
+        return True
     except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
         # Convergence detection is best-effort — never crash a write.
         # A trigger-raised IntegrityError here would mean a state transition
@@ -1610,12 +1619,80 @@ def _maybe_update_replicated(
         # the underlying invariant remains intact. Surface a WARNING so
         # silently-swallowed failures are debuggable — without it, a
         # mis-configured trigger or contention pattern would let claims sit
-        # at PRELIMINARY with no record of why.
+        # at PRELIMINARY with no record of why. EpistemicGraph wires
+        # ``on_error`` to a counter so callers can detect drift without
+        # parsing log records.
+        if on_error is not None:
+            try:
+                on_error(exc)
+            except Exception:  # pragma: no cover - defensive
+                pass
         import logging
         logging.getLogger("mareforma").warning(
             "Convergence detection swallowed %s for claim %s: %s",
             type(exc).__name__, new_claim_id, exc,
         )
+        return False
+
+
+def find_dangling_supports(conn: sqlite3.Connection) -> list[dict]:
+    """Return UUID-shaped ``supports[]`` entries that point to no local claim.
+
+    A ``supports`` entry can be:
+
+      * a UUID-shaped string — interpreted by the substrate as a claim_id;
+      * a DOI like ``10.1234/abc`` — an external reference;
+      * any other free-form string — also treated as external.
+
+    Only UUID-shaped entries can plausibly point at a local claim and so
+    only those are checked. A dangling reference is not necessarily a
+    bug — it could legitimately reference a claim from another project,
+    a not-yet-asserted upstream, or a DOI mistyped as a UUID. But
+    operators auditing graph integrity want a single query that surfaces
+    every such hanging arrow, so they can decide case by case.
+
+    Returns a list of ``{"claim_id", "dangling_ref"}`` dicts, sorted by
+    ``claim_id`` then ``dangling_ref`` for deterministic output. Returns
+    an empty list when nothing is dangling.
+
+    REPLICATED detection already refuses to promote on a dangling
+    reference (it requires the referenced ESTABLISHED claim to actually
+    exist and be open), so a dangling entry cannot trigger spurious
+    promotion. This helper is for auditing, not enforcement.
+    """
+    rows = conn.execute(
+        "SELECT c.claim_id, j.value AS ref "
+        "FROM claims c, json_each(c.supports_json) j"
+    ).fetchall()
+
+    if not rows:
+        return []
+
+    candidates = [
+        (row["claim_id"], row["ref"])
+        for row in rows
+        if isinstance(row["ref"], str) and _CLAIM_ID_RE.match(row["ref"])
+    ]
+    if not candidates:
+        return []
+
+    refs = sorted({ref for (_cid, ref) in candidates})
+    placeholders = ",".join("?" * len(refs))
+    existing = {
+        r["claim_id"]
+        for r in conn.execute(
+            f"SELECT claim_id FROM claims WHERE claim_id IN ({placeholders})",
+            refs,
+        ).fetchall()
+    }
+
+    dangling = [
+        {"claim_id": cid, "dangling_ref": ref}
+        for (cid, ref) in candidates
+        if ref not in existing
+    ]
+    dangling.sort(key=lambda r: (r["claim_id"], r["dangling_ref"]))
+    return dangling
 
 
 def _extract_validation_signer_keyid(validation_signature: str) -> str | None:

@@ -93,6 +93,12 @@ class EpistemicGraph:
         self._rekor_url = rekor_url
         self._require_rekor = require_rekor
         self._closed = False
+        # Convergence detection swallows SQLite errors so a misconfigured
+        # trigger or contention pattern cannot crash a write. A WARNING is
+        # logged each time, but operators not watching logs would never know
+        # promotions stopped firing. Track the count here so it can be
+        # asserted in tests and surfaced in dashboards.
+        self._convergence_errors = 0
 
         # Bootstrap-of-trust: the first key opened against a fresh project's
         # graph.db auto-enrolls as the root validator. This is silent and
@@ -253,6 +259,9 @@ class EpistemicGraph:
                 f"got {type(evidence).__name__}"
             )
 
+        def _bump_convergence_errors(_exc: Exception) -> None:
+            self._convergence_errors += 1
+
         return _db.add_claim(
             self._conn,
             self._root,
@@ -271,6 +280,7 @@ class EpistemicGraph:
             signer=self._signer,
             rekor_url=self._rekor_url,
             require_rekor=self._require_rekor,
+            on_convergence_error=_bump_convergence_errors,
         )
 
     def query(
@@ -820,6 +830,114 @@ class EpistemicGraph:
             "still_unresolved": still_unresolved,
         }
 
+    def refresh_all_dois(self) -> dict[str, int]:
+        """Force-re-resolve every DOI in the graph, bypassing the positive cache.
+
+        Walks every claim's ``supports[]`` and ``contradicts[]``, dedupes the
+        DOIs, and re-runs the HEAD check against Crossref + DataCite,
+        bypassing the 30-day positive cache. The ``doi_cache`` table is
+        overwritten with fresh results, so subsequent ``assert_claim``
+        calls see the new state.
+
+        Use when you suspect a referenced DOI has been retracted or its
+        registry state has changed. ``refresh_unresolved`` only retries
+        claims that were flagged at insert time; this method covers the
+        case where a previously-resolved DOI has since failed.
+
+        This method does **not** mutate ``support_level`` or the per-claim
+        ``unresolved`` flag — re-running a HEAD check is not strong enough
+        evidence to demote across the trust ladder, and the no-back-
+        transitions invariant is intentional. To find claims affected by
+        a newly-failing DOI, run::
+
+            failed = [r["doi"] for r in conn.execute(
+                "SELECT doi FROM doi_cache WHERE resolved = 0"
+            )]
+
+        and search ``supports_json``/``contradicts_json`` for those values.
+
+        Returns
+        -------
+        dict
+            ``{"checked", "still_resolved", "now_unresolved",
+            "newly_failed"}`` — int counts. ``newly_failed`` is the number
+            of DOIs whose cache state flipped from resolved to unresolved
+            (the drift signal the operator usually wants).
+        """
+        self._check_open()
+
+        all_dois: set[str] = set()
+        for row in self._conn.execute(
+            "SELECT supports_json, contradicts_json FROM claims"
+        ).fetchall():
+            try:
+                supports = json.loads(row["supports_json"] or "[]")
+                contradicts = json.loads(row["contradicts_json"] or "[]")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            all_dois.update(_doi.extract_dois(supports + contradicts))
+
+        if not all_dois:
+            return {
+                "checked": 0,
+                "still_resolved": 0,
+                "now_unresolved": 0,
+                "newly_failed": 0,
+            }
+
+        # Snapshot the prior cache state for every DOI we're about to refresh,
+        # so we can report which entries flipped from resolved → unresolved.
+        placeholders = ",".join("?" * len(all_dois))
+        prior = {
+            r["doi"]: bool(r["resolved"])
+            for r in self._conn.execute(
+                f"SELECT doi, resolved FROM doi_cache "
+                f"WHERE doi IN ({placeholders})",
+                list(all_dois),
+            ).fetchall()
+        }
+
+        results = _doi.resolve_dois_with_cache(
+            self._conn, list(all_dois), force=True,
+        )
+
+        still_resolved = sum(1 for ok in results.values() if ok)
+        now_unresolved = sum(1 for ok in results.values() if not ok)
+        newly_failed = sum(
+            1
+            for d, ok in results.items()
+            if (not ok) and prior.get(d, False) is True
+        )
+
+        return {
+            "checked": len(results),
+            "still_resolved": still_resolved,
+            "now_unresolved": now_unresolved,
+            "newly_failed": newly_failed,
+        }
+
+    def find_dangling_supports(self) -> list[dict]:
+        """Return UUID-shaped ``supports[]`` entries that point nowhere.
+
+        A "dangling" reference is a UUID-shaped entry in some claim's
+        ``supports[]`` whose claim_id does not exist in this graph. DOIs
+        and other free-form strings are external references and are NOT
+        flagged — only UUID-shaped strings that look like local claim_ids
+        but resolve to no row.
+
+        Returns ``[{"claim_id", "dangling_ref"}, ...]`` sorted
+        deterministically. Empty list when the graph is clean.
+
+        The substrate accepts dangling references at assertion time by
+        design — a ``supports`` entry could legitimately reference a
+        claim from another project or a not-yet-asserted upstream. This
+        helper is for auditing integrity, not for blocking writes.
+        REPLICATED detection already refuses to promote on a dangling
+        reference, so a hanging arrow cannot trigger spurious promotion.
+        """
+        self._check_open()
+        return _db.find_dangling_supports(self._conn)
+
     def refresh_unsigned(self) -> dict[str, int]:
         """Retry Rekor submission for every signed-but-not-logged claim.
 
@@ -1089,6 +1207,27 @@ class EpistemicGraph:
             )
 
         return [query_graph, assert_finding]
+
+    # ------------------------------------------------------------------
+    # Observability
+    # ------------------------------------------------------------------
+
+    @property
+    def convergence_errors(self) -> int:
+        """Number of swallowed SQLite errors during convergence detection.
+
+        Convergence detection (PRELIMINARY → REPLICATED promotion) runs
+        after a successful claim INSERT and swallows SQLite errors so a
+        misconfigured trigger or contention pattern can never crash a
+        write. A WARNING is logged each time; this counter mirrors that
+        log so the failure is observable without log parsing.
+
+        Resets to zero each time the graph is re-opened. A non-zero value
+        means at least one assertion since open completed but its
+        promotion check did not run cleanly; inspect the warnings in the
+        ``mareforma`` logger for details.
+        """
+        return self._convergence_errors
 
     # ------------------------------------------------------------------
     # Lifecycle

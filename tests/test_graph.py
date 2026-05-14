@@ -775,3 +775,211 @@ class TestDoiResolution:
         assert result["checked"] == 2
         assert result["resolved"] == 1
         assert result["still_unresolved"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Convergence-error counter
+# ---------------------------------------------------------------------------
+
+
+class TestConvergenceErrorCounter:
+    """`EpistemicGraph.convergence_errors` mirrors swallowed SQLite errors
+    from `_maybe_update_replicated` so silent failures are observable.
+    """
+
+    def test_counter_starts_at_zero(self, tmp_path):
+        with mareforma.open(tmp_path) as graph:
+            assert graph.convergence_errors == 0
+
+    def test_counter_stays_zero_on_clean_assertions(self, tmp_path):
+        """Happy-path writes do not increment the counter."""
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            upstream = graph.assert_claim(
+                "anchor", generated_by="seed", seed=True,
+            )
+            graph.assert_claim(
+                "child A", generated_by="lab_a", supports=[upstream],
+            )
+            graph.assert_claim(
+                "child B", generated_by="lab_b", supports=[upstream],
+            )
+            assert graph.convergence_errors == 0
+
+    def test_counter_increments_when_detection_swallows_error(
+        self, tmp_path, monkeypatch,
+    ):
+        """Force `_maybe_update_replicated_unlocked` to raise; counter ticks."""
+        from mareforma import db as _db
+
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            upstream = graph.assert_claim(
+                "anchor", generated_by="seed", seed=True,
+            )
+
+            # Patch after the seed lands so the seed itself runs cleanly.
+            def _boom(*_args, **_kwargs):
+                raise sqlite3.OperationalError("forced for test")
+
+            monkeypatch.setattr(_db, "_maybe_update_replicated_unlocked", _boom)
+
+            # This child has a non-empty supports[] and no DOIs, so
+            # convergence detection runs and hits the monkeypatched boom.
+            graph.assert_claim(
+                "child", generated_by="lab_a", supports=[upstream],
+            )
+            assert graph.convergence_errors >= 1
+
+    def test_counter_is_read_only(self, tmp_path):
+        """`convergence_errors` is exposed as a property — direct writes
+        raise AttributeError so callers cannot manufacture a clean signal."""
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            with pytest.raises(AttributeError):
+                graph.convergence_errors = 99  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# find_dangling_supports()
+# ---------------------------------------------------------------------------
+
+
+class TestFindDanglingSupports:
+    """`EpistemicGraph.find_dangling_supports()` surfaces UUID-shaped
+    ``supports[]`` entries that point to no local claim.
+    """
+
+    def test_clean_graph_returns_empty(self, tmp_path):
+        with mareforma.open(tmp_path) as graph:
+            anchor = graph.assert_claim("anchor", generated_by="agent")
+            graph.assert_claim(
+                "child", generated_by="agent", supports=[anchor],
+            )
+            assert graph.find_dangling_supports() == []
+
+    def test_phantom_uuid_surfaced(self, tmp_path):
+        """The reviewer's exact counter-example: a UUID that points nowhere."""
+        phantom = "12345678-1234-1234-1234-123456789012"
+        with mareforma.open(tmp_path) as graph:
+            cid = graph.assert_claim(
+                "phantom-citer", generated_by="agent", supports=[phantom],
+            )
+            result = graph.find_dangling_supports()
+            assert result == [{"claim_id": cid, "dangling_ref": phantom}]
+
+    def test_dois_are_not_flagged(self, tmp_path, monkeypatch):
+        """DOIs in supports[] are external references and never dangling."""
+        # Force DOI resolution to succeed without network.
+        from mareforma import doi_resolver
+        monkeypatch.setattr(
+            doi_resolver, "resolve_dois_with_cache",
+            lambda conn, dois: {d: True for d in dois},
+        )
+
+        with mareforma.open(tmp_path) as graph:
+            graph.assert_claim(
+                "doi-citer",
+                generated_by="agent",
+                supports=["10.1234/example"],
+            )
+            assert graph.find_dangling_supports() == []
+
+    def test_mixed_dangling_and_valid_surfaces_only_dangling(self, tmp_path):
+        """Real anchor + phantom UUID: only the phantom shows up."""
+        phantom = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        with mareforma.open(tmp_path) as graph:
+            anchor = graph.assert_claim("anchor", generated_by="agent")
+            cid = graph.assert_claim(
+                "mixed-citer",
+                generated_by="agent",
+                supports=[anchor, phantom],
+            )
+            result = graph.find_dangling_supports()
+            assert result == [{"claim_id": cid, "dangling_ref": phantom}]
+
+    def test_multiple_dangling_sorted_deterministically(self, tmp_path):
+        """Output ordered by (claim_id, dangling_ref) for stable audits."""
+        p1 = "11111111-1111-1111-1111-111111111111"
+        p2 = "22222222-2222-2222-2222-222222222222"
+        with mareforma.open(tmp_path) as graph:
+            graph.assert_claim(
+                "a", generated_by="agent", supports=[p2, p1],
+            )
+            result = graph.find_dangling_supports()
+            assert len(result) == 2
+            assert [r["dangling_ref"] for r in result] == [p1, p2]
+
+
+# ---------------------------------------------------------------------------
+# refresh_all_dois()
+# ---------------------------------------------------------------------------
+
+
+class TestRefreshAllDois:
+    """`EpistemicGraph.refresh_all_dois()` force-re-resolves every DOI,
+    bypassing the positive cache so retraction drift is observable."""
+
+    def test_empty_graph_reports_zero(self, tmp_path):
+        with mareforma.open(tmp_path) as graph:
+            assert graph.refresh_all_dois() == {
+                "checked": 0,
+                "still_resolved": 0,
+                "now_unresolved": 0,
+                "newly_failed": 0,
+            }
+
+    def test_graph_with_no_dois_reports_zero(self, tmp_path):
+        """Claims with only UUID supports[] entries → no DOIs to refresh."""
+        with mareforma.open(tmp_path) as graph:
+            anchor = graph.assert_claim("anchor", generated_by="agent")
+            graph.assert_claim(
+                "child", generated_by="agent", supports=[anchor],
+            )
+            assert graph.refresh_all_dois()["checked"] == 0
+
+    def test_newly_failed_detects_retraction(self, tmp_path, monkeypatch):
+        """A DOI that resolved at assert time but fails now is in newly_failed."""
+        from mareforma import doi_resolver
+
+        # First call (during assert_claim): DOI resolves cleanly.
+        # Second call (during refresh_all_dois force=True): DOI fails.
+        call_state = {"count": 0}
+
+        def _flaky_resolve(_doi_str, timeout=None):
+            call_state["count"] += 1
+            if call_state["count"] == 1:
+                return (True, "crossref", False)
+            return (False, None, False)
+
+        monkeypatch.setattr(doi_resolver, "resolve_doi", _flaky_resolve)
+
+        with mareforma.open(tmp_path) as graph:
+            graph.assert_claim(
+                "cites-doi",
+                generated_by="agent",
+                supports=["10.1234/will-be-retracted"],
+            )
+            result = graph.refresh_all_dois()
+            assert result["checked"] == 1
+            assert result["now_unresolved"] == 1
+            assert result["newly_failed"] == 1
+            assert result["still_resolved"] == 0
+
+    def test_still_resolved_when_doi_remains_valid(self, tmp_path, monkeypatch):
+        """A DOI that resolves both times → still_resolved=1, newly_failed=0."""
+        from mareforma import doi_resolver
+        monkeypatch.setattr(
+            doi_resolver, "resolve_doi",
+            lambda *_a, **_k: (True, "crossref", False),
+        )
+
+        with mareforma.open(tmp_path) as graph:
+            graph.assert_claim(
+                "cites-doi",
+                generated_by="agent",
+                supports=["10.1234/still-good"],
+            )
+            result = graph.refresh_all_dois()
+            assert result["still_resolved"] == 1
+            assert result["newly_failed"] == 0
