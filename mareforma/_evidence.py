@@ -13,7 +13,7 @@ predicate. The vector is *part of the signature* — values cannot be
 retroactively changed without producing a different statement_cid and
 a new signature.
 
-In v0.3.0 OSS the EvidenceVector is constructed by the asserter (the
+In the OSS substrate the EvidenceVector is constructed by the asserter (the
 agent or human producing the claim). Future platform-layer evidence
 assistants may help authors fill it; the data model is the same.
 

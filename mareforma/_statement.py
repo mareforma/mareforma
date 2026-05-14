@@ -78,8 +78,8 @@ def build_statement(
 
     The returned dict is ready to be canonicalized + signed. Field
     selection mirrors :data:`mareforma.signing.SIGNED_FIELDS` plus the
-    new ``evidence`` block, so the signature binds the same claim
-    fields it did pre-v0.3.0 + the GRADE vector.
+    ``evidence`` block, so the signature binds the canonical claim
+    fields plus the GRADE vector in one byte sequence.
 
     Parameters
     ----------

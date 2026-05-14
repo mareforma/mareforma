@@ -684,4 +684,4 @@ from mareforma.export_bundle import BundleVerificationError
 Only the top-level helpers are re-exported from `mareforma` directly:
 `open`, `schema`, `safe_for_llm`, `sanitize_for_llm`, `wrap_untrusted`.
 
-Schema-mismatch message (raised when `open_db()` cannot migrate the file in place): `"graph.db schema vN is not compatible with mareforma v0.3.0. Delete .mareforma/graph.db to start fresh — your claims are backed up in claims.toml."`
+Schema-mismatch message (raised when `open_db()` finds a graph.db whose `user_version` differs from the substrate's `_SCHEMA_VERSION`): `"graph.db has user_version=N but this mareforma expects user_version=M. The dev branch does not migrate schemas. Delete .mareforma/graph.db to start fresh; claims.toml is a human-readable record of the prior state."`

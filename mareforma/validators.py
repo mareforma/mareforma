@@ -13,7 +13,7 @@ The first key opened against a fresh project ``graph.db`` auto-enrolls
 as the root validator with a self-signed enrollment envelope.
 Subsequent validators are added by an already-enrolled validator via
 ``enroll_validator()`` or the ``mareforma validator add`` CLI. Removal
-is intentionally not supported in v0.3.0 — append-only validator
+is intentionally not supported currently — append-only validator
 history mirrors the append-only claim history.
 
 Enrollment payload
@@ -472,7 +472,7 @@ def auto_enroll_root(
     # mareforma.open → user (1 → 2 → 3 → 4).
     warnings.warn(
         f"Enrolled key {keyid[:12]}… ({identity!r}) as root validator on "
-        f"this project. This is silent and irrevocable in v0.3.0 — if you "
+        f"this project. This is silent and irrevocable currently — if you "
         "opened the graph with the wrong key, fix it before any further "
         "validate() calls.",
         stacklevel=4,

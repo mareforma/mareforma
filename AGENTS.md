@@ -666,12 +666,12 @@ anchor by design.
 **Local-trust scope.** The chain anchors at a self-signed row inside
 the project's own `graph.db`. A verifier who trusts that file's
 integrity can verify; a verifier who suspects the file is tampered
-has no external anchor in v0.3.0 (no cross-org PKI, no notary
+has no external anchor currently (no cross-org PKI, no notary
 endorsement). Mareforma is a local epistemic graph; this section
 gates *who can validate within the project*, not who can vouch for
 the project to the outside world.
 
-**Removal is not supported in v0.3.0.** Validators are append-only,
+**Removal is not supported currently.** Validators are append-only,
 mirroring claim history. If a key is compromised, rotate the bootstrap
 key and re-bless validators under a fresh root.
 
@@ -831,7 +831,7 @@ mareforma restore backups/state.toml  # explicit source
 Restore is **fresh-only** — it refuses to run if the target
 `graph.db` already contains claims. Merge semantics are out of scope
 (status drift, supports[] divergence, and validator chain conflicts
-have no clean answers in v0.3.0). Wipe `graph.db` first if you really
+have no clean answers currently). Wipe `graph.db` first if you really
 mean to overwrite.
 
 Every signature is verified before any row is inserted: enrollment

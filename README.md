@@ -220,8 +220,8 @@ Honest scope, so the design choices land in the right frame:
   rating (high/moderate/low/very-low), does not gate upgrade flags on
   study design (RCT vs. observational), and does not integrate the
   vector into the `PRELIMINARY → REPLICATED → ESTABLISHED` ladder.
-  Full GRADE-style certainty derivation is out of scope for v0.3.0
-  and on the v0.4 backlog.
+  Full GRADE-style certainty derivation is out of scope for the current release
+  and on the deferred-features backlog.
 - **Rekor inclusion verification is opt-in, not on by default.** When
   `rekor_url=` is configured, signed claims are submitted to the log
   and the response — entry uuid, logIndex, integratedTime, and the
@@ -240,7 +240,7 @@ Honest scope, so the design choices land in the right frame:
   submit-time response (persisted locally for future
   re-verification); the operator who needs strict transparency must
   opt in. Restore-time re-verification of stored proofs is on the
-  v0.4 list (it needs the `rekor_inclusions` sidecar round-tripped
+  deferred-features list (it needs the `rekor_inclusions` sidecar round-tripped
   through `claims.toml`).
 - **DOIs are HEAD-checked, not content-verified.** External references
   resolve to a 200 response; the substrate does not parse, sign, or

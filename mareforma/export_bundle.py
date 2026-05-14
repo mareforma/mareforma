@@ -20,7 +20,7 @@ The bundle is then signed by the local Ed25519 key using a DSSE-style
 envelope. Verification checks the bundle signature AND every per-claim
 signature inside ``predicate``.
 
-Design choices (one-way doors, locked in v0.3.0):
+Design choices (one-way doors, locked currently):
 
 - **Subject naming**: ``urn:mareforma:claim:<uuid>``. The URN namespace
   is forever once published; consumers will key off this prefix.

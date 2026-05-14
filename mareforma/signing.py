@@ -450,7 +450,7 @@ def load_private_key(path: Path) -> Ed25519PrivateKey:
     if not isinstance(key, Ed25519PrivateKey):
         raise SigningError(
             f"Key at {path} is not an Ed25519 key (got {type(key).__name__}). "
-            "mareforma only signs with Ed25519 in v0.3.0."
+            "mareforma only signs with Ed25519 currently."
         )
     return key
 
@@ -1073,10 +1073,10 @@ def attach_rekor_entry(
 #      log operator could supply any root that hashes its forgery.
 #
 # Both parts are necessary; mareforma refuses inclusions that fail
-# either. Callers supply the log's public key as PEM bytes; v0.3.0 does
-# NOT hardcode the public Sigstore Rekor key (TUF-based key distribution
-# is out of scope), so users must fetch the key themselves and pass it
-# to the verification entry points.
+# either. Callers supply the log's public key as PEM bytes; mareforma
+# does NOT hardcode the public Sigstore Rekor key (TUF-based key
+# distribution is out of scope), so users must fetch the key
+# themselves and pass it to the verification entry points.
 
 # RFC 6962 §2.1: leaf nodes are prefixed with 0x00, inner nodes with 0x01.
 _RFC6962_LEAF_PREFIX = b"\x00"
@@ -1416,7 +1416,7 @@ def verify_rekor_checkpoint(
     log_pubkey_pem:
         PEM-encoded Ed25519 or ECDSA P-256 public key of the log
         operator. mareforma does not hardcode the public Sigstore
-        Rekor key in v0.3.0; callers fetch it from a trusted source
+        Rekor key currently; callers fetch it from a trusted source
         (Sigstore TUF, cosign root, etc.) and pass it here.
     expected_root_hash, expected_tree_size:
         Optional cross-check. When supplied, both must equal the

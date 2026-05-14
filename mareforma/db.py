@@ -768,7 +768,7 @@ def open_db(root: Path) -> sqlite3.Connection:
     ``_CLAIM_COLUMNS`` is the source of truth for what the schema must
     contain.
 
-    No in-place schema migrations during v0.3.0 development. Adding a
+    No in-place schema migrations in this release development. Adding a
     column or trigger means updating ``_SCHEMA_SQL`` in place; existing
     dev-branch databases get the schema-validation error and the user
     deletes graph.db (``claims.toml`` is the human-readable backup).
@@ -820,7 +820,7 @@ def open_db(root: Path) -> sqlite3.Connection:
             conn.commit()
             return conn
 
-        # No in-place migrations during v0.3.x. A db whose user_version
+        # No in-place migrations in this release. A db whose user_version
         # is neither 0 nor _SCHEMA_VERSION was written by a different
         # build of the dev branch and may carry a partial schema (e.g.
         # a v2-stranded db is missing the retracted-is-terminal trigger
@@ -3906,7 +3906,7 @@ def restore(
 
     The rebuild is **fresh-only**. ``restore`` refuses to run if
     ``.mareforma/graph.db`` already contains claims — merge semantics
-    are out of scope for v0.3.0 (status drift, supports[] divergence,
+    are out of scope for the current release (status drift, supports[] divergence,
     and validator chain conflicts have no clean answers). Wipe
     ``graph.db`` first if you really mean to overwrite.
 
@@ -4807,7 +4807,7 @@ def _verify_claim_signatures_on_restore(
             if cited is None:
                 raise RestoreError(
                     f"Claim {claim_id} validation envelope is missing "
-                    "the evidence_seen field; v0.3.0 envelopes always "
+                    "the evidence_seen field; current envelopes always "
                     "bind this field (use [] for the no-review case).",
                     kind="claim_unverified",
                 )
@@ -4941,7 +4941,7 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
                 entry["transparency_logged"] = False
             if c.get("artifact_hash"):
                 entry["artifact_hash"] = c["artifact_hash"]
-            # GRADE EvidenceVector: always present in v0.3.0 schema.
+            # GRADE EvidenceVector: always present currently schema.
             # Round-trip the full JSON so restore can rebuild the
             # canonical Statement v1 bytes — chain_hash + signature both
             # bind these values. statement_cid is the cross-check anchor

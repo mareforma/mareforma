@@ -281,7 +281,7 @@ Export all claims as a JSON-LD document, optionally as a SCITT-style signed bund
 mareforma export [OPTIONS]
 ```
 
-**Plain JSON-LD** (default). Writes `ontology.jsonld` in the mareforma-native vocabulary (`@type=mare:Graph`, media type `application/x-mareforma-graph+json`). The export is NOT PROV-O-conformant — earlier versions name-dropped PROV-O without populating the full graph; v0.3.0 ships an honest mareforma-native vocabulary instead. Each claim node carries every `SIGNED_FIELDS` member so a bundle verifier can re-derive `canonical_payload` from a node alone.
+**Plain JSON-LD** (default). Writes `ontology.jsonld` in the mareforma-native vocabulary (`@type=mare:Graph`, media type `application/x-mareforma-graph+json`). The export is NOT PROV-O-conformant — earlier versions name-dropped PROV-O without populating the full graph; the current export uses an honest mareforma-native vocabulary instead. Each claim node carries every `SIGNED_FIELDS` member so a bundle verifier can re-derive `canonical_payload` from a node alone.
 
 **Signed bundle** (`--bundle`). Wraps the JSON-LD export in an in-toto Statement v1 envelope and signs it with the local Ed25519 key. The bundle includes one subject entry per claim (`urn:mareforma:claim:<uuid>`) with a SHA-256 of the claim's `canonical_payload`, plus a bundle-level DSSE signature. Requires a bootstrapped XDG key.
 

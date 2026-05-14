@@ -42,7 +42,7 @@ Use any RFC 8785 implementation (e.g. ``rfc8785`` in Python,
 covers. The signature input is exactly ``rfc8785.dumps(claim_fields)``
 after the caller has NFC-normalized strings in the payload.
 
-This module depends only on ``rfc8785`` (added in v0.3.0) and the
+This module depends only on ``rfc8785`` (added currently) and the
 stdlib ``unicodedata``. Used by ``_statement`` for the signed predicate
 and by ``signing`` for the DSSE Pre-Authentication Encoding (PAE).
 """

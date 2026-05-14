@@ -179,7 +179,7 @@ The per-project set of public keys allowed to promote claims to `ESTABLISHED`.
 
 The first key opened against a fresh `graph.db` auto-enrolls as the root with a self-signed envelope (`BEGIN IMMEDIATE` guards against two simultaneous opens both becoming roots). The chain walk enforces a singleton-root invariant: if two rows have `keyid == enrolled_by_keyid`, neither is trusted. Walk is capped at 64 hops.
 
-Removal is intentionally unsupported in v0.3.x — validator history is append-only.
+Removal is intentionally unsupported currently — validator history is append-only.
 
 ## Schema versioning
 
@@ -188,10 +188,10 @@ The schema version is stored in SQLite's `user_version` pragma.
 | Version | State |
 |---|---|
 | `0` | Fresh database — full schema applied on first `open_db()` |
-| `1` | v0.3.0 schema |
+| `1` | the current schema |
 | Any other | `DatabaseError` — delete `graph.db` to start fresh; `claims.toml` is the backup |
 
-No in-place migrations during v0.3.x. Adding a column, index, or
+No in-place migrations in this release. Adding a column, index, or
 trigger means updating the schema in place; existing development
 databases get the schema-validation error and the operator deletes
 `graph.db` (`claims.toml` is the restore artifact). Versioned
