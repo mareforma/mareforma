@@ -1,4 +1,4 @@
-"""validator_type substrate tests (spec.md #97 / MF-017).
+"""validator_type substrate tests.
 
 The validators table carries a ``validator_type`` column —
 ``'human'`` or ``'llm'`` — bound into the signed enrollment envelope.

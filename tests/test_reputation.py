@@ -1,4 +1,4 @@
-"""Reputation-aware retrieval tests (spec.md #96 / MF-016).
+"""Reputation-aware retrieval tests.
 
 `graph.query()` gains an ``include_unverified`` kwarg and a per-row
 ``validator_reputation`` projection. ``graph.get_validator_reputation()``

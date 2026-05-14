@@ -1,4 +1,4 @@
-"""FTS5 search tests (spec.md #98 / MF-009).
+"""FTS5 search tests.
 
 ``graph.search(query, ...)`` runs SQLite FTS5 with the unicode61
 tokenizer over claim text. Sync is via three triggers on the

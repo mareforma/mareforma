@@ -1,4 +1,4 @@
-"""Restore-from-claims.toml tests (spec.md #99).
+"""Restore-from-claims.toml tests.
 
 ``mareforma.restore(project_root)`` rebuilds a fresh graph.db from the
 TOML state file written by every mutation. The rebuild is fresh-only

@@ -3544,7 +3544,7 @@ def query_claims(
     include_unverified:
         When False (default), PRELIMINARY claims whose ``signature_bundle``
         is unsigned or signed by a keyid not present in the ``validators``
-        table are excluded — the spec.md #96 default. REPLICATED and
+        table are excluded by default. REPLICATED and
         ESTABLISHED rows already require an enrolled validator chain and
         are never filtered by this flag. Pass ``True`` to surface
         unverified preliminary claims (e.g. inspection of pending work).
