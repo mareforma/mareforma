@@ -1,4 +1,4 @@
-"""tests/test_cycle_detection.py — P1.6 DFS cycle / self-loop detection.
+"""tests/test_cycle_detection.py — DFS cycle / self-loop detection.
 
 Covers:
   - self-loop via add_claim's supports[] (impossible at the API surface
@@ -10,8 +10,9 @@ Covers:
   - mixed claim_id + DOI supports — only the claim_id part walks
   - depth cap kicks in on pathologically long chains
   - empty supports passes
-  - signed claim's supports[] cannot be mutated (existing P0 invariant
-    still holds — cycle detection never reached on signed claims)
+  - signed claim's supports[] cannot be mutated (the signed-immutability
+    invariant still holds — cycle detection never reached on signed
+    claims)
 """
 
 from __future__ import annotations
@@ -164,7 +165,7 @@ class TestSignedClaimUnreachable:
         self, tmp_path: Path,
     ) -> None:
         """Signed claims refuse supports mutation upstream of cycle
-        detection. P0 invariant unchanged."""
+        detection. The signed-immutability invariant is unchanged."""
         from mareforma import signing as _sig
         key = tmp_path / "k"
         _sig.bootstrap_key(key)

@@ -24,16 +24,16 @@ Mareforma is that combination. It is **not** trying to replace:
 
 - W3C PROV-O (richer provenance vocabulary — mareforma is a runtime
   substrate, not an RDF graph)
-- FAIRSCAPE's EVI (research-evidence ontology — primario item 204 plans
-  an EVI export adapter that maps mareforma claims onto EVI Claim /
-  EvidenceGraph / supports / challenges classes; the schema stays
+- FAIRSCAPE's EVI (research-evidence ontology — an EVI export adapter
+  is on the v0.4 backlog and would map mareforma claims onto EVI Claim
+  / EvidenceGraph / supports / challenges classes; the schema stays
   mareforma-native, the export is the interop surface)
-- IETF SCITT (federated supply-chain transparency — primario item 205
-  plans a SCITT submission path alongside Rekor)
+- IETF SCITT (federated supply-chain transparency — a SCITT submission
+  path alongside Rekor is on the v0.4 backlog)
 - Sigstore (transparency for software artifacts — mareforma uses Rekor
   for claim transparency; the protocols are the same shape)
-- RO-Crate (FAIR research-object packaging — primario item 203 plans
-  an RO-Crate 1.2 export from `export_bundle.py`)
+- RO-Crate (FAIR research-object packaging — an RO-Crate 1.2 export
+  from `export_bundle.py` is on the v0.4 backlog)
 - MLflow / DVC / W&B (run + dataset versioning — orthogonal; those
   track artifacts, mareforma tracks claims)
 
@@ -58,9 +58,8 @@ The verdict-issuer protocol in mareforma (`record_replication_verdict`
 and `record_contradiction_verdict`) is the public API that any of those
 trains can write to. The OSS substrate accepts any signed verdict from
 an enrolled validator; the predicates that produce those verdicts are
-out of scope by design. Future inference-layer work in the
-`mareforma-platform` private repository plans those trains; the OSS
-substrate stays narrow and verifiable.
+out of scope by design. The OSS substrate stays narrow and verifiable;
+the trains plug in through the public protocol.
 
 ## Data flow
 
@@ -245,7 +244,7 @@ The restore path:
 
 Failure of ANY check rolls the entire restore back. Restore is
 `fresh-only` and `fail-all-or-nothing` by design; partial-restore mode
-is primario item 209.
+is on the v0.4 backlog.
 
 ### Two known gaps in what TOML guarantees
 
@@ -254,7 +253,7 @@ reorders claims (swap two `created_at` values) restores to a different
 but internally-consistent chain. The signatures bind canonical statement
 bytes, not chain position. For tamper-evidence across restore boundaries,
 the per-claim Rekor entry is the external anchor — though Merkle
-inclusion proof verification is itself primario item 200.
+inclusion proof verification is itself on the v0.4 backlog.
 
 **The TOML write lags the SQLite commit.** `_backup_claims_toml` runs
 **after** the INSERT/UPDATE transaction commits. A process crash between
@@ -262,9 +261,9 @@ inclusion proof verification is itself primario item 200.
 from `claims.toml`. The next mutation rewrites the TOML from current DB
 state, so the crash window closes on the next successful write. For a
 clean recovery snapshot, finish any in-flight writes before snapshotting
-the TOML. Primario item 202 (perf rewrite) addresses both the foreground-
-commit-path cost and the crash gap by moving to an append-only sidecar
-+ periodic compaction model.
+the TOML. The v0.4 perf rewrite addresses both the foreground-commit-
+path cost and the crash gap by moving to an append-only sidecar +
+periodic compaction model.
 
 ## Honest scope
 

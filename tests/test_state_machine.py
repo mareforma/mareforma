@@ -119,7 +119,7 @@ class TestUpdateTrigger:
         ``validate_claim`` has a Python-layer guard that blocks this
         path with a ValueError before reaching the DB. We bypass it
         here to exercise the trigger directly, which is the actual
-        defense-in-depth layer P1.5 adds."""
+        defense-in-depth layer the DB trigger provides."""
         conn = open_db(tmp_path)
         try:
             cid = add_claim(conn, tmp_path, "x", generated_by="agent")

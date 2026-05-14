@@ -593,7 +593,7 @@ class TestVerdictListingFiltersInvalidated:
 
 
 # ---------------------------------------------------------------------------
-# /review hardening pass (security + testing specialist findings)
+# Invalidated-claim guards on the validation + verdict surfaces
 # ---------------------------------------------------------------------------
 
 

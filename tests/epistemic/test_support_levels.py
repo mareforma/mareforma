@@ -46,10 +46,10 @@ from mareforma.db import ClaimNotFoundError
 def open_graph(tmp_path: Path):
     """Open a graph with a bootstrapped key so seed=True works.
 
-    P1.7 made ESTABLISHED-upstream the default rule for REPLICATED
-    promotion, so REPLICATED tests need seed=True on the upstream —
-    which in turn requires a loaded signing key. The local helper
-    bootstraps one transparently."""
+    ESTABLISHED-upstream is the default rule for REPLICATED promotion,
+    so REPLICATED tests need seed=True on the upstream — which in turn
+    requires a loaded signing key. The local helper bootstraps one
+    transparently."""
     from mareforma import signing as _signing
     key_path = tmp_path / "_test_key"
     if not key_path.exists():

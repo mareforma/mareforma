@@ -1,5 +1,5 @@
 """
-export_bundle.py — SCITT-style signed export bundle (P1.9).
+export_bundle.py — SCITT-style signed export bundle.
 
 Wraps the JSON-LD graph export in an in-toto Statement v1 envelope:
 
@@ -29,7 +29,8 @@ Design choices (one-way doors, locked in v0.3.0):
   ``mareforma.dev`` for schema dereferencing. Evolution to v2 carries
   a new predicateType, leaving v1 verifiers intact.
 - **Predicate body**: the existing JSON-LD export. No additional
-  PROV-O modelling — P1.8 Path A already scoped that decision out.
+  PROV-O modelling — the JSON-LD scoping rationale already covers
+  why (see ``mareforma/exporters/jsonld.py`` module docstring).
 
 The schema lives in ``docs/reference/scitt-bundle.md``.
 """

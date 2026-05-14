@@ -423,8 +423,7 @@ class EpistemicGraph:
         The OSS substrate accepts verdicts from any enrolled identity.
         The predicates that GENERATE verdicts (semantic-cluster,
         cross-method, contradiction-detection) live outside the OSS
-        (primario spec items 106–108) and call this method to write
-        their output.
+        substrate and call this method to write their output.
 
         Parameters
         ----------

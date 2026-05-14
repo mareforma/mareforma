@@ -164,8 +164,8 @@ Honest scope, so the design choices land in the right frame:
   rating (high/moderate/low/very-low), does not gate upgrade flags on
   study design (RCT vs. observational), and does not integrate the
   vector into the `PRELIMINARY → REPLICATED → ESTABLISHED` ladder.
-  Full GRADE-style certainty derivation is out of scope for v0.3.0;
-  see primario item 208 for the v0.4 plan.
+  Full GRADE-style certainty derivation is out of scope for v0.3.0
+  and on the v0.4 backlog.
 - **Rekor inclusion is logged, not proof-verified.** When `rekor_url=` is
   configured, signed claims are submitted and the entry uuid + logIndex
   are recorded. The substrate does not (yet) re-fetch and verify the

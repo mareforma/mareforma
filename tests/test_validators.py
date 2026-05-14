@@ -194,9 +194,9 @@ class TestValidateIdentityCheck:
         return id_a
 
     def test_validate_requires_loaded_signer(self, tmp_path: Path) -> None:
-        # Phase 1: bootstrap a key, build the REPLICATED chain via the
-        # seeded-upstream path. Phase 2: re-open without a key and
-        # confirm validate() refuses on the loaded-signer gate.
+        # Bootstrap a key, build the REPLICATED chain via the seeded-
+        # upstream path. Then re-open without a key and confirm
+        # validate() refuses on the loaded-signer gate.
         key_path = _bootstrap_key(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as graph:
             id_a = self._setup_replicated(graph)

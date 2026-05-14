@@ -309,9 +309,8 @@ END;
 -- accepts verdicts from any party in the ``validators`` table; the
 -- predicates that PRODUCE these verdicts (semantic-cluster,
 -- cross-method, contradiction-detection) live outside the OSS
--- (primario spec items 106–108, future platform layer). Any
--- third-party verdict-issuer can write to these tables via the
--- Graph.record_*_verdict APIs.
+-- substrate. Any third-party verdict-issuer can write to these
+-- tables via the Graph.record_*_verdict APIs.
 --
 -- The signed payload bound to ``signature`` is the canonical JSON
 -- of the verdict record minus the signature itself; the
@@ -398,12 +397,11 @@ END;
 -- DESIGN RULE — DO NOT PROPAGATE DOWNSTREAM. The trigger marks only the
 -- directly-contradicted claim. Claims that cited the now-invalidated one
 -- via ``supports[]`` are unaffected. This is a deliberate boundary, not
--- an oversight: transitive falsification would change the substrate's
--- semantics, require an attorney FTO opinion, and conflict with the
--- ``per-claim contradiction`` model documented in AGENTS.md. Any future
--- attempt to add downstream propagation needs a separate design review
--- before the commit. (See dossier operations/legal.md, "Patent landscape
--- — Mareforma v0.3.0 FTO scan" for context.)
+-- an oversight: transitive falsification is a different model with
+-- different semantics from per-claim contradiction, and conflicts with
+-- the ``per-claim contradiction`` model documented in AGENTS.md. Any
+-- future attempt to add downstream propagation needs a separate design
+-- review before the commit.
 CREATE TRIGGER IF NOT EXISTS contradiction_invalidates_older
 AFTER INSERT ON contradiction_verdicts
 BEGIN
@@ -681,8 +679,9 @@ def open_db(root: Path) -> sqlite3.Connection:
         conn.row_factory = sqlite3.Row
         # SQLite default is foreign_keys = OFF. Every REFERENCES clause
         # in the schema is advisory without this PRAGMA. Verdict-issuer
-        # tables FK to validators(keyid) and claims(claim_id); the
-        # adversarial review found these were unenforced. Turn on now.
+        # tables FK to validators(keyid) and claims(claim_id); without
+        # this set on every connection the FK is unenforced and direct-
+        # SQL INSERTs with fabricated keyids would succeed.
         conn.execute("PRAGMA foreign_keys = ON")
 
         version = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -1170,7 +1169,7 @@ def add_claim(
     # half-built state on rejection.
     _check_no_cycle(conn, claim_id, supports or [])
 
-    # Seed-claim bootstrap (P1.7). A seed claim is asserted by an
+    # Seed-claim bootstrap. A seed claim is asserted by an
     # enrolled validator and inserted directly with
     # support_level='ESTABLISHED' + a signed seed envelope. This is
     # the only path that can place a claim at ESTABLISHED without
@@ -1486,8 +1485,8 @@ def _maybe_update_replicated_unlocked(
     case), behaviour falls back to identity-only REPLICATED: the
     hash signal is opt-in, not retroactive.
 
-    ESTABLISHED-upstream requirement (P1.7)
-    ---------------------------------------
+    ESTABLISHED-upstream requirement
+    --------------------------------
     The candidate peer's ``supports[]`` must include at least one
     claim with ``support_level = 'ESTABLISHED'``. Matches Cochrane /
     GRADE evidence-chain methodology: REPLICATED-of-noise is not
@@ -2192,7 +2191,7 @@ def update_claim(
     # Cycle / self-loop check on the NEW supports[] if it changed. Signed
     # claims refuse supports mutation upstream (SignedClaimImmutableError
     # raised earlier in this function), so reaching here implies an
-    # unsigned claim — the cycle-introduction window P1.6 closes.
+    # unsigned claim — the cycle-introduction window the DFS check covers.
     if supports_changed:
         new_supports_list = json.loads(new_supports_json)
         _check_no_cycle(conn, claim_id, new_supports_list)
@@ -2458,10 +2457,10 @@ def record_replication_verdict(
     method, confidence)``. Restore re-derives this binding to catch
     TOML tampering of verdict rows.
 
-    The OSS doesn't fire replication predicates itself — third-party
-    verdict-issuers (or a future mareforma-platform) call this method
-    after running their predicate logic. The substrate just accepts
-    the signed verdict and triggers the support_level promotion.
+    The OSS substrate doesn't fire replication predicates itself —
+    third-party verdict-issuers call this method after running their
+    predicate logic. The substrate just accepts the signed verdict and
+    triggers the support_level promotion.
     """
     from mareforma import signing as _signing
 

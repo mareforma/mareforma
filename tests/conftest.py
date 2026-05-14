@@ -43,11 +43,10 @@ def open_graph(tmp_path: Path):
     """Open an EpistemicGraph in a temp directory, with a bootstrapped
     signing key so seed=True works for ESTABLISHED-upstream bootstrap.
 
-    P1.7 made the ESTABLISHED-upstream rule strict by default, so most
-    tests that exercise REPLICATED detection need a seeded upstream.
-    A signing key is bootstrapped automatically; tests that don't
-    want one can use ``mareforma.open(tmp_path)`` directly without
-    the fixture."""
+    REPLICATED detection requires an ESTABLISHED upstream by default, so
+    most tests that exercise it need a seeded upstream. A signing key is
+    bootstrapped automatically; tests that don't want one can use
+    ``mareforma.open(tmp_path)`` directly without the fixture."""
     from mareforma import signing as _signing
     key_path = tmp_path / "mareforma.key"
     if not key_path.exists():

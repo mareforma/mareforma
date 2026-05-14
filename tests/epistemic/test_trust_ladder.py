@@ -16,11 +16,11 @@ Scenarios covered
     - Anyone with read access to the project's signing key can act as the
       enrolled root validator. Mareforma is local-trust, not cross-org PKI.
 
-  Self-supporting claim (closed in P1.6)
+  Self-supporting claim
     - Updating a claim to include its own claim_id in supports[] is
       rejected with CycleDetectedError.
 
-  Cyclic supports (closed in P1.6)
+  Cyclic supports
     - A supports B, B supports A — the second edge is rejected with
       CycleDetectedError on update_claim.
 
@@ -44,7 +44,7 @@ from mareforma.db import open_db, add_claim, update_claim
 # ---------------------------------------------------------------------------
 
 def open_graph(tmp_path: Path):
-    """Open with a bootstrapped key so seed=True works (P1.7)."""
+    """Open with a bootstrapped key so seed=True works."""
     from mareforma import signing as _signing
     key_path = tmp_path / "_test_key"
     if not key_path.exists():
@@ -150,9 +150,8 @@ class TestSelfSupport:
         """A claim cannot be updated to include its own claim_id in
         ``supports[]``.
 
-        Closed by v0.3.0 P1.6: cycle detection on ``update_claim``
-        rejects the self-loop. Provenance chains are required to be
-        acyclic.
+        Cycle detection on ``update_claim`` rejects the self-loop.
+        Provenance chains are required to be acyclic.
         """
         from mareforma.db import CycleDetectedError
         conn = open_db(tmp_path)
@@ -175,9 +174,9 @@ class TestCyclicSupports:
     def test_cyclic_supports_rejected(self, tmp_path: Path) -> None:
         """A supports B, B supports A — the second edge is rejected.
 
-        Closed by v0.3.0 P1.6: cycle detection on ``update_claim``
-        walks the supports[] graph forward from the proposed edge and
-        rejects any closure back to the updated claim.
+        Cycle detection on ``update_claim`` walks the supports[] graph
+        forward from the proposed edge and rejects any closure back to
+        the updated claim.
 
         Uses unsigned graph directly (not the keyed open_graph fixture)
         because the cycle test exercises the unsigned-edit window —
@@ -251,11 +250,10 @@ class TestContradictAndSupport:
 #   - Restore round-trips claims + validators + verdicts
 #
 # The launch story DOES NOT include the inference layer (embedder, NLI,
-# semantic-cluster predicate). Those live outside the OSS — see primario
-# blueprints/mareforma/spec.md items 101-116. Any external verdict-issuer
-# (or the future mareforma-platform) calls the verdict-issuer protocol
-# below; the OSS substrate accepts the signed verdicts and gates the
-# trust ladder accordingly.
+# semantic-cluster predicate). Those live outside the OSS substrate. Any
+# external verdict-issuer calls the verdict-issuer protocol below; the
+# OSS substrate accepts the signed verdicts and gates the trust ladder
+# accordingly.
 
 
 class TestLaunchSubstrateShipGate:

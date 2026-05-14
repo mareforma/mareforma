@@ -24,7 +24,7 @@ class TestContextAndStructure:
         ctx = doc["@context"]
         assert "schema" in ctx
         assert "mare" in ctx
-        # PROV-O references removed in v0.3.0 P1.8: the prior export
+        # PROV-O references removed in v0.3.0: the prior export
         # name-dropped prov: without populating the full PROV graph.
         # Honest scoping — the export is mareforma-native, not PROV-O.
         assert "prov" not in ctx
@@ -87,9 +87,9 @@ class TestClaimNodes:
         assert node["@id"] == f"mare:claim/{claim_id}"
 
     def test_claim_with_source_has_usedsource_link(self, tmp_path: Path) -> None:
-        # P1.8: ``used`` (formerly aliased to prov:used) → ``usedSource``
-        # (now aliased to mare:usedSource) so the export stays inside
-        # the mareforma-native vocabulary.
+        # ``used`` (formerly aliased to prov:used) was renamed to
+        # ``usedSource`` (now aliased to mare:usedSource) so the export
+        # stays inside the mareforma-native vocabulary.
         conn = _open(tmp_path)
         try:
             add_claim(conn, tmp_path, "Finding about dataset", source_name="dataset_alpha")

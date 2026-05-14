@@ -1,7 +1,7 @@
-"""tests/test_established_upstream.py — P1.7 ESTABLISHED-upstream gate + seed.
+"""tests/test_established_upstream.py — ESTABLISHED-upstream gate + seed.
 
 Covers:
-  - REPLICATED requires an ESTABLISHED upstream (strict by default per D1)
+  - REPLICATED requires an ESTABLISHED upstream (strict by default)
   - seed=True creates a directly-ESTABLISHED claim with a signed envelope
   - seed=True requires a loaded signer
   - seed=True refused for unenrolled keys

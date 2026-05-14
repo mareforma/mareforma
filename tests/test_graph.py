@@ -349,9 +349,9 @@ def test_validate_nonexistent_claim_raises(tmp_path):
 def test_validate_without_signer_raises(tmp_path):
     """No key loaded → graph.validate() refuses with a clear error.
 
-    Phase 1: bootstrap a key, build a REPLICATED pair via the seeded
-    upstream pathway. Phase 2: re-open without the key and confirm
-    validate() refuses on the loaded-signer gate.
+    Bootstrap a key, build a REPLICATED pair via the seeded upstream
+    pathway, then re-open without the key and confirm validate() refuses
+    on the loaded-signer gate.
     """
     key_path = _bootstrap_key(tmp_path)
     with mareforma.open(tmp_path, key_path=key_path) as graph:
@@ -692,10 +692,9 @@ class TestDoiResolution:
             status_code=200,
         )
 
-        # P1.7 requires an ESTABLISHED upstream for REPLICATED. Bootstrap
-        # a key and seed the upstream via the graph API, then drop down
-        # to the db API for the DOI-curing flow this test actually
-        # exercises.
+        # REPLICATED requires an ESTABLISHED upstream. Bootstrap a key
+        # and seed the upstream via the graph API, then drop down to the
+        # db API for the DOI-curing flow this test actually exercises.
         key_path = _bootstrap_key(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as g:
             upstream = g.assert_claim(

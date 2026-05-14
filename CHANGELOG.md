@@ -16,8 +16,8 @@ from canonical-statement bytes. Signatures survive because they bind
 the canonical statement, not the chain position. The most recent row
 may lag SQLite commit on a process crash because `_backup_claims_toml`
 runs after `COMMIT`, outside the SQLite transaction; the v0.4
-performance rewrite (primario item 202) moves this off the foreground
-commit path and addresses the crash gap.
+performance rewrite moves this off the foreground commit path and
+addresses the crash gap.
 
 What ships in v0.3.0:
 

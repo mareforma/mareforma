@@ -70,8 +70,9 @@ Before opening a PR, confirm:
 
 - [ ] Full test suite passes
 - [ ] New behaviour has a test that would fail without the fix
-- [ ] No internal planning labels in shipped code / public docstrings
-  / comments / commit-message subjects (see "Internal labels" below)
+- [ ] Commit subjects, docstrings, and inline comments read as
+  user-facing technical descriptions of the diff (no milestone codes,
+  sprint numbers, or roadmap pointers)
 - [ ] If the change touches the public API, `AGENTS.md` and
   `docs/reference/api.mdx` reflect the new surface
 - [ ] If the change touches the CLI, `docs/reference/cli.mdx` reflects
@@ -85,7 +86,7 @@ Conventional commits with a tight subject (≤ 70 chars) and a body
 that explains *why*:
 
 ```
-feat(P1.7): ESTABLISHED-upstream gate + seed-claim bootstrap (8 tests)
+feat: ESTABLISHED-upstream gate + seed-claim bootstrap (8 tests)
 
 REPLICATED detection now requires at least one ESTABLISHED claim in
 the converging peer's supports[]. Matches Cochrane / GRADE evidence
@@ -99,20 +100,18 @@ diff — a refactor that ships a bug fix is still `fix:`.
 
 ## Internal labels
 
-Internal planning artifacts (`P0.x`, `P1.5`, `Phase A/B`, "wave",
-"hardening pass", "adversarial review", subagent names) belong in
-spec docs and substrate-decision artifacts only. They MUST NOT appear
-in:
+Internal milestone codes, sprint numbers, phase labels, workflow names,
+and roadmap pointers belong in private planning artifacts. They MUST
+NOT appear in:
 
 - Shipped code or public docstrings
 - Inline comments
-- Commit-message subjects (bodies are allowed when load-bearing — see
-  the `feat(P1.7):` example above; the body cites the work for
-  archaeology, the subject stays user-facing)
+- Commit-message subjects or bodies
 - Public documentation
 
-These labels are noise for users and a maintenance liability when
-renumbered.
+These labels decay as plans shift and are noise for users trying to
+read the codebase as it stands. If a PR you're reviewing carries one,
+ask the author to rewrite it before merging.
 
 ## Trust-substrate changes
 

@@ -4,7 +4,7 @@ name: Tests
 # tab. The prior config triggered only on `main`, which meant feature
 # branches (where all dev actually happens) never got pytest on a clean
 # checkout — that's how `test_canonical.py` shipped with a hardcoded
-# `/home/pipe/...` cwd undetected on the v0.3.0 branch.
+# absolute path that only resolved on one machine.
 on:
   push:
   pull_request:

@@ -599,9 +599,9 @@ validator. Verdicts come in two shapes:
 The substrate ratifies what enrolled identities sign. The predicates
 that PRODUCE verdicts (semantic-cluster on BGE-M3 embeddings,
 contradiction-detection via bidirectional NLI, etc.) live outside the
-OSS — see the v0.4+ inference layer roadmap. Any third-party
-verdict-issuer can integrate against this protocol by calling
-`Graph.record_replication_verdict()` / `Graph.record_contradiction_verdict()`.
+OSS substrate. Any third-party verdict-issuer can integrate against
+this protocol by calling `Graph.record_replication_verdict()` /
+`Graph.record_contradiction_verdict()`.
 
 ```python
 # An enrolled validator records that two claims replicate.

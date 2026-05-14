@@ -16,7 +16,7 @@ Vocabulary
 ----------
 The export uses mareforma's own ``mare:`` vocabulary plus schema.org
 for cross-tool friendliness. PROV-O references were removed in v0.3.0
-P1.8 — the previous JSON-LD context name-dropped ``prov:wasGeneratedBy``
+— the previous JSON-LD context name-dropped ``prov:wasGeneratedBy``
 and ``prov:used`` without populating the full PROV-O graph (no
 prov:Activity, no prov:wasAssociatedWith, no model identity, no
 prompt/response hashes). Consumers integrating against the export
@@ -36,7 +36,7 @@ from mareforma import __version__
 
 
 # Media type for the exported graph. Distinct from PROV-O — see module
-# docstring for the scoping rationale (P1.8 Path A).
+# docstring for the scoping rationale.
 EXPORT_MEDIA_TYPE = "application/x-mareforma-graph+json"
 
 

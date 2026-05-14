@@ -37,9 +37,9 @@ class TestTrafficLight:
         assert "PRELIMINARY" in report.rationale
 
     def test_green_when_replicated_claim_exists(self, tmp_path: Path) -> None:
-        # Seed the upstream via the graph API (P1.7 requires an
-        # ESTABLISHED upstream for REPLICATED), then drop down to the
-        # db API for the rest of the test.
+        # Seed the upstream via the graph API (REPLICATED requires an
+        # ESTABLISHED upstream), then drop down to the db API for the
+        # rest of the test.
         from mareforma import signing as _sig
         import mareforma
         key = tmp_path / "k"

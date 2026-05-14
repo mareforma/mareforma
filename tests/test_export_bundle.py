@@ -1,4 +1,4 @@
-"""tests/test_export_bundle.py — P1.9 SCITT-style signed export bundle.
+"""tests/test_export_bundle.py — SCITT-style signed export bundle.
 
 Covers:
   - build_statement produces in-toto Statement v1 shape with the right
