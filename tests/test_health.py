@@ -16,6 +16,11 @@ def _open(tmp_path: Path) -> sqlite3.Connection:
     return open_db(tmp_path)
 
 
+# ---------------------------------------------------------------------------
+# Traffic light state derivation
+# ---------------------------------------------------------------------------
+
+
 class TestTrafficLight:
     def test_red_when_no_claims(self, tmp_path: Path) -> None:
         conn = _open(tmp_path)
@@ -57,6 +62,11 @@ class TestTrafficLight:
         assert report.traffic_light == "green"
 
 
+# ---------------------------------------------------------------------------
+# Per-status + per-support-level counters
+# ---------------------------------------------------------------------------
+
+
 class TestCounts:
     def test_claims_open_vs_resolved(self, tmp_path: Path) -> None:
         conn = _open(tmp_path)
@@ -90,6 +100,11 @@ class TestCounts:
         assert report.support_level_breakdown.get("PRELIMINARY", 0) == 2
 
 
+# ---------------------------------------------------------------------------
+# Never-raises contract
+# ---------------------------------------------------------------------------
+
+
 class TestNeverRaises:
     def test_empty_project_no_error(self, tmp_path: Path) -> None:
         conn = _open(tmp_path)
@@ -98,6 +113,11 @@ class TestNeverRaises:
             assert isinstance(report, HealthReport)
         finally:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Corruption-vs-empty differentiation
+# ---------------------------------------------------------------------------
 
 
 class TestCorruptionVsEmpty:

@@ -61,6 +61,11 @@ def _seeded_upstream(graph) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# REPLICATED detection filters by status
+# ---------------------------------------------------------------------------
+
+
 class TestReplicatedFiltersStatus:
     def test_retracted_peer_does_not_trigger_replicated(
         self, tmp_path: Path,
@@ -138,6 +143,11 @@ class TestReplicatedFiltersStatus:
             assert g.get_claim(tainted)["support_level"] == "PRELIMINARY"
 
 
+# ---------------------------------------------------------------------------
+# validate() refuses non-open claims
+# ---------------------------------------------------------------------------
+
+
 class TestValidateRefusesNonOpen:
     def test_validate_refused_on_contested(self, tmp_path: Path) -> None:
         """Build a REPLICATED row by normal means, then flip status, then
@@ -159,6 +169,11 @@ class TestValidateRefusesNonOpen:
             # b is still open and still validatable.
             g.validate(b, validated_by="reviewer")
             assert g.get_claim(b)["support_level"] == "ESTABLISHED"
+
+
+# ---------------------------------------------------------------------------
+# seed=True refuses non-open status
+# ---------------------------------------------------------------------------
 
 
 class TestSeedRefusesNonOpen:
@@ -183,6 +198,11 @@ class TestSeedRefusesNonOpen:
                     seed=True,
                     status="contested",
                 )
+
+
+# ---------------------------------------------------------------------------
+# Retracted status is terminal at the storage layer
+# ---------------------------------------------------------------------------
 
 
 class TestRetractedIsTerminal:
@@ -254,6 +274,11 @@ class TestRetractedIsTerminal:
             assert g.get_claim(adv)["status"] == "retracted"
             assert g.get_claim(honest_a)["support_level"] == "REPLICATED"
             assert g.get_claim(honest_b)["support_level"] == "REPLICATED"
+
+
+# ---------------------------------------------------------------------------
+# LLM tool surfaces reflect status
+# ---------------------------------------------------------------------------
 
 
 class TestLLMToolSurfacesStatus:

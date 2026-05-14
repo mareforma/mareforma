@@ -98,6 +98,11 @@ class TestInsertTrigger:
             conn.close()
 
 
+# ---------------------------------------------------------------------------
+# UPDATE trigger — transitions
+# ---------------------------------------------------------------------------
+
+
 class TestUpdateTrigger:
     def test_preliminary_to_replicated_allowed(self, tmp_path: Path) -> None:
         # The auto-promotion path that _maybe_update_replicated takes.
@@ -405,6 +410,11 @@ class TestSignedFieldsAppendOnly:
             assert g.get_claim(cid)["status"] == "retracted"
         finally:
             g.close()
+
+
+# ---------------------------------------------------------------------------
+# Append-only — signed rows refuse DELETE
+# ---------------------------------------------------------------------------
 
 
 class TestSignedDeleteAppendOnly:

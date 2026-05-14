@@ -29,6 +29,11 @@ def _minimal_statement(**overrides) -> dict:
     return build_statement(**base)
 
 
+# ---------------------------------------------------------------------------
+# Statement v1 envelope shape
+# ---------------------------------------------------------------------------
+
+
 class TestStatementShape:
     def test_type_and_predicate_type(self) -> None:
         stmt = _minimal_statement()
@@ -73,6 +78,11 @@ class TestStatementShape:
         assert stmt["predicate"]["evidence"] == evidence
 
 
+# ---------------------------------------------------------------------------
+# text_sha256 helper
+# ---------------------------------------------------------------------------
+
+
 class TestTextSha256:
     def test_nfc_normalization(self) -> None:
         import unicodedata
@@ -86,6 +96,11 @@ class TestTextSha256:
 
     def test_hex_length_64(self) -> None:
         assert len(text_sha256("anything")) == 64
+
+
+# ---------------------------------------------------------------------------
+# statement_cid — content identifier derivation
+# ---------------------------------------------------------------------------
 
 
 class TestStatementCid:

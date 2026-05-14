@@ -7,6 +7,11 @@ import pytest
 from mareforma._evidence import EvidenceVector, EvidenceVectorError
 
 
+# ---------------------------------------------------------------------------
+# Default vector — all-zero
+# ---------------------------------------------------------------------------
+
+
 class TestDefaults:
     def test_all_zero_default(self) -> None:
         ev = EvidenceVector()
@@ -25,6 +30,11 @@ class TestDefaults:
         ev = EvidenceVector()
         with pytest.raises(Exception):
             ev.risk_of_bias = -1  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Domain bounds — [-2, 0] integer scale
+# ---------------------------------------------------------------------------
 
 
 class TestDomainBounds:
@@ -58,6 +68,11 @@ class TestDomainBounds:
         # GRADE downgrade levels are not bool.
         with pytest.raises(EvidenceVectorError):
             EvidenceVector(risk_of_bias=True)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Rationale required on non-zero downgrades
+# ---------------------------------------------------------------------------
 
 
 class TestRationaleRequired:
@@ -103,6 +118,11 @@ class TestRationaleRequired:
         assert ev.inconsistency == -2
 
 
+# ---------------------------------------------------------------------------
+# Upgrade flags
+# ---------------------------------------------------------------------------
+
+
 class TestUpgradeFlags:
     def test_bool_only(self) -> None:
         with pytest.raises(EvidenceVectorError):
@@ -115,6 +135,11 @@ class TestUpgradeFlags:
         assert ev.large_effect is True
         assert ev.dose_response is True
         assert ev.opposing_confounding is True
+
+
+# ---------------------------------------------------------------------------
+# Reporting compliance list
+# ---------------------------------------------------------------------------
 
 
 class TestReportingCompliance:
@@ -134,6 +159,11 @@ class TestReportingCompliance:
             reporting_compliance=("CONSORT", "PRISMA"),
         )
         assert ev.reporting_compliance == ("CONSORT", "PRISMA")
+
+
+# ---------------------------------------------------------------------------
+# to_dict / from_dict round-trip
+# ---------------------------------------------------------------------------
 
 
 class TestRoundTrip:
@@ -167,6 +197,11 @@ class TestRoundTrip:
 # story it didn't let callers tell. These tests cover the new parameter
 # surface end-to-end: caller-supplied vectors land in the signed
 # predicate, the ev_* columns, and survive restore round-trip.
+
+
+# ---------------------------------------------------------------------------
+# assert_claim() evidence= parameter binding
+# ---------------------------------------------------------------------------
 
 
 class TestAssertClaimEvidenceParameter:

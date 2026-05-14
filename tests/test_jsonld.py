@@ -17,6 +17,11 @@ def _open(tmp_path: Path) -> sqlite3.Connection:
     return open_db(tmp_path)
 
 
+# ---------------------------------------------------------------------------
+# @context + top-level structure
+# ---------------------------------------------------------------------------
+
+
 class TestContextAndStructure:
     def test_context_present(self, tmp_path: Path) -> None:
         doc = JSONLDExporter(tmp_path).export()
@@ -52,6 +57,11 @@ class TestContextAndStructure:
     def test_empty_graph_when_no_claims(self, tmp_path: Path) -> None:
         doc = JSONLDExporter(tmp_path).export()
         assert doc["@graph"] == []
+
+
+# ---------------------------------------------------------------------------
+# Claim node serialization
+# ---------------------------------------------------------------------------
 
 
 class TestClaimNodes:
@@ -111,6 +121,11 @@ class TestClaimNodes:
         doc = JSONLDExporter(tmp_path).export()
         claims = [n for n in doc["@graph"] if n.get("@type") == "mare:Claim"]
         assert len(claims) == 3
+
+
+# ---------------------------------------------------------------------------
+# File output / write()
+# ---------------------------------------------------------------------------
 
 
 class TestFileOutput:

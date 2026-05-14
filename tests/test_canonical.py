@@ -11,6 +11,11 @@ import pytest
 from mareforma._canonical import canonicalize
 
 
+# ---------------------------------------------------------------------------
+# Core canonicalize() contract
+# ---------------------------------------------------------------------------
+
+
 class TestCanonicalize:
     def test_sorts_keys(self) -> None:
         assert canonicalize({"b": 1, "a": 2}) == b'{"a":2,"b":1}'
@@ -49,6 +54,11 @@ class TestCanonicalize:
         assert canonicalize([]) == b"[]"
 
 
+# ---------------------------------------------------------------------------
+# Non-finite float rejection
+# ---------------------------------------------------------------------------
+
+
 class TestRejectsNonFinite:
     def test_nan_rejected(self) -> None:
         with pytest.raises(ValueError):
@@ -61,6 +71,11 @@ class TestRejectsNonFinite:
     def test_negative_infinity_rejected(self) -> None:
         with pytest.raises(ValueError):
             canonicalize({"p": -math.inf})
+
+
+# ---------------------------------------------------------------------------
+# Byte stability across runs
+# ---------------------------------------------------------------------------
 
 
 class TestBytestableAcrossRuns:
@@ -93,6 +108,11 @@ class TestBytestableAcrossRuns:
         assert result.stdout == in_process
 
 
+# ---------------------------------------------------------------------------
+# RFC 8785 ECMAScript Number rules
+# ---------------------------------------------------------------------------
+
+
 class TestRfc8785NumberRules:
     """Verify the canonicalizer follows RFC 8785 ECMAScript Number rules
     for floats. The non-float schema in v0.3.0 happens to produce the
@@ -116,6 +136,11 @@ class TestRfc8785NumberRules:
     def test_negative_zero_normalizes_to_zero(self) -> None:
         """-0.0 and 0.0 are equal under IEEE-754 but JSON has one zero."""
         assert canonicalize({"x": -0.0}) == canonicalize({"x": 0.0})
+
+
+# ---------------------------------------------------------------------------
+# Byte compatibility with prior stdlib canonicalizer (no-float schema)
+# ---------------------------------------------------------------------------
 
 
 class TestRfc8785ByteCompatWithNoFloats:
@@ -190,6 +215,11 @@ class TestRfc8785ByteCompatWithNoFloats:
         # The whole envelope decodes back to the same dict.
         import json as _json
         assert _json.loads(out) == payload
+
+
+# ---------------------------------------------------------------------------
+# NFC-collision detection on dict keys
+# ---------------------------------------------------------------------------
 
 
 class TestNfcKeyCollision:
