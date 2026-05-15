@@ -40,7 +40,7 @@ Envelope upgrade + verdict-issuer protocol (substrate-launch additions):
 - **In-toto Statement v1 + DSSE v1 PAE envelope.** Every signed claim
   is now a DSSE envelope (`payloadType=application/vnd.in-toto+json`)
   wrapping an in-toto Statement v1
-  (`predicateType=https://mareforma.dev/claim/v1`). Standards-aligned;
+  (`predicateType=urn:mareforma:predicate:claim:v1`). Standards-aligned;
   introspectable by `cosign`, GUAC, and any in-toto-aware tool without
   a mareforma-specific verifier. The signature covers the DSSE
   Pre-Authentication Encoding (PAE), not the payload bytes alone —

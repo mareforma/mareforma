@@ -40,7 +40,7 @@ class TestStatementShape:
         assert stmt["_type"] == STATEMENT_TYPE
         assert stmt["_type"] == "https://in-toto.io/Statement/v1"
         assert stmt["predicateType"] == PREDICATE_TYPE
-        assert stmt["predicateType"] == "https://mareforma.dev/claim/v1"
+        assert stmt["predicateType"] == "urn:mareforma:predicate:claim:v1"
 
     def test_subject_shape(self) -> None:
         stmt = _minimal_statement()

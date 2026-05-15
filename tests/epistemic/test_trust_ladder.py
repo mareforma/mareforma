@@ -269,7 +269,7 @@ class TestLaunchSubstrateShipGate:
     ) -> None:
         """Every signed claim's envelope is a DSSE v1 wrapping an
         in-toto Statement v1 with predicateType
-        https://mareforma.dev/claim/v1. Subject digest binds the
+        urn:mareforma:predicate:claim:v1. Subject digest binds the
         text; predicate carries SIGNED_FIELDS + EvidenceVector."""
         from mareforma import signing as _signing
         with open_signed_graph(tmp_path) as g:

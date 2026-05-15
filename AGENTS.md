@@ -484,7 +484,7 @@ keypair at `~/.config/mareforma/key` (mode 0600). After that, every
 **Envelope shape — in-toto Statement v1 + DSSE v1.** The envelope is a
 DSSE v1 envelope (`payloadType=application/vnd.in-toto+json`) whose
 payload is an in-toto Statement v1
-(`predicateType=https://mareforma.dev/claim/v1`). The signed predicate
+(`predicateType=urn:mareforma:predicate:claim:v1`). The signed predicate
 binds `claim_id`, `text`, `classification`, `generated_by`, `supports`,
 `contradicts`, `source_name`, `artifact_hash`, `created_at`, and the
 GRADE `evidence` vector (see below). The subject digest is

@@ -175,7 +175,7 @@ class TestSignVerify:
         # fields live one level deeper under predicate.
         stmt = envelope_payload(envelope)
         assert stmt["_type"] == "https://in-toto.io/Statement/v1"
-        assert stmt["predicateType"] == "https://mareforma.dev/claim/v1"
+        assert stmt["predicateType"] == "urn:mareforma:predicate:claim:v1"
         predicate = claim_predicate_from_envelope(envelope)
         # Field-by-field check — extras like updated_at must NOT appear in
         # the signed predicate (only the canonical _SIGNED_FIELDS + evidence).

@@ -53,7 +53,7 @@ The Statement v1 payload is::
       "_type":         "https://in-toto.io/Statement/v1",
       "subject":       [{"name": "mareforma:claim:<id>",
                          "digest": {"sha256": "<text_sha256>"}}],
-      "predicateType": "https://mareforma.dev/claim/v1",
+      "predicateType": "urn:mareforma:predicate:claim:v1",
       "predicate":     { <claim fields + GRADE EvidenceVector> }
     }
 

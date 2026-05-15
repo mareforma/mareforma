@@ -9,7 +9,7 @@ Sigstore and SLSA). The envelope shape is::
       "_type":         "https://in-toto.io/Statement/v1",
       "subject":       [{"name": "mareforma:claim:<id>",
                          "digest": {"sha256": "<text_sha256>"}}],
-      "predicateType": "https://mareforma.dev/claim/v1",
+      "predicateType": "urn:mareforma:predicate:claim:v1",
       "predicate":     { <claim fields + EvidenceVector> }
     }
 
@@ -29,10 +29,11 @@ own" at face value.
 
 predicateType
 -------------
-``https://mareforma.dev/claim/v1`` — versioned. A future v2 predicate
-schema (e.g. adding new evidence dimensions) gets a new predicateType
-URL; v1 stays valid forever for already-signed claims. The URL is a
-namespace, not a fetched document; mareforma never resolves it.
+``urn:mareforma:predicate:claim:v1`` — versioned. A future v2 predicate
+schema (e.g. adding new evidence dimensions) gets a new predicateType;
+v1 stays valid forever for already-signed claims. URN (not DNS) — the
+identifier is a stable name, not a fetched document, and avoids a
+perpetual-ownership commitment on any DNS name.
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ from ._canonical import canonicalize
 
 
 STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
-PREDICATE_TYPE = "https://mareforma.dev/claim/v1"
+PREDICATE_TYPE = "urn:mareforma:predicate:claim:v1"
 SUBJECT_NAME_PREFIX = "mareforma:claim:"
 
 

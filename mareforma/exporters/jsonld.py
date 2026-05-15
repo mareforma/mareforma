@@ -42,7 +42,7 @@ EXPORT_MEDIA_TYPE = "application/x-mareforma-graph+json"
 
 _CONTEXT = {
     "schema": "https://schema.org/",
-    "mare":   "https://mareforma.dev/ns#",
+    "mare":   "urn:mareforma:ns:",
     "xsd":    "http://www.w3.org/2001/XMLSchema#",
     "name":            "schema:name",
     "dateCreated":     "schema:dateCreated",
