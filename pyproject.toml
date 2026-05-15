@@ -38,13 +38,13 @@ Issues = "https://github.com/mareforma/mareforma/issues"
 
 [project.optional-dependencies]
 git = [
-    "gitpython>=3.1",
+    "gitpython>=3.1.50",
 ]
 dev = [
     "pytest>=7.4",
     "pytest-cov",
     "pytest-httpx>=0.30",
-    "gitpython>=3.1",
+    "gitpython>=3.1.50",
 ]
 docs = []
 
