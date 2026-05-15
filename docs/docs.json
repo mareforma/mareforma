@@ -24,6 +24,10 @@
     }
   },
   "favicon": "/favicon.svg",
+  "styling": {
+    "codeblocks": "dark"
+  },
+  "customCSS": "/style.css",
   "navbar": {
     "links": [
       {
