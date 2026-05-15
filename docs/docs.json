@@ -3,13 +3,33 @@
   "theme": "mint",
   "name": "Mareforma",
   "colors": {
-    "primary": "#0D9488",
-    "light": "#14B8A6",
-    "dark": "#0F766E"
+    "primary": "#c8965a",
+    "light": "#d4a76a",
+    "dark": "#8a6338"
   },
-  "favicon": "/favicon.png",
+  "background": {
+    "dark": "#0e0e0c"
+  },
+  "appearance": {
+    "default": "dark"
+  },
+  "fonts": {
+    "heading": {
+      "family": "Playfair Display",
+      "weight": 700
+    },
+    "body": {
+      "family": "Hanken Grotesk",
+      "weight": 400
+    }
+  },
+  "favicon": "/favicon.svg",
   "navbar": {
     "links": [
+      {
+        "label": "Website",
+        "href": "https://mareforma.com"
+      },
       {
         "label": "GitHub",
         "href": "https://github.com/mareforma/mareforma"
