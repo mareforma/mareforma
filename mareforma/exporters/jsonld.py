@@ -1,35 +1,28 @@
 """
-exporters/jsonld.py — Export the project ontology as a JSON-LD document.
-
-Vocabulary
-----------
-Uses a pragmatic mix:
-  - schema.org/Dataset  for data sources
-  - PROV-O (W3C)        for provenance (wasGeneratedBy, used, Activity)
-  - mare: prefix        for mareforma-specific concepts (acquisitionProtocol, Claim)
-
-The result is valid JSON-LD 1.1, readable by any linked-data tool, and
-designed to be attached to a preprint or shared as a project URL.
+exporters/jsonld.py — Export claims as a mareforma-native JSON-LD document.
 
 Output structure
 ----------------
 {
   "@context": { ... },
   "@graph": [
-    { "@type": "schema:Dataset",  "@id": "mare:source/morphology", ... },
-    { "@type": "prov:Activity",   "@id": "mare:transform/morphology.register", ... },
-    { "@type": "prov:Entity",     "@id": "mare:artifact/morphology.register", ... },
-    { "@type": "mare:Claim",      "@id": "mare:claim/<uuid>", ... }
-  ]
+    { "@type": "mare:Claim", "@id": "mare:claim/<uuid>", ... }
+  ],
+  "@type": "mare:Graph",
+  "mare:mediaType": "application/x-mareforma-graph+json"
 }
 
-Data sources
-------------
-  - mareforma.project.toml  : project metadata and sources
-  - graph.db                : transform run provenance (all_transform_runs)
-                              and explicit scientific claims (list_claims)
-
-Updated automatically after every successful build and every add-source.
+Vocabulary
+----------
+The export uses mareforma's own ``mare:`` vocabulary plus schema.org
+for cross-tool friendliness. PROV-O references were removed currently
+— the previous JSON-LD context name-dropped ``prov:wasGeneratedBy``
+and ``prov:used`` without populating the full PROV-O graph (no
+prov:Activity, no prov:wasAssociatedWith, no model identity, no
+prompt/response hashes). Consumers integrating against the export
+should treat it as a mareforma-native format with media type
+``application/x-mareforma-graph+json``, not as a standards-compliant
+PROV-O graph. See ``docs/reference/export-format.md`` for the schema.
 """
 
 from __future__ import annotations
@@ -42,55 +35,52 @@ from typing import Any
 from mareforma import __version__
 
 
+# Media type for the exported graph. Distinct from PROV-O — see module
+# docstring for the scoping rationale.
+EXPORT_MEDIA_TYPE = "application/x-mareforma-graph+json"
+
+
 _CONTEXT = {
     "schema": "https://schema.org/",
-    "prov": "http://www.w3.org/ns/prov#",
-    "mare": "https://mareforma.dev/ns#",
-    "xsd": "http://www.w3.org/2001/XMLSchema#",
-    # Shorthand aliases — source / transform / artifact
-    "name": "schema:name",
-    "description": "schema:description",
-    "dateCreated": "schema:dateCreated",
-    "format": "schema:encodingFormat",
-    "path": "schema:contentUrl",
-    "status": "mare:status",
-    "protocolFile": "mare:acquisitionProtocol",
-    "wasGeneratedBy": "prov:wasGeneratedBy",
-    "used": "prov:used",
-    "startedAtTime": "prov:startedAtTime",
-    "hadDuration": "mare:durationMs",
-    "dependsOn": "mare:dependsOn",
-    "inputHash": "mare:inputHash",
-    "outputHash": "mare:outputHash",
-    "sourceHash": "mare:sourceHash",
-    "columns": "mare:schemaColumns",
-    "shape": "mare:schemaShape",
-    # Shorthand aliases — claims
-    "claimText": "mare:claimText",
-    "confidence": "mare:confidence",
-    "confidenceFloat": "mare:confidenceFloat",
-    "claimStatus": "mare:claimStatus",
-    "replicationStatus": "mare:replicationStatus",
-    "sourceName": "mare:sourceName",
-    "generatedBy": "mare:generatedBy",
-    "generationMethod": "mare:generationMethod",
-    "supports": "mare:supports",
-    "contradicts": "mare:contradicts",
+    "mare":   "urn:mareforma:ns:",
+    "xsd":    "http://www.w3.org/2001/XMLSchema#",
+    "name":            "schema:name",
+    "dateCreated":     "schema:dateCreated",
+    "claimText":       "mare:claimText",
+    "classification":  "mare:classification",
+    "supportLevel":    "mare:supportLevel",
+    "claimStatus":     "mare:claimStatus",
+    "sourceName":      "mare:sourceName",
+    "generatedBy":     "mare:generatedBy",
+    # Flat list of strings (back-compat): exactly what's stored in
+    # supports_json / contradicts_json. Mixed types — claim_ids, DOIs,
+    # external refs — appear in arbitrary order.
+    "supports":        "mare:supports",
+    "contradicts":     "mare:contradicts",
+    # Typed buckets: every entry from supports/contradicts also appears
+    # under the matching typed predicate, so a downstream consumer can
+    # distinguish "graph-node edges" from "external citations" without
+    # re-running the classification regex.
+    "supportsClaim":      "mare:supportsClaim",
+    "supportsDoi":        "mare:supportsDoi",
+    "supportsReference":  "mare:supportsReference",
+    "contradictsClaim":      "mare:contradictsClaim",
+    "contradictsDoi":        "mare:contradictsDoi",
+    "contradictsReference":  "mare:contradictsReference",
     "comparisonSummary": "mare:comparisonSummary",
-    # Shorthand aliases — literature
-    "doi": "schema:identifier",
-    "datePublished": "schema:datePublished",
-    "author": "schema:author",
+    "validatedBy":     "mare:validatedBy",
+    "usedSource":      "mare:usedSource",
+    "artifactHash":    "mare:artifactHash",
 }
 
 
 class JSONLDExporter:
-    """Converts mareforma.project.toml + graph.db → JSON-LD graph.
+    """Export claims from graph.db as a JSON-LD document.
 
     Parameters
     ----------
     root:
-        Project root directory.
+        Project root directory containing .mareforma/graph.db.
     """
 
     def __init__(self, root: Path) -> None:
@@ -98,51 +88,29 @@ class JSONLDExporter:
 
     def export(self) -> dict[str, Any]:
         """Build and return the full JSON-LD document as a Python dict."""
-        from mareforma.registry import load as load_toml
-        from mareforma.db import open_db, all_transform_runs, list_claims
-
-        toml_data = load_toml(self._root)
+        from mareforma.db import open_db, list_claims
 
         conn = open_db(self._root)
         try:
-            runs = all_transform_runs(conn)
             claims = list_claims(conn)
         finally:
             conn.close()
 
-        graph: list[dict[str, Any]] = []
-
-        # Project node
-        project = toml_data.get("project", {})
-        graph.append(self._project_node(project))
-
-        # Source nodes
-        sources = toml_data.get("sources", {})
-        for source_name, source_cfg in sources.items():
-            graph.append(self._source_node(source_name, source_cfg))
-
-        # Transform + artifact nodes from graph.db
-        for transform_name, run_data in runs.items():
-            graph.append(self._transform_node(transform_name, run_data, sources))
-            if run_data.get("status") == "success":
-                graph.append(self._artifact_node(transform_name, run_data))
-
-        # Literature nodes from TOML
-        literature = toml_data.get("literature", {})
-        for doi_key, lit_cfg in literature.items():
-            graph.append(self._literature_node(doi_key, lit_cfg))
-
-        # Claim nodes from graph.db
-        for claim in claims:
-            graph.append(self._claim_node(claim))
+        graph: list[dict[str, Any]] = [
+            self._claim_node(c) for c in claims
+        ]
 
         return {
             "@context": _CONTEXT,
+            "@type": "mare:Graph",
             "@graph": graph,
+            "mare:mediaType": EXPORT_MEDIA_TYPE,
+            "mare:exportedAt": datetime.now(timezone.utc).isoformat(),
+            "mare:mareformaVersion": __version__,
         }
 
     def write(self, output_path: Path | None = None) -> Path:
-        """Write JSON-LD to *output_path* (default: project root/ontology.jsonld).
+        """Write JSON-LD to *output_path* (default: <root>/ontology.jsonld).
 
         Returns the path written.
         """
@@ -161,103 +129,77 @@ class JSONLDExporter:
     # Node builders
     # ------------------------------------------------------------------
 
-    def _project_node(self, project: dict) -> dict:
-        return {
-            "@type": "schema:ResearchProject",
-            "@id": f"mare:project/{_slug(project.get('name', 'unknown'))}",
-            "name": project.get("name", ""),
-            "description": project.get("description", ""),
-            "dateCreated": project.get("created", ""),
-            "mare:mareformaVersion": __version__,
-            "mare:exportedAt": datetime.now(timezone.utc).isoformat(),
-        }
-
-    def _source_node(self, name: str, cfg: dict) -> dict:
-        node: dict[str, Any] = {
-            "@type": "schema:Dataset",
-            "@id": f"mare:source/{name}",
-            "name": name,
-            "description": cfg.get("description", ""),
-            "format": cfg.get("format", ""),
-            "path": cfg.get("path", ""),
-            "status": cfg.get("status", "raw"),
-            "dateCreated": cfg.get("added", ""),
-        }
-
-        acq = cfg.get("acquisition", {})
-        if acq:
-            node["protocolFile"] = acq.get("protocol_file", "")
-
-        return node
-
-    def _transform_node(
-        self,
-        name: str,
-        run_data: dict,
-        sources: dict,
-    ) -> dict:
-        source_name = name.split(".")[0]
-        node: dict[str, Any] = {
-            "@type": "prov:Activity",
-            "@id": f"mare:transform/{name}",
-            "name": name,
-            "startedAtTime": run_data.get("timestamp", ""),
-            "hadDuration": run_data.get("duration_ms"),
-            "status": run_data.get("status", ""),
-        }
-        if source_name in sources:
-            node["used"] = f"mare:source/{source_name}"
-        return node
-
-    def _artifact_node(self, transform_name: str, _run_data: dict) -> dict:
-        return {
-            "@type": "prov:Entity",
-            "@id": f"mare:artifact/{transform_name}",
-            "name": f"{transform_name} output",
-            "wasGeneratedBy": f"mare:transform/{transform_name}",
-        }
-
-    def _literature_node(self, doi_key: str, cfg: dict) -> dict:
-        return {
-            "@type": "schema:ScholarlyArticle",
-            "@id": f"mare:literature/{doi_key}",
-            "doi": cfg.get("doi", ""),
-            "name": cfg.get("title", ""),
-            "author": cfg.get("authors", []),
-            "datePublished": cfg.get("year", 0),
-            "schema:isPartOf": cfg.get("journal", ""),
-        }
-
     def _claim_node(self, claim: dict) -> dict:
+        # Always include every SIGNED_FIELDS member + the GRADE
+        # EvidenceVector so a downstream consumer (e.g. SCITT bundle
+        # verification) can re-derive the canonical Statement v1 bytes
+        # from the node alone. Optional fields use null/[] defaults to
+        # match canonical_statement's expected shape.
+        supports = json.loads(claim.get("supports_json", "[]") or "[]")
+        contradicts = json.loads(claim.get("contradicts_json", "[]") or "[]")
+        try:
+            evidence_dict = json.loads(claim.get("evidence_json") or "{}")
+        except (ValueError, TypeError):
+            evidence_dict = {}
+
+        # 215: emit typed buckets alongside the flat list. The flat
+        # ``supports`` / ``contradicts`` arrays stay byte-identical to
+        # what was signed (and to claims.toml's round-tripped copy), so
+        # the canonical_statement digest still matches. The typed
+        # arrays are derived view: a consumer that knows about the
+        # typed predicates can route on them; a consumer that doesn't
+        # falls back to the flat list and re-classifies if it cares.
+        from mareforma.db import (
+            SUPPORT_TYPE_CLAIM,
+            SUPPORT_TYPE_DOI,
+            SUPPORT_TYPE_EXTERNAL,
+            classify_supports,
+        )
+
+        def _split(entries: list[str]) -> tuple[list[str], list[str], list[str]]:
+            claims_b: list[str] = []
+            dois_b: list[str] = []
+            refs_b: list[str] = []
+            for typed in classify_supports(entries):
+                t = typed["type"]
+                v = typed["value"]
+                if t == SUPPORT_TYPE_CLAIM:
+                    claims_b.append(v)
+                elif t == SUPPORT_TYPE_DOI:
+                    dois_b.append(v)
+                else:
+                    assert t == SUPPORT_TYPE_EXTERNAL
+                    refs_b.append(v)
+            return claims_b, dois_b, refs_b
+
+        sup_claims, sup_dois, sup_refs = _split(supports)
+        con_claims, con_dois, con_refs = _split(contradicts)
+
         node: dict[str, Any] = {
             "@type": "mare:Claim",
             "@id": f"mare:claim/{claim['claim_id']}",
             "claimText": claim["text"],
-            "confidence": claim["confidence"],
-            "confidenceFloat": claim["confidence_float"],
+            "classification": claim.get("classification", "INFERRED"),
+            "supportLevel": claim.get("support_level", "PRELIMINARY"),
             "claimStatus": claim["status"],
-            "replicationStatus": claim["replication_status"],
-            "generatedBy": claim.get("generated_by", "human"),
-            "generationMethod": claim.get("generation_method", "explicit"),
+            "generatedBy": claim.get("generated_by", "agent"),
             "dateCreated": claim["created_at"],
+            "supports": supports,
+            "contradicts": contradicts,
+            "supportsClaim": sup_claims,
+            "supportsDoi": sup_dois,
+            "supportsReference": sup_refs,
+            "contradictsClaim": con_claims,
+            "contradictsDoi": con_dois,
+            "contradictsReference": con_refs,
+            "sourceName": claim.get("source_name"),
+            "artifactHash": claim.get("artifact_hash"),
+            "evidence": evidence_dict,
         }
-        supports = json.loads(claim.get("supports_json", "[]") or "[]")
-        contradicts = json.loads(claim.get("contradicts_json", "[]") or "[]")
-        if supports:
-            node["supports"] = supports
-        if contradicts:
-            node["contradicts"] = contradicts
         if claim.get("comparison_summary"):
             node["comparisonSummary"] = claim["comparison_summary"]
         if claim.get("source_name"):
-            node["sourceName"] = claim["source_name"]
-            node["used"] = f"mare:source/{claim['source_name']}"
+            node["usedSource"] = f"mare:source/{claim['source_name']}"
+        if claim.get("validated_by"):
+            node["validatedBy"] = claim["validated_by"]
         return node
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _slug(name: str) -> str:
-    return name.lower().replace(" ", "_").replace("/", "_")

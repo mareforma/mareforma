@@ -1,0 +1,132 @@
+---
+title: "Trust"
+description: "How Mareforma derives trust from graph topology, not from agent self-reporting."
+---
+
+Trust in a claim is a property of its position in the graph, not a property
+of the agent that made it.
+
+There is no confidence score. An agent that is wrong is still confident.
+The graph does not ask the agent how sure it is — it tracks what the agent
+can demonstrate.
+
+## Support levels
+
+<AccordionGroup>
+  <Accordion title="PRELIMINARY">
+    One agent claimed it. Could be correct. No independent confirmation yet.
+
+    Set automatically at INSERT. Every new claim starts here.
+  </Accordion>
+  <Accordion title="REPLICATED">
+    ≥2 agents with different `generated_by` values share the same upstream
+    in `supports[]`, AND at least one of those upstreams is itself
+    `ESTABLISHED`. Set automatically at INSERT. No extra step required.
+
+    The ESTABLISHED-upstream rule (added currently) matches Cochrane / GRADE
+    evidence-chain methodology — replication-of-noise is not replication. A
+    fresh project bootstraps the chain via a *seed claim* (see below).
+  </Accordion>
+  <Accordion title="ESTABLISHED">
+    A human (an enrolled validator) reviewed the provenance chain and
+    validated it. Only reachable via `graph.validate()`. No agent can
+    self-promote.
+
+    This is the gate for consequential actions.
+  </Accordion>
+</AccordionGroup>
+
+## How REPLICATED fires
+
+```
+ESTABLISHED upstream ──► ANALYTICAL claim (lab_a, generated_by="agent/a")  ──┐
+                                                                              ├──► REPLICATED
+ESTABLISHED upstream ──► ANALYTICAL claim (lab_b, generated_by="agent/b")  ──┘
+```
+
+Three conditions must all be true:
+1. Both claims reference the **same upstream** in `supports[]`
+2. Both claims have **different `generated_by`** values
+3. At least one shared upstream is itself **ESTABLISHED**
+
+A single agent asserting the same claim a thousand times is still PRELIMINARY.
+Independence of provenance paths is what matters, not count.
+
+### Bootstrapping a fresh project (seed claim)
+
+On a brand new graph, no claim is yet ESTABLISHED, so the third condition
+above can never be satisfied. An enrolled validator (typically the project's
+root, auto-enrolled on first open) bootstraps the chain by asserting a
+*seed claim* — a claim inserted directly at `ESTABLISHED` with a signed seed
+envelope.
+
+```python
+import mareforma
+
+with mareforma.open() as graph:
+    # Bootstrap the chain. Only an enrolled validator can produce a seed.
+    seed_id = graph.assert_claim(
+        "Prior literature establishes X under condition C",
+        classification="DERIVED",
+        generated_by="agent/seed",
+        seed=True,
+    )
+
+    # Downstream peers now have an ESTABLISHED upstream to converge on.
+    id_a = graph.assert_claim(
+        "Finding A consistent with X",
+        supports=[seed_id],
+        generated_by="agent/model-a",
+    )
+    id_b = graph.assert_claim(
+        "Finding B consistent with X",
+        supports=[seed_id],
+        generated_by="agent/model-b",
+    )
+
+    graph.get_claim(id_a)["support_level"]  # → "REPLICATED"
+    graph.get_claim(id_b)["support_level"]  # → "REPLICATED"
+```
+
+### Artifact-hash gate
+
+When two converging peers BOTH supply `artifact_hash` (a SHA-256 hex digest
+of the output bytes — figure, CSV, model), the hashes must match for
+`REPLICATED` to fire. Identity convergence alone is no longer enough in
+that case. When either peer omits the hash, the gate is bypassed and
+identity-only `REPLICATED` applies — the signal is opt-in, not retroactive.
+
+The hash is part of the signed payload, so an attacker who edits the
+column without the private key breaks verification.
+
+## How ESTABLISHED is reached
+
+```python
+# Only after REPLICATED — will raise ValueError if PRELIMINARY
+graph.validate(claim_id, validated_by="reviewer@example.org")
+```
+
+`graph.validate()` is **identity-gated**. The graph must have a loaded
+signing key AND that key must be enrolled in the project's `validators`
+table. The first key opened against a fresh graph auto-enrolls as the
+root validator (silent self-signed enrollment with a `UserWarning`).
+Additional validators are added via `mareforma validator add` or
+`graph.enroll_validator()`.
+
+The validation event itself is signed: a DSSE-style envelope binding
+`(claim_id, validator_keyid, validated_at)` is persisted to the claim's
+`validation_signature` column. `validated_by` is a cosmetic display
+label; the authoritative identity is the keyid embedded in the signed
+envelope.
+
+`validate()` raises `ValueError` if the claim is not yet `REPLICATED`,
+if no signer is loaded, or if the loaded signer is not enrolled.
+
+## What trust is not
+
+ESTABLISHED does not mean the claim is true. The graph records what agents
+assert and what the provenance structure supports. A REPLICATED finding can
+still be wrong if both agents were reasoning from the same false prior.
+
+Trust in Mareforma is a structural property — a measure of how the finding
+was reached, not of whether it is correct.

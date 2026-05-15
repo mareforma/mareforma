@@ -209,3 +209,15 @@ __marimo__/
 # Local planning documents
 SPEC.md
 TODOS.md
+docs/_build/
+
+# Claude Code local session state and cache
+.claude/
+
+# GStack artifacts
+.gstack/
+
+# Mareforma runtime artifacts
+.mareforma/
+claims.toml
+ontology.jsonld

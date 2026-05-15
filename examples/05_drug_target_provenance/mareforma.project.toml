@@ -1,0 +1,15 @@
+[project]
+name = "drug_target_provenance"
+description = "Drug target identification from multi-omics data — epistemic provenance for AI scientist findings"
+created = "2026-03-24T00:00:00+00:00"
+mareforma_version = "0.3.0"
+
+[project.author]
+name = "Jane Doe"
+email = "jane.doe@example-lab.org"
+institution = "Example Research Institute"
+
+[sources.medeadb]
+path = "data/medeadb/raw"
+description = "MedeaDB — multi-omics gene-disease database for AI-driven drug target identification. Download: huggingface-cli download mims-harvard/MedeaDB --repo-type dataset --local-dir data/medeadb/raw/"
+format = "csv"

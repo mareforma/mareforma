@@ -1,0 +1,44 @@
+---
+title: "Compounding Agents"
+description: "Two agents work sequentially. Knowledge accumulates in the graph instead of evaporating between runs."
+---
+
+<Card title="View on GitHub" icon="github" href="https://github.com/mareforma/mareforma/tree/main/examples/02_compounding_agents">
+  `examples/02_compounding_agents/`
+</Card>
+
+Agent A analyses two independent datasets, citing the same upstream evidence.
+Agent B queries the graph before asserting — finds the REPLICATED findings
+and builds a DERIVED synthesis on top.
+
+## Run
+
+```bash
+pip install langchain-core
+cd examples/02_compounding_agents
+python 02_compounding_agents.py
+```
+
+No API key required. To use a real LLM:
+
+```python
+from langchain_openai import ChatOpenAI
+from langgraph.prebuilt import create_react_agent
+agent = create_react_agent(ChatOpenAI(model="gpt-4o"), tools=[query_graph, assert_finding])
+```
+
+## Key pattern
+
+```python
+@tool
+def query_graph(topic: str, min_support: str = "PRELIMINARY") -> str:
+    results = graph.query(topic, min_support=min_support)
+    return json.dumps([r["text"] for r in results])
+
+@tool
+def assert_finding(text: str, classification: str, supports: list[str]) -> str:
+    return graph.assert_claim(
+        text, classification=classification, supports=supports,
+        generated_by="agent/synthesiser",
+    )
+```

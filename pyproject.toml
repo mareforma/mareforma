@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mareforma"
-version = "0.2.1"
-description = "Automatic provenance for AI-driven research pipelines"
+version = "0.3.0"
+description = "Epistemic infrastructure for AI scientists"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-keywords = ["provenance", "reproducibility", "ai-agents", "research", "data-pipeline"]
+keywords = ["epistemic-graph", "ai-scientists", "provenance", "reproducibility", "multi-agent", "research"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
@@ -17,17 +17,22 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 dependencies = [
     "click>=8.1",
     "tomli-w>=1.0",
-    "rich>=13.0",
     "tomli>=2.0; python_version < '3.11'",
+    "httpx>=0.27",
+    "cryptography>=42",
+    "rfc8785>=0.1",
 ]
 
 [project.urls]
 Homepage = "https://github.com/mareforma/mareforma"
+Documentation = "https://docs.mareforma.com"
 Repository = "https://github.com/mareforma/mareforma"
 Issues = "https://github.com/mareforma/mareforma/issues"
 
@@ -35,16 +40,13 @@ Issues = "https://github.com/mareforma/mareforma/issues"
 git = [
     "gitpython>=3.1",
 ]
-paper = [
-    "httpx>=0.27",
-]
 dev = [
     "pytest>=7.4",
     "pytest-cov",
     "pytest-httpx>=0.30",
     "gitpython>=3.1",
-    "httpx>=0.27",
 ]
+docs = []
 
 [project.scripts]
 mareforma = "mareforma.cli:cli"

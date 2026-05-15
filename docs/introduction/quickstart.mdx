@@ -1,0 +1,162 @@
+---
+title: "Quickstart"
+description: "Five minutes to your first claim."
+---
+
+## Install
+
+```bash
+uv add mareforma
+```
+
+## (Optional) bootstrap a signing key
+
+```bash
+mareforma bootstrap
+```
+
+Generates an Ed25519 keypair at `~/.config/mareforma/key` (mode `0600`).
+Optional but recommended: with a key, every claim is signed and the first
+project you open will auto-enroll you as its root validator (the only
+identity allowed to promote claims to `ESTABLISHED`). Without a key, the
+graph still works — claims are just stored unsigned.
+
+## Open a graph
+
+```python
+import mareforma
+
+graph = mareforma.open()
+```
+
+No project setup. No init command. `graph.db` is created in `.mareforma/`
+under the current directory on first call.
+
+## Assert a claim
+
+```python
+claim_id = graph.assert_claim(
+    "Cell type A receives more inhibitory input than cell type B",
+    classification="ANALYTICAL",
+    generated_by="agent/model-a/lab_a",
+    source_name="dataset_alpha",
+)
+```
+
+`claim_id` is a UUID. The claim is immediately persisted to `graph.db` and
+backed up to `claims.toml` — a human-readable TOML file written after every
+mutation. If `graph.db` is ever deleted or corrupted, `claims.toml` preserves
+the full record.
+
+A claim is a falsifiable assertion with provenance: what was asserted,
+how the knowledge was derived (`classification`), from which data source,
+and building on which upstream claims (`supports`). Claims are append-only
+— once recorded, a claim is built upon, contradicted, or retracted, never
+overwritten.
+
+## Query what is already known
+
+```python
+results = graph.query("cell type A", min_support="PRELIMINARY")
+for r in results:
+    print(r["text"], r["support_level"])
+```
+
+Always query before asserting. If the graph already has a REPLICATED or
+ESTABLISHED finding on your topic, build on it — don't duplicate it.
+
+When the results will be spliced into an LLM prompt, use
+`graph.query_for_llm(...)` instead — it sanitizes free-text fields and
+wraps them in `<untrusted_data>...</untrusted_data>` delimiters so
+stored prompt-injection in earlier claim text cannot escape.
+
+## Bootstrap an ESTABLISHED upstream
+
+REPLICATED requires at least one `ESTABLISHED` claim in the converging
+peers' `supports[]` (Cochrane / GRADE evidence-chain methodology — stops
+replication-of-noise). On a fresh project, no claim is yet ESTABLISHED, so
+the first thing the root validator does is assert a *seed claim* — a claim
+that goes directly to `ESTABLISHED` via a signed seed envelope.
+
+```python
+# Bootstrap. Only an enrolled validator (the bootstrap key auto-enrolls
+# as root the first time the project is opened) can produce a seed.
+seed_id = graph.assert_claim(
+    "Prior literature establishes that target T is elevated in condition C",
+    classification="DERIVED",
+    generated_by="agent/seed",
+    seed=True,
+)
+```
+
+## Let two agents converge
+
+```python
+# Agent A — supports the seed
+id_a = graph.assert_claim(
+    "Target T elevated in condition C (n=620)",
+    classification="ANALYTICAL",
+    generated_by="agent/model-a/lab_a",
+    supports=[seed_id],
+    source_name="dataset_alpha",
+)
+
+# Agent B — independent data, same upstream
+id_b = graph.assert_claim(
+    "Target T elevated in condition C (n=580)",
+    classification="ANALYTICAL",
+    generated_by="agent/model-b/lab_b",
+    supports=[seed_id],
+    source_name="dataset_beta",
+)
+
+# REPLICATED fires automatically
+graph.get_claim(id_a)["support_level"]  # → "REPLICATED"
+graph.get_claim(id_b)["support_level"]  # → "REPLICATED"
+```
+
+Two independent agents, shared ESTABLISHED upstream, different
+`generated_by` → `REPLICATED` is set automatically at INSERT time. No
+extra step required.
+
+## Promote to ESTABLISHED
+
+```python
+graph.validate(id_a, validated_by="reviewer@example.org")
+graph.get_claim(id_a)["support_level"]  # → "ESTABLISHED"
+```
+
+Only `REPLICATED` claims can be promoted. `validate()` is identity-gated:
+the loaded signing key must be enrolled in the project's `validators`
+table. The validation event itself is signed and persisted to the claim's
+`validation_signature` column.
+
+## Close the graph
+
+```python
+graph.close()
+```
+
+Or use a context manager — it closes automatically on exit:
+
+```python
+with mareforma.open() as graph:
+    graph.assert_claim("...")
+```
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Concepts" icon="book" href="/concepts/trust">
+    What is trust, what is origin, what is the graph.
+  </Card>
+  <Card title="For agents" icon="robot" href="/for-agents/agents">
+    Full execution contract — methods, patterns, forbidden patterns.
+  </Card>
+  <Card title="API reference" icon="code" href="/reference/api">
+    Complete method signatures and return types.
+  </Card>
+  <Card title="Examples" icon="play" href="/examples/api-walkthrough">
+    Five runnable examples, from walkthrough to real AI scientists.
+  </Card>
+</CardGroup>

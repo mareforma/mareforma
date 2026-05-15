@@ -1,14 +1,4 @@
-"""
-tests/test_cli.py — smoke tests for all CLI commands.
-
-Uses click's CliRunner to invoke commands in an isolated temp directory.
-
-Additional coverage (v0.3):
-  - trace: linear pipeline shows all transforms in order
-  - trace: single-node pipeline (root only)
-  - trace: transform never ran → exit 1 with helpful message
-  - trace: --json flag emits valid JSON with chain
-"""
+"""tests/test_cli.py — smoke tests for the mareforma CLI (agent-native commands)."""
 
 from __future__ import annotations
 
@@ -16,299 +6,605 @@ import json
 import os
 from pathlib import Path
 
-import pytest
 from click.testing import CliRunner
 
 from mareforma.cli import cli
 
 
-@pytest.fixture()
-def project_dir(tmp_path: Path) -> Path:
-    """Return a temp dir with a fully initialised mareforma project."""
-    runner = CliRunner()
-    with runner.isolated_filesystem(temp_dir=tmp_path):
-        result = runner.invoke(cli, ["init"])
-        assert result.exit_code == 0, result.output
-        yield Path(os.getcwd())
-
-
 # ---------------------------------------------------------------------------
-# init
+# claim add
 # ---------------------------------------------------------------------------
 
-class TestInit:
-    def test_fresh_project_creates_structure(self, tmp_path: Path) -> None:
+class TestClaimAdd:
+    def test_add_exits_0(self, tmp_path: Path) -> None:
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
-            result = runner.invoke(cli, ["init"])
-            assert result.exit_code == 0
-            cwd = Path(os.getcwd())
-            assert (cwd / ".mareforma" / "commits").is_dir()
-            assert (cwd / "data").is_dir()
-            assert (cwd / "mareforma.project.toml").is_file()
-            assert (cwd / ".gitignore").is_file()
-
-    def test_idempotent_on_existing_project(self, project_dir: Path) -> None:
-        runner = CliRunner()
-        with runner.isolated_filesystem(temp_dir=project_dir.parent):
-            os.chdir(project_dir)
-            result = runner.invoke(cli, ["init"])
-            assert result.exit_code == 0
-            assert "already initialised" in result.output
-
-    def test_does_not_overwrite_existing_toml(self, project_dir: Path) -> None:
-        toml = project_dir / "mareforma.project.toml"
-        original = toml.read_text()
-        toml.write_text(original + '\n# custom comment\n')
-        runner = CliRunner()
-        os.chdir(project_dir)
-        runner.invoke(cli, ["init"])
-        assert "custom comment" in toml.read_text()
-
-
-# ---------------------------------------------------------------------------
-# add-source
-# ---------------------------------------------------------------------------
-
-class TestAddSource:
-    def test_creates_dirs_and_registers_in_toml(self, project_dir: Path) -> None:
-        runner = CliRunner()
-        os.chdir(project_dir)
-        result = runner.invoke(cli, ["add-source", "morphology", "--description", "Morphology data"])
+            result = runner.invoke(cli, ["claim", "add", "Target T is elevated"],
+                                   catch_exceptions=False)
         assert result.exit_code == 0
-        base = project_dir / "data" / "morphology"
-        for d in ["raw", "processed", "protocols", "preprocessing"]:
-            assert (base / d).is_dir(), f"Missing: {d}"
-        toml_text = (project_dir / "mareforma.project.toml").read_text()
-        assert "morphology" in toml_text
-        assert "Morphology data" in toml_text
 
-    def test_duplicate_fails_without_force(self, project_dir: Path) -> None:
-        runner = CliRunner()
-        os.chdir(project_dir)
-        runner.invoke(cli, ["add-source", "morphology"])
-        result = runner.invoke(cli, ["add-source", "morphology"])
-        assert result.exit_code == 1
-        assert "already registered" in result.output.lower() or "already registered" in (result.stderr or "")
-
-    def test_duplicate_succeeds_with_force(self, project_dir: Path) -> None:
-        runner = CliRunner()
-        os.chdir(project_dir)
-        runner.invoke(cli, ["add-source", "morphology", "--description", "old"])
-        result = runner.invoke(cli, ["add-source", "morphology", "--description", "new", "--force"])
-        assert result.exit_code == 0
-        toml_text = (project_dir / "mareforma.project.toml").read_text()
-        assert "new" in toml_text
-
-    def test_nonexistent_path_warns_but_registers(self, project_dir: Path) -> None:
-        runner = CliRunner()
-        os.chdir(project_dir)
-        result = runner.invoke(cli, ["add-source", "ghost", "--path", "/nonexistent/path"])
-        # Should warn but exit 0
-        assert result.exit_code == 0
-        assert "does not exist" in result.output or "Warning" in result.output
-
-    def test_creates_build_transform_template(self, project_dir: Path) -> None:
-        runner = CliRunner()
-        os.chdir(project_dir)
-        runner.invoke(cli, ["add-source", "imaging"])
-        bt = project_dir / "data" / "imaging" / "preprocessing" / "build_transform.py"
-        assert bt.is_file()
-        assert "imaging" in bt.read_text()
-
-
-# ---------------------------------------------------------------------------
-# explain
-# ---------------------------------------------------------------------------
-
-class TestExplain:
-    def test_explain_project_no_sources(self, project_dir: Path) -> None:
-        runner = CliRunner()
-        os.chdir(project_dir)
-        result = runner.invoke(cli, ["explain"])
-        assert result.exit_code == 0
-        assert "PROJECT" in result.output
-
-    def test_explain_project_lists_sources(self, project_dir: Path) -> None:
-        runner = CliRunner()
-        os.chdir(project_dir)
-        runner.invoke(cli, ["add-source", "morphology"])
-        runner.invoke(cli, ["add-source", "ephys"])
-        result = runner.invoke(cli, ["explain"])
-        assert result.exit_code == 0
-        assert "morphology" in result.output
-        assert "ephys" in result.output
-
-    def test_explain_source(self, project_dir: Path) -> None:
-        runner = CliRunner()
-        os.chdir(project_dir)
-        runner.invoke(cli, ["add-source", "morphology", "--description", "Skeleton data"])
-        result = runner.invoke(cli, ["explain", "morphology"])
-        assert result.exit_code == 0
-        assert "morphology" in result.output
-        assert "Skeleton data" in result.output
-
-    def test_explain_source_json(self, project_dir: Path) -> None:
-        runner = CliRunner()
-        os.chdir(project_dir)
-        runner.invoke(cli, ["add-source", "morphology"])
-        result = runner.invoke(cli, ["explain", "morphology", "--json"])
-        assert result.exit_code == 0
-        parsed = json.loads(result.output)
-        assert "morphology" in parsed
-
-    def test_explain_unknown_source_exits_1(self, project_dir: Path) -> None:
-        runner = CliRunner()
-        os.chdir(project_dir)
-        result = runner.invoke(cli, ["explain", "does_not_exist"])
-        assert result.exit_code == 1
-
-    def test_explain_project_json(self, project_dir: Path) -> None:
-        runner = CliRunner()
-        os.chdir(project_dir)
-        result = runner.invoke(cli, ["explain", "--json"])
-        assert result.exit_code == 0
-        parsed = json.loads(result.output)
-        assert "project" in parsed
-        assert "sources" in parsed
-
-
-# ---------------------------------------------------------------------------
-# check
-# ---------------------------------------------------------------------------
-
-class TestCheck:
-    def test_empty_project_warns(self, project_dir: Path) -> None:
-        runner = CliRunner()
-        os.chdir(project_dir)
-        result = runner.invoke(cli, ["check"])
-        # No sources registered → warning → exit 1
-        assert result.exit_code == 1
-
-    def test_clean_project_exits_0(self, project_dir: Path, tmp_path: Path) -> None:
-        runner = CliRunner()
-        os.chdir(project_dir)
-
-        # Create an actual raw dir so path check passes
-        raw = project_dir / "data" / "morphology" / "raw"
-        raw.mkdir(parents=True, exist_ok=True)
-
-        runner.invoke(cli, [
-            "add-source", "morphology",
-            "--path", str(raw),
-            "--description", "Skeleton reconstructions",
-        ])
-
-        # Manually fill format field
-        toml_path = project_dir / "mareforma.project.toml"
-        text = toml_path.read_text()
-        text = text.replace('format = ""', 'format = "SWC"')
-        # Also fill project description
-        text = text.replace('description = ""', 'description = "Test project"', 1)
-        toml_path.write_text(text)
-
-        result = runner.invoke(cli, ["check"])
-        assert result.exit_code == 0, result.output
-
-    def test_missing_path_warns(self, project_dir: Path) -> None:
-        runner = CliRunner()
-        os.chdir(project_dir)
-        runner.invoke(cli, ["add-source", "ghost", "--path", "/nonexistent/path"])
-        result = runner.invoke(cli, ["check"])
-        assert result.exit_code == 1
-        assert "does not exist" in result.output or "does not exist" in (result.stderr or "")
-
-    def test_no_project_exits_1(self, tmp_path: Path) -> None:
+    def test_add_prints_claim_id(self, tmp_path: Path) -> None:
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
-            result = runner.invoke(cli, ["check"])
-            assert result.exit_code == 1
+            result = runner.invoke(cli, ["claim", "add", "Some finding"],
+                                   catch_exceptions=False)
+        assert "ID:" in result.output
 
-
-# ---------------------------------------------------------------------------
-# trace (v0.3)
-# ---------------------------------------------------------------------------
-
-class TestTrace:
-    """Smoke tests for `mareforma trace <transform_name>`."""
-
-    def _seed_runs(self, project_dir: Path) -> None:
-        """Populate graph.db with a small linear pipeline: load → filter → features."""
-        import uuid
-        import sqlite3
-        from mareforma.db import open_db, begin_run, end_run, record_deps, write_transform_class
-
-        conn = open_db(project_dir)
-        try:
-            for name, deps, cls in [
-                ("src.load",     [],              "raw"),
-                ("src.filter",   ["src.load"],    "processed"),
-                ("src.features", ["src.filter"],  "analysed"),
-            ]:
-                run_id = str(uuid.uuid4())
-                begin_run(conn, run_id, name, "ih", "sh")
-                record_deps(conn, name, deps)
-                end_run(conn, run_id, status="success", output_hash=f"h_{name}")
-                write_transform_class(
-                    conn, run_id,
-                    transform_class=cls,
-                    class_confidence=0.9,
-                    class_method="heuristic",
-                    class_reason="test",
-                )
-        finally:
-            conn.close()
-
-    def test_trace_linear_pipeline(self, project_dir: Path) -> None:
-        self._seed_runs(project_dir)
+    def test_add_with_classification(self, tmp_path: Path) -> None:
         runner = CliRunner()
-        os.chdir(project_dir)
-        result = runner.invoke(cli, ["trace", "src.features"])
-        assert result.exit_code == 0, result.output
-        # All three transforms should appear
-        assert "src.load" in result.output
-        assert "src.filter" in result.output
-        assert "src.features" in result.output
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            result = runner.invoke(
+                cli,
+                ["claim", "add", "Analytical finding", "--classification", "ANALYTICAL"],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        assert "ANALYTICAL" in result.output
 
-    def test_trace_single_node(self, project_dir: Path) -> None:
-        """A root-only transform traces cleanly."""
-        self._seed_runs(project_dir)
+    def test_add_empty_text_exits_1(self, tmp_path: Path) -> None:
         runner = CliRunner()
-        os.chdir(project_dir)
-        result = runner.invoke(cli, ["trace", "src.load"])
-        assert result.exit_code == 0, result.output
-        assert "src.load" in result.output
-
-    def test_trace_unknown_transform_exits_1(self, project_dir: Path) -> None:
-        runner = CliRunner()
-        os.chdir(project_dir)
-        result = runner.invoke(cli, ["trace", "nonexistent.transform"])
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            result = runner.invoke(cli, ["claim", "add", "   "])
         assert result.exit_code == 1
-        assert "nonexistent.transform" in result.output or "No runs" in result.output
 
-    def test_trace_json_flag_emits_valid_json(self, project_dir: Path) -> None:
-        self._seed_runs(project_dir)
+
+# ---------------------------------------------------------------------------
+# claim list
+# ---------------------------------------------------------------------------
+
+class TestClaimList:
+    def test_list_empty_exits_0(self, tmp_path: Path) -> None:
         runner = CliRunner()
-        os.chdir(project_dir)
-        result = runner.invoke(cli, ["trace", "src.features", "--json"])
-        assert result.exit_code == 0, result.output
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            result = runner.invoke(cli, ["claim", "list"], catch_exceptions=False)
+        assert result.exit_code == 0
+        assert "No claims" in result.output
+
+    def test_list_shows_added_claim(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            runner.invoke(cli, ["claim", "add", "Unique claim text XYZ"],
+                          catch_exceptions=False)
+            result = runner.invoke(cli, ["claim", "list"], catch_exceptions=False)
+        assert "Unique claim text XYZ" in result.output
+
+    def test_list_json_flag_emits_valid_json(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            runner.invoke(cli, ["claim", "add", "Claim for JSON test"],
+                          catch_exceptions=False)
+            result = runner.invoke(cli, ["claim", "list", "--json"],
+                                   catch_exceptions=False)
         data = json.loads(result.output)
-        assert data["transform"] == "src.features"
-        assert isinstance(data["chain"], list)
-        assert len(data["chain"]) >= 1
-        # Each chain entry has required keys
-        for entry in data["chain"]:
-            assert "transform_name" in entry
-            assert "class" in entry
-            assert "support" in entry
+        assert isinstance(data, list)
+        assert len(data) == 1
 
-    def test_trace_shows_class_labels(self, project_dir: Path) -> None:
-        self._seed_runs(project_dir)
+    def test_list_filter_by_status(self, tmp_path: Path) -> None:
         runner = CliRunner()
-        os.chdir(project_dir)
-        result = runner.invoke(cli, ["trace", "src.features"])
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            runner.invoke(cli, ["claim", "add", "Open claim"], catch_exceptions=False)
+            runner.invoke(cli, ["claim", "add", "Contested claim",
+                                "--status", "contested"], catch_exceptions=False)
+            result = runner.invoke(cli, ["claim", "list", "--status", "open"],
+                                   catch_exceptions=False)
+        assert "Open claim" in result.output
+        assert "Contested claim" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# claim show
+# ---------------------------------------------------------------------------
+
+class TestClaimShow:
+    def _add_and_get_id(self, runner: CliRunner, text: str) -> str:
+        result = runner.invoke(cli, ["claim", "add", text], catch_exceptions=False)
+        return next(
+            line.split("ID:")[-1].strip()
+            for line in result.output.splitlines()
+            if "ID:" in line
+        )
+
+    def test_show_exits_0_for_existing_claim(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            claim_id = self._add_and_get_id(runner, "Show test claim")
+            result = runner.invoke(cli, ["claim", "show", claim_id],
+                                   catch_exceptions=False)
         assert result.exit_code == 0
-        output = result.output.upper()
-        assert "RAW" in output
-        assert "PROCESSED" in output
-        assert "ANALYSED" in output
+        assert "Show test claim" in result.output
+
+    def test_show_missing_id_exits_1(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            result = runner.invoke(cli, ["claim", "show", "nonexistent-id"])
+        assert result.exit_code == 1
+
+    def test_show_json_flag(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            claim_id = self._add_and_get_id(runner, "JSON show test")
+            result = runner.invoke(cli, ["claim", "show", claim_id, "--json"],
+                                   catch_exceptions=False)
+        data = json.loads(result.output)
+        assert data["text"] == "JSON show test"
+
+
+# ---------------------------------------------------------------------------
+# claim update
+# ---------------------------------------------------------------------------
+
+class TestClaimUpdate:
+    def _add_and_get_id(self, runner: CliRunner, text: str) -> str:
+        result = runner.invoke(cli, ["claim", "add", text], catch_exceptions=False)
+        return next(
+            line.split("ID:")[-1].strip()
+            for line in result.output.splitlines()
+            if "ID:" in line
+        )
+
+    def test_update_status_exits_0(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            claim_id = self._add_and_get_id(runner, "Update test claim")
+            result = runner.invoke(
+                cli, ["claim", "update", claim_id, "--status", "contested"],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+
+    def test_update_missing_id_exits_1(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            result = runner.invoke(
+                cli, ["claim", "update", "no-such-id", "--status", "contested"]
+            )
+        assert result.exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# status
+# ---------------------------------------------------------------------------
+
+class TestStatus:
+    def test_status_red_on_empty_graph(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            result = runner.invoke(cli, ["status"], catch_exceptions=False)
+        assert result.exit_code == 0
+        assert "RED" in result.output
+
+    def test_status_json_flag_emits_valid_json(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            result = runner.invoke(cli, ["status", "--json"], catch_exceptions=False)
+        data = json.loads(result.output)
+        assert "traffic_light" in data
+        assert data["traffic_light"] == "red"
+
+    def test_status_yellow_after_preliminary_claim(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            runner.invoke(cli, ["claim", "add", "Single agent finding"],
+                          catch_exceptions=False)
+            result = runner.invoke(cli, ["status"], catch_exceptions=False)
+        assert "YELLOW" in result.output
+
+
+# ---------------------------------------------------------------------------
+# export
+# ---------------------------------------------------------------------------
+
+class TestExport:
+    def test_export_json_flag_emits_valid_json(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            result = runner.invoke(cli, ["export", "--json"], catch_exceptions=False)
+        data = json.loads(result.output)
+        assert "@context" in data
+        assert "@graph" in data
+
+    def test_export_includes_claims(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            runner.invoke(cli, ["claim", "add", "Exported claim ABC"],
+                          catch_exceptions=False)
+            result = runner.invoke(cli, ["export", "--json"], catch_exceptions=False)
+        data = json.loads(result.output)
+        claims = [n for n in data["@graph"] if n.get("@type") == "mare:Claim"]
+        assert len(claims) == 1
+        assert "Exported claim ABC" in claims[0]["claimText"]
+
+    def test_export_creates_file(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            result = runner.invoke(cli, ["export"], catch_exceptions=False)
+            written = Path(os.getcwd()) / "ontology.jsonld"
+        assert result.exit_code == 0
+        assert written.exists()
+
+
+# ---------------------------------------------------------------------------
+# claim validate
+# ---------------------------------------------------------------------------
+
+class TestClaimValidate:
+    def _ensure_xdg_key(self) -> None:
+        """Bootstrap the XDG signing key the CLI's validate path needs.
+
+        ``mareforma claim validate`` now routes through ``graph.validate()``
+        which requires an enrolled validator. Bootstrapping the default
+        XDG key auto-enrolls it as root on first project open.
+        """
+        from mareforma import signing as _signing
+        key_path = _signing.default_key_path()
+        if not key_path.exists():
+            _signing.bootstrap_key(key_path)
+
+    def _make_replicated_claim_id(self) -> tuple[str, str]:
+        """Return (prior_id, replicated_id).
+
+        Claims are asserted under a generator key distinct from the XDG
+        validator key, then XDG is enrolled as a second validator. The
+        substrate refuses self-validation; the CLI must run as a
+        different signer from the one that signed the claim.
+        """
+        import mareforma
+        from mareforma import signing as _signing
+
+        gen_key_path = Path("generator.key")
+        if not gen_key_path.exists():
+            _signing.bootstrap_key(gen_key_path)
+
+        with mareforma.open(key_path=gen_key_path) as g:
+            prior = g.assert_claim("upstream reference", generated_by="seed", seed=True)
+            rep_id = g.assert_claim("finding A", supports=[prior], generated_by="agent-A")
+            g.assert_claim("finding B", supports=[prior], generated_by="agent-B")
+            xdg_pem = _signing.public_key_to_pem(
+                _signing.load_private_key(_signing.default_key_path()).public_key(),
+            )
+            g.enroll_validator(xdg_pem, identity="xdg-validator")
+        return prior, rep_id
+
+    def test_validate_success(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            self._ensure_xdg_key()
+            _, rep_id = self._make_replicated_claim_id()
+            result = runner.invoke(cli, ["claim", "validate", rep_id],
+                                   catch_exceptions=False)
+        assert result.exit_code == 0
+        assert "ESTABLISHED" in result.output
+
+    def test_validate_not_found_exits_1(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            self._ensure_xdg_key()
+            result = runner.invoke(cli, ["claim", "validate", "nonexistent-id"])
+        assert result.exit_code == 1
+
+    def test_validate_preliminary_claim_exits_1(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            self._ensure_xdg_key()
+            add = runner.invoke(cli, ["claim", "add", "only one agent"],
+                                catch_exceptions=False)
+            claim_id = next(
+                line.split("ID:")[-1].strip()
+                for line in add.output.splitlines()
+                if "ID:" in line
+            )
+            result = runner.invoke(cli, ["claim", "validate", claim_id])
+        assert result.exit_code == 1
+        assert "REPLICATED" in result.output
+
+    def test_validate_with_validated_by(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            self._ensure_xdg_key()
+            _, rep_id = self._make_replicated_claim_id()
+            runner.invoke(
+                cli,
+                ["claim", "validate", rep_id, "--validated-by", "reviewer@example.org"],
+                catch_exceptions=False,
+            )
+            result = runner.invoke(cli, ["claim", "show", rep_id, "--json"],
+                                   catch_exceptions=False)
+        data = json.loads(result.output)
+        assert data["validated_by"] == "reviewer@example.org"
+        # CLI now produces a signed envelope persisted to the row.
+        assert data["validation_signature"] is not None
+
+
+# ---------------------------------------------------------------------------
+# key show
+# ---------------------------------------------------------------------------
+
+class TestKeyShow:
+    def test_key_show_no_key_exits_1(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            result = runner.invoke(cli, ["key", "show"])
+        assert result.exit_code == 1
+        assert "No signing key" in result.output
+        assert "mareforma bootstrap" in result.output
+
+    def test_key_show_default_emits_keyid_and_pem(self, tmp_path: Path) -> None:
+        from mareforma import signing as _signing
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            _signing.bootstrap_key(_signing.default_key_path())
+            result = runner.invoke(cli, ["key", "show"],
+                                   catch_exceptions=False)
+        assert result.exit_code == 0
+        assert "keyid:" in result.output
+        assert "-----BEGIN PUBLIC KEY-----" in result.output
+        assert "-----END PUBLIC KEY-----" in result.output
+
+    def test_key_show_pem_flag_emits_only_pem(self, tmp_path: Path) -> None:
+        from mareforma import signing as _signing
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            _signing.bootstrap_key(_signing.default_key_path())
+            result = runner.invoke(cli, ["key", "show", "--pem"],
+                                   catch_exceptions=False)
+        assert result.exit_code == 0
+        # First non-empty line must be the PEM header — pipe-able to a file.
+        first_nonempty = next(
+            line for line in result.output.splitlines() if line.strip()
+        )
+        assert first_nonempty == "-----BEGIN PUBLIC KEY-----"
+        assert "-----END PUBLIC KEY-----" in result.output
+        # No human-readable framing leaked in.
+        assert "keyid:" not in result.output
+        assert "Signing key at" not in result.output
+
+    def test_key_show_keyid_flag_emits_only_hex(self, tmp_path: Path) -> None:
+        from mareforma import signing as _signing
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            _signing.bootstrap_key(_signing.default_key_path())
+            result = runner.invoke(cli, ["key", "show", "--keyid"],
+                                   catch_exceptions=False)
+        assert result.exit_code == 0
+        line = result.output.strip()
+        # SHA-256 hex digest: 64 lowercase hex chars, nothing else.
+        assert len(line) == 64
+        assert all(c in "0123456789abcdef" for c in line)
+
+    def test_key_show_pem_and_keyid_mutually_exclusive(
+        self, tmp_path: Path,
+    ) -> None:
+        from mareforma import signing as _signing
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            _signing.bootstrap_key(_signing.default_key_path())
+            result = runner.invoke(cli, ["key", "show", "--pem", "--keyid"])
+        assert result.exit_code == 1
+        assert "mutually exclusive" in result.output
+
+    def test_key_show_explicit_path(self, tmp_path: Path) -> None:
+        from mareforma import signing as _signing
+        custom = tmp_path / "custom.key"
+        _signing.bootstrap_key(custom)
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ["key", "show", "--key-path", str(custom), "--keyid"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0
+        assert len(result.output.strip()) == 64
+
+    def test_key_show_pem_matches_loaded_key(self, tmp_path: Path) -> None:
+        """The CLI must emit the SAME PEM the substrate computes for the
+        same private key. Without this, `key show --pem | validator add
+        --pubkey -` would silently enroll the wrong identity."""
+        from mareforma import signing as _signing
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            _signing.bootstrap_key(_signing.default_key_path())
+            result = runner.invoke(cli, ["key", "show", "--pem"],
+                                   catch_exceptions=False)
+            expected = _signing.public_key_to_pem(
+                _signing.load_private_key(
+                    _signing.default_key_path(),
+                ).public_key(),
+            ).decode("ascii")
+        assert result.output == expected
+
+
+# ---------------------------------------------------------------------------
+# bootstrap output — next-step hint
+# ---------------------------------------------------------------------------
+
+class TestBootstrapHint:
+    def test_bootstrap_prints_enrollment_next_steps(
+        self, tmp_path: Path,
+    ) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            result = runner.invoke(cli, ["bootstrap"],
+                                   catch_exceptions=False)
+        assert result.exit_code == 0
+        assert "Next steps:" in result.output
+        # Names the rule that traps first-time users.
+        assert "self-validation" in result.output
+        # Points at the exact commands needed to unblock it.
+        assert "mareforma key show" in result.output
+        assert "mareforma validator add" in result.output
+
+
+# ---------------------------------------------------------------------------
+# claim validate — error-translation paths
+# ---------------------------------------------------------------------------
+
+class TestClaimValidateErrors:
+    def test_self_validation_surfaces_resolution_hint(
+        self, tmp_path: Path,
+    ) -> None:
+        """When the loaded validator key is the same key that signed the
+        claim, the CLI must surface SelfValidationError text + a
+        concrete resolution pointing at validator add / key show.
+        Without it, a first-time user gets a Python traceback because
+        SelfValidationError doesn't inherit from ValueError."""
+        from mareforma import signing as _signing
+        import mareforma
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            _signing.bootstrap_key(_signing.default_key_path())
+            # Build a REPLICATED claim signed by the XDG key (the same
+            # key the CLI will load when we invoke `claim validate`).
+            with mareforma.open() as g:
+                prior = g.assert_claim(
+                    "upstream", generated_by="seed", seed=True,
+                )
+                a = g.assert_claim(
+                    "shared finding", supports=[prior],
+                    generated_by="agent-A",
+                )
+                g.assert_claim(
+                    "shared finding restated", supports=[prior],
+                    generated_by="agent-B",
+                )
+                assert g.get_claim(a)["support_level"] == "REPLICATED"
+            result = runner.invoke(cli, ["claim", "validate", a])
+        assert result.exit_code == 1
+        # Substrate's own message comes through (no traceback).
+        assert "self-promotion is refused" in result.output
+        # CLI adds the resolution pointing at the relevant commands.
+        assert "Resolution:" in result.output
+        assert "mareforma validator add" in result.output
+        assert "mareforma key show" in result.output
+
+
+# ---------------------------------------------------------------------------
+# CLI claim add/update — signing path consistency with the Python API
+# ---------------------------------------------------------------------------
+
+class TestClaimCLISigningParity:
+    """The CLI's write paths must produce the same trust posture as the
+    Python API. Before this fix, ``mareforma claim add`` and
+    ``mareforma claim update`` went through ``open_db`` + raw helpers
+    with no signer loaded, so a project that had run ``mareforma
+    bootstrap`` would still get unsigned claims from the CLI while the
+    Python API auto-signed them. README claimed "every claim auto-signs
+    once bootstrap runs." Now it does, regardless of entry point.
+    """
+
+    def _ensure_xdg_key(self) -> None:
+        from mareforma import signing as _signing
+        key_path = _signing.default_key_path()
+        if not key_path.exists():
+            _signing.bootstrap_key(key_path)
+
+    def test_claim_add_via_cli_produces_signed_claim_when_key_present(
+        self, tmp_path: Path,
+    ) -> None:
+        """After ``mareforma bootstrap``, ``mareforma claim add`` must
+        produce a row whose ``signature_bundle`` is non-NULL — same as
+        what ``mareforma.open().assert_claim()`` does."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            self._ensure_xdg_key()
+            result = runner.invoke(
+                cli, ["claim", "add", "signed via CLI"],
+                catch_exceptions=False,
+            )
+            assert result.exit_code == 0
+            claim_id = next(
+                line.split("ID:")[-1].strip()
+                for line in result.output.splitlines()
+                if "ID:" in line
+            )
+            show = runner.invoke(
+                cli, ["claim", "show", claim_id, "--json"],
+                catch_exceptions=False,
+            )
+            data = json.loads(show.output)
+        assert data["signature_bundle"] is not None, (
+            "CLI claim add MUST sign when an XDG key is present. "
+            "Got NULL signature_bundle — the CLI is bypassing signing again."
+        )
+
+    def test_claim_add_via_cli_unsigned_when_no_key(
+        self, tmp_path: Path,
+    ) -> None:
+        """Without ``mareforma bootstrap`` (no XDG key on disk), the
+        CLI produces an unsigned claim. The substrate decides; the CLI
+        does not force signing."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            # No _ensure_xdg_key — default path does not exist.
+            result = runner.invoke(
+                cli, ["claim", "add", "unsigned via CLI"],
+                catch_exceptions=False,
+            )
+            assert result.exit_code == 0
+            claim_id = next(
+                line.split("ID:")[-1].strip()
+                for line in result.output.splitlines()
+                if "ID:" in line
+            )
+            show = runner.invoke(
+                cli, ["claim", "show", claim_id, "--json"],
+                catch_exceptions=False,
+            )
+            data = json.loads(show.output)
+        assert data["signature_bundle"] is None
+
+    def test_claim_update_status_via_cli_on_signed_row(
+        self, tmp_path: Path,
+    ) -> None:
+        """``mareforma claim update --status`` on a signed row must
+        succeed — status is not in the locked signed-field set."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            self._ensure_xdg_key()
+            add = runner.invoke(
+                cli, ["claim", "add", "signed row"],
+                catch_exceptions=False,
+            )
+            claim_id = next(
+                line.split("ID:")[-1].strip()
+                for line in add.output.splitlines()
+                if "ID:" in line
+            )
+            result = runner.invoke(
+                cli, ["claim", "update", claim_id, "--status", "contested"],
+                catch_exceptions=False,
+            )
+            assert result.exit_code == 0
+            show = runner.invoke(
+                cli, ["claim", "show", claim_id, "--json"],
+                catch_exceptions=False,
+            )
+            data = json.loads(show.output)
+        assert data["status"] == "contested"
+        # And the signature is unchanged.
+        assert data["signature_bundle"] is not None
+
+    def test_claim_update_text_via_cli_on_signed_row_refused(
+        self, tmp_path: Path,
+    ) -> None:
+        """Mutating signed predicate fields on a signed row via the CLI
+        must surface the substrate's refusal cleanly, not a traceback."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            self._ensure_xdg_key()
+            add = runner.invoke(
+                cli, ["claim", "add", "signed row"],
+                catch_exceptions=False,
+            )
+            claim_id = next(
+                line.split("ID:")[-1].strip()
+                for line in add.output.splitlines()
+                if "ID:" in line
+            )
+            result = runner.invoke(
+                cli, ["claim", "update", claim_id, "--text", "tampered"],
+            )
+        assert result.exit_code == 1
+        # Substrate's typed refusal comes through (not a Python traceback).
+        # The Python-layer SignedClaimImmutableError fires before the SQL
+        # trigger, with a precise field-list message.
+        assert "is signed" in result.output
+        assert "refused to mutate" in result.output

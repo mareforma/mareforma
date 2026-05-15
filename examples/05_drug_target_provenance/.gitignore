@@ -1,0 +1,15 @@
+# mareforma runtime artifacts (binary / large)
+.mareforma/graph.db
+.mareforma/artifacts/
+ontology.jsonld
+agent.log
+pip_install*.log
+
+# MedeaDB — download separately with:
+# huggingface-cli download psui3905/MedeaDB --local-dir data/medeadb/raw/
+data/medeadb/raw/
+
+# Environments and cloned deps
+medea_env/
+Medea/
+.env

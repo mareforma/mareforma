@@ -1,118 +1,55 @@
-"""
-tests/conftest.py — shared pytest fixtures for mareforma tests.
-
-Fixtures
---------
-project(tmp_path)
-    Fully initialised mareforma project root. Returns Path.
-
-project_with_source(project)
-    Project with one source 'morphology' registered and raw/ dir created.
-    Returns (root, raw_path).
-
-make_record(...)
-    Factory for TransformRecord instances without needing @transform decoration.
-
-registry_cleared
-    Auto-use fixture that clears the global TransformRegistry before and after
-    each test. Critical: without this, decorated functions from one test leak
-    into the next via the module-level singleton.
-"""
+"""tests/conftest.py — shared pytest fixtures for mareforma tests."""
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-from mareforma.initializer import initialize
-from mareforma.registry import add_source
-from mareforma.transforms import TransformRecord, registry as _registry
+import mareforma
+from mareforma import doi_resolver
 
-
-# ---------------------------------------------------------------------------
-# Auto-use: clear the global TransformRegistry around every test
-# ---------------------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
-def registry_cleared():
-    """Clear the global TransformRegistry before and after every test.
+def _reset_doi_client():
+    """Drop the module-level httpx.Client around every test.
 
-    This prevents @transform decorations in one test from bleeding into another
-    via the module-level singleton.
+    The DOI resolver pools a Client across calls. Tests using pytest-httpx
+    patch httpx's transport per test; a Client constructed during test N
+    must not leak into test N+1 with stale mock state.
     """
-    _registry.clear()
+    doi_resolver._reset_client_for_testing()
     yield
-    _registry.clear()
-
-    # Also evict any _mareforma_build_* modules imported during discovery tests
-    # so they get freshly imported next time.
-    to_remove = [k for k in sys.modules if k.startswith("_mareforma_build_")]
-    for k in to_remove:
-        del sys.modules[k]
+    doi_resolver._reset_client_for_testing()
 
 
-# ---------------------------------------------------------------------------
-# Project fixtures
-# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _isolate_xdg_config(tmp_path, monkeypatch):
+    """Scope XDG_CONFIG_HOME to a per-TEST tmpdir so tests never observe
+    (or write to) the real user's ~/.config/mareforma/key.
 
-@pytest.fixture()
-def project(tmp_path: Path) -> Path:
-    """Return a fully initialised mareforma project root."""
-    initialize(tmp_path)
-    return tmp_path
-
-
-@pytest.fixture()
-def project_with_source(project: Path):
-    """Return (root, raw_path) with source 'morphology' registered.
-
-    The raw/ directory is created on disk so path-existence checks pass.
+    Function-scoped tmp_path (not session-scoped tmp_path_factory) so two
+    tests that both bootstrap the default key path don't collide on the
+    second run — bootstrap_key now uses O_CREAT|O_EXCL and would fail the
+    loser with a SigningError.
     """
-    raw = project / "data" / "morphology" / "raw"
-    raw.mkdir(parents=True, exist_ok=True)
-    add_source(project, "morphology", str(raw), "Test skeleton data")
+    sandbox = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(sandbox))
+    yield
 
-    # Fill required fields so mareforma check passes
-    toml = project / "mareforma.project.toml"
-    text = toml.read_text()
-    text = text.replace('description = ""', 'description = "Test project"', 1)
-    text = text.replace('format = ""', 'format = "SWC"')
-    toml.write_text(text)
-
-    return project, raw
-
-
-# ---------------------------------------------------------------------------
-# TransformRecord factory
-# ---------------------------------------------------------------------------
 
 @pytest.fixture()
-def make_record():
-    """Factory for TransformRecord instances.
+def open_graph(tmp_path: Path):
+    """Open an EpistemicGraph in a temp directory, with a bootstrapped
+    signing key so seed=True works for ESTABLISHED-upstream bootstrap.
 
-    Usage:
-        rec = make_record("morphology.load")
-        rec = make_record("morphology.register", depends_on=["morphology.load"])
-        rec = make_record("morphology.features", fn=my_fn)
-    """
-    def _make(
-        name: str,
-        depends_on: list[str] | None = None,
-        fn: Any = None,
-        source_code: str = "",
-    ) -> TransformRecord:
-        if fn is None:
-            def _noop(ctx=None):
-                pass
-            fn = _noop
-        return TransformRecord(
-            name=name,
-            fn=fn,
-            depends_on=depends_on or [],
-            source_file="<test>",
-            source_code=source_code or f"def {name.replace('.','_')}(): pass",
-        )
-    return _make
+    REPLICATED detection requires an ESTABLISHED upstream by default, so
+    most tests that exercise it need a seeded upstream. A signing key is
+    bootstrapped automatically; tests that don't want one can use
+    ``mareforma.open(tmp_path)`` directly without the fixture."""
+    from mareforma import signing as _signing
+    key_path = tmp_path / "mareforma.key"
+    if not key_path.exists():
+        _signing.bootstrap_key(key_path)
+    with mareforma.open(tmp_path, key_path=key_path) as graph:
+        yield graph

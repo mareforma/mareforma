@@ -1,0 +1,32 @@
+/* Custom styling for Mareforma docs — matches mareforma.com brand */
+
+/* IBM Plex Mono for all monospace surfaces (code blocks, inline code, kbd) */
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&display=swap');
+
+/* Merriweather for the navbar wordmark */
+@import url('https://fonts.googleapis.com/css2?family=Merriweather:wght@700&display=swap');
+
+#navbar .nav-logo,
+.nav-logo,
+div.nav-logo {
+  font-family: 'Merriweather', Georgia, serif !important;
+  font-weight: 700 !important;
+}
+
+code,
+pre,
+kbd,
+samp,
+tt,
+.font-mono,
+[class*="language-"],
+[class*="language-"] code,
+[class*="language-"] pre {
+  font-family: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace !important;
+}
+
+/* Slightly tighter line-height for code readability */
+pre code,
+[class*="language-"] {
+  line-height: 1.6;
+}
