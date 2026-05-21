@@ -344,7 +344,11 @@ def restore(
     return _restore(project_root, claims_toml=claims_toml)
 
 
-from mareforma._evidence import EvidenceVector, EvidenceVectorError
+from mareforma._evidence import (
+    EvidenceVector,
+    EvidenceVectorError,
+    VALID_STUDY_DESIGNS,
+)
 
 # Re-export the user-catchable exception surface. AGENTS.md / docstrings
 # document these as raise paths from the public API (assert_claim,
@@ -392,6 +396,7 @@ __all__ = [
     "schema",
     "restore",
     "EvidenceVector",
+    "VALID_STUDY_DESIGNS",
     "safe_for_llm",
     "sanitize_for_llm",
     "wrap_untrusted",

@@ -270,6 +270,319 @@ def resolve_dois_with_cache(
     return results
 
 
+def _extract_metadata_subset(
+    metadata: dict, registry: str | None,
+) -> dict | None:
+    """Project Crossref OR DataCite metadata onto the drift-stable subset.
+
+    Crossref and DataCite use different field names for the same data;
+    a single extractor would silently produce empty subsets for one of
+    the registries. The ``registry`` arg selects the right shape.
+    When unspecified, both shapes are tried with Crossref first.
+
+    Returns ``None`` when every extracted field is empty/None —
+    refuses to seed an effectively-empty digest that would collide
+    with every other empty-metadata DOI.
+    """
+    import unicodedata
+
+    title: str | None = None
+    year: object = None
+    container: str | None = None
+    authors: list[str] = []
+
+    def _crossref(m: dict) -> None:
+        nonlocal title, year, container, authors
+        t = m.get("title")
+        if isinstance(t, list) and t:
+            t = t[0]
+        if isinstance(t, str):
+            title = unicodedata.normalize("NFC", t)
+        issued = m.get("issued") or m.get("published")
+        if isinstance(issued, dict):
+            parts = issued.get("date-parts")
+            if isinstance(parts, list) and parts and isinstance(parts[0], list):
+                year = parts[0][0] if parts[0] else None
+        c = m.get("container-title")
+        if isinstance(c, list) and c:
+            c = c[0]
+        if isinstance(c, str):
+            container = unicodedata.normalize("NFC", c)
+        raw = m.get("author") or []
+        if isinstance(raw, list):
+            authors = [
+                unicodedata.normalize("NFC", a["family"])
+                for a in raw
+                if isinstance(a, dict) and isinstance(a.get("family"), str)
+            ]
+
+    def _datacite(m: dict) -> None:
+        nonlocal title, year, container, authors
+        titles = m.get("titles")
+        if isinstance(titles, list) and titles and isinstance(titles[0], dict):
+            t = titles[0].get("title")
+            if isinstance(t, str):
+                title = unicodedata.normalize("NFC", t)
+        py = m.get("publicationYear")
+        if isinstance(py, (int, str)):
+            try:
+                year = int(py)
+            except (TypeError, ValueError):
+                year = None
+        c = m.get("container")
+        if isinstance(c, dict):
+            ct = c.get("title")
+            if isinstance(ct, str):
+                container = unicodedata.normalize("NFC", ct)
+        creators = m.get("creators")
+        if isinstance(creators, list):
+            authors = [
+                unicodedata.normalize("NFC", a["familyName"])
+                for a in creators
+                if isinstance(a, dict) and isinstance(a.get("familyName"), str)
+            ]
+
+    if registry == "crossref":
+        _crossref(metadata)
+    elif registry == "datacite":
+        _datacite(metadata)
+    else:
+        _crossref(metadata)
+        if not title and not authors:
+            _datacite(metadata)
+
+    # Collapse empty strings to None so "" doesn't bypass the empty
+    # check below.
+    if title == "":
+        title = None
+    if container == "":
+        container = None
+
+    subset = {
+        "title": title,
+        "year": year,
+        "container_title": container,
+        "authors": authors,
+    }
+    # Refuse to seed when every field came back empty — those rows
+    # would collide with every other empty-metadata DOI and produce a
+    # single useless digest. Let the caller try again next pass.
+    if title is None and year is None and container is None and not authors:
+        return None
+    return subset
+
+
+def _compute_content_digest(
+    metadata: dict | None,
+    registry: str | None = None,
+) -> str | None:
+    """SHA-256 hex of a canonical subset of resolver metadata.
+
+    Hashes a stable subset (title + year + container-title + author
+    family names) so drift detection catches post-publication
+    corrections / retractions without firing on benign churn (abstract
+    edits, license updates, indexed-by changes).
+
+    ``registry`` selects the field shape (``"crossref"`` or
+    ``"datacite"``); pass ``None`` to try both. Returns ``None`` when
+    the input is non-dict or the extracted subset is entirely empty —
+    callers should treat that as "fetch indeterminate, try again".
+
+    Strings are NFC-normalised before hashing so a registry that
+    flips between NFC and NFD encoding for the same author name does
+    not register as drift.
+    """
+    import hashlib
+    import json as _json
+
+    if not isinstance(metadata, dict):
+        return None
+    subset = _extract_metadata_subset(metadata, registry)
+    if subset is None:
+        return None
+    canonical = _json.dumps(
+        subset, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def fetch_doi_metadata(
+    doi: str,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT,
+    registry: str | None = None,
+) -> tuple[dict | None, str | None, bool]:
+    """Fetch full metadata for *doi* from a specific registry (or both).
+
+    Used by :func:`find_drifted_dois` to recompute the content digest
+    of a previously-cached DOI. When ``registry`` is given (``"crossref"``
+    or ``"datacite"``), only that registry is contacted — pin to the
+    registry where the row was originally resolved to avoid producing
+    false drift when Crossref blips and DataCite has the same DOI in a
+    different shape. When ``None``, Crossref is tried first, then
+    DataCite.
+
+    Returns ``(metadata, registry_hit, rate_limited)``:
+      * ``metadata`` is the parsed JSON body's ``message`` (Crossref
+        shape) or ``data.attributes`` (DataCite shape), or ``None`` on
+        any failure / non-2xx.
+      * ``registry_hit`` is the registry that returned the metadata
+        (``"crossref"`` / ``"datacite"``), or ``None`` on failure.
+      * ``rate_limited`` is True if any registry returned 429.
+        Callers MUST honour this by backing off and not iterating
+        through additional DOIs in the same pass.
+    """
+    if not HAS_HTTPX:
+        return (None, None, False)
+    encoded = _encode_doi(doi.strip())
+    client = _get_client()
+    rate_limited = False
+    candidates: list[tuple[str, str]]
+    if registry == "crossref":
+        candidates = [("crossref", _CROSSREF_URL)]
+    elif registry == "datacite":
+        candidates = [("datacite", _DATACITE_URL)]
+    else:
+        candidates = [
+            ("crossref", _CROSSREF_URL),
+            ("datacite", _DATACITE_URL),
+        ]
+    for reg, url_template in candidates:
+        url = url_template.format(doi=encoded)
+        try:
+            r = client.get(url, timeout=timeout)
+        except (httpx.HTTPError, httpx.InvalidURL, OSError):
+            continue
+        if r.status_code == 429:
+            rate_limited = True
+            continue
+        if not (200 <= r.status_code < 300):
+            continue
+        try:
+            body = r.json()
+        except (ValueError, AttributeError):
+            continue
+        if reg == "crossref" and isinstance(body, dict):
+            msg = body.get("message")
+            if isinstance(msg, dict):
+                return (msg, "crossref", rate_limited)
+        if reg == "datacite" and isinstance(body, dict):
+            data = body.get("data")
+            if isinstance(data, dict):
+                attrs = data.get("attributes")
+                if isinstance(attrs, dict):
+                    return (attrs, "datacite", rate_limited)
+    return (None, None, rate_limited)
+
+
+# Default cap on how many DOIs find_drifted_dois inspects per call.
+# Two GETs per DOI (plus Crossref polite-pool guidance of ~50 req/sec)
+# means an unbounded walk on a 10k-DOI graph would blow past the
+# polite-pool ceiling and earn an IP ban. Bounded passes let the
+# operator iterate by calling repeatedly with backoff between calls.
+_DEFAULT_DRIFT_LIMIT = 100
+
+
+def find_drifted_dois(
+    conn: sqlite3.Connection,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT,
+    limit: int | None = None,
+) -> list[dict]:
+    """Walk the doi_cache and report DOIs whose metadata has drifted.
+
+    For every cached resolved DOI carrying a stored content_digest,
+    re-fetches the registry metadata (pinned to the registry that
+    originally resolved the DOI when known), recomputes the digest,
+    and appends an entry to the result when the two differ. DOIs that
+    have never been digested (legacy rows) are also fetched and
+    seeded with the current digest — those count as "first seen", not
+    drifted, and are NOT included in the returned list.
+
+    Returns a list of ``{doi, stored_digest, current_digest,
+    last_checked_at}`` dicts for DOIs that drifted. Empty list when
+    nothing changed, when httpx is unavailable, or when the walk
+    aborted on a registry 429.
+
+    The walk is read-and-update only; no row is deleted. A drifted
+    digest signals to the operator that the referenced paper's
+    metadata has changed (retraction, correction, indexing-host swap).
+    Whether to update the cache or flag the citing claim as
+    ``unresolved`` is a policy decision left to the caller.
+
+    Rate limit / politeness
+    -----------------------
+    The walk aborts on the first 429 (rate-limit) response from any
+    registry and returns whatever drift was detected before the
+    abort. Crossref's polite-pool guidance is ~50 req/sec; with two
+    GETs per DOI, this method caps the per-call walk at
+    :data:`_DEFAULT_DRIFT_LIMIT` rows when ``limit=None``. Operators
+    who want to inspect a larger graph should call repeatedly with
+    pacing between calls.
+
+    Parameters
+    ----------
+    limit
+        Optional cap on how many DOIs to inspect this pass. Defaults
+        to :data:`_DEFAULT_DRIFT_LIMIT` (100). Use a smaller value
+        for faster health-check cycles; pass a larger value at your
+        own (rate-limit-burning) risk.
+    """
+    if not HAS_HTTPX:
+        return []
+    effective_limit = limit if (limit is not None and limit > 0) else _DEFAULT_DRIFT_LIMIT
+    sql = (
+        "SELECT doi, registry, content_digest, last_checked_at "
+        "FROM doi_cache WHERE resolved = 1 LIMIT ?"
+    )
+    try:
+        rows = conn.execute(sql, (int(effective_limit),)).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    drifted: list[dict] = []
+    seeded_any = False
+    for row in rows:
+        metadata, registry_hit, rate_limited = fetch_doi_metadata(
+            row["doi"],
+            timeout=timeout,
+            registry=row["registry"] if row["registry"] else None,
+        )
+        if rate_limited:
+            # Stop early — continuing would burn through the rate-limit
+            # window on the operator's IP. Return what we have so far.
+            break
+        if metadata is None:
+            continue
+        current = _compute_content_digest(metadata, registry=registry_hit)
+        if current is None:
+            continue
+        stored = row["content_digest"]
+        if stored is None:
+            # First-seen seed — accumulate; commit at end of loop.
+            try:
+                conn.execute(
+                    "UPDATE doi_cache SET content_digest = ? WHERE doi = ?",
+                    (current, row["doi"]),
+                )
+                seeded_any = True
+            except sqlite3.OperationalError:
+                pass
+            continue
+        if stored != current:
+            drifted.append({
+                "doi": row["doi"],
+                "stored_digest": stored,
+                "current_digest": current,
+                "last_checked_at": row["last_checked_at"],
+            })
+    if seeded_any:
+        try:
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+    return drifted
+
+
 def clear_unresolved_cache(conn: sqlite3.Connection) -> list[str]:
     """Delete cache entries for unresolved DOIs. Returns the list cleared.
 

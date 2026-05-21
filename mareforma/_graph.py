@@ -1016,6 +1016,39 @@ class EpistemicGraph:
             "newly_failed": newly_failed,
         }
 
+    def find_drifted_dois(self, *, limit: int | None = None) -> list[dict]:
+        """Walk the doi_cache and report DOIs whose metadata has drifted.
+
+        Fetches Crossref / DataCite metadata for every cached resolved
+        DOI, recomputes a stable content digest (title + year +
+        container + author family names), and returns the DOIs whose
+        digest differs from the one stored at last resolution.
+
+        First-seen rows (no stored digest) are seeded with the current
+        digest and excluded from the result — they're a baseline, not
+        drift. Returns ``[]`` when httpx is unavailable or no drift is
+        detected.
+
+        Use as a periodic health-check: a drifted DOI may indicate a
+        retraction, correction, or indexing-host swap on a referenced
+        paper. Whether to refresh the cache or flag affected claims is
+        a policy decision left to the caller.
+
+        Parameters
+        ----------
+        limit
+            Optional cap on how many DOIs to inspect per call. ``None``
+            walks every resolved row.
+
+        Returns
+        -------
+        list[dict]
+            ``[{"doi", "stored_digest", "current_digest",
+            "last_checked_at"}, ...]`` — one entry per drifted DOI.
+        """
+        self._check_open()
+        return _doi.find_drifted_dois(self._conn, limit=limit)
+
     def refresh_convergence(self) -> dict[str, int]:
         """Retry convergence detection for every flagged claim.
 

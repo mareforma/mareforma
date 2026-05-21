@@ -529,7 +529,14 @@ CREATE TABLE IF NOT EXISTS doi_cache (
     doi              TEXT PRIMARY KEY,
     resolved         INTEGER NOT NULL CHECK (resolved IN (0, 1)),
     registry         TEXT,
-    last_checked_at  TEXT NOT NULL
+    last_checked_at  TEXT NOT NULL,
+    -- SHA-256 hex of canonicalised metadata fetched from the registry
+    -- (title + year + container-title + author family names). NULL
+    -- when the cache row only carries a HEAD-check result with no
+    -- metadata body. find_drifted_dois compares a fresh fetch against
+    -- this column to detect post-publication corrections or
+    -- retractions.
+    content_digest   TEXT
 );
 
 -- Full-text search over claim text. Independent FTS5 virtual table
@@ -938,10 +945,45 @@ def open_db(root: Path) -> sqlite3.Connection:
                 "your claims are backed up in claims.toml."
             )
         _attach_supports_cache(conn, root)
+        _ensure_doi_cache_columns(conn)
         return conn
 
     except sqlite3.OperationalError as exc:
         raise DatabaseError(f"Could not open database at {path}: {exc}") from exc
+
+
+def _ensure_doi_cache_columns(conn: sqlite3.Connection) -> None:
+    """Add the ``content_digest`` column to legacy doi_cache tables.
+
+    The doi_cache table is not part of the signed-schema integrity
+    surface (it caches external resolver results, not claim data), so
+    in-place ALTER is safe. CREATE TABLE IF NOT EXISTS on a fresh DB
+    already creates the column; this fills the gap on DBs created by
+    older mareforma builds.
+    """
+    cols = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(doi_cache)").fetchall()
+    }
+    if "content_digest" not in cols:
+        try:
+            conn.execute("ALTER TABLE doi_cache ADD COLUMN content_digest TEXT")
+            conn.commit()
+        except sqlite3.OperationalError as exc:
+            # Concurrent open: another process won the ALTER race and
+            # already added the column. Re-check before raising —
+            # "duplicate column name" is benign, anything else is real.
+            cols2 = {
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(doi_cache)"
+                ).fetchall()
+            }
+            if "content_digest" in cols2:
+                return
+            raise DatabaseError(
+                f"Could not add doi_cache.content_digest column: {exc}"
+            ) from exc
 
 
 def _attach_supports_cache(conn: sqlite3.Connection, root: Path) -> None:
