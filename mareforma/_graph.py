@@ -161,6 +161,9 @@ class EpistemicGraph:
         artifact_hash: str | None = None,
         evidence: "EvidenceVector | dict | None" = None,
         seed: bool = False,
+        signer: "object | None" = None,
+        predicate_payload: dict | None = None,
+        original_signature_bundle: str | None = None,
     ) -> str:
         """Assert a claim into the epistemic graph. Returns claim_id.
 
@@ -288,11 +291,13 @@ class EpistemicGraph:
             artifact_hash=artifact_hash,
             evidence=ev,
             seed=seed,
-            signer=self._signer,
+            signer=signer if signer is not None else self._signer,
             rekor_url=self._rekor_url,
             require_rekor=self._require_rekor,
             on_convergence_error=_bump_convergence_errors,
             rekor_log_pubkey_pem=self._rekor_log_pubkey_pem,
+            predicate_payload=predicate_payload,
+            original_signature_bundle=original_signature_bundle,
         )
 
     def query(

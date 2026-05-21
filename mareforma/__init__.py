@@ -378,6 +378,13 @@ from mareforma.signing import (
     RekorInclusionError,
 )
 from mareforma.validators import ValidatorNotEnrolledError
+from mareforma.predicate_types import (
+    BUILTIN_URIS,
+    PredicateTypeError,
+    is_registered,
+    predicates,
+    register as register_predicate,
+)
 
 
 __all__ = [
@@ -389,6 +396,12 @@ __all__ = [
     "sanitize_for_llm",
     "wrap_untrusted",
     "__version__",
+    # Predicate-type registry (v0.3.1 item 301).
+    "BUILTIN_URIS",
+    "PredicateTypeError",
+    "is_registered",
+    "predicates",
+    "register_predicate",
     # User-catchable exceptions (alphabetical under MareformaError).
     "MareformaError",
     "ChainIntegrityError",

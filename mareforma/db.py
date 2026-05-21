@@ -146,6 +146,26 @@ CREATE TABLE IF NOT EXISTS claims (
     -- a legitimate operational mutation, not predicate tampering.
     convergence_retry_needed INTEGER NOT NULL DEFAULT 0
                             CHECK (convergence_retry_needed IN (0, 1)),
+    -- Predicate-type-specific structured payload. Adapters that ship
+    -- a distinct predicateType (tool-call/v1, ingested-trace/v1,
+    -- gemini/*/v1, wet-lab-assay/*, review/v1, elo-match/v1, ...)
+    -- write their typed payload here so substrate queries can filter
+    -- by predicate_type without parsing the claim text JSON. The
+    -- canonical predicate body still lives inside the signed
+    -- envelope's payload; this column is the queryable denormalised
+    -- copy. Default empty string keeps v0.3.0 graphs forward-
+    -- compatible. The signed envelope wins on any drift.
+    predicate_payload TEXT NOT NULL DEFAULT '',
+    -- Federation-import preservation. When a claim is re-asserted on
+    -- a receiving graph after federation bundle import, the ORIGINAL
+    -- signature envelope from the source graph is preserved here.
+    -- The active ``signature_bundle`` column carries the receiver's
+    -- re-signed envelope (different keyid, different claim_id under
+    -- substrate UUID re-mapping). Verifiers that want to reconstruct
+    -- the source-side proof read this column; the substrate's own
+    -- verification path uses ``signature_bundle``. NULL on claims
+    -- that were not federation-imported.
+    original_signature_bundle TEXT,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
     -- ESTABLISHED rows must carry a signed validation envelope. The
@@ -565,9 +585,30 @@ _CLAIM_COLUMNS = (
     "statement_cid", "t_invalid",
     # Convergence-detection retry queue.
     "convergence_retry_needed",
+    # Adapter-specific structured predicate payload (queryable
+    # denormalisation of the signed envelope's predicate body).
+    "predicate_payload",
+    # Federation-import preservation of source-side signature.
+    "original_signature_bundle",
     "created_at", "updated_at",
 )
 _CLAIM_SELECT = ", ".join(_CLAIM_COLUMNS)
+
+
+def _serialize_predicate_payload(payload: dict | None) -> str:
+    """Serialize an adapter's structured predicate_payload for storage.
+
+    Canonical JSON (sorted keys, NFC Unicode, no whitespace, ``allow_nan=False``)
+    so the column round-trips byte-stably across writers. ``None`` becomes
+    the empty string to match the column's ``DEFAULT ''`` and keep
+    v0.3.0-shape callers (who never pass this kwarg) writing the same bytes
+    they did before. The active signed envelope is the authoritative copy
+    of the predicate body; this column is the queryable denormalisation.
+    """
+    if payload is None:
+        return ""
+    from ._canonical import canonicalize
+    return canonicalize(payload).decode("utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -1242,6 +1283,8 @@ def add_claim(
     require_rekor: bool = False,
     on_convergence_error: "Callable[[Exception], None] | None" = None,
     rekor_log_pubkey_pem: bytes | None = None,
+    predicate_payload: dict | None = None,
+    original_signature_bundle: str | None = None,
 ) -> str:
     """Insert a new claim and return its claim_id.
 
@@ -1547,9 +1590,10 @@ def add_claim(
                  ev_risk_of_bias, ev_inconsistency, ev_indirectness,
                  ev_imprecision, ev_pub_bias,
                  evidence_json, statement_cid,
+                 predicate_payload, original_signature_bundle,
                  created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 claim_id, text, classification, initial_level, idempotency_key,
@@ -1563,6 +1607,8 @@ def add_claim(
                 evidence_obj.indirectness, evidence_obj.imprecision,
                 evidence_obj.publication_bias,
                 evidence_json, statement_cid,
+                _serialize_predicate_payload(predicate_payload),
+                original_signature_bundle,
                 now, now,
             ),
         )
@@ -3209,6 +3255,13 @@ _VALID_REPLICATION_METHODS = (
     "semantic-cluster",
     "shared-resolved-upstream",
     "cross-method",
+    # Signed-bracket tournament replay: an external verdict-issuer (e.g.
+    # mareforma_elo) has independently replayed a signed Elo tournament
+    # bracket and confirms two claims converge under that bracket's
+    # outcome. The replay itself produces a signed
+    # ``elo-bracket-snapshot/v1`` predicate; this verdict method records
+    # the convergence it attests to.
+    "signed-elo-bracket-replay",
 )
 
 
@@ -4210,10 +4263,11 @@ def restore(
                              ev_indirectness, ev_imprecision, ev_pub_bias,
                              evidence_json, statement_cid,
                              convergence_retry_needed,
+                             predicate_payload, original_signature_bundle,
                              created_at, updated_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                ?, ?, ?, ?, ?)
+                                ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             claim_id, c_text, c_classification,
@@ -4241,6 +4295,8 @@ def restore(
                             evidence_json_str,
                             statement_cid_str,
                             1 if c.get("convergence_retry_needed") else 0,
+                            c.get("predicate_payload") or "",
+                            c.get("original_signature_bundle"),
                             c_created_at, c_updated_at,
                         ),
                     )
@@ -4955,6 +5011,14 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
             # We do NOT round-trip the column directly — that would
             # accept a TOML-tampered t_invalid value without verifying
             # it against a signed contradiction envelope.
+            # Adapter-specific predicate_payload + federation-imported
+            # original_signature_bundle: round-trip only when populated.
+            # Empty/NULL defaults stay omitted from the TOML so v0.3.0
+            # backups don't grow new fields uselessly.
+            if c.get("predicate_payload"):
+                entry["predicate_payload"] = c["predicate_payload"]
+            if c.get("original_signature_bundle"):
+                entry["original_signature_bundle"] = c["original_signature_bundle"]
             data["claims"][c["claim_id"]] = entry
 
         # Verdict tables. Each verdict carries its own signature

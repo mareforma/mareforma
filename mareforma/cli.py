@@ -406,23 +406,87 @@ def status_cmd(as_json: bool) -> None:
 
 @cli.command()
 @click.option("--output", default=None,
-              help="Output path. Default: <cwd>/ontology.jsonld or "
-                   "<cwd>/mareforma-bundle.json when --bundle is set.")
+              help="Output path. Default depends on --format / --bundle.")
 @click.option("--json", "as_json", is_flag=True, default=False,
-              help="Print JSON-LD to stdout instead of writing a file.")
+              help="Print JSON to stdout instead of writing a file.")
 @click.option("--bundle", is_flag=True, default=False,
               help="Produce a SCITT-style signed bundle (in-toto Statement "
                    "v1 + DSSE envelope). Requires a loaded signing key.")
-def export(output: str | None, as_json: bool, bundle: bool) -> None:
-    """Export all claims as a JSON-LD document, optionally as a signed bundle.
+@click.option(
+    "--format", "fmt",
+    type=click.Choice(["jsonld", "in-toto-v1", "ro-crate-1.2"]),
+    default="jsonld",
+    help=(
+        "Export format. 'jsonld' (default) = mareforma-native JSON-LD; "
+        "'in-toto-v1' = unsigned in-toto Statement v1 (sigstore / SLSA / "
+        "GUAC ecosystem); 'ro-crate-1.2' = RO-Crate 1.2 Process Run Crate "
+        "metadata (Galaxy / EuroScienceGateway / FAIR-EASE ecosystem). "
+        "Use --bundle for a signed in-toto Statement v1 (different from "
+        "--format=in-toto-v1 which is unsigned)."
+    ),
+)
+def export(
+    output: str | None, as_json: bool, bundle: bool, fmt: str,
+) -> None:
+    """Export all claims, optionally as a signed bundle or interop format.
 
     \b
     Examples:
         mareforma export
         mareforma export --bundle
+        mareforma export --format=in-toto-v1
+        mareforma export --format=ro-crate-1.2 --output crate-metadata.json
         cat ontology.jsonld | jq '.["@graph"][]'
     """
     root = _root()
+
+    if bundle and fmt != "jsonld":
+        _err(
+            "--bundle and --format are mutually exclusive. --bundle produces "
+            "a signed in-toto v1 envelope; --format selects an unsigned "
+            "export shape. Choose one."
+        )
+        sys.exit(1)
+
+    if fmt == "in-toto-v1":
+        from mareforma.exporters.in_toto import build_statement
+        try:
+            statement = build_statement(root)
+            if as_json:
+                click.echo(json.dumps(statement, indent=2, ensure_ascii=False))
+                return
+            out_path = (
+                Path(output) if output else root / "mareforma-statement.json"
+            )
+            out_path.write_text(
+                json.dumps(statement, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            _ok(f"Exported in-toto Statement v1 → {out_path.relative_to(root)}")
+        except Exception as exc:
+            _err(f"in-toto export failed: {exc}")
+            sys.exit(1)
+        return
+
+    if fmt == "ro-crate-1.2":
+        from mareforma.exporters.ro_crate import build_crate
+        try:
+            crate = build_crate(root)
+            if as_json:
+                click.echo(json.dumps(crate, indent=2, ensure_ascii=False))
+                return
+            out_path = (
+                Path(output) if output else root / "ro-crate-metadata.json"
+            )
+            out_path.write_text(
+                json.dumps(crate, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            _ok(f"Exported RO-Crate 1.2 → {out_path.relative_to(root)}")
+        except Exception as exc:
+            _err(f"RO-Crate export failed: {exc}")
+            sys.exit(1)
+        return
 
     if bundle:
         # Signed bundle path — needs a key.
