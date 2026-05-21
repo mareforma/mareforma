@@ -414,13 +414,14 @@ def status_cmd(as_json: bool) -> None:
                    "v1 + DSSE envelope). Requires a loaded signing key.")
 @click.option(
     "--format", "fmt",
-    type=click.Choice(["jsonld", "in-toto-v1", "ro-crate-1.2"]),
+    type=click.Choice(["jsonld", "in-toto-v1", "ro-crate-1.2", "prov-o"]),
     default="jsonld",
     help=(
         "Export format. 'jsonld' (default) = mareforma-native JSON-LD; "
         "'in-toto-v1' = unsigned in-toto Statement v1 (sigstore / SLSA / "
         "GUAC ecosystem); 'ro-crate-1.2' = RO-Crate 1.2 Process Run Crate "
-        "metadata (Galaxy / EuroScienceGateway / FAIR-EASE ecosystem). "
+        "metadata (Galaxy / EuroScienceGateway / FAIR-EASE ecosystem); "
+        "'prov-o' = W3C PROV-O JSON-LD for provenance-aware tooling. "
         "Use --bundle for a signed in-toto Statement v1 (different from "
         "--format=in-toto-v1 which is unsigned)."
     ),
@@ -492,6 +493,26 @@ def export(
             _ok(f"Exported RO-Crate 1.2 → {_display_path(out_path)}")
         except Exception as exc:
             _err(f"RO-Crate export failed: {exc}")
+            sys.exit(1)
+        return
+
+    if fmt == "prov-o":
+        from mareforma.exporters.prov_o import build_prov_o
+        try:
+            doc = build_prov_o(root)
+            if as_json:
+                click.echo(json.dumps(doc, indent=2, ensure_ascii=False))
+                return
+            out_path = (
+                Path(output) if output else root / "mareforma-prov-o.jsonld"
+            )
+            out_path.write_text(
+                json.dumps(doc, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            _ok(f"Exported PROV-O JSON-LD → {_display_path(out_path)}")
+        except Exception as exc:
+            _err(f"PROV-O export failed: {exc}")
             sys.exit(1)
         return
 
