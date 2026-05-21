@@ -400,6 +400,58 @@ def status_cmd(as_json: bool) -> None:
     click.echo("")
 
 
+@cli.command("stats")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Emit JSON to stdout instead of a formatted table.")
+@click.option("--last", "last_n", type=int, default=None,
+              help="Aggregate only the last N events. Default: all events.")
+def stats_cmd(as_json: bool, last_n: int | None) -> None:
+    """Show rolling operational rates from .mareforma/health.jsonl.
+
+    The health log captures one JSONL line per substrate operation
+    that produces operational signal: provenance queries, grounding
+    sensor verdicts, DOI drift scans, refresh_unsigned /
+    refresh_unresolved retries. ``mareforma stats`` aggregates the
+    log and prints rolling rates (grounding-pass-rate, DOI-drift-rate,
+    Rekor-log-recovery-rate) so an operator can see how the
+    substrate is behaving over time without re-querying graph.db.
+
+    \b
+    Examples:
+        mareforma stats
+        mareforma stats --last=100
+        mareforma stats --json
+    """
+    from mareforma.health import compute_rolling_stats
+    root = _root()
+    stats = compute_rolling_stats(root, last_n=last_n)
+    if as_json:
+        click.echo(json.dumps(stats, indent=2, sort_keys=True))
+        return
+    click.echo("  " + "-" * 50)
+    click.echo(f"  Events scanned: {stats['events_total']}")
+    if stats.get("read_error"):
+        click.echo("  Health log unreadable.")
+        click.echo("  " + "-" * 50)
+        return
+    if not stats["ops"]:
+        click.echo("  No operational events recorded yet.")
+        click.echo("  " + "-" * 50)
+        return
+    for op in sorted(stats["ops"]):
+        bucket = stats["ops"][op]
+        click.echo(f"  {op}:  {bucket['count']} events  "
+                   f"({bucket['ok']} ok / {bucket['fail']} fail / "
+                   f"{bucket['partial']} partial)")
+        extras = {
+            k: v for k, v in bucket.items()
+            if k not in ("count", "ok", "fail", "partial")
+        }
+        for k, v in sorted(extras.items()):
+            click.echo(f"      {k}: {v}")
+    click.echo("  " + "-" * 50)
+
+
 # ---------------------------------------------------------------------------
 # export
 # ---------------------------------------------------------------------------

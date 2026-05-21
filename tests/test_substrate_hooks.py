@@ -44,10 +44,10 @@ class TestPredicateTypeRegistry:
 
     def test_register_adapter_uri_appears_in_listing(self) -> None:
         mareforma.register_predicate(
-            "urn:mareforma:predicate:tool-call:v1",
-            owner="mareforma_tooluniverse",
+            "urn:mareforma:predicate:custom-adapter:v1",
+            owner="test-adapter",
         )
-        assert "urn:mareforma:predicate:tool-call:v1" in mareforma.predicates()
+        assert "urn:mareforma:predicate:custom-adapter:v1" in mareforma.predicates()
 
     def test_predicates_returns_sorted_list(self) -> None:
         mareforma.register_predicate("urn:mareforma:predicate:zzz-last:v1")
@@ -62,23 +62,23 @@ class TestPredicateTypeRegistry:
 
     def test_re_register_same_owner_is_noop(self) -> None:
         mareforma.register_predicate(
-            "urn:mareforma:predicate:tool-call:v1",
-            owner="mareforma_tooluniverse",
+            "urn:mareforma:predicate:custom-adapter:v1",
+            owner="test-adapter",
         )
         # Same owner, second call: no exception.
         mareforma.register_predicate(
-            "urn:mareforma:predicate:tool-call:v1",
-            owner="mareforma_tooluniverse",
+            "urn:mareforma:predicate:custom-adapter:v1",
+            owner="test-adapter",
         )
 
     def test_re_register_different_owner_raises(self) -> None:
         mareforma.register_predicate(
-            "urn:mareforma:predicate:tool-call:v1",
-            owner="mareforma_tooluniverse",
+            "urn:mareforma:predicate:custom-adapter:v1",
+            owner="test-adapter",
         )
         with pytest.raises(mareforma.PredicateTypeError):
             mareforma.register_predicate(
-                "urn:mareforma:predicate:tool-call:v1",
+                "urn:mareforma:predicate:custom-adapter:v1",
                 owner="evil_squatter",
             )
 

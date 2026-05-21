@@ -131,6 +131,47 @@ layer (DB trigger, signing payload, state machine) rather than
 patching the wrapper. The trust ladder must not be bypassable via a
 public API path the wrapper happens to not expose.
 
+## Tests that wire an LLM or NLI model
+
+Some adapters and verifiers are backed by real ML models. Tests that
+exercise those code paths must NOT pull a model from the network at
+test time and must NOT depend on remote API tokens. Use a stub
+verifier instead:
+
+```python
+class _StubNLI:
+    """Deterministic stand-in for a real entailment model."""
+    def grounding_score(self, claim_text, supports):
+        return (0.9, "stub: returned a fixed score")
+
+# in the test
+graph.assert_claim("the claim", grounding_sensor=_StubNLI())
+```
+
+For the `Verifier` protocol specifically, `mareforma.MockNLIVerifier`
+ships as a reference stub that satisfies the protocol with a
+configurable fixed score; prefer it over rolling your own per-test
+stub when a deterministic score is all you need:
+
+```python
+from mareforma import MockNLIVerifier
+graph.assert_claim("the claim", grounding_sensor=MockNLIVerifier(score=0.85))
+```
+
+Rules of thumb:
+
+- Stubs return tuples, never coroutines (the substrate calls
+  verifiers synchronously inside the BEGIN IMMEDIATE write
+  transaction).
+- Stubs MUST be deterministic — random scores produce flaky tests.
+- Stubs SHOULD raise the same exception types real models raise
+  (`OSError`, `RuntimeError`, `ConnectionError`) when you need to
+  test the substrate's fallback path; the assertion still lands and
+  a `RuntimeWarning` surfaces.
+- Tests that need an actually-trained model must be guarded behind
+  an opt-in marker (`@pytest.mark.requires_model`) and skipped by
+  default — running the full suite must not download anything.
+
 ## Examples
 
 Examples in `examples/` must:

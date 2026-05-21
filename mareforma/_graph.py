@@ -343,6 +343,11 @@ class EpistemicGraph:
                     "grounding_score": float(score),
                     "grounding_rationale": rationale,
                 })
+                from mareforma import health as _health
+                _health.append_health_event(
+                    self._root, "grounding_verdict",
+                    score=float(score),
+                )
             except Exception as exc:
                 _warnings.warn(
                     f"grounding_sensor raised {type(exc).__name__}: "
@@ -412,6 +417,44 @@ class EpistemicGraph:
             When ``False`` (default), claims marked invalid by a signed
             contradiction verdict (``t_invalid IS NOT NULL``) are
             excluded. Pass ``True`` for audit / history queries.
+        refutation_filter:
+            Optional refutation-state filter, one of ``"clean"`` /
+            ``"contradicted"`` / ``"contested"`` / ``"retracted"`` /
+            ``"any"``. Composes with the other filters via AND:
+
+            * ``"clean"`` — restrict to ``t_invalid IS NULL`` AND
+              ``status = 'open'`` (the strictest "nothing wrong"
+              cohort).
+            * ``"contradicted"`` — restrict to ``t_invalid IS NOT
+              NULL``; overrides the default ``include_invalidated``
+              gate so contradicted rows surface even when the flag
+              wasn't flipped.
+            * ``"contested"`` — restrict to ``status = 'contested'``.
+            * ``"retracted"`` — restrict to ``status = 'retracted'``.
+            * ``"any"`` — surface every refutation state; implies
+              ``include_invalidated=True``.
+
+            Composition examples::
+
+                # high-confidence ESTABLISHED claims with no refutation
+                graph.query(
+                    min_support="ESTABLISHED",
+                    refutation_filter="clean",
+                )
+
+                # every claim with a signed contradiction, including
+                # the contradicting + contradicted pairs
+                graph.query(
+                    refutation_filter="contradicted",
+                    include_invalidated=True,
+                )
+
+                # full-text search within unverified preliminary work
+                graph.search(
+                    "gene therapy",
+                    refutation_filter="clean",
+                    include_unverified=True,
+                )
 
         Returns
         -------
@@ -1139,6 +1182,12 @@ class EpistemicGraph:
             if (not ok) and prior.get(d, False) is True
         )
 
+        from mareforma import health as _health
+        _health.append_health_event(
+            self._root, "refresh_unresolved",
+            succeeded=still_resolved,
+            checked=len(results),
+        )
         return {
             "checked": len(results),
             "still_resolved": still_resolved,
@@ -1177,7 +1226,15 @@ class EpistemicGraph:
             "last_checked_at"}, ...]`` — one entry per drifted DOI.
         """
         self._check_open()
-        return _doi.find_drifted_dois(self._conn, limit=limit)
+        # Count inspected rows by walking the same SELECT the impl
+        # would, so we can emit a coherent (total, drifted) signal.
+        from mareforma import health as _health
+        drifted = _doi.find_drifted_dois(self._conn, limit=limit)
+        _health.append_health_event(
+            self._root, "doi_drift_scan",
+            drifted=len(drifted),
+        )
+        return drifted
 
     def refresh_convergence(self) -> dict[str, int]:
         """Retry convergence detection for every flagged claim.
@@ -1406,6 +1463,12 @@ class EpistemicGraph:
         )
         repl_verdicts = _db.list_replication_verdicts(
             self._conn, member_claim_id=claim_id,
+        )
+
+        # Operational log: this is a queryable signal, emit one event.
+        from mareforma import health as _health
+        _health.append_health_event(
+            self._root, "provenance_query", depth=depth,
         )
 
         return {
@@ -1672,6 +1735,12 @@ class EpistemicGraph:
             else:
                 still_unlogged += 1
 
+        from mareforma import health as _health
+        _health.append_health_event(
+            self._root, "refresh_unsigned",
+            succeeded=logged_count,
+            checked=len(unlogged),
+        )
         return {
             "checked": len(unlogged),
             "logged": logged_count,

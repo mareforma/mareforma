@@ -66,9 +66,33 @@ _URI_RE = re.compile(
 # Built-in URIs the substrate ships with. Adapters MUST NOT
 # re-register these; doing so raises ``PredicateTypeError``.
 BUILTIN_URIS: tuple[str, ...] = (
+    # Core substrate predicates (writers live in the substrate itself).
     "urn:mareforma:predicate:claim:v1",
     "urn:mareforma:predicate:epistemic-graph:v1",
     "urn:mareforma:predicate:claim-with-roles:v1",
+    # Reserved namespaces for upstream adapters. The substrate ships
+    # no writer for these; an adapter that emits one of these
+    # predicateTypes opts into the shape contract documented in the
+    # adapter's own docs. Listed here so the substrate's URI registry
+    # cannot be poisoned by a third-party module silently
+    # re-registering one of these slots.
+    "urn:mareforma:predicate:tool-call:v1",
+    "urn:mareforma:predicate:ingested-trace:v1",
+    "urn:mareforma:predicate:agent-trace:v1",
+    "urn:mareforma:predicate:llm-output:v1",
+    "urn:mareforma:predicate:review:v1",
+    "urn:mareforma:predicate:peer-review:v1",
+    "urn:mareforma:predicate:elo-match:v1",
+    "urn:mareforma:predicate:tournament-bracket:v1",
+    "urn:mareforma:predicate:wet-lab-assay/flow-cytometry:v1",
+    "urn:mareforma:predicate:wet-lab-assay/sequencing:v1",
+    "urn:mareforma:predicate:wet-lab-assay/imaging:v1",
+    "urn:mareforma:predicate:wet-lab-assay/proteomics:v1",
+    "urn:mareforma:predicate:wet-lab-assay/electrophysiology:v1",
+    "urn:mareforma:predicate:replication-attestation:v1",
+    "urn:mareforma:predicate:compounding-attestation:v1",
+    "urn:mareforma:predicate:semantic-grounding:v1",
+    "urn:mareforma:predicate:doi-resolution:v1",
 )
 
 
