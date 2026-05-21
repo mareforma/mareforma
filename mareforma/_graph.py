@@ -164,6 +164,7 @@ class EpistemicGraph:
         signer: "object | None" = None,
         predicate_payload: dict | None = None,
         original_signature_bundle: str | None = None,
+        grounding_sensor: "object | None" = None,
     ) -> str:
         # signer:
         #     Per-call override for the graph's loaded signer. When
@@ -305,6 +306,33 @@ class EpistemicGraph:
                 f"got {type(evidence).__name__}"
             )
 
+        # Snapshot the grounding sensor's verdict into the EvidenceVector
+        # so the score is signed alongside the rest of the claim. A
+        # broken sensor (raises VerifierError, returns malformed shape)
+        # does NOT block assertion — we log a warning and drop the
+        # score. Asserter philosophy: the substrate signs what the
+        # asserter claims; verifier wiring is a quality hint, not a
+        # gate.
+        if grounding_sensor is not None:
+            from mareforma.verifiers import VerifierError as _VE
+            import warnings as _warnings
+            try:
+                score, rationale = grounding_sensor.grounding_score(
+                    text, supports or [],
+                )
+                ev = EvidenceVector.from_dict({
+                    **ev.to_dict(),
+                    "grounding_score": float(score),
+                    "grounding_rationale": str(rationale),
+                })
+            except (_VE, AttributeError, TypeError, ValueError) as exc:
+                _warnings.warn(
+                    f"grounding_sensor raised {type(exc).__name__}: "
+                    f"{exc}; asserting without grounding_score.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
         def _bump_convergence_errors(_exc: Exception) -> None:
             self._convergence_errors += 1
 
@@ -341,6 +369,7 @@ class EpistemicGraph:
         limit: int = 20,
         include_unverified: bool = False,
         include_invalidated: bool = False,
+        refutation_filter: str | None = None,
     ) -> list[dict]:
         """Query claims from the epistemic graph.
 
@@ -393,7 +422,64 @@ class EpistemicGraph:
             limit=limit,
             include_unverified=include_unverified,
             include_invalidated=include_invalidated,
+            refutation_filter=refutation_filter,
         )
+
+    def update_claim(
+        self,
+        claim_id: str,
+        *,
+        status: str | None = None,
+        text: str | None = None,
+        supports: list[str] | None = None,
+        contradicts: list[str] | None = None,
+        comparison_summary: str | None = None,
+    ) -> None:
+        """Update mutable fields on an existing claim.
+
+        ``status`` and ``comparison_summary`` are always editable.
+        ``text`` / ``supports`` / ``contradicts`` are part of the signed
+        payload and refuse to mutate when the claim carries a signature
+        bundle — use a retraction-plus-new-assertion flow on those
+        cases.
+
+        Raises :class:`ClaimNotFoundError`,
+        :class:`SignedClaimImmutableError`,
+        :class:`IllegalStateTransitionError`, or :class:`ValueError`
+        per the underlying :func:`mareforma.db.update_claim` contract.
+        """
+        self._check_open()
+        _db.update_claim(
+            self._conn,
+            self._root,
+            claim_id,
+            status=status,
+            text=text,
+            supports=supports,
+            contradicts=contradicts,
+            comparison_summary=comparison_summary,
+        )
+
+    def refutation_status(self, claim_id: str) -> dict:
+        """Return the refutation classification for *claim_id*.
+
+        Result shape: ``{"state", "reason", "signal"}`` where
+        ``state`` is one of :data:`mareforma.db.REFUTATION_STATES`
+        (``"clean"`` | ``"contradicted"`` | ``"contested"`` |
+        ``"retracted"``), ``reason`` is a short human-readable
+        explanation, and ``signal`` is ``"signed-verdict"`` /
+        ``"editorial"`` / ``"none"`` indicating the strength of the
+        underlying evidence.
+
+        Raises :class:`ClaimNotFoundError` if no such claim exists.
+        """
+        self._check_open()
+        row = _db.get_claim(self._conn, claim_id)
+        if row is None:
+            raise _db.ClaimNotFoundError(
+                f"Claim '{claim_id}' not found."
+            )
+        return _db.refutation_status(row)
 
     def search(
         self,

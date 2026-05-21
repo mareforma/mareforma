@@ -373,6 +373,14 @@ from mareforma.db import (
     RestoreError,
     CycleDetectedError,
     VerdictIssuerError,
+    REFUTATION_STATES,
+    VALID_REFUTATION_FILTERS,
+    refutation_status,
+)
+from mareforma.verifiers import (
+    Verifier,
+    MockNLIVerifier,
+    VerifierError,
 )
 from mareforma.signing import (
     SigningError,
@@ -429,6 +437,14 @@ __all__ = [
     "SigningError",
     "ValidatorNotEnrolledError",
     "VerdictIssuerError",
+    "VerifierError",
+    # Refutation taxonomy + presenter.
+    "REFUTATION_STATES",
+    "VALID_REFUTATION_FILTERS",
+    "refutation_status",
+    # Grounding sensor protocol + reference impl.
+    "Verifier",
+    "MockNLIVerifier",
 ]
 
 

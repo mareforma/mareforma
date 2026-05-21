@@ -141,6 +141,14 @@ class EvidenceVector:
     # one of :data:`VALID_STUDY_DESIGNS` otherwise. Drives the baseline
     # certainty score in :meth:`certainty`.
     study_design: str | None = None
+    # Asserter-time grounding sensor verdict (in [0.0, 1.0]) + the
+    # rationale string. Snapshotted at assertion time and signed
+    # together with the rest of the vector. Future verifiers can re-
+    # run independently and produce a different number; that
+    # recomputed verdict is NOT stored on the claim. None = no
+    # grounding sensor was wired into this assertion.
+    grounding_score: float | None = None
+    grounding_rationale: str | None = None
 
     def __post_init__(self) -> None:
         # Domains must be in [-2, 0]. The bound is checked here so a
@@ -210,6 +218,38 @@ class EvidenceVector:
                     f"{VALID_STUDY_DESIGNS}"
                 )
 
+        # grounding_score: optional float in [0.0, 1.0]; both score and
+        # rationale must be present together or both absent.
+        if self.grounding_score is not None:
+            if isinstance(self.grounding_score, bool):
+                raise EvidenceVectorError(
+                    "grounding_score must be a float, not a bool"
+                )
+            if not isinstance(self.grounding_score, (int, float)):
+                raise EvidenceVectorError(
+                    f"grounding_score must be a float or None; got "
+                    f"{type(self.grounding_score).__name__}"
+                )
+            gs = float(self.grounding_score)
+            if gs != gs:  # NaN
+                raise EvidenceVectorError("grounding_score must not be NaN")
+            if gs < 0.0 or gs > 1.0:
+                raise EvidenceVectorError(
+                    f"grounding_score={gs} out of [0.0, 1.0]"
+                )
+            if not isinstance(self.grounding_rationale, str) or not (
+                self.grounding_rationale.strip()
+            ):
+                raise EvidenceVectorError(
+                    "grounding_rationale is required when grounding_score "
+                    "is set; pass the verifier's explanation string"
+                )
+        elif self.grounding_rationale is not None:
+            raise EvidenceVectorError(
+                "grounding_rationale set without grounding_score; "
+                "either pass both or neither"
+            )
+
     def to_dict(self) -> dict:
         """Serialize to a JSON-compatible dict for inclusion in a Statement.
 
@@ -232,6 +272,9 @@ class EvidenceVector:
         }
         if self.study_design is not None:
             out["study_design"] = self.study_design
+        if self.grounding_score is not None:
+            out["grounding_score"] = float(self.grounding_score)
+            out["grounding_rationale"] = self.grounding_rationale
         return out
 
     def certainty(self) -> str:
@@ -301,4 +344,6 @@ class EvidenceVector:
             rationale=dict(data.get("rationale") or {}),
             reporting_compliance=tuple(data.get("reporting_compliance") or ()),
             study_design=data.get("study_design"),
+            grounding_score=data.get("grounding_score"),
+            grounding_rationale=data.get("grounding_rationale"),
         )

@@ -3952,6 +3952,74 @@ def list_contradiction_verdicts(
     return [dict(r) for r in rows]
 
 
+# Refutation taxonomy — the four states a claim can be in with respect
+# to active refutations against it. Surfaced to callers via
+# :func:`refutation_status` and as a filter argument to query_claims.
+#   clean        — no signed contradiction, status='open', not retracted
+#   contradicted — t_invalid IS NOT NULL (a signed contradiction
+#                  verdict from an enrolled validator marked the older
+#                  claim invalid)
+#   contested    — status='contested' (an editorial-level flag set by
+#                  update_claim; non-cryptographic, weaker than a
+#                  contradiction verdict but visible to consumers)
+#   retracted    — status='retracted' (the asserter withdrew the claim
+#                  themselves; terminal state in the status state
+#                  machine)
+REFUTATION_STATES: tuple[str, ...] = (
+    "clean", "contradicted", "contested", "retracted",
+)
+# Filter values that query_claims accepts on refutation_filter=. ``None``
+# preserves the legacy behaviour gated by include_invalidated.
+VALID_REFUTATION_FILTERS: tuple[str, ...] = (
+    "clean", "contradicted", "contested", "retracted", "any",
+)
+
+
+def refutation_status(row: dict) -> dict:
+    """Classify a claim row's refutation state.
+
+    Returns a dict with three fields:
+
+      * ``state``  — one of :data:`REFUTATION_STATES`
+      * ``reason`` — short human-readable explanation
+      * ``signal`` — ``"signed-verdict"`` if backed by a cryptographic
+                     verdict, ``"editorial"`` if backed only by a
+                     status flag, or ``"none"`` for clean claims
+
+    The presenter is a pure function over the row's queryable
+    columns; it does NOT walk verdict tables (callers wanting the
+    underlying verdicts use
+    :meth:`EpistemicGraph.contradiction_verdicts`).
+    """
+    if row.get("t_invalid") is not None:
+        return {
+            "state": "contradicted",
+            "reason": (
+                "a signed contradiction verdict marked this claim "
+                f"invalid at t_invalid={row['t_invalid']}"
+            ),
+            "signal": "signed-verdict",
+        }
+    status = row.get("status")
+    if status == "retracted":
+        return {
+            "state": "retracted",
+            "reason": "the asserter retracted this claim",
+            "signal": "editorial",
+        }
+    if status == "contested":
+        return {
+            "state": "contested",
+            "reason": "this claim was editorially flagged as contested",
+            "signal": "editorial",
+        }
+    return {
+        "state": "clean",
+        "reason": "no refutation signal on this claim",
+        "signal": "none",
+    }
+
+
 def query_claims(
     conn: sqlite3.Connection,
     *,
@@ -3961,6 +4029,7 @@ def query_claims(
     classification: str | None = None,
     include_unverified: bool = False,
     include_invalidated: bool = False,
+    refutation_filter: str | None = None,
 ) -> list[dict]:
     """Return claims ordered by support_level (desc) then recency (desc).
 
@@ -4026,6 +4095,38 @@ def query_claims(
             )
         conditions.append("classification = ?")
         params.append(classification)
+
+    # Refutation filter is composable with include_invalidated:
+    #   refutation_filter="clean"        — restrict to clean rows
+    #   refutation_filter="contradicted" — restrict to t_invalid IS NOT NULL
+    #   refutation_filter="contested"    — restrict to status='contested'
+    #   refutation_filter="retracted"    — restrict to status='retracted'
+    #   refutation_filter="any"          — include every refutation state
+    #                                      (implies include_invalidated=True)
+    if refutation_filter is not None:
+        if refutation_filter not in VALID_REFUTATION_FILTERS:
+            raise ValueError(
+                f"Unknown refutation_filter '{refutation_filter}'. "
+                f"Use one of: {', '.join(VALID_REFUTATION_FILTERS)}"
+            )
+        if refutation_filter == "clean":
+            conditions.append("t_invalid IS NULL")
+            conditions.append("status = 'open'")
+        elif refutation_filter == "contradicted":
+            # Override include_invalidated=False so we can SELECT
+            # contradicted rows even when the caller forgot to flip
+            # the include flag.
+            if "t_invalid IS NULL" in conditions:
+                conditions.remove("t_invalid IS NULL")
+            conditions.append("t_invalid IS NOT NULL")
+        elif refutation_filter == "contested":
+            conditions.append("status = 'contested'")
+        elif refutation_filter == "retracted":
+            conditions.append("status = 'retracted'")
+        elif refutation_filter == "any":
+            # Surface every refutation kind — implies include_invalidated.
+            if "t_invalid IS NULL" in conditions:
+                conditions.remove("t_invalid IS NULL")
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
