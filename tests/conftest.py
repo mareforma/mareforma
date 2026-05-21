@@ -38,6 +38,21 @@ def _isolate_xdg_config(tmp_path, monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _isolate_predicate_registry():
+    """Snapshot + restore the process-global predicate-type registry.
+
+    ``mareforma.predicate_types`` keeps registered URIs in a module-
+    level dict. Tests that exercise ``register_predicate`` would
+    otherwise leak entries between tests — green-alone, red-in-suite.
+    """
+    from mareforma import predicate_types as _pt
+    snapshot = dict(_pt._registry)
+    yield
+    _pt._registry.clear()
+    _pt._registry.update(snapshot)
+
+
 @pytest.fixture()
 def open_graph(tmp_path: Path):
     """Open an EpistemicGraph in a temp directory, with a bootstrapped

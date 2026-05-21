@@ -241,7 +241,7 @@ class TestContradictAndSupport:
 # ---------------------------------------------------------------------------
 #
 # These tests are the OSS substrate's ship gate. They exercise the
-# complete v0.3.0 launch story end-to-end:
+# complete trust-ladder story end-to-end:
 #
 #   - in-toto Statement v1 + DSSE envelope on every signed claim
 #   - GRADE EvidenceVector inside the signed predicate

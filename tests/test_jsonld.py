@@ -29,9 +29,9 @@ class TestContextAndStructure:
         ctx = doc["@context"]
         assert "schema" in ctx
         assert "mare" in ctx
-        # PROV-O references removed in v0.3.0: the prior export
-        # name-dropped prov: without populating the full PROV graph.
-        # Honest scoping — the export is mareforma-native, not PROV-O.
+        # PROV-O references are intentionally absent here: this export
+        # is mareforma-native. A real PROV-O view ships separately via
+        # ``mareforma export --format=prov-o``.
         assert "prov" not in ctx
 
     def test_export_media_type(self, tmp_path: Path) -> None:

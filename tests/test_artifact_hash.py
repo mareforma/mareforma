@@ -376,7 +376,7 @@ class TestCLIArtifactHash:
 # Strict idempotency contract — every semantic field must match
 # ---------------------------------------------------------------------------
 #
-# Tightened in v0.3.0 to refuse the silent-merge anti-pattern. Prior
+# Tightened from the silent-merge anti-pattern. Prior
 # behavior matched only on artifact_hash; this let two callers using the
 # same key with different text + generated_by collapse into one row,
 # destroying the second author's content and breaking the REPLICATED

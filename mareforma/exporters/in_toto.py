@@ -14,9 +14,10 @@ Statement v1 dict, leaving signing + DSSE wrap to the caller. Use cases:
 For a signed bundle ready to verify with ``mareforma verify``, use
 :mod:`mareforma.export_bundle` (`mareforma export --bundle`).
 
-Predicate type: ``urn:mareforma:predicate:epistemic-graph:v1`` (matches
-existing v0.3.0 signed-bundle predicate type for round-trip
-compatibility). Each claim appears as a subject under
+Predicate type: ``urn:mareforma:predicate:epistemic-graph:v1`` — the
+same predicate the signed-bundle path uses, so a verifier that knows
+how to read a signed bundle reads the unsigned form unchanged.
+Each claim appears as a subject under
 ``urn:mareforma:claim:<uuid>`` with a SHA-256 of the canonical
 Statement v1 bytes — same shape :mod:`mareforma.export_bundle` already
 uses, so verifiers that already know the signed-bundle shape need no
@@ -56,8 +57,7 @@ def build_statement(root: Path) -> dict[str, Any]:
         wrapping in a DSSE envelope.
     """
     # Delegate to the signed-bundle helper which already builds the
-    # Statement v1 dict in the right shape. This keeps a single source
-    # of truth for the predicate shape; the v0.3.0 bundle verifier and
-    # the v0.3.1 unsigned exporter cannot drift.
+    # Statement v1 dict in the right shape. Single source of truth for
+    # the predicate body; signed and unsigned exporters cannot drift.
     from mareforma.export_bundle import build_statement as _build
     return _build(root)

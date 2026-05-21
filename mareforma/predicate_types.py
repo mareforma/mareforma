@@ -63,7 +63,7 @@ _URI_RE = re.compile(
 )
 
 
-# Built-in URIs the substrate ships with at v0.3.1. Adapters MUST NOT
+# Built-in URIs the substrate ships with. Adapters MUST NOT
 # re-register these; doing so raises ``PredicateTypeError``.
 BUILTIN_URIS: tuple[str, ...] = (
     "urn:mareforma:predicate:claim:v1",

@@ -77,7 +77,13 @@ _UUID_RE = re.compile(
 )
 
 
+# WAL on both DBs so a writer holding the graph.db lock isn't blocked by
+# cache readers, and so the cache journal mode matches the main graph
+# (SQLite restricts atomic cross-database commits when journal modes
+# differ — running both in WAL keeps the mode consistent).
 _CACHE_SCHEMA = """
+PRAGMA supports_cache.journal_mode=WAL;
+
 CREATE TABLE IF NOT EXISTS supports_cache.claim_supports (
     claim_id          TEXT NOT NULL,
     supports_claim_id TEXT NOT NULL,
@@ -105,6 +111,14 @@ def attach_cache(conn: sqlite3.Connection, root: Path) -> None:
     Idempotent: re-calling on an already-attached connection is a
     no-op (the ATTACH itself raises an OperationalError which we
     silently treat as already-attached).
+
+    Concurrent first-open contention: if two processes open the
+    project simultaneously on a missing or stale cache, both will
+    race for the ``BEGIN IMMEDIATE`` inside :func:`rebuild_cache`.
+    The loser receives ``SQLITE_BUSY`` after the connection's
+    ``busy_timeout`` expires. We set a 5-second timeout here so the
+    losing process waits for the rebuild to finish instead of
+    failing the open call.
     """
     path = _cache_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -116,6 +130,9 @@ def attach_cache(conn: sqlite3.Connection, root: Path) -> None:
         if "already" not in str(exc).lower():
             raise
         return
+    # Wait up to 5s on a contended write lock so two concurrent
+    # first-opens don't fail one of them with SQLITE_BUSY mid-rebuild.
+    conn.execute("PRAGMA busy_timeout = 5000")
     conn.executescript(_CACHE_SCHEMA)
     if is_cache_stale(conn):
         rebuild_cache(conn)

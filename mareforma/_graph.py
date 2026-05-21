@@ -171,12 +171,12 @@ class EpistemicGraph:
         #     to ``mareforma.open(key_path=...)``. When supplied, the
         #     claim is signed with this key instead. Note: this does
         #     NOT check that the signer's keyid is enrolled in the
-        #     validators table — same trust model as v0.3.0
+        #     validators table — same trust model as
         #     ``mareforma.open(key_path=...)`` (anyone can sign, but
         #     only enrolled keys can ``validate()`` claims to
         #     ESTABLISHED). Use for multi-signer hosts that have
         #     multiple keys loaded (e.g. one per role-actor in the
-        #     v0.3.1 ``claim-with-roles/v1`` predicate variant).
+        #     ``claim-with-roles:v1`` predicate variant).
         # predicate_payload:
         #     Optional structured predicate body for adapters that
         #     ship a typed predicateType (tool-call/v1,
@@ -193,9 +193,9 @@ class EpistemicGraph:
         #     federation-import flows. The active ``signature_bundle``
         #     carries the receiver's re-signed envelope; this column
         #     holds the original for downstream verifiers that want
-        #     to reconstruct the source-side proof. NOTE: in v0.3.1
-        #     the substrate does NOT validate this string (Phase-2
-        #     federation-import path will). Pass a structurally
+        #     to reconstruct the source-side proof. NOTE: the substrate
+        #     does NOT validate this string at write time (only that
+        #     it parses as JSON for normalisation). Pass a structurally
         #     valid DSSE envelope JSON or leave None.
         """Assert a claim into the epistemic graph. Returns claim_id.
 
@@ -1161,25 +1161,41 @@ class EpistemicGraph:
         self._check_open()
         from mareforma import _supports
 
+        # claim_id is interpolated into a LIKE pattern below; an
+        # attacker-controlled claim_id containing % or _ wildcards
+        # would force a full-table scan. Validate UUID shape up front
+        # so the LIKE pattern is constrained to a hex-only payload.
+        if not _db._is_claim_id(claim_id):
+            raise _db.ClaimNotFoundError(
+                f"Claim '{claim_id}' is not a valid claim_id; cannot "
+                "build lineage."
+            )
+
         focal = _db.get_claim(self._conn, claim_id)
         if focal is None:
             raise _db.ClaimNotFoundError(
                 f"Claim '{claim_id}' not found; cannot build lineage."
             )
 
-        # Role attestations: every signature in the DSSE envelope is a
-        # role-actor claim. claim:v1 carries one (the asserter);
-        # claim-with-roles:v1 carries N (planner / executor / reviewer
-        # / validator). The substrate stores all of them verbatim.
-        role_attestations: list[dict] = []
+        # Signers on the DSSE envelope. claim:v1 has one (the
+        # asserter); claim-with-roles:v1 has N (planner / executor /
+        # reviewer / validator). The keyid IS cryptographically bound
+        # (each signature is verified over the PAE on disk during
+        # restore). The ``role`` string sits on the signature entry
+        # and is NOT covered by the signed payload bytes — see
+        # :func:`mareforma.signing.sign_claim_with_roles` for the
+        # trust boundary. The field is exposed here as
+        # ``role_attestations_unverified`` so callers can't mistake
+        # the role tag for a substrate guarantee.
+        role_attestations_unverified: list[dict] = []
         if focal.get("signature_bundle"):
             try:
                 bundle = json.loads(focal["signature_bundle"])
                 for sig in bundle.get("signatures", []) or []:
                     if isinstance(sig, dict):
-                        role_attestations.append({
+                        role_attestations_unverified.append({
                             "keyid": sig.get("keyid"),
-                            "role": sig.get("role"),
+                            "role_unverified": sig.get("role"),
                         })
             except (json.JSONDecodeError, TypeError, AttributeError):
                 pass
@@ -1232,7 +1248,9 @@ class EpistemicGraph:
         return {
             "claim": {
                 **focal,
-                "role_attestations": role_attestations,
+                "role_attestations_unverified": (
+                    role_attestations_unverified
+                ),
             },
             "upstream": _hydrate(upstream_edges),
             "downstream": _hydrate(downstream_edges),

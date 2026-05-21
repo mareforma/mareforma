@@ -151,16 +151,15 @@ CREATE TABLE IF NOT EXISTS claims (
     -- gemini/*/v1, wet-lab-assay/*, review/v1, elo-match/v1, ...)
     -- write their typed payload here so substrate queries can filter
     -- by predicate_type without parsing the claim text JSON. Default
-    -- empty string keeps v0.3.0 graphs forward-compatible.
+    -- empty string keeps existing graphs forward-compatible.
     --
-    -- v0.3.1 NOTE — TRUST MODEL: this column is NOT yet bound into
-    -- the signed envelope or chain hash. Adapters that depend on
-    -- cryptographic integrity of the predicate body should encode
-    -- it inside the claim text JSON. Phase-2 follow-on (with
-    -- role-attestations) will bind this column into the canonical
-    -- signed payload + chain_input + claims_signed_fields_no_laundering
-    -- watchlist. Until then, treat this column as a QUERYABLE INDEX,
-    -- not a SOURCE OF TRUTH.
+    -- TRUST MODEL: this column is NOT bound into the signed envelope
+    -- or chain hash. It is a QUERY-SIDE DENORMALISATION, not a source
+    -- of truth. Adapters that need cryptographic integrity of the
+    -- predicate body must encode it inside the claim text JSON.
+    -- Idempotency reconciliation does NOT compare this field for the
+    -- same reason — federation exports that drop the column would
+    -- otherwise round-trip differently than direct asserts.
     predicate_payload TEXT NOT NULL DEFAULT '',
     -- Federation-import preservation. When a claim is re-asserted on
     -- a receiving graph after federation bundle import, the ORIGINAL
@@ -613,7 +612,7 @@ def _serialize_predicate_payload(payload: dict | None) -> str:
     Canonical JSON (sorted keys, NFC Unicode, no whitespace, ``allow_nan=False``)
     so the column round-trips byte-stably across writers. ``None`` becomes
     the empty string to match the column's ``DEFAULT ''`` and keep
-    v0.3.0-shape callers (who never pass this kwarg) writing the same bytes
+    Callers that never pass this kwarg write the same bytes
     they did before. The active signed envelope is the authoritative copy
     of the predicate body; this column is the queryable denormalisation.
 
@@ -1299,10 +1298,15 @@ def _reconcile_idempotency_row(
         mismatches.append("source_name")
     if row["artifact_hash"] != artifact_hash:
         mismatches.append("artifact_hash")
-    expected_predicate = _serialize_predicate_payload(predicate_payload)
-    if (row["predicate_payload"] or "") != expected_predicate:
-        mismatches.append("predicate_payload")
-    if (row["original_signature_bundle"] or None) != original_signature_bundle:
+    # predicate_payload is intentionally NOT compared. It is a query-
+    # side denormalisation that does not enter the signed envelope or
+    # the chain hash; treating it as a semantic field for idempotency
+    # would mean federation exports (which drop predicate_payload)
+    # round-trip differently than direct asserts. The signed bytes
+    # are the only authoritative semantic identity.
+    expected_original = _canonical_envelope(original_signature_bundle)
+    stored_original = _canonical_envelope(row["original_signature_bundle"])
+    if stored_original != expected_original:
         mismatches.append("original_signature_bundle")
     if mismatches:
         raise IdempotencyConflictError(
@@ -1667,7 +1671,7 @@ def add_claim(
                 evidence_obj.publication_bias,
                 evidence_json, statement_cid,
                 _serialize_predicate_payload(predicate_payload),
-                original_signature_bundle,
+                _canonical_envelope(original_signature_bundle),
                 now, now,
             ),
         )
@@ -2113,6 +2117,63 @@ def _refuse_llm_contradiction_issuer(
         )
 
 
+def _canonical_envelope(envelope_str: str | None) -> str | None:
+    """Canonicalise a JSON envelope so byte-level comparison is stable.
+
+    Two semantically identical envelopes that differ only in JSON key
+    order or whitespace should compare equal during idempotency
+    reconciliation. Falls back to the raw string if the input isn't
+    valid JSON — preserves the "arbitrary string content" contract
+    for ``original_signature_bundle``.
+    """
+    if envelope_str is None:
+        return None
+    try:
+        parsed = json.loads(envelope_str)
+    except (json.JSONDecodeError, TypeError):
+        return envelope_str
+    return json.dumps(parsed, sort_keys=True, separators=(",", ":"))
+
+
+def _restore_predicate_payload(c: dict, claim_id: str) -> str:
+    """Coerce restored ``predicate_payload`` per the add_claim write contract.
+
+    ``add_claim`` rejects non-dict / non-string values at write time.
+    Restore must be at least as strict; a tampered TOML carrying an int
+    or list for this field would otherwise land as ``""`` (silent data
+    loss). Either the field is a string (passed through) or absent
+    (default empty) — anything else is a malformed TOML and aborts.
+    """
+    val = c.get("predicate_payload")
+    if val is None:
+        return ""
+    if isinstance(val, str):
+        return val
+    raise RestoreError(
+        f"Claim {claim_id} predicate_payload is not a string "
+        f"(got {type(val).__name__}); claims.toml is malformed.",
+        kind="claim_unverified",
+    )
+
+
+def _restore_original_signature_bundle(c: dict, claim_id: str) -> str | None:
+    """Coerce restored ``original_signature_bundle`` consistently.
+
+    Same posture as :func:`_restore_predicate_payload`. Non-string,
+    non-null values are TOML corruption and abort the restore.
+    """
+    val = c.get("original_signature_bundle")
+    if val is None:
+        return None
+    if isinstance(val, str):
+        return val
+    raise RestoreError(
+        f"Claim {claim_id} original_signature_bundle is not a string "
+        f"(got {type(val).__name__}); claims.toml is malformed.",
+        kind="claim_unverified",
+    )
+
+
 def _refuse_self_verdict(
     conn: sqlite3.Connection,
     issuer_keyid: str,
@@ -2141,6 +2202,24 @@ def _refuse_self_verdict(
     ).fetchone()
     if row is None or row["signature_bundle"] is None:
         return
+    # Reject empty-array envelopes outright — they would slip through
+    # the keyid-match check and let the issuer bypass the self-verdict
+    # gate by writing a structurally-empty signatures array.
+    try:
+        _bundle = json.loads(row["signature_bundle"])
+    except (json.JSONDecodeError, TypeError):
+        _bundle = None
+    if isinstance(_bundle, dict):
+        _sigs = _bundle.get("signatures")
+        if _sigs is not None and (
+            not isinstance(_sigs, list) or len(_sigs) == 0
+        ):
+            raise VerdictIssuerError(
+                f"{verdict_kind} verdict refused: claim '{claim_id}' "
+                "(relation=" + relation + ") has a signature_bundle "
+                "whose signatures field is empty or non-list. Refusing "
+                "to gate against an empty identity set."
+            )
     keyids = _claim_signer_keyids(row["signature_bundle"])
     if issuer_keyid in keyids:
         try:
@@ -2178,13 +2257,26 @@ def _claim_signer_keyids(claim_signature_bundle: str | None) -> list[str]:
         return []
     try:
         bundle = json.loads(claim_signature_bundle)
-        sigs = bundle.get("signatures") or []
-        return [
-            s["keyid"] for s in sigs
-            if isinstance(s, dict) and isinstance(s.get("keyid"), str)
-        ]
-    except (json.JSONDecodeError, TypeError, AttributeError):
+    except (json.JSONDecodeError, TypeError):
         return []
+    if not isinstance(bundle, dict):
+        return []
+    sigs = bundle.get("signatures")
+    # Structurally invalid envelopes — empty signatures list or a non-
+    # list signatures field — must NOT silently collapse to []. Callers
+    # use that empty result to mean "unsigned claim, gates pass". An
+    # empty-array envelope would slip through every keyid match.
+    # _refuse_self_validation / _refuse_self_verdict layer the explicit
+    # rejection on top; this helper preserves the "no envelope" return
+    # only for the genuine no-envelope case (signatures key absent).
+    if sigs is None:
+        return []
+    if not isinstance(sigs, list):
+        return []
+    return [
+        s["keyid"] for s in sigs
+        if isinstance(s, dict) and isinstance(s.get("keyid"), str)
+    ]
 
 
 def _refuse_self_validation(
@@ -2203,20 +2295,33 @@ def _refuse_self_validation(
 
     Unsigned claims (``signature_bundle IS NULL``) carry no signer
     identity to compare against and pass this gate. A malformed bundle
-    is treated as absent (same posture as v0.3.0).
+    is treated as absent (conservative posture).
     """
     matched_role: str | None = None
     if claim_signature_bundle is not None:
         try:
             bundle = json.loads(claim_signature_bundle)
-            for sig in bundle.get("signatures") or []:
-                if not isinstance(sig, dict):
-                    continue
-                if sig.get("keyid") == validator_keyid:
-                    matched_role = sig.get("role") or "asserter"
-                    break
-        except (json.JSONDecodeError, TypeError, AttributeError):
+        except (json.JSONDecodeError, TypeError):
             return
+        signatures = bundle.get("signatures") if isinstance(bundle, dict) else None
+        # A signed claim with an empty / non-list signatures field is a
+        # structurally invalid envelope. Treating it as "absent" would
+        # let a tamperer drop their keyid from the gate and self-promote
+        # — refuse the operation rather than silently pass.
+        if signatures is None:
+            return  # no signature_bundle subfield at all → unsigned
+        if not isinstance(signatures, list) or not signatures:
+            raise SelfValidationError(
+                f"Claim '{claim_id}' has a signature_bundle whose "
+                "signatures field is empty or non-list. Refusing to "
+                "gate self-validation against an empty identity set."
+            )
+        for sig in signatures:
+            if not isinstance(sig, dict):
+                continue
+            if sig.get("keyid") == validator_keyid:
+                matched_role = sig.get("role") or "asserter"
+                break
     if matched_role is not None:
         raise SelfValidationError(
             f"Validator {validator_keyid[:12]}… signed claim "
@@ -4473,16 +4578,8 @@ def restore(
                             evidence_json_str,
                             statement_cid_str,
                             1 if c.get("convergence_retry_needed") else 0,
-                            (
-                                c["predicate_payload"]
-                                if isinstance(c.get("predicate_payload"), str)
-                                else ""
-                            ),
-                            (
-                                c["original_signature_bundle"]
-                                if isinstance(c.get("original_signature_bundle"), str)
-                                else None
-                            ),
+                            _restore_predicate_payload(c, claim_id),
+                            _restore_original_signature_bundle(c, claim_id),
                             c_created_at, c_updated_at,
                         ),
                     )
@@ -4564,10 +4661,24 @@ def restore(
         from mareforma.validators import invalidate_conn_cache
         invalidate_conn_cache(conn)
         # Rebuild the claim_supports cache from the freshly-replayed
-        # chain. The cache file lives outside the signed graph;
-        # bulk-restore is the simplest correctness boundary.
+        # chain. The cache file lives outside the signed graph; if
+        # the rebuild fails (disk full, attached file locked) the
+        # main restore has already committed and the next open() will
+        # re-detect staleness and rebuild. Surface a warning so the
+        # operator knows restore succeeded but the cache is dirty
+        # until next open.
         from mareforma import _supports
-        _supports.rebuild_cache(conn)
+        try:
+            _supports.rebuild_cache(conn)
+        except sqlite3.Error as exc:
+            import warnings
+            warnings.warn(
+                "restore: claim_supports cache rebuild failed "
+                f"({exc}); the next mareforma.open() will rebuild it. "
+                "Restore itself succeeded.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         return {
             "validators_restored": len(ordered_validators),
             "claims_restored": len(ordered_claims),
@@ -4808,8 +4919,13 @@ def _verify_claim_signatures_on_restore(
     if sig_bundle_json:
         try:
             bundle = json.loads(sig_bundle_json)
-            bundle_keyid = bundle["signatures"][0]["keyid"]
-        except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+            all_sigs = bundle["signatures"]
+            if not isinstance(all_sigs, list) or not all_sigs:
+                raise ValueError("empty or non-list signatures")
+            bundle_keyid = all_sigs[0]["keyid"]
+        except (
+            json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError,
+        ) as exc:
             raise RestoreError(
                 f"Claim {claim_id} signature_bundle is malformed.",
                 kind="claim_unverified",
@@ -4850,6 +4966,48 @@ def _verify_claim_signatures_on_restore(
                 f"Claim {claim_id} signature_bundle failed verification.",
                 kind="claim_unverified",
             )
+        # Multi-signature envelopes (claim-with-roles:v1) carry N
+        # signatures; verify_envelope only checked signatures[0]. Walk
+        # the remaining signatures and verify each one individually
+        # against its claimed signer's enrolled pubkey. An attacker
+        # who attached forged extra signatures would otherwise sneak
+        # them past restore and into substrate-trusted role attestations.
+        for extra_sig in all_sigs[1:]:
+            if not isinstance(extra_sig, dict):
+                raise RestoreError(
+                    f"Claim {claim_id} signature entry is not an object.",
+                    kind="claim_unverified",
+                )
+            extra_keyid = extra_sig.get("keyid")
+            if not isinstance(extra_keyid, str):
+                raise RestoreError(
+                    f"Claim {claim_id} signature entry missing keyid.",
+                    kind="claim_unverified",
+                )
+            if extra_keyid not in validators_section:
+                raise RestoreError(
+                    f"Claim {claim_id} carries an extra signature from "
+                    f"keyid {extra_keyid[:12]}… which is not in the "
+                    "validators section. Restore refuses orphan signers.",
+                    kind="orphan_signer",
+                )
+            try:
+                extra_pem = base64.standard_b64decode(
+                    validators_section[extra_keyid]["pubkey_pem"],
+                )
+                extra_pub = _signing.public_key_from_pem(extra_pem)
+                extra_sig_bytes = base64.standard_b64decode(extra_sig["sig"])
+                pae = _signing.dsse_pae(
+                    _signing.PAYLOAD_TYPE_CLAIM,
+                    base64.standard_b64decode(bundle["payload"]),
+                )
+                extra_pub.verify(extra_sig_bytes, pae)
+            except Exception as exc:
+                raise RestoreError(
+                    f"Claim {claim_id} extra signature from keyid "
+                    f"{extra_keyid[:12]}… failed verification: {exc}",
+                    kind="claim_unverified",
+                ) from exc
         # Defense in depth: every signed-predicate field must equal the
         # claim's restored field. Tampering with the row but reusing a
         # legitimate envelope is caught here. Statement v1 puts these
@@ -5204,8 +5362,8 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
             # it against a signed contradiction envelope.
             # Adapter-specific predicate_payload + federation-imported
             # original_signature_bundle: round-trip only when populated.
-            # Empty/NULL defaults stay omitted from the TOML so v0.3.0
-            # backups don't grow new fields uselessly.
+            # Empty/NULL defaults stay omitted from the TOML so backups
+            # don't grow new fields uselessly.
             if c.get("predicate_payload"):
                 entry["predicate_payload"] = c["predicate_payload"]
             if c.get("original_signature_bundle"):

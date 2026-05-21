@@ -115,7 +115,7 @@ class TestBytestableAcrossRuns:
 
 class TestRfc8785NumberRules:
     """Verify the canonicalizer follows RFC 8785 ECMAScript Number rules
-    for floats. The non-float schema in v0.3.0 happens to produce the
+    for floats. The current non-float schema happens to produce the
     same bytes as the prior stdlib canonicalizer — these tests guard
     the case where a future schema introduces a float field."""
 
@@ -144,8 +144,8 @@ class TestRfc8785NumberRules:
 
 
 class TestRfc8785ByteCompatWithNoFloats:
-    """The current v0.3.0 schema contains no float fields. Byte output
-    for the existing field shapes must match the prior stdlib
+    """The current schema contains no float fields. Byte output for
+    the existing field shapes must match the prior stdlib
     canonicalization exactly — otherwise every signed claim in any
     existing graph.db would fail re-verification on this release."""
 

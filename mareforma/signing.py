@@ -566,6 +566,25 @@ def sign_claim_with_roles(
     interoperable ``role`` field so verifiers can route each signature
     to the right expected public key.
 
+    Trust boundary on the ``role`` field
+    -----------------------------------
+    The ``role`` string lives on the signature entry, **not** inside
+    the canonical Statement v1 payload. The DSSE pre-authentication
+    encoding (PAE) covers only ``(payloadType, payload)`` — identical
+    bytes for every signer — so a signer signing as ``"executor"``
+    produces bytes indistinguishable from the same key signing as
+    ``"planner"``. The keyid in each signature **is** cryptographically
+    bound (the verifier checks ``pubkey.verify(sig, PAE)``); the role
+    label is asserter-provided metadata that callers can re-label
+    without invalidating any signature.
+
+    Verifier-side code (:func:`verify_envelope_multi`) enforces a
+    role→key map at verify time, but a consumer who only sees the
+    envelope (without an expected map) MUST NOT treat the role string
+    as a substrate guarantee. Downstream agents that read role
+    attestations via :meth:`mareforma.EpistemicGraph.query_provenance`
+    receive the role under ``role_attestations_unverified``.
+
     Parameters
     ----------
     claim_fields

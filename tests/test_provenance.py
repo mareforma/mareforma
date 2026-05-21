@@ -155,10 +155,13 @@ class TestQueryProvenance:
         with mareforma.open(tmp_path, key_path=key_path) as graph:
             a = graph.assert_claim("a")
             lineage = graph.query_provenance(a)
-        attestations = lineage["claim"]["role_attestations"]
+        attestations = lineage["claim"]["role_attestations_unverified"]
         # Single-sig envelope = one attestation, asserter's keyid present.
+        # The "_unverified" suffix on the field name + the "role_unverified"
+        # key on each entry are the trust-boundary signal to consumers.
         assert len(attestations) == 1
         assert attestations[0]["keyid"]
+        assert "role_unverified" in attestations[0]
 
     def test_unknown_claim_raises(self, tmp_path: Path) -> None:
         with mareforma.open(tmp_path) as graph:
@@ -520,3 +523,120 @@ class TestProvOExport:
         # Empty graph → empty @graph list, still well-formed.
         validate_prov_o(doc)
         assert doc["@graph"] == []
+
+    def test_refuses_non_uuid_claim_id(self) -> None:
+        # Parity with the RO-Crate exporter: federation-imported foreign
+        # ids must be remapped to UUIDs before they enter URN @id space.
+        from mareforma.exporters.prov_o import _entity_id
+        with pytest.raises(ValueError, match="non-UUID"):
+            _entity_id("not-a-uuid")
+
+
+# ----------------------------------------------------------------------------
+# Hardening regressions surfaced by adversarial review
+# ----------------------------------------------------------------------------
+
+
+class TestSupportsCacheWalMode:
+    """The cache db must run in WAL — same journal mode as graph.db —
+    so cross-DB transaction semantics are consistent and any future
+    code that relies on atomic-together commits has a hope of it."""
+
+    def test_cache_journal_mode_is_wal(self, tmp_path: Path) -> None:
+        with mareforma.open(tmp_path) as graph:
+            mode = graph._conn.execute(
+                "PRAGMA supports_cache.journal_mode"
+            ).fetchone()[0].lower()
+            assert mode == "wal"
+
+
+class TestRestoreVerifiesEverySignatureInMultiSigEnvelope:
+    """A multi-sig signature_bundle landing in graph.db must have EVERY
+    signature verified by restore, not just signatures[0]. An attacker
+    who attached forged extra signatures to a valid envelope would
+    otherwise sneak them past restore and into substrate role lookups.
+    """
+
+    def _build_minimal_signed_graph(self, tmp_path: Path):
+        key_path = tmp_path / "asserter.key"
+        _signing.save_private_key(_signing.generate_keypair(), key_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            a = graph.assert_claim("a")
+        return key_path, a
+
+    def test_tampered_extra_signature_rejected_on_restore(
+        self, tmp_path: Path,
+    ) -> None:
+        from mareforma.db import RestoreError
+        key_path, a = self._build_minimal_signed_graph(tmp_path)
+        # Read the persisted claims.toml + inject a forged extra
+        # signature onto the asserter's single-sig envelope.
+        toml_path = tmp_path / "claims.toml"
+        text = toml_path.read_text()
+        # Find the signature_bundle line for the claim and append an
+        # extra signature entry with a valid-looking but bogus keyid.
+        bundle_line = next(
+            ln for ln in text.splitlines() if "signature_bundle" in ln
+        )
+        bundle_value = bundle_line.split(" = ", 1)[1].strip().strip('"').strip("'")
+        bundle = json.loads(bundle_value.encode().decode("unicode_escape"))
+        forged_keyid = "f" * 64
+        bundle["signatures"].append({
+            "keyid": forged_keyid,
+            "sig": "AAAA",
+            "role": "executor",
+        })
+        tampered = json.dumps(bundle).replace('"', '\\"')
+        new_text = text.replace(
+            bundle_line,
+            f'signature_bundle = "{tampered}"',
+        )
+        toml_path.write_text(new_text)
+        # Drop graph.db so restore replays from the tampered TOML.
+        (tmp_path / ".mareforma" / "graph.db").unlink()
+        (tmp_path / ".mareforma" / "claim_supports_cache.db").unlink(
+            missing_ok=True
+        )
+        with pytest.raises(RestoreError) as ei:
+            mareforma.restore(tmp_path)
+        # Forged-keyid extra signature → orphan-signer kind, since it's
+        # not in the validators table.
+        assert ei.value.kind == "orphan_signer"
+
+
+class TestSelfValidationRejectsEmptySignatures:
+    """A signature_bundle whose signatures array is empty would slip
+    through the keyid-walk and let the issuer self-validate. The gate
+    must reject this structurally-invalid envelope outright."""
+
+    def test_empty_signatures_array_refused(self, tmp_path: Path) -> None:
+        from mareforma.db import SelfValidationError, _refuse_self_validation
+        bundle_json = '{"payloadType":"x","payload":"y","signatures":[]}'
+        with pytest.raises(SelfValidationError, match="empty"):
+            _refuse_self_validation("any-claim", bundle_json, "any-keyid")
+
+    def test_non_list_signatures_refused(self, tmp_path: Path) -> None:
+        from mareforma.db import SelfValidationError, _refuse_self_validation
+        bundle_json = '{"payloadType":"x","payload":"y","signatures":"forged"}'
+        with pytest.raises(SelfValidationError, match="empty or non-list"):
+            _refuse_self_validation("any-claim", bundle_json, "any-keyid")
+
+    def test_unsigned_claim_still_passes(self) -> None:
+        # NULL signature_bundle = legitimately unsigned claim, gate
+        # passes silently per the conservative trust posture.
+        from mareforma.db import _refuse_self_validation
+        _refuse_self_validation("any-claim", None, "any-keyid")  # no raise
+
+
+class TestQueryProvenanceRejectsLikeWildcards:
+    """An attacker-controlled claim_id containing % or _ would force a
+    full-table scan via the contradicts_back LIKE filter. The method
+    validates UUID shape up front so the LIKE pattern can't escape."""
+
+    def test_wildcard_claim_id_rejected(self, tmp_path: Path) -> None:
+        with mareforma.open(tmp_path) as graph:
+            graph.assert_claim("a")
+            with pytest.raises(_db.ClaimNotFoundError, match="not a valid"):
+                graph.query_provenance("%")
+            with pytest.raises(_db.ClaimNotFoundError, match="not a valid"):
+                graph.query_provenance("_")

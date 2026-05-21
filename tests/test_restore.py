@@ -38,7 +38,7 @@ def _pem_of(key_path: Path) -> bytes:
 
 
 def _build_full_graph(tmp_path: Path) -> dict:
-    """Populate a project with the full v0.3.0 substrate: root validator,
+    """Populate a project with the full substrate surface: root validator,
     second validator, seed claim, REPLICATED pair, ESTABLISHED claim,
     one unsigned PRELIMINARY (in a separate unsigned-mode project).
 

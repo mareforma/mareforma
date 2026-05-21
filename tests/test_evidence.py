@@ -191,7 +191,7 @@ class TestRoundTrip:
 # assert_claim(evidence=...) — end-to-end through the Graph API
 # ---------------------------------------------------------------------------
 #
-# Before v0.3.0 launch tightening, EvidenceVector was plumbed through the
+# Earlier shapes plumbed EvidenceVector through the
 # entire signing stack but had no user-facing parameter — every signed
 # claim carried the default all-zeros vector. The substrate signed a
 # story it didn't let callers tell. These tests cover the new parameter

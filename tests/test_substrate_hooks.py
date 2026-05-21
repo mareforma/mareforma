@@ -197,21 +197,28 @@ class TestOriginalSignatureBundleColumn:
             conn.close()
 
     def test_explicit_write_persists(self, tmp_path: Path) -> None:
-        original_envelope = json.dumps({
+        original_envelope = {
             "payloadType": "application/vnd.in-toto+json",
             "payload": "base64...",
             "signatures": [{"keyid": "abc", "sig": "xyz"}],
-        })
+        }
+        # Pass with deliberately-loose whitespace + non-sorted key order;
+        # the write path canonicalises so two semantically-equal envelopes
+        # round-trip to the same stored bytes.
+        loose = json.dumps(original_envelope, indent=2)
+        canonical = json.dumps(
+            original_envelope, sort_keys=True, separators=(",", ":"),
+        )
         conn = open_db(tmp_path)
         try:
             claim_id = add_claim(
                 conn,
                 tmp_path,
                 "federation-imported claim",
-                original_signature_bundle=original_envelope,
+                original_signature_bundle=loose,
             )
             row = next(c for c in list_claims(conn) if c["claim_id"] == claim_id)
-            assert row["original_signature_bundle"] == original_envelope
+            assert row["original_signature_bundle"] == canonical
         finally:
             conn.close()
 
@@ -458,25 +465,33 @@ class TestReplicationVerdictIntegration:
 
 
 class TestIdempotencyReconciliationCoversNewFields:
-    """Retry with different predicate_payload or original_signature_bundle
-    but same idempotency_key must raise IdempotencyConflictError instead
-    of silently merging two distinct claims into one row.
+    """Retry with different original_signature_bundle but same
+    idempotency_key must raise IdempotencyConflictError instead of
+    silently merging two distinct claims into one row.
+
+    predicate_payload is intentionally NOT compared: it is a query-side
+    denormalisation that does not enter the signed envelope or chain
+    hash, so callers that diverge on this field share an idempotency
+    key but the SIGNED IDENTITY is unchanged.
     """
 
-    def test_predicate_payload_mismatch_raises(self, tmp_path: Path) -> None:
-        from mareforma.db import IdempotencyConflictError
+    def test_predicate_payload_mismatch_does_not_raise(
+        self, tmp_path: Path,
+    ) -> None:
+        # predicate_payload is intentionally NOT a reconciliation field.
+        # Two retries with divergent payloads share the same claim id.
         with mareforma.open(tmp_path) as graph:
-            graph.assert_claim(
+            id1 = graph.assert_claim(
                 "shared text",
                 idempotency_key="run_X_claim_1",
                 predicate_payload={"adapter": "test"},
             )
-            with pytest.raises(IdempotencyConflictError):
-                graph.assert_claim(
-                    "shared text",
-                    idempotency_key="run_X_claim_1",
-                    predicate_payload={"adapter": "DIFFERENT"},
-                )
+            id2 = graph.assert_claim(
+                "shared text",
+                idempotency_key="run_X_claim_1",
+                predicate_payload={"adapter": "DIFFERENT"},
+            )
+            assert id1 == id2
 
     def test_original_signature_bundle_mismatch_raises(
         self, tmp_path: Path
@@ -494,6 +509,24 @@ class TestIdempotencyReconciliationCoversNewFields:
                     idempotency_key="run_Y_claim_1",
                     original_signature_bundle='{"version":"b"}',
                 )
+
+    def test_original_signature_bundle_whitespace_normalised(
+        self, tmp_path: Path
+    ) -> None:
+        # Two semantically-identical envelopes that differ only in JSON
+        # whitespace must reconcile as a retry, not conflict.
+        with mareforma.open(tmp_path) as graph:
+            id1 = graph.assert_claim(
+                "shared text",
+                idempotency_key="run_W_claim_1",
+                original_signature_bundle='{"a":1,"b":2}',
+            )
+            id2 = graph.assert_claim(
+                "shared text",
+                idempotency_key="run_W_claim_1",
+                original_signature_bundle='{\n  "b": 2,\n  "a": 1\n}',
+            )
+            assert id1 == id2
 
     def test_same_idempotency_key_matching_fields_is_idempotent(
         self, tmp_path: Path
@@ -603,16 +636,16 @@ class TestRoCrateInputValidation:
 
 
 class TestRestoreTypeSafety:
-    """restore() must not silently coerce unexpected types (False, 0,
-    dict, list) into the new columns."""
+    """restore() refuses to silently coerce unexpected types (bool,
+    int, dict, list) into the new TEXT columns. add_claim raises
+    TypeError on non-dict predicate_payload at the write path; restore
+    must be at least as strict at the read path."""
 
-    def test_restore_with_non_string_predicate_payload_coerces_to_empty(
-        self, tmp_path: Path
+    def test_restore_with_non_string_predicate_payload_raises(
+        self, tmp_path: Path,
     ) -> None:
-        # Build a graph, then mock a malformed claims.toml restore where
-        # predicate_payload has an unexpected type. The restore should
-        # NOT raise (isinstance check returns False, default-empty path).
         import tomli_w
+        from mareforma.db import RestoreError
         toml_path = tmp_path / "claims.toml"
         bad_claim_id = "abcdef01-2345-6789-abcd-ef0123456789"
         toml_path.write_text(tomli_w.dumps({
@@ -627,12 +660,13 @@ class TestRestoreTypeSafety:
                     "contradicts": [],
                     "comparison_summary": "",
                     "evidence_json": "{}",
-                    "predicate_payload": True,  # bad type — should coerce.
+                    "predicate_payload": True,  # bool — refused.
                     "created_at": "2026-01-01T00:00:00+00:00",
                     "updated_at": "2026-01-01T00:00:00+00:00",
                 }
             }
         }))
-        result = mareforma.restore(tmp_path)
-        # Restore succeeds; non-string predicate_payload coerced to "".
-        assert result["claims_restored"] == 1
+        with pytest.raises(RestoreError) as ei:
+            mareforma.restore(tmp_path)
+        assert ei.value.kind == "claim_unverified"
+        assert "predicate_payload" in str(ei.value)

@@ -64,12 +64,30 @@ def _safe_agent_id(agent: str) -> str:
     return re.sub(r"[^A-Za-z0-9._/\-]", "_", agent)
 
 
+def _require_uuid_claim_id(claim_id: str) -> str:
+    """Guard against non-UUID claim_ids being spliced into URN @ids.
+
+    Federation imports can land non-UUID identifiers in the substrate;
+    those must be remapped to UUIDs before export — otherwise we emit
+    malformed JSON-LD ``@id`` values that downstream PROV-O tooling
+    cannot parse. Mirror the RO-Crate exporter's posture: refuse,
+    don't sanitise.
+    """
+    if not isinstance(claim_id, str) or not _UUID_RE.match(claim_id):
+        raise ValueError(
+            f"PROV-O export refuses non-UUID claim_id: {claim_id!r}. "
+            "Federation-imported foreign IDs must be remapped to UUIDs "
+            "before export."
+        )
+    return claim_id
+
+
 def _entity_id(claim_id: str) -> str:
-    return f"mareforma:claim:{claim_id}"
+    return f"mareforma:claim:{_require_uuid_claim_id(claim_id)}"
 
 
 def _activity_id(claim_id: str, kind: str) -> str:
-    return f"mareforma:activity:{kind}:{claim_id}"
+    return f"mareforma:activity:{kind}:{_require_uuid_claim_id(claim_id)}"
 
 
 def _agent_id(generated_by: str) -> str:
