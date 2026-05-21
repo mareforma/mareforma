@@ -427,13 +427,15 @@ def stats_cmd(as_json: bool, last_n: int | None) -> None:
     stats = compute_rolling_stats(root, last_n=last_n)
     if as_json:
         click.echo(json.dumps(stats, indent=2, sort_keys=True))
+        if stats.get("read_error"):
+            sys.exit(1)
         return
+    if stats.get("read_error"):
+        _err("Health log unreadable. Check filesystem permissions on "
+             ".mareforma/health.jsonl.")
+        sys.exit(1)
     click.echo("  " + "-" * 50)
     click.echo(f"  Events scanned: {stats['events_total']}")
-    if stats.get("read_error"):
-        click.echo("  Health log unreadable.")
-        click.echo("  " + "-" * 50)
-        return
     if not stats["ops"]:
         click.echo("  No operational events recorded yet.")
         click.echo("  " + "-" * 50)

@@ -65,6 +65,15 @@ _URI_RE = re.compile(
 
 # Built-in URIs the substrate ships with. Adapters MUST NOT
 # re-register these; doing so raises ``PredicateTypeError``.
+# Core substrate-owned URIs: writer lives in the substrate, so a
+# foreign re-registration is unambiguously wrong and raises hard.
+_CORE_BUILTIN_URIS: tuple[str, ...] = (
+    "urn:mareforma:predicate:claim:v1",
+    "urn:mareforma:predicate:epistemic-graph:v1",
+    "urn:mareforma:predicate:claim-with-roles:v1",
+)
+
+
 BUILTIN_URIS: tuple[str, ...] = (
     # Core substrate predicates (writers live in the substrate itself).
     "urn:mareforma:predicate:claim:v1",
@@ -84,6 +93,10 @@ BUILTIN_URIS: tuple[str, ...] = (
     "urn:mareforma:predicate:peer-review:v1",
     "urn:mareforma:predicate:elo-match:v1",
     "urn:mareforma:predicate:tournament-bracket:v1",
+    # Reserve the parent slot too — leaving wet-lab-assay:v1 open
+    # would let a third-party register the umbrella URI and poison
+    # the namespace the substrate clearly intends to own.
+    "urn:mareforma:predicate:wet-lab-assay:v1",
     "urn:mareforma:predicate:wet-lab-assay/flow-cytometry:v1",
     "urn:mareforma:predicate:wet-lab-assay/sequencing:v1",
     "urn:mareforma:predicate:wet-lab-assay/imaging:v1",
@@ -133,9 +146,27 @@ def register(uri: str, owner: str | None = None) -> None:
         if uri in BUILTIN_URIS and uri in _registry:
             existing = _registry[uri]
             if owner is not None and owner != existing:
-                raise PredicateTypeError(
-                    f"Cannot re-register built-in URI {uri!r} with "
-                    f"owner={owner!r} (substrate owns this URI)"
+                # Core substrate-owned URIs (the original three)
+                # always raise — those slots have substrate-side
+                # writers and any third-party claim on them is wrong.
+                # Newly-reserved adapter URIs were previously open;
+                # foreign callers that registered them before
+                # promotion get a DeprecationWarning instead of a
+                # hard break, scheduled to raise in the next release.
+                if uri in _CORE_BUILTIN_URIS:
+                    raise PredicateTypeError(
+                        f"Cannot re-register built-in URI {uri!r} with "
+                        f"owner={owner!r} (substrate owns this URI)"
+                    )
+                import warnings as _warnings
+                _warnings.warn(
+                    f"URI {uri!r} is now substrate-reserved; the next "
+                    f"release will refuse re-registration by owner "
+                    f"{owner!r}. Pre-empt by dropping the register() "
+                    "call from your adapter and treating the URI as "
+                    "substrate-owned.",
+                    DeprecationWarning,
+                    stacklevel=3,
                 )
             return
         if uri in _registry:

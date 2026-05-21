@@ -139,10 +139,25 @@ def append_health_event(
     ``"partial"``. Extra ``counters`` are merged into the JSON line
     verbatim — keep them small and JSON-encodable.
 
-    Writes are best-effort: a permission / disk failure is swallowed
-    with a RuntimeWarning so the upstream substrate operation always
-    completes. The substrate's signed graph never depends on this
-    log being writable.
+    Writes are best-effort: any permission / disk / encoding failure
+    is swallowed with a RuntimeWarning so the upstream substrate
+    operation always completes. The substrate's signed graph never
+    depends on this log being writable.
+
+    Encoding: ``json.dumps(allow_nan=False)`` so NaN / Infinity
+    counters do not produce non-portable JSONL that breaks ``jq`` and
+    browser ``JSON.parse``. Non-JSON-encodable counters
+    (``datetime`` / ``set`` / ``bytes``) raise ``TypeError`` from
+    ``json.dumps``; that is caught here and surfaced as a warning so
+    a caller wiring a buggy emitter does not silently lose the
+    upstream operation result.
+
+    Concurrency: on POSIX (Linux + macOS), ``open(path, "a")`` uses
+    ``O_APPEND`` which guarantees atomic line-sized writes up to
+    ``PIPE_BUF`` (4 KB). Event lines are well under that. On
+    Windows, append atomicity across processes is not guaranteed —
+    operators running mareforma cross-process on Windows must
+    serialise health-log writes externally.
     """
     path = _health_log_path(root)
     try:
@@ -154,9 +169,10 @@ def append_health_event(
         }
         for k, v in counters.items():
             event[k] = v
+        line = json.dumps(event, sort_keys=True, allow_nan=False)
         with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(event, sort_keys=True) + "\n")
-    except OSError as exc:
+            f.write(line + "\n")
+    except (OSError, TypeError, ValueError) as exc:
         _warnings.warn(
             f"health log append failed ({type(exc).__name__}: {exc}); "
             "the underlying operation still completed.",
@@ -188,7 +204,14 @@ def compute_rolling_stats(
     path = _health_log_path(root)
     if not path.exists():
         return {"events_total": 0, "ops": {}}
-    events: list[dict] = []
+    # Bounded reads use deque so a 10 GB log + last_n=100 stays at
+    # O(100) memory instead of buffering the full file before slicing.
+    from collections import deque
+    buffer: deque | list
+    if last_n is not None and last_n > 0:
+        buffer = deque(maxlen=int(last_n))
+    else:
+        buffer = []
     try:
         with path.open("r", encoding="utf-8") as f:
             for line in f:
@@ -196,13 +219,12 @@ def compute_rolling_stats(
                 if not line:
                     continue
                 try:
-                    events.append(json.loads(line))
+                    buffer.append(json.loads(line))
                 except (json.JSONDecodeError, TypeError, ValueError):
                     continue
     except OSError:
         return {"events_total": 0, "ops": {}, "read_error": True}
-    if last_n is not None and last_n > 0:
-        events = events[-int(last_n):]
+    events = list(buffer)
     ops: dict[str, dict] = {}
     for ev in events:
         op = ev.get("op")

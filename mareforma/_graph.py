@@ -355,6 +355,17 @@ class EpistemicGraph:
                     RuntimeWarning,
                     stacklevel=2,
                 )
+                # Emit a failure event so rolling stats can compute
+                # availability = ok / (ok + fail) alongside pass_rate;
+                # otherwise a flaky sensor with 100% pass-when-running
+                # but 50% success reports as 100% pass_rate and the
+                # operator never sees the unreliability.
+                from mareforma import health as _health
+                _health.append_health_event(
+                    self._root, "grounding_verdict",
+                    outcome="fail",
+                    error=type(exc).__name__,
+                )
 
         def _bump_convergence_errors(_exc: Exception) -> None:
             self._convergence_errors += 1
@@ -1226,13 +1237,29 @@ class EpistemicGraph:
             "last_checked_at"}, ...]`` — one entry per drifted DOI.
         """
         self._check_open()
-        # Count inspected rows by walking the same SELECT the impl
-        # would, so we can emit a coherent (total, drifted) signal.
         from mareforma import health as _health
+        # Snapshot the inspected-row count BEFORE the walk so the
+        # emitted event carries the (drifted, total_inspected) pair
+        # the aggregator advertises.
+        effective_limit = (
+            int(limit) if (limit is not None and limit > 0)
+            else _doi._DEFAULT_DRIFT_LIMIT
+        )
+        try:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM ("
+                "SELECT doi FROM doi_cache WHERE resolved = 1 LIMIT ?"
+                ")",
+                (effective_limit,),
+            ).fetchone()
+            total_inspected = int(row["n"])
+        except sqlite3.OperationalError:
+            total_inspected = 0
         drifted = _doi.find_drifted_dois(self._conn, limit=limit)
         _health.append_health_event(
             self._root, "doi_drift_scan",
             drifted=len(drifted),
+            total_inspected=total_inspected,
         )
         return drifted
 
