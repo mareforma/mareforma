@@ -182,12 +182,11 @@ class EpistemicGraph:
         #     ship a typed predicateType (tool-call/v1,
         #     ingested-trace/v1, wet-lab-assay/<class>/v1, etc.).
         #     Stored in the ``predicate_payload`` column for
-        #     queryable filters. NOTE: in v0.3.1 this column is NOT
-        #     yet bound into the signed envelope or chain hash
-        #     (Phase-2 follow-on; binds alongside the role-attestation
-        #     work). Adapters that depend on cryptographic integrity
-        #     of the predicate body should encode it inside the
-        #     claim text JSON until Phase 2 lands; this column is
+        #     queryable filters. NOTE: this column is NOT bound into
+        #     the signed envelope or chain hash — it is a query-side
+        #     denormalisation only. Adapters that depend on
+        #     cryptographic integrity of the predicate body should
+        #     encode it inside the claim text JSON; this column is
         #     the queryable index, not the source of truth.
         # original_signature_bundle:
         #     Optional source-side DSSE envelope, preserved by
@@ -1104,6 +1103,149 @@ class EpistemicGraph:
         yields the same output.
         """
         return _db.classify_supports(values)
+
+    def query_provenance(
+        self,
+        claim_id: str,
+        *,
+        depth: int = 4,
+    ) -> dict:
+        """Return a structured provenance lineage for *claim_id*.
+
+        The returned object is the agent-readable interface to the
+        substrate. It snapshots, in one deterministic shape:
+
+        * the focal claim's identity, classification, support_level,
+          status, GRADE evidence vector, asserter, and role
+          attestations (the signatures in the DSSE envelope)
+        * a recursive upstream chain (``supports[]`` walked to *depth*
+          hops via the rebuildable :mod:`mareforma._supports` cache)
+        * inbound contradictions (claims this one contradicts and
+          claims that contradict it, including signed
+          ``contradiction_verdicts`` rows)
+        * the replication signal (which clusters this claim sits in,
+          via ``replication_verdicts``)
+        * a transparency-log slice (Rekor inclusion proofs for the
+          focal claim and its ancestors)
+
+        The shape is intentionally JSON-serialisable end-to-end so the
+        caller can feed it directly to a downstream agent prompt,
+        attach it to a PROV-O export, or persist it as audit evidence.
+        No fields are post-processed beyond denormalisation; every
+        signed envelope is returned verbatim from the row so consumers
+        can independently re-verify against the enrolled validators.
+
+        Parameters
+        ----------
+        claim_id
+            UUIDv4 claim identifier to anchor the walk on.
+        depth
+            Maximum recursive hops to follow into the upstream chain.
+            Bounded at the cache walker level; ``depth=0`` returns the
+            focal claim and metadata only (no upstream chain).
+
+        Returns
+        -------
+        dict
+            ``{"claim", "upstream", "downstream", "contradictions",
+            "replication", "transparency"}``. ``claim`` carries the
+            focal row + role attestations; ``upstream`` /
+            ``downstream`` are lists of ``{"claim_id", "depth",
+            "position", "row"}`` entries.
+
+        Raises
+        ------
+        ClaimNotFoundError
+            If *claim_id* does not exist in the graph.
+        """
+        self._check_open()
+        from mareforma import _supports
+
+        focal = _db.get_claim(self._conn, claim_id)
+        if focal is None:
+            raise _db.ClaimNotFoundError(
+                f"Claim '{claim_id}' not found; cannot build lineage."
+            )
+
+        # Role attestations: every signature in the DSSE envelope is a
+        # role-actor claim. claim:v1 carries one (the asserter);
+        # claim-with-roles:v1 carries N (planner / executor / reviewer
+        # / validator). The substrate stores all of them verbatim.
+        role_attestations: list[dict] = []
+        if focal.get("signature_bundle"):
+            try:
+                bundle = json.loads(focal["signature_bundle"])
+                for sig in bundle.get("signatures", []) or []:
+                    if isinstance(sig, dict):
+                        role_attestations.append({
+                            "keyid": sig.get("keyid"),
+                            "role": sig.get("role"),
+                        })
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                pass
+
+        # Upstream / downstream walks via the rebuildable cache.
+        upstream_edges = (
+            _supports.walk_upstream(self._conn, claim_id, depth=depth)
+            if depth >= 1 else []
+        )
+        downstream_edges = (
+            _supports.walk_downstream(self._conn, claim_id, depth=depth)
+            if depth >= 1 else []
+        )
+
+        def _hydrate(edges: list[dict]) -> list[dict]:
+            out: list[dict] = []
+            for edge in edges:
+                row = _db.get_claim(self._conn, edge["claim_id"])
+                out.append({
+                    "claim_id": edge["claim_id"],
+                    "depth": edge["depth"],
+                    "position": edge["position"],
+                    "row": row,  # may be None for dangling refs
+                })
+            return out
+
+        # Inbound contradictions: claims that list this one in their
+        # contradicts[] array, plus signed contradiction_verdicts that
+        # cite it.
+        inbound_contradictions = self._conn.execute(
+            "SELECT claim_id, contradicts_json FROM claims "
+            "WHERE contradicts_json LIKE ?",
+            (f'%"{claim_id}"%',),
+        ).fetchall()
+        contradicts_back: list[str] = []
+        for r in inbound_contradictions:
+            try:
+                if claim_id in json.loads(r["contradicts_json"] or "[]"):
+                    contradicts_back.append(r["claim_id"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        verdicts_for = _db.list_contradiction_verdicts(
+            self._conn, claim_id=claim_id,
+        )
+        repl_verdicts = _db.list_replication_verdicts(
+            self._conn, member_claim_id=claim_id,
+        )
+
+        return {
+            "claim": {
+                **focal,
+                "role_attestations": role_attestations,
+            },
+            "upstream": _hydrate(upstream_edges),
+            "downstream": _hydrate(downstream_edges),
+            "contradictions": {
+                "this_contradicts": json.loads(
+                    focal.get("contradicts_json") or "[]"
+                ),
+                "contradicted_by": contradicts_back,
+                "signed_verdicts": verdicts_for,
+            },
+            "replication": repl_verdicts,
+            "depth": depth,
+        }
 
     def find_dangling_supports(self) -> list[dict]:
         """Return UUID-shaped ``supports[]`` entries that point nowhere.

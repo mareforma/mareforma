@@ -1,12 +1,12 @@
-"""Tests for v0.3.1 Phase 1 substrate hooks (items 300-305).
+"""Tests for substrate hooks used by predicate-typed adapters.
 
-Items covered:
-- 300 ``predicate_payload`` TEXT column on claims table
-- 301 ``predicate_type`` reflective registry (``mareforma.predicates()``)
-- 302 ``mareforma export --format=in-toto-v1|ro-crate-1.2`` CLI
-- 303 Public ``assert_claim(..., signer=key)`` param on EpistemicGraph
-- 304 Per-row ``original_signature_bundle`` column
-- 305 ``record_replication_verdict(method='signed-elo-bracket-replay')`` enum extension
+Coverage:
+- ``predicate_payload`` TEXT column on claims table
+- ``predicate_type`` reflective registry (``mareforma.predicates()``)
+- ``mareforma export --format=in-toto-v1|ro-crate-1.2`` CLI
+- Public ``assert_claim(..., signer=key)`` param on EpistemicGraph
+- Per-row ``original_signature_bundle`` column
+- ``record_replication_verdict(method='signed-elo-bracket-replay')`` enum
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from mareforma.db import open_db, add_claim, list_claims
 
 
 # ----------------------------------------------------------------------------
-# Item 301 — predicate_type reflective registry
+# Predicate-type reflective registry
 # ----------------------------------------------------------------------------
 
 
@@ -119,7 +119,7 @@ class TestPredicateTypeRegistry:
 
 
 # ----------------------------------------------------------------------------
-# Item 300 — predicate_payload column
+# predicate_payload column
 # ----------------------------------------------------------------------------
 
 
@@ -167,12 +167,14 @@ class TestPredicatePayloadColumn:
         content = toml_path.read_text()
         assert "predicate_payload" in content
 
-    def test_v030_caller_writes_empty_default(self, tmp_path: Path) -> None:
+    def test_caller_without_predicate_writes_empty_default(
+        self, tmp_path: Path,
+    ) -> None:
         # Callers that don't pass predicate_payload write the empty
         # default; round-trip preserves "no predicate".
         conn = open_db(tmp_path)
         try:
-            claim_id = add_claim(conn, tmp_path, "v0.3.0-shape call")
+            claim_id = add_claim(conn, tmp_path, "predicate-omitted call")
             row = next(c for c in list_claims(conn) if c["claim_id"] == claim_id)
             assert row["predicate_payload"] == ""
         finally:
@@ -180,7 +182,7 @@ class TestPredicatePayloadColumn:
 
 
 # ----------------------------------------------------------------------------
-# Item 304 — original_signature_bundle column
+# original_signature_bundle column
 # ----------------------------------------------------------------------------
 
 
@@ -215,7 +217,7 @@ class TestOriginalSignatureBundleColumn:
 
 
 # ----------------------------------------------------------------------------
-# Item 305 — record_replication_verdict enum extension
+# record_replication_verdict method enum
 # ----------------------------------------------------------------------------
 
 
@@ -225,7 +227,7 @@ class TestReplicationVerdictMethodEnum:
         assert "signed-elo-bracket-replay" in _VALID_REPLICATION_METHODS
 
     def test_pre_existing_methods_still_valid(self) -> None:
-        # Regression: don't drop any of the v0.3.0 methods.
+        # Regression: don't drop any of the established methods.
         from mareforma.db import _VALID_REPLICATION_METHODS
         assert "hash-match" in _VALID_REPLICATION_METHODS
         assert "semantic-cluster" in _VALID_REPLICATION_METHODS
@@ -234,14 +236,14 @@ class TestReplicationVerdictMethodEnum:
 
 
 # ----------------------------------------------------------------------------
-# Item 303 — public assert_claim(signer=) on EpistemicGraph
+# Public assert_claim(signer=) on EpistemicGraph
 # ----------------------------------------------------------------------------
 
 
 class TestPerCallSignerOverride:
     def test_signer_kwarg_accepted_no_signing_path(self, tmp_path: Path) -> None:
-        # Unsigned graph + signer=None on the call: equivalent to v0.3.0
-        # behaviour. The kwarg exists and is accepted.
+        # Unsigned graph + signer=None on the call is equivalent to
+        # the legacy no-kwarg form; the kwarg exists and is accepted.
         with mareforma.open(tmp_path) as graph:
             claim_id = graph.assert_claim("test", signer=None)
             assert claim_id
@@ -287,7 +289,7 @@ class TestPerCallSignerOverride:
 
 
 # ----------------------------------------------------------------------------
-# Item 302 — mareforma export --format CLI
+# mareforma export --format CLI
 # ----------------------------------------------------------------------------
 
 
@@ -391,7 +393,7 @@ class TestExportFormats:
     def test_in_toto_empty_graph_handles_gracefully(
         self, tmp_path: Path
     ) -> None:
-        # M11 from /review — symmetric coverage with RO-Crate exporter.
+        # Symmetric coverage with the RO-Crate empty-graph case.
         from mareforma.exporters.in_toto import build_statement
         with mareforma.open(tmp_path):
             pass
@@ -403,25 +405,32 @@ class TestExportFormats:
 
 
 # ----------------------------------------------------------------------------
-# /review-driven hardening tests (P0 + H + M findings from adversarial pass)
+# Hardening regressions (substrate-level integrity gates)
 # ----------------------------------------------------------------------------
 
 
 class TestReplicationVerdictIntegration:
-    """C1 from /review — `signed-elo-bracket-replay` must work end-to-end,
-    not just pass the Python validator. The SQL CHECK constraint MUST
-    list the new method or the INSERT fails with IntegrityError.
+    """`signed-elo-bracket-replay` must work end-to-end, not just pass
+    the Python validator. The SQL CHECK constraint must also list the
+    new method or the INSERT fails with IntegrityError.
     """
 
     def test_signed_elo_bracket_replay_inserts_successfully(
         self, tmp_path: Path
     ) -> None:
-        # Open with a key so we have a signer that can issue verdicts.
+        # Two separate keys: asserter (writes both claims) and verdict
+        # issuer (enrolled second; required because the substrate
+        # refuses self-verdicts).
         from mareforma import signing as _signing
-        key_path = tmp_path / "test.key"
-        _signing.save_private_key(_signing.generate_keypair(), key_path)
-        # Seed two claims to satisfy FK constraints.
-        with mareforma.open(tmp_path, key_path=key_path) as graph:
+        asserter_key = tmp_path / "asserter.key"
+        issuer_key = tmp_path / "issuer.key"
+        _signing.save_private_key(_signing.generate_keypair(), asserter_key)
+        _signing.save_private_key(_signing.generate_keypair(), issuer_key)
+        issuer_pem = _signing.public_key_to_pem(
+            _signing.load_private_key(issuer_key).public_key(),
+        )
+        with mareforma.open(tmp_path, key_path=asserter_key) as graph:
+            graph.enroll_validator(issuer_pem, identity="issuer")
             a = graph.assert_claim(
                 "claim A",
                 classification="DERIVED",
@@ -434,7 +443,7 @@ class TestReplicationVerdictIntegration:
                 supports=[a],
                 generated_by="agent-b",
             )
-            # Use the new method — should NOT raise.
+        with mareforma.open(tmp_path, key_path=issuer_key) as graph:
             graph.record_replication_verdict(
                 verdict_id="rv_test_elo",
                 cluster_id="cl_test",
@@ -449,9 +458,9 @@ class TestReplicationVerdictIntegration:
 
 
 class TestIdempotencyReconciliationCoversNewFields:
-    """H1 from /review — retry with different predicate_payload or
-    original_signature_bundle but same idempotency_key MUST raise
-    IdempotencyConflictError instead of silently merging.
+    """Retry with different predicate_payload or original_signature_bundle
+    but same idempotency_key must raise IdempotencyConflictError instead
+    of silently merging two distinct claims into one row.
     """
 
     def test_predicate_payload_mismatch_raises(self, tmp_path: Path) -> None:
@@ -507,8 +516,8 @@ class TestIdempotencyReconciliationCoversNewFields:
 
 
 class TestPredicatePayloadTypeValidation:
-    """M5 from /review — non-dict predicate_payload raises TypeError
-    instead of silently canonicalizing into a non-object JSON string."""
+    """Non-dict predicate_payload raises TypeError instead of silently
+    canonicalising into a non-object JSON string."""
 
     def test_non_dict_payload_raises_typeerror(self, tmp_path: Path) -> None:
         with mareforma.open(tmp_path) as graph:
@@ -530,8 +539,8 @@ class TestPredicatePayloadTypeValidation:
 
 
 class TestRoCrateInputValidation:
-    """H4 / H6 from /review — RO-Crate exporter refuses non-UUID
-    claim_ids and gracefully handles malformed supports_json shapes.
+    """RO-Crate exporter refuses non-UUID claim_ids and gracefully
+    handles malformed supports_json shapes.
     """
 
     def test_non_uuid_claim_id_raises(self) -> None:
@@ -556,9 +565,9 @@ class TestRoCrateInputValidation:
     def test_supports_json_dict_does_not_iterate_keys(
         self, tmp_path: Path
     ) -> None:
-        # H6: a malformed supports_json that decoded to a dict would
-        # iterate its keys under the old code (silent footgun).
-        # New code checks isinstance(decoded, list) explicitly.
+        # A malformed supports_json that decoded to a dict would
+        # iterate its keys under naive code (silent footgun); the
+        # exporter checks isinstance(decoded, list) explicitly.
         from mareforma.exporters.ro_crate import _claim_to_create_action
         import uuid
         valid_uuid = str(uuid.uuid4())
@@ -594,8 +603,8 @@ class TestRoCrateInputValidation:
 
 
 class TestRestoreTypeSafety:
-    """H2 from /review — restore() must not silently coerce
-    unexpected types (False, 0, dict, list) into the new columns."""
+    """restore() must not silently coerce unexpected types (False, 0,
+    dict, list) into the new columns."""
 
     def test_restore_with_non_string_predicate_payload_coerces_to_empty(
         self, tmp_path: Path

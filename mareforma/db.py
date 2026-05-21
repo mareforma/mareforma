@@ -172,10 +172,9 @@ CREATE TABLE IF NOT EXISTS claims (
     -- verification path uses ``signature_bundle``. NULL on claims
     -- that were not federation-imported.
     --
-    -- v0.3.1 NOTE: this column accepts arbitrary string content. The
-    -- federation-import path (Phase 2/3) will add structural
-    -- validation (JSON parse, DSSE-envelope shape check). v0.3.1
-    -- callers writing this field directly are responsible for
+    -- NOTE: this column accepts arbitrary string content; structural
+    -- validation (JSON parse, DSSE-envelope shape) is not enforced
+    -- here. Callers writing this field directly are responsible for
     -- supplying a valid DSSE envelope JSON string.
     original_signature_bundle TEXT,
     created_at      TEXT NOT NULL,
@@ -885,6 +884,7 @@ def open_db(root: Path) -> sqlite3.Connection:
             conn.executescript(_SCHEMA_SQL)
             conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             conn.commit()
+            _attach_supports_cache(conn, root)
             return conn
 
         # No in-place migrations in this release. A db whose user_version
@@ -938,10 +938,33 @@ def open_db(root: Path) -> sqlite3.Connection:
                 "Delete .mareforma/graph.db to start fresh — "
                 "your claims are backed up in claims.toml."
             )
+        _attach_supports_cache(conn, root)
         return conn
 
     except sqlite3.OperationalError as exc:
         raise DatabaseError(f"Could not open database at {path}: {exc}") from exc
+
+
+def _attach_supports_cache(conn: sqlite3.Connection, root: Path) -> None:
+    """Attach the rebuildable claim_supports cache.
+
+    The cache lives outside the versioned schema (separate DB file) so
+    the file can be deleted with no consequence beyond a one-time
+    rebuild on next open. Errors during attach are surfaced as
+    :class:`DatabaseError` so the operator sees a clear remediation
+    message rather than a deferred sqlite3 error on the first
+    provenance query.
+    """
+    from mareforma import _supports
+    try:
+        _supports.attach_cache(conn, root)
+    except sqlite3.Error as exc:
+        raise DatabaseError(
+            f"Could not attach claim_supports cache: {exc}. "
+            "Delete .mareforma/claim_supports_cache.db and re-open "
+            "the project (the cache is rebuildable from claims.toml "
+            "and graph.db; this file is not part of the signed graph)."
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -1648,6 +1671,12 @@ def add_claim(
                 now, now,
             ),
         )
+        # Maintain claim_supports rebuildable cache inside the same
+        # transaction so the edge rows and the main-claim INSERT
+        # commit atomically. Cache is auto-rebuilt on next open if
+        # maintenance ever drifts.
+        from mareforma import _supports
+        _supports.record_supports_edges(conn, claim_id, supports)
         if _own_transaction:
             conn.commit()
     except sqlite3.IntegrityError as exc:
@@ -2084,31 +2113,116 @@ def _refuse_llm_contradiction_issuer(
         )
 
 
+def _refuse_self_verdict(
+    conn: sqlite3.Connection,
+    issuer_keyid: str,
+    claim_id: str,
+    *,
+    relation: str,
+    verdict_kind: str,
+) -> None:
+    """Raise :class:`VerdictIssuerError` if *issuer_keyid* signed ANY
+    role on *claim_id*'s envelope.
+
+    Walks every keyid in the claim's ``signature_bundle.signatures[*]``
+    so a planner / executor / reviewer / validator on a
+    ``claim-with-roles:v1`` envelope cannot also issue a replication
+    or contradiction verdict on the same claim.
+
+    Unsigned claims (``signature_bundle IS NULL``) pass the gate — same
+    posture as :func:`_refuse_self_validation`. The gate is layered
+    AFTER the enrollment check, so a non-enrolled key was already
+    rejected; here the issuer is enrolled and we just check role
+    overlap.
+    """
+    row = conn.execute(
+        "SELECT signature_bundle FROM claims WHERE claim_id = ?",
+        (claim_id,),
+    ).fetchone()
+    if row is None or row["signature_bundle"] is None:
+        return
+    keyids = _claim_signer_keyids(row["signature_bundle"])
+    if issuer_keyid in keyids:
+        try:
+            bundle = json.loads(row["signature_bundle"])
+            role = next(
+                (s.get("role") for s in bundle.get("signatures") or []
+                 if isinstance(s, dict) and s.get("keyid") == issuer_keyid),
+                None,
+            ) or "asserter"
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            role = "asserter"
+        raise VerdictIssuerError(
+            f"{verdict_kind} verdict issuer {issuer_keyid[:12]}… signed "
+            f"claim '{claim_id}' (relation={relation}) as {role!r}; "
+            "self-verdicts are refused. The issuer must be an external "
+            "witness whose keyid does not appear on the claim envelope."
+        )
+
+
+def _claim_signer_keyids(claim_signature_bundle: str | None) -> list[str]:
+    """Return every keyid that signed the claim envelope.
+
+    For ``claim:v1`` envelopes (single signature) the result has one
+    entry — the asserter. For ``claim-with-roles:v1`` envelopes (multi-
+    signature) the result has one entry per role-actor (planner /
+    executor / reviewer / validator).
+
+    Malformed bundles return an empty list — the substrate cannot
+    decide identity against a corrupted envelope, so downstream gates
+    short-circuit and the row falls through to whatever pre-existing
+    layer handles unsigned data. Same conservative posture as the
+    earlier single-sig code path.
+    """
+    if claim_signature_bundle is None:
+        return []
+    try:
+        bundle = json.loads(claim_signature_bundle)
+        sigs = bundle.get("signatures") or []
+        return [
+            s["keyid"] for s in sigs
+            if isinstance(s, dict) and isinstance(s.get("keyid"), str)
+        ]
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        return []
+
+
 def _refuse_self_validation(
     claim_id: str,
     claim_signature_bundle: str | None,
     validator_keyid: str,
 ) -> None:
-    """Raise :class:`SelfValidationError` if the claim's signing keyid
-    equals the validator's keyid.
+    """Raise :class:`SelfValidationError` if the validator signed ANY
+    role on the claim envelope.
+
+    Walks every keyid in ``signature_bundle.signatures[*].keyid`` —
+    the primary asserter AND any role-attestation signer (planner /
+    executor / reviewer / validator on a ``claim-with-roles:v1``
+    envelope). Promotion to ESTABLISHED requires a witnessing
+    validator whose keyid does not appear on the envelope at all.
 
     Unsigned claims (``signature_bundle IS NULL``) carry no signer
     identity to compare against and pass this gate. A malformed bundle
-    is treated as absent (the substrate cannot decide self-equality
-    against a corrupted envelope).
+    is treated as absent (same posture as v0.3.0).
     """
-    if claim_signature_bundle is None:
-        return
-    try:
-        bundle = json.loads(claim_signature_bundle)
-        claim_signer_keyid = bundle["signatures"][0]["keyid"]
-    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
-        return
-    if claim_signer_keyid == validator_keyid:
+    matched_role: str | None = None
+    if claim_signature_bundle is not None:
+        try:
+            bundle = json.loads(claim_signature_bundle)
+            for sig in bundle.get("signatures") or []:
+                if not isinstance(sig, dict):
+                    continue
+                if sig.get("keyid") == validator_keyid:
+                    matched_role = sig.get("role") or "asserter"
+                    break
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            return
+    if matched_role is not None:
         raise SelfValidationError(
             f"Validator {validator_keyid[:12]}… signed claim "
-            f"'{claim_id}' itself; self-promotion is refused. "
-            "Promotion requires an external witnessing validator. "
+            f"'{claim_id}' as {matched_role!r}; self-promotion is "
+            "refused. Promotion requires a witnessing validator "
+            "whose keyid does not appear on the claim envelope. "
             "Have a different enrolled key call graph.validate(...)."
         )
 
@@ -3424,6 +3538,20 @@ def record_replication_verdict(
     _require_claim_exists(conn, member_claim_id, "member_claim_id")
     if other_claim_id is not None:
         _require_claim_exists(conn, other_claim_id, "other_claim_id")
+    # Defense-in-depth: a verdict issuer cannot be a role-actor on
+    # either claim under verdict. Walks ALL signatures on each
+    # claim's signature_bundle so a planner / executor / reviewer /
+    # validator on a claim-with-roles:v1 envelope cannot also issue
+    # the verdict.
+    _refuse_self_verdict(
+        conn, issuer_keyid, member_claim_id,
+        relation="member_claim_id", verdict_kind="replication",
+    )
+    if other_claim_id is not None:
+        _refuse_self_verdict(
+            conn, issuer_keyid, other_claim_id,
+            relation="other_claim_id", verdict_kind="replication",
+        )
 
     confidence_dict = confidence or {}
     # canonicalize() (NFC + sorted keys + no whitespace + allow_nan=False)
@@ -3546,6 +3674,16 @@ def record_contradiction_verdict(
     _refuse_llm_contradiction_issuer(conn, issuer_keyid)
     _require_claim_exists(conn, member_claim_id, "member_claim_id")
     _require_claim_exists(conn, other_claim_id, "other_claim_id")
+    # Defense-in-depth: the contradiction issuer cannot be a role-
+    # actor on either claim.
+    _refuse_self_verdict(
+        conn, issuer_keyid, member_claim_id,
+        relation="member_claim_id", verdict_kind="contradiction",
+    )
+    _refuse_self_verdict(
+        conn, issuer_keyid, other_claim_id,
+        relation="other_claim_id", verdict_kind="contradiction",
+    )
 
     confidence_dict = confidence or {}
     # canonicalize() (NFC + sorted keys + no whitespace + allow_nan=False)
@@ -4425,6 +4563,11 @@ def restore(
         # for any future restore caller that reuses the connection.)
         from mareforma.validators import invalidate_conn_cache
         invalidate_conn_cache(conn)
+        # Rebuild the claim_supports cache from the freshly-replayed
+        # chain. The cache file lives outside the signed graph;
+        # bulk-restore is the simplest correctness boundary.
+        from mareforma import _supports
+        _supports.rebuild_cache(conn)
         return {
             "validators_restored": len(ordered_validators),
             "claims_restored": len(ordered_claims),

@@ -396,7 +396,7 @@ __all__ = [
     "sanitize_for_llm",
     "wrap_untrusted",
     "__version__",
-    # Predicate-type registry (v0.3.1 item 301).
+    # Predicate-type registry.
     "BUILTIN_URIS",
     "PredicateTypeError",
     "is_registered",

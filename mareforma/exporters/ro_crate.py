@@ -9,8 +9,8 @@ travel with the package.
 Downstream consumers: Galaxy, EuroScienceGateway, FAIR-EASE, any
 RO-Crate-aware FAIR-research tooling.
 
-This is a minimal-viable v0.3.1 implementation. Polish targets for
-follow-on work (Phase 6 / v0.3.2):
+This is a minimal-viable implementation. Polish targets for follow-on
+work:
 
 * RO-Crate zip writer (bundle the JSON-LD + claim text payload files +
   signed-envelope sidecars into a single ``.crate.zip``).

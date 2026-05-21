@@ -14,12 +14,12 @@ are available in the current Python environment without import-walking).
 Built-in URIs registered at import:
 
 * ``urn:mareforma:predicate:claim:v1`` — the substrate's default
-  single-claim envelope (v0.3.0).
+  single-claim envelope.
 * ``urn:mareforma:predicate:epistemic-graph:v1`` — the signed-bundle
-  envelope produced by ``mareforma export --bundle`` (v0.3.0).
+  envelope produced by ``mareforma export --bundle``.
 * ``urn:mareforma:predicate:claim-with-roles:v1`` — the multi-signature
-  variant introduced in v0.3.1 (item 308). The actual writer lives in
-  ``mareforma.signing``; this module reserves the URI.
+  variant; the actual writer lives in ``mareforma.signing``, this
+  module reserves the URI.
 
 The registry is process-local (a Python ``dict``) and does NOT
 persist. The columnar ``predicate_payload`` field on the claims table
