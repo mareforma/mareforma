@@ -387,3 +387,243 @@ class TestExportFormats:
         from mareforma.exporters.ro_crate import build_crate
         with pytest.raises(FileNotFoundError):
             build_crate(tmp_path)
+
+    def test_in_toto_empty_graph_handles_gracefully(
+        self, tmp_path: Path
+    ) -> None:
+        # M11 from /review — symmetric coverage with RO-Crate exporter.
+        from mareforma.exporters.in_toto import build_statement
+        with mareforma.open(tmp_path):
+            pass
+        statement = build_statement(tmp_path)
+        # Empty graph still produces a valid statement (just empty subject).
+        assert statement["_type"]
+        assert statement["predicateType"]
+        assert "subject" in statement
+
+
+# ----------------------------------------------------------------------------
+# /review-driven hardening tests (P0 + H + M findings from adversarial pass)
+# ----------------------------------------------------------------------------
+
+
+class TestReplicationVerdictIntegration:
+    """C1 from /review — `signed-elo-bracket-replay` must work end-to-end,
+    not just pass the Python validator. The SQL CHECK constraint MUST
+    list the new method or the INSERT fails with IntegrityError.
+    """
+
+    def test_signed_elo_bracket_replay_inserts_successfully(
+        self, tmp_path: Path
+    ) -> None:
+        # Open with a key so we have a signer that can issue verdicts.
+        from mareforma import signing as _signing
+        key_path = tmp_path / "test.key"
+        _signing.save_private_key(_signing.generate_keypair(), key_path)
+        # Seed two claims to satisfy FK constraints.
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            a = graph.assert_claim(
+                "claim A",
+                classification="DERIVED",
+                generated_by="agent-a",
+                seed=True,
+            )
+            b = graph.assert_claim(
+                "claim B",
+                classification="DERIVED",
+                supports=[a],
+                generated_by="agent-b",
+            )
+            # Use the new method — should NOT raise.
+            graph.record_replication_verdict(
+                verdict_id="rv_test_elo",
+                cluster_id="cl_test",
+                member_claim_id=b,
+                other_claim_id=a,
+                method="signed-elo-bracket-replay",
+                confidence={"bracket_id": "br_test", "ordinal": 1},
+            )
+            verdicts = graph.replication_verdicts(member_claim_id=b)
+            assert any(v["method"] == "signed-elo-bracket-replay"
+                       for v in verdicts)
+
+
+class TestIdempotencyReconciliationCoversNewFields:
+    """H1 from /review — retry with different predicate_payload or
+    original_signature_bundle but same idempotency_key MUST raise
+    IdempotencyConflictError instead of silently merging.
+    """
+
+    def test_predicate_payload_mismatch_raises(self, tmp_path: Path) -> None:
+        from mareforma.db import IdempotencyConflictError
+        with mareforma.open(tmp_path) as graph:
+            graph.assert_claim(
+                "shared text",
+                idempotency_key="run_X_claim_1",
+                predicate_payload={"adapter": "test"},
+            )
+            with pytest.raises(IdempotencyConflictError):
+                graph.assert_claim(
+                    "shared text",
+                    idempotency_key="run_X_claim_1",
+                    predicate_payload={"adapter": "DIFFERENT"},
+                )
+
+    def test_original_signature_bundle_mismatch_raises(
+        self, tmp_path: Path
+    ) -> None:
+        from mareforma.db import IdempotencyConflictError
+        with mareforma.open(tmp_path) as graph:
+            graph.assert_claim(
+                "shared text",
+                idempotency_key="run_Y_claim_1",
+                original_signature_bundle='{"version":"a"}',
+            )
+            with pytest.raises(IdempotencyConflictError):
+                graph.assert_claim(
+                    "shared text",
+                    idempotency_key="run_Y_claim_1",
+                    original_signature_bundle='{"version":"b"}',
+                )
+
+    def test_same_idempotency_key_matching_fields_is_idempotent(
+        self, tmp_path: Path
+    ) -> None:
+        # Sanity: matching fields → same claim_id returned, no error.
+        with mareforma.open(tmp_path) as graph:
+            id1 = graph.assert_claim(
+                "shared text",
+                idempotency_key="run_Z_claim_1",
+                predicate_payload={"adapter": "test"},
+                original_signature_bundle='{"version":"a"}',
+            )
+            id2 = graph.assert_claim(
+                "shared text",
+                idempotency_key="run_Z_claim_1",
+                predicate_payload={"adapter": "test"},
+                original_signature_bundle='{"version":"a"}',
+            )
+            assert id1 == id2
+
+
+class TestPredicatePayloadTypeValidation:
+    """M5 from /review — non-dict predicate_payload raises TypeError
+    instead of silently canonicalizing into a non-object JSON string."""
+
+    def test_non_dict_payload_raises_typeerror(self, tmp_path: Path) -> None:
+        with mareforma.open(tmp_path) as graph:
+            with pytest.raises(TypeError):
+                graph.assert_claim(
+                    "claim",
+                    predicate_payload="just a string",  # type: ignore[arg-type]
+                )
+            with pytest.raises(TypeError):
+                graph.assert_claim(
+                    "claim",
+                    predicate_payload=[1, 2, 3],  # type: ignore[arg-type]
+                )
+            with pytest.raises(TypeError):
+                graph.assert_claim(
+                    "claim",
+                    predicate_payload=42,  # type: ignore[arg-type]
+                )
+
+
+class TestRoCrateInputValidation:
+    """H4 / H6 from /review — RO-Crate exporter refuses non-UUID
+    claim_ids and gracefully handles malformed supports_json shapes.
+    """
+
+    def test_non_uuid_claim_id_raises(self) -> None:
+        from mareforma.exporters.ro_crate import _claim_to_create_action
+        with pytest.raises(ValueError, match="non-UUID claim_id"):
+            _claim_to_create_action({
+                "claim_id": "not-a-uuid",
+                "generated_by": "agent",
+            })
+
+    def test_unsafe_agent_id_sanitized(self) -> None:
+        from mareforma.exporters.ro_crate import _safe_agent_id
+        # Slash + dash + dot OK (model/version/context convention).
+        assert _safe_agent_id("openai/gpt-4o/v1.0") == "openai/gpt-4o/v1.0"
+        # Hash sign → underscore (breaks JSON-LD @id fragment otherwise).
+        assert "#" not in _safe_agent_id("evil#agent")
+        # Whitespace → underscore.
+        assert " " not in _safe_agent_id("agent with spaces")
+        # Other shell-meta → underscore.
+        assert ";" not in _safe_agent_id("agent;rm")
+
+    def test_supports_json_dict_does_not_iterate_keys(
+        self, tmp_path: Path
+    ) -> None:
+        # H6: a malformed supports_json that decoded to a dict would
+        # iterate its keys under the old code (silent footgun).
+        # New code checks isinstance(decoded, list) explicitly.
+        from mareforma.exporters.ro_crate import _claim_to_create_action
+        import uuid
+        valid_uuid = str(uuid.uuid4())
+        action = _claim_to_create_action({
+            "claim_id": valid_uuid,
+            "generated_by": "agent",
+            # Dict instead of list — should be ignored, not iterated.
+            "supports_json": '{"x": 1, "y": 2}',
+        })
+        assert "object" not in action  # No supports[] references emitted.
+
+    def test_supports_json_filters_non_uuid_refs(
+        self, tmp_path: Path
+    ) -> None:
+        # DOIs / external refs in supports[] are intentionally omitted
+        # from the JSON-LD @id graph (no urn:mareforma:claim: identity).
+        from mareforma.exporters.ro_crate import _claim_to_create_action
+        import uuid
+        valid_uuid = str(uuid.uuid4())
+        other_uuid = str(uuid.uuid4())
+        action = _claim_to_create_action({
+            "claim_id": valid_uuid,
+            "generated_by": "agent",
+            "supports_json": json.dumps([
+                other_uuid,
+                "10.1038/s41586-026-10652-y",  # DOI — should be filtered.
+                "external-ref-string",  # also filtered.
+            ]),
+        })
+        assert action["object"] == [
+            {"@id": f"urn:mareforma:claim:{other_uuid}"}
+        ]
+
+
+class TestRestoreTypeSafety:
+    """H2 from /review — restore() must not silently coerce
+    unexpected types (False, 0, dict, list) into the new columns."""
+
+    def test_restore_with_non_string_predicate_payload_coerces_to_empty(
+        self, tmp_path: Path
+    ) -> None:
+        # Build a graph, then mock a malformed claims.toml restore where
+        # predicate_payload has an unexpected type. The restore should
+        # NOT raise (isinstance check returns False, default-empty path).
+        import tomli_w
+        toml_path = tmp_path / "claims.toml"
+        bad_claim_id = "abcdef01-2345-6789-abcd-ef0123456789"
+        toml_path.write_text(tomli_w.dumps({
+            "claims": {
+                bad_claim_id: {
+                    "text": "test",
+                    "classification": "INFERRED",
+                    "support_level": "PRELIMINARY",
+                    "generated_by": "agent",
+                    "status": "open",
+                    "supports": [],
+                    "contradicts": [],
+                    "comparison_summary": "",
+                    "evidence_json": "{}",
+                    "predicate_payload": True,  # bad type — should coerce.
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                }
+            }
+        }))
+        result = mareforma.restore(tmp_path)
+        # Restore succeeds; non-string predicate_payload coerced to "".
+        assert result["claims_restored"] == 1

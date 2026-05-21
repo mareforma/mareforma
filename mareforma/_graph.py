@@ -165,6 +165,39 @@ class EpistemicGraph:
         predicate_payload: dict | None = None,
         original_signature_bundle: str | None = None,
     ) -> str:
+        # signer:
+        #     Per-call override for the graph's loaded signer. When
+        #     ``None`` (default), the call inherits the signer passed
+        #     to ``mareforma.open(key_path=...)``. When supplied, the
+        #     claim is signed with this key instead. Note: this does
+        #     NOT check that the signer's keyid is enrolled in the
+        #     validators table — same trust model as v0.3.0
+        #     ``mareforma.open(key_path=...)`` (anyone can sign, but
+        #     only enrolled keys can ``validate()`` claims to
+        #     ESTABLISHED). Use for multi-signer hosts that have
+        #     multiple keys loaded (e.g. one per role-actor in the
+        #     v0.3.1 ``claim-with-roles/v1`` predicate variant).
+        # predicate_payload:
+        #     Optional structured predicate body for adapters that
+        #     ship a typed predicateType (tool-call/v1,
+        #     ingested-trace/v1, wet-lab-assay/<class>/v1, etc.).
+        #     Stored in the ``predicate_payload`` column for
+        #     queryable filters. NOTE: in v0.3.1 this column is NOT
+        #     yet bound into the signed envelope or chain hash
+        #     (Phase-2 follow-on; binds alongside the role-attestation
+        #     work). Adapters that depend on cryptographic integrity
+        #     of the predicate body should encode it inside the
+        #     claim text JSON until Phase 2 lands; this column is
+        #     the queryable index, not the source of truth.
+        # original_signature_bundle:
+        #     Optional source-side DSSE envelope, preserved by
+        #     federation-import flows. The active ``signature_bundle``
+        #     carries the receiver's re-signed envelope; this column
+        #     holds the original for downstream verifiers that want
+        #     to reconstruct the source-side proof. NOTE: in v0.3.1
+        #     the substrate does NOT validate this string (Phase-2
+        #     federation-import path will). Pass a structurally
+        #     valid DSSE envelope JSON or leave None.
         """Assert a claim into the epistemic graph. Returns claim_id.
 
         Parameters

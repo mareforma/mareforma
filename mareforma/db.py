@@ -150,11 +150,17 @@ CREATE TABLE IF NOT EXISTS claims (
     -- a distinct predicateType (tool-call/v1, ingested-trace/v1,
     -- gemini/*/v1, wet-lab-assay/*, review/v1, elo-match/v1, ...)
     -- write their typed payload here so substrate queries can filter
-    -- by predicate_type without parsing the claim text JSON. The
-    -- canonical predicate body still lives inside the signed
-    -- envelope's payload; this column is the queryable denormalised
-    -- copy. Default empty string keeps v0.3.0 graphs forward-
-    -- compatible. The signed envelope wins on any drift.
+    -- by predicate_type without parsing the claim text JSON. Default
+    -- empty string keeps v0.3.0 graphs forward-compatible.
+    --
+    -- v0.3.1 NOTE — TRUST MODEL: this column is NOT yet bound into
+    -- the signed envelope or chain hash. Adapters that depend on
+    -- cryptographic integrity of the predicate body should encode
+    -- it inside the claim text JSON. Phase-2 follow-on (with
+    -- role-attestations) will bind this column into the canonical
+    -- signed payload + chain_input + claims_signed_fields_no_laundering
+    -- watchlist. Until then, treat this column as a QUERYABLE INDEX,
+    -- not a SOURCE OF TRUTH.
     predicate_payload TEXT NOT NULL DEFAULT '',
     -- Federation-import preservation. When a claim is re-asserted on
     -- a receiving graph after federation bundle import, the ORIGINAL
@@ -165,6 +171,12 @@ CREATE TABLE IF NOT EXISTS claims (
     -- the source-side proof read this column; the substrate's own
     -- verification path uses ``signature_bundle``. NULL on claims
     -- that were not federation-imported.
+    --
+    -- v0.3.1 NOTE: this column accepts arbitrary string content. The
+    -- federation-import path (Phase 2/3) will add structural
+    -- validation (JSON parse, DSSE-envelope shape check). v0.3.1
+    -- callers writing this field directly are responsible for
+    -- supplying a valid DSSE envelope JSON string.
     original_signature_bundle TEXT,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
@@ -361,7 +373,8 @@ CREATE TABLE IF NOT EXISTS replication_verdicts (
                             'hash-match',
                             'semantic-cluster',
                             'shared-resolved-upstream',
-                            'cross-method'
+                            'cross-method',
+                            'signed-elo-bracket-replay'
                         )),
     confidence_json TEXT NOT NULL DEFAULT '{}',
     issuer_keyid    TEXT NOT NULL REFERENCES validators(keyid),
@@ -604,9 +617,22 @@ def _serialize_predicate_payload(payload: dict | None) -> str:
     v0.3.0-shape callers (who never pass this kwarg) writing the same bytes
     they did before. The active signed envelope is the authoritative copy
     of the predicate body; this column is the queryable denormalisation.
+
+    Raises :class:`TypeError` if payload is non-dict. Adapters MUST pass
+    a JSON-object-shaped dict (the typed predicate body); passing a
+    string, list, int, or other non-object JSON value would serialize
+    successfully but break the substrate's "predicate body is a dict"
+    contract that downstream consumers (eg. PROV-O exporter,
+    role-attestation walker) assume.
     """
     if payload is None:
         return ""
+    if not isinstance(payload, dict):
+        raise TypeError(
+            f"predicate_payload must be a dict (the typed predicate body), "
+            f"got {type(payload).__name__}. Wrap non-dict values in a dict "
+            "with a documented key, e.g. {{'value': <your value>}}."
+        )
     from ._canonical import canonicalize
     return canonicalize(payload).decode("utf-8")
 
@@ -1211,6 +1237,8 @@ def _reconcile_idempotency_row(
     contradicts: list[str] | None,
     source_name: str | None,
     artifact_hash: str | None,
+    predicate_payload: dict | None = None,
+    original_signature_bundle: str | None = None,
 ) -> str:
     """Compare a found row against the current call's semantic fields.
 
@@ -1248,6 +1276,11 @@ def _reconcile_idempotency_row(
         mismatches.append("source_name")
     if row["artifact_hash"] != artifact_hash:
         mismatches.append("artifact_hash")
+    expected_predicate = _serialize_predicate_payload(predicate_payload)
+    if (row["predicate_payload"] or "") != expected_predicate:
+        mismatches.append("predicate_payload")
+    if (row["original_signature_bundle"] or None) != original_signature_bundle:
+        mismatches.append("original_signature_bundle")
     if mismatches:
         raise IdempotencyConflictError(
             f"idempotency_key={idempotency_key!r} already exists "
@@ -1387,7 +1420,8 @@ def add_claim(
         try:
             row = conn.execute(
                 "SELECT claim_id, text, classification, generated_by, "
-                "supports_json, contradicts_json, source_name, artifact_hash "
+                "supports_json, contradicts_json, source_name, artifact_hash, "
+                "predicate_payload, original_signature_bundle "
                 "FROM claims WHERE idempotency_key = ?",
                 (idempotency_key,),
             ).fetchone()
@@ -1395,6 +1429,8 @@ def add_claim(
                 existing_id = _reconcile_idempotency_row(
                     row, idempotency_key, text, classification, generated_by,
                     supports, contradicts, source_name, artifact_hash,
+                    predicate_payload=predicate_payload,
+                    original_signature_bundle=original_signature_bundle,
                 )
                 return existing_id
         except sqlite3.OperationalError as exc:
@@ -1637,7 +1673,9 @@ def add_claim(
                 row = conn.execute(
                     "SELECT claim_id, text, classification, generated_by, "
                     "supports_json, contradicts_json, source_name, "
-                    "artifact_hash FROM claims WHERE idempotency_key = ?",
+                    "artifact_hash, predicate_payload, "
+                    "original_signature_bundle "
+                    "FROM claims WHERE idempotency_key = ?",
                     (idempotency_key,),
                 ).fetchone()
             except sqlite3.OperationalError as fetch_exc:
@@ -1648,6 +1686,8 @@ def add_claim(
                 return _reconcile_idempotency_row(
                     row, idempotency_key, text, classification, generated_by,
                     supports, contradicts, source_name, artifact_hash,
+                    predicate_payload=predicate_payload,
+                    original_signature_bundle=original_signature_bundle,
                 )
         translated = _state_error_from_integrity(exc)
         if translated is not None:
@@ -4295,8 +4335,16 @@ def restore(
                             evidence_json_str,
                             statement_cid_str,
                             1 if c.get("convergence_retry_needed") else 0,
-                            c.get("predicate_payload") or "",
-                            c.get("original_signature_bundle"),
+                            (
+                                c["predicate_payload"]
+                                if isinstance(c.get("predicate_payload"), str)
+                                else ""
+                            ),
+                            (
+                                c["original_signature_bundle"]
+                                if isinstance(c.get("original_signature_bundle"), str)
+                                else None
+                            ),
                             c_created_at, c_updated_at,
                         ),
                     )

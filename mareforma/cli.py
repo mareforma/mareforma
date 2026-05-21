@@ -448,6 +448,13 @@ def export(
         )
         sys.exit(1)
 
+    def _display_path(p: Path) -> str:
+        """Show paths inside root as relative; absolute outside the tree."""
+        try:
+            return str(p.relative_to(root))
+        except ValueError:
+            return str(p)
+
     if fmt == "in-toto-v1":
         from mareforma.exporters.in_toto import build_statement
         try:
@@ -462,7 +469,7 @@ def export(
                 json.dumps(statement, indent=2, ensure_ascii=False) + "\n",
                 encoding="utf-8",
             )
-            _ok(f"Exported in-toto Statement v1 → {out_path.relative_to(root)}")
+            _ok(f"Exported in-toto Statement v1 → {_display_path(out_path)}")
         except Exception as exc:
             _err(f"in-toto export failed: {exc}")
             sys.exit(1)
@@ -482,7 +489,7 @@ def export(
                 json.dumps(crate, indent=2, ensure_ascii=False) + "\n",
                 encoding="utf-8",
             )
-            _ok(f"Exported RO-Crate 1.2 → {out_path.relative_to(root)}")
+            _ok(f"Exported RO-Crate 1.2 → {_display_path(out_path)}")
         except Exception as exc:
             _err(f"RO-Crate export failed: {exc}")
             sys.exit(1)
