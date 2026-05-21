@@ -17,13 +17,34 @@ The substrate does not bundle any model dependencies. Callers wire
 their own concrete verifiers; :class:`MockNLIVerifier` is provided as
 a reference implementation for tests and for adapter scaffolding.
 
+SECURITY NOTE
+-------------
+The verifier sees the FULL claim text and the supports[] list.
+Verifier implementations that call remote APIs (LLM providers,
+HuggingFace Inference, sentence-transformers cache fetches) WILL
+transmit every asserted claim to that endpoint at write time.
+Privacy-sensitive deployments should wire local-only verifiers
+(e.g. ``sentence-transformers`` + a local NLI model loaded from
+disk). The substrate's "your scientific findings stay on your
+machine" posture flips the moment you wire a network-backed
+verifier into ``assert_claim(grounding_sensor=...)``.
+
+The supports list is passed to the verifier as an immutable tuple
+so a hostile or buggy implementation cannot mutate the asserter's
+citations before the predicate is signed.
+
 Protocol contract
 -----------------
 Implementations must be pure functions (no I/O hidden in __init__).
 The substrate calls :meth:`Verifier.grounding_score` synchronously
 inside :meth:`mareforma.EpistemicGraph.assert_claim`; long-running
 implementations should batch upstream prefetch BEFORE handing the
-verifier to the substrate.
+verifier to the substrate. The substrate catches every
+:class:`Exception` subclass raised by the verifier (logs a
+``RuntimeWarning``, asserts the claim without a score), so an
+unreliable sensor degrades gracefully. ``KeyboardInterrupt`` /
+``SystemExit`` / ``MemoryError`` (all ``BaseException`` subclasses)
+propagate.
 """
 
 from __future__ import annotations

@@ -308,24 +308,42 @@ class EpistemicGraph:
 
         # Snapshot the grounding sensor's verdict into the EvidenceVector
         # so the score is signed alongside the rest of the claim. A
-        # broken sensor (raises VerifierError, returns malformed shape)
+        # broken sensor (any Exception subclass: bad shape, model
+        # failure, OSError, KeyError, IndexError, network error, etc.)
         # does NOT block assertion — we log a warning and drop the
-        # score. Asserter philosophy: the substrate signs what the
-        # asserter claims; verifier wiring is a quality hint, not a
-        # gate.
+        # score. BaseException-only failures (KeyboardInterrupt /
+        # SystemExit / MemoryError) propagate so signal-driven
+        # shutdown still works. Asserter philosophy: the substrate
+        # signs what the asserter claims; verifier wiring is a
+        # quality hint, not a gate.
+        #
+        # SECURITY: the verifier sees the full claim text and the
+        # supports list. A verifier backed by a remote API (LLM
+        # provider, HuggingFace Inference, etc.) will transmit
+        # claim content to that endpoint. Callers handling
+        # privacy-sensitive content should wire local verifiers
+        # only.
+        #
+        # The supports list is passed as an immutable tuple so a
+        # hostile or buggy verifier cannot mutate the asserter's
+        # citation list before the predicate is signed.
         if grounding_sensor is not None:
-            from mareforma.verifiers import VerifierError as _VE
             import warnings as _warnings
             try:
                 score, rationale = grounding_sensor.grounding_score(
-                    text, supports or [],
+                    text, tuple(supports or ()),
                 )
+                if not isinstance(rationale, str):
+                    raise TypeError(
+                        "grounding_sensor rationale must be a str; got "
+                        f"{type(rationale).__name__}"
+                    )
                 ev = EvidenceVector.from_dict({
                     **ev.to_dict(),
                     "grounding_score": float(score),
-                    "grounding_rationale": str(rationale),
+                    "grounding_rationale": rationale,
                 })
-            except (_VE, AttributeError, TypeError, ValueError) as exc:
+            except Exception as exc:
                 _warnings.warn(
                     f"grounding_sensor raised {type(exc).__name__}: "
                     f"{exc}; asserting without grounding_score.",
@@ -442,6 +460,32 @@ class EpistemicGraph:
         payload and refuse to mutate when the claim carries a signature
         bundle — use a retraction-plus-new-assertion flow on those
         cases.
+
+        Trust model on ``status`` mutations
+        -----------------------------------
+        A status change (open / contested / retracted) is an EDITORIAL
+        action — it produces no signed envelope, requires no validator
+        keyid, and is not round-tripped through the signature-verify
+        layer. An ESTABLISHED claim can be flipped to ``retracted`` by
+        any process with DB write access; nothing in the substrate
+        cryptographically records who pulled the lever. Compare with
+        signed contradiction verdicts, which DO require an enrolled
+        validator's signature and DO survive restore intact.
+
+        For a cryptographically-traceable retraction story, prefer the
+        retract-then-supersede pattern: assert a new claim with
+        ``contradicts=[<old_claim_id>]`` signed by a validator key.
+        That produces a signed envelope plus a contradiction verdict
+        that restore can re-verify.
+
+        Concurrency
+        -----------
+        Two processes calling ``update_claim`` on the same claim are
+        serialised by SQLite at the row level; semantics are
+        last-writer-wins with no conflict detection. Callers that need
+        compare-and-set semantics on ``status`` should add their own
+        out-of-band lock or assert a new claim instead of mutating an
+        existing one.
 
         Raises :class:`ClaimNotFoundError`,
         :class:`SignedClaimImmutableError`,

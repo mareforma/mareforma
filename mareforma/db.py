@@ -3990,7 +3990,20 @@ def refutation_status(row: dict) -> dict:
     columns; it does NOT walk verdict tables (callers wanting the
     underlying verdicts use
     :meth:`EpistemicGraph.contradiction_verdicts`).
+
+    Raises :class:`ValueError` when *row* lacks the required
+    ``status`` field — a hand-crafted partial dict would otherwise
+    fall through to a falsely-confident ``"clean"`` verdict.
     """
+    if not isinstance(row, dict):
+        raise ValueError(
+            f"refutation_status: row must be a dict, got {type(row).__name__}"
+        )
+    if "status" not in row:
+        raise ValueError(
+            "refutation_status: row missing 'status' field; pass a row "
+            "fetched via list_claims / get_claim, not a partial dict."
+        )
     if row.get("t_invalid") is not None:
         return {
             "state": "contradicted",
@@ -4110,7 +4123,15 @@ def query_claims(
                 f"Use one of: {', '.join(VALID_REFUTATION_FILTERS)}"
             )
         if refutation_filter == "clean":
-            conditions.append("t_invalid IS NULL")
+            # Guard against double-adding t_invalid IS NULL when
+            # include_invalidated=False already pushed the same
+            # predicate above. SQL is idempotent on AND-of-equals
+            # today, but the conditions.remove() in the
+            # "contradicted" branch only strips the first occurrence
+            # — if a future refactor expects exactly-once semantics,
+            # the duplicate could silently widen results.
+            if "t_invalid IS NULL" not in conditions:
+                conditions.append("t_invalid IS NULL")
             conditions.append("status = 'open'")
         elif refutation_filter == "contradicted":
             # Override include_invalidated=False so we can SELECT

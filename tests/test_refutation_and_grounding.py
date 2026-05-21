@@ -52,6 +52,14 @@ class TestRefutationStatusPresenter:
         rs = mareforma.refutation_status(row)
         assert rs["state"] == "contradicted"
 
+    def test_partial_row_raises(self) -> None:
+        # A hand-crafted dict missing 'status' would otherwise fall
+        # through to a confidently-wrong "clean" — refuse instead.
+        with pytest.raises(ValueError, match="missing 'status'"):
+            mareforma.refutation_status({"t_invalid": None})
+        with pytest.raises(ValueError, match="must be a dict"):
+            mareforma.refutation_status("not-a-dict")  # type: ignore[arg-type]
+
 
 class TestRefutationStatusOnGraph:
     def test_unknown_claim_raises(self, tmp_path: Path) -> None:
@@ -305,6 +313,39 @@ class TestGroundingSensorPlumbing:
         evidence = json.loads(row["evidence_json"])
         assert "grounding_score" not in evidence
 
+    def test_tampered_grounding_score_refused_by_restore(
+        self, tmp_path: Path,
+    ) -> None:
+        # Lock-in regression: the score is BOUND into the signed
+        # predicate. Tampering evidence_json in claims.toml after the
+        # fact must trip restore's envelope-vs-row verification.
+        from mareforma.db import RestoreError
+        key_path = tmp_path / "asserter.key"
+        _signing.save_private_key(_signing.generate_keypair(), key_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            graph.assert_claim(
+                "tamper-target",
+                grounding_sensor=MockNLIVerifier(score=0.3, rationale="r"),
+            )
+        # Rewrite evidence_json with a forged grounding_score.
+        toml_path = tmp_path / "claims.toml"
+        text = toml_path.read_text()
+        # The evidence_json value contains "grounding_score":0.3 — flip
+        # to 0.99 directly in the TOML.
+        tampered = text.replace(
+            '\\"grounding_score\\":0.3',
+            '\\"grounding_score\\":0.99',
+        )
+        assert tampered != text  # confirm the replacement landed
+        toml_path.write_text(tampered)
+        (tmp_path / ".mareforma" / "graph.db").unlink()
+        (tmp_path / ".mareforma" / "claim_supports_cache.db").unlink(
+            missing_ok=True,
+        )
+        with pytest.raises(RestoreError) as ei:
+            mareforma.restore(tmp_path)
+        assert ei.value.kind == "claim_unverified"
+
     def test_score_is_immutable_after_assertion(
         self, tmp_path: Path,
     ) -> None:
@@ -337,6 +378,95 @@ class TestGroundingSensorPlumbing:
 # ----------------------------------------------------------------------------
 # Legacy round-trip preserved
 # ----------------------------------------------------------------------------
+
+
+class TestVerifierHardening:
+    """Regressions for the verifier sandboxing guarantees."""
+
+    def test_verifier_cannot_mutate_supports_list(
+        self, tmp_path: Path,
+    ) -> None:
+        # A hostile or buggy verifier must NOT be able to rewrite the
+        # asserter's supports[] citations between assert_claim and
+        # the signed envelope. The substrate hands the verifier a
+        # tuple, not the live list.
+        captured: list[object] = []
+
+        class _MutatingVerifier:
+            def grounding_score(self, claim, supports):
+                captured.append(supports)
+                try:
+                    supports.append("10.0/forged")  # type: ignore[attr-defined]
+                except (AttributeError, TypeError):
+                    pass
+                return (0.5, "tested mutation")
+
+        with mareforma.open(tmp_path) as graph:
+            a = graph.assert_claim("upstream")
+            cid = graph.assert_claim(
+                "downstream",
+                supports=[a],
+                grounding_sensor=_MutatingVerifier(),
+            )
+            row = graph.get_claim(cid)
+        # The verifier received a tuple (immutable), and the persisted
+        # supports_json carries ONLY the asserter's original ref.
+        assert isinstance(captured[0], tuple)
+        persisted = json.loads(row["supports_json"])
+        assert persisted == [a]
+        assert "10.0/forged" not in persisted
+
+    def test_verifier_oserror_does_not_block_assert(
+        self, tmp_path: Path,
+    ) -> None:
+        # Real verifiers raise OSError / ConnectionError / RuntimeError
+        # routinely (model load failure, network blip, OOM). The
+        # substrate's contract is "claim still lands, score dropped."
+        class _OSErrorVerifier:
+            def grounding_score(self, claim, supports):
+                raise OSError("model file missing")
+
+        with mareforma.open(tmp_path) as graph:
+            with pytest.warns(RuntimeWarning, match="OSError"):
+                cid = graph.assert_claim(
+                    "fallback", grounding_sensor=_OSErrorVerifier(),
+                )
+            evidence = json.loads(graph.get_claim(cid)["evidence_json"])
+        assert "grounding_score" not in evidence
+
+    def test_verifier_keyerror_does_not_block_assert(
+        self, tmp_path: Path,
+    ) -> None:
+        class _KeyErrorVerifier:
+            def grounding_score(self, claim, supports):
+                raise KeyError("missing-model-key")
+
+        with mareforma.open(tmp_path) as graph:
+            with pytest.warns(RuntimeWarning, match="KeyError"):
+                cid = graph.assert_claim(
+                    "fallback", grounding_sensor=_KeyErrorVerifier(),
+                )
+            evidence = json.loads(graph.get_claim(cid)["evidence_json"])
+        assert "grounding_score" not in evidence
+
+    def test_verifier_non_string_rationale_does_not_block(
+        self, tmp_path: Path,
+    ) -> None:
+        # Coercing rationale via str() would silently sign garbage
+        # ("None", "b'abc'", "{...}"). The substrate now refuses
+        # non-str rationale at the verifier-call site and falls
+        # through to the warning path.
+        class _BadRationale:
+            def grounding_score(self, claim, supports):
+                return (0.7, None)  # type: ignore[return-value]
+
+        with mareforma.open(tmp_path) as graph:
+            with pytest.warns(RuntimeWarning):
+                cid = graph.assert_claim(
+                    "fallback", grounding_sensor=_BadRationale(),
+                )
+            evidence = json.loads(graph.get_claim(cid)["evidence_json"])
+        assert "grounding_score" not in evidence
 
 
 class TestLegacyEvidenceVectorRoundTrip:
