@@ -1,7 +1,7 @@
 """Mareforma — local epistemic substrate for AI-assisted research."""
 
 __description__ = "Mareforma — local epistemic substrate for AI-assisted research."
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 from pathlib import Path
 from typing import TYPE_CHECKING

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mareforma"
-version = "0.3.0"
+version = "0.3.1"
 description = "Epistemic infrastructure for AI scientists"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -57,7 +57,10 @@ include = ["mareforma*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short -m 'not slow'"
+markers = [
+    "slow: long-running test (perf pins at 50k claims, network-backed adapters)",
+]
 
 [tool.coverage.run]
 source = ["mareforma"]

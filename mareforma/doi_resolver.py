@@ -60,7 +60,7 @@ _TTL_RESOLVED = timedelta(days=30)
 _TTL_UNRESOLVED = timedelta(hours=24)
 
 _USER_AGENT = (
-    "mareforma/0.3.0 (+https://github.com/mareforma/mareforma; "
+    "mareforma/0.3.1 (+https://github.com/mareforma/mareforma; "
     "mailto:hello@mareforma.com)"
 )
 
