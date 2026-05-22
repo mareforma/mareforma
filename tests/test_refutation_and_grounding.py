@@ -484,6 +484,22 @@ class TestVerifierHardening:
             evidence = json.loads(graph.get_claim(cid)["evidence_json"])
         assert "grounding_score" not in evidence
 
+    def test_verifier_baseexception_propagates(
+        self, tmp_path: Path,
+    ) -> None:
+        # The substrate catches `Exception` (so a flaky NLI / network
+        # verifier degrades gracefully) but MUST NOT catch
+        # `BaseException` subclasses — Ctrl-C during a long-running
+        # assertion has to actually interrupt the process. Regression
+        # against a refactor that widens the except clause.
+        class _Interrupt:
+            def grounding_score(self, c, s):
+                raise KeyboardInterrupt
+
+        with mareforma.open(tmp_path) as graph:
+            with pytest.raises(KeyboardInterrupt):
+                graph.assert_claim("x", grounding_sensor=_Interrupt())
+
     def test_verifier_non_string_rationale_does_not_block(
         self, tmp_path: Path,
     ) -> None:

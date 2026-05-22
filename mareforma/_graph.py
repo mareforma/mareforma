@@ -1448,32 +1448,62 @@ class EpistemicGraph:
         )
 
         def _hydrate(edges: list[dict]) -> list[dict]:
-            out: list[dict] = []
-            for edge in edges:
-                row = _db.get_claim(self._conn, edge["claim_id"])
-                out.append({
-                    "claim_id": edge["claim_id"],
-                    "depth": edge["depth"],
-                    "position": edge["position"],
-                    "row": row,  # may be None for dangling refs
-                })
-            return out
+            if not edges:
+                return []
+            # Batched fetch: one query per ~999 edges instead of one
+            # query per edge. SQLite's variable-count cap is 999 in
+            # most builds; chunk the IN-list to stay under it.
+            ids = list({e["claim_id"] for e in edges})
+            rows_by_id: dict[str, dict] = {}
+            chunk_size = 900
+            for i in range(0, len(ids), chunk_size):
+                chunk = ids[i:i + chunk_size]
+                placeholders = ",".join("?" * len(chunk))
+                cursor = self._conn.execute(
+                    f"SELECT {_db._CLAIM_SELECT} FROM claims "
+                    f"WHERE claim_id IN ({placeholders})",
+                    chunk,
+                )
+                for row in cursor.fetchall():
+                    rows_by_id[row["claim_id"]] = dict(row)
+            return [
+                {
+                    "claim_id": e["claim_id"],
+                    "depth": e["depth"],
+                    "position": e["position"],
+                    "row": rows_by_id.get(e["claim_id"]),
+                }
+                for e in edges
+            ]
 
         # Inbound contradictions: claims that list this one in their
-        # contradicts[] array, plus signed contradiction_verdicts that
-        # cite it.
-        inbound_contradictions = self._conn.execute(
-            "SELECT claim_id, contradicts_json FROM claims "
-            "WHERE contradicts_json LIKE ?",
-            (f'%"{claim_id}"%',),
-        ).fetchall()
+        # contradicts[] array. Uses json_each so SQLite can scan the
+        # JSON values directly instead of falling back to LIKE-based
+        # substring match on every row. Still O(N) in the absence of a
+        # reverse-cache table (deferred future work), but the json_each
+        # form is friendlier to future expression-index work.
         contradicts_back: list[str] = []
-        for r in inbound_contradictions:
-            try:
-                if claim_id in json.loads(r["contradicts_json"] or "[]"):
-                    contradicts_back.append(r["claim_id"])
-            except (json.JSONDecodeError, TypeError):
-                continue
+        try:
+            inbound = self._conn.execute(
+                "SELECT DISTINCT c.claim_id FROM claims c, "
+                "json_each(c.contradicts_json) je "
+                "WHERE je.value = ?",
+                (claim_id,),
+            ).fetchall()
+            contradicts_back = [r["claim_id"] for r in inbound]
+        except sqlite3.OperationalError:
+            # Fallback for SQLite builds without json1 (vanishingly rare
+            # on the documented ≥3.30 floor, but cheap insurance).
+            for r in self._conn.execute(
+                "SELECT claim_id, contradicts_json FROM claims "
+                "WHERE contradicts_json LIKE ?",
+                (f'%"{claim_id}"%',),
+            ).fetchall():
+                try:
+                    if claim_id in json.loads(r["contradicts_json"] or "[]"):
+                        contradicts_back.append(r["claim_id"])
+                except (json.JSONDecodeError, TypeError):
+                    continue
 
         # query_provenance is an AUDIT surface; show the verdicts that
         # invalidated the focal claim. Without include_invalidated=True

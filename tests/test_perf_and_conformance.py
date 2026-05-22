@@ -86,24 +86,51 @@ def test_supports_cache_50k_walk_under_300ms(tmp_path: Path) -> None:
         )
 
 
+def _percentile(samples: list[float], q: float) -> float:
+    """Linear-interp percentile in [0, 1]. ``q=0.99`` → p99."""
+    if not samples:
+        raise ValueError("samples must be non-empty")
+    s = sorted(samples)
+    if len(s) == 1:
+        return s[0]
+    rank = q * (len(s) - 1)
+    lo = int(rank)
+    hi = min(lo + 1, len(s) - 1)
+    frac = rank - lo
+    return s[lo] + frac * (s[hi] - s[lo])
+
+
 def test_supports_cache_1k_walk_under_50ms(tmp_path: Path) -> None:
     """1k-scale pin runs in the default suite so the regression is
-    caught on every CI invocation."""
+    caught on every CI invocation.
+
+    Methodology: 1000 sample iterations, first 50 discarded as cache
+    warmup, p99 computed via linear interpolation across the
+    remaining 950. A generous 50ms ceiling absorbs CI shared-runner
+    jitter; a regression that pushes p99 past 50ms is unambiguously
+    architectural, not noise.
+    """
     n = 1_000
     with mareforma.open(tmp_path) as graph:
         ids = _build_wide_dag(graph, n)
 
     with mareforma.open(tmp_path) as graph:
         leaf = ids[-1]
+        warmup = 50
+        samples = 1000
         latencies: list[float] = []
-        for _ in range(50):
+        for i in range(warmup + samples):
             t0 = time.perf_counter()
             _supports.walk_upstream(graph._conn, leaf, depth=4)
-            latencies.append(time.perf_counter() - t0)
-        latencies.sort()
-        p99 = latencies[int(0.99 * len(latencies))]
+            elapsed = time.perf_counter() - t0
+            if i >= warmup:
+                latencies.append(elapsed)
+        p50 = _percentile(latencies, 0.50)
+        p95 = _percentile(latencies, 0.95)
+        p99 = _percentile(latencies, 0.99)
         assert p99 < 0.05, (
-            f"1k-claim p99 walk_upstream = {p99*1000:.1f}ms exceeds 50ms"
+            f"1k-claim walk_upstream p99={p99*1000:.2f}ms (p95="
+            f"{p95*1000:.2f}ms, p50={p50*1000:.2f}ms) exceeds 50ms"
         )
 
 

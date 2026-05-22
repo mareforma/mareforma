@@ -124,12 +124,38 @@ def attach_cache(conn: sqlite3.Connection, root: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         conn.execute("ATTACH DATABASE ? AS supports_cache", (str(path),))
-    except sqlite3.OperationalError as exc:
-        # Already attached → benign. Any other operational error is a
-        # real problem (permission, disk full, foreign-format file).
-        if "already" not in str(exc).lower():
+    # sqlite3.DatabaseError covers both OperationalError and the
+    # bare-form DatabaseError that ATTACH raises on a non-SQLite file
+    # ("file is not a database"). Catching the parent class lets a
+    # single handler recover from "already attached" / "corrupt file".
+    except sqlite3.Error as exc:
+        msg = str(exc).lower()
+        # Already attached → benign no-op.
+        if "already" in msg:
+            return
+        # Corrupt cache file → unlink + retry ATTACH once. The cache is
+        # explicitly rebuildable from claims.supports_json and the
+        # alternative ("delete this file manually") is operator-toil
+        # we don't need to inflict for a non-signed cache.
+        corruption_markers = (
+            "not a database", "malformed", "corrupt", "file is encrypted",
+        )
+        if path.exists() and any(m in msg for m in corruption_markers):
+            import warnings as _warnings
+            _warnings.warn(
+                f"claim_supports cache file at {path} appears corrupt "
+                f"({exc}); unlinking and rebuilding.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            conn.execute("ATTACH DATABASE ? AS supports_cache", (str(path),))
+            # Fall through to schema + rebuild below.
+        else:
             raise
-        return
     # Wait up to 5s on a contended write lock so two concurrent
     # first-opens don't fail one of them with SQLITE_BUSY mid-rebuild.
     conn.execute("PRAGMA busy_timeout = 5000")

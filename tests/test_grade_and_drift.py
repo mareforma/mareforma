@@ -167,6 +167,68 @@ class TestDoiCacheContentDigestColumn:
             }
             assert "content_digest" in cols
 
+    def test_legacy_db_missing_all_new_columns_upgrades_cleanly(
+        self, tmp_path: Path,
+    ) -> None:
+        # The realistic v0.3.0 → v0.3.1 upgrade scenario: a graph.db
+        # whose claims table lacks BOTH predicate_payload and
+        # original_signature_bundle AND whose doi_cache lacks
+        # content_digest. Open under v0.3.1 must succeed with all
+        # three columns auto-added on the way through open_db.
+        with mareforma.open(tmp_path) as graph:
+            pass  # write a fresh v0.3.1 DB so we have a baseline
+        db_path = tmp_path / ".mareforma" / "graph.db"
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute(
+                "ALTER TABLE claims DROP COLUMN predicate_payload"
+            )
+            conn.execute(
+                "ALTER TABLE claims DROP COLUMN original_signature_bundle"
+            )
+            conn.execute(
+                "ALTER TABLE doi_cache DROP COLUMN content_digest"
+            )
+            conn.commit()
+        except sqlite3.OperationalError:
+            pytest.skip("SQLite < 3.35 cannot DROP COLUMN; test n/a")
+        finally:
+            conn.close()
+        # Confirm the simulated legacy state.
+        conn = sqlite3.connect(str(db_path))
+        try:
+            claims_cols = {
+                r[1] for r in conn.execute(
+                    "PRAGMA table_info(claims)"
+                ).fetchall()
+            }
+            doi_cols = {
+                r[1] for r in conn.execute(
+                    "PRAGMA table_info(doi_cache)"
+                ).fetchall()
+            }
+        finally:
+            conn.close()
+        assert "predicate_payload" not in claims_cols
+        assert "original_signature_bundle" not in claims_cols
+        assert "content_digest" not in doi_cols
+
+        # Re-open under v0.3.1 — open_db must auto-migrate all three.
+        with mareforma.open(tmp_path) as graph:
+            claims_cols_after = {
+                r[1] for r in graph._conn.execute(
+                    "PRAGMA table_info(claims)"
+                ).fetchall()
+            }
+            doi_cols_after = {
+                r[1] for r in graph._conn.execute(
+                    "PRAGMA table_info(doi_cache)"
+                ).fetchall()
+            }
+        assert "predicate_payload" in claims_cols_after
+        assert "original_signature_bundle" in claims_cols_after
+        assert "content_digest" in doi_cols_after
+
     def test_column_added_to_legacy_db(self, tmp_path: Path) -> None:
         # Simulate a legacy DB by opening once, dropping the column via
         # raw SQL (SQLite ALTER TABLE DROP COLUMN requires 3.35+), then

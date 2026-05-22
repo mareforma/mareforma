@@ -301,6 +301,31 @@ class TestPerCallSignerOverride:
             claim_id = graph.assert_claim("test", signer=None)
             assert claim_id
 
+    def test_per_call_signer_actually_overrides_graph_signer(
+        self, tmp_path: Path,
+    ) -> None:
+        # The kwarg is the only point of the API. A regression that
+        # silently falls through to self._signer would pass without
+        # this verification.
+        from mareforma import signing as _signing
+        key_a_path = tmp_path / "a.key"
+        _signing.save_private_key(
+            _signing.generate_keypair(), key_a_path,
+        )
+        key_a_pub = _signing.load_private_key(key_a_path).public_key()
+        key_a_keyid = _signing.public_key_id(key_a_pub)
+
+        key_b = _signing.generate_keypair()
+        key_b_keyid = _signing.public_key_id(key_b.public_key())
+
+        with mareforma.open(tmp_path, key_path=key_a_path) as graph:
+            cid = graph.assert_claim(
+                "override-target", signer=key_b,
+            )
+            env = json.loads(graph.get_claim(cid)["signature_bundle"])
+        assert env["signatures"][0]["keyid"] == key_b_keyid
+        assert env["signatures"][0]["keyid"] != key_a_keyid
+
     def test_predicate_payload_kwarg_threaded_through(
         self, tmp_path: Path
     ) -> None:

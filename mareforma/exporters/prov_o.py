@@ -9,6 +9,18 @@ Validation events become a second activity that
 ``prov:wasAssociatedWith`` the validator agent. The whole document is
 PROV-O JSON-LD with the standard ``prov:`` namespace prefix.
 
+PRIVACY NOTE
+------------
+The exported document carries the first 120 characters of every
+claim's text verbatim as ``prov:label`` on the entity node, and the
+asserter's ``generated_by`` + validator's ``validated_by`` as agent
+labels. The substrate's posture is "your scientific findings stay
+on your machine," but PROV-O export is the intended cross-boundary
+surface and text fragments DO leave the local store. Sensitive
+content (clinical notes, embargoed findings, PII) should be
+redacted before passing the exported document to a third-party
+consumer; the substrate does not redact for you.
+
 The exporter is *one-way*. Re-importing PROV-O back into mareforma is
 out of scope — the PROV model carries less than the signed substrate
 (no DSSE envelopes, no GRADE evidence vector, no hash chain), so a

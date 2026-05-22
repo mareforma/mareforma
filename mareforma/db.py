@@ -917,6 +917,16 @@ def open_db(root: Path) -> sqlite3.Connection:
         existing_cols = {
             row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()
         }
+        # Auto-migrate the two columns added between v0.3.0 and v0.3.1.
+        # Both are non-signed, non-CHECK'd query-side denormalisations with
+        # safe defaults, so ALTER ADD COLUMN is a non-disruptive in-place
+        # additive migration that preserves every existing row's signed
+        # bytes. Concurrent first-opens hit a "duplicate column name" race
+        # we treat as benign.
+        _ensure_claims_columns_for_upgrade(conn, existing_cols)
+        existing_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()
+        }
         expected_cols = set(_CLAIM_COLUMNS)
         if existing_cols != expected_cols:
             missing = expected_cols - existing_cols
@@ -950,6 +960,54 @@ def open_db(root: Path) -> sqlite3.Connection:
 
     except sqlite3.OperationalError as exc:
         raise DatabaseError(f"Could not open database at {path}: {exc}") from exc
+
+
+def _ensure_claims_columns_for_upgrade(
+    conn: sqlite3.Connection, existing_cols: set[str],
+) -> None:
+    """Auto-add the claims-table columns introduced in this release.
+
+    Both ``predicate_payload`` and ``original_signature_bundle`` are
+    query-side fields that are NOT part of the signed envelope or the
+    chain hash. ALTER TABLE ADD COLUMN with the documented defaults
+    leaves every existing row's signed bytes byte-identical, so the
+    migration is safe to run on any legacy graph.db.
+
+    Concurrent first-opens race the ALTER: SQLite serialises writes;
+    the loser's ALTER fails with ``duplicate column name`` and we
+    re-check + return. Same posture as ``_ensure_doi_cache_columns``.
+    """
+    # If the claims table itself is missing, there's nothing to ALTER —
+    # let the column-set validation below surface the schema-mismatch
+    # error with its actionable message.
+    if not existing_cols:
+        return
+    upgrades = [
+        ("predicate_payload",
+         "ALTER TABLE claims ADD COLUMN predicate_payload "
+         "TEXT NOT NULL DEFAULT ''"),
+        ("original_signature_bundle",
+         "ALTER TABLE claims ADD COLUMN original_signature_bundle TEXT"),
+    ]
+    for col, alter_sql in upgrades:
+        if col in existing_cols:
+            continue
+        try:
+            conn.execute(alter_sql)
+            conn.commit()
+        except sqlite3.OperationalError as exc:
+            # Re-check: a concurrent process may have won the ALTER
+            # race. Duplicate-column-name is benign; any other failure
+            # is real.
+            cols_after = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(claims)").fetchall()
+            }
+            if col in cols_after:
+                continue
+            raise DatabaseError(
+                f"Could not add claims.{col} column: {exc}"
+            ) from exc
 
 
 def _ensure_doi_cache_columns(conn: sqlite3.Connection) -> None:
@@ -2280,24 +2338,35 @@ def _refuse_self_verdict(
     ).fetchone()
     if row is None or row["signature_bundle"] is None:
         return
-    # Reject empty-array envelopes outright — they would slip through
-    # the keyid-match check and let the issuer bypass the self-verdict
-    # gate by writing a structurally-empty signatures array.
+    # Reject malformed / empty-array envelopes outright — they would
+    # slip through the keyid-match check and let the issuer bypass
+    # the self-verdict gate either by corrupting the JSON or by
+    # writing a structurally-empty signatures array. Fail closed.
     try:
         _bundle = json.loads(row["signature_bundle"])
     except (json.JSONDecodeError, TypeError):
-        _bundle = None
-    if isinstance(_bundle, dict):
-        _sigs = _bundle.get("signatures")
-        if _sigs is not None and (
-            not isinstance(_sigs, list) or len(_sigs) == 0
-        ):
-            raise VerdictIssuerError(
-                f"{verdict_kind} verdict refused: claim '{claim_id}' "
-                "(relation=" + relation + ") has a signature_bundle "
-                "whose signatures field is empty or non-list. Refusing "
-                "to gate against an empty identity set."
-            )
+        raise VerdictIssuerError(
+            f"{verdict_kind} verdict refused: claim '{claim_id}' "
+            "(relation=" + relation + ") has a signature_bundle that "
+            "is not valid JSON. Refusing to gate against an unknowable "
+            "identity set."
+        )
+    if not isinstance(_bundle, dict):
+        raise VerdictIssuerError(
+            f"{verdict_kind} verdict refused: claim '{claim_id}' "
+            "(relation=" + relation + ") signature_bundle did not "
+            "decode to a JSON object."
+        )
+    _sigs = _bundle.get("signatures")
+    if _sigs is not None and (
+        not isinstance(_sigs, list) or len(_sigs) == 0
+    ):
+        raise VerdictIssuerError(
+            f"{verdict_kind} verdict refused: claim '{claim_id}' "
+            "(relation=" + relation + ") has a signature_bundle "
+            "whose signatures field is empty or non-list. Refusing "
+            "to gate against an empty identity set."
+        )
     keyids = _claim_signer_keyids(row["signature_bundle"])
     if issuer_keyid in keyids:
         try:
@@ -2380,8 +2449,22 @@ def _refuse_self_validation(
         try:
             bundle = json.loads(claim_signature_bundle)
         except (json.JSONDecodeError, TypeError):
-            return
-        signatures = bundle.get("signatures") if isinstance(bundle, dict) else None
+            # Fail closed: a non-NULL bundle that doesn't parse means
+            # the keyid set is unknowable, and the safe posture for a
+            # self-loop refusal gate is to refuse the validation
+            # rather than pass it.
+            raise SelfValidationError(
+                f"Claim '{claim_id}' has a signature_bundle that is "
+                "not valid JSON. Refusing to gate self-validation "
+                "against an unknowable identity set; investigate the "
+                "row's signature_bundle column before retrying."
+            )
+        if not isinstance(bundle, dict):
+            raise SelfValidationError(
+                f"Claim '{claim_id}' signature_bundle did not decode "
+                "to a JSON object; refusing to validate."
+            )
+        signatures = bundle.get("signatures")
         # A signed claim with an empty / non-list signatures field is a
         # structurally invalid envelope. Treating it as "absent" would
         # let a tamperer drop their keyid from the gate and self-promote
@@ -5181,7 +5264,19 @@ def _verify_claim_signatures_on_restore(
         # the remaining signatures and verify each one individually
         # against its claimed signer's enrolled pubkey. An attacker
         # who attached forged extra signatures would otherwise sneak
-        # them past restore and into substrate-trusted role attestations.
+        # them past restore and into substrate-trusted role
+        # attestations.
+        #
+        # Enforce the same role contract sign_claim_with_roles /
+        # verify_envelope_multi apply at write/verify time: every
+        # signature beyond the asserter MUST carry a role in
+        # VALID_CLAIM_ROLES, and roles must be unique across the
+        # envelope. Tampered TOML carrying two planner-tagged sigs or
+        # a fabricated "superuser" role gets refused here so the
+        # downstream query_provenance / unverified-role attestation
+        # set stays trustworthy.
+        from mareforma.signing import VALID_CLAIM_ROLES as _ROLES
+        seen_roles: set[str] = set()
         for extra_sig in all_sigs[1:]:
             if not isinstance(extra_sig, dict):
                 raise RestoreError(
@@ -5194,6 +5289,20 @@ def _verify_claim_signatures_on_restore(
                     f"Claim {claim_id} signature entry missing keyid.",
                     kind="claim_unverified",
                 )
+            extra_role = extra_sig.get("role")
+            if not isinstance(extra_role, str) or extra_role not in _ROLES:
+                raise RestoreError(
+                    f"Claim {claim_id} multi-sig entry carries role "
+                    f"{extra_role!r} which is not in {_ROLES}.",
+                    kind="claim_unverified",
+                )
+            if extra_role in seen_roles:
+                raise RestoreError(
+                    f"Claim {claim_id} multi-sig envelope has duplicate "
+                    f"role {extra_role!r}; each role may sign at most once.",
+                    kind="claim_unverified",
+                )
+            seen_roles.add(extra_role)
             if extra_keyid not in validators_section:
                 raise RestoreError(
                     f"Claim {claim_id} carries an extra signature from "

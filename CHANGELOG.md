@@ -4,12 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [0.3.1] - 2026-05-22
 
-Additive release. No schema migration required — the substrate's
-versioned schema stays at v1; the only on-disk schema change is a
-non-signed ALTER TABLE on `doi_cache` (auto-applied on first
-`mareforma.open()` after upgrade). A new rebuildable cache file
-lives at `.mareforma/claim_supports_cache.db`; deleting it
-triggers a one-time rebuild on next open.
+Additive release. The substrate's versioned schema stays at v1; new
+columns land via in-place `ALTER TABLE ADD COLUMN` on the
+non-signed-integrity surface. On first `mareforma.open()` after the
+upgrade the substrate auto-adds three columns: `claims.predicate_payload`
+(`TEXT NOT NULL DEFAULT ''`), `claims.original_signature_bundle`
+(`TEXT NULL`), and `doi_cache.content_digest` (`TEXT NULL`). None of
+these are part of the signed envelope or chain hash, so every
+existing claim's signed bytes round-trip byte-equal and signatures
+re-verify under the new code. A new rebuildable cache file lives at
+`.mareforma/claim_supports_cache.db`; the file is created on first
+open and auto-rebuilt on detection of count-mismatch, missing, or
+corrupt state.
 
 ### Added
 
