@@ -400,29 +400,208 @@ def status_cmd(as_json: bool) -> None:
     click.echo("")
 
 
+@cli.command("activity")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Emit JSON to stdout instead of a formatted table.")
+@click.option("--last", "last_n", type=int, default=None,
+              help="Aggregate only the last N events. Default: all events.")
+def activity_cmd(as_json: bool, last_n: int | None) -> None:
+    """Show rolling operational rates from the activity log.
+
+    The activity log captures one JSONL line per substrate operation
+    that produces operational signal: provenance queries, grounding
+    sensor verdicts, DOI drift scans, refresh_unsigned /
+    refresh_unresolved retries. ``mareforma activity`` aggregates the
+    log and prints rolling rates (grounding-pass-rate, DOI-drift-rate,
+    Rekor-log-recovery-rate) so an operator can see how the
+    substrate is behaving over time without re-querying graph.db.
+
+    Distinct from ``mareforma status``: ``status`` is a snapshot of
+    graph state right now; ``activity`` is a rolling view of what the
+    substrate has been doing.
+
+    \b
+    Examples:
+        mareforma activity
+        mareforma activity --last=100
+        mareforma activity --json
+    """
+    from mareforma.health import compute_rolling_stats
+    root = _root()
+    stats = compute_rolling_stats(root, last_n=last_n)
+    if as_json:
+        click.echo(json.dumps(stats, indent=2, sort_keys=True))
+        if stats.get("read_error"):
+            sys.exit(1)
+        return
+    if stats.get("read_error"):
+        _err("Activity log unreadable. Check filesystem permissions "
+             "on .mareforma/health.jsonl.")
+        sys.exit(1)
+    click.echo("  " + "-" * 50)
+    click.echo(f"  Events scanned: {stats['events_total']}")
+    malformed = stats.get("malformed_lines", 0)
+    if malformed:
+        click.echo(
+            f"  Malformed lines: {malformed}  "
+            "(check .mareforma/health.jsonl for corruption)"
+        )
+    if not stats["ops"]:
+        click.echo("  No operational events recorded yet.")
+        click.echo("  " + "-" * 50)
+        return
+    for op in sorted(stats["ops"]):
+        bucket = stats["ops"][op]
+        click.echo(f"  {op}:  {bucket['count']} events  "
+                   f"({bucket['ok']} ok / {bucket['fail']} fail / "
+                   f"{bucket['partial']} partial)")
+        extras = {
+            k: v for k, v in bucket.items()
+            if k not in ("count", "ok", "fail", "partial")
+        }
+        for k, v in sorted(extras.items()):
+            click.echo(f"      {k}: {v}")
+    click.echo("  " + "-" * 50)
+
+
+@cli.command("stats", hidden=True, deprecated=True)
+@click.option("--json", "as_json", is_flag=True, default=False)
+@click.option("--last", "last_n", type=int, default=None)
+@click.pass_context
+def stats_cmd(ctx: click.Context, as_json: bool, last_n: int | None) -> None:
+    """Deprecated alias of ``mareforma activity``.
+
+    ``mareforma stats`` and ``mareforma status`` are one letter apart
+    and semantically different (rolling rates vs. snapshot), so v0.3.1
+    renames the rolling-rates command to ``mareforma activity``. The
+    old name is kept as an alias for one release; v0.4 removes it.
+    """
+    import warnings as _warnings
+    _warnings.warn(
+        "`mareforma stats` has been renamed to `mareforma activity` "
+        "to break the stats/status homonym; the alias will be removed "
+        "in v0.4. Switch your scripts to `mareforma activity`.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    ctx.invoke(activity_cmd, as_json=as_json, last_n=last_n)
+
+
 # ---------------------------------------------------------------------------
 # export
 # ---------------------------------------------------------------------------
 
 @cli.command()
 @click.option("--output", default=None,
-              help="Output path. Default: <cwd>/ontology.jsonld or "
-                   "<cwd>/mareforma-bundle.json when --bundle is set.")
+              help="Output path. Default depends on --format / --bundle.")
 @click.option("--json", "as_json", is_flag=True, default=False,
-              help="Print JSON-LD to stdout instead of writing a file.")
+              help="Print JSON to stdout instead of writing a file.")
 @click.option("--bundle", is_flag=True, default=False,
               help="Produce a SCITT-style signed bundle (in-toto Statement "
                    "v1 + DSSE envelope). Requires a loaded signing key.")
-def export(output: str | None, as_json: bool, bundle: bool) -> None:
-    """Export all claims as a JSON-LD document, optionally as a signed bundle.
+@click.option(
+    "--format", "fmt",
+    type=click.Choice(["jsonld", "in-toto-v1", "ro-crate-1.2", "prov-o"]),
+    default="jsonld",
+    help=(
+        "Export format. 'jsonld' (default) = mareforma-native JSON-LD; "
+        "'in-toto-v1' = unsigned in-toto Statement v1 (sigstore / SLSA / "
+        "GUAC ecosystem); 'ro-crate-1.2' = RO-Crate 1.2 Process Run Crate "
+        "metadata (Galaxy / EuroScienceGateway / FAIR-EASE ecosystem); "
+        "'prov-o' = W3C PROV-O JSON-LD for provenance-aware tooling. "
+        "Use --bundle for a signed in-toto Statement v1 (different from "
+        "--format=in-toto-v1 which is unsigned)."
+    ),
+)
+def export(
+    output: str | None, as_json: bool, bundle: bool, fmt: str,
+) -> None:
+    """Export all claims, optionally as a signed bundle or interop format.
 
     \b
     Examples:
         mareforma export
         mareforma export --bundle
+        mareforma export --format=in-toto-v1
+        mareforma export --format=ro-crate-1.2 --output crate-metadata.json
         cat ontology.jsonld | jq '.["@graph"][]'
     """
     root = _root()
+
+    if bundle and fmt != "jsonld":
+        _err(
+            "--bundle and --format are mutually exclusive. --bundle produces "
+            "a signed in-toto v1 envelope; --format selects an unsigned "
+            "export shape. Choose one."
+        )
+        sys.exit(1)
+
+    def _display_path(p: Path) -> str:
+        """Show paths inside root as relative; absolute outside the tree."""
+        try:
+            return str(p.relative_to(root))
+        except ValueError:
+            return str(p)
+
+    if fmt == "in-toto-v1":
+        from mareforma.exporters.in_toto import build_statement
+        try:
+            statement = build_statement(root)
+            if as_json:
+                click.echo(json.dumps(statement, indent=2, ensure_ascii=False))
+                return
+            out_path = (
+                Path(output) if output else root / "mareforma-statement.json"
+            )
+            out_path.write_text(
+                json.dumps(statement, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            _ok(f"Exported in-toto Statement v1 → {_display_path(out_path)}")
+        except Exception as exc:
+            _err(f"in-toto export failed: {exc}")
+            sys.exit(1)
+        return
+
+    if fmt == "ro-crate-1.2":
+        from mareforma.exporters.ro_crate import build_crate
+        try:
+            crate = build_crate(root)
+            if as_json:
+                click.echo(json.dumps(crate, indent=2, ensure_ascii=False))
+                return
+            out_path = (
+                Path(output) if output else root / "ro-crate-metadata.json"
+            )
+            out_path.write_text(
+                json.dumps(crate, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            _ok(f"Exported RO-Crate 1.2 → {_display_path(out_path)}")
+        except Exception as exc:
+            _err(f"RO-Crate export failed: {exc}")
+            sys.exit(1)
+        return
+
+    if fmt == "prov-o":
+        from mareforma.exporters.prov_o import build_prov_o
+        try:
+            doc = build_prov_o(root)
+            if as_json:
+                click.echo(json.dumps(doc, indent=2, ensure_ascii=False))
+                return
+            out_path = (
+                Path(output) if output else root / "mareforma-prov-o.jsonld"
+            )
+            out_path.write_text(
+                json.dumps(doc, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            _ok(f"Exported PROV-O JSON-LD → {_display_path(out_path)}")
+        except Exception as exc:
+            _err(f"PROV-O export failed: {exc}")
+            sys.exit(1)
+        return
 
     if bundle:
         # Signed bundle path — needs a key.

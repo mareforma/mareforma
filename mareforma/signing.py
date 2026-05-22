@@ -550,6 +550,176 @@ def canonical_statement(
 
 
 
+VALID_CLAIM_ROLES = ("planner", "executor", "reviewer", "validator")
+
+
+def sign_claim_with_roles(
+    claim_fields: dict[str, Any],
+    role_signers: list[tuple[Ed25519PrivateKey, str]],
+    *,
+    evidence: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Sign a claim with multiple role-actors.
+
+    Produces a DSSE envelope whose ``signatures`` array carries one
+    entry per role-actor. Each entry adds a non-standard but
+    interoperable ``role`` field so verifiers can route each signature
+    to the right expected public key.
+
+    Trust boundary on the ``role`` field
+    -----------------------------------
+    The ``role`` string lives on the signature entry, **not** inside
+    the canonical Statement v1 payload. The DSSE pre-authentication
+    encoding (PAE) covers only ``(payloadType, payload)`` — identical
+    bytes for every signer — so a signer signing as ``"executor"``
+    produces bytes indistinguishable from the same key signing as
+    ``"planner"``. The keyid in each signature **is** cryptographically
+    bound (the verifier checks ``pubkey.verify(sig, PAE)``); the role
+    label is asserter-provided metadata that callers can re-label
+    without invalidating any signature.
+
+    Verifier-side code (:func:`verify_envelope_multi`) enforces a
+    role→key map at verify time, but a consumer who only sees the
+    envelope (without an expected map) MUST NOT treat the role string
+    as a substrate guarantee. Downstream agents that read role
+    attestations via :meth:`mareforma.EpistemicGraph.query_provenance`
+    receive the role under ``role_attestations_unverified``.
+
+    Parameters
+    ----------
+    claim_fields
+        Must contain every key in :data:`SIGNED_FIELDS`. The signed
+        Statement v1 payload is identical to single-sig ``sign_claim``
+        output; only the signature count differs.
+    role_signers
+        Non-empty list of ``(private_key, role)`` tuples. Each role
+        must be in :data:`VALID_CLAIM_ROLES`. Roles must be unique
+        within one envelope — two signatures sharing a role is a
+        malformed role attestation (the verifier would not know
+        which key to use).
+    evidence
+        Optional GRADE EvidenceVector.
+
+    Returns
+    -------
+    dict
+        DSSE envelope with N signature entries, each carrying
+        ``{"keyid", "sig", "role"}``. The payload bytes (and therefore
+        the chain hash + Statement v1 CID) are identical regardless of
+        signature count — adding role signatures does not perturb the
+        signed bytes.
+
+    Raises
+    ------
+    ValueError
+        If ``role_signers`` is empty, contains a non-VALID_CLAIM_ROLES
+        role, or contains duplicate roles.
+    """
+    if not role_signers:
+        raise ValueError(
+            "sign_claim_with_roles requires at least one (key, role) tuple"
+        )
+    seen_roles: set[str] = set()
+    for _, role in role_signers:
+        if role not in VALID_CLAIM_ROLES:
+            raise ValueError(
+                f"role {role!r} is not one of {VALID_CLAIM_ROLES}; "
+                "claim-with-roles:v1 envelopes name a known role per signature"
+            )
+        if role in seen_roles:
+            raise ValueError(
+                f"duplicate role {role!r} in role_signers; "
+                "each role may sign at most once per envelope"
+            )
+        seen_roles.add(role)
+    body = canonical_statement(claim_fields, evidence or {})
+    pae = dsse_pae(PAYLOAD_TYPE_CLAIM, body)
+    signatures: list[dict[str, str]] = []
+    for private_key, role in role_signers:
+        sig = private_key.sign(pae)
+        signatures.append({
+            "keyid": public_key_id(private_key.public_key()),
+            "sig": base64.standard_b64encode(sig).decode("ascii"),
+            "role": role,
+        })
+    return {
+        "payloadType": PAYLOAD_TYPE_CLAIM,
+        "payload": base64.standard_b64encode(body).decode("ascii"),
+        "signatures": signatures,
+    }
+
+
+def verify_envelope_multi(
+    envelope: dict[str, Any],
+    role_pubkeys: dict[str, Ed25519PublicKey],
+) -> bool:
+    """Verify every signature in a multi-sig DSSE envelope.
+
+    Each signature entry must (a) carry a ``role`` matching a key in
+    ``role_pubkeys`` and (b) verify against that key over the same
+    PAE bytes. ``role_pubkeys`` must cover every role present in the
+    envelope; a missing key is a verification failure, not an opt-out
+    (otherwise an attacker would forge a role and silently bypass
+    verification by omitting that key on the verifier side).
+
+    Returns True iff every signature in the envelope verifies under
+    the keyed role. Legacy single-sig envelopes (no ``role`` field on
+    the entry) are explicitly rejected — callers verifying those must
+    use :func:`verify_envelope` for backwards compatibility.
+
+    Raises
+    ------
+    InvalidEnvelopeError
+        On structural problems (no signatures, missing payload, bad
+        base64). Crypto-level mismatches return False; structural
+        problems raise so the caller can distinguish "wrong key" from
+        "malformed envelope".
+    """
+    if not isinstance(envelope, dict):
+        raise InvalidEnvelopeError("envelope must be a dict")
+    if envelope.get("payloadType") != PAYLOAD_TYPE_CLAIM:
+        raise InvalidEnvelopeError(
+            f"verify_envelope_multi only handles claim envelopes "
+            f"(payloadType={PAYLOAD_TYPE_CLAIM!r}); got "
+            f"{envelope.get('payloadType')!r}"
+        )
+    try:
+        payload_bytes = base64.standard_b64decode(envelope["payload"])
+        signatures = envelope["signatures"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise InvalidEnvelopeError(f"malformed envelope: {exc}") from exc
+    if not signatures:
+        raise InvalidEnvelopeError("envelope has no signatures")
+    pae = dsse_pae(PAYLOAD_TYPE_CLAIM, payload_bytes)
+    seen_roles: set[str] = set()
+    for entry in signatures:
+        if not isinstance(entry, dict):
+            raise InvalidEnvelopeError(
+                "signature entry must be a dict"
+            )
+        role = entry.get("role")
+        if not isinstance(role, str) or not role:
+            return False
+        if role in seen_roles:
+            return False
+        seen_roles.add(role)
+        pubkey = role_pubkeys.get(role)
+        if pubkey is None:
+            return False
+        try:
+            sig_bytes = base64.standard_b64decode(entry["sig"])
+            keyid = entry["keyid"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise InvalidEnvelopeError(f"malformed signature: {exc}") from exc
+        if keyid != public_key_id(pubkey):
+            return False
+        try:
+            pubkey.verify(sig_bytes, pae)
+        except InvalidSignature:
+            return False
+    return True
+
+
 def sign_claim(
     claim_fields: dict[str, Any],
     private_key: Ed25519PrivateKey,

@@ -5,21 +5,27 @@
 [![PyPI](https://img.shields.io/pypi/v/mareforma)](https://pypi.org/project/mareforma/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-AI scientists are being deployed on real research problems before any infrastructure exists to know which of their findings can be trusted. Observability tools record what an agent did — they do not record what it means, whether it converges with independent evidence, or how far a conclusion is from its raw data.
+**Trust your AI agents' findings without taking them on faith.**
 
-Mareforma is a local epistemic graph that accumulates findings across agent runs, detects convergence automatically when independent agents reach the same conclusion through different data paths, and exposes the full provenance chain so trust can be derived from structure rather than from self-reported confidence.
+Mareforma is the local store where research agents write their claims — signed, cross-referenced, and promoted when independent agents converge — so trust comes from evidence, not the agent's own confidence score.
 
-Every individual capability mareforma uses — Ed25519 signing, DSSE envelopes, Sigstore-Rekor transparency, GRADE-shaped evidence vectors, local SQLite — exists in mature form elsewhere. What's missing in the OSS landscape is the combination: a runtime, opt-in Python library that bundles them as the place an agent writes claims to. See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the lane.
+## Why
 
-**Mareforma records *what* the agent claimed and *how* — so silent pipeline failures, prior-knowledge fallbacks, and self-reported convergence become visible.** Trust signals are derived from graph structure (whose key signed what, which upstreams are cited, how many independent agents wrote the same conclusion), not from the agent's own confidence. The substrate is honest about what those signals do and do not prove — see "What mareforma is NOT" below.
+AI agents are being deployed on real research problems before any infrastructure exists to know which of their findings can be trusted. Tracing tools record *what the agent did*; they do not record what it means, whether it converges with independent evidence, or how far a conclusion is from its raw data. Without that structure, a silent pipeline failure, a prior-knowledge fallback, and a real result look identical.
+
+Every primitive mareforma uses — Ed25519 signing, DSSE envelopes, Sigstore-Rekor transparency, GRADE evidence vectors, SQLite — already exists in mature form. What is missing in the OSS landscape is the combination: a runtime, opt-in Python library that bundles them as the place an agent writes claims to.
+
+## What it does
 
 ```python
 import mareforma
 
 with mareforma.open() as graph:
 
-    # Query what is already established before asserting
-    prior = graph.query("topic X", min_support="REPLICATED")
+    # Query established prior claims. query_for_llm wraps text in
+    # <untrusted_data>...</untrusted_data> tags so a downstream LLM
+    # consumes it as data, not instructions.
+    prior = graph.query_for_llm("topic X", min_support="REPLICATED")
 
     claim_id = graph.assert_claim(
         "Cell type A exhibits property X under condition Y (n=842, p<0.001)",
@@ -27,6 +33,10 @@ with mareforma.open() as graph:
         generated_by="agent/model-a/lab_a",
         supports=[c["claim_id"] for c in prior],
     )
+
+    # Walk the full lineage of any claim: upstream + downstream + signatures
+    # + contradictions + verdicts in one deterministic dict.
+    lineage = graph.query_provenance(claim_id, depth=4)
 ```
 
 ```mermaid
@@ -44,125 +54,58 @@ graph LR
     style E fill:#713f12,stroke:#f59e0b,color:#fde68a
 ```
 
-`REPLICATED` requires that the converging claims share an `ESTABLISHED`
-upstream in `supports[]` — matches Cochrane/GRADE evidence-chain methodology.
-On a fresh graph, bootstrap an `ESTABLISHED` anchor with `seed=True`
-(enrolled validator only); see [Example 03](examples/03_documented_contestation)
-for the full seed-then-converge pattern.
+`REPLICATED` fires when two enrolled keys sign claims with different
+`generated_by` strings, all citing the same `ESTABLISHED` upstream in
+`supports[]` — three conditions, all required. On a fresh graph,
+bootstrap an `ESTABLISHED` anchor with `seed=True` (enrolled validator
+only); see [Example 03](examples/03_documented_contestation) for the
+full seed-then-converge pattern.
 
-## Findings contradict — both stay in the graph
-
-```python
-# ESTABLISHED consensus sits in the graph
-prior = graph.query("Treatment X", min_support="ESTABLISHED")
-
-# New larger study gets a different result — don't discard it, document it
-graph.assert_claim(
-    "Treatment X shows no effect (n=1240, p=0.21) — larger and more diverse cohort",
-    classification="ANALYTICAL",
-    contradicts=[c["claim_id"] for c in prior],
-)
-```
-
-Science advances by documented contestation, not by one side disappearing.
-Both claims coexist. A human reviewer sees the tension explicitly in the graph.
-
-## The infrastructure gap
-
-The current generation of agent systems provides no principled way to distinguish:
-
-- a finding backed by data from one backed by LLM prior knowledge
-- genuine independent replication from two agents repeating each other
-- an established consensus from a single speculative assertion
-
-Without that structure, every output looks like a result.
-
-- **Tracing and observability tools** record what the agent did. They do not
-record what it means, whether it can be trusted, or whether another agent
-already found the same thing by a different path.
-
-- **One-shot pipelines** evaporate findings between runs. There is no memory
-of what was established, no way to detect convergence, no accumulated graph.
-Each run starts from scratch.
-
-- **Silent pipeline failures** look like results. If the data pipeline returns
-null and the agent falls back to LLM prior knowledge, the finding looks
-identical to a data-driven one — unless you record the classification at
-assertion time.
-
-## Architecture
-
-```python
-graph = mareforma.open()                                # zero setup, no init required
-graph.assert_claim(text, classification="ANALYTICAL", supports=[...])
-graph.query(text, min_support="REPLICATED")
-graph.validate(claim_id, evidence_seen=[...])           # human promotes to ESTABLISHED, citing reviewed claims
-graph.health()                                          # HealthReport: per-status + per-support-level counters, traffic light
-graph.refresh_unresolved()                              # retry DOI verification for offline claims
-graph.refresh_all_dois()                                # force-re-check every DOI (retraction drift)
-graph.refresh_unsigned()                                # retry Rekor (replays from rekor_inclusions sidecar if present)
-graph.refresh_convergence()                             # retry detection for claims whose post-INSERT promotion errored
-graph.find_dangling_supports()                          # audit UUID refs that point nowhere
-graph.classify_supports([...])                          # tag each entry as claim/doi/external
-graph.get_tools(generated_by="agent/model-a/lab_a")     # framework-ready callables
-```
-
-**External verification, opt-in by component:**
-
-- **DOIs in `supports[]`/`contradicts[]`** are HEAD-checked against Crossref
-  and DataCite at assertion time. Failed verifications hold the claim out
-  of `REPLICATED` until `refresh_unresolved()` succeeds.
-- **Cryptographic signing** is opt-in. `mareforma bootstrap` once to
-  generate an Ed25519 keypair; every claim is then signed and tamper-evident.
-- **Sigstore-Rekor transparency log** is opt-in via
-  `mareforma.open(rekor_url=mareforma.signing.PUBLIC_REKOR_URL)`. Signed
-  claims are submitted to the log; the entry uuid + logIndex + raw
-  response bytes are persisted to the local `rekor_inclusions` sidecar.
-  Submission failures are retried by `refresh_unsigned()`.
-- **RFC 6962 inclusion-proof verification** is opt-in via
-  `mareforma.open(rekor_log_pubkey_pem=...)` (or `rekor_log_pubkey_path=`).
-  When the log operator's public key is supplied, every signed-claim
-  submit and every `refresh_unsigned()` re-fetches the entry from
-  Rekor and cryptographically verifies the Merkle audit path against
-  the log's signed checkpoint. Verification failure refuses to mark
-  the row `transparency_logged=1`. The key is persisted to
-  `.mareforma/rekor_log_pubkey.pem` as a TOFU pin — silent rotation
-  is refused on subsequent opens. See the Rekor limits below for
-  what verification does and does not prove.
-
-**Trust levels** — derived from graph topology, never self-reported:
+**Trust ladder** — derived from graph topology, never self-reported:
 
 | Level | Meaning |
 |---|---|
-| `PRELIMINARY` | One agent asserted it. The substrate has cryptographic provenance but no convergence signal yet. |
-| `REPLICATED` | ≥2 enrolled keys signed claims sharing an `ESTABLISHED` upstream with different `generated_by` strings. As strong as the writers' honesty about independence — the substrate detects that two strings differ, not that two physical agents do. |
-| `ESTABLISHED` | An enrolled human-typed key signed a validation envelope. Pass `evidence_seen=[...]` to bind the validator's review citations (every cited claim must exist and predate validation). Without `evidence_seen`, the envelope records that a human pressed a button; with it, the envelope records *what they reviewed*. |
+| `PRELIMINARY` | One agent asserted it. Cryptographic provenance, no convergence signal yet. |
+| `REPLICATED` | ≥2 enrolled keys signed claims sharing an `ESTABLISHED` upstream with different `generated_by` strings. |
+| `ESTABLISHED` | An enrolled human-typed key signed a validation envelope binding `evidence_seen=[...]` review citations. |
 
-**Classification** — declared by the agent, records epistemic origin:
+**Classification** — declared by the agent, records what kind of work produced it: `INFERRED` (LLM reasoning), `ANALYTICAL` (deterministic analysis against source data), `DERIVED` (explicitly built on `ESTABLISHED` / `REPLICATED` claims). Trust level and classification are independent axes — query both: `graph.query(text, min_support="REPLICATED", classification="ANALYTICAL")`.
 
-| Value | When |
-|---|---|
-| `INFERRED` | LLM reasoning (default) |
-| `ANALYTICAL` | Deterministic analysis against source data |
-| `DERIVED` | Explicitly built on ESTABLISHED or REPLICATED claims |
+### Core surface
 
-> **Trust level and classification are independent axes.** An `INFERRED + ESTABLISHED`
-> claim is possible (a human validated an LLM-prior-knowledge assertion); so is an
-> `ANALYTICAL + PRELIMINARY` claim (a data-grounded finding with no convergence yet).
-> Trust answers "how many parties witnessed this?"; classification answers "what did
-> the agent compute it from?" Use both when querying: `graph.query(text,
-> min_support="REPLICATED", classification="ANALYTICAL")`.
+```python
+graph.assert_claim(text, classification, supports=[...], grounding_sensor=verifier)
+graph.query(text, min_support="REPLICATED")           # filter by trust + classification
+graph.query_for_llm(text, ...)                        # prompt-injection-safe wrapper
+graph.query_provenance(claim_id, depth=4)             # full lineage view
+graph.validate(claim_id, evidence_seen=[...])         # human promotes to ESTABLISHED
+graph.refutation_status(claim_id)                     # clean / contested / contradicted / retracted
+graph.find_drifted_dois(limit=100)                    # detect retraction / metadata drift
+graph.find_dangling_supports()                        # audit references that point nowhere
+graph.get_tools(generated_by="agent/model-a/lab_a")   # framework-ready callables
+```
 
-Storage: local SQLite, WAL mode, ACID guarantees. Network calls only for opt-in external verification: DOI lookups (Crossref + DataCite) and Sigstore-Rekor transparency log.
+```bash
+mareforma bootstrap                  # one-time: generate Ed25519 signing key
+mareforma status                     # snapshot health report
+mareforma activity --last 100        # rolling op stats (verdict score, drift, ...)
+mareforma export <claim_id> --format prov-o   # also in-toto-v1 / ro-crate-1.2 / jsonld
+mareforma verify <bundle>            # check signatures + chain hashes
+```
+
+### External verification, opt-in by component
+
+- **DOIs in `supports[]` / `contradicts[]`** are HEAD-checked against Crossref and DataCite at assertion time. Failed verifications hold the claim out of `REPLICATED` until `refresh_unresolved()` succeeds. `refresh_all_dois()` force-re-checks every DOI and `find_drifted_dois()` surfaces registry metadata changes (catches retractions).
+- **Ed25519 signing** is opt-in via `mareforma bootstrap`. Every claim then carries a tamper-evident DSSE signature; legacy single-sig and the role-bound `claim-with-roles:v1` multi-signature envelopes both verify on `restore()`.
+- **Sigstore-Rekor transparency log** is opt-in via `mareforma.open(rekor_url=mareforma.signing.PUBLIC_REKOR_URL)`. Signed claims are submitted; entry uuid + logIndex + raw response bytes persist locally.
+- **RFC 6962 inclusion-proof verification** is opt-in via `mareforma.open(rekor_log_pubkey_pem=...)`. The substrate re-fetches each entry and cryptographically verifies the Merkle audit path against the log's signed checkpoint. The key is TOFU-pinned to `.mareforma/rekor_log_pubkey.pem` — silent rotation is refused.
+- **Grounding sensors** are opt-in via `assert_claim(grounding_sensor=verifier)`. Implement `mareforma.Verifier`; the verdict (score + rationale) is snapshotted into the signed predicate at assertion time. A reference `MockNLIVerifier` ships with the package.
+
+Storage: local SQLite, WAL mode, ACID guarantees. Network calls only for the opt-in external verifications above.
 
 ## Silent pipeline failures become visible
 
-The reproduction-worthy use case mareforma was built for. A real AI scientist
-agent runs a multi-step analysis: query a public dataset, regress a gene's
-expression against a phenotype, return the top hit. The data lookup silently
-returns null because of a stale EFO id. The agent's LLM reasoning fills the
-gap with prior knowledge and returns a plausible-sounding answer. The output
-looks identical to a data-driven result.
+The reproduction-worthy use case mareforma was built for. An AI agent runs a multi-step analysis: query a public dataset, regress a gene's expression against a phenotype, return the top hit. The data lookup silently returns null because of a stale identifier. The agent's LLM reasoning fills the gap with prior knowledge and returns a plausible-sounding answer. The output looks identical to a data-driven result.
 
 ```python
 finding_text = run_pipeline(target_gene, phenotype)
@@ -179,136 +122,44 @@ graph.assert_claim(
 )
 ```
 
-Now a downstream consumer querying `min_support="REPLICATED",
-classification="ANALYTICAL"` excludes the silent-fallback rows. The hallucinated
-finding is in the graph (auditable, signed), but it's NOT in the trustworthy
-result set. The wrapper that picks `"ANALYTICAL"` vs `"INFERRED"` is doing the
-work — the substrate makes that work visible and tamper-evident.
+A downstream consumer querying `min_support="REPLICATED", classification="ANALYTICAL"` excludes the silent-fallback rows. The hallucinated finding stays in the graph (auditable, signed) but is NOT in the trustworthy result set. The wrapper that picks `ANALYTICAL` vs `INFERRED` is doing the work — the substrate makes that work visible and tamper-evident.
 
-[Example 05 — Drug Target Provenance](examples/05_drug_target_provenance/)
-wraps MEDEA (a real AI scientist agent published on arXiv), reproduces a real
-silent-failure mode in its EFO id lookup, and shows the classification gate
-catching it.
+[Example 05 — Drug Target Provenance](examples/05_drug_target_provenance/) wraps MEDEA (a real AI research agent published on arXiv), reproduces a real silent-failure mode in its identifier lookup, and shows the classification gate catching it.
 
-## What mareforma is NOT
+## Findings contradict — both stay in the graph
 
-Honest scope, so the design choices land in the right frame:
+```python
+prior = graph.query("Treatment X", min_support="ESTABLISHED")
 
-- **Not a global trust system.** Trust is local to a project's enrolled
-  validators. Two projects' `ESTABLISHED` claims are not comparable across
-  installations — there is no federation layer, no cross-project key
-  directory, no shared ground truth.
-- **Classification is self-declared.** `ANALYTICAL`, `INFERRED`, `DERIVED`
-  are the asserter's claims about epistemic origin. The substrate signs
-  them tamper-evidently but does not verify them against the actual code
-  path. A misclassified claim is a trust failure of the asserter, not the
-  substrate.
-- **`generated_by` is self-declared too.** It is the substrate's primary
-  independence signal — `REPLICATED` fires only when two claims sharing
-  an upstream have different `generated_by` values. But the substrate
-  cannot verify that `agent/claude/lab_a` and `agent/claude/lab_b`
-  correspond to different physical agents; both are free-form strings
-  supplied by the caller. An adversary running both labs can produce
-  `REPLICATED` at will. Honest agents produce a useful signal; the
-  signal is no stronger than the discipline of the agents writing to
-  the graph.
-- **GRADE EvidenceVector is GRADE-shaped storage, not GRADE evaluation.**
-  Each claim carries a 5-domain vector (`risk_of_bias`, `inconsistency`,
-  `indirectness`, `imprecision`, `publication_bias`) plus three upgrade
-  flags, bound into the signed predicate. The substrate stores and
-  round-trips these values; it does not derive a single GRADE certainty
-  rating (high/moderate/low/very-low), does not gate upgrade flags on
-  study design (RCT vs. observational), and does not integrate the
-  vector into the `PRELIMINARY → REPLICATED → ESTABLISHED` ladder.
-  Full GRADE-style certainty derivation is out of scope for the current release
-  and on the deferred-features backlog.
-- **Rekor inclusion verification is opt-in, not on by default.** When
-  `rekor_url=` is configured, signed claims are submitted to the log
-  and the response — entry uuid, logIndex, integratedTime, and the
-  raw body bytes — is persisted to the local `rekor_inclusions`
-  sidecar. The submit-time response is cryptographically checked
-  (the returned entry must record OUR hash + OUR signature; mismatch
-  → submission treated as a failure), so a hostile log operator
-  cannot get the substrate to accept an unrelated entry as ours.
-  When the caller additionally supplies the log operator's public
-  key (`rekor_log_pubkey_pem=` or `rekor_log_pubkey_path=`), the
-  substrate re-fetches the entry and verifies the RFC 6962 Merkle
-  inclusion proof against the log's signed checkpoint — closing the
-  residual "the log forked or rewrote history after we submitted"
-  gap on the submit and `refresh_unsigned()` paths. Without an
-  explicit pubkey, the substrate trusts the log operator's
-  submit-time response (persisted locally for future
-  re-verification); the operator who needs strict transparency must
-  opt in. Restore-time re-verification of stored proofs is on the
-  deferred-features list (it needs the `rekor_inclusions` sidecar round-tripped
-  through `claims.toml`).
-- **DOIs are HEAD-checked, not content-verified.** External references
-  resolve to a 200 response; the substrate does not parse, sign, or
-  archive the referenced content. A DOI that resolves today may resolve
-  to different content tomorrow. The positive cache holds resolved DOIs
-  for 30 days — operators worried about retraction drift can call
-  `graph.refresh_all_dois()` to force-re-check every DOI against the
-  registry and surface the diff.
-- **No semantic deduplication.** Two claims with different `text` but
-  identical meaning are distinct rows. Convergence detection runs on
-  `supports[]` topology, not on text similarity.
-- **Dangling references in `supports[]` are accepted.** The substrate
-  does not refuse UUID-shaped strings that don't point to any existing
-  claim — a `supports` entry could legitimately reference a claim from
-  another project, a not-yet-asserted upstream, or a DOI. REPLICATED
-  detection requires the referenced ESTABLISHED claim to actually
-  exist + be open, so a dangling reference cannot trigger spurious
-  promotion. Operators auditing a graph for integrity can call
-  `graph.find_dangling_supports()` to surface every such hanging arrow.
-- **Contradiction is per-claim, not propagated downstream.** A signed
-  contradiction marks the older of two referenced claims; claims that
-  cited the now-invalidated one via `supports[]` are unaffected.
-  Deliberate boundary — see ARCHITECTURE.md.
-- **Verdict-issuer method labels are self-declared.** When an enrolled
-  issuer signs a `replication_verdict` with `method="semantic-cluster"`,
-  the substrate stores the label and binds it into the signature. It
-  does not verify that the labeled method was actually run, that two
-  `semantic-cluster` verdicts from different issuers used the same
-  algorithm or threshold, or that the issuer's confidence dict is
-  calibrated. Like `generated_by`, method labels are as strong as the
-  issuer's honesty. The verdict-issuer table is a typed-string registry
-  with cryptographic stapling, not an epistemic primitive on its own.
-- **No automated fraud detection.** The substrate refuses self-validation
-  and gates LLM-typed validators on both promotion and contradiction
-  paths, but it cannot detect colluding human validators, manufactured
-  datasets, or fabricated DOIs.
+graph.assert_claim(
+    "Treatment X shows no effect (n=1240, p=0.21) — larger and more diverse cohort",
+    classification="ANALYTICAL",
+    contradicts=[c["claim_id"] for c in prior],
+)
+```
 
-Related work mareforma does not replace: W3C PROV-O / PROV-AGENT
-(W3C-recommended provenance vocabulary), FAIRSCAPE's Evidence Graph
-Ontology (EVI — research-evidence ontology at `w3id.org/EVI`, MIT-
-licensed, not a W3C deliverable), IETF SCITT (signed supply-chain
-transparency architecture, currently `draft-ietf-scitt-architecture-22`).
-Mareforma is a runtime substrate for an agent's working graph, not a
-publication-grade provenance record.
+Science advances by documented contestation, not by one side disappearing. Both claims coexist; a human reviewer sees the tension in the graph. `graph.refutation_status(claim_id)` surfaces whether a claim is `clean`, `contested`, `contradicted`, or `retracted`.
+
+## Honest scope
+
+Mareforma signs *what the asserter claimed*. It does not verify that `classification`, `generated_by`, or verdict `method` labels match the actual computation behind them — they are typed strings under cryptographic stapling, not evidence on their own. Trust is local to a project's enrolled validators; there is no federation across installations.
+
+A single attacker with shell access can produce a fully-signature-conforming `REPLICATED` chain (two keys, two `generated_by` strings, a shared upstream) and promote it to `ESTABLISHED` (a second key with `validator_type="human"`) — every signature verifies, every export is spec-conformant, because one process on one machine is not a worldwide replication. Operators worried about this should pin a substrate-external identity anchor (ORCID resolution on `validated_by`, OIDC-anchored certificates, SCITT-style transparency-service receipts). The substrate makes the structural claims visible and tamper-evident; it does not adjudicate them.
+
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full set of design boundaries and [`SECURITY.md`](SECURITY.md) for the threat model.
+
+Related work mareforma does not replace: W3C PROV-O / PROV-AGENT (W3C-recommended provenance vocabulary), FAIRSCAPE's Evidence Graph Ontology (EVI, MIT-licensed), IETF SCITT (signed supply-chain transparency, currently `draft-ietf-scitt-architecture-22`). Mareforma is a runtime substrate for an agent's working graph, not a publication-grade provenance record.
 
 ## Get started
 
 ```bash
 uv add mareforma
-mareforma bootstrap            # one-time: generate Ed25519 signing key
+mareforma bootstrap            # optional: enable signing + transparency
 ```
 
-`mareforma bootstrap` is optional. Without it, claims are stored
-unsigned. With it, every claim carries a tamper-evident signature and
-can be published to a Sigstore-Rekor transparency log on demand.
+`mareforma bootstrap` is optional. Without it, claims are stored unsigned. With it, every claim carries a tamper-evident signature and can be published to a Sigstore-Rekor transparency log on demand.
 
-See [AGENTS.md](AGENTS.md) — execution contract, forbidden patterns,
-signing and transparency log, idempotency convention, `generated_by`
-requirements.
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the substrate design (rails
-not trains), [CONTRIBUTING.md](CONTRIBUTING.md) for the dev workflow,
-[SECURITY.md](SECURITY.md) for the threat model and disclosure
-channel, [CHANGELOG.md](CHANGELOG.md) for release notes.
-
-Full documentation: **https://docs.mareforma.com**
-
-## Examples
+### Examples
 
 | | Example | What it shows |
 |---|---|---|
@@ -316,4 +167,12 @@ Full documentation: **https://docs.mareforma.com**
 | 02 | [Compounding Agents](examples/02_compounding_agents/) | Findings accumulate across agent runs |
 | 03 | [Documented Contestation](examples/03_documented_contestation/) | Agent challenges established consensus |
 | 04 | [Private Data, Public Findings](examples/04_private_data_public_findings/) | Two labs share provenance without sharing data |
-| 05 | [Drug Target Provenance](examples/05_drug_target_provenance/) | Real AI scientist with honest epistemic status |
+| 05 | [Drug Target Provenance](examples/05_drug_target_provenance/) | Real AI research agent with honest evidence labels |
+
+[`AGENTS.md`](AGENTS.md) — execution contract, forbidden patterns, signing and transparency log, idempotency convention, `generated_by` requirements.
+[`ARCHITECTURE.md`](ARCHITECTURE.md) — substrate design (rails not trains), trust ladder topology, full design boundaries.
+[`CONTRIBUTING.md`](CONTRIBUTING.md) — dev workflow.
+[`CHANGELOG.md`](CHANGELOG.md) — release notes.
+[`SECURITY.md`](SECURITY.md) — threat model and disclosure channel.
+
+Full documentation: **https://docs.mareforma.com**

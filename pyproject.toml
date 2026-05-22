@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mareforma"
-version = "0.3.0"
+version = "0.3.1"
 description = "Epistemic infrastructure for AI scientists"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -55,9 +55,18 @@ mareforma = "mareforma.cli:cli"
 where = ["."]
 include = ["mareforma*"]
 
+[tool.setuptools.package-data]
+# PEP 561: ship the py.typed marker inside the wheel so downstream
+# type-checkers (mypy / pyright) honour mareforma's annotations
+# instead of treating every symbol as Any.
+mareforma = ["py.typed"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short -m 'not slow'"
+markers = [
+    "slow: long-running test (perf pins at 50k claims, network-backed adapters)",
+]
 
 [tool.coverage.run]
 source = ["mareforma"]

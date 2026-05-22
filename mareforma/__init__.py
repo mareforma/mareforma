@@ -1,13 +1,11 @@
 """Mareforma — local epistemic substrate for AI-assisted research."""
 
 __description__ = "Mareforma — local epistemic substrate for AI-assisted research."
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from mareforma._graph import EpistemicGraph
+from mareforma._graph import EpistemicGraph
 
 
 def _pem_canonical_der(pem_bytes: bytes) -> bytes:
@@ -344,7 +342,11 @@ def restore(
     return _restore(project_root, claims_toml=claims_toml)
 
 
-from mareforma._evidence import EvidenceVector, EvidenceVectorError
+from mareforma._evidence import (
+    EvidenceVector,
+    EvidenceVectorError,
+    VALID_STUDY_DESIGNS,
+)
 
 # Re-export the user-catchable exception surface. AGENTS.md / docstrings
 # document these as raise paths from the public API (assert_claim,
@@ -369,6 +371,14 @@ from mareforma.db import (
     RestoreError,
     CycleDetectedError,
     VerdictIssuerError,
+    REFUTATION_STATES,
+    VALID_REFUTATION_FILTERS,
+    refutation_status,
+)
+from mareforma.verifiers import (
+    Verifier,
+    MockNLIVerifier,
+    VerifierError,
 )
 from mareforma.signing import (
     SigningError,
@@ -378,17 +388,32 @@ from mareforma.signing import (
     RekorInclusionError,
 )
 from mareforma.validators import ValidatorNotEnrolledError
+from mareforma.predicate_types import (
+    BUILTIN_URIS,
+    PredicateTypeError,
+    is_registered,
+    predicates,
+    register as register_predicate,
+)
 
 
 __all__ = [
     "open",
+    "EpistemicGraph",
     "schema",
     "restore",
     "EvidenceVector",
+    "VALID_STUDY_DESIGNS",
     "safe_for_llm",
     "sanitize_for_llm",
     "wrap_untrusted",
     "__version__",
+    # Predicate-type registry.
+    "BUILTIN_URIS",
+    "PredicateTypeError",
+    "is_registered",
+    "predicates",
+    "register_predicate",
     # User-catchable exceptions (alphabetical under MareformaError).
     "MareformaError",
     "ChainIntegrityError",
@@ -411,6 +436,14 @@ __all__ = [
     "SigningError",
     "ValidatorNotEnrolledError",
     "VerdictIssuerError",
+    "VerifierError",
+    # Refutation taxonomy + presenter.
+    "REFUTATION_STATES",
+    "VALID_REFUTATION_FILTERS",
+    "refutation_status",
+    # Grounding sensor protocol + reference impl.
+    "Verifier",
+    "MockNLIVerifier",
 ]
 
 

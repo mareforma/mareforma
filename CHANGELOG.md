@@ -2,6 +2,168 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.1] - 2026-05-22
+
+Additive release. The substrate's versioned schema stays at v1; new
+columns land via in-place `ALTER TABLE ADD COLUMN` on the
+non-signed-integrity surface. On first `mareforma.open()` after the
+upgrade the substrate auto-adds three columns: `claims.predicate_payload`
+(`TEXT NOT NULL DEFAULT ''`), `claims.original_signature_bundle`
+(`TEXT NULL`), and `doi_cache.content_digest` (`TEXT NULL`). None of
+these are part of the signed envelope or chain hash, so every
+existing claim's signed bytes round-trip byte-equal and signatures
+re-verify under the new code. A new rebuildable cache file lives at
+`.mareforma/claim_supports_cache.db`; the file is created on first
+open and auto-rebuilt on detection of count-mismatch, missing, or
+corrupt state.
+
+### Added
+
+- **`EpistemicGraph.query_provenance(claim_id, depth=4)`** —
+  agent-readable lineage view of a claim: focal row + role-actor
+  signatures + recursive upstream / downstream walks + inbound
+  contradictions + replication verdicts in one deterministic dict.
+- **Rebuildable `claim_supports` cache.** Edge denormalisation in a
+  separate SQLite file (`.mareforma/claim_supports_cache.db`).
+  Recursive-CTE walkers serve provenance queries in O(depth * deg).
+  Auto-rebuilt on stale / missing detection; 50k-claim p99 < 300ms.
+- **`claim-with-roles:v1` multi-signature DSSE envelopes.** New
+  `mareforma.signing.sign_claim_with_roles` + `verify_envelope_multi`
+  let asserters carry per-role (planner / executor / reviewer /
+  validator) signatures inside one envelope. Legacy single-sig
+  envelopes verify under the existing `verify_envelope` unchanged.
+- **PROV-O JSON-LD exporter** + four-invariant hand-rolled
+  validator. `mareforma export --format=prov-o`.
+- **Self-validation defense-in-depth.** `_refuse_self_validation`
+  walks every signature on the envelope (not just signatures[0]);
+  new `_refuse_self_verdict` blocks replication / contradiction
+  verdict issuers from signing either referenced claim.
+- **GRADE certainty surface.** Optional `study_design` field on
+  `EvidenceVector` (`randomised-trial` / `observational` /
+  `case-series` / `not-applicable`) + new `EvidenceVector.certainty()`
+  returning the GRADE four-tier band.
+- **DOI metadata drift detection.** New
+  `doi_cache.content_digest` column +
+  `EpistemicGraph.find_drifted_dois(limit=N)` (Crossref AND DataCite
+  shapes, NFC-normalised, rate-limit-aware, registry-pinned).
+- **Refutation taxonomy + filter.** New `refutation_status()`
+  presenter (clean / contradicted / contested / retracted) and a
+  composable `refutation_filter` kwarg on `query()` / `search()`.
+- **Grounding sensor protocol.** New `mareforma.Verifier` Protocol +
+  `MockNLIVerifier` reference impl. `EpistemicGraph.assert_claim(
+  grounding_sensor=verifier)` snapshots the verdict (score +
+  rationale) into the signed Statement v1 predicate at assertion
+  time. Broken sensors fall back to no-score with a RuntimeWarning;
+  the claim still asserts.
+- **Predicate URI reservations.** `BUILTIN_URIS` expanded from 3 to
+  21 entries reserving the substrate-owned slots (claim,
+  epistemic-graph, claim-with-roles) plus 18 adapter URIs
+  (tool-call, ingested-trace, agent-trace, llm-output, review,
+  peer-review, elo-match, tournament-bracket, wet-lab-assay/{
+  flow-cytometry, sequencing, imaging, proteomics,
+  electrophysiology}, replication-attestation,
+  compounding-attestation, semantic-grounding, doi-resolution, and
+  the wet-lab-assay umbrella).
+- **Operational health log + stats CLI.** Append-only
+  `.mareforma/health.jsonl` records per-op operational signal
+  (provenance queries, grounding verdicts, DOI drift scans,
+  refresh retries). New `mareforma stats [--last N] [--json]`
+  command renders rolling rates (avg score, pass rate,
+  availability, average drift). Bounded reads use a
+  fixed-capacity deque so the reader stays O(last_n) on long logs.
+- **Public `EpistemicGraph.update_claim`** wrapper around
+  `db.update_claim`. Status mutations are EDITORIAL — the
+  docstring documents the unsigned trust posture and recommends
+  the retract-and-supersede pattern for cryptographically-traceable
+  retractions.
+- **Public `EpistemicGraph.refutation_status(claim_id)`** thin
+  wrapper exposing the presenter.
+- **`mareforma export --format` adds `prov-o`** alongside the
+  existing `in-toto-v1` / `ro-crate-1.2` / `jsonld` shapes.
+- **`assert_claim(signer=key, predicate_payload=dict,
+  original_signature_bundle=str, grounding_sensor=verifier)`** —
+  four new kwargs on the public assertion path for adapter
+  scaffolding.
+- **`record_replication_verdict(method='signed-elo-bracket-replay')`**
+  — new method enum value alongside hash-match, semantic-cluster,
+  shared-resolved-upstream, cross-method.
+
+### Changed
+
+- **CLI: `mareforma stats` renamed to `mareforma activity`.** The
+  old `stats` name was one letter from the unrelated `status`
+  command (snapshot vs. rolling-rate), and the homonym was a
+  source of confusion. `mareforma activity` carries the same
+  flags (`--json`, `--last=N`) and reads the same on-disk log.
+  The `mareforma stats` alias still works for one release and
+  emits a `DeprecationWarning` pointing at the new name; v0.4
+  removes the alias.
+- **Wheels now ship `mareforma/py.typed`** (PEP 561). Downstream
+  type-checkers (mypy / pyright) now honour mareforma's
+  annotations instead of treating every imported symbol as
+  `Any`. No source change required by callers; existing typed
+  integration code starts seeing real errors against the
+  substrate's signatures.
+- **`mareforma.EpistemicGraph` is now part of the public surface**
+  (added to `__all__`, importable via `mareforma.EpistemicGraph`).
+  Type-hint callers no longer need to reach into the private
+  `mareforma._graph` module to annotate function signatures that
+  accept a graph handle.
+
+### Hardening
+
+- Mixed journal mode bug fixed — both `graph.db` and
+  `claim_supports_cache.db` now run WAL so cross-DB transactions
+  share atomicity guarantees.
+- Multi-sig envelopes on `signature_bundle` get every signature
+  verified on `restore()`, not just signatures[0]. Forged extra
+  signatures are rejected.
+- Self-validation / self-verdict gates refuse claims whose
+  `signature_bundle.signatures` is empty or non-list (would
+  otherwise let a tamperer drop their keyid from the gate).
+- `find_drifted_dois` aborts on the first 429 and defaults to a
+  cap of 100 inspected DOIs per call (Crossref polite-pool
+  guidance ~50 req/sec with two GETs per DOI).
+- Grounding sensor receives `supports` as an immutable tuple so a
+  hostile or buggy verifier cannot mutate the citation list before
+  the predicate is signed.
+- Grounding sensor exception catch widened from
+  `(VerifierError, AttributeError, TypeError, ValueError)` to
+  `Exception` — real-world verifiers raise OSError /
+  ConnectionError / KeyError / RuntimeError, and the substrate's
+  documented "claim still lands" contract now actually holds for
+  those.
+- `health.jsonl` writes use `json.dumps(allow_nan=False)` so a NaN
+  score never produces non-portable JSONL that breaks `jq` /
+  browser `JSON.parse`.
+- PROV-O exporter refuses non-UUID claim_ids (parity with
+  RO-Crate); `_extract_metadata_subset` returns None on empty
+  subsets so first-seen seeding doesn't collapse every empty-
+  metadata DOI to the same digest.
+
+### Compatibility
+
+- Legacy single-signature claim envelopes verify under
+  `verify_envelope` unchanged.
+- `EvidenceVector.to_dict()` omits `study_design` /
+  `grounding_score` / `grounding_rationale` when None so the
+  canonical bytes of a previously-signed claim round-trip
+  byte-equal under the new verifier.
+- Re-registering one of the 18 newly-reserved adapter URIs
+  (anything other than `claim:v1`, `epistemic-graph:v1`,
+  `claim-with-roles:v1`) by a foreign owner is downgraded from
+  raise to DeprecationWarning for one release — adapters that
+  pre-registered before promotion get one cycle to drop the
+  call before the next version refuses outright. The three core
+  substrate-owned URIs still raise hard on foreign re-registration.
+- `predicate_payload` is intentionally NOT part of the
+  idempotency reconciliation surface — a retry with the same
+  `idempotency_key` but divergent `predicate_payload` silently
+  returns the first writer's `claim_id` and discards the second
+  payload. The field is a query-side denormalisation, not
+  cryptographic identity; adapters that need predicate-body
+  integrity must encode the body in the claim text instead.
+
 ## [0.3.0] - 2026-05-13
 
 Breaking change from v0.2.x. Schema does not migrate from older

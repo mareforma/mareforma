@@ -161,7 +161,43 @@ class EpistemicGraph:
         artifact_hash: str | None = None,
         evidence: "EvidenceVector | dict | None" = None,
         seed: bool = False,
+        signer: "object | None" = None,
+        predicate_payload: dict | None = None,
+        original_signature_bundle: str | None = None,
+        grounding_sensor: "object | None" = None,
     ) -> str:
+        # signer:
+        #     Per-call override for the graph's loaded signer. When
+        #     ``None`` (default), the call inherits the signer passed
+        #     to ``mareforma.open(key_path=...)``. When supplied, the
+        #     claim is signed with this key instead. Note: this does
+        #     NOT check that the signer's keyid is enrolled in the
+        #     validators table — same trust model as
+        #     ``mareforma.open(key_path=...)`` (anyone can sign, but
+        #     only enrolled keys can ``validate()`` claims to
+        #     ESTABLISHED). Use for multi-signer hosts that have
+        #     multiple keys loaded (e.g. one per role-actor in the
+        #     ``claim-with-roles:v1`` predicate variant).
+        # predicate_payload:
+        #     Optional structured predicate body for adapters that
+        #     ship a typed predicateType (tool-call/v1,
+        #     ingested-trace/v1, wet-lab-assay/<class>/v1, etc.).
+        #     Stored in the ``predicate_payload`` column for
+        #     queryable filters. NOTE: this column is NOT bound into
+        #     the signed envelope or chain hash — it is a query-side
+        #     denormalisation only. Adapters that depend on
+        #     cryptographic integrity of the predicate body should
+        #     encode it inside the claim text JSON; this column is
+        #     the queryable index, not the source of truth.
+        # original_signature_bundle:
+        #     Optional source-side DSSE envelope, preserved by
+        #     federation-import flows. The active ``signature_bundle``
+        #     carries the receiver's re-signed envelope; this column
+        #     holds the original for downstream verifiers that want
+        #     to reconstruct the source-side proof. NOTE: the substrate
+        #     does NOT validate this string at write time (only that
+        #     it parses as JSON for normalisation). Pass a structurally
+        #     valid DSSE envelope JSON or leave None.
         """Assert a claim into the epistemic graph. Returns claim_id.
 
         Parameters
@@ -270,6 +306,67 @@ class EpistemicGraph:
                 f"got {type(evidence).__name__}"
             )
 
+        # Snapshot the grounding sensor's verdict into the EvidenceVector
+        # so the score is signed alongside the rest of the claim. A
+        # broken sensor (any Exception subclass: bad shape, model
+        # failure, OSError, KeyError, IndexError, network error, etc.)
+        # does NOT block assertion — we log a warning and drop the
+        # score. BaseException-only failures (KeyboardInterrupt /
+        # SystemExit / MemoryError) propagate so signal-driven
+        # shutdown still works. Asserter philosophy: the substrate
+        # signs what the asserter claims; verifier wiring is a
+        # quality hint, not a gate.
+        #
+        # SECURITY: the verifier sees the full claim text and the
+        # supports list. A verifier backed by a remote API (LLM
+        # provider, HuggingFace Inference, etc.) will transmit
+        # claim content to that endpoint. Callers handling
+        # privacy-sensitive content should wire local verifiers
+        # only.
+        #
+        # The supports list is passed as an immutable tuple so a
+        # hostile or buggy verifier cannot mutate the asserter's
+        # citation list before the predicate is signed.
+        if grounding_sensor is not None:
+            import warnings as _warnings
+            try:
+                score, rationale = grounding_sensor.grounding_score(
+                    text, tuple(supports or ()),
+                )
+                if not isinstance(rationale, str):
+                    raise TypeError(
+                        "grounding_sensor rationale must be a str; got "
+                        f"{type(rationale).__name__}"
+                    )
+                ev = EvidenceVector.from_dict({
+                    **ev.to_dict(),
+                    "grounding_score": float(score),
+                    "grounding_rationale": rationale,
+                })
+                from mareforma import health as _health
+                _health.append_health_event(
+                    self._root, "grounding_verdict",
+                    score=float(score),
+                )
+            except Exception as exc:
+                _warnings.warn(
+                    f"grounding_sensor raised {type(exc).__name__}: "
+                    f"{exc}; asserting without grounding_score.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                # Emit a failure event so rolling stats can compute
+                # availability = ok / (ok + fail) alongside pass_rate;
+                # otherwise a flaky sensor with 100% pass-when-running
+                # but 50% success reports as 100% pass_rate and the
+                # operator never sees the unreliability.
+                from mareforma import health as _health
+                _health.append_health_event(
+                    self._root, "grounding_verdict",
+                    outcome="fail",
+                    error=type(exc).__name__,
+                )
+
         def _bump_convergence_errors(_exc: Exception) -> None:
             self._convergence_errors += 1
 
@@ -288,11 +385,13 @@ class EpistemicGraph:
             artifact_hash=artifact_hash,
             evidence=ev,
             seed=seed,
-            signer=self._signer,
+            signer=signer if signer is not None else self._signer,
             rekor_url=self._rekor_url,
             require_rekor=self._require_rekor,
             on_convergence_error=_bump_convergence_errors,
             rekor_log_pubkey_pem=self._rekor_log_pubkey_pem,
+            predicate_payload=predicate_payload,
+            original_signature_bundle=original_signature_bundle,
         )
 
     def query(
@@ -304,8 +403,18 @@ class EpistemicGraph:
         limit: int = 20,
         include_unverified: bool = False,
         include_invalidated: bool = False,
+        refutation_filter: str | None = None,
     ) -> list[dict]:
         """Query claims from the epistemic graph.
+
+        Returns claim dicts with the raw ``text`` field. **If the
+        caller plans to splice these into an LLM prompt context,
+        use** :meth:`query_for_llm` **instead** — it wraps the text in
+        ``<untrusted_data>...</untrusted_data>`` markers so the LLM
+        treats retrieved content as data, not instructions
+        (Greshake et al., AISec '23, arXiv:2302.12173). This method
+        returns bytes verbatim; the burden of escape is on the
+        caller.
 
         Parameters
         ----------
@@ -328,6 +437,44 @@ class EpistemicGraph:
             When ``False`` (default), claims marked invalid by a signed
             contradiction verdict (``t_invalid IS NOT NULL``) are
             excluded. Pass ``True`` for audit / history queries.
+        refutation_filter:
+            Optional refutation-state filter, one of ``"clean"`` /
+            ``"contradicted"`` / ``"contested"`` / ``"retracted"`` /
+            ``"any"``. Composes with the other filters via AND:
+
+            * ``"clean"`` — restrict to ``t_invalid IS NULL`` AND
+              ``status = 'open'`` (the strictest "nothing wrong"
+              cohort).
+            * ``"contradicted"`` — restrict to ``t_invalid IS NOT
+              NULL``; overrides the default ``include_invalidated``
+              gate so contradicted rows surface even when the flag
+              wasn't flipped.
+            * ``"contested"`` — restrict to ``status = 'contested'``.
+            * ``"retracted"`` — restrict to ``status = 'retracted'``.
+            * ``"any"`` — surface every refutation state; implies
+              ``include_invalidated=True``.
+
+            Composition examples::
+
+                # high-confidence ESTABLISHED claims with no refutation
+                graph.query(
+                    min_support="ESTABLISHED",
+                    refutation_filter="clean",
+                )
+
+                # every claim with a signed contradiction, including
+                # the contradicting + contradicted pairs
+                graph.query(
+                    refutation_filter="contradicted",
+                    include_invalidated=True,
+                )
+
+                # full-text search within unverified preliminary work
+                graph.search(
+                    "gene therapy",
+                    refutation_filter="clean",
+                    include_unverified=True,
+                )
 
         Returns
         -------
@@ -356,7 +503,90 @@ class EpistemicGraph:
             limit=limit,
             include_unverified=include_unverified,
             include_invalidated=include_invalidated,
+            refutation_filter=refutation_filter,
         )
+
+    def update_claim(
+        self,
+        claim_id: str,
+        *,
+        status: str | None = None,
+        text: str | None = None,
+        supports: list[str] | None = None,
+        contradicts: list[str] | None = None,
+        comparison_summary: str | None = None,
+    ) -> None:
+        """Update mutable fields on an existing claim.
+
+        ``status`` and ``comparison_summary`` are always editable.
+        ``text`` / ``supports`` / ``contradicts`` are part of the signed
+        payload and refuse to mutate when the claim carries a signature
+        bundle — use a retraction-plus-new-assertion flow on those
+        cases.
+
+        Trust model on ``status`` mutations
+        -----------------------------------
+        A status change (open / contested / retracted) is an EDITORIAL
+        action — it produces no signed envelope, requires no validator
+        keyid, and is not round-tripped through the signature-verify
+        layer. An ESTABLISHED claim can be flipped to ``retracted`` by
+        any process with DB write access; nothing in the substrate
+        cryptographically records who pulled the lever. Compare with
+        signed contradiction verdicts, which DO require an enrolled
+        validator's signature and DO survive restore intact.
+
+        For a cryptographically-traceable retraction story, prefer the
+        retract-then-supersede pattern: assert a new claim with
+        ``contradicts=[<old_claim_id>]`` signed by a validator key.
+        That produces a signed envelope plus a contradiction verdict
+        that restore can re-verify.
+
+        Concurrency
+        -----------
+        Two processes calling ``update_claim`` on the same claim are
+        serialised by SQLite at the row level; semantics are
+        last-writer-wins with no conflict detection. Callers that need
+        compare-and-set semantics on ``status`` should add their own
+        out-of-band lock or assert a new claim instead of mutating an
+        existing one.
+
+        Raises :class:`ClaimNotFoundError`,
+        :class:`SignedClaimImmutableError`,
+        :class:`IllegalStateTransitionError`, or :class:`ValueError`
+        per the underlying :func:`mareforma.db.update_claim` contract.
+        """
+        self._check_open()
+        _db.update_claim(
+            self._conn,
+            self._root,
+            claim_id,
+            status=status,
+            text=text,
+            supports=supports,
+            contradicts=contradicts,
+            comparison_summary=comparison_summary,
+        )
+
+    def refutation_status(self, claim_id: str) -> dict:
+        """Return the refutation classification for *claim_id*.
+
+        Result shape: ``{"state", "reason", "signal"}`` where
+        ``state`` is one of :data:`mareforma.db.REFUTATION_STATES`
+        (``"clean"`` | ``"contradicted"`` | ``"contested"`` |
+        ``"retracted"``), ``reason`` is a short human-readable
+        explanation, and ``signal`` is ``"signed-verdict"`` /
+        ``"editorial"`` / ``"none"`` indicating the strength of the
+        underlying evidence.
+
+        Raises :class:`ClaimNotFoundError` if no such claim exists.
+        """
+        self._check_open()
+        row = _db.get_claim(self._conn, claim_id)
+        if row is None:
+            raise _db.ClaimNotFoundError(
+                f"Claim '{claim_id}' not found."
+            )
+        return _db.refutation_status(row)
 
     def search(
         self,
@@ -972,12 +1202,65 @@ class EpistemicGraph:
             if (not ok) and prior.get(d, False) is True
         )
 
+        from mareforma import health as _health
+        _health.append_health_event(
+            self._root, "refresh_unresolved",
+            succeeded=still_resolved,
+            checked=len(results),
+        )
         return {
             "checked": len(results),
             "still_resolved": still_resolved,
             "now_unresolved": now_unresolved,
             "newly_failed": newly_failed,
         }
+
+    def find_drifted_dois(self, *, limit: int | None = None) -> list[dict]:
+        """Walk the doi_cache and report DOIs whose metadata has drifted.
+
+        Fetches Crossref / DataCite metadata for every cached resolved
+        DOI, recomputes a stable content digest (title + year +
+        container + author family names), and returns the DOIs whose
+        digest differs from the one stored at last resolution.
+
+        First-seen rows (no stored digest) are seeded with the current
+        digest and excluded from the result — they're a baseline, not
+        drift. Returns ``[]`` when httpx is unavailable or no drift is
+        detected.
+
+        Use as a periodic health-check: a drifted DOI may indicate a
+        retraction, correction, or indexing-host swap on a referenced
+        paper. Whether to refresh the cache or flag affected claims is
+        a policy decision left to the caller.
+
+        Parameters
+        ----------
+        limit
+            Optional cap on how many DOIs to inspect per call. ``None``
+            walks every resolved row.
+
+        Returns
+        -------
+        list[dict]
+            ``[{"doi", "stored_digest", "current_digest",
+            "last_checked_at"}, ...]`` — one entry per drifted DOI.
+        """
+        self._check_open()
+        from mareforma import health as _health
+        drifted, walked, aborted = _doi.find_drifted_dois(
+            self._conn, limit=limit,
+        )
+        # Emit a coherent (drifted, total_inspected) pair plus an
+        # outcome that distinguishes "clean full scan" from "walk
+        # aborted on 429 after K rows" — otherwise the rolling
+        # rate-limit-recovery signal in stats CLI is invisible.
+        _health.append_health_event(
+            self._root, "doi_drift_scan",
+            outcome="partial" if aborted else "ok",
+            drifted=len(drifted),
+            total_inspected=walked,
+        )
+        return drifted
 
     def refresh_convergence(self) -> dict[str, int]:
         """Retry convergence detection for every flagged claim.
@@ -1066,6 +1349,209 @@ class EpistemicGraph:
         yields the same output.
         """
         return _db.classify_supports(values)
+
+    def query_provenance(
+        self,
+        claim_id: str,
+        *,
+        depth: int = 4,
+    ) -> dict:
+        """Return a structured provenance lineage for *claim_id*.
+
+        The returned object is the agent-readable interface to the
+        substrate. It snapshots, in one deterministic shape:
+
+        * the focal claim's identity, classification, support_level,
+          status, GRADE evidence vector, asserter, and role
+          attestations (the signatures in the DSSE envelope)
+        * a recursive upstream chain (``supports[]`` walked to *depth*
+          hops via the rebuildable :mod:`mareforma._supports` cache)
+        * inbound contradictions (claims this one contradicts and
+          claims that contradict it, including signed
+          ``contradiction_verdicts`` rows)
+        * the replication signal (which clusters this claim sits in,
+          via ``replication_verdicts``)
+        * a transparency-log slice (Rekor inclusion proofs for the
+          focal claim and its ancestors)
+
+        The shape is intentionally JSON-serialisable end-to-end so the
+        caller can feed it directly to a downstream agent prompt,
+        attach it to a PROV-O export, or persist it as audit evidence.
+        No fields are post-processed beyond denormalisation; every
+        signed envelope is returned verbatim from the row so consumers
+        can independently re-verify against the enrolled validators.
+
+        Parameters
+        ----------
+        claim_id
+            UUIDv4 claim identifier to anchor the walk on.
+        depth
+            Maximum recursive hops to follow into the upstream chain.
+            Bounded at the cache walker level; ``depth=0`` returns the
+            focal claim and metadata only (no upstream chain).
+
+        Returns
+        -------
+        dict
+            ``{"claim", "upstream", "downstream", "contradictions",
+            "replication", "transparency"}``. ``claim`` carries the
+            focal row + role attestations; ``upstream`` /
+            ``downstream`` are lists of ``{"claim_id", "depth",
+            "position", "row"}`` entries.
+
+        Raises
+        ------
+        ClaimNotFoundError
+            If *claim_id* does not exist in the graph.
+        """
+        self._check_open()
+        from mareforma import _supports
+
+        # claim_id is interpolated into a LIKE pattern below; an
+        # attacker-controlled claim_id containing % or _ wildcards
+        # would force a full-table scan. Validate UUID shape up front
+        # so the LIKE pattern is constrained to a hex-only payload.
+        if not _db._is_claim_id(claim_id):
+            raise _db.ClaimNotFoundError(
+                f"Claim '{claim_id}' is not a valid claim_id; cannot "
+                "build lineage."
+            )
+
+        focal = _db.get_claim(self._conn, claim_id)
+        if focal is None:
+            raise _db.ClaimNotFoundError(
+                f"Claim '{claim_id}' not found; cannot build lineage."
+            )
+
+        # Signers on the DSSE envelope. claim:v1 has one (the
+        # asserter); claim-with-roles:v1 has N (planner / executor /
+        # reviewer / validator). The keyid IS cryptographically bound
+        # (each signature is verified over the PAE on disk during
+        # restore). The ``role`` string sits on the signature entry
+        # and is NOT covered by the signed payload bytes — see
+        # :func:`mareforma.signing.sign_claim_with_roles` for the
+        # trust boundary. The field is exposed here as
+        # ``role_attestations_unverified`` so callers can't mistake
+        # the role tag for a substrate guarantee.
+        role_attestations_unverified: list[dict] = []
+        if focal.get("signature_bundle"):
+            try:
+                bundle = json.loads(focal["signature_bundle"])
+                for sig in bundle.get("signatures", []) or []:
+                    if isinstance(sig, dict):
+                        role_attestations_unverified.append({
+                            "keyid": sig.get("keyid"),
+                            "role_unverified": sig.get("role"),
+                        })
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                pass
+
+        # Upstream / downstream walks via the rebuildable cache.
+        upstream_edges = (
+            _supports.walk_upstream(self._conn, claim_id, depth=depth)
+            if depth >= 1 else []
+        )
+        downstream_edges = (
+            _supports.walk_downstream(self._conn, claim_id, depth=depth)
+            if depth >= 1 else []
+        )
+
+        def _hydrate(edges: list[dict]) -> list[dict]:
+            if not edges:
+                return []
+            # Batched fetch: one query per ~999 edges instead of one
+            # query per edge. SQLite's variable-count cap is 999 in
+            # most builds; chunk the IN-list to stay under it.
+            ids = list({e["claim_id"] for e in edges})
+            rows_by_id: dict[str, dict] = {}
+            chunk_size = 900
+            for i in range(0, len(ids), chunk_size):
+                chunk = ids[i:i + chunk_size]
+                placeholders = ",".join("?" * len(chunk))
+                cursor = self._conn.execute(
+                    f"SELECT {_db._CLAIM_SELECT} FROM claims "
+                    f"WHERE claim_id IN ({placeholders})",
+                    chunk,
+                )
+                for row in cursor.fetchall():
+                    rows_by_id[row["claim_id"]] = dict(row)
+            return [
+                {
+                    "claim_id": e["claim_id"],
+                    "depth": e["depth"],
+                    "position": e["position"],
+                    "row": rows_by_id.get(e["claim_id"]),
+                }
+                for e in edges
+            ]
+
+        # Inbound contradictions: claims that list this one in their
+        # contradicts[] array. Uses json_each so SQLite can scan the
+        # JSON values directly instead of falling back to LIKE-based
+        # substring match on every row. Still O(N) in the absence of a
+        # reverse-cache table (deferred future work), but the json_each
+        # form is friendlier to future expression-index work.
+        contradicts_back: list[str] = []
+        try:
+            inbound = self._conn.execute(
+                "SELECT DISTINCT c.claim_id FROM claims c, "
+                "json_each(c.contradicts_json) je "
+                "WHERE je.value = ?",
+                (claim_id,),
+            ).fetchall()
+            contradicts_back = [r["claim_id"] for r in inbound]
+        except sqlite3.OperationalError:
+            # Fallback for SQLite builds without json1 (vanishingly rare
+            # on the documented ≥3.30 floor, but cheap insurance).
+            for r in self._conn.execute(
+                "SELECT claim_id, contradicts_json FROM claims "
+                "WHERE contradicts_json LIKE ?",
+                (f'%"{claim_id}"%',),
+            ).fetchall():
+                try:
+                    if claim_id in json.loads(r["contradicts_json"] or "[]"):
+                        contradicts_back.append(r["claim_id"])
+                except (json.JSONDecodeError, TypeError):
+                    continue
+
+        # query_provenance is an AUDIT surface; show the verdicts that
+        # invalidated the focal claim. Without include_invalidated=True
+        # a signed contradiction verdict against this claim would be
+        # filtered out — exactly the verdict the operator needs to see
+        # when investigating provenance of an invalidated claim.
+        verdicts_for = _db.list_contradiction_verdicts(
+            self._conn, claim_id=claim_id, include_invalidated=True,
+        )
+        repl_verdicts = _db.list_replication_verdicts(
+            self._conn, member_claim_id=claim_id,
+            include_invalidated=True,
+        )
+
+        # Operational log: this is a queryable signal, emit one event.
+        from mareforma import health as _health
+        _health.append_health_event(
+            self._root, "provenance_query", depth=depth,
+        )
+
+        return {
+            "claim": {
+                **focal,
+                "role_attestations_unverified": (
+                    role_attestations_unverified
+                ),
+            },
+            "upstream": _hydrate(upstream_edges),
+            "downstream": _hydrate(downstream_edges),
+            "contradictions": {
+                "this_contradicts": json.loads(
+                    focal.get("contradicts_json") or "[]"
+                ),
+                "contradicted_by": contradicts_back,
+                "signed_verdicts": verdicts_for,
+            },
+            "replication": repl_verdicts,
+            "depth": depth,
+        }
 
     def find_dangling_supports(self) -> list[dict]:
         """Return UUID-shaped ``supports[]`` entries that point nowhere.
@@ -1311,6 +1797,12 @@ class EpistemicGraph:
             else:
                 still_unlogged += 1
 
+        from mareforma import health as _health
+        _health.append_health_event(
+            self._root, "refresh_unsigned",
+            succeeded=logged_count,
+            checked=len(unlogged),
+        )
         return {
             "checked": len(unlogged),
             "logged": logged_count,
