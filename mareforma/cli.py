@@ -400,27 +400,31 @@ def status_cmd(as_json: bool) -> None:
     click.echo("")
 
 
-@cli.command("stats")
+@cli.command("activity")
 @click.option("--json", "as_json", is_flag=True, default=False,
               help="Emit JSON to stdout instead of a formatted table.")
 @click.option("--last", "last_n", type=int, default=None,
               help="Aggregate only the last N events. Default: all events.")
-def stats_cmd(as_json: bool, last_n: int | None) -> None:
-    """Show rolling operational rates from .mareforma/health.jsonl.
+def activity_cmd(as_json: bool, last_n: int | None) -> None:
+    """Show rolling operational rates from the activity log.
 
-    The health log captures one JSONL line per substrate operation
+    The activity log captures one JSONL line per substrate operation
     that produces operational signal: provenance queries, grounding
     sensor verdicts, DOI drift scans, refresh_unsigned /
-    refresh_unresolved retries. ``mareforma stats`` aggregates the
+    refresh_unresolved retries. ``mareforma activity`` aggregates the
     log and prints rolling rates (grounding-pass-rate, DOI-drift-rate,
     Rekor-log-recovery-rate) so an operator can see how the
     substrate is behaving over time without re-querying graph.db.
 
+    Distinct from ``mareforma status``: ``status`` is a snapshot of
+    graph state right now; ``activity`` is a rolling view of what the
+    substrate has been doing.
+
     \b
     Examples:
-        mareforma stats
-        mareforma stats --last=100
-        mareforma stats --json
+        mareforma activity
+        mareforma activity --last=100
+        mareforma activity --json
     """
     from mareforma.health import compute_rolling_stats
     root = _root()
@@ -431,8 +435,8 @@ def stats_cmd(as_json: bool, last_n: int | None) -> None:
             sys.exit(1)
         return
     if stats.get("read_error"):
-        _err("Health log unreadable. Check filesystem permissions on "
-             ".mareforma/health.jsonl.")
+        _err("Activity log unreadable. Check filesystem permissions "
+             "on .mareforma/health.jsonl.")
         sys.exit(1)
     click.echo("  " + "-" * 50)
     click.echo(f"  Events scanned: {stats['events_total']}")
@@ -458,6 +462,29 @@ def stats_cmd(as_json: bool, last_n: int | None) -> None:
         for k, v in sorted(extras.items()):
             click.echo(f"      {k}: {v}")
     click.echo("  " + "-" * 50)
+
+
+@cli.command("stats", hidden=True, deprecated=True)
+@click.option("--json", "as_json", is_flag=True, default=False)
+@click.option("--last", "last_n", type=int, default=None)
+@click.pass_context
+def stats_cmd(ctx: click.Context, as_json: bool, last_n: int | None) -> None:
+    """Deprecated alias of ``mareforma activity``.
+
+    ``mareforma stats`` and ``mareforma status`` are one letter apart
+    and semantically different (rolling rates vs. snapshot), so v0.3.1
+    renames the rolling-rates command to ``mareforma activity``. The
+    old name is kept as an alias for one release; v0.4 removes it.
+    """
+    import warnings as _warnings
+    _warnings.warn(
+        "`mareforma stats` has been renamed to `mareforma activity` "
+        "to break the stats/status homonym; the alias will be removed "
+        "in v0.4. Switch your scripts to `mareforma activity`.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    ctx.invoke(activity_cmd, as_json=as_json, last_n=last_n)
 
 
 # ---------------------------------------------------------------------------

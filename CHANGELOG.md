@@ -88,6 +88,28 @@ corrupt state.
   — new method enum value alongside hash-match, semantic-cluster,
   shared-resolved-upstream, cross-method.
 
+### Changed
+
+- **CLI: `mareforma stats` renamed to `mareforma activity`.** The
+  old `stats` name was one letter from the unrelated `status`
+  command (snapshot vs. rolling-rate), and the homonym was a
+  source of confusion. `mareforma activity` carries the same
+  flags (`--json`, `--last=N`) and reads the same on-disk log.
+  The `mareforma stats` alias still works for one release and
+  emits a `DeprecationWarning` pointing at the new name; v0.4
+  removes the alias.
+- **Wheels now ship `mareforma/py.typed`** (PEP 561). Downstream
+  type-checkers (mypy / pyright) now honour mareforma's
+  annotations instead of treating every imported symbol as
+  `Any`. No source change required by callers; existing typed
+  integration code starts seeing real errors against the
+  substrate's signatures.
+- **`mareforma.EpistemicGraph` is now part of the public surface**
+  (added to `__all__`, importable via `mareforma.EpistemicGraph`).
+  Type-hint callers no longer need to reach into the private
+  `mareforma._graph` module to annotate function signatures that
+  accept a graph handle.
+
 ### Hardening
 
 - Mixed journal mode bug fixed — both `graph.db` and

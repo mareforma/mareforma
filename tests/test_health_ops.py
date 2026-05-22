@@ -318,18 +318,15 @@ class TestGraphEmitsHealthEvents:
 # ----------------------------------------------------------------------------
 
 
-class TestStatsCommand:
-    def test_stats_empty_project(self, tmp_path: Path) -> None:
+class TestActivityCommand:
+    def test_activity_empty_project(self, tmp_path: Path) -> None:
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
-            result = runner.invoke(_cli, ["status"])
-            # status_cmd needs a bootstrapped project — skip the
-            # initialisation by going straight to stats.
-            result = runner.invoke(_cli, ["stats"])
+            result = runner.invoke(_cli, ["activity"])
         assert result.exit_code == 0
         assert "Events scanned: 0" in result.output
 
-    def test_stats_after_provenance_query(
+    def test_activity_after_provenance_query(
         self, tmp_path: Path, monkeypatch,
     ) -> None:
         # The CLI's _root() reads Path.cwd(); chdir to the project.
@@ -338,11 +335,11 @@ class TestStatsCommand:
             graph.query_provenance(a)
         monkeypatch.chdir(tmp_path)
         runner = CliRunner()
-        result = runner.invoke(_cli, ["stats"])
+        result = runner.invoke(_cli, ["activity"])
         assert result.exit_code == 0
         assert "provenance_query" in result.output
 
-    def test_stats_json_mode(
+    def test_activity_json_mode(
         self, tmp_path: Path, monkeypatch,
     ) -> None:
         with mareforma.open(tmp_path) as graph:
@@ -350,8 +347,60 @@ class TestStatsCommand:
             graph.query_provenance(a)
         monkeypatch.chdir(tmp_path)
         runner = CliRunner()
-        result = runner.invoke(_cli, ["stats", "--json"])
+        result = runner.invoke(_cli, ["activity", "--json"])
         assert result.exit_code == 0
         parsed = json.loads(result.output)
         assert parsed["events_total"] >= 1
         assert "provenance_query" in parsed["ops"]
+
+
+class TestStatsDeprecationAlias:
+    """`mareforma stats` is kept as a deprecation alias for one
+    release. It must delegate to `mareforma activity` and emit a
+    DeprecationWarning. v0.4 will remove the alias entirely."""
+
+    def test_stats_alias_still_works(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        with mareforma.open(tmp_path) as graph:
+            a = graph.assert_claim("a")
+            graph.query_provenance(a)
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(_cli, ["stats"])
+        # The alias still produces the same output as the renamed cmd.
+        assert result.exit_code == 0
+        assert "provenance_query" in result.output
+
+    def test_stats_alias_emits_deprecation_warning(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        import warnings
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        # CliRunner swallows warnings by default; catch them around the
+        # invoke so we can assert on the deprecation.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            runner.invoke(_cli, ["stats"])
+        dep = [
+            w for w in caught
+            if issubclass(w.category, DeprecationWarning)
+            and "renamed to `mareforma activity`" in str(w.message)
+        ]
+        assert dep, (
+            "expected DeprecationWarning about the stats→activity "
+            f"rename; got {[str(w.message) for w in caught]}"
+        )
+
+    def test_stats_hidden_from_top_level_help(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(_cli, ["--help"])
+        # The renamed `activity` command must appear; the deprecated
+        # `stats` alias must NOT (it's hidden so first-time users
+        # discover the right name).
+        assert "activity" in result.output
+        # `stats` appearing as a substring of "Statistics" or similar
+        # would be a false positive; check the discrete word boundary.
+        # Click's --help formats commands one-per-line as "  name  Description"
+        assert "\n  stats " not in result.output

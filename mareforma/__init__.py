@@ -4,10 +4,8 @@ __description__ = "Mareforma — local epistemic substrate for AI-assisted resea
 __version__ = "0.3.1"
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from mareforma._graph import EpistemicGraph
+from mareforma._graph import EpistemicGraph
 
 
 def _pem_canonical_der(pem_bytes: bytes) -> bytes:
@@ -401,6 +399,7 @@ from mareforma.predicate_types import (
 
 __all__ = [
     "open",
+    "EpistemicGraph",
     "schema",
     "restore",
     "EvidenceVector",
