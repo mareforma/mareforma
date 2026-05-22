@@ -564,6 +564,57 @@ class TestRestoreVerifiesEverySignatureInMultiSigEnvelope:
             a = graph.assert_claim("a")
         return key_path, a
 
+    def test_forged_extra_signature_from_enrolled_key_rejected(
+        self, tmp_path: Path,
+    ) -> None:
+        # The HARD case: the extra signature carries an ENROLLED
+        # keyid (so the orphan-signer gate passes) but the sig bytes
+        # are forged — this exercises the cryptographic verify path,
+        # not just the keyid lookup.
+        import base64 as _b64
+        from mareforma.db import RestoreError
+        asserter_key = tmp_path / "asserter.key"
+        extra_key = tmp_path / "extra.key"
+        _signing.save_private_key(_signing.generate_keypair(), asserter_key)
+        _signing.save_private_key(_signing.generate_keypair(), extra_key)
+        extra_pem = _signing.public_key_to_pem(
+            _signing.load_private_key(extra_key).public_key(),
+        )
+        extra_keyid = _signing.public_key_id(
+            _signing.load_private_key(extra_key).public_key(),
+        )
+        with mareforma.open(tmp_path, key_path=asserter_key) as graph:
+            graph.enroll_validator(extra_pem, identity="extra-role")
+            graph.assert_claim("forged-extra-sig target")
+        # Inject a structurally-valid but cryptographically-invalid
+        # second signature (real keyid, garbage 64-byte sig).
+        toml_path = tmp_path / "claims.toml"
+        text = toml_path.read_text()
+        bundle_line = next(
+            ln for ln in text.splitlines() if "signature_bundle = " in ln
+        )
+        bundle_value = bundle_line.split(" = ", 1)[1].strip().strip('"')
+        bundle = json.loads(bundle_value.encode().decode("unicode_escape"))
+        garbage_sig = _b64.standard_b64encode(b"\x00" * 64).decode("ascii")
+        bundle["signatures"].append({
+            "keyid": extra_keyid,
+            "sig": garbage_sig,
+            "role": "reviewer",
+        })
+        tampered = json.dumps(bundle).replace('"', '\\"')
+        toml_path.write_text(
+            text.replace(bundle_line, f'signature_bundle = "{tampered}"'),
+        )
+        (tmp_path / ".mareforma" / "graph.db").unlink()
+        (tmp_path / ".mareforma" / "claim_supports_cache.db").unlink(
+            missing_ok=True,
+        )
+        with pytest.raises(RestoreError) as ei:
+            mareforma.restore(tmp_path)
+        # The cryptographic verify path catches this — kind is
+        # claim_unverified, not orphan_signer.
+        assert ei.value.kind == "claim_unverified"
+
     def test_tampered_extra_signature_rejected_on_restore(
         self, tmp_path: Path,
     ) -> None:
@@ -626,6 +677,43 @@ class TestSelfValidationRejectsEmptySignatures:
         # passes silently per the conservative trust posture.
         from mareforma.db import _refuse_self_validation
         _refuse_self_validation("any-claim", None, "any-keyid")  # no raise
+
+
+class TestQueryProvenanceShowsInvalidatingVerdict:
+    """When a claim is contradicted by a signed verdict, the verdict
+    that invalidated it MUST appear in query_provenance — without
+    that, the audit surface silently hides the verdict the operator
+    is investigating."""
+
+    def test_invalidated_claim_returns_contradicting_verdict(
+        self, tmp_path: Path,
+    ) -> None:
+        asserter = tmp_path / "asserter.key"
+        issuer = tmp_path / "issuer.key"
+        _signing.save_private_key(_signing.generate_keypair(), asserter)
+        _signing.save_private_key(_signing.generate_keypair(), issuer)
+        issuer_pem = _signing.public_key_to_pem(
+            _signing.load_private_key(issuer).public_key(),
+        )
+        with mareforma.open(tmp_path, key_path=asserter) as graph:
+            graph.enroll_validator(
+                issuer_pem, identity="contradiction-issuer",
+                validator_type="human",
+            )
+            a = graph.assert_claim("foo", classification="DERIVED")
+            b = graph.assert_claim("not foo", classification="DERIVED")
+        with mareforma.open(tmp_path, key_path=issuer) as graph:
+            graph.record_contradiction_verdict(
+                verdict_id="cv-1",
+                member_claim_id=a,
+                other_claim_id=b,
+                confidence={"reason": "direct contradiction"},
+            )
+        with mareforma.open(tmp_path, key_path=asserter) as graph:
+            lineage = graph.query_provenance(a)
+        signed = lineage["contradictions"]["signed_verdicts"]
+        assert len(signed) == 1
+        assert signed[0]["member_claim_id"] in (a, b)
 
 
 class TestQueryProvenanceRejectsLikeWildcards:

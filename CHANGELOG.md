@@ -119,13 +119,22 @@ triggers a one-time rebuild on next open.
   `verify_envelope` unchanged.
 - `EvidenceVector.to_dict()` omits `study_design` /
   `grounding_score` / `grounding_rationale` when None so the
-  canonical bytes of a v0.3.0-signed claim round-trip byte-equal
-  under the v0.3.1 verifier.
-- Re-registering one of the new reserved adapter URIs by a
-  foreign owner is downgraded from raise to DeprecationWarning
-  for one release — adapters that pre-registered before
-  promotion get one cycle to drop the call before the next
-  version refuses outright.
+  canonical bytes of a previously-signed claim round-trip
+  byte-equal under the new verifier.
+- Re-registering one of the 18 newly-reserved adapter URIs
+  (anything other than `claim:v1`, `epistemic-graph:v1`,
+  `claim-with-roles:v1`) by a foreign owner is downgraded from
+  raise to DeprecationWarning for one release — adapters that
+  pre-registered before promotion get one cycle to drop the
+  call before the next version refuses outright. The three core
+  substrate-owned URIs still raise hard on foreign re-registration.
+- `predicate_payload` is intentionally NOT part of the
+  idempotency reconciliation surface — a retry with the same
+  `idempotency_key` but divergent `predicate_payload` silently
+  returns the first writer's `claim_id` and discards the second
+  payload. The field is a query-side denormalisation, not
+  cryptographic identity; adapters that need predicate-body
+  integrity must encode the body in the claim text instead.
 
 ## [0.3.0] - 2026-05-13
 

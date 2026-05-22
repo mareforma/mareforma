@@ -436,6 +436,12 @@ def stats_cmd(as_json: bool, last_n: int | None) -> None:
         sys.exit(1)
     click.echo("  " + "-" * 50)
     click.echo(f"  Events scanned: {stats['events_total']}")
+    malformed = stats.get("malformed_lines", 0)
+    if malformed:
+        click.echo(
+            f"  Malformed lines: {malformed}  "
+            "(check .mareforma/health.jsonl for corruption)"
+        )
     if not stats["ops"]:
         click.echo("  No operational events recorded yet.")
         click.echo("  " + "-" * 50)

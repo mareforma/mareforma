@@ -212,6 +212,7 @@ def compute_rolling_stats(
         buffer = deque(maxlen=int(last_n))
     else:
         buffer = []
+    malformed_lines = 0
     try:
         with path.open("r", encoding="utf-8") as f:
             for line in f:
@@ -221,6 +222,7 @@ def compute_rolling_stats(
                 try:
                     buffer.append(json.loads(line))
                 except (json.JSONDecodeError, TypeError, ValueError):
+                    malformed_lines += 1
                     continue
     except OSError:
         return {"events_total": 0, "ops": {}, "read_error": True}
@@ -301,4 +303,8 @@ def compute_rolling_stats(
                 bucket["avg_succeeded"] = round(
                     agg["succeeded_sum"] / agg["succeeded_n"], 3,
                 )
-    return {"events_total": len(events), "ops": ops}
+    return {
+        "events_total": len(events),
+        "malformed_lines": malformed_lines,
+        "ops": ops,
+    }

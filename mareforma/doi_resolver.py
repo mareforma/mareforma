@@ -488,7 +488,7 @@ def find_drifted_dois(
     *,
     timeout: float = _DEFAULT_TIMEOUT,
     limit: int | None = None,
-) -> list[dict]:
+) -> tuple[list[dict], int, bool]:
     """Walk the doi_cache and report DOIs whose metadata has drifted.
 
     For every cached resolved DOI carrying a stored content_digest,
@@ -499,10 +499,20 @@ def find_drifted_dois(
     seeded with the current digest — those count as "first seen", not
     drifted, and are NOT included in the returned list.
 
-    Returns a list of ``{doi, stored_digest, current_digest,
-    last_checked_at}`` dicts for DOIs that drifted. Empty list when
-    nothing changed, when httpx is unavailable, or when the walk
-    aborted on a registry 429.
+    Returns ``(drifted, walked, aborted_rate_limited)``:
+
+    * ``drifted`` — list of ``{doi, stored_digest, current_digest,
+      last_checked_at}`` dicts for DOIs whose digest moved.
+    * ``walked`` — number of cache rows the helper successfully
+      fetched from the registry before returning (lets the caller
+      distinguish "0 drifted in 100 inspected" from "0 drifted,
+      walk aborted at 5 inspected").
+    * ``aborted_rate_limited`` — True when the walk stopped early
+      because a registry returned 429. Callers that emit health
+      events should mark the result ``outcome="partial"`` in that
+      case.
+
+    Returns ``([], 0, False)`` when httpx is unavailable.
 
     The walk is read-and-update only; no row is deleted. A drifted
     digest signals to the operator that the referenced paper's
@@ -529,7 +539,7 @@ def find_drifted_dois(
         own (rate-limit-burning) risk.
     """
     if not HAS_HTTPX:
-        return []
+        return ([], 0, False)
     effective_limit = limit if (limit is not None and limit > 0) else _DEFAULT_DRIFT_LIMIT
     sql = (
         "SELECT doi, registry, content_digest, last_checked_at "
@@ -538,9 +548,11 @@ def find_drifted_dois(
     try:
         rows = conn.execute(sql, (int(effective_limit),)).fetchall()
     except sqlite3.OperationalError:
-        return []
+        return ([], 0, False)
     drifted: list[dict] = []
     seeded_any = False
+    walked = 0
+    aborted_rate_limited = False
     for row in rows:
         metadata, registry_hit, rate_limited = fetch_doi_metadata(
             row["doi"],
@@ -549,8 +561,13 @@ def find_drifted_dois(
         )
         if rate_limited:
             # Stop early — continuing would burn through the rate-limit
-            # window on the operator's IP. Return what we have so far.
+            # window on the operator's IP. Return what we have so far,
+            # but signal the early abort so callers can record the
+            # partial coverage rather than appearing to have inspected
+            # every planned row.
+            aborted_rate_limited = True
             break
+        walked += 1
         if metadata is None:
             continue
         current = _compute_content_digest(metadata, registry=registry_hit)
@@ -580,7 +597,7 @@ def find_drifted_dois(
             conn.commit()
         except sqlite3.OperationalError:
             pass
-    return drifted
+    return drifted, walked, aborted_rate_limited
 
 
 def clear_unresolved_cache(conn: sqlite3.Connection) -> list[str]:

@@ -2164,16 +2164,52 @@ def _canonical_envelope(envelope_str: str | None) -> str | None:
 
     Two semantically identical envelopes that differ only in JSON key
     order or whitespace should compare equal during idempotency
-    reconciliation. Falls back to the raw string if the input isn't
-    valid JSON — preserves the "arbitrary string content" contract
-    for ``original_signature_bundle``.
+    reconciliation. Refuses non-JSON input and refuses JSON that
+    isn't shaped like a DSSE envelope (top-level object with a
+    ``signatures`` list of objects carrying ``keyid`` + ``sig``);
+    the substrate stores this on the federation-import path and
+    callers who passed garbage previously got a silent fallback.
+
+    The substrate does NOT cross-verify the envelope against any
+    source-graph validator set — that is an adapter responsibility.
+    Shape validation alone keeps tamperers from poisoning the
+    column with non-DSSE content.
     """
     if envelope_str is None:
         return None
+    if not isinstance(envelope_str, str):
+        raise ValueError(
+            f"original_signature_bundle must be a JSON string; got "
+            f"{type(envelope_str).__name__}"
+        )
     try:
         parsed = json.loads(envelope_str)
-    except (json.JSONDecodeError, TypeError):
-        return envelope_str
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError(
+            f"original_signature_bundle is not valid JSON: {exc}"
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            "original_signature_bundle must decode to a JSON object"
+        )
+    sigs = parsed.get("signatures")
+    if not isinstance(sigs, list) or not sigs:
+        raise ValueError(
+            "original_signature_bundle: signatures must be a non-empty list"
+        )
+    for s in sigs:
+        if not isinstance(s, dict):
+            raise ValueError(
+                "original_signature_bundle: signature entries must be objects"
+            )
+        if not isinstance(s.get("keyid"), str) or not s.get("keyid"):
+            raise ValueError(
+                "original_signature_bundle: every signature entry needs a keyid"
+            )
+        if not isinstance(s.get("sig"), str) or not s.get("sig"):
+            raise ValueError(
+                "original_signature_bundle: every signature entry needs a sig"
+            )
     return json.dumps(parsed, sort_keys=True, separators=(",", ":"))
 
 
@@ -4126,10 +4162,10 @@ def query_claims(
             # Guard against double-adding t_invalid IS NULL when
             # include_invalidated=False already pushed the same
             # predicate above. SQL is idempotent on AND-of-equals
-            # today, but the conditions.remove() in the
-            # "contradicted" branch only strips the first occurrence
-            # — if a future refactor expects exactly-once semantics,
-            # the duplicate could silently widen results.
+            # today, but the conditions.remove() pattern below only
+            # strips the first occurrence — if a future refactor
+            # expects exactly-once semantics, the duplicate could
+            # silently widen results.
             if "t_invalid IS NULL" not in conditions:
                 conditions.append("t_invalid IS NULL")
             conditions.append("status = 'open'")
@@ -4141,8 +4177,18 @@ def query_claims(
                 conditions.remove("t_invalid IS NULL")
             conditions.append("t_invalid IS NOT NULL")
         elif refutation_filter == "contested":
+            # A row can be both contested AND contradicted; the
+            # caller asking for "contested" wants every contested
+            # row regardless of t_invalid, so override the default
+            # invalidation gate.
+            if "t_invalid IS NULL" in conditions:
+                conditions.remove("t_invalid IS NULL")
             conditions.append("status = 'contested'")
         elif refutation_filter == "retracted":
+            # Same posture: retracted-and-contradicted should still
+            # surface under "retracted".
+            if "t_invalid IS NULL" in conditions:
+                conditions.remove("t_invalid IS NULL")
             conditions.append("status = 'retracted'")
         elif refutation_filter == "any":
             # Surface every refutation kind — implies include_invalidated.

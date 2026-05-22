@@ -128,6 +128,41 @@ class TestRefutationFilter:
             assert ids == [b]
             assert a not in ids
 
+    def test_retracted_filter_surfaces_invalidated_retracted_rows(
+        self, tmp_path: Path,
+    ) -> None:
+        # A row that is BOTH retracted AND contradicted should surface
+        # under refutation_filter="retracted" — otherwise the filter
+        # silently under-counts every retracted-and-contradicted row.
+        asserter = tmp_path / "asserter.key"
+        issuer = tmp_path / "issuer.key"
+        _signing.save_private_key(_signing.generate_keypair(), asserter)
+        _signing.save_private_key(_signing.generate_keypair(), issuer)
+        issuer_pem = _signing.public_key_to_pem(
+            _signing.load_private_key(issuer).public_key(),
+        )
+        with mareforma.open(tmp_path, key_path=asserter) as graph:
+            graph.enroll_validator(
+                issuer_pem, identity="issuer", validator_type="human",
+            )
+            a = graph.assert_claim("retracted-and-contradicted")
+            b = graph.assert_claim("contradicting peer")
+            graph.update_claim(a, status="retracted")
+        with mareforma.open(tmp_path, key_path=issuer) as graph:
+            graph.record_contradiction_verdict(
+                verdict_id="cv-retract",
+                member_claim_id=a,
+                other_claim_id=b,
+                confidence={"reason": "x"},
+            )
+        with mareforma.open(tmp_path, key_path=asserter) as graph:
+            results = graph.query(
+                refutation_filter="retracted", include_unverified=True,
+            )
+            ids = [r["claim_id"] for r in results]
+            # The invalidated-retracted claim must still surface.
+            assert a in ids
+
     def test_any_filter_includes_all_states(self, tmp_path: Path) -> None:
         with mareforma.open(tmp_path) as graph:
             a = graph.assert_claim("clean")

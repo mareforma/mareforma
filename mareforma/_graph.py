@@ -1238,28 +1238,18 @@ class EpistemicGraph:
         """
         self._check_open()
         from mareforma import health as _health
-        # Snapshot the inspected-row count BEFORE the walk so the
-        # emitted event carries the (drifted, total_inspected) pair
-        # the aggregator advertises.
-        effective_limit = (
-            int(limit) if (limit is not None and limit > 0)
-            else _doi._DEFAULT_DRIFT_LIMIT
+        drifted, walked, aborted = _doi.find_drifted_dois(
+            self._conn, limit=limit,
         )
-        try:
-            row = self._conn.execute(
-                "SELECT COUNT(*) AS n FROM ("
-                "SELECT doi FROM doi_cache WHERE resolved = 1 LIMIT ?"
-                ")",
-                (effective_limit,),
-            ).fetchone()
-            total_inspected = int(row["n"])
-        except sqlite3.OperationalError:
-            total_inspected = 0
-        drifted = _doi.find_drifted_dois(self._conn, limit=limit)
+        # Emit a coherent (drifted, total_inspected) pair plus an
+        # outcome that distinguishes "clean full scan" from "walk
+        # aborted on 429 after K rows" — otherwise the rolling
+        # rate-limit-recovery signal in stats CLI is invisible.
         _health.append_health_event(
             self._root, "doi_drift_scan",
+            outcome="partial" if aborted else "ok",
             drifted=len(drifted),
-            total_inspected=total_inspected,
+            total_inspected=walked,
         )
         return drifted
 
@@ -1485,11 +1475,17 @@ class EpistemicGraph:
             except (json.JSONDecodeError, TypeError):
                 continue
 
+        # query_provenance is an AUDIT surface; show the verdicts that
+        # invalidated the focal claim. Without include_invalidated=True
+        # a signed contradiction verdict against this claim would be
+        # filtered out — exactly the verdict the operator needs to see
+        # when investigating provenance of an invalidated claim.
         verdicts_for = _db.list_contradiction_verdicts(
-            self._conn, claim_id=claim_id,
+            self._conn, claim_id=claim_id, include_invalidated=True,
         )
         repl_verdicts = _db.list_replication_verdicts(
             self._conn, member_claim_id=claim_id,
+            include_invalidated=True,
         )
 
         # Operational log: this is a queryable signal, emit one event.

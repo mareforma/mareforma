@@ -412,6 +412,74 @@ class TestFindDriftedDois:
             # 100 = _DEFAULT_DRIFT_LIMIT.
             assert len(calls) == 100
 
+    def test_walked_count_reflects_actual_inspection(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        # Walk 5 rows successfully, then 429 on the 6th → the
+        # returned walked count is 5, aborted=True. Operator sees
+        # the partial-coverage signal in health log.
+        from mareforma import doi_resolver as _doi
+        with mareforma.open(tmp_path) as graph:
+            conn = graph._conn
+            for i in range(10):
+                conn.execute(
+                    "INSERT INTO doi_cache (doi, resolved, registry, "
+                    "last_checked_at, content_digest) VALUES "
+                    "(?, 1, 'crossref', ?, ?)",
+                    (f"10.1234/walk-{i}", "2026-01-01T00:00:00+00:00",
+                     "old-digest"),
+                )
+            conn.commit()
+            call_counter = {"n": 0}
+
+            def _spy(doi, timeout=5.0, registry=None):
+                call_counter["n"] += 1
+                if call_counter["n"] == 6:
+                    return (None, None, True)
+                return ({"title": ["X"]}, "crossref", False)
+
+            monkeypatch.setattr(_doi, "fetch_doi_metadata", _spy)
+            drifted, walked, aborted = _doi.find_drifted_dois(conn)
+        assert walked == 5
+        assert aborted is True
+
+    def test_graph_wrapper_emits_partial_outcome_on_rate_limit(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        # End-to-end: a rate-limited drift scan emits outcome=partial
+        # with total_inspected reflecting actual coverage. Operator
+        # running `mareforma stats` can distinguish "100 inspected /
+        # 0 drifted" from "5 inspected, walk aborted / 0 drifted".
+        from mareforma import doi_resolver as _doi
+        from mareforma import health as _health
+        with mareforma.open(tmp_path) as graph:
+            conn = graph._conn
+            for i in range(20):
+                conn.execute(
+                    "INSERT INTO doi_cache (doi, resolved, registry, "
+                    "last_checked_at, content_digest) VALUES "
+                    "(?, 1, 'crossref', ?, ?)",
+                    (f"10.1234/part-{i}", "2026-01-01T00:00:00+00:00",
+                     "old-digest"),
+                )
+            conn.commit()
+            calls = {"n": 0}
+
+            def _spy(doi, timeout=5.0, registry=None):
+                calls["n"] += 1
+                if calls["n"] == 4:
+                    return (None, None, True)
+                return ({"title": ["X"]}, "crossref", False)
+
+            monkeypatch.setattr(_doi, "fetch_doi_metadata", _spy)
+            graph.find_drifted_dois()
+        stats = _health.compute_rolling_stats(tmp_path)
+        drift = stats["ops"]["doi_drift_scan"]
+        assert drift["partial"] == 1
+        assert drift["ok"] == 0
+        # walked=3 (calls 1, 2, 3 succeeded; 4 was rate-limited).
+        assert drift["total_inspected"] == 3
+
     def test_pinned_to_original_registry(
         self, tmp_path: Path, monkeypatch,
     ) -> None:

@@ -186,6 +186,52 @@ class TestPredicatePayloadColumn:
 # ----------------------------------------------------------------------------
 
 
+class TestOriginalSignatureBundleValidation:
+    """The federation-import column accepts a DSSE envelope string;
+    structurally-invalid input is refused at write time instead of
+    landing as silent garbage."""
+
+    def test_rejects_non_json_input(self, tmp_path: Path) -> None:
+        with mareforma.open(tmp_path) as graph:
+            with pytest.raises(ValueError, match="not valid JSON"):
+                graph.assert_claim(
+                    "x", original_signature_bundle="not json at all",
+                )
+
+    def test_rejects_non_dsse_shape(self, tmp_path: Path) -> None:
+        with mareforma.open(tmp_path) as graph:
+            with pytest.raises(ValueError, match="signatures"):
+                graph.assert_claim(
+                    "x", original_signature_bundle='{"foo": "bar"}',
+                )
+
+    def test_rejects_signature_entry_missing_keyid(
+        self, tmp_path: Path,
+    ) -> None:
+        with mareforma.open(tmp_path) as graph:
+            with pytest.raises(ValueError, match="keyid"):
+                graph.assert_claim(
+                    "x",
+                    original_signature_bundle=json.dumps({
+                        "signatures": [{"sig": "abc"}],
+                    }),
+                )
+
+    def test_accepts_well_formed_dsse_envelope(
+        self, tmp_path: Path,
+    ) -> None:
+        with mareforma.open(tmp_path) as graph:
+            cid = graph.assert_claim(
+                "x",
+                original_signature_bundle=json.dumps({
+                    "payloadType": "application/vnd.in-toto+json",
+                    "payload": "base64...",
+                    "signatures": [{"keyid": "abc", "sig": "xyz"}],
+                }),
+            )
+            assert cid
+
+
 class TestOriginalSignatureBundleColumn:
     def test_default_null(self, tmp_path: Path) -> None:
         conn = open_db(tmp_path)
@@ -278,19 +324,22 @@ class TestPerCallSignerOverride:
     def test_original_signature_bundle_kwarg_threaded_through(
         self, tmp_path: Path
     ) -> None:
+        envelope = json.dumps({
+            "payloadType": "application/vnd.in-toto+json",
+            "payload": "base64...",
+            "signatures": [{"keyid": "imported-key", "sig": "xyz"}],
+        }, sort_keys=True, separators=(",", ":"))
         with mareforma.open(tmp_path) as graph:
             claim_id = graph.assert_claim(
                 "imported claim",
-                original_signature_bundle='{"original":"envelope"}',
+                original_signature_bundle=envelope,
             )
         conn = open_db(tmp_path)
         try:
             row = next(
                 c for c in list_claims(conn) if c["claim_id"] == claim_id
             )
-            assert row["original_signature_bundle"] == (
-                '{"original":"envelope"}'
-            )
+            assert row["original_signature_bundle"] == envelope
         finally:
             conn.close()
 
@@ -497,17 +546,27 @@ class TestIdempotencyReconciliationCoversNewFields:
         self, tmp_path: Path
     ) -> None:
         from mareforma.db import IdempotencyConflictError
+        env_a = json.dumps({
+            "payloadType": "application/vnd.in-toto+json",
+            "payload": "AAA",
+            "signatures": [{"keyid": "k1", "sig": "sigA"}],
+        })
+        env_b = json.dumps({
+            "payloadType": "application/vnd.in-toto+json",
+            "payload": "BBB",
+            "signatures": [{"keyid": "k1", "sig": "sigB"}],
+        })
         with mareforma.open(tmp_path) as graph:
             graph.assert_claim(
                 "shared text",
                 idempotency_key="run_Y_claim_1",
-                original_signature_bundle='{"version":"a"}',
+                original_signature_bundle=env_a,
             )
             with pytest.raises(IdempotencyConflictError):
                 graph.assert_claim(
                     "shared text",
                     idempotency_key="run_Y_claim_1",
-                    original_signature_bundle='{"version":"b"}',
+                    original_signature_bundle=env_b,
                 )
 
     def test_original_signature_bundle_whitespace_normalised(
@@ -515,16 +574,23 @@ class TestIdempotencyReconciliationCoversNewFields:
     ) -> None:
         # Two semantically-identical envelopes that differ only in JSON
         # whitespace must reconcile as a retry, not conflict.
+        envelope_dict = {
+            "payloadType": "application/vnd.in-toto+json",
+            "payload": "XXX",
+            "signatures": [{"keyid": "k1", "sig": "s"}],
+        }
+        compact = json.dumps(envelope_dict, separators=(",", ":"))
+        pretty = json.dumps(envelope_dict, indent=2)
         with mareforma.open(tmp_path) as graph:
             id1 = graph.assert_claim(
                 "shared text",
                 idempotency_key="run_W_claim_1",
-                original_signature_bundle='{"a":1,"b":2}',
+                original_signature_bundle=compact,
             )
             id2 = graph.assert_claim(
                 "shared text",
                 idempotency_key="run_W_claim_1",
-                original_signature_bundle='{\n  "b": 2,\n  "a": 1\n}',
+                original_signature_bundle=pretty,
             )
             assert id1 == id2
 
@@ -532,18 +598,23 @@ class TestIdempotencyReconciliationCoversNewFields:
         self, tmp_path: Path
     ) -> None:
         # Sanity: matching fields → same claim_id returned, no error.
+        env = json.dumps({
+            "payloadType": "application/vnd.in-toto+json",
+            "payload": "p",
+            "signatures": [{"keyid": "k", "sig": "s"}],
+        })
         with mareforma.open(tmp_path) as graph:
             id1 = graph.assert_claim(
                 "shared text",
                 idempotency_key="run_Z_claim_1",
                 predicate_payload={"adapter": "test"},
-                original_signature_bundle='{"version":"a"}',
+                original_signature_bundle=env,
             )
             id2 = graph.assert_claim(
                 "shared text",
                 idempotency_key="run_Z_claim_1",
                 predicate_payload={"adapter": "test"},
-                original_signature_bundle='{"version":"a"}',
+                original_signature_bundle=env,
             )
             assert id1 == id2
 

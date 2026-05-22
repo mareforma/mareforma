@@ -121,6 +121,10 @@ class TestHealthEventLog:
         )
         stats = _health.compute_rolling_stats(tmp_path)
         assert stats["events_total"] == 2
+        # The torn / corrupt line is now counted explicitly so the
+        # operator's stats CLI surfaces drift instead of swallowing
+        # it silently.
+        assert stats["malformed_lines"] == 1
 
     def test_write_failure_does_not_raise(
         self, tmp_path: Path, monkeypatch,
