@@ -1568,6 +1568,25 @@ def add_claim(
     supports_json = json.dumps(supports or [])
     contradicts_json = json.dumps(contradicts or [])
 
+    # Refuse a claim that simultaneously supports AND contradicts the
+    # same upstream — the row would be logically incoherent
+    # (downstream readers cannot tell which interpretation is "real").
+    # Compare on UUID-shaped refs only; DOI / arXiv / external string
+    # refs are out of scope for this gate (a claim citing the same
+    # paper both as supporting evidence and as a contrary point may be
+    # legitimate at the citation level).
+    if supports and contradicts:
+        sup_ids = {s for s in supports if isinstance(s, str) and _is_claim_id(s)}
+        con_ids = {c for c in contradicts if isinstance(c, str) and _is_claim_id(c)}
+        overlap = sup_ids & con_ids
+        if overlap:
+            raise ValueError(
+                f"supports[] and contradicts[] reference the same "
+                f"upstream claim(s): {sorted(overlap)}. A claim that "
+                "simultaneously builds on and refutes the same upstream "
+                "is logically incoherent; pick one relation."
+            )
+
     # Cycle / self-loop check on supports[]. DOI entries are external
     # references and not graph nodes — _check_no_cycle filters them
     # out. The walk runs before signing and INSERT so we don't strand
@@ -4202,8 +4221,18 @@ def query_claims(
     params: list = []
 
     if text is not None:
-        conditions.append("text LIKE ?")
-        params.append(f"%{text}%")
+        # SQLite treats % and _ as LIKE wildcards; a caller-supplied
+        # text containing those metacharacters (or an empty string)
+        # would otherwise behave as a wildcard match against every
+        # row. Escape with \ + ESCAPE clause so the substring filter
+        # is literal as documented.
+        escaped = (
+            text.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+        )
+        conditions.append("text LIKE ? ESCAPE '\\'")
+        params.append(f"%{escaped}%")
 
     if not include_invalidated:
         conditions.append("t_invalid IS NULL")

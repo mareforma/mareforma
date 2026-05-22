@@ -18,8 +18,12 @@ import mareforma
 
 with mareforma.open() as graph:
 
-    # Query what is already established before asserting
-    prior = graph.query("topic X", min_support="REPLICATED")
+    # Query what is already established before asserting. query_for_llm
+    # wraps claim text in <untrusted_data>...</untrusted_data> tags so a
+    # downstream LLM that consumes the result reads it as data, not
+    # instructions. The bare graph.query() returns raw text and is the
+    # right choice ONLY when the consumer is not an LLM context.
+    prior = graph.query_for_llm("topic X", min_support="REPLICATED")
 
     claim_id = graph.assert_claim(
         "Cell type A exhibits property X under condition Y (n=842, p<0.001)",
@@ -277,6 +281,28 @@ Honest scope, so the design choices land in the right frame:
   and gates LLM-typed validators on both promotion and contradiction
   paths, but it cannot detect colluding human validators, manufactured
   datasets, or fabricated DOIs.
+- **One operator, two keys, no outside reality can produce an
+  ESTABLISHED chain.** Each item above is individually disclosed; the
+  compose deserves its own callout. A single attacker with shell
+  access can `mareforma bootstrap` (enrolled silently and irrevocably
+  as the project's root validator), `assert_claim(..., seed=True)`
+  to mint an ESTABLISHED "prior literature" anchor with any text,
+  sybil-assert two converging downstream claims under different
+  `generated_by` strings (REPLICATED fires), enroll a second
+  Ed25519 key with `validator_type="human"` (no actual human
+  involved), open with the second key, and `graph.validate(...)` the
+  converged claim to ESTABLISHED. Every signature on the chain
+  verifies; every chain-hash link is correct; the exported in-toto /
+  RO-Crate / PROV-O documents are spec-conformant. The substrate
+  records *what the asserter claimed and signed* — it cannot tell
+  one process on one machine from a worldwide replication. A
+  downstream consumer reading the export must verify the asserter's
+  identity claims out of band; the institutional vocabulary the
+  export uses does not constrain who held the keys. Operators
+  worried about this should pin a substrate-external identity
+  anchor (ORCID resolution on `validated_by`, OIDC-anchored
+  certificates, SCITT-style transparency-service receipts) — none
+  of which the substrate currently embeds.
 
 Related work mareforma does not replace: W3C PROV-O / PROV-AGENT
 (W3C-recommended provenance vocabulary), FAIRSCAPE's Evidence Graph

@@ -407,6 +407,15 @@ class EpistemicGraph:
     ) -> list[dict]:
         """Query claims from the epistemic graph.
 
+        Returns claim dicts with the raw ``text`` field. **If the
+        caller plans to splice these into an LLM prompt context,
+        use** :meth:`query_for_llm` **instead** — it wraps the text in
+        ``<untrusted_data>...</untrusted_data>`` markers so the LLM
+        treats retrieved content as data, not instructions
+        (Greshake et al., AISec '23, arXiv:2302.12173). This method
+        returns bytes verbatim; the burden of escape is on the
+        caller.
+
         Parameters
         ----------
         text:

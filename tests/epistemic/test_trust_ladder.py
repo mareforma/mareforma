@@ -214,26 +214,24 @@ class TestCyclicSupports:
 # ---------------------------------------------------------------------------
 
 class TestContradictAndSupport:
-    def test_contradicting_and_supporting_same_claim_accepted(
+    def test_same_upstream_in_supports_and_contradicts_refused(
         self, tmp_path: Path
     ) -> None:
-        """A claim can list the same upstream in both supports and contradicts.
-
-        No validation prevents this. The result is logically contradictory
-        provenance, but the graph accepts it without error.
+        """A claim that lists the same UUID upstream in both supports
+        and contradicts is logically incoherent — the substrate refuses
+        it at write time so downstream readers never see undefined
+        epistemic semantics.
         """
+        import pytest
         with open_graph(tmp_path) as g:
             upstream = g.assert_claim("upstream", generated_by="seed")
-            claim_id = g.assert_claim(
-                "Contradictory claim",
-                supports=[upstream],
-                contradicts=[upstream],
-                generated_by="agent-X",
-            )
-            claim = g.get_claim(claim_id)
-
-        assert upstream in json.loads(claim["supports_json"])
-        assert upstream in json.loads(claim["contradicts_json"])
+            with pytest.raises(ValueError, match="same upstream"):
+                g.assert_claim(
+                    "Contradictory claim",
+                    supports=[upstream],
+                    contradicts=[upstream],
+                    generated_by="agent-X",
+                )
 
 
 # ---------------------------------------------------------------------------
