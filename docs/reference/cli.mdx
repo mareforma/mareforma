@@ -360,4 +360,6 @@ mareforma restore
 mareforma restore backups/state.toml
 ```
 
-The output reports `validators_restored` and `claims_restored` counts. Failure exits `1` with a `RestoreError` message naming the failure mode: `graph_not_empty`, `toml_not_found`, `toml_malformed`, `enrollment_unverified`, `claim_unverified`, `mode_inconsistent`, or `orphan_signer`.
+The output reports `validators_restored` and `claims_restored` counts. Failure exits `1` with a `RestoreError` message naming the failure mode: `graph_not_empty`, `toml_not_found`, `toml_malformed`, `enrollment_unverified`, `claim_unverified`, `mode_inconsistent`, `orphan_signer`, or `rekor_inclusion_invalid`.
+
+Since v0.3.2, `claims.toml` includes a `[rekor_inclusions]` section. Pre-v0.3.2 files restore successfully with a `RekorSidecarSectionAbsentWarning`. Run `refresh_unsigned()` afterward to re-fetch inclusion proofs.
