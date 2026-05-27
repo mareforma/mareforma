@@ -31,3 +31,5 @@ jobs:
       - name: Publish to PyPI
         # pypa/gh-action-pypi-publish release/v1 — pinned 2026-05-12
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b
+        with:
+          skip-existing: true
