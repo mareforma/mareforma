@@ -140,8 +140,8 @@ class TestEdgeCases:
         (1024 hops) is too long to test directly because the chain
         construction itself would trip it — but the cap-rejection
         path is the same."""
-        from mareforma import db as _db
-        monkeypatch.setattr(_db, "_CYCLE_MAX_DEPTH", 5)
+        from mareforma.db import core as _db_core
+        monkeypatch.setattr(_db_core, "_CYCLE_MAX_DEPTH", 5)
         with mareforma.open(tmp_path) as g:
             ids = [g.assert_claim("genesis")]
             # Build 7 hops — past the patched cap of 5. The first 5

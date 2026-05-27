@@ -1111,7 +1111,7 @@ class TestConvergenceErrorCounter:
         self, tmp_path, monkeypatch,
     ):
         """Force `_maybe_update_replicated_unlocked` to raise; counter ticks."""
-        from mareforma import db as _db
+        from mareforma.db import core as _db_core
 
         key_path = _bootstrap_key(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as graph:
@@ -1123,7 +1123,7 @@ class TestConvergenceErrorCounter:
             def _boom(*_args, **_kwargs):
                 raise sqlite3.OperationalError("forced for test")
 
-            monkeypatch.setattr(_db, "_maybe_update_replicated_unlocked", _boom)
+            monkeypatch.setattr(_db_core, "_maybe_update_replicated_unlocked", _boom)
 
             # This child has a non-empty supports[] and no DOIs, so
             # convergence detection runs and hits the monkeypatched boom.
@@ -1165,7 +1165,7 @@ class TestConvergenceRetryQueue:
 
     def test_swallowed_error_sets_retry_flag(self, tmp_path, monkeypatch):
         """A SQLite failure in detection sets convergence_retry_needed=1."""
-        from mareforma import db as _db
+        from mareforma.db import core as _db_core
 
         key_path = _bootstrap_key(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as graph:
@@ -1176,7 +1176,7 @@ class TestConvergenceRetryQueue:
             def _boom(*_args, **_kwargs):
                 raise sqlite3.OperationalError("forced for test")
 
-            monkeypatch.setattr(_db, "_maybe_update_replicated_unlocked", _boom)
+            monkeypatch.setattr(_db_core, "_maybe_update_replicated_unlocked", _boom)
 
             graph.assert_claim(
                 "child", generated_by="lab_a", supports=[upstream],
@@ -1190,7 +1190,7 @@ class TestConvergenceRetryQueue:
         self, tmp_path, monkeypatch,
     ):
         """A flagged claim whose retry runs cleanly has the flag cleared."""
-        from mareforma import db as _db
+        from mareforma.db import core as _db_core
 
         key_path = _bootstrap_key(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as graph:
@@ -1199,12 +1199,12 @@ class TestConvergenceRetryQueue:
             )
 
             # Phase one: monkeypatch detection to fail so the flag lands.
-            original = _db._maybe_update_replicated_unlocked
+            original = _db_core._maybe_update_replicated_unlocked
 
             def _boom(*_args, **_kwargs):
                 raise sqlite3.OperationalError("forced for test")
 
-            monkeypatch.setattr(_db, "_maybe_update_replicated_unlocked", _boom)
+            monkeypatch.setattr(_db_core, "_maybe_update_replicated_unlocked", _boom)
 
             graph.assert_claim(
                 "child", generated_by="lab_a", supports=[upstream],
@@ -1212,7 +1212,7 @@ class TestConvergenceRetryQueue:
             assert graph.health()["convergence_retry_pending"] == 1
 
             # Phase two: restore the real detection, retry — flag clears.
-            monkeypatch.setattr(_db, "_maybe_update_replicated_unlocked", original)
+            monkeypatch.setattr(_db_core, "_maybe_update_replicated_unlocked", original)
             result = graph.refresh_convergence()
             assert result["checked"] == 1
             assert result["promoted"] == 1
@@ -1221,7 +1221,7 @@ class TestConvergenceRetryQueue:
 
     def test_refresh_keeps_flag_when_retry_fails(self, tmp_path, monkeypatch):
         """A flagged claim whose retry errors again stays flagged."""
-        from mareforma import db as _db
+        from mareforma.db import core as _db_core
 
         key_path = _bootstrap_key(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as graph:
@@ -1232,7 +1232,7 @@ class TestConvergenceRetryQueue:
             def _boom(*_args, **_kwargs):
                 raise sqlite3.OperationalError("forced for test")
 
-            monkeypatch.setattr(_db, "_maybe_update_replicated_unlocked", _boom)
+            monkeypatch.setattr(_db_core, "_maybe_update_replicated_unlocked", _boom)
 
             graph.assert_claim(
                 "child", generated_by="lab_a", supports=[upstream],
