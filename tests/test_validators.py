@@ -29,17 +29,8 @@ from mareforma import signing as _signing
 from mareforma import validators as _validators
 from mareforma.cli import cli as mareforma_cli
 from mareforma.db import open_db
+from tests._helpers import _bootstrap_key
 
-
-def _bootstrap_key(tmp_path: Path, name: str = "mareforma.key") -> Path:
-    key_path = tmp_path / name
-    _signing.bootstrap_key(key_path)
-    return key_path
-
-
-# ---------------------------------------------------------------------------
-# auto_enroll_root
-# ---------------------------------------------------------------------------
 
 class TestAutoEnrollRoot:
     def test_root_enrolls_on_first_open(self, tmp_path: Path) -> None:

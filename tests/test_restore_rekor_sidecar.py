@@ -17,17 +17,11 @@ import pytest
 
 import mareforma
 from mareforma.db import RestoreError
+from tests._helpers import _bootstrap_key
 from mareforma.db.errors import (
     RekorSidecarEntryMissingWarning,
     RekorSidecarSectionAbsentWarning,
 )
-
-
-def _bootstrap_key(tmp_path: Path) -> Path:
-    from mareforma.signing import bootstrap_key
-    key_path = tmp_path / "keys" / "key"
-    bootstrap_key(key_path)
-    return key_path
 
 
 class TestSidecarRoundTrip:

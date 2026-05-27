@@ -28,6 +28,7 @@ import pytest
 
 import mareforma
 from mareforma.db import DatabaseError, ClaimNotFoundError
+from tests._helpers import _bootstrap_key
 
 
 # ---------------------------------------------------------------------------
@@ -286,13 +287,6 @@ def test_get_claim_nonexistent_returns_none(tmp_path):
 # ---------------------------------------------------------------------------
 # validate()
 # ---------------------------------------------------------------------------
-
-def _bootstrap_key(tmp_path, name: str = "mareforma.key"):
-    """Generate a signing key inside tmp_path and return its absolute path."""
-    from mareforma import signing as _signing
-    key_path = tmp_path / name
-    _signing.bootstrap_key(key_path)
-    return key_path
 
 
 def _validator_pubkey_pem(key_path):
