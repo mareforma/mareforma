@@ -2,6 +2,72 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.2] - 2026-05-27
+
+Internal restructure + one restore-time verification improvement.
+Schema stays at v1; no migration required. All existing
+`from mareforma.db import X` and `from mareforma.signing import Y`
+import paths continue to work unchanged.
+
+### Changed
+
+- **`mareforma/signing.py` split into `mareforma/signing/` subpackage.**
+  `signing/core.py` carries DSSE PAE, canonical Statement v1, key
+  management, envelope sign/verify, and `bootstrap_key`.
+  `signing/rekor.py` carries Rekor submission, RFC 6962 Merkle
+  inclusion-proof verification, checkpoint parsing, SSRF defense, and
+  log-pubkey fetch. `signing/__init__.py` re-exports every public and
+  underscore-prefixed name with explicit `__all__` (PEP 561).
+- **`mareforma/db.py` split into `mareforma/db/` subpackage.**
+  `db/core.py` (~3960 LOC) carries the live-write path, queries,
+  verdicts, Rekor saga, and TOML backup — the threat-model locality
+  stays in one buffer. `db/_schema_sql.py` carries the DDL constant
+  and column contract. `db/errors.py` carries the exception hierarchy.
+  `db/restore.py` carries `restore()` and its verification helpers.
+  `db/__init__.py` re-exports the full surface with explicit `__all__`.
+- **Warnings idiom normalised.** All function-body lazy
+  `import warnings as _warnings` hoisted to module-top
+  `import warnings`; `_warnings.warn()` rewritten to `warnings.warn()`
+  across 7 call sites.
+
+### Added
+
+- **`rekor_inclusions` sidecar round-trip through `claims.toml`.**
+  `_backup_claims_toml` now emits a `[rekor_inclusions]` section
+  carrying each sidecar row's uuid, log\_index, integrated\_time,
+  raw\_response\_b64, and recorded\_at. `restore()` replays entries
+  into the sidecar table after the corresponding claim INSERT, inside
+  the same fail-all-or-nothing transaction. Closes the restore-time
+  gap where Merkle inclusion proofs could not be re-verified
+  post-restore.
+- **Two drift-warning classes** for the sidecar restore path:
+  `RekorSidecarSectionAbsentWarning` fires once per restore when the
+  TOML has no `[rekor_inclusions]` section (expected for pre-v0.3.2
+  files); `RekorSidecarEntryMissingWarning` fires per Rekor-logged
+  claim when the section exists but lacks an entry for that claim
+  (suspicious). The two are distinct so operators can tell a
+  legitimate upgrade from a TOML edit.
+- **CI guard tests** (`test_signing_reexports.py`,
+  `test_db_reexports.py`) walk each submodule source file via AST and
+  assert every defined name is importable AND accessible via
+  `getattr` on the package. Fails CI if a future contributor adds a
+  name without mirroring it in `__init__.py`.
+- **Restore-time sidecar validation.** Orphan `rekor_inclusions`
+  entries (referencing a claim\_id not in `[claims]`) and entries
+  missing required fields (uuid, raw\_response\_b64) raise
+  `RestoreError`. Sequential inclusion-proof verification costs ~1ms
+  per entry (~50s for a 50k-claim Rekor-logged graph on the one-shot
+  disaster-recovery path).
+
+### Compatibility
+
+- All `from mareforma.db import X` and `from mareforma.signing import Y`
+  import paths work unchanged. External callers need no code changes.
+- `claims.toml` files from v0.3.0 / v0.3.1 (no `[rekor_inclusions]`
+  section) restore successfully on v0.3.2 with a
+  `RekorSidecarSectionAbsentWarning`. Run `refresh_unsigned()` after
+  restore to re-fetch inclusion proofs from the log.
+
 ## [0.3.1] - 2026-05-22
 
 Additive release. The substrate's versioned schema stays at v1; new

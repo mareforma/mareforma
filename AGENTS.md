@@ -587,11 +587,12 @@ silently clobber each other. Verification failure raises
 `RekorInclusionError` with a stable `.reason` token (`missing_proof`,
 `malformed_proof`, `merkle_root_mismatch`, `checkpoint_bad_sig`,
 `checkpoint_root_mismatch`, `unsupported_key`, ...) so callers can
-pattern-match on failure modes without parsing English. Restore-time
-re-verification of stored proofs is on the deferred-features list —
-the `rekor_inclusions` sidecar doesn't currently round-trip through
-`claims.toml`, so restore loses sidecar entries and offline
-re-verification is not yet possible.
+pattern-match on failure modes without parsing English. Since v0.3.2
+the `rekor_inclusions` sidecar round-trips through `claims.toml` —
+`restore()` replays entries and (when `rekor_log_pubkey_pem` is
+supplied) re-verifies each inclusion proof against the pinned key.
+Pre-v0.3.2 TOML files restore with a `RekorSidecarSectionAbsentWarning`;
+run `refresh_unsigned()` afterward to re-fetch proofs from the log.
 
 **Key rotation is destructive.** `mareforma bootstrap --overwrite`
 strands every claim signed by the prior key — verification breaks AND

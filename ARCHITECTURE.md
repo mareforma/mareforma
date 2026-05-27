@@ -382,7 +382,7 @@ on a signed row is refused at the SQL layer.
 | `statement_cid` cross-check | column never directly written by user code | yes — re-derives from the row's fields + evidence and compares to the stored `statement_cid` |
 | Validation envelope binds this claim | substrate gates: `_extract_validation_signer_keyid`, `_refuse_llm_validator`, `_refuse_self_validation`, `_verify_evidence_seen`, envelope/kwarg agreement; cryptographic verify on the envelope | yes — verifies the validation envelope's signature, then checks `claim_id` / `validator_keyid` / timestamp / `evidence_seen` fields against the row |
 | Contradiction verdict is signed by an enrolled validator | enforced at `record_contradiction_verdict`; chain walk via `is_enrolled` | yes — replays each verdict envelope in `created_at` order, verifies before INSERT, the contradiction trigger re-sets `t_invalid` |
-| Rekor inclusion proof is cryptographically valid | only when opt-in `rekor_log_pubkey_pem` was supplied at `mareforma.open()`; submit path + `refresh_unsigned()` verify the Merkle path against the signed checkpoint | deferred — the `rekor_inclusions` sidecar isn't yet round-tripped through `claims.toml`, so restore loses sidecar entries (next-release item) |
+| Rekor inclusion proof is cryptographically valid | only when opt-in `rekor_log_pubkey_pem` was supplied at `mareforma.open()`; submit path + `refresh_unsigned()` verify the Merkle path against the signed checkpoint | yes (v0.3.2) — `rekor_inclusions` sidecar round-tripped through `claims.toml`; `restore()` replays entries and (when `rekor_log_pubkey_pem` supplied) re-verifies each inclusion proof against the pinned key. Pre-v0.3.2 TOML files restore with `RekorSidecarSectionAbsentWarning` |
 
 ### One-page threat model
 

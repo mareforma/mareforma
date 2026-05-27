@@ -77,12 +77,23 @@ def restore(
     project_root: Path | str,
     *,
     claims_toml: Path | str | None = None,
+    rekor_log_pubkey_pem: bytes | None = None,
 ) -> dict:
     """Rebuild a fresh graph.db from claims.toml.
 
     Reverse of :func:`_backup_claims_toml`. Intended for catastrophic-
     loss recovery: ``graph.db`` is missing or corrupt, the operator
     has a recent ``claims.toml``, the project must be reconstructable.
+
+    Parameters
+    ----------
+    rekor_log_pubkey_pem:
+        PEM-encoded Rekor log operator public key. When supplied, every
+        ``[rekor_inclusions]`` entry is cryptographically verified via
+        :func:`mareforma.signing.verify_rekor_inclusion` before INSERT.
+        Verification failure raises :class:`RestoreError` with
+        ``kind='rekor_inclusion_invalid'``. When ``None``, entries are
+        replayed unverified (matching the submit-path opt-in posture).
 
     The rebuild is **fresh-only**. ``restore`` refuses to run if
     ``.mareforma/graph.db`` already contains claims — merge semantics
@@ -535,6 +546,19 @@ def restore(
                         "required fields (uuid, raw_response_b64)",
                         kind="rekor_inclusion_invalid",
                     )
+                if rekor_log_pubkey_pem is not None and r_raw:
+                    try:
+                        raw_json = base64.standard_b64decode(r_raw).decode("utf-8")
+                        rekor_body = json.loads(raw_json)
+                        entry_val = next(iter(rekor_body.values())) if isinstance(rekor_body, dict) and rekor_body else rekor_body
+                        from mareforma.signing import verify_rekor_inclusion
+                        verify_rekor_inclusion(entry_val, rekor_log_pubkey_pem)
+                    except Exception as exc:
+                        raise RestoreError(
+                            f"Rekor inclusion proof verification failed for "
+                            f"claim {cid!r}: {exc}",
+                            kind="rekor_inclusion_invalid",
+                        ) from exc
                 conn.execute(
                     "INSERT OR IGNORE INTO rekor_inclusions "
                     "(claim_id, uuid, log_index, integrated_time, "
