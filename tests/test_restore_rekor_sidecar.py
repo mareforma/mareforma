@@ -121,8 +121,11 @@ class TestDriftWarnings:
 
         # Strip [rekor_inclusions] from TOML to simulate pre-v0.3.2
         toml_path = tmp_path / "claims.toml"
-        import tomli
-        data = tomli.loads(toml_path.read_text())
+        try:
+            import tomllib
+        except ModuleNotFoundError:
+            import tomli as tomllib  # type: ignore[no-redef]
+        data = tomllib.loads(toml_path.read_text())
         data.pop("rekor_inclusions", None)
         import tomli_w
         toml_path.write_bytes(tomli_w.dumps(data).encode("utf-8"))
@@ -174,8 +177,11 @@ class TestDriftWarnings:
 
         # Edit TOML: keep [rekor_inclusions] section but remove this claim's entry
         toml_path = tmp_path / "claims.toml"
-        import tomli
-        data = tomli.loads(toml_path.read_text())
+        try:
+            import tomllib
+        except ModuleNotFoundError:
+            import tomli as tomllib  # type: ignore[no-redef]
+        data = tomllib.loads(toml_path.read_text())
         data["rekor_inclusions"] = {}  # section present, but empty
         import tomli_w
         toml_path.write_bytes(tomli_w.dumps(data).encode("utf-8"))
@@ -210,8 +216,11 @@ class TestAdversarial:
 
         # Inject a sidecar entry for a non-existent claim
         toml_path = tmp_path / "claims.toml"
-        import tomli
-        data = tomli.loads(toml_path.read_text())
+        try:
+            import tomllib
+        except ModuleNotFoundError:
+            import tomli as tomllib  # type: ignore[no-redef]
+        data = tomllib.loads(toml_path.read_text())
         data["rekor_inclusions"] = {
             "00000000-0000-4000-8000-000000000000": {
                 "uuid": "ghost",
@@ -245,8 +254,11 @@ class TestAdversarial:
         conn.close()
 
         toml_path = tmp_path / "claims.toml"
-        import tomli
-        data = tomli.loads(toml_path.read_text())
+        try:
+            import tomllib
+        except ModuleNotFoundError:
+            import tomli as tomllib  # type: ignore[no-redef]
+        data = tomllib.loads(toml_path.read_text())
         data["rekor_inclusions"] = {
             cid: {"log_index": 1}  # missing uuid and raw_response_b64
         }
@@ -274,8 +286,11 @@ class TestAdversarial:
         conn.close()
 
         toml_path = tmp_path / "claims.toml"
-        import tomli
-        data = tomli.loads(toml_path.read_text())
+        try:
+            import tomllib
+        except ModuleNotFoundError:
+            import tomli as tomllib  # type: ignore[no-redef]
+        data = tomllib.loads(toml_path.read_text())
         data["rekor_inclusions"] = {}
         import tomli_w
         toml_path.write_bytes(tomli_w.dumps(data).encode("utf-8"))
