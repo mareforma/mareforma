@@ -14,17 +14,8 @@ import pytest
 
 import mareforma
 from mareforma import signing as _signing
+from tests._helpers import _bootstrap_key
 
-
-def _bootstrap_key(tmp_path: Path, name: str = "root.key") -> Path:
-    key_path = tmp_path / name
-    _signing.bootstrap_key(key_path)
-    return key_path
-
-
-# ---------------------------------------------------------------------------
-# Basic match
-# ---------------------------------------------------------------------------
 
 class TestSearchBasicMatch:
     def test_single_term_match(self, tmp_path: Path) -> None:

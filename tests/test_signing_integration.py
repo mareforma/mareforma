@@ -22,18 +22,8 @@ from click.testing import CliRunner
 import mareforma
 from mareforma import signing as _signing
 from mareforma.cli import cli as mareforma_cli
+from tests._helpers import _bootstrap_key
 
-
-def _bootstrap_key(tmp_path: Path) -> Path:
-    """Generate a key inside tmp_path and return its absolute path."""
-    key_path = tmp_path / "mareforma.key"
-    _signing.bootstrap_key(key_path)
-    return key_path
-
-
-# ---------------------------------------------------------------------------
-# Library-level integration
-# ---------------------------------------------------------------------------
 
 class TestOpenWithSigning:
     def test_no_key_yields_unsigned_claims(self, tmp_path):

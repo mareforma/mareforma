@@ -32,16 +32,11 @@ _TEST_REKOR_URL = "https://rekor.test.example/api/v1/log/entries"
 
 
 # Reuse the Merkle helpers from the unit-test file.
+from tests._helpers import _bootstrap_key
 from tests.test_rekor_verify import (
     _leaf_hash, _node_hash, _merkle_root, _merkle_inclusion_path,
     _sign_checkpoint_ed25519, _sign_checkpoint_ecdsa, _pubkey_pem,
 )
-
-
-def _bootstrap_key(tmp_path: Path, name: str = "mareforma.key") -> Path:
-    p = tmp_path / name
-    _signing.bootstrap_key(p)
-    return p
 
 
 def _hash_and_sig(envelope: dict) -> tuple[str, str]:

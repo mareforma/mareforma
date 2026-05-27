@@ -1,7 +1,7 @@
 """Mareforma — local epistemic substrate for AI-assisted research."""
 
 __description__ = "Mareforma — local epistemic substrate for AI-assisted research."
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 
 from pathlib import Path
 
@@ -302,6 +302,7 @@ def restore(
     project_root: "str | Path",
     *,
     claims_toml: "str | Path | None" = None,
+    rekor_log_pubkey_pem: "bytes | None" = None,
 ) -> dict:
     """Rebuild a fresh graph.db from claims.toml.
 
@@ -325,6 +326,12 @@ def restore(
     claims_toml:
         Path to the source TOML. Defaults to
         ``<project_root>/claims.toml``.
+    rekor_log_pubkey_pem:
+        PEM-encoded Rekor log operator public key. When supplied,
+        every ``[rekor_inclusions]`` entry's Merkle inclusion proof
+        is cryptographically verified before replay. Verification
+        failure raises ``RestoreError(kind='rekor_inclusion_invalid')``.
+        When ``None``, sidecar entries are replayed unverified.
 
     Returns
     -------
@@ -336,10 +343,15 @@ def restore(
     mareforma.db.RestoreError
         With a ``.kind`` field naming the failure mode: graph_not_empty,
         toml_not_found, toml_malformed, enrollment_unverified,
-        claim_unverified, mode_inconsistent, or orphan_signer.
+        claim_unverified, mode_inconsistent, orphan_signer, or
+        rekor_inclusion_invalid.
     """
     from mareforma.db import restore as _restore
-    return _restore(project_root, claims_toml=claims_toml)
+    return _restore(
+        project_root,
+        claims_toml=claims_toml,
+        rekor_log_pubkey_pem=rekor_log_pubkey_pem,
+    )
 
 
 from mareforma._evidence import (

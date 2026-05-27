@@ -66,7 +66,7 @@ s["transitions"]       # list of state transition dicts
 
 ---
 
-## `mareforma.restore(project_root, *, claims_toml=None)`
+## `mareforma.restore(project_root, *, claims_toml=None, rekor_log_pubkey_pem=None)`
 
 Rebuild a fresh `graph.db` from `claims.toml` for catastrophic-loss
 recovery. Fresh-only — refuses to run if `graph.db` already has any
@@ -84,6 +84,7 @@ result = mareforma.restore("/path/to/project")
 |---|---|---|---|
 | `project_root` | `str \| Path` | required | Project directory. `graph.db` is reconstructed under `<root>/.mareforma/`. |
 | `claims_toml` | `str \| Path \| None` | `None` | Path to source TOML. Defaults to `<project_root>/claims.toml`. |
+| `rekor_log_pubkey_pem` | `bytes \| None` | `None` | PEM-encoded Rekor log operator public key. When supplied, every `[rekor_inclusions]` entry's Merkle inclusion proof is cryptographically verified before replay. Verification failure raises `RestoreError(kind='rekor_inclusion_invalid')`. When `None`, sidecar entries are replayed unverified. |
 
 **Returns** `dict` with `validators_restored` and `claims_restored` counts.
 
@@ -98,6 +99,7 @@ result = mareforma.restore("/path/to/project")
 | `claim_unverified` | A claim's `signature_bundle` or `validation_signature` failed verification. |
 | `mode_inconsistent` | Signed-mode graph (validators enrolled) contains a claim with no signature. |
 | `orphan_signer` | A claim is signed by a keyid not present in the validators section. |
+| `rekor_inclusion_invalid` | A `[rekor_inclusions]` entry failed verification, references a missing claim, or is missing required fields. |
 
 ---
 

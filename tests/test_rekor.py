@@ -28,16 +28,10 @@ import pytest
 
 import mareforma
 from mareforma import signing as _signing
+from tests._helpers import _bootstrap_key
 
 
 _TEST_REKOR_URL = "https://rekor.test.example/api/v1/log/entries"
-
-
-def _bootstrap_key(tmp_path: Path) -> Path:
-    """Generate a key inside tmp_path and return its absolute path."""
-    key_path = tmp_path / "mareforma.key"
-    _signing.bootstrap_key(key_path)
-    return key_path
 
 
 def _rekor_response_for(

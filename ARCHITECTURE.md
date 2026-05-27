@@ -73,10 +73,10 @@ EpistemicGraph (mareforma/_graph.py)
   │ ─ classifies (caller-supplied; substrate does not verify)
   │ ─ canonical_statement(claim_fields) → bytes (NFC + sorted keys + no whitespace)
   │ ─ in-toto Statement v1 wrapping (mareforma/_statement.py)
-  │ ─ DSSE PAE encoding (mareforma/signing.py)
+  │ ─ DSSE PAE encoding (mareforma/signing/core.py)
   │ ─ Ed25519 signature
   ▼
-db.add_claim (mareforma/db.py)
+db.add_claim (mareforma/db/core.py)
   │
   │ ─ BEGIN IMMEDIATE
   │ ─ prev_hash chain extension under lock
@@ -110,7 +110,7 @@ Three rules:
    `ESTABLISHED` upstream in `supports[]`, must have different
    `generated_by`, and (if both supply `artifact_hash`) must agree on
    the hash. Status, transparency log, and DOI resolution gates apply
-   too — see `_maybe_update_replicated_unlocked` in db.py.
+   too — see `_maybe_update_replicated_unlocked` in db/core.py.
 2. **REPLICATED → ESTABLISHED is human-only.** `graph.validate()`
    requires an enrolled validator key whose `validator_type` is
    `'human'`. LLM-typed validators may sign validations but cannot
@@ -144,7 +144,7 @@ What contradiction does **not** do:
 This per-claim boundary is a deliberate design rule, not an oversight.
 Transitive falsification is a different model with different semantics
 and a different freedom-to-operate posture; see the design comment on
-the `contradiction_invalidates_older` trigger in `db.py` for context.
+the `contradiction_invalidates_older` trigger in `db/_schema_sql.py` for context.
 
 ## Signing surface
 
@@ -301,7 +301,7 @@ A 30-minute audit map. Each row links a substrate property to the
 exact mechanism that enforces it and the specific threat it
 defends against. Designed for the reader who wants to verify
 mareforma's invariants without scrolling through 4,600 lines of
-`db.py`.
+`db/core.py`.
 
 ### State-machine transitions
 
@@ -382,7 +382,7 @@ on a signed row is refused at the SQL layer.
 | `statement_cid` cross-check | column never directly written by user code | yes — re-derives from the row's fields + evidence and compares to the stored `statement_cid` |
 | Validation envelope binds this claim | substrate gates: `_extract_validation_signer_keyid`, `_refuse_llm_validator`, `_refuse_self_validation`, `_verify_evidence_seen`, envelope/kwarg agreement; cryptographic verify on the envelope | yes — verifies the validation envelope's signature, then checks `claim_id` / `validator_keyid` / timestamp / `evidence_seen` fields against the row |
 | Contradiction verdict is signed by an enrolled validator | enforced at `record_contradiction_verdict`; chain walk via `is_enrolled` | yes — replays each verdict envelope in `created_at` order, verifies before INSERT, the contradiction trigger re-sets `t_invalid` |
-| Rekor inclusion proof is cryptographically valid | only when opt-in `rekor_log_pubkey_pem` was supplied at `mareforma.open()`; submit path + `refresh_unsigned()` verify the Merkle path against the signed checkpoint | deferred — the `rekor_inclusions` sidecar isn't yet round-tripped through `claims.toml`, so restore loses sidecar entries (next-release item) |
+| Rekor inclusion proof is cryptographically valid | only when opt-in `rekor_log_pubkey_pem` was supplied at `mareforma.open()`; submit path + `refresh_unsigned()` verify the Merkle path against the signed checkpoint | yes (v0.3.2) — `rekor_inclusions` sidecar round-tripped through `claims.toml`; `restore()` replays entries and (when `rekor_log_pubkey_pem` supplied) re-verifies each inclusion proof against the pinned key. Pre-v0.3.2 TOML files restore with `RekorSidecarSectionAbsentWarning` |
 
 ### One-page threat model
 
@@ -423,24 +423,24 @@ this is the consolidated view.
 
 For the reader who wants to read the actual enforcement:
 
-- **State-machine triggers** — [`mareforma/db.py`](mareforma/db.py) `_SCHEMA_SQL`
+- **State-machine triggers** — [`mareforma/db/_schema_sql.py`](mareforma/db/_schema_sql.py) `_SCHEMA_SQL`
   (search for `claims_insert_state_check`, `claims_update_state_check`,
   `claims_update_status_terminal`, `claims_signed_fields_no_laundering`,
   `claims_signed_no_delete`)
-- **Convergence detection** — `_maybe_update_replicated_unlocked` in `db.py`
-- **Validation gates** — `validate_claim` in `db.py` (substrate-bypass
+- **Convergence detection** — `_maybe_update_replicated_unlocked` in [`mareforma/db/core.py`](mareforma/db/core.py)
+- **Validation gates** — `validate_claim` in `db/core.py` (substrate-bypass
   defense: cryptographic verify + LLM-type ceiling + self-validation
   refusal + payload field equality + evidence_seen citation gate)
 - **Verdict-issuer protocol** — `record_replication_verdict` /
-  `record_contradiction_verdict` in `db.py`; trigger
+  `record_contradiction_verdict` in `db/core.py`; trigger
   `contradiction_invalidates_older`
 - **Restore proofs** — `_verify_claim_signatures_on_restore`,
   `_verify_and_insert_replication_verdict`,
-  `_verify_and_insert_contradiction_verdict` in `db.py`
+  `_verify_and_insert_contradiction_verdict` in [`mareforma/db/restore.py`](mareforma/db/restore.py)
 - **Rekor inclusion verification** — `verify_rekor_inclusion`,
   `verify_merkle_inclusion_proof`, `verify_rekor_checkpoint`,
   `fetch_inclusion_proof`, `fetch_log_pubkey` in
-  [`mareforma/signing.py`](mareforma/signing.py)
+  [`mareforma/signing/rekor.py`](mareforma/signing/rekor.py)
 - **TOFU pubkey pinning** — `_pem_canonical_der` +
   `O_CREAT|O_EXCL` write in [`mareforma/__init__.py`](mareforma/__init__.py)
 - **Validator chain walk** — `_verify_chain`, `is_enrolled` in

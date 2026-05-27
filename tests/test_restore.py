@@ -19,16 +19,12 @@ import pytest
 import mareforma
 from mareforma import db as _db
 from mareforma import signing as _signing
+from tests._helpers import _bootstrap_key
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _bootstrap_key(tmp_path: Path, name: str) -> Path:
-    key_path = tmp_path / name
-    _signing.bootstrap_key(key_path)
-    return key_path
 
 
 def _pem_of(key_path: Path) -> bytes:
