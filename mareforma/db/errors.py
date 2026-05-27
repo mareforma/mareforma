@@ -180,3 +180,25 @@ class VerdictIssuerError(MareformaError):
     """
 
 
+class RekorSidecarSectionAbsentWarning(UserWarning):
+    """Emitted once per restore when claims.toml has no ``[rekor_inclusions]`` section.
+
+    This is the expected state for TOML files written by v0.3.1 or earlier.
+    Every Rekor-logged claim restores successfully; the sidecar entries are
+    simply absent. Run ``refresh_unsigned()`` after restore to re-fetch
+    inclusion proofs from the log and rebuild the sidecar.
+    """
+
+
+class RekorSidecarEntryMissingWarning(UserWarning):
+    """Emitted per claim when the ``[rekor_inclusions]`` section exists but
+    lacks an entry for a Rekor-logged claim.
+
+    Unlike :class:`RekorSidecarSectionAbsentWarning` (which signals a
+    legitimate pre-v0.3.2 upgrade), a present-but-incomplete section
+    suggests the TOML was edited to remove specific entries. The claim
+    restores successfully, but the operator should investigate why the
+    entry is missing.
+    """
+
+

@@ -488,6 +488,75 @@ def restore(
                     conn, verdict_id, v, validators_section,
                 )
 
+            # Rekor inclusion sidecar. Replay entries so post-restore
+            # graphs carry the same Rekor proof data as the original.
+            # When rekor_log_pubkey_pem was supplied at open(), verify
+            # each entry's inclusion proof against the pinned key.
+            rekor_section = data.get("rekor_inclusions") or {}
+            has_rekor_section = "rekor_inclusions" in data
+            rekor_logged_claim_ids = set()
+            for cid, c in ordered_claims:
+                bundle_str = c.get("signature_bundle")
+                if bundle_str:
+                    try:
+                        bundle = json.loads(bundle_str)
+                        if bundle.get("rekor"):
+                            rekor_logged_claim_ids.add(cid)
+                    except (ValueError, TypeError):
+                        pass
+
+            if not has_rekor_section and rekor_logged_claim_ids:
+                from .errors import RekorSidecarSectionAbsentWarning
+                warnings.warn(
+                    f"claims.toml has no [rekor_inclusions] section but "
+                    f"{len(rekor_logged_claim_ids)} claim(s) have Rekor "
+                    "coords in their signature_bundle. This is expected "
+                    "when restoring from a pre-v0.3.2 TOML. Run "
+                    "refresh_unsigned() to re-fetch inclusion proofs.",
+                    RekorSidecarSectionAbsentWarning,
+                    stacklevel=2,
+                )
+
+            for cid, entry in rekor_section.items():
+                if cid not in claims_section:
+                    raise RestoreError(
+                        f"rekor_inclusions entry references claim_id "
+                        f"{cid!r} which is not in the [claims] section",
+                        kind="rekor_inclusion_invalid",
+                    )
+                r_uuid = entry.get("uuid")
+                r_log_index = entry.get("log_index")
+                r_raw = entry.get("raw_response_b64")
+                r_itime = entry.get("integrated_time")
+                r_recorded = entry.get("recorded_at")
+                if not r_uuid or r_raw is None:
+                    raise RestoreError(
+                        f"rekor_inclusions entry for {cid!r} is missing "
+                        "required fields (uuid, raw_response_b64)",
+                        kind="rekor_inclusion_invalid",
+                    )
+                conn.execute(
+                    "INSERT OR IGNORE INTO rekor_inclusions "
+                    "(claim_id, uuid, log_index, integrated_time, "
+                    "raw_response_b64, recorded_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (cid, r_uuid, r_log_index, r_itime, r_raw, r_recorded),
+                )
+
+            if has_rekor_section and rekor_logged_claim_ids:
+                from .errors import RekorSidecarEntryMissingWarning
+                for cid in rekor_logged_claim_ids:
+                    if cid not in rekor_section:
+                        warnings.warn(
+                            f"Claim {cid[:12]}... has Rekor coords in its "
+                            "signature_bundle but no matching entry in "
+                            "[rekor_inclusions]. The section exists (not a "
+                            "pre-v0.3.2 upgrade) — investigate whether the "
+                            "entry was removed from claims.toml.",
+                            RekorSidecarEntryMissingWarning,
+                            stacklevel=2,
+                        )
+
             conn.execute("COMMIT")
         except Exception:
             try:

@@ -3949,6 +3949,26 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
                     "created_at": v["created_at"],
                 }
 
+        # Rekor inclusion sidecar. Every successful submit is recorded
+        # here independently of whether the claims-row UPDATE succeeded.
+        # Round-tripping through TOML lets restore() re-verify inclusion
+        # proofs against a pinned log pubkey.
+        rekor_rows = conn.execute(
+            "SELECT claim_id, uuid, log_index, integrated_time, "
+            "raw_response_b64, recorded_at "
+            "FROM rekor_inclusions ORDER BY recorded_at"
+        ).fetchall()
+        if rekor_rows:
+            data["rekor_inclusions"] = {}
+            for r in rekor_rows:
+                data["rekor_inclusions"][r["claim_id"]] = {
+                    "uuid": r["uuid"],
+                    "log_index": r["log_index"],
+                    "integrated_time": r["integrated_time"],
+                    "raw_response_b64": r["raw_response_b64"],
+                    "recorded_at": r["recorded_at"],
+                }
+
         out = root / "claims.toml"
         out.write_bytes(tomli_w.dumps(data).encode("utf-8"))
 

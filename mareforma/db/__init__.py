@@ -37,6 +37,8 @@ from .errors import (
     RestoreError,
     CycleDetectedError,
     VerdictIssuerError,
+    RekorSidecarSectionAbsentWarning,
+    RekorSidecarEntryMissingWarning,
 )
 from .core import (
     # Constants.
