@@ -514,6 +514,16 @@ CREATE TABLE IF NOT EXISTS validators (
     enrollment_envelope  TEXT NOT NULL
 );
 
+"""
+
+
+# Additive tables created on every open_db() call (both fresh and
+# already-initialised dbs). All CREATE statements are IF NOT EXISTS so
+# the script is idempotent. Lives outside _SCHEMA_SQL because it must
+# also run on the v1 path: existing v0.3.2 graph.db files have
+# user_version=1 and skip _SCHEMA_SQL entirely, so literature_claims
+# and agent_activities would otherwise be missing on every upgrade.
+_ADDITIVE_TABLES_SQL = """
 -- literature_claims: paper-ingested claim drafts.
 -- Populated by `mareforma ingest`. Separate from the signed `claims`
 -- table because ingest-extracted assertions are drafts pending review,
@@ -547,6 +557,34 @@ AFTER DELETE ON literature_claims BEGIN
     INSERT INTO literature_claims_fts(literature_claims_fts, rowid, claim_text)
     VALUES ('delete', old.rowid, old.claim_text);
 END;
+
+-- AFTER UPDATE OF claim_text keeps the FTS index in sync when a caller
+-- runs UPDATE literature_claims SET claim_text=? instead of the
+-- INSERT-OR-REPLACE path. Without this trigger, ask returns hits from
+-- stale text while the JOIN renders the current text — silently
+-- misleading results with no error.
+CREATE TRIGGER IF NOT EXISTS literature_claims_au
+AFTER UPDATE OF claim_text ON literature_claims BEGIN
+    INSERT INTO literature_claims_fts(literature_claims_fts, rowid, claim_text)
+    VALUES ('delete', old.rowid, old.claim_text);
+    INSERT INTO literature_claims_fts(rowid, claim_text)
+    VALUES (new.rowid, new.claim_text);
+END;
+
+-- agent_activities: PROV-O Activity rows for ambient Claude Code tool
+-- calls (mareforma.hooks.agent_hook). High-volume, low-semantic-density
+-- data — most rows never escalate into signed claims so they live
+-- outside the signed envelope chain. Created here (instead of from the
+-- hook on demand) so the table is part of the canonical schema and
+-- mareforma.db.open_db is the only path that opens this DB.
+CREATE TABLE IF NOT EXISTS agent_activities (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT,
+    tool_name   TEXT NOT NULL,
+    tool_input  TEXT NOT NULL,
+    started_at  TEXT NOT NULL,
+    prov_type   TEXT NOT NULL DEFAULT 'prov:Activity'
+);
 """
 
 

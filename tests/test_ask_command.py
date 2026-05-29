@@ -57,17 +57,16 @@ def test_ask_cli_outputs_table(populated_db, tmp_path):
     from click.testing import CliRunner
     import sqlite3
 
-    # open_db expects a project root, not a db path. mareforma writes
-    # the actual file at <root>/.mareforma/graph.db.
-    from mareforma.db import open_db
+    from mareforma.db import open_db_from_db_path
     from mareforma.ingest_command import ingest_file
-    conn = open_db(tmp_path)
     from pathlib import Path
+
+    db_path = tmp_path / "literature.db"
+    conn = open_db_from_db_path(db_path)
     sample_dir = Path(__file__).parent / "ingest_fixtures"
     ingest_file(sample_dir / "abstract_a.txt", conn)
     conn.close()
 
-    db_path = tmp_path / ".mareforma" / "graph.db"
     runner = CliRunner()
     result = runner.invoke(ask_cli, ["CRP", "--db", str(db_path)])
     assert result.exit_code == 0

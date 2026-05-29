@@ -224,7 +224,7 @@ def claims_to_toml(claims: list[dict]) -> str:
 )
 def ingest_cli(file, db_path, use_llm, model):
     """Ingest a literature file into the provenance graph."""
-    from mareforma.db import open_db
+    from mareforma.db import open_db_from_db_path
 
     file_path = Path(file)
     if not file_path.exists():
@@ -241,17 +241,8 @@ def ingest_cli(file, db_path, use_llm, model):
             )
             sys.exit(1)
 
-    # db_path is given relative to the project root convention
-    # '.mareforma/graph.db' — use its parent's parent as the project
-    # root for open_db().
     db_file = Path(db_path).resolve()
-    if db_file.parent.name == ".mareforma":
-        project_root = db_file.parent.parent
-    else:
-        # Caller passed a fully custom path; treat its grandparent as
-        # the root and let open_db re-derive the .mareforma/ location.
-        project_root = db_file.parent
-    conn = open_db(project_root)
+    conn = open_db_from_db_path(db_file)
 
     try:
         claims = ingest_file(file_path, conn, use_llm=use_llm, model=model)

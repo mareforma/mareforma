@@ -97,8 +97,8 @@ def test_ingest_llm_flag_fails_gracefully_when_anthropic_missing(
     db_path = tmp_path / "g.db"
 
     # Pre-create the db so --db arg is valid
-    from mareforma.db import open_db
-    open_db(db_path).close()
+    from mareforma.db import open_db_from_db_path
+    open_db_from_db_path(db_path).close()
 
     result = runner.invoke(
         ingest_cli, [str(sample_abstract_a), "--db", str(db_path), "--llm"]
@@ -116,11 +116,49 @@ def test_ingest_llm_flag_fails_gracefully_when_anthropic_missing(
 
 def test_ingest_missing_file_exits_1(tmp_path):
     from mareforma.ingest_command import ingest_cli
-    from mareforma.db import open_db
+    from mareforma.db import open_db_from_db_path
     db_path = tmp_path / "g.db"
-    open_db(db_path).close()
+    open_db_from_db_path(db_path).close()
     runner = CliRunner()
     result = runner.invoke(
         ingest_cli, [str(tmp_path / "nonexistent.txt"), "--db", str(db_path)]
     )
     assert result.exit_code == 1
+
+
+def test_ingest_respects_custom_db_path(tmp_path, sample_abstract_a):
+    """`--db /path/file.db` writes claims to file.db, NOT to <parent>/.mareforma/graph.db.
+
+    Regression: prior implementation re-derived a project_root and silently
+    opened <root>/.mareforma/graph.db, so the user-supplied filename was
+    ignored and claims landed in a different file.
+    """
+    from mareforma.ingest_command import ingest_cli
+
+    custom_db = tmp_path / "custom.db"
+    rewritten_path = tmp_path / ".mareforma" / "graph.db"
+
+    runner = CliRunner()
+    result = runner.invoke(
+        ingest_cli, [str(sample_abstract_a), "--db", str(custom_db)]
+    )
+    assert result.exit_code == 0, result.output
+
+    # The file the user asked for must exist with non-zero size.
+    assert custom_db.exists(), "ingest did not write to the --db path the user supplied"
+    assert custom_db.stat().st_size > 0
+
+    # The previously-buggy rewrite path must NOT have been created.
+    assert not rewritten_path.exists(), (
+        "ingest still rewrote --db under .mareforma/graph.db — "
+        "open_db_from_db_path is not honouring the user-supplied filename"
+    )
+
+    # And the rows are queryable from the user-supplied file.
+    import sqlite3
+    conn = sqlite3.connect(str(custom_db))
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM literature_claims").fetchone()[0]
+        assert n > 0, "no claims written to the --db path"
+    finally:
+        conn.close()

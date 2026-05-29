@@ -104,18 +104,14 @@ def ask(
 )
 def ask_cli(question, db_path, limit, as_json):
     """Search literature claims using full-text search."""
-    from mareforma.db import open_db
+    from mareforma.db import open_db_from_db_path
 
     resolved_db = Path(db_path).resolve()
     if not resolved_db.exists():
         console.print(f"[red]Error:[/red] DB not found: {resolved_db}")
         sys.exit(1)
 
-    if resolved_db.parent.name == ".mareforma":
-        project_root = resolved_db.parent.parent
-    else:
-        project_root = resolved_db.parent
-    conn = open_db(project_root)
+    conn = open_db_from_db_path(resolved_db)
     results = ask(question, conn, limit=limit)
     conn.close()
 

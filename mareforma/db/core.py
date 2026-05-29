@@ -21,7 +21,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from ._schema_sql import _SCHEMA_SQL, _CLAIM_COLUMNS, _CLAIM_SELECT  # noqa: F401
+from ._schema_sql import (  # noqa: F401
+    _ADDITIVE_TABLES_SQL,
+    _CLAIM_COLUMNS,
+    _CLAIM_SELECT,
+    _SCHEMA_SQL,
+)
 from .errors import (  # noqa: F401
     MareformaError,
     DatabaseError,
@@ -178,6 +183,7 @@ def open_db(root: Path) -> sqlite3.Connection:
 
         if version == 0:
             conn.executescript(_SCHEMA_SQL)
+            conn.executescript(_ADDITIVE_TABLES_SQL)
             conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             conn.commit()
             _attach_supports_cache(conn, root)
@@ -246,10 +252,54 @@ def open_db(root: Path) -> sqlite3.Connection:
             )
         _attach_supports_cache(conn, root)
         _ensure_doi_cache_columns(conn)
+        # Additive tables (literature_claims, agent_activities) must be
+        # present on every initialised db, not just fresh ones —
+        # otherwise an existing v0.3.2 graph.db opened by v0.3.3 lacks
+        # them and the first `mareforma ingest` or hook event raises
+        # 'no such table'.
+        conn.executescript(_ADDITIVE_TABLES_SQL)
+        conn.commit()
         return conn
 
     except sqlite3.OperationalError as exc:
         raise DatabaseError(f"Could not open database at {path}: {exc}") from exc
+
+
+def open_db_from_db_path(db_path: "str | Path") -> sqlite3.Connection:
+    """Open the graph DB from a direct path to ``graph.db`` (not a project root).
+
+    The CLI conventionally accepts ``--db <project_root>/.mareforma/graph.db``
+    even though ``open_db`` takes the project root and re-derives that
+    path. This helper reverses the convention so a caller that has the
+    file path can use it without silently rewriting it.
+
+    Accepted shapes:
+      - ``<root>/.mareforma/graph.db`` — opens ``<root>`` as project root.
+      - any other path — opens the DB file directly; the user supplied
+        a non-conventional location and we honour it. The parent
+        directory becomes the "project root" for cache lookups, and the
+        DB lives at the supplied path (NOT at ``<parent>/.mareforma/``).
+    """
+    db_file = Path(db_path).resolve()
+    if db_file.parent.name == ".mareforma":
+        return open_db(db_file.parent.parent)
+
+    # Non-conventional path: connect to db_file directly and apply the
+    # schema script (idempotent). This preserves the user-supplied
+    # filename instead of silently rewriting it under .mareforma/.
+    db_file.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_file), check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version == 0:
+        conn.executescript(_SCHEMA_SQL)
+        conn.executescript(_ADDITIVE_TABLES_SQL)
+        conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+    else:
+        conn.executescript(_ADDITIVE_TABLES_SQL)
+    conn.commit()
+    return conn
 
 
 def _ensure_claims_columns_for_upgrade(

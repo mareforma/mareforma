@@ -110,18 +110,14 @@ def export_narrative(conn: sqlite3.Connection) -> str:
 )
 def narrative_cmd(db_path, output):
     """Export literature claims as a Markdown narrative."""
-    from mareforma.db import open_db
+    from mareforma.db import open_db_from_db_path
 
     resolved_db = Path(db_path).resolve()
     if not resolved_db.exists():
         console.print(f"[red]Error:[/red] DB not found: {resolved_db}")
         raise SystemExit(1)
 
-    if resolved_db.parent.name == ".mareforma":
-        project_root = resolved_db.parent.parent
-    else:
-        project_root = resolved_db.parent
-    conn = open_db(project_root)
+    conn = open_db_from_db_path(resolved_db)
     md = export_narrative(conn)
     conn.close()
 
