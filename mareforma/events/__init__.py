@@ -21,9 +21,34 @@ from mareforma.events.protocol import (
     EventSource,
 )
 
+
+# Canonical source-name constants. EventPayload.source is a string for
+# wire-format compatibility, but adapters and handlers MUST use these
+# constants instead of string literals — a typo on a literal silently
+# routes events to the wrong handler with no type-check or runtime
+# error. Mirrors the predicate-URI constants pattern.
+SOURCE_CLAWINSTITUTE = "clawinstitute"
+SOURCE_TOOLUNIVERSE = "tooluniverse"
+SOURCE_GEMINI = "gemini"
+SOURCE_CLAUDE_CODE_PRETOOLUSE = "claude-code-pretooluse"
+
+
+KNOWN_SOURCES: frozenset[str] = frozenset({
+    SOURCE_CLAWINSTITUTE,
+    SOURCE_TOOLUNIVERSE,
+    SOURCE_GEMINI,
+    SOURCE_CLAUDE_CODE_PRETOOLUSE,
+})
+
+
 __all__ = [
     "ClaimResult",
     "EventHandler",
     "EventPayload",
     "EventSource",
+    "KNOWN_SOURCES",
+    "SOURCE_CLAWINSTITUTE",
+    "SOURCE_TOOLUNIVERSE",
+    "SOURCE_GEMINI",
+    "SOURCE_CLAUDE_CODE_PRETOOLUSE",
 ]

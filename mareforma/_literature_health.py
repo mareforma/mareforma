@@ -58,11 +58,34 @@ class Contradiction:
 # ---------------------------------------------------------------------------
 
 
+# Common sentence-initial / discourse words that the capitalised-token
+# regex would otherwise pick up. Without filtering these, two abstracts
+# that both contain 'Patients' or 'Results' generate a spurious shared
+# term and a false contradiction.
+_STOPWORD_TERMS: frozenset[str] = frozenset({
+    "A", "An", "And", "As", "At", "Be", "But", "By", "For", "From",
+    "Here", "However", "If", "In", "Is", "It", "Its", "Methods", "Or",
+    "Of", "On", "Patients", "Results", "Subjects", "That", "The", "This",
+    "These", "Those", "To", "We", "Were", "What", "When", "Where",
+    "Which", "While", "With", "Conclusion", "Conclusions", "Background",
+    "Discussion", "Introduction", "Objective", "Objectives", "Outcome",
+    "Outcomes", "Findings",
+})
+
+
 def _extract_key_terms(text: str) -> set[str]:
-    """Extract capitalised multi-word tokens and biomarker patterns."""
+    """Extract capitalised multi-word tokens and biomarker patterns.
+
+    Filters out a curated stopword list of sentence-initial / discourse
+    words so common openings ('Patients', 'Results') don't get treated
+    as shared topic terms across unrelated abstracts.
+    """
     tokens = re.findall(r"\b([A-Z][a-zA-Z\-]*(?:\s+[A-Z][a-zA-Z\-]*)*)\b", text)
     tokens += re.findall(r"\b([A-Z]{2,}(?:-\d+)?)\b", text)
-    return {t.strip() for t in tokens if len(t) >= 2}
+    return {
+        t.strip() for t in tokens
+        if len(t) >= 2 and t.strip() not in _STOPWORD_TERMS
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -106,15 +129,33 @@ def detect_contradictions(conn: sqlite3.Connection) -> list[Contradiction]:
                     ))
 
     # --- Heuristic ---
-    positive_rows = [r for r in rows if _POSITIVE.search(r["claim_text"])]
-    negative_rows = [r for r in rows if _NEGATION.search(r["claim_text"])]
+    # A claim with BOTH a positive and a negation phrase ("reduced X
+    # but did not improve Y") is ambiguous, not a polarity signal.
+    # Excluding these from both sides prevents a row from contradicting
+    # itself across the cross-product and prevents inflated contradiction
+    # counts on common scientific-abstract phrasing.
+    pure_positive = [
+        r for r in rows
+        if _POSITIVE.search(r["claim_text"])
+        and not _NEGATION.search(r["claim_text"])
+    ]
+    pure_negative = [
+        r for r in rows
+        if _NEGATION.search(r["claim_text"])
+        and not _POSITIVE.search(r["claim_text"])
+    ]
 
-    for pos in positive_rows:
+    # Hoist negative-side term extraction out of the inner loop —
+    # avoids O(P×N) regex sweeps on the same N rows.
+    neg_with_terms = [
+        (neg, _extract_key_terms(neg["claim_text"])) for neg in pure_negative
+    ]
+
+    for pos in pure_positive:
         pos_terms = _extract_key_terms(pos["claim_text"])
-        for neg in negative_rows:
+        for neg, neg_terms in neg_with_terms:
             if pos["source_doc_id"] == neg["source_doc_id"]:
                 continue  # same document — not a contradiction
-            neg_terms = _extract_key_terms(neg["claim_text"])
             shared = pos_terms & neg_terms
             if shared:
                 contradictions.append(Contradiction(

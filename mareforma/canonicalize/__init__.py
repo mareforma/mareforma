@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import threading
 from typing import Any, Callable
 
 import rfc8785
@@ -23,6 +24,7 @@ import rfc8785
 __all__ = [
     "CanonicalizationError",
     "DEFAULT_CANONICALIZER",
+    "DSSE_JCS_NFC_V1",
     "canonicalize",
     "canonicalize_default",
     "digest_bytes",
@@ -37,6 +39,12 @@ class CanonicalizationError(ValueError):
 
 
 DEFAULT_CANONICALIZER = "json-c14n-v1"
+
+# NFC-normalising JCS — the substrate's signed-envelope canonicalizer
+# exposed under a registered name so adapters that need the same
+# byte-for-byte form as the envelope layer can opt in by form name
+# instead of importing the private mareforma._canonical module.
+DSSE_JCS_NFC_V1 = "dsse-jcs-nfc-v1"
 
 
 def canonicalize_default(value: Any) -> bytes:
@@ -72,6 +80,12 @@ _REGISTRY: dict[str, Callable[[Any], bytes]] = {
     DEFAULT_CANONICALIZER: canonicalize_default,
 }
 
+# Lock guards _REGISTRY against the dictionary-changed-size-during-
+# iteration race: canonicalize() formats _REGISTRY.keys() inside its
+# KeyError path while register_canonicalizer() may be mutating the
+# dict from another thread.
+_LOCK = threading.Lock()
+
 
 def register_canonicalizer(name: str, fn: Callable[[Any], bytes]) -> None:
     """Register a specialty canonicalizer under ``name``.
@@ -86,12 +100,14 @@ def register_canonicalizer(name: str, fn: Callable[[Any], bytes]) -> None:
             "canonicalizer name must be non-empty kebab-case or "
             "underscored alphanumeric"
         )
-    _REGISTRY[name] = fn
+    with _LOCK:
+        _REGISTRY[name] = fn
 
 
 def registered_canonicalizers() -> tuple[str, ...]:
     """Return the registered canonicalizer names in registration order."""
-    return tuple(_REGISTRY.keys())
+    with _LOCK:
+        return tuple(_REGISTRY.keys())
 
 
 def canonicalize(value: Any, *, form: str = DEFAULT_CANONICALIZER) -> bytes:
@@ -100,13 +116,14 @@ def canonicalize(value: Any, *, form: str = DEFAULT_CANONICALIZER) -> bytes:
     Raises :class:`CanonicalizationError` when ``form`` is not
     registered (the message lists the registered names).
     """
-    try:
-        fn = _REGISTRY[form]
-    except KeyError as exc:
+    with _LOCK:
+        fn = _REGISTRY.get(form)
+        known = tuple(_REGISTRY.keys()) if fn is None else ()
+    if fn is None:
         raise CanonicalizationError(
             f"unknown canonicalizer form {form!r} "
-            f"(registered: {', '.join(_REGISTRY.keys())})"
-        ) from exc
+            f"(registered: {', '.join(known)})"
+        )
     return fn(value)
 
 
@@ -122,3 +139,25 @@ def fingerprint_tool_config(config: dict[str, Any]) -> str:
     objects) should be summarised to a clean dict before fingerprinting.
     """
     return "sha256:" + digest_bytes(canonicalize(config))
+
+
+# Register the substrate's NFC-normalising envelope canonicalizer as a
+# named form so adapters that need the SAME bytes the envelope layer
+# signs can opt in by form name. Delegates to mareforma._canonical
+# (the canonical envelope canonicaliser) — keeps a single
+# implementation; this is just an alias under a registered name.
+def _canonicalize_dsse_jcs_nfc_v1(value: Any) -> bytes:
+    """NFC-normalising JCS — same bytes as the signed-envelope layer."""
+    from mareforma._canonical import canonicalize as _envelope_canonicalize
+    return _envelope_canonicalize(value)
+
+
+register_canonicalizer(DSSE_JCS_NFC_V1, _canonicalize_dsse_jcs_nfc_v1)
+
+
+# Auto-import specialty canonicalizers so the documented forms
+# (rdkit-canonical-smiles-v1, fasta-nfc-v1, pdb-atom-sorted-v1) are
+# available the moment `mareforma.canonicalize` is imported. Without
+# this the docstring promise — "specialty canonicalizers register
+# themselves" — is false: users have to discover the submodule import.
+from mareforma.canonicalize import specialty as _specialty  # noqa: E402,F401

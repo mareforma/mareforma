@@ -122,3 +122,48 @@ def test_rdkit_canonicalizer_fallback_path():
         # Both rdkit and fallback should accept the same molecule.
         assert isinstance(out, bytes)
         assert len(out) > 0
+
+
+def test_specialty_auto_imported_on_package_import():
+    """Importing mareforma.canonicalize alone registers the specialty forms.
+
+    Verifies the static import statement in __init__.py drags the
+    specialty submodule in. The reload caveat (re-running __init__
+    creates a new _REGISTRY but specialty.py keeps its old reference)
+    makes a runtime-reload test unreliable; instead we read the source
+    and assert the import line is present.
+    """
+    import inspect
+    import mareforma.canonicalize as can
+    src = inspect.getsource(can)
+    assert "from mareforma.canonicalize import specialty" in src, (
+        "mareforma/canonicalize/__init__.py must auto-import the specialty "
+        "submodule so its forms are registered without the caller having to "
+        "discover the import"
+    )
+    # And in the live import, all three forms are registered.
+    names = set(can.registered_canonicalizers())
+    assert "rdkit-canonical-smiles-v1" in names
+    assert "fasta-nfc-v1" in names
+    assert "pdb-atom-sorted-v1" in names
+
+
+def test_dsse_jcs_nfc_v1_registered():
+    """The substrate envelope canonicaliser is exposed under a registered form."""
+    from mareforma.canonicalize import (
+        DSSE_JCS_NFC_V1, canonicalize, registered_canonicalizers,
+    )
+    assert DSSE_JCS_NFC_V1 in registered_canonicalizers()
+    # And it produces the same bytes as the private envelope canonicaliser.
+    from mareforma._canonical import canonicalize as envelope
+    payload = {"x": 1, "name": "café"}
+    assert canonicalize(payload, form=DSSE_JCS_NFC_V1) == envelope(payload)
+
+
+def test_dsse_jcs_nfc_v1_nfc_normalises():
+    """dsse-jcs-nfc-v1 collapses NFC vs NFD into the same bytes."""
+    from mareforma.canonicalize import canonicalize, DSSE_JCS_NFC_V1
+    # 'é' as precomposed U+00E9 vs decomposed e+U+0301.
+    a = canonicalize({"k": "café"}, form=DSSE_JCS_NFC_V1)
+    b = canonicalize({"k": "café"}, form=DSSE_JCS_NFC_V1)
+    assert a == b

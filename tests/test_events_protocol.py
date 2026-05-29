@@ -111,3 +111,22 @@ def test_end_to_end_dispatch():
     src.unsubscribe(handler)
     src.fire(payload)
     assert len(received) == 1  # unsubscribe took effect
+
+
+def test_source_name_constants_distinct_and_known():
+    """Adapters must use constants, not literals, for source identifiers."""
+    from mareforma.events import (
+        KNOWN_SOURCES,
+        SOURCE_CLAWINSTITUTE,
+        SOURCE_CLAUDE_CODE_PRETOOLUSE,
+        SOURCE_GEMINI,
+        SOURCE_TOOLUNIVERSE,
+    )
+    sources = {
+        SOURCE_CLAWINSTITUTE, SOURCE_TOOLUNIVERSE,
+        SOURCE_GEMINI, SOURCE_CLAUDE_CODE_PRETOOLUSE,
+    }
+    assert len(sources) == 4
+    assert sources == set(KNOWN_SOURCES)
+    for s in sources:
+        assert isinstance(s, str) and s == s.lower()

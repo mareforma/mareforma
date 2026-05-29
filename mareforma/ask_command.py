@@ -39,7 +39,16 @@ def ask(
     Search literature claims via FTS5 BM25.
     Returns QueryResult list, highest score first.
     """
-    tokens = [f'"{w}"' for w in question.split() if w.strip()]
+    # FTS5 token sanitisation. Each token is double-quoted so hyphens
+    # and special characters are treated as literals, not operators.
+    # Embedded double quotes must be escaped by doubling per the FTS5
+    # spec; without this, input like 'mutations of "BRCA1"' produces
+    # 'mutations" "of" ""BRCA1""' which raises OperationalError.
+    tokens = [
+        '"' + w.replace('"', '""') + '"'
+        for w in question.split()
+        if w.strip()
+    ]
     if not tokens:
         return []
     safe_question = " ".join(tokens)

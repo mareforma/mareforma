@@ -71,3 +71,29 @@ def test_ask_cli_outputs_table(populated_db, tmp_path):
     result = runner.invoke(ask_cli, ["CRP", "--db", str(db_path)])
     assert result.exit_code == 0
     assert len(result.output) > 0
+
+
+def test_ask_handles_embedded_double_quotes(populated_db):
+    """Regression: input containing `"` must not produce invalid FTS5 syntax.
+
+    Before the fix: `mareforma ask 'word "quoted"'` produced
+    `"word" ""quoted""` which raised sqlite3.OperationalError.
+    """
+    from mareforma.ask_command import ask
+    # Should not raise — the embedded quote must be escaped per FTS5.
+    results = ask('mutations of "BRCA1"', populated_db, limit=5)
+    assert isinstance(results, list)
+
+
+def test_ask_handles_fts5_special_characters(populated_db):
+    """Regression: parens / asterisks / hyphens must be safe inside tokens."""
+    from mareforma.ask_command import ask
+    # Each of these would otherwise be interpreted as FTS5 syntax.
+    for q in (
+        "study (n=42)",
+        "drug-X*y",
+        "title: subtitle",
+        "OR AND NOT",  # FTS5 reserved-ish operators
+    ):
+        results = ask(q, populated_db, limit=5)
+        assert isinstance(results, list), f"failed on query: {q!r}"

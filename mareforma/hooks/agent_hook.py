@@ -31,13 +31,12 @@ call.
 from __future__ import annotations
 
 import json
-import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, Any
 
-from mareforma.hooks.db_activities import create_activities_table, record_activity
+from mareforma.hooks.db_activities import record_activity
 
 
 __all__ = ["find_graph_db", "main", "parse_event"]
@@ -73,12 +72,6 @@ def find_graph_db(start: Path) -> Path | None:
         current = parent
 
 
-def _open_db(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(db_path), timeout=5.0)
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
-
-
 def main() -> None:
     try:
         event = parse_event(sys.stdin)
@@ -103,9 +96,15 @@ def main() -> None:
         session_id = event.get("session_id")
         started_at = datetime.now(timezone.utc).isoformat()
 
-        conn = _open_db(db_path)
+        # Route through the canonical mareforma.db.open_db so this
+        # hook respects schema_version validation, foreign_keys
+        # PRAGMA, and additive migrations. agent_activities is now
+        # part of the canonical schema (_ADDITIVE_TABLES_SQL), so no
+        # CREATE-on-demand is needed here.
+        from mareforma.db import open_db
+        project_root = db_path.parent.parent
+        conn = open_db(project_root)
         try:
-            create_activities_table(conn)
             record_activity(
                 conn,
                 tool_name=tool_name,

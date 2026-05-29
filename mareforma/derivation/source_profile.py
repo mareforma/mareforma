@@ -30,26 +30,48 @@ import json
 import os
 from dataclasses import dataclass, field
 
+# Broad exception catch on purpose: ImportError covers the missing-package
+# case, but tree_sitter and tree_sitter_python release independently and
+# ABI/version mismatches surface as TypeError / RuntimeError / OSError
+# from Language(...) — none of which are ImportError subclasses. Catching
+# Exception keeps the substrate importable in any broken-extras state
+# and routes the failure to _require_tree_sitter() with a clean install
+# hint.
 try:
     import tree_sitter_python as tspython
     from tree_sitter import Language, Parser
     PY_LANGUAGE = Language(tspython.language())
     HAS_TREE_SITTER = True
-except ImportError:
+    _TREE_SITTER_IMPORT_ERROR: Exception | None = None
+except Exception as _exc:  # noqa: BLE001 — intentional, see comment above
     tspython = None  # type: ignore[assignment]
     Language = None  # type: ignore[assignment,misc]
     Parser = None  # type: ignore[assignment,misc]
     PY_LANGUAGE = None
     HAS_TREE_SITTER = False
+    _TREE_SITTER_IMPORT_ERROR = _exc
 
 
 def _require_tree_sitter() -> None:
     if not HAS_TREE_SITTER:
-        raise ImportError(
+        hint = (
             "mareforma.derivation source-profile extraction requires "
             "tree_sitter and tree_sitter_python. Install the optional "
             "derivation extra: pip install mareforma[derivation]"
         )
+        if _TREE_SITTER_IMPORT_ERROR is not None and not isinstance(
+            _TREE_SITTER_IMPORT_ERROR, ImportError
+        ):
+            # tree_sitter / tree_sitter_python were importable but the
+            # Language(...) call failed — most often an ABI mismatch
+            # between independently-released packages. Surface the
+            # underlying error so the user knows which pin to fix.
+            hint += (
+                f"\n\nUnderlying error at import time: "
+                f"{type(_TREE_SITTER_IMPORT_ERROR).__name__}: "
+                f"{_TREE_SITTER_IMPORT_ERROR}"
+            )
+        raise ImportError(hint)
 
 # ---------- Pattern definitions ----------
 
@@ -264,8 +286,14 @@ def _collect_dead_zones(root_node) -> list[tuple[int, int]]:  # noqa: ANN001
 
     Dead code includes:
     - Body of `if False:` blocks
-    - Exception handler bodies (except blocks)
     - Code after unconditional `return` in the same block
+
+    Exception handler bodies are NOT dead code — except clauses run
+    when the matching exception is raised. A common idiom is to put
+    fallback data-access (e.g. ``except ConnectionError:
+    requests.get(backup_url)``) in the except body; classifying that
+    as dead caused legitimate ANALYTICAL agents to be derived as
+    INFERRED.
     """
     dead_zones: list[tuple[int, int]] = []
 
@@ -277,16 +305,6 @@ def _collect_dead_zones(root_node) -> list[tuple[int, int]]:  # noqa: ANN001
                 consequence = node.child_by_field_name("consequence")
                 if consequence is not None:
                     dead_zones.append((consequence.start_byte, consequence.end_byte))
-
-        # except_clause — treat the handler body as dead code
-        if node.type == "except_clause":
-            # The body is the block inside the except clause
-            # In tree-sitter, the except_clause has child nodes:
-            # the exception type and the body block
-            for child in node.children:
-                if child.type == "block":
-                    dead_zones.append((child.start_byte, child.end_byte))
-                    break
 
         # Code after unconditional return in a block
         if node.type == "block":
@@ -463,7 +481,11 @@ def _find_patterns(
                         # Check if resolved_obj is a known module
                         if attr_text in _DATA_METHODS:
                             for mod in _ALL_IMPORTS:
-                                if resolved_obj == mod or resolved_obj.startswith(mod):
+                                # Require dot separator after the module
+                                # prefix so 'urllib_legacy.get' does not
+                                # match 'urllib' import via bare
+                                # startswith. Mirrors _check_import.
+                                if resolved_obj == mod or resolved_obj.startswith(mod + "."):
                                     patterns.append(SourcePattern(
                                         kind=_DATA_METHODS[attr_text],
                                         location=f"line {line_num}",
