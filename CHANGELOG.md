@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.3.3] - 2026-05-29
 
 Adapter framework and substrate primitives. Five new primitives in
 core (events, tools, canonicalize, derivation, hooks) plus three
