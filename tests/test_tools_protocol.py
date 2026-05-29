@@ -1,4 +1,12 @@
-"""Conformance tests for :mod:`mareforma.tools`."""
+"""Conformance tests for :mod:`mareforma.tools`.
+
+Conceptual clusters:
+
+- :class:`TestToolProtocol` — runtime_checkable structural shape.
+- :class:`TestToolResult` — TypedDict acceptance shape.
+- :class:`TestReplayResult` — dataclass immutability + defaults.
+- :class:`TestTypedExceptions` — exception parent-class wiring.
+"""
 
 from __future__ import annotations
 
@@ -13,67 +21,68 @@ from mareforma.tools import (
 )
 
 
-def test_tool_runtime_checkable_positive():
-    class GoodTool:
-        name = "demo"
-        version = "1.0.0"
+class TestToolProtocol:
+    def test_runtime_checkable_positive(self):
+        class GoodTool:
+            name = "demo"
+            version = "1.0.0"
 
-        def call(self, **kwargs):
-            return {"data": kwargs}
+            def call(self, **kwargs):
+                return {"data": kwargs}
 
-    assert isinstance(GoodTool(), Tool)
+        assert isinstance(GoodTool(), Tool)
 
+    def test_runtime_checkable_negative_missing_version(self):
+        class NoVersion:
+            name = "x"
 
-def test_tool_runtime_checkable_negative_missing_version():
-    class NoVersion:
-        name = "x"
+            def call(self, **kwargs):
+                return {"data": None}
 
-        def call(self, **kwargs):
-            return {"data": None}
+        assert not isinstance(NoVersion(), Tool)
 
-    assert not isinstance(NoVersion(), Tool)
+    def test_runtime_checkable_negative_missing_call(self):
+        class NoCall:
+            name = "x"
+            version = "0"
 
-
-def test_tool_runtime_checkable_negative_missing_call():
-    class NoCall:
-        name = "x"
-        version = "0"
-
-    assert not isinstance(NoCall(), Tool)
-
-
-def test_tool_result_typed_dict_acceptance():
-    r: ToolResult = {"data": [1, 2, 3], "metadata": {"cached": True}}
-    assert r["data"] == [1, 2, 3]
-    assert r.get("source_version") is None
+        assert not isinstance(NoCall(), Tool)
 
 
-def test_replay_result_immutable_and_diff_default_empty():
-    r = ReplayResult(
-        ok=True,
-        observed_result_digest="abc",
-        expected_result_digest="abc",
-    )
-    assert r.ok is True
-    assert r.diff_fields == ()
-    with pytest.raises((AttributeError, TypeError)):
-        r.ok = False  # frozen
+class TestToolResult:
+    def test_typed_dict_acceptance(self):
+        r: ToolResult = {"data": [1, 2, 3], "metadata": {"cached": True}}
+        assert r["data"] == [1, 2, 3]
+        assert r.get("source_version") is None
 
 
-def test_replay_result_with_diff_fields():
-    r = ReplayResult(
-        ok=False,
-        observed_result_digest="abc",
-        expected_result_digest="def",
-        diff_fields=("result_digest", "tool_version"),
-    )
-    assert r.ok is False
-    assert r.diff_fields == ("result_digest", "tool_version")
+class TestReplayResult:
+    def test_immutable_and_diff_default_empty(self):
+        r = ReplayResult(
+            ok=True,
+            observed_result_digest="abc",
+            expected_result_digest="abc",
+        )
+        assert r.ok is True
+        assert r.diff_fields == ()
+        with pytest.raises((AttributeError, TypeError)):
+            r.ok = False  # frozen
+
+    def test_with_diff_fields(self):
+        r = ReplayResult(
+            ok=False,
+            observed_result_digest="abc",
+            expected_result_digest="def",
+            diff_fields=("result_digest", "tool_version"),
+        )
+        assert r.ok is False
+        assert r.diff_fields == ("result_digest", "tool_version")
 
 
-def test_typed_exceptions_are_distinguishable():
-    assert issubclass(ToolCallError, Exception)
-    assert issubclass(PredicateBoundaryError, ValueError)
-    # Catchable via parent class.
-    with pytest.raises(ValueError):
-        raise PredicateBoundaryError("smuggled tag")
+class TestTypedExceptions:
+    def test_distinguishable_via_parent_classes(self):
+        assert issubclass(ToolCallError, Exception)
+        assert issubclass(PredicateBoundaryError, ValueError)
+        # Catchable via parent class.
+        with pytest.raises(ValueError):
+            raise PredicateBoundaryError("smuggled tag")

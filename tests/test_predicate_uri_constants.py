@@ -1,6 +1,14 @@
 """Capability-shaped URI constants live in :mod:`mareforma.predicate_types`
 and re-export at the top level. Drift between constants, BUILTIN_URIS,
 and the registered set is a contract violation tested here.
+
+Conceptual clusters:
+
+- :class:`TestConstantRegistration` — every named constant is in
+  ``BUILTIN_URIS`` and registered at import.
+- :class:`TestTopLevelReExport` — the top-level ``mareforma.X``
+  re-exports match the source-of-truth in ``predicate_types``.
+- :class:`TestUriShape` — every URI is URN-form; no DNS-form leftovers.
 """
 
 from __future__ import annotations
@@ -41,39 +49,40 @@ _CONSTANT_NAMES = (
 )
 
 
-def test_every_constant_is_in_builtin_uris():
-    for name in _CONSTANT_NAMES:
-        assert getattr(pt, name) in pt.BUILTIN_URIS, (
-            f"{name}={getattr(pt, name)!r} not in BUILTIN_URIS"
-        )
+class TestConstantRegistration:
+    def test_every_constant_is_in_builtin_uris(self):
+        for name in _CONSTANT_NAMES:
+            assert getattr(pt, name) in pt.BUILTIN_URIS, (
+                f"{name}={getattr(pt, name)!r} not in BUILTIN_URIS"
+            )
+
+    def test_capability_uris_registered_at_import(self):
+        registered = set(mareforma.predicates())
+        for name in (
+            "CODE_VARIATION_V1", "HYPOTHESIS_V1", "LITERATURE_INSIGHT_V1",
+            "SCIENCE_SKILL_V1", "CONTAINER_EXEC_V1", "META_CLAIM_V1",
+            "WORKSHOP_EVENT_V1",
+        ):
+            uri = getattr(mareforma, name)
+            assert uri in registered, f"{name}={uri} not registered at import"
 
 
-def test_top_level_re_export_matches_predicate_types():
-    for name in _CONSTANT_NAMES:
-        assert getattr(mareforma, name) == getattr(pt, name)
+class TestTopLevelReExport:
+    def test_re_export_matches_predicate_types(self):
+        for name in _CONSTANT_NAMES:
+            assert getattr(mareforma, name) == getattr(pt, name)
 
 
-def test_capability_uris_registered_at_import():
-    registered = set(mareforma.predicates())
-    for name in (
-        "CODE_VARIATION_V1", "HYPOTHESIS_V1", "LITERATURE_INSIGHT_V1",
-        "SCIENCE_SKILL_V1", "CONTAINER_EXEC_V1", "META_CLAIM_V1",
-        "WORKSHOP_EVENT_V1",
-    ):
-        uri = getattr(mareforma, name)
-        assert uri in registered, f"{name}={uri} not registered at import"
+class TestUriShape:
+    def test_no_dns_form_in_builtin_uris(self):
+        for uri in pt.BUILTIN_URIS:
+            assert not uri.startswith("https://"), (
+                f"BUILTIN_URIS has DNS-form URI: {uri}"
+            )
 
-
-def test_no_dns_form_in_builtin_uris():
-    for uri in pt.BUILTIN_URIS:
-        assert not uri.startswith("https://"), (
-            f"BUILTIN_URIS has DNS-form URI: {uri}"
-        )
-
-
-def test_all_constants_urn_form():
-    for name in _CONSTANT_NAMES:
-        uri = getattr(pt, name)
-        assert uri.startswith("urn:mareforma:predicate:"), (
-            f"{name}={uri!r} is not URN-form"
-        )
+    def test_all_constants_urn_form(self):
+        for name in _CONSTANT_NAMES:
+            uri = getattr(pt, name)
+            assert uri.startswith("urn:mareforma:predicate:"), (
+                f"{name}={uri!r} is not URN-form"
+            )
