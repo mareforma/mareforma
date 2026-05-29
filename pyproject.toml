@@ -67,6 +67,7 @@ testpaths = ["tests"]
 addopts = "-v --tb=short -m 'not slow'"
 markers = [
     "slow: long-running test (perf pins at 50k claims, network-backed adapters)",
+    "adapters: tests exercising the mareforma.adapters.* namespace",
 ]
 
 [tool.coverage.run]
