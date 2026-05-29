@@ -41,11 +41,26 @@ Issues = "https://github.com/mareforma/mareforma/issues"
 git = [
     "gitpython>=3.1",
 ]
+# Adapter extras. Each names the platform-specific runtime deps the
+# adapter needs. mareforma core stays slim; users opt into the
+# platforms they actually integrate with.
+clawinstitute = []  # httpx is already a core dep
+tooluniverse = []   # rich + rfc8785 already core deps
+gemini = []          # read-only ingest, no platform SDK
+# Substrate-derived classification. tree_sitter + tree_sitter_python
+# are heavy native deps; gating them behind an extra keeps the default
+# install fast and avoids a wheel-availability constraint on the matrix.
+derivation = [
+    "tree_sitter>=0.20",
+    "tree_sitter_python>=0.20",
+]
 dev = [
     "pytest>=9.0.3",
     "pytest-cov",
     "pytest-httpx>=0.36.2",
     "gitpython>=3.1",
+    "tree_sitter>=0.20",
+    "tree_sitter_python>=0.20",
 ]
 docs = []
 
