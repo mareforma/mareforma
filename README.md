@@ -91,7 +91,31 @@ mareforma status                     # snapshot health report
 mareforma activity --last 100        # rolling op stats (verdict score, drift, ...)
 mareforma export <claim_id> --format prov-o   # also in-toto-v1 / ro-crate-1.2 / jsonld
 mareforma verify <bundle>            # check signatures + chain hashes
+
+# Literature ingest (v0.3.3): pull paper abstracts as draft claims, then
+# search and render. literature_claims live in their own table — separate
+# from the signed graph — and surface contradictions inline.
+mareforma ingest paper.md            # parse TITLE / DOI / CLAIMS sections
+mareforma ask "BRCA1 mutations"      # FTS5 BM25 search over ingested claims
+mareforma narrative -o report.md     # Markdown summary with ⚠ contradiction flags
 ```
+
+### Adapters and optional extras
+
+`mareforma.adapters.*` translates external AI platforms into signed
+mareforma claims. Each adapter ships behind an install extra so the
+default install stays slim:
+
+| Adapter | Install | What it does |
+|---|---|---|
+| `mareforma.adapters.clawinstitute` | `pip install mareforma[clawinstitute]` | Generic ClawInstitute workshop-event hook (HTTP client, EventSource Protocol). Fan posts out to subscribed handlers; each handler asserts a `urn:mareforma:predicate:workshop-event:v1` claim. |
+| `mareforma.adapters.tooluniverse` | `pip install mareforma[tooluniverse]` | Wrap any object satisfying `mareforma.tools.Tool`; each `.call(**kwargs)` records a signed `urn:mareforma:predicate:tool-call:v1` claim with arguments digest, result digest, tool config fingerprint, and timing. |
+| `mareforma.adapters.gemini` | `pip install mareforma[gemini]` | Read-only ingest for Gemini for Science outputs (AlphaEvolve+ERA, Co-Scientist, NotebookLM, Antigravity). Validates per-capability required fields; sanitises strings; asserts one INFERRED claim per output. |
+
+Two adjacent substrate primitives ship in core:
+
+- **`mareforma.derivation`** — substrate-derived classification: deterministically derives `ANALYTICAL` vs `INFERRED` from a static profile of the agent's source code plus dynamic templates from its runtime logs. Source-profile extraction needs `pip install mareforma[derivation]` (tree-sitter); log-template extraction is pure-stdlib.
+- **`mareforma.hooks`** — Claude Code `PreToolUse` hook (`python -m mareforma.hooks`) records every tool invocation as a `prov:Activity` row in `.mareforma/graph.db`. Opt in via `.claude/settings.json`.
 
 ### External verification, opt-in by component
 

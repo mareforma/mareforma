@@ -446,6 +446,48 @@ For the reader who wants to read the actual enforcement:
 - **Validator chain walk** — `_verify_chain`, `is_enrolled` in
   [`mareforma/validators.py`](mareforma/validators.py)
 
+## Adapter framework
+
+The substrate is intentionally agnostic about which AI platforms
+exist. `mareforma.adapters.*` is the opt-in extension point where
+platform-specific translation lives. Three load-bearing properties:
+
+- **Adapters live on top of the substrate, never inside it.** The
+  substrate ships the storage + signing + state-machine + invariants;
+  adapters ship platform plumbing (HTTP clients, payload shapes,
+  event semantics). A new adapter never modifies `mareforma.db`,
+  `_graph`, or `_canonical`; it imports them.
+- **Opt-in by install extra.** `pip install mareforma` brings the
+  substrate alone. `pip install mareforma[clawinstitute]` /
+  `[tooluniverse]` / `[gemini]` / `[derivation]` adds the platform's
+  runtime deps. Users pay for what they integrate.
+- **Convention surface, not framework.** Each adapter exposes the
+  same minimum: a constructor taking `graph=`, `predicate_uris()`
+  enumerating the URIs it may emit, `emit_sample()` for the
+  cross-adapter coexistence test in
+  `tests/adapters/test_coexistence.py`. The substrate does not
+  prescribe HOW an adapter wraps its platform — only that any
+  adapter writing into one graph composes with peers without
+  predicate-URI collision.
+
+Substrate primitives `mareforma.events` (EventSource Protocol +
+typed payloads + source-name constants) and `mareforma.tools` (Tool
+Protocol + ToolResult + ReplayResult) live alongside `_graph` /
+`_canonical` / `signing` because the contracts ARE substrate. They
+have no dependency on any adapter; an adapter that disappears does
+not break the contracts. URI constants live in
+`mareforma.predicate_types`: a single source of truth for the URIs
+the substrate reserves, re-exported at the top level for
+ergonomics. The five substrate primitives shipped in v0.3.3
+(events, canonicalize, tools, derivation, hooks) each follow the
+same substrate-first rule.
+
+The intentionally-deferred adapters (the full per-surface Gemini
+producers, a federation bundle exporter, an MCP server) sit one
+altitude up: they need richer platform integration than v0.3.3
+ships. v0.3.3 ships the framework + three adapters; the rest
+follows adoption signal.
+
 ## Honest scope
 
 Read [`README.md`](README.md#what-mareforma-is-not) for the bulleted
