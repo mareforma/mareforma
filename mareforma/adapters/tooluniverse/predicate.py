@@ -88,8 +88,6 @@ def build_tool_call_predicate(
     tool_call_id: str,
     data_source_version: str | None = None,
     parent_claim_id: str | None = None,
-    result_truncated: bool = False,
-    canonicalizer_fallback: bool = False,
     cache_origin: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the `tool-call/v1` predicate dict.
@@ -118,8 +116,6 @@ def build_tool_call_predicate(
         "tool_call_id": tool_call_id,
         "data_source_version": data_source_version,
         "parent_claim_id": parent_claim_id,
-        "result_truncated": result_truncated,
-        "canonicalizer_fallback": canonicalizer_fallback,
         "cache_origin": cache_origin,
     }
     return predicate

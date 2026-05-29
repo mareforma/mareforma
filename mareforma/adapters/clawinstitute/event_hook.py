@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import base64
+import hashlib
 from datetime import datetime, timezone
 from typing import Any, TYPE_CHECKING
 
@@ -25,10 +25,16 @@ __all__ = ["EventHook"]
 
 
 # Substrate-side cap on per-post content size. Posts above this are
-# digest-only (the digest still binds the content; the body is stored
-# outside the claim). Sized to comfortably fit Claude / GPT context
-# windows with headroom for surrounding agent instructions.
+# digest-only (the SHA-256 of the full raw content is still recorded
+# in the payload; the body is replaced with a truncation marker).
+# Sized to comfortably fit Claude / GPT context windows with headroom
+# for surrounding agent instructions.
 _MAX_CONTENT_BYTES = 16 * 1024 * 1024  # 16 MiB
+
+# Marker that sanitize_for_llm appends when its 100k-character cap
+# fires. Detected here so the EventPayload's content_truncated flag
+# reflects sanitiser-cap truncation, not only byte-cap truncation.
+from mareforma.prompt_safety import _TRUNCATION_MARKER as _SANITIZE_TRUNCATION_MARKER
 
 
 class EventHook:
@@ -37,6 +43,11 @@ class EventHook:
     Construction is cheap; runtime cost per post is one HTTP fetch
     (already paid by the polling caller), one sanitisation pass, and
     one ``assert_claim`` call per subscribed handler.
+
+    Handler exception contract: if a subscribed handler raises during
+    :meth:`dispatch`, the exception is caught and converted to a
+    :class:`ClaimResult` with ``emitted=False`` and ``error=<repr>``,
+    so a misbehaving subscriber cannot block dispatch to peers.
 
     Parameters
     ----------
@@ -82,11 +93,25 @@ class EventHook:
         Each subscribed handler is invoked once with the same payload;
         the returned list preserves subscription order. Untrusted
         post content runs through three layers of sanitisation
-        (sanitize_for_llm → 16 MiB cap → wrap_untrusted) before
+        (raw-byte cap → sanitize_for_llm → wrap_untrusted) before
         anything else can see it.
+
+        Handler exceptions are caught and converted to a ClaimResult
+        with ``emitted=False`` and ``error=<repr>`` so one bad
+        subscriber does not poison dispatch for peers.
         """
         payload = self._to_payload(post)
-        return [h.handle_event(payload) for h in self._handlers]
+        results: list[ClaimResult] = []
+        for h in self._handlers:
+            try:
+                results.append(h.handle_event(payload))
+            except Exception as exc:
+                results.append({
+                    "claim_id": None,
+                    "emitted": False,
+                    "error": repr(exc),
+                })
+        return results
 
     def _to_payload(self, post: dict[str, Any]) -> EventPayload:
         post_id = post.get("id") or post.get("post_id") or "unknown"
@@ -100,21 +125,45 @@ class EventHook:
                 f"post {post_id!r} 'content' field must be str, "
                 f"got {type(raw_content).__name__}"
             )
-        # Reject pathological inputs early. sanitize_for_llm has its
-        # own 100k-character cap, but checking the raw-byte length
-        # first skips a per-character sanitiser pass on a payload that
-        # is going to be truncated anyway.
-        raw_bytes = raw_content.encode("utf-8", errors="replace")
-        if len(raw_bytes) > _MAX_CONTENT_BYTES:
+
+        # Cheap upper bound: UTF-8 is ≤4 bytes/char, so any string
+        # whose char-count * 4 fits in the cap is guaranteed to fit.
+        # Only allocate the full encoded bytes when we're close to the
+        # boundary, OR when we need them for the digest.
+        char_estimate_bytes = len(raw_content) * 4
+        if char_estimate_bytes > _MAX_CONTENT_BYTES:
+            raw_bytes = raw_content.encode("utf-8", errors="replace")
+            actual_too_big = len(raw_bytes) > _MAX_CONTENT_BYTES
+        else:
+            raw_bytes = raw_content.encode("utf-8", errors="replace")
+            actual_too_big = False
+
+        # SHA-256 of the FULL raw bytes — content-addressable. A
+        # downstream verifier can re-fetch the post body and confirm
+        # the digest, regardless of whether the body was truncated
+        # in the EventPayload.
+        content_digest = "sha256:" + hashlib.sha256(raw_bytes).hexdigest()
+
+        truncated = False
+        truncation_reason: str | None = None
+
+        if actual_too_big:
             content_for_payload = (
                 f"<truncated: post exceeded {_MAX_CONTENT_BYTES} bytes; "
                 "fetch via the API for the full content>"
             )
             truncated = True
+            truncation_reason = "byte_cap"
         else:
             sanitised = sanitize_for_llm(raw_content) or ""
+            # sanitize_for_llm appends _TRUNCATION_MARKER when its own
+            # 100k-character cap fires. Surface that as truncated=True
+            # so a downstream consumer cannot mistake the sanitiser-
+            # truncated body for the full content.
+            if sanitised.endswith(_SANITIZE_TRUNCATION_MARKER):
+                truncated = True
+                truncation_reason = "sanitize_char_cap"
             content_for_payload = wrap_untrusted(sanitised)
-            truncated = False
 
         return {
             "source": SOURCE_CLAWINSTITUTE,
@@ -125,9 +174,8 @@ class EventHook:
                 "workspace_id": workspace_id,
                 "content": content_for_payload,
                 "content_truncated": truncated,
-                "content_digest_b64": base64.b64encode(
-                    raw_bytes[:64]  # prefix-only marker, not the full digest
-                ).decode("ascii"),
+                "content_truncation_reason": truncation_reason,
+                "content_digest_sha256": content_digest,
             },
             "timestamp": created_at,
         }

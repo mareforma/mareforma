@@ -34,8 +34,15 @@ def _predicate_uri(graph, claim_id: str) -> str:
     """Read the predicate URI out of a claim, accepting either
     storage shape: ``predicate_payload`` column (clawinstitute,
     gemini) OR a tagged-JSON predicate embedded in the claim text
-    (tooluniverse). Production verifiers handle both."""
+    (tooluniverse). Production verifiers handle both.
+
+    The tagged-text branch parses on ``</predicate>`` close tag so
+    it works for any ``<predicate X v1>`` family member, not just
+    tool-call (container-exec routing emits ``<predicate
+    container-exec v1>`` from the same wrapper).
+    """
     import json
+    import re
     row = graph.get_claim(claim_id)
     payload_str = row["predicate_payload"]
     if payload_str:
@@ -43,15 +50,14 @@ def _predicate_uri(graph, claim_id: str) -> str:
             return json.loads(payload_str)["predicate_type"]
         except (json.JSONDecodeError, KeyError, TypeError):
             pass
-    # tooluniverse embeds the predicate inside the claim text as
-    # <predicate tool-call v1>{...}</predicate>.
-    text = row["text"]
-    open_tag, close_tag = "<predicate tool-call v1>", "</predicate>"
-    if text.startswith(open_tag):
-        end = text.find(close_tag, len(open_tag))
-        if end > 0:
-            inner = json.loads(text[len(open_tag):end])
-            return inner["predicate_type"]
+    # Generic <predicate <name> v<N>>{...}</predicate> parser.
+    match = re.match(
+        r"^<predicate\s+[a-z0-9._/\-]+\s+v\d+>(\{.*?\})</predicate>",
+        row["text"], re.DOTALL,
+    )
+    if match:
+        inner = json.loads(match.group(1))
+        return inner["predicate_type"]
     raise AssertionError(
         f"could not extract predicate_type from claim {claim_id}"
     )
@@ -71,61 +77,84 @@ def test_gemini_ingester_covers_all_four_capabilities(graph):
     """Each Gemini capability writes a claim under the right URI."""
     ing = OutputIngester(graph=graph)
     expected_pairs = {
-        "code-variation": CODE_VARIATION_V1,
-        "hypothesis": HYPOTHESIS_V1,
-        "literature-insight": LITERATURE_INSIGHT_V1,
-        "science-skill": SCIENCE_SKILL_V1,
+        "code-variation": (CODE_VARIATION_V1, {
+            "input_problem_digest": "sha256:" + "1" * 64,
+            "code_variation_source_digest": "sha256:" + "2" * 64,
+            "score": 0.9, "model_version": "g",
+        }),
+        "hypothesis": (HYPOTHESIS_V1, {
+            "final_hypothesis_text_digest": "sha256:" + "3" * 64,
+            "model_version": "g",
+        }),
+        "literature-insight": (LITERATURE_INSIGHT_V1, {
+            "cell_value_digest": "sha256:" + "4" * 64,
+            "cited_paper_dois": [], "model_version": "g",
+        }),
+        "science-skill": (SCIENCE_SKILL_V1, {
+            "db_name": "UniProt", "query_digest": "sha256:" + "5" * 64,
+            "result_digest": "sha256:" + "6" * 64,
+            "result_canonical_form": "json-c14n-v1", "provider": "g",
+        }),
     }
-    for cap, uri in expected_pairs.items():
-        cid = ing.ingest(capability=cap, payload={"summary": f"sample {cap}"})
+    for cap, (uri, extra) in expected_pairs.items():
+        payload = {"summary": f"sample {cap}", **extra}
+        cid = ing.ingest(capability=cap, payload=payload)
         assert _predicate_uri(graph, cid) == uri
 
 
-def test_two_hosts_converge_on_a_replicated_finding(tmp_path: Path):
-    """Simulated cross-host replication: two independent graphs each
-    record a Gemini ``hypothesis`` claim with the same artifact_hash;
-    the merge target should see ≥2 INFERRED claims supporting the
-    same finding (the substrate's REPLICATED-promotion path that
-    downstream agents act on)."""
+def test_two_hosts_emit_convergent_findings(tmp_path: Path):
+    """Two independent graphs each record a Gemini hypothesis claim
+    with the same hypothesis content; verify both produce INFERRED
+    claims with matching text and matching predicate payload (the
+    convergence signal a downstream merge agent looks for).
+
+    Cryptographic envelope cross-host replay is exercised by the
+    signing/restore suite; this test only verifies that two
+    independent adapter calls produce comparable claims when given
+    the same input — the precondition the REPLICATED-promotion path
+    requires.
+    """
     from mareforma import signing as _signing
 
     host_a = tmp_path / "host-a"
     host_b = tmp_path / "host-b"
-    merge = tmp_path / "merge"
-    host_a.mkdir(); host_b.mkdir(); merge.mkdir()
+    host_a.mkdir(); host_b.mkdir()
 
     # Two independent signing keys (different agents on different hosts).
     key_a = host_a / "k"; _signing.bootstrap_key(key_a)
     key_b = host_b / "k"; _signing.bootstrap_key(key_b)
-    key_merge = merge / "k"; _signing.bootstrap_key(key_merge)
 
-    # Each host independently emits the same finding via Gemini ingest.
     summary = "Compound X inhibits target Y at IC50=15nM"
+    payload = {
+        "summary": summary,
+        "final_hypothesis_text_digest": "sha256:" + "a" * 64,
+        "model_version": "gemini-2.0-2026-05",
+    }
     with mareforma.open(host_a, key_path=key_a) as ga:
         cid_a = OutputIngester(graph=ga).ingest(
-            capability="hypothesis",
-            payload={"summary": summary, "ic50_nM": 15},
+            capability="hypothesis", payload=dict(payload),
             generated_by="adapter:gemini@host-a",
         )
         row_a = ga.get_claim(cid_a)
 
     with mareforma.open(host_b, key_path=key_b) as gb:
         cid_b = OutputIngester(graph=gb).ingest(
-            capability="hypothesis",
-            payload={"summary": summary, "ic50_nM": 15},
+            capability="hypothesis", payload=dict(payload),
             generated_by="adapter:gemini@host-b",
         )
         row_b = gb.get_claim(cid_b)
 
-    # The two independently-emitted claims must agree on the
-    # human-readable text — this is the convergence signal a merge
-    # agent looks for. (Cryptographic envelope cross-host replay is
-    # exercised by the broader signing/restore suite; here we only
-    # verify that two independent adapter calls produce comparable
-    # claims when given the same input.)
+    # Convergence: same human-readable text, both INFERRED.
     assert row_a["text"] == row_b["text"]
     assert row_a["classification"] == row_b["classification"] == "INFERRED"
-    # Distinct claim IDs (they were signed by different keys on
-    # different hosts) — that distinctness is exactly what allows
-    # REPLICATED promotion on a downstream merge.
+    # Distinct claim IDs (different keys, different hosts) — the
+    # distinctness is what allows REPLICATED promotion on a downstream
+    # merge that imports both.
     assert cid_a != cid_b
+    # Predicate payloads agree on the load-bearing hypothesis digest
+    # (the bytes a merge agent compares against).
+    import json
+    pa = json.loads(row_a["predicate_payload"])
+    pb = json.loads(row_b["predicate_payload"])
+    assert pa["final_hypothesis_text_digest"] == pb["final_hypothesis_text_digest"]
+    assert pa["predicate_type"] == pb["predicate_type"]

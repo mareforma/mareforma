@@ -54,8 +54,13 @@ MAX_RESULT_BYTES_DEFAULT = 10 * 1024 * 1024
 
 
 class ResultTooLargeError(ValueError):
-    """Raised when a tool result exceeds `max_result_bytes` and
-    `truncate_oversized` is False (the default)."""
+    """Raised when a tool result's canonical bytes exceed ``max_result_bytes``.
+
+    The adapter refuses to sign over-cap results — slicing
+    canonicalised JSON at an arbitrary byte boundary would produce
+    bytes no replay tool can re-derive. Raise the cap if the upstream
+    tool can be trusted to return honestly large payloads.
+    """
 
 
 class MissingToolVersionWarning(UserWarning):
@@ -121,7 +126,6 @@ class ProvenanceToolAdapter:
         canonicalizer: str = DEFAULT_CANONICALIZER,
         tool_config: dict[str, Any] | None = None,
         max_result_bytes: int = MAX_RESULT_BYTES_DEFAULT,
-        truncate_oversized: bool = False,
     ) -> None:
         self.tool = tool
         self.graph = graph
@@ -129,9 +133,8 @@ class ProvenanceToolAdapter:
         self.role = role
         self.tool_namespace = tool_namespace
         self.canonicalizer = canonicalizer
-        self._tool_config = tool_config or {}
+        self._tool_config = {} if tool_config is None else tool_config
         self.max_result_bytes = max_result_bytes
-        self.truncate_oversized = truncate_oversized
         # Pre-compute the tool config fingerprint at construction so a
         # mid-life config mutation by the caller is detectable via a
         # repeat call to ``fingerprint_tool_config``.
@@ -171,7 +174,11 @@ class ProvenanceToolAdapter:
 
         try:
             result = self.tool.call(**kwargs)
-        except Exception as exc:
+        except (ValueError, TypeError, RuntimeError, OSError, LookupError) as exc:
+            # Re-wrap predictable domain errors as ToolCallError.
+            # AssertionError, MemoryError, RecursionError, and any user
+            # BaseException subclass propagate unchanged so operators
+            # see the real failure mode.
             raise ToolCallError(
                 f"underlying tool {self.tool.name!r} raised: {exc}"
             ) from exc
@@ -205,14 +212,14 @@ class ProvenanceToolAdapter:
 
         try:
             task_id, fut = await self.tool.start_call(**kwargs)
-        except Exception as exc:
+        except (ValueError, TypeError, RuntimeError, OSError, LookupError) as exc:
             raise ToolCallError(
                 f"underlying tool {self.tool.name!r} start_call raised: {exc}"
             ) from exc
 
         try:
             result = await fut
-        except Exception as exc:
+        except (ValueError, TypeError, RuntimeError, OSError, LookupError) as exc:
             raise ToolCallError(
                 f"underlying tool {self.tool.name!r} await raised: {exc}"
             ) from exc
@@ -254,31 +261,34 @@ class ProvenanceToolAdapter:
 
         result_bytes = canonicalize(data, form=self.canonicalizer)
 
-        # Phase 4 size cap. Refuse (or truncate-with-flag) before we
-        # spend cycles signing a payload that will never fit downstream.
-        result_truncated = False
+        # Size cap. Refuse before we sign a payload that will never fit
+        # downstream. The old `truncate_oversized=True` escape hatch was
+        # removed: slicing canonicalised JSON at an arbitrary byte
+        # boundary cuts mid-UTF-8 or mid-string and the resulting
+        # signed result_digest cannot be re-derived by any replayer.
+        # Better to fail loudly than ship un-verifiable provenance.
         if len(result_bytes) > self.max_result_bytes:
-            if not self.truncate_oversized:
-                raise ResultTooLargeError(
-                    f"tool {self._sanitized_tool_name!r} returned "
-                    f"{len(result_bytes)} canonical bytes; cap is "
-                    f"{self.max_result_bytes}. Either raise "
-                    "max_result_bytes or pass truncate_oversized=True."
-                )
-            # Truncation: keep a structurally honest marker AND the
-            # bytes that fit. The signed result is the truncated form;
-            # the predicate flags it so replay knows.
-            result_bytes = result_bytes[: self.max_result_bytes]
-            result_truncated = True
+            raise ResultTooLargeError(
+                f"tool {self._sanitized_tool_name!r} returned "
+                f"{len(result_bytes)} canonical bytes; cap is "
+                f"{self.max_result_bytes}. Raise max_result_bytes "
+                "if the upstream tool can be trusted to return "
+                "honestly large payloads."
+            )
 
         result_digest_hex = digest_bytes(result_bytes)
         result_digest = "sha256:" + result_digest_hex
         result_bytes_size = len(result_bytes)
         completed_at = _utc_now()
 
-        metadata = result.get("metadata") or {}
-        # Stash for downstream builders that need to set the predicate flag.
-        self._last_result_truncated = result_truncated
+        metadata = result.get("metadata")
+        if metadata is None:
+            metadata = {}
+        elif not isinstance(metadata, dict):
+            raise ToolCallError(
+                f"tool {self.tool.name!r} returned non-dict metadata: "
+                f"{type(metadata).__name__}; ToolResult.metadata must be a dict"
+            )
 
         if self._is_exec_class:
             claim_text, supports, _ = self._build_container_exec_claim(
@@ -365,7 +375,6 @@ class ProvenanceToolAdapter:
                 else None
             ),
             parent_claim_id=self.parent_claim_id,
-            result_truncated=getattr(self, "_last_result_truncated", False),
         )
 
         summary = (

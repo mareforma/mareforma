@@ -105,7 +105,12 @@ def test_payload_strips_nul_bytes_via_sanitize_for_llm():
     assert "\x00" not in captured[0]["data"]["content"]
 
 
-def test_payload_truncates_oversize_content():
+def test_payload_truncates_oversize_content(monkeypatch):
+    """Use a small monkeypatched cap so the unit test does not need
+    to allocate 17 MiB just to exercise the byte-cap branch."""
+    from mareforma.adapters.clawinstitute import event_hook as eh_mod
+    monkeypatch.setattr(eh_mod, "_MAX_CONTENT_BYTES", 64)
+
     hook = EventHook()
     captured: list[dict[str, Any]] = []
 
@@ -115,14 +120,85 @@ def test_payload_truncates_oversize_content():
             return {"claim_id": None, "emitted": False, "error": None}
 
     hook.subscribe(H())
-    huge = "x" * (17 * 1024 * 1024)  # 17 MiB, over the 16 MiB cap
+    huge = "x" * 256  # 256 bytes > 64-byte cap
     hook.dispatch({"id": "p", "content": huge})
 
     body = captured[0]["data"]["content"]
     assert "truncated" in body
     assert captured[0]["data"]["content_truncated"] is True
-    # And nothing close to 17 MiB ended up in the payload.
-    assert len(body) < 1024
+    assert captured[0]["data"]["content_truncation_reason"] == "byte_cap"
+    # The digest binds the FULL content even though the body was truncated.
+    assert captured[0]["data"]["content_digest_sha256"].startswith("sha256:")
+
+
+def test_payload_propagates_sanitize_truncation_signal(monkeypatch):
+    """sanitize_for_llm has its own 100k-char cap; truncation there
+    must set content_truncated=True with reason 'sanitize_char_cap'."""
+    from mareforma.adapters.clawinstitute import event_hook as eh_mod
+    from mareforma import prompt_safety
+    # Shrink sanitize_for_llm's cap so the test stays tiny.
+    monkeypatch.setattr(prompt_safety, "_MAX_FIELD_LEN", 32)
+
+    hook = EventHook()
+    captured: list[dict[str, Any]] = []
+
+    class H:
+        def handle_event(self, payload):
+            captured.append(payload)
+            return {"claim_id": None, "emitted": False, "error": None}
+
+    hook.subscribe(H())
+    # 256 chars × 1 byte each = 256 bytes; well under the 16 MiB byte
+    # cap, so the sanitize path runs and trips its own char cap.
+    hook.dispatch({"id": "p", "content": "x" * 256})
+    assert captured[0]["data"]["content_truncated"] is True
+    assert captured[0]["data"]["content_truncation_reason"] == "sanitize_char_cap"
+
+
+def test_payload_emits_real_sha256_digest():
+    """content_digest_sha256 must be the SHA-256 of the full raw bytes,
+    not a base64 prefix marker."""
+    import hashlib
+    hook = EventHook()
+    captured: list[dict[str, Any]] = []
+
+    class H:
+        def handle_event(self, payload):
+            captured.append(payload)
+            return {"claim_id": None, "emitted": False, "error": None}
+
+    hook.subscribe(H())
+    content = "the quick brown fox"
+    expected = "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
+    hook.dispatch({"id": "p", "content": content})
+    assert captured[0]["data"]["content_digest_sha256"] == expected
+
+
+def test_dispatch_catches_handler_exception_and_returns_error_result():
+    """A subscribed handler that raises must not block dispatch to peers."""
+    hook = EventHook()
+    received_by_b: list[Any] = []
+
+    class A:
+        def handle_event(self, payload):
+            raise RuntimeError("handler A is broken")
+
+    class B:
+        def handle_event(self, payload):
+            received_by_b.append(payload)
+            return {"claim_id": "b", "emitted": True, "error": None}
+
+    hook.subscribe(A())
+    hook.subscribe(B())
+    results = hook.dispatch({"id": "p", "content": "hello"})
+
+    assert len(results) == 2
+    assert results[0]["emitted"] is False
+    assert results[0]["error"] is not None
+    assert "handler A is broken" in results[0]["error"]
+    assert results[1] == {"claim_id": "b", "emitted": True, "error": None}
+    # B received the payload even though A raised.
+    assert len(received_by_b) == 1
 
 
 def test_non_string_content_raises_typeerror():

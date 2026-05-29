@@ -3,7 +3,9 @@
 The Protocol pattern lets tests inject a deterministic stub without
 mocking ``httpx``, and lets downstream users plug in a custom client
 (e.g. retry wrapper, auth via a different mechanism) without
-subclassing. :class:`HttpxClient` is the default implementation.
+subclassing. :class:`HttpxClient` is the default implementation,
+backed by a pooled :class:`httpx.Client` so polling workloads do not
+pay per-request TCP/TLS setup.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 from typing import Any, Protocol, runtime_checkable
+from urllib.parse import quote
 
 
 __all__ = [
@@ -23,16 +26,18 @@ __all__ = [
     "JsonDecodeError",
     "NotFoundError",
     "ServerError",
+    "SUPPORTED_API_VERSION",
     "TimeoutError",
     "UnexpectedShapeError",
 ]
 
 
 # API version this client expects from the ClawInstitute REST surface.
-# The version is checked at runtime against the API's reported version
-# (if any) and raises ApiVersionError on incompatibility — pinning the
-# contract so a server-side API upgrade surfaces as a typed error here,
-# not as a silent shape mismatch downstream.
+# Baked into every request URL — the path pin IS the version contract,
+# and a 404 / 5xx surfaces a real mismatch from the server. The
+# api_version() probe below is an OPTIONAL caller-invoked check, not a
+# hot-path gate; callers who want fail-fast version-mismatch behaviour
+# should call it once at startup.
 SUPPORTED_API_VERSION: str = "v1"
 
 
@@ -96,17 +101,27 @@ class ClawInstituteClient(Protocol):
         ...
 
     def api_version(self) -> str:
-        """Return the server-reported API version string."""
+        """Return the server-reported API version string.
+
+        OPTIONAL probe — not auto-invoked. Callers that want fail-fast
+        version-mismatch behaviour should call this once at startup.
+        Raises :class:`ApiVersionError` if the server's version does
+        not match :data:`SUPPORTED_API_VERSION`.
+        """
         ...
 
 
 class HttpxClient:
-    """Default ``ClawInstituteClient`` backed by ``httpx``.
+    """Default ``ClawInstituteClient`` backed by a pooled ``httpx.Client``.
 
     Reads token + base URL from constructor args, falling back to
     ``CLAWINSTITUTE_TOKEN`` and ``CLAWINSTITUTE_BASE_URL`` environment
     variables. Per-call timeout defaults to 30 s; override with
-    ``timeout=`` at construction time.
+    ``timeout=`` at construction time. Use as a context manager to
+    release the connection pool at scope exit:
+
+        with HttpxClient() as c:
+            posts = c.list_workspace_posts("w1")
     """
 
     def __init__(
@@ -116,6 +131,17 @@ class HttpxClient:
         token: str | None = None,
         timeout: float = 30.0,
     ) -> None:
+        # Import httpx at construction time, not per-request — the
+        # extras-install hint surfaces here instead of inside every
+        # _request call.
+        try:
+            import httpx
+        except ImportError as exc:
+            raise ImportError(
+                "mareforma.adapters.clawinstitute.HttpxClient requires "
+                "httpx. Install via: pip install mareforma[clawinstitute]"
+            ) from exc
+
         resolved_url = base_url or os.environ.get("CLAWINSTITUTE_BASE_URL")
         resolved_token = token or os.environ.get("CLAWINSTITUTE_TOKEN")
         if not resolved_url:
@@ -129,21 +155,59 @@ class HttpxClient:
                 "CLAWINSTITUTE_TOKEN is not set in the environment"
             )
         self._base_url = resolved_url.rstrip("/")
-        self._token = resolved_token
         self._timeout = float(timeout)
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
-        """Execute one HTTP call and convert library errors into typed ones."""
+        # Pooled client: shared TCP + TLS across calls, ~3-5× faster
+        # for polling workloads vs httpx.request() per call. Headers
+        # are set once and reused. follow_redirects=False prevents an
+        # open-redirect on the API host from leaking the Bearer token.
+        self._http = httpx.Client(
+            base_url=self._base_url,
+            headers={
+                "Authorization": f"Bearer {resolved_token}",
+                "Accept": "application/json",
+            },
+            timeout=self._timeout,
+            follow_redirects=False,
+        )
+
+    def __enter__(self) -> "HttpxClient":
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Release the pooled connection. Safe to call multiple times."""
+        if getattr(self, "_http", None) is not None:
+            self._http.close()
+            self._http = None  # type: ignore[assignment]
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+        json_body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Execute one HTTP call and convert library errors into typed ones.
+
+        Only ``params`` and ``json_body`` are forwarded to httpx. Other
+        kwargs (verify=, follow_redirects=, auth=, cert=) are NOT
+        accepted — those would let a caller bypass TLS validation or
+        the Bearer-token redirect protection.
+        """
         import httpx
 
-        headers = {
-            "Authorization": f"Bearer {self._token}",
-            "Accept": "application/json",
-        }
-        url = f"{self._base_url}{path}"
+        if self._http is None:
+            raise ClawInstituteApiError(
+                "HttpxClient is closed; construct a new one"
+            )
+
         try:
-            response = httpx.request(
-                method, url, headers=headers, timeout=self._timeout, **kwargs,
+            response = self._http.request(
+                method, path, params=params, json=json_body,
             )
         except httpx.TimeoutException as exc:
             raise TimeoutError(f"timeout calling {method} {path}: {exc}") from exc
@@ -184,11 +248,14 @@ class HttpxClient:
     def list_workspace_posts(
         self, workspace_id: str, *, since: str | None = None,
     ) -> list[dict[str, Any]]:
+        # URL-quote workspace_id with safe='' so '/' and '..' cannot
+        # traverse out of /workspaces/<id>/posts into another route.
+        safe_id = quote(workspace_id, safe="")
         params: dict[str, str] = {}
         if since is not None:
             params["since"] = since
         body = self._request(
-            "GET", f"/api/{SUPPORTED_API_VERSION}/workspaces/{workspace_id}/posts",
+            "GET", f"/api/{SUPPORTED_API_VERSION}/workspaces/{safe_id}/posts",
             params=params or None,
         )
         posts = body.get("posts")
@@ -199,7 +266,10 @@ class HttpxClient:
         return posts
 
     def get_post(self, post_id: str) -> dict[str, Any]:
-        body = self._request("GET", f"/api/{SUPPORTED_API_VERSION}/posts/{post_id}")
+        safe_id = quote(post_id, safe="")
+        body = self._request(
+            "GET", f"/api/{SUPPORTED_API_VERSION}/posts/{safe_id}",
+        )
         return body
 
     def api_version(self) -> str:
