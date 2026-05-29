@@ -990,3 +990,19 @@ def restore_cmd(claims_toml_path: Path | None) -> None:
     _ok(f"Restored graph.db from claims.toml ({_root()}/.mareforma/graph.db).")
     _info(f"validators_restored: {result['validators_restored']}")
     _info(f"claims_restored:     {result['claims_restored']}")
+
+
+# ---------------------------------------------------------------------------
+# Literature ingest + ask + narrative export
+# ---------------------------------------------------------------------------
+
+# Register ingest, ask, and narrative as top-level subcommands so they
+# share the cli's --help surface. The actual command bodies live in
+# their own modules; this file is the wiring.
+from mareforma.ingest_command import ingest_cli as _ingest_cli
+from mareforma.ask_command import ask_cli as _ask_cli
+from mareforma.exporters.narrative import narrative_cmd as _narrative_cmd
+
+cli.add_command(_ingest_cli)
+cli.add_command(_ask_cli)
+cli.add_command(_narrative_cmd, name="narrative")

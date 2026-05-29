@@ -513,6 +513,40 @@ CREATE TABLE IF NOT EXISTS validators (
     enrolled_by_keyid    TEXT NOT NULL,
     enrollment_envelope  TEXT NOT NULL
 );
+
+-- literature_claims: paper-ingested claim drafts.
+-- Populated by `mareforma ingest`. Separate from the signed `claims`
+-- table because ingest-extracted assertions are drafts pending review,
+-- and most never get promoted into the signed graph.
+CREATE TABLE IF NOT EXISTS literature_claims (
+    claim_id      TEXT PRIMARY KEY,
+    source_doc_id TEXT NOT NULL,
+    doi           TEXT,
+    title         TEXT,
+    claim_text    TEXT NOT NULL,
+    confidence    REAL NOT NULL DEFAULT 0.5,
+    extracted_by  TEXT NOT NULL DEFAULT 'ingest:mock',
+    ingested_at   TEXT NOT NULL,
+    contradicts   TEXT
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS literature_claims_fts USING fts5(
+    claim_text,
+    content='literature_claims',
+    content_rowid='rowid'
+);
+
+CREATE TRIGGER IF NOT EXISTS literature_claims_ai
+AFTER INSERT ON literature_claims BEGIN
+    INSERT INTO literature_claims_fts(rowid, claim_text)
+    VALUES (new.rowid, new.claim_text);
+END;
+
+CREATE TRIGGER IF NOT EXISTS literature_claims_ad
+AFTER DELETE ON literature_claims BEGIN
+    INSERT INTO literature_claims_fts(literature_claims_fts, rowid, claim_text)
+    VALUES ('delete', old.rowid, old.claim_text);
+END;
 """
 
 
