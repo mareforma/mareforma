@@ -363,3 +363,97 @@ mareforma restore backups/state.toml
 The output reports `validators_restored` and `claims_restored` counts. Failure exits `1` with a `RestoreError` message naming the failure mode: `graph_not_empty`, `toml_not_found`, `toml_malformed`, `enrollment_unverified`, `claim_unverified`, `mode_inconsistent`, `orphan_signer`, or `rekor_inclusion_invalid`.
 
 Since v0.3.2, `claims.toml` includes a `[rekor_inclusions]` section. Pre-v0.3.2 files restore successfully with a `RekorSidecarSectionAbsentWarning`. Run `refresh_unsigned()` afterward to re-fetch inclusion proofs.
+
+---
+
+## ingest
+
+Added in v0.3.3. Read a paper abstract from disk, extract claim drafts, and write them to the project's `literature_claims` table (separate from the signed `claims` table — most drafts stay drafts pending review).
+
+```bash
+mareforma ingest <FILE> [--db PATH] [--llm] [--model MODEL]
+```
+
+**Arguments**
+
+| Argument | Description |
+|---|---|
+| `FILE` | Path to a structured abstract file (TITLE: / DOI: / CLAIMS: sections). |
+
+**Options**
+
+| Option | Default | Description |
+|---|---|---|
+| `--db PATH` | `.mareforma/graph.db` | Path to the graph DB. Honours the literal filename — non-conventional paths are NOT silently rewritten under `.mareforma/`. |
+| `--llm` | off | Use the Anthropic Claude API to extract claims from arbitrary text. Requires `pip install anthropic`. |
+| `--model MODEL` | `claude-opus-4-7` | Anthropic model name when `--llm` is set. |
+
+**Default (structured) mode** parses files with explicit `TITLE:` / `DOI:` / `CLAIMS:` sections; each `CLAIMS:` line becomes one draft with an optional `(confidence: 0.NN)` marker. Zero external dependencies.
+
+**Example**
+
+```bash
+mareforma ingest paper.md
+# Ingested 3 claim(s) → written to .mareforma/graph.db
+
+mareforma ingest preprint.txt --llm --model claude-opus-4-7
+# Extracts claims from arbitrary text via Claude.
+```
+
+---
+
+## ask
+
+Added in v0.3.3. FTS5 BM25 search over ingested literature claims. Input is sanitised so hyphens, parens, and asterisks are treated as literals; embedded double quotes are escaped per the FTS5 spec.
+
+```bash
+mareforma ask "<QUESTION>" [--db PATH] [--limit N] [--json]
+```
+
+**Arguments**
+
+| Argument | Description |
+|---|---|
+| `QUESTION` | Free-form search query. |
+
+**Options**
+
+| Option | Default | Description |
+|---|---|---|
+| `--db PATH` | `.mareforma/graph.db` | Path to the graph DB. |
+| `--limit N` | `5` | Maximum results. |
+| `--json` | off | Output raw JSON instead of the rendered table. |
+
+**Example**
+
+```bash
+mareforma ask "BRCA1 mutations"
+# Returns top-5 ranked literature_claims hits.
+
+mareforma ask 'mutations of "BRCA1"' --json
+# Embedded quotes are escaped; FTS5 syntax errors do not surface.
+```
+
+---
+
+## narrative
+
+Added in v0.3.3. Export all ingested literature claims as a Markdown narrative grouped by source document, with structural and polarity-heuristic contradictions flagged inline.
+
+```bash
+mareforma narrative [--db PATH] [--output FILE]
+```
+
+**Options**
+
+| Option | Default | Description |
+|---|---|---|
+| `--db PATH` | `.mareforma/graph.db` | Path to the graph DB. |
+| `--output, -o FILE` | stdout | Write to file instead of stdout. |
+
+**Example**
+
+```bash
+mareforma narrative -o report.md
+# Writes # Literature Summary + per-source sections; ⚠ contradiction flags inline.
+```

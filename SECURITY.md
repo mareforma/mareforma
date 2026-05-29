@@ -72,7 +72,7 @@ After installing, you can confirm the package came from PyPI's
 Trusted-Publisher path by checking the PyPI provenance attestation:
 
 ```bash
-pip install mareforma==0.3.0
+pip install mareforma                  # latest release
 python -m pip show mareforma           # confirms the installed version
 # Provenance: https://pypi.org/project/mareforma/#files
 ```

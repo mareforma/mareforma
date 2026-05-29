@@ -1,7 +1,7 @@
 """Mareforma — local epistemic substrate for AI-assisted research."""
 
 __description__ = "Mareforma — local epistemic substrate for AI-assisted research."
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 
 from pathlib import Path
 
@@ -406,6 +406,35 @@ from mareforma.predicate_types import (
     is_registered,
     predicates,
     register as register_predicate,
+    # Capability-shaped predicate URI constants.
+    CLAIM_V1,
+    EPISTEMIC_GRAPH_V1,
+    CLAIM_WITH_ROLES_V1,
+    TOOL_CALL_V1,
+    CONTAINER_EXEC_V1,
+    CODE_VARIATION_V1,
+    HYPOTHESIS_V1,
+    LITERATURE_INSIGHT_V1,
+    SCIENCE_SKILL_V1,
+    META_CLAIM_V1,
+    WORKSHOP_EVENT_V1,
+    AGENT_TRACE_V1,
+    INGESTED_TRACE_V1,
+    LLM_OUTPUT_V1,
+    REVIEW_V1,
+    PEER_REVIEW_V1,
+    ELO_MATCH_V1,
+    TOURNAMENT_BRACKET_V1,
+    WET_LAB_ASSAY_V1,
+    WET_LAB_ASSAY_FLOW_CYTOMETRY_V1,
+    WET_LAB_ASSAY_SEQUENCING_V1,
+    WET_LAB_ASSAY_IMAGING_V1,
+    WET_LAB_ASSAY_PROTEOMICS_V1,
+    WET_LAB_ASSAY_ELECTROPHYSIOLOGY_V1,
+    REPLICATION_ATTESTATION_V1,
+    COMPOUNDING_ATTESTATION_V1,
+    SEMANTIC_GROUNDING_V1,
+    DOI_RESOLUTION_V1,
 )
 
 
@@ -426,6 +455,35 @@ __all__ = [
     "is_registered",
     "predicates",
     "register_predicate",
+    # Capability-shaped predicate URI constants.
+    "CLAIM_V1",
+    "EPISTEMIC_GRAPH_V1",
+    "CLAIM_WITH_ROLES_V1",
+    "TOOL_CALL_V1",
+    "CONTAINER_EXEC_V1",
+    "CODE_VARIATION_V1",
+    "HYPOTHESIS_V1",
+    "LITERATURE_INSIGHT_V1",
+    "SCIENCE_SKILL_V1",
+    "META_CLAIM_V1",
+    "WORKSHOP_EVENT_V1",
+    "AGENT_TRACE_V1",
+    "INGESTED_TRACE_V1",
+    "LLM_OUTPUT_V1",
+    "REVIEW_V1",
+    "PEER_REVIEW_V1",
+    "ELO_MATCH_V1",
+    "TOURNAMENT_BRACKET_V1",
+    "WET_LAB_ASSAY_V1",
+    "WET_LAB_ASSAY_FLOW_CYTOMETRY_V1",
+    "WET_LAB_ASSAY_SEQUENCING_V1",
+    "WET_LAB_ASSAY_IMAGING_V1",
+    "WET_LAB_ASSAY_PROTEOMICS_V1",
+    "WET_LAB_ASSAY_ELECTROPHYSIOLOGY_V1",
+    "REPLICATION_ATTESTATION_V1",
+    "COMPOUNDING_ATTESTATION_V1",
+    "SEMANTIC_GROUNDING_V1",
+    "DOI_RESOLUTION_V1",
     # User-catchable exceptions (alphabetical under MareformaError).
     "MareformaError",
     "ChainIntegrityError",

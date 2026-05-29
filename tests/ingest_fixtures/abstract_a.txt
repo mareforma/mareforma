@@ -1,0 +1,15 @@
+TITLE: Drug X reduces inflammatory marker CRP by 30% in diabetic cohort
+DOI: 10.1234/study-a-2024
+AUTHORS: Smith J, Lee K
+YEAR: 2024
+
+ABSTRACT:
+We conducted a randomised controlled trial of Drug X in 450 diabetic patients.
+After 12 weeks, serum CRP levels decreased by 30% (p<0.001, 95% CI 25-35%).
+Secondary endpoints showed a 15% reduction in IL-6 levels (p=0.03).
+No serious adverse events were recorded.
+
+CLAIMS:
+- Drug X reduces CRP by 30% in diabetic patients (confidence: 0.90)
+- Drug X reduces IL-6 by 15% in diabetic patients (confidence: 0.75)
+- Drug X has no serious adverse events in diabetic patients (confidence: 0.80)

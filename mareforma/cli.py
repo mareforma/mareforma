@@ -990,3 +990,40 @@ def restore_cmd(claims_toml_path: Path | None) -> None:
     _ok(f"Restored graph.db from claims.toml ({_root()}/.mareforma/graph.db).")
     _info(f"validators_restored: {result['validators_restored']}")
     _info(f"claims_restored:     {result['claims_restored']}")
+
+
+# ---------------------------------------------------------------------------
+# Literature ingest + ask + narrative export
+# ---------------------------------------------------------------------------
+
+# Lazy-registered subcommands. ingest/ask/narrative each pull rich +
+# tomli_w eagerly; importing them at module top would pay the cost on
+# every CLI invocation (--version, --help, bootstrap, validator add,
+# tab-completion, …) even for users who never touch the literature
+# pipeline. Override get_command + list_commands so the submodule
+# loads only when the subcommand is actually invoked.
+_LAZY_SUBCOMMANDS = {
+    "ingest":    ("mareforma.ingest_command",      "ingest_cli"),
+    "ask":       ("mareforma.ask_command",         "ask_cli"),
+    "narrative": ("mareforma.exporters.narrative", "narrative_cmd"),
+}
+
+
+_real_get_command = cli.get_command
+_real_list_commands = cli.list_commands
+
+
+def _lazy_get_command(ctx, name):  # noqa: ANN001
+    if name in _LAZY_SUBCOMMANDS:
+        module_path, attr = _LAZY_SUBCOMMANDS[name]
+        from importlib import import_module
+        return getattr(import_module(module_path), attr)
+    return _real_get_command(ctx, name)
+
+
+def _lazy_list_commands(ctx):  # noqa: ANN001
+    return sorted({*_real_list_commands(ctx), *_LAZY_SUBCOMMANDS})
+
+
+cli.get_command = _lazy_get_command  # type: ignore[method-assign]
+cli.list_commands = _lazy_list_commands  # type: ignore[method-assign]

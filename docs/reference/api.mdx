@@ -702,3 +702,143 @@ submodule. The submodule paths in the table tell you where the source
 lives.
 
 Schema-mismatch message (raised when `open_db()` finds a graph.db whose `user_version` differs from the substrate's `_SCHEMA_VERSION`): `"graph.db has user_version=N but this mareforma expects user_version=M. The dev branch does not migrate schemas. Delete .mareforma/graph.db to start fresh; claims.toml is a human-readable record of the prior state."`
+
+---
+
+## v0.3.3 surface
+
+### `mareforma.open_db_from_db_path(db_path)`
+
+Open the graph DB from a direct path to `graph.db`, not a project root. Honours the supplied filename when it sits outside the conventional `<root>/.mareforma/graph.db` layout (where `mareforma.open()` would re-derive that path).
+
+```python
+from mareforma.db import open_db_from_db_path
+
+conn = open_db_from_db_path("/tmp/custom.db")
+# Opens /tmp/custom.db, not /tmp/.mareforma/graph.db.
+```
+
+Used internally by the v0.3.3 CLI subcommands (`ingest`, `ask`, `narrative`) when `--db` points outside `.mareforma/`.
+
+### Capability-shaped predicate URI constants
+
+`mareforma.predicate_types` exposes URN-form constants for every reserved predicate. Re-exported at the top level so adapter authors can `from mareforma import TOOL_CALL_V1`.
+
+Substrate-owned (writer in the substrate):
+
+- `CLAIM_V1` — `urn:mareforma:predicate:claim:v1`
+- `EPISTEMIC_GRAPH_V1` — `urn:mareforma:predicate:epistemic-graph:v1`
+- `CLAIM_WITH_ROLES_V1` — `urn:mareforma:predicate:claim-with-roles:v1`
+
+Adapter-owned (writer in `mareforma.adapters.*` or a third-party adapter):
+
+- `TOOL_CALL_V1` — `urn:mareforma:predicate:tool-call:v1`
+- `CONTAINER_EXEC_V1` — `urn:mareforma:predicate:container-exec:v1`
+- `CODE_VARIATION_V1` — `urn:mareforma:predicate:code-variation:v1`
+- `HYPOTHESIS_V1` — `urn:mareforma:predicate:hypothesis:v1`
+- `LITERATURE_INSIGHT_V1` — `urn:mareforma:predicate:literature-insight:v1`
+- `SCIENCE_SKILL_V1` — `urn:mareforma:predicate:science-skill:v1`
+- `META_CLAIM_V1` — `urn:mareforma:predicate:meta-claim:v1`
+- `WORKSHOP_EVENT_V1` — `urn:mareforma:predicate:workshop-event:v1`
+- `AGENT_TRACE_V1`, `INGESTED_TRACE_V1`, `LLM_OUTPUT_V1`,
+  `REVIEW_V1`, `PEER_REVIEW_V1`, `ELO_MATCH_V1`,
+  `TOURNAMENT_BRACKET_V1` — additional reserved namespaces.
+- Wet-lab assay family: `WET_LAB_ASSAY_V1` plus
+  `_FLOW_CYTOMETRY`, `_SEQUENCING`, `_IMAGING`, `_PROTEOMICS`,
+  `_ELECTROPHYSIOLOGY` siblings.
+- `REPLICATION_ATTESTATION_V1`, `COMPOUNDING_ATTESTATION_V1`,
+  `SEMANTIC_GROUNDING_V1`, `DOI_RESOLUTION_V1`.
+
+Constants beat string literals: a typo on a name fails at import; a typo on a URI string would silently mis-classify a claim.
+
+### `mareforma.events`
+
+Typed Protocol contract for adapter event sources.
+
+```python
+from mareforma.events import (
+    EventSource, EventHandler, EventPayload, ClaimResult,
+    SOURCE_CLAWINSTITUTE, SOURCE_TOOLUNIVERSE,
+    SOURCE_GEMINI, SOURCE_CLAUDE_CODE_PRETOOLUSE,
+)
+```
+
+`EventSource` and `EventHandler` are `@runtime_checkable` Protocols — `isinstance(obj, EventSource)` at adapter construction time fails loudly on a missing `subscribe` / `unsubscribe` / `handle_event` attribute. `EventPayload` and `ClaimResult` are TypedDicts. Source-name constants prevent string-typo dispatch bugs.
+
+### `mareforma.tools`
+
+Structural contract for any wrappable callable.
+
+```python
+from mareforma.tools import Tool, ToolResult, ReplayResult, ToolCallError
+
+class MyTool:
+    name = "open_targets"
+    version = "1.0"
+    def call(self, **kwargs) -> ToolResult:
+        return {"data": ..., "metadata": {}, "source_version": "..."}
+
+assert isinstance(MyTool(), Tool)
+```
+
+### `mareforma.canonicalize`
+
+Registry-based canonicalizer surface for adapter authors. Distinct from the internal envelope canonicaliser (`mareforma._canonical`) — adapters use the public registry so claim `result_canonical_form` fields can name forms by registered string.
+
+```python
+from mareforma.canonicalize import (
+    canonicalize, registered_canonicalizers,
+    DEFAULT_CANONICALIZER, DSSE_JCS_NFC_V1,
+)
+
+canonicalize({"x": 1})                          # json-c14n-v1 (RFC 8785)
+canonicalize({"x": 1}, form=DSSE_JCS_NFC_V1)    # NFC-normalising, same bytes as envelope
+```
+
+Importing `mareforma.canonicalize` also registers the specialty forms `rdkit-canonical-smiles-v1`, `fasta-nfc-v1`, `pdb-atom-sorted-v1` via the auto-imported `specialty` submodule. RDKit canonicaliser gracefully falls back to NFC-stripped UTF-8 when `rdkit` isn't installed.
+
+### `mareforma.derivation`
+
+Substrate-derived classification. Deterministically derives `ANALYTICAL` vs `INFERRED` from a static source-code profile plus dynamic runtime-log templates.
+
+```python
+from mareforma.derivation import (
+    derive_classification, verify_classification,
+    extract_source_profile, extract_templates,
+    DERIVATION_VERSION,
+)
+
+result = derive_classification(source_code, runtime_logs)
+# ClassificationResult with .classification + .evidence
+```
+
+Source-profile extraction requires `pip install mareforma[derivation]` (`tree_sitter` + `tree_sitter_python`); log-template extraction (Drain parser) is pure stdlib.
+
+### `mareforma.hooks`
+
+Claude Code `PreToolUse` handler. Records every tool invocation as a `prov:Activity` row in the project's `.mareforma/graph.db`.
+
+Opt in via `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "",
+      "hooks": [{"type": "command", "command": "python -m mareforma.hooks"}]
+    }]
+  }
+}
+```
+
+`agent_activities` table is part of the canonical schema; the hook routes through `mareforma.db.open_db` so it inherits foreign-keys PRAGMA + schema validation. Hook exit is always 0; failures log to stderr but never propagate.
+
+### `mareforma.adapters.*`
+
+Three opt-in adapter packages — see [Mareforma adapters](../for-agents/agents) (under the *Adapter framework* section) for full integration examples. Quick reference:
+
+| Package | Install | What it does |
+|---|---|---|
+| `mareforma.adapters.clawinstitute` | `pip install mareforma[clawinstitute]` | Workshop-event hook with HttpxClient, EventSource Protocol implementation, 3-layer content sanitisation, 8 typed exceptions. |
+| `mareforma.adapters.tooluniverse` | `pip install mareforma[tooluniverse]` | `ProvenanceToolAdapter` wraps any `mareforma.tools.Tool`; each call records a signed `tool-call:v1` claim. Container-exec class tools route to `container-exec:v1`. |
+| `mareforma.adapters.gemini` | `pip install mareforma[gemini]` | Read-only `OutputIngester` for 4 Gemini for Science capabilities. Per-capability `REQUIRED_FIELDS` validation; string payload values sanitised. |

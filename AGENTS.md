@@ -1230,6 +1230,170 @@ its data provenance works. The graph does not validate it.
 
 ---
 
+## Adapter framework (`mareforma.adapters.*`)
+
+Three opt-in adapter packages translate external AI platforms into
+signed mareforma claims. Each ships behind a matching install extra so
+the default install stays slim. All three share a convention surface
+exercised by `tests/adapters/test_coexistence.py`: every adapter has
+`predicate_uris()` and `emit_sample()` so the cross-adapter test can
+verify multiple adapters writing into one graph without predicate-URI
+collisions.
+
+### `mareforma.adapters.clawinstitute`
+
+```python
+from mareforma.adapters.clawinstitute import EventHook, HttpxClient
+
+hook = EventHook(graph=graph, client=HttpxClient())  # client optional
+
+class PersistHandler:
+    def handle_event(self, payload):
+        return {"claim_id": graph.assert_claim(
+            payload["data"]["content"],
+            classification="INFERRED",
+            generated_by=f"adapter:{payload['source']}",
+            predicate_payload={"predicate_type":
+                "urn:mareforma:predicate:workshop-event:v1", **payload["data"]},
+        ), "emitted": True, "error": None}
+
+hook.subscribe(PersistHandler())
+# Per-handler exceptions are caught and returned as
+# ClaimResult(emitted=False, error=...) — a misbehaving subscriber
+# cannot block dispatch to peers.
+results = hook.dispatch(post)
+```
+
+Three sanitisation layers run on untrusted post content before any
+handler sees it: 16 MiB raw-byte cap (rejects pathological inputs
+early), `sanitize_for_llm` (strips control chars and prompt-injection
+vectors), `wrap_untrusted` (brackets the body in `<untrusted_data>`
+tags so a downstream LLM cannot mistake it for a directive). The
+`content_digest_sha256` field binds the FULL raw bytes via SHA-256
+even when the body is truncated. `HttpxClient` uses a pooled
+`httpx.Client` with `follow_redirects=False`; URL path segments
+quote workspace_id / post_id so `'..'` cannot traverse routes.
+
+### `mareforma.adapters.tooluniverse`
+
+```python
+from mareforma.adapters.tooluniverse import ProvenanceToolAdapter
+from mareforma.tools import Tool  # the Protocol any wrapped callable must satisfy
+
+class MyTool:
+    name = "open_targets"
+    version = "1.0"
+    def call(self, **kwargs):
+        return {"data": ..., "metadata": {}, "source_version": "..."}
+
+adapter = ProvenanceToolAdapter(tool=MyTool(), graph=graph,
+                                role="executor")
+result = adapter.call(target="EGFR")
+claim_id = result["metadata"]["mareforma_claim_id"]
+```
+
+Every wrapped call records a signed `urn:mareforma:predicate:tool-call:v1`
+claim with arguments digest, result digest, tool config fingerprint,
+and timing. Container-exec class tools (category matches `python_exec`
+/ `code_execution` / `exec`) route to `urn:mareforma:predicate:container-exec:v1`
+with the same envelope shape. Results above `max_result_bytes` raise
+`ResultTooLargeError` — truncating canonical bytes mid-string would
+produce a digest no replayer can re-derive.
+
+### `mareforma.adapters.gemini`
+
+```python
+from mareforma.adapters.gemini import OutputIngester
+
+ing = OutputIngester(graph=graph)
+claim_id = ing.ingest(
+    capability="hypothesis",  # one of: code-variation / hypothesis / literature-insight / science-skill
+    payload={
+        "summary": "Compound X inhibits target Y at IC50=15nM",
+        "final_hypothesis_text_digest": "sha256:...",
+        "model_version": "gemini-2.0-2026-05",
+    },
+)
+```
+
+Read-only ingest of Gemini for Science outputs. Per-capability
+`REQUIRED_FIELDS` validates payload shape before `assert_claim`
+runs; string values flow through `sanitize_for_llm`; reserved keys
+(`predicate_type`, `capability`) are adapter-owned and a caller
+that tries to set them in `payload` raises `ValueError`.
+
+## Substrate primitives (v0.3.3)
+
+Two adjacent primitives ship in core for adapter authors:
+
+- **`mareforma.events`** — `EventSource` / `EventHandler` Protocols
+  plus typed `EventPayload` and `ClaimResult`. Source-name
+  constants (`SOURCE_CLAWINSTITUTE`, `SOURCE_TOOLUNIVERSE`,
+  `SOURCE_GEMINI`, `SOURCE_CLAUDE_CODE_PRETOOLUSE`) prevent
+  string-typo dispatch bugs.
+- **`mareforma.tools`** — `Tool` Protocol (`name`, `version`,
+  `call(**kwargs) -> ToolResult`), `ToolResult` TypedDict,
+  `ReplayResult` dataclass. Implement to wrap any callable into
+  the tooluniverse adapter's `ProvenanceToolAdapter`.
+
+Plus the public canonicalize registry and predicate-URI constants:
+
+- **`mareforma.canonicalize`** — `canonicalize(value, form=...)`
+  with registered forms `json-c14n-v1` (default RFC 8785),
+  `dsse-jcs-nfc-v1` (NFC-normalising — same bytes the signed
+  envelope layer produces), plus specialty `rdkit-canonical-smiles-v1`
+  / `fasta-nfc-v1` / `pdb-atom-sorted-v1` registered on import of
+  `mareforma.canonicalize`.
+- **Capability URI constants** at `mareforma.predicate_types` (also
+  re-exported at the top level): `CLAIM_V1`, `TOOL_CALL_V1`,
+  `WORKSHOP_EVENT_V1`, `CODE_VARIATION_V1`, `HYPOTHESIS_V1`,
+  `LITERATURE_INSIGHT_V1`, `SCIENCE_SKILL_V1`, `META_CLAIM_V1`,
+  `CONTAINER_EXEC_V1`, plus the wet-lab assay family. Use the
+  constants instead of string literals so a typo fails at import.
+
+## Claude Code hook (`mareforma.hooks`)
+
+`python -m mareforma.hooks` is a Claude Code `PreToolUse` handler
+that records every tool invocation as a `prov:Activity` row in the
+project's `.mareforma/graph.db`. The `agent_activities` table is
+part of the canonical schema; the hook routes through
+`mareforma.db.open_db` so it inherits foreign-keys PRAGMA + schema
+validation. Opt in via `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "",
+      "hooks": [{"type": "command", "command": "python -m mareforma.hooks"}]
+    }]
+  }
+}
+```
+
+Hook exit is always 0; failures log to stderr but never propagate
+so a hook glitch can never interrupt a Claude Code tool call.
+
+## Literature ingest CLI
+
+Paper claim drafts live in their own `literature_claims` table
+(separate from the signed `claims` table) so most ingested
+assertions stay drafts pending review. Three subcommands:
+
+```bash
+mareforma ingest paper.md        # parse TITLE / DOI / CLAIMS, write drafts
+mareforma ingest paper.md --llm  # use Claude API (needs `pip install anthropic`)
+mareforma ask "BRCA1 mutations"  # FTS5 BM25 search over draft text
+mareforma narrative -o out.md    # Markdown summary, ⚠ contradiction flags
+```
+
+The `--db` flag accepts the full path to the `graph.db` file
+(`mareforma.db.open_db_from_db_path` honours the supplied filename
+instead of re-deriving `.mareforma/graph.db`). Existing v0.3.2 graphs
+auto-create the new tables on next `open_db()` without a schema bump.
+
+---
+
 ## For more
 
 - [Quickstart](docs/introduction/quickstart.mdx)

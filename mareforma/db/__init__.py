@@ -18,6 +18,7 @@ internal organisation, not a public API change.
 # accessible here via import AND getattr.
 
 from ._schema_sql import (
+    _ADDITIVE_TABLES_SQL,
     _SCHEMA_SQL,
     _CLAIM_COLUMNS,
     _CLAIM_SELECT,
@@ -61,6 +62,7 @@ from .core import (
     _CONTRADICTION_VERDICT_FIELDS,
     # Connection management.
     open_db,
+    open_db_from_db_path,
     _db_path,
     _ensure_claims_columns_for_upgrade,
     _ensure_doi_cache_columns,
@@ -149,6 +151,7 @@ from .restore import (
 __all__ = [
     # Schema.
     "_SCHEMA_SQL",
+    "_ADDITIVE_TABLES_SQL",
     "_CLAIM_COLUMNS",
     "_CLAIM_SELECT",
     # Exceptions.
@@ -176,6 +179,7 @@ __all__ = [
     "SUPPORT_TYPE_EXTERNAL",
     # Connection.
     "open_db",
+    "open_db_from_db_path",
     # Support classification.
     "classify_support",
     "classify_supports",

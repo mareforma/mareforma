@@ -2,6 +2,132 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.3] - 2026-05-29
+
+Adapter framework and substrate primitives. Five new primitives in
+core (events, tools, canonicalize, derivation, hooks) plus three
+opt-in adapters under `mareforma.adapters.*` and a literature-ingest
+CLI. Schema stays at v1; existing v0.3.2 graph.db
+auto-applies the new `literature_claims` and `agent_activities`
+tables on next `open_db()`.
+
+### Added
+
+- **Substrate primitives**
+  - `mareforma.events` — `EventSource` / `EventHandler` Protocols,
+    typed `EventPayload` and `ClaimResult`, source-name constants
+    (`SOURCE_CLAWINSTITUTE`, `SOURCE_TOOLUNIVERSE`, `SOURCE_GEMINI`,
+    `SOURCE_CLAUDE_CODE_PRETOOLUSE`) so adapters dispatch on
+    constants, not string literals.
+  - `mareforma.tools` — `Tool` Protocol (`name`, `version`,
+    `call(**kwargs) -> ToolResult`), `ToolResult` TypedDict,
+    `ReplayResult` dataclass. The structural contract any wrappable
+    callable satisfies.
+  - `mareforma.canonicalize` — registry-based canonicalizer surface
+    for adapter authors. Default `json-c14n-v1` (RFC 8785 JCS) plus
+    `dsse-jcs-nfc-v1` (same bytes the signed-envelope layer produces).
+    `mareforma.canonicalize.specialty` registers
+    `rdkit-canonical-smiles-v1`, `fasta-nfc-v1`, `pdb-atom-sorted-v1`
+    on import; registry is lock-guarded for thread safety.
+  - `mareforma.derivation` — substrate-derived classification.
+    Deterministically derives `ANALYTICAL` vs `INFERRED` from a static
+    profile of the agent's source code plus dynamic templates extracted
+    from runtime logs (Drain parser). Source-profile extraction
+    requires the `[derivation]` extra (tree-sitter); log-template
+    extraction is pure stdlib.
+  - `mareforma.hooks` — Claude Code `PreToolUse` handler
+    (`python -m mareforma.hooks`) records every tool invocation as a
+    `prov:Activity` row. The `agent_activities` table is part of the
+    canonical schema; the hook routes through `mareforma.db.open_db`
+    so it inherits foreign-keys PRAGMA + schema validation.
+- **Capability-shaped predicate URI constants** on
+  `mareforma.predicate_types` (re-exported at the top level):
+  `CONTAINER_EXEC_V1`, `CODE_VARIATION_V1`, `HYPOTHESIS_V1`,
+  `LITERATURE_INSIGHT_V1`, `SCIENCE_SKILL_V1`, `META_CLAIM_V1`,
+  `WORKSHOP_EVENT_V1`. Adapters import the constants — a typo on a
+  constant name fails at import; a typo on a URI string would
+  silently mis-classify a claim.
+- **Three opt-in adapters under `mareforma.adapters.*`** (each
+  behind an install extra so the default install stays slim):
+  - `mareforma.adapters.clawinstitute` — generic ClawInstitute
+    workshop-event hook. `EventHook` implements the EventSource
+    Protocol; `HttpxClient` uses a pooled `httpx.Client` with
+    `follow_redirects=False` and quotes URL path segments to refuse
+    `..` traversal. Eight typed exceptions all share
+    `ClawInstituteApiError` as parent. Untrusted post content runs
+    through three sanitisation layers (raw-byte cap →
+    `sanitize_for_llm` → `wrap_untrusted`) before any handler sees
+    it. Handler exceptions during `dispatch()` are caught and
+    returned as `ClaimResult(error=...)` so a misbehaving
+    subscriber cannot block peers.
+  - `mareforma.adapters.tooluniverse` — wrap any
+    `mareforma.tools.Tool` so each `.call(**kwargs)` records a
+    signed `urn:mareforma:predicate:tool-call:v1` claim with
+    arguments digest, result digest, tool config fingerprint,
+    timing. Container-exec class tools route to
+    `urn:mareforma:predicate:container-exec:v1`. Over-cap results
+    raise `ResultTooLargeError` rather than truncating mid-byte
+    (truncated canonical JSON produces a digest no replayer can
+    re-derive).
+  - `mareforma.adapters.gemini` — read-only ingest for Gemini for
+    Science outputs (4 capabilities: AlphaEvolve code-variation,
+    Co-Scientist hypothesis, NotebookLM literature-insight,
+    Antigravity science-skill). Per-capability `REQUIRED_FIELDS`
+    validation runs before `assert_claim`; string payload values
+    flow through `sanitize_for_llm`; reserved keys (`predicate_type`,
+    `capability`) are adapter-owned and a caller that tries to set
+    them in `payload` raises `ValueError`.
+- **Literature ingest CLI:** `mareforma ingest <file>`,
+  `mareforma ask "<query>"`, `mareforma narrative`. Paper claim
+  drafts live in their own `literature_claims` table (separate from
+  the signed `claims` table) so most ingested assertions stay drafts
+  pending review. FTS5 BM25 search escapes embedded quotes; the
+  narrative exporter flags structural and polarity-heuristic
+  contradictions inline.
+- **`mareforma.db.open_db_from_db_path()`** — opens a graph DB from
+  a direct file path (the CLI accepts `--db <root>/.mareforma/graph.db`
+  or any non-conventional location). Honours the supplied filename
+  instead of silently re-deriving `<root>/.mareforma/graph.db`.
+- **`rich` is now a core dep** (used by ingest / ask / narrative
+  output formatting).
+
+### Changed
+
+- **Schema is additive on every `open_db()`.** `literature_claims`,
+  `literature_claims_fts` (with insert / delete / **update**
+  triggers — the update trigger is new), and `agent_activities`
+  tables are created via an `_ADDITIVE_TABLES_SQL` script that
+  runs on both fresh and v1-initialised graphs. Existing v0.3.2
+  databases pick up the new tables on first open with no migration
+  required.
+- **`cli.py` lazy-loads ingest / ask / narrative subcommands** so
+  `mareforma --help` / `--version` / `bootstrap` / `validator add`
+  do not pay the rich + tomli_w import cost.
+
+### Fixed
+
+- `mareforma.derivation.source_profile`: import guard now catches
+  `Exception` (tree-sitter ABI mismatch surfaces as `TypeError` /
+  `RuntimeError`, not `ImportError`). `_require_tree_sitter` includes
+  the underlying error in the install hint.
+- `mareforma.derivation.source_profile`: module-prefix matching
+  requires a dot separator so `urllib_legacy.get` no longer matches
+  the `urllib` import.
+- `mareforma.derivation.source_profile`: dead-zone walker no longer
+  marks `except` clause bodies as dead. The prior behaviour silently
+  demoted ANALYTICAL agents to INFERRED on any error-handling path.
+
+### Removed
+
+- `truncate_oversized=True` constructor option on
+  `mareforma.adapters.tooluniverse.ProvenanceToolAdapter`. Truncating
+  canonicalised JSON at an arbitrary byte boundary produces bytes no
+  replayer can re-derive; the adapter now always raises
+  `ResultTooLargeError` when results exceed `max_result_bytes`.
+- Unused `canonicalizer_fallback` and `result_truncated` parameters
+  from `build_tool_call_predicate` (always-False fields signed into
+  every envelope; permanent on-disk noise).
+
 ## [0.3.2] - 2026-05-27
 
 Internal restructure + one restore-time verification improvement.

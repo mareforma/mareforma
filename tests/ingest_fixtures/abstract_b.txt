@@ -1,0 +1,14 @@
+TITLE: No significant effect of Drug X on CRP in pre-diabetic cohort
+DOI: 10.5678/study-b-2025
+AUTHORS: Patel R, Chen W
+YEAR: 2025
+
+ABSTRACT:
+In a meta-analysis of 3 trials totalling 1200 pre-diabetic subjects, Drug X
+showed no statistically significant reduction in CRP (mean reduction 4%,
+p=0.41, 95% CI -2% to +10%). IL-6 levels were unchanged (p=0.88).
+Results suggest the drug effect may be cohort-specific.
+
+CLAIMS:
+- Drug X does not reduce CRP in pre-diabetic patients (confidence: 0.85)
+- Drug X does not reduce IL-6 in pre-diabetic patients (confidence: 0.82)

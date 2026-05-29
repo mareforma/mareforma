@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mareforma"
-version = "0.3.2"
+version = "0.3.3"
 description = "Epistemic infrastructure for AI scientists"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -28,6 +28,7 @@ dependencies = [
     "httpx>=0.27",
     "cryptography>=48.0.0",
     "rfc8785>=0.1",
+    "rich>=13.0",
 ]
 
 [project.urls]
@@ -40,11 +41,26 @@ Issues = "https://github.com/mareforma/mareforma/issues"
 git = [
     "gitpython>=3.1",
 ]
+# Adapter extras. Each names the platform-specific runtime deps the
+# adapter needs. mareforma core stays slim; users opt into the
+# platforms they actually integrate with.
+clawinstitute = []  # httpx is already a core dep
+tooluniverse = []   # rich + rfc8785 already core deps
+gemini = []          # read-only ingest, no platform SDK
+# Substrate-derived classification. tree_sitter + tree_sitter_python
+# are heavy native deps; gating them behind an extra keeps the default
+# install fast and avoids a wheel-availability constraint on the matrix.
+derivation = [
+    "tree_sitter>=0.20",
+    "tree_sitter_python>=0.20",
+]
 dev = [
     "pytest>=9.0.3",
     "pytest-cov",
     "pytest-httpx>=0.36.2",
     "gitpython>=3.1",
+    "tree_sitter>=0.20",
+    "tree_sitter_python>=0.20",
 ]
 docs = []
 
@@ -66,6 +82,7 @@ testpaths = ["tests"]
 addopts = "-v --tb=short -m 'not slow'"
 markers = [
     "slow: long-running test (perf pins at 50k claims, network-backed adapters)",
+    "adapters: tests exercising the mareforma.adapters.* namespace",
 ]
 
 [tool.coverage.run]

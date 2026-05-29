@@ -53,6 +53,37 @@ def _isolate_predicate_registry():
     _pt._registry.update(snapshot)
 
 
+_INGEST_FIXTURES = Path(__file__).parent / "ingest_fixtures"
+
+
+@pytest.fixture()
+def db(tmp_path):
+    """Fresh mareforma graph.db with all DDL applied — for ingest/ask tests."""
+    from mareforma.db import open_db
+    conn = open_db(tmp_path)
+    yield conn
+    conn.close()
+
+
+@pytest.fixture()
+def sample_abstract_a():
+    return _INGEST_FIXTURES / "abstract_a.txt"
+
+
+@pytest.fixture()
+def sample_abstract_b():
+    return _INGEST_FIXTURES / "abstract_b.txt"
+
+
+@pytest.fixture()
+def populated_db(db, sample_abstract_a, sample_abstract_b):
+    """DB with two sample abstracts ingested."""
+    from mareforma.ingest_command import ingest_file
+    ingest_file(sample_abstract_a, db, extracted_by="ingest:mock")
+    ingest_file(sample_abstract_b, db, extracted_by="ingest:mock")
+    return db
+
+
 @pytest.fixture()
 def open_graph(tmp_path: Path):
     """Open an EpistemicGraph in a temp directory, with a bootstrapped

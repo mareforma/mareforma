@@ -6,6 +6,229 @@ description: "Notable changes across Mareforma releases."
 The authoritative changelog lives in [CHANGELOG.md](https://github.com/mareforma/mareforma/blob/main/CHANGELOG.md).
 This page mirrors it.
 
+## v0.3.3 — 2026-05-29
+
+Adapter framework and substrate primitives. Five new primitives in
+core (events, tools, canonicalize, derivation, hooks) plus three
+opt-in adapters under `mareforma.adapters.*` and a literature-ingest
+CLI. Schema stays at v1; existing v0.3.2 `graph.db` auto-applies the
+new `literature_claims` and `agent_activities` tables on next
+`open_db()`.
+
+### Added
+
+**Substrate primitives**
+
+- `mareforma.events` — `EventSource` / `EventHandler` Protocols,
+  typed `EventPayload` and `ClaimResult`, source-name constants
+  (`SOURCE_CLAWINSTITUTE`, `SOURCE_TOOLUNIVERSE`, `SOURCE_GEMINI`,
+  `SOURCE_CLAUDE_CODE_PRETOOLUSE`) so adapters dispatch on
+  constants, not string literals.
+- `mareforma.tools` — `Tool` Protocol (`name`, `version`,
+  `call(**kwargs) -> ToolResult`), `ToolResult` TypedDict,
+  `ReplayResult` dataclass. The structural contract any wrappable
+  callable satisfies.
+- `mareforma.canonicalize` — registry-based canonicalizer surface
+  for adapter authors. Default `json-c14n-v1` (RFC 8785 JCS) plus
+  `dsse-jcs-nfc-v1` (same bytes the signed-envelope layer produces).
+  Importing `mareforma.canonicalize` registers
+  `rdkit-canonical-smiles-v1`, `fasta-nfc-v1`, `pdb-atom-sorted-v1`
+  via the specialty submodule.
+- `mareforma.derivation` — substrate-derived classification.
+  Deterministically derives `ANALYTICAL` vs `INFERRED` from a static
+  source-code profile plus dynamic log templates (Drain parser).
+  Source-profile extraction requires the `[derivation]` extra
+  (`tree_sitter`); log-template extraction is pure stdlib.
+- `mareforma.hooks` — Claude Code `PreToolUse` handler
+  (`python -m mareforma.hooks`) records every tool invocation as a
+  `prov:Activity` row. `agent_activities` table is part of the
+  canonical schema.
+
+**Capability-shaped predicate URI constants** on
+`mareforma.predicate_types` (re-exported at the top level):
+`TOOL_CALL_V1`, `CONTAINER_EXEC_V1`, `CODE_VARIATION_V1`,
+`HYPOTHESIS_V1`, `LITERATURE_INSIGHT_V1`, `SCIENCE_SKILL_V1`,
+`META_CLAIM_V1`, `WORKSHOP_EVENT_V1`. Adapters import the
+constants — a typo on a constant name fails at import; a typo on a
+URI string would silently mis-classify a claim.
+
+**Three opt-in adapters under `mareforma.adapters.*`**:
+
+- `mareforma.adapters.clawinstitute` — generic ClawInstitute
+  workshop-event hook. `EventHook` implements the EventSource
+  Protocol; `HttpxClient` uses a pooled `httpx.Client` with
+  `follow_redirects=False` and URL-quotes path segments. Eight typed
+  exceptions share `ClawInstituteApiError` as parent. Untrusted
+  workshop content runs through three sanitisation layers (raw-byte
+  cap → `sanitize_for_llm` → `wrap_untrusted`). Handler exceptions
+  during `dispatch()` are caught and returned as
+  `ClaimResult(error=…)` so a misbehaving subscriber cannot block
+  peers.
+- `mareforma.adapters.tooluniverse` — wrap any `mareforma.tools.Tool`
+  so each `.call(**kwargs)` records a signed `tool-call:v1` claim
+  with arguments digest, result digest, tool config fingerprint,
+  timing. Container-exec class tools route to `container-exec:v1`.
+  Over-cap results raise `ResultTooLargeError`.
+- `mareforma.adapters.gemini` — read-only ingest for Gemini for
+  Science outputs (4 capabilities: code-variation, hypothesis,
+  literature-insight, science-skill). Per-capability
+  `REQUIRED_FIELDS` validation runs before `assert_claim`; string
+  payload values flow through `sanitize_for_llm`; reserved keys
+  (`predicate_type`, `capability`) are adapter-owned.
+
+**Literature ingest CLI:** `mareforma ingest <file>`,
+`mareforma ask "<query>"`, `mareforma narrative`. Paper claim drafts
+live in their own `literature_claims` table (separate from the
+signed `claims` table). FTS5 BM25 search escapes embedded quotes;
+the narrative exporter flags structural and polarity-heuristic
+contradictions inline.
+
+**`mareforma.db.open_db_from_db_path()`** — opens a graph DB from a
+direct file path. Honours the supplied filename instead of silently
+re-deriving `<root>/.mareforma/graph.db`.
+
+`rich` is now a core dependency.
+
+### Changed
+
+- **Schema is additive on every `open_db()`.** `literature_claims`,
+  `literature_claims_fts` (with insert / delete / update triggers),
+  and `agent_activities` tables are created via an
+  `_ADDITIVE_TABLES_SQL` script that runs on both fresh and
+  v1-initialised graphs. Existing v0.3.2 databases pick up the new
+  tables on first open with no migration required.
+- **`cli.py` lazy-loads ingest / ask / narrative subcommands** so
+  `mareforma --help` / `--version` / `bootstrap` / `validator add`
+  do not pay the `rich` + `tomli_w` import cost.
+
+### Fixed
+
+- `mareforma.derivation.source_profile`: import guard catches
+  `Exception` (tree-sitter ABI mismatch surfaces as `TypeError` /
+  `RuntimeError`, not `ImportError`). Module-prefix matching
+  requires a dot separator so `urllib_legacy.get` no longer matches
+  the `urllib` import. Dead-zone walker no longer marks `except`
+  clause bodies as dead (was silently demoting ANALYTICAL agents
+  to INFERRED on error-handling paths).
+
+### Removed
+
+- `truncate_oversized=True` option on
+  `mareforma.adapters.tooluniverse.ProvenanceToolAdapter`.
+  Truncating canonicalised JSON at an arbitrary byte boundary
+  produces bytes no replayer can re-derive; the adapter now always
+  raises `ResultTooLargeError`.
+
+## v0.3.2 — 2026-05-27
+
+Internal restructure + one restore-time verification improvement.
+Schema stays at v1; no migration required. All existing
+`from mareforma.db import X` and `from mareforma.signing import Y`
+import paths continue to work unchanged.
+
+### Changed
+
+- **`mareforma/signing.py` split into `mareforma/signing/`
+  subpackage.** `signing/core.py` carries DSSE PAE, canonical
+  Statement v1, key management, envelope sign/verify, and
+  `bootstrap_key`. `signing/rekor.py` carries Rekor submission,
+  RFC 6962 Merkle inclusion-proof verification, checkpoint
+  parsing, SSRF defense, and log-pubkey fetch.
+- **`mareforma/db.py` split into `mareforma/db/` subpackage.**
+  `db/core.py` carries the live-write path, queries, verdicts,
+  Rekor saga, and TOML backup. `db/_schema_sql.py` carries the
+  DDL constant. `db/errors.py` carries the exception hierarchy.
+  `db/restore.py` carries `restore()` and its verification
+  helpers.
+
+### Added
+
+- **`rekor_inclusions` sidecar round-trip through `claims.toml`.**
+  `_backup_claims_toml` emits a `[rekor_inclusions]` section
+  carrying each sidecar row's uuid, log_index, integrated_time,
+  raw_response_b64, and recorded_at. `restore()` replays entries
+  into the sidecar table after the corresponding claim INSERT,
+  inside the same fail-all-or-nothing transaction. Closes the
+  restore-time gap where Merkle inclusion proofs could not be
+  re-verified post-restore.
+- **Two drift-warning classes** for the sidecar restore path:
+  `RekorSidecarSectionAbsentWarning` (TOML has no
+  `[rekor_inclusions]` section — expected for pre-v0.3.2 files)
+  and `RekorSidecarEntryMissingWarning` (section exists but
+  lacks an entry for a Rekor-logged claim — suspicious).
+- **CI guard tests** walk each submodule source file via AST and
+  assert every defined name is importable AND accessible via
+  `getattr` on the package. Fails CI if a future contributor
+  adds a name without mirroring it in `__init__.py`.
+- **Restore-time sidecar validation.** Orphan `rekor_inclusions`
+  entries and entries missing required fields raise
+  `RestoreError`.
+
+### Compatibility
+
+- `claims.toml` files from v0.3.0 / v0.3.1 (no
+  `[rekor_inclusions]` section) restore successfully on v0.3.2
+  with a `RekorSidecarSectionAbsentWarning`. Run
+  `refresh_unsigned()` after restore to re-fetch inclusion
+  proofs from the log.
+
+## v0.3.1 — 2026-05-22
+
+Additive release. Schema stays at v1; new columns land via
+in-place `ALTER TABLE ADD COLUMN` on the non-signed-integrity
+surface. First `mareforma.open()` after upgrade auto-adds:
+`claims.predicate_payload`, `claims.original_signature_bundle`,
+and `doi_cache.content_digest`. None are part of the signed
+envelope or chain hash, so every existing claim's signed bytes
+round-trip byte-equal and signatures re-verify under the new
+code.
+
+### Added
+
+- **`EpistemicGraph.query_provenance(claim_id, depth=4)`** —
+  agent-readable lineage view of a claim: focal row + role-actor
+  signatures + recursive upstream / downstream walks + inbound
+  contradictions + replication verdicts in one deterministic dict.
+- **Rebuildable `claim_supports` cache.** Edge denormalisation
+  in a separate SQLite file
+  (`.mareforma/claim_supports_cache.db`). Recursive-CTE walkers
+  serve provenance queries in O(depth × deg). Auto-rebuilt on
+  stale / missing detection; 50k-claim p99 < 300ms.
+- **`claim-with-roles:v1` multi-signature DSSE envelopes.** New
+  `mareforma.signing.sign_claim_with_roles` +
+  `verify_envelope_multi` let asserters carry per-role
+  (planner / executor / reviewer / validator) signatures inside
+  one envelope. Legacy single-sig envelopes verify under the
+  existing `verify_envelope` unchanged.
+- **PROV-O JSON-LD exporter** + four-invariant hand-rolled
+  validator. `mareforma export --format=prov-o`.
+- **GRADE certainty surface.** Optional `study_design` field on
+  `EvidenceVector` (`randomised-trial` / `observational` /
+  `case-series` / `not-applicable`) + new
+  `EvidenceVector.certainty()` returning the GRADE four-tier band.
+- **DOI metadata drift detection.** New
+  `doi_cache.content_digest` column +
+  `EpistemicGraph.find_drifted_dois(limit=N)`.
+- **Refutation taxonomy + filter.** New `refutation_status()`
+  presenter (clean / contradicted / contested / retracted) and a
+  composable `refutation_filter` kwarg on `query()` / `search()`.
+- **Grounding sensor protocol.** New `mareforma.Verifier`
+  Protocol + `MockNLIVerifier` reference impl.
+  `EpistemicGraph.assert_claim(grounding_sensor=verifier)`
+  snapshots the verdict (score + rationale) into the signed
+  Statement v1 predicate at assertion time.
+- **Predicate URI reservations.** `BUILTIN_URIS` expanded from
+  3 to 21 entries reserving substrate-owned slots plus 18
+  adapter URIs.
+- **Operational health log + stats CLI.** Append-only
+  `.mareforma/health.jsonl` records per-op operational signal.
+  New `mareforma stats [--last N] [--json]` renders rolling
+  rates.
+- **Public `EpistemicGraph.update_claim`** wrapper around
+  `db.update_claim`. Status mutations are EDITORIAL —
+  cryptographically-traceable changes use the retract-and-
+  supersede pattern.
+
 ## v0.3.0 — 2026-05-13
 
 Breaking change from v0.2.x. Schema does not migrate from older

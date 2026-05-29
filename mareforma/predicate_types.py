@@ -41,7 +41,82 @@ __all__ = [
     "unregister",
     "PredicateTypeError",
     "BUILTIN_URIS",
+    # Capability-shaped URI constants — re-exported from mareforma top
+    # level so adapter authors can import them ergonomically.
+    "CLAIM_V1",
+    "EPISTEMIC_GRAPH_V1",
+    "CLAIM_WITH_ROLES_V1",
+    "TOOL_CALL_V1",
+    "CONTAINER_EXEC_V1",
+    "CODE_VARIATION_V1",
+    "HYPOTHESIS_V1",
+    "LITERATURE_INSIGHT_V1",
+    "SCIENCE_SKILL_V1",
+    "META_CLAIM_V1",
+    "WORKSHOP_EVENT_V1",
+    "AGENT_TRACE_V1",
+    "INGESTED_TRACE_V1",
+    "LLM_OUTPUT_V1",
+    "REVIEW_V1",
+    "PEER_REVIEW_V1",
+    "ELO_MATCH_V1",
+    "TOURNAMENT_BRACKET_V1",
+    "WET_LAB_ASSAY_V1",
+    "WET_LAB_ASSAY_FLOW_CYTOMETRY_V1",
+    "WET_LAB_ASSAY_SEQUENCING_V1",
+    "WET_LAB_ASSAY_IMAGING_V1",
+    "WET_LAB_ASSAY_PROTEOMICS_V1",
+    "WET_LAB_ASSAY_ELECTROPHYSIOLOGY_V1",
+    "REPLICATION_ATTESTATION_V1",
+    "COMPOUNDING_ATTESTATION_V1",
+    "SEMANTIC_GROUNDING_V1",
+    "DOI_RESOLUTION_V1",
 ]
+
+
+# Named constants for the URIs in BUILTIN_URIS. Adapter authors import
+# these instead of string-passing — a typo on a constant name fails at
+# import; a typo on a URI string would silently mis-classify a claim.
+CLAIM_V1 = "urn:mareforma:predicate:claim:v1"
+EPISTEMIC_GRAPH_V1 = "urn:mareforma:predicate:epistemic-graph:v1"
+CLAIM_WITH_ROLES_V1 = "urn:mareforma:predicate:claim-with-roles:v1"
+TOOL_CALL_V1 = "urn:mareforma:predicate:tool-call:v1"
+CONTAINER_EXEC_V1 = "urn:mareforma:predicate:container-exec:v1"
+CODE_VARIATION_V1 = "urn:mareforma:predicate:code-variation:v1"
+HYPOTHESIS_V1 = "urn:mareforma:predicate:hypothesis:v1"
+LITERATURE_INSIGHT_V1 = "urn:mareforma:predicate:literature-insight:v1"
+SCIENCE_SKILL_V1 = "urn:mareforma:predicate:science-skill:v1"
+META_CLAIM_V1 = "urn:mareforma:predicate:meta-claim:v1"
+WORKSHOP_EVENT_V1 = "urn:mareforma:predicate:workshop-event:v1"
+AGENT_TRACE_V1 = "urn:mareforma:predicate:agent-trace:v1"
+INGESTED_TRACE_V1 = "urn:mareforma:predicate:ingested-trace:v1"
+LLM_OUTPUT_V1 = "urn:mareforma:predicate:llm-output:v1"
+REVIEW_V1 = "urn:mareforma:predicate:review:v1"
+PEER_REVIEW_V1 = "urn:mareforma:predicate:peer-review:v1"
+ELO_MATCH_V1 = "urn:mareforma:predicate:elo-match:v1"
+TOURNAMENT_BRACKET_V1 = "urn:mareforma:predicate:tournament-bracket:v1"
+WET_LAB_ASSAY_V1 = "urn:mareforma:predicate:wet-lab-assay:v1"
+WET_LAB_ASSAY_FLOW_CYTOMETRY_V1 = (
+    "urn:mareforma:predicate:wet-lab-assay/flow-cytometry:v1"
+)
+WET_LAB_ASSAY_SEQUENCING_V1 = (
+    "urn:mareforma:predicate:wet-lab-assay/sequencing:v1"
+)
+WET_LAB_ASSAY_IMAGING_V1 = "urn:mareforma:predicate:wet-lab-assay/imaging:v1"
+WET_LAB_ASSAY_PROTEOMICS_V1 = (
+    "urn:mareforma:predicate:wet-lab-assay/proteomics:v1"
+)
+WET_LAB_ASSAY_ELECTROPHYSIOLOGY_V1 = (
+    "urn:mareforma:predicate:wet-lab-assay/electrophysiology:v1"
+)
+REPLICATION_ATTESTATION_V1 = (
+    "urn:mareforma:predicate:replication-attestation:v1"
+)
+COMPOUNDING_ATTESTATION_V1 = (
+    "urn:mareforma:predicate:compounding-attestation:v1"
+)
+SEMANTIC_GROUNDING_V1 = "urn:mareforma:predicate:semantic-grounding:v1"
+DOI_RESOLUTION_V1 = "urn:mareforma:predicate:doi-resolution:v1"
 
 
 class PredicateTypeError(ValueError):
@@ -106,6 +181,19 @@ BUILTIN_URIS: tuple[str, ...] = (
     "urn:mareforma:predicate:compounding-attestation:v1",
     "urn:mareforma:predicate:semantic-grounding:v1",
     "urn:mareforma:predicate:doi-resolution:v1",
+    # Capability-shaped predicates for the mareforma.adapters.* family.
+    # Names describe the WHAT (a code variation was produced; a
+    # hypothesis was generated) rather than the WHO (which platform).
+    # Multiple adapters can emit the same predicate type when the
+    # capability matches; downstream consumers reason about the
+    # capability, not the source.
+    "urn:mareforma:predicate:container-exec:v1",
+    "urn:mareforma:predicate:code-variation:v1",
+    "urn:mareforma:predicate:hypothesis:v1",
+    "urn:mareforma:predicate:literature-insight:v1",
+    "urn:mareforma:predicate:science-skill:v1",
+    "urn:mareforma:predicate:meta-claim:v1",
+    "urn:mareforma:predicate:workshop-event:v1",
 )
 
 
