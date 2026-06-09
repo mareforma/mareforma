@@ -114,7 +114,7 @@ def replay_from_claim(
     canonical_args = predicate["arguments_canonical"]
     # Reverify arguments_digest before executing — protects against
     # the bizarre case where the claim's stored canonical args were
-    # tampered (and the substrate trigger missed it).
+    # tampered (and the graph trigger missed it).
     args_bytes = canonicalize(canonical_args, form=canonical_form)
     args_digest_observed = "sha256:" + digest_bytes(args_bytes)
     if args_digest_observed != expected_args_digest:

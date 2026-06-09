@@ -138,9 +138,9 @@ _ENROLLMENT_FIELDS = (
 # the signed payload — an empty list is a positive statement that the
 # validator reviewed nothing, which is then visible in the audit trail
 # rather than hidden by absence. The validator's enumeration is
-# self-declared (the substrate cannot prove the validator actually
+# self-declared (mareforma cannot prove the validator actually
 # opened the cited claims) but every cited entry must exist in the
-# graph and predate the validation timestamp — that part the substrate
+# graph and predate the validation timestamp — that part mareforma
 # DOES verify at write and at restore.
 _VALIDATION_FIELDS = (
     "claim_id",
@@ -448,7 +448,7 @@ def sign_claim_with_roles(
     Verifier-side code (:func:`verify_envelope_multi`) enforces a
     role→key map at verify time, but a consumer who only sees the
     envelope (without an expected map) MUST NOT treat the role string
-    as a substrate guarantee. Downstream agents that read role
+    as a mareforma guarantee. Downstream agents that read role
     attestations via :meth:`mareforma.EpistemicGraph.query_provenance`
     receive the role under ``role_attestations_unverified``.
 

@@ -13,7 +13,7 @@ different score; that recomputed verdict is NOT persisted on the
 claim. The signed score is the asserter's verdict at the moment they
 made the claim — same posture as the GRADE EvidenceVector.
 
-The substrate does not bundle any model dependencies. Callers wire
+Mareforma does not bundle any model dependencies. Callers wire
 their own concrete verifiers; :class:`MockNLIVerifier` is provided as
 a reference implementation for tests and for adapter scaffolding.
 
@@ -25,7 +25,7 @@ HuggingFace Inference, sentence-transformers cache fetches) WILL
 transmit every asserted claim to that endpoint at write time.
 Privacy-sensitive deployments should wire local-only verifiers
 (e.g. ``sentence-transformers`` + a local NLI model loaded from
-disk). The substrate's "your scientific findings stay on your
+disk). Mareforma's "your scientific findings stay on your
 machine" posture flips the moment you wire a network-backed
 verifier into ``assert_claim(grounding_sensor=...)``.
 
@@ -36,10 +36,10 @@ citations before the predicate is signed.
 Protocol contract
 -----------------
 Implementations must be pure functions (no I/O hidden in __init__).
-The substrate calls :meth:`Verifier.grounding_score` synchronously
+Mareforma calls :meth:`Verifier.grounding_score` synchronously
 inside :meth:`mareforma.EpistemicGraph.assert_claim`; long-running
 implementations should batch upstream prefetch BEFORE handing the
-verifier to the substrate. The substrate catches every
+verifier to mareforma. Mareforma catches every
 :class:`Exception` subclass raised by the verifier (logs a
 ``RuntimeWarning``, asserts the claim without a score), so an
 unreliable sensor degrades gracefully. ``KeyboardInterrupt`` /
@@ -58,7 +58,7 @@ __all__ = ["Verifier", "MockNLIVerifier", "VerifierError"]
 class VerifierError(Exception):
     """Raised when a verifier returns a structurally-invalid result.
 
-    The substrate catches this exception around the verifier call so
+    Mareforma catches this exception around the verifier call so
     a broken sensor doesn't take down the assertion path; the claim
     is still asserted, the score is dropped, and the caller sees a
     warning in the WARNING stream.
@@ -72,7 +72,7 @@ class Verifier(Protocol):
     A conforming implementation accepts the claim text + the list of
     supports references (UUIDs of local claims or external strings
     such as DOIs) and returns a ``(score, rationale)`` tuple. The
-    substrate is opinion-free about WHAT the verifier checks — it
+    mareforma is opinion-free about WHAT the verifier checks — it
     only enforces the return shape.
     """
 
@@ -120,7 +120,7 @@ class MockNLIVerifier:
     """Deterministic stub verifier for tests and adapter scaffolding.
 
     Returns a fixed score for every call. Useful for exercising the
-    substrate's grounding_sensor plumbing without bundling a real NLI
+    mareforma's grounding_sensor plumbing without bundling a real NLI
     model. Production adapters should ship a real verifier (e.g.
     sentence-transformers + an entailment model) and pass it via
     ``assert_claim(grounding_sensor=...)``.

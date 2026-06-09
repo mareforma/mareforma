@@ -95,8 +95,8 @@ class EpistemicGraph:
         self._rekor_url = rekor_url
         self._require_rekor = require_rekor
         # Rekor log operator's public key, used to verify the signed
-        # checkpoint that anchors each inclusion proof. When None, the
-        # substrate trusts only the submit-time response binding (OUR
+        # checkpoint that anchors each inclusion proof. When None,
+        # mareforma trusts only the submit-time response binding (OUR
         # hash + OUR signature inside the returned entry); the residual
         # gap is the "trust the log operator's submit-time response"
         # posture documented in README "Limits of the Rekor integration".
@@ -194,7 +194,7 @@ class EpistemicGraph:
         #     federation-import flows. The active ``signature_bundle``
         #     carries the receiver's re-signed envelope; this column
         #     holds the original for downstream verifiers that want
-        #     to reconstruct the source-side proof. NOTE: the substrate
+        #     to reconstruct the source-side proof. NOTE: mareforma
         #     does NOT validate this string at write time (only that
         #     it parses as JSON for normalisation). Pass a structurally
         #     valid DSSE envelope JSON or leave None.
@@ -313,7 +313,7 @@ class EpistemicGraph:
         # does NOT block assertion — we log a warning and drop the
         # score. BaseException-only failures (KeyboardInterrupt /
         # SystemExit / MemoryError) propagate so signal-driven
-        # shutdown still works. Asserter philosophy: the substrate
+        # shutdown still works. Asserter philosophy: mareforma
         # signs what the asserter claims; verifier wiring is a
         # quality hint, not a gate.
         #
@@ -530,7 +530,7 @@ class EpistemicGraph:
         action — it produces no signed envelope, requires no validator
         keyid, and is not round-tripped through the signature-verify
         layer. An ESTABLISHED claim can be flipped to ``retracted`` by
-        any process with DB write access; nothing in the substrate
+        any process with DB write access; nothing in mareforma
         cryptographically records who pulled the lever. Compare with
         signed contradiction verdicts, which DO require an enrolled
         validator's signature and DO survive restore intact.
@@ -662,10 +662,10 @@ class EpistemicGraph:
         used by :meth:`assert_claim`); its keyid must be enrolled in
         the project's ``validators`` table.
 
-        The OSS substrate accepts verdicts from any enrolled identity.
+        The OSS core accepts verdicts from any enrolled identity.
         The predicates that GENERATE verdicts (semantic-cluster,
         cross-method, contradiction-detection) live outside the OSS
-        substrate and call this method to write their output.
+        core and call this method to write their output.
 
         Parameters
         ----------
@@ -879,7 +879,7 @@ class EpistemicGraph:
             :class:`mareforma.db.EvidenceCitationError` is raised before
             any state change.
 
-            The validator's enumeration is self-declared — the substrate
+            The validator's enumeration is self-declared — mareforma
             cannot prove the validator actually opened the cited claims —
             but the field shifts "a human pressed a button" to "a human
             pressed a button AND named the evidence they consulted." A
@@ -899,7 +899,7 @@ class EpistemicGraph:
             non-existent claim, or post-dates the validation timestamp.
         InvalidValidationEnvelopeError
             If the signed envelope produced by the loaded signer fails
-            any substrate-level structural or cryptographic gate
+            any mareforma-level structural or cryptographic gate
             (malformed payload, non-enrolled signer, wrong payloadType,
             signature verification failure, or payload-field mismatch
             against the row being promoted). Should not fire on the
@@ -907,7 +907,7 @@ class EpistemicGraph:
             from the same kwargs it threads through — but is listed
             for completeness because the underlying
             :func:`mareforma.db.validate_claim` defends against
-            substrate-bypass at this layer too.
+            a bypass at this layer too.
         LLMValidatorPromotionError
             If the loaded signer is enrolled with ``validator_type='llm'``.
             LLM-typed validators can sign validation envelopes but
@@ -997,8 +997,8 @@ class EpistemicGraph:
             ``'human'`` (default) or ``'llm'``. Self-declared honesty
             signal bound into the signed enrollment envelope. LLM-typed
             validators may sign validation envelopes but cannot promote
-            a claim past REPLICATED — :meth:`validate` refuses them at
-            the substrate layer.
+            a claim past REPLICATED — :meth:`validate` refuses them in
+            mareforma.
 
         Raises
         ------
@@ -1267,7 +1267,7 @@ class EpistemicGraph:
 
         Convergence detection (PRELIMINARY → REPLICATED promotion) runs
         after a successful claim INSERT. When a SQLite trigger or
-        contention pattern causes that detection to raise, the substrate
+        contention pattern causes that detection to raise, mareforma
         swallows the error so the write never crashes, logs a WARNING,
         increments :attr:`convergence_errors`, and sets
         ``convergence_retry_needed = 1`` on the affected claim.
@@ -1339,11 +1339,11 @@ class EpistemicGraph:
         """Classify each entry as ``claim`` | ``doi`` | ``external``.
 
         Thin wrapper over :func:`mareforma.db.classify_supports`. Returns
-        ``[{"value": ..., "type": ...}, ...]`` in input order. The
-        substrate uses this same classification for cycle detection,
+        ``[{"value": ..., "type": ...}, ...]`` in input order.
+        Mareforma uses this same classification for cycle detection,
         REPLICATED anchoring, dangling-reference audit, and JSON-LD
-        export. Exposed publicly so callers can introspect what the
-        substrate sees for any candidate list before insertion.
+        export. Exposed publicly so callers can introspect what
+        mareforma sees for any candidate list before insertion.
 
         Pure-function: no network, no database read. Same input always
         yields the same output.
@@ -1358,8 +1358,8 @@ class EpistemicGraph:
     ) -> dict:
         """Return a structured provenance lineage for *claim_id*.
 
-        The returned object is the agent-readable interface to the
-        substrate. It snapshots, in one deterministic shape:
+        The returned object is the agent-readable interface to
+        mareforma. It snapshots, in one deterministic shape:
 
         * the focal claim's identity, classification, support_level,
           status, GRADE evidence vector, asserter, and role
@@ -1432,7 +1432,7 @@ class EpistemicGraph:
         # :func:`mareforma.signing.sign_claim_with_roles` for the
         # trust boundary. The field is exposed here as
         # ``role_attestations_unverified`` so callers can't mistake
-        # the role tag for a substrate guarantee.
+        # the role tag for a mareforma guarantee.
         role_attestations_unverified: list[dict] = []
         if focal.get("signature_bundle"):
             try:
@@ -1565,7 +1565,7 @@ class EpistemicGraph:
         Returns ``[{"claim_id", "dangling_ref"}, ...]`` sorted
         deterministically. Empty list when the graph is clean.
 
-        The substrate accepts dangling references at assertion time by
+        Mareforma accepts dangling references at assertion time by
         design — a ``supports`` entry could legitimately reference a
         claim from another project or a not-yet-asserted upstream. This
         helper is for auditing integrity, not for blocking writes.
@@ -1946,7 +1946,7 @@ class EpistemicGraph:
         return self._convergence_errors
 
     def health(self) -> dict[str, int]:
-        """Single-call audit summary of substrate state.
+        """Single-call audit summary of mareforma state.
 
         Aggregates the counters operators inspect when they want a
         snapshot of "what's the graph telling me right now?" without

@@ -1,7 +1,7 @@
 """
 rekor.py — Sigstore-Rekor transparency-log integration.
 
-The substrate submits each signed claim envelope to a Rekor instance for
+Mareforma submits each signed claim envelope to a Rekor instance for
 public, tamper-evident witnessing. The submit path verifies the response
 binds OUR hash + OUR signature; the opt-in inclusion-proof path re-fetches
 the entry and cryptographically verifies the RFC 6962 Merkle audit path
@@ -1073,7 +1073,7 @@ def fetch_log_pubkey(
     Used by :func:`mareforma.open` to implement TOFU pinning of the
     log key: the first connection to a Rekor URL fetches the key over
     HTTPS and persists it to ``.mareforma/rekor_log_pubkey.pem``;
-    every subsequent connection loads from disk and the substrate
+    every subsequent connection loads from disk and mareforma
     refuses silent rotation (a mismatched key triggers a verification
     failure on the next inclusion proof).
 

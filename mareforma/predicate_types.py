@@ -2,7 +2,7 @@
 
 Adapters (`mareforma_tooluniverse`, `mareforma_gemini`, `mareforma_wet_lab`,
 `mareforma_peer_review`, `mareforma_elo`, ...) call :func:`register` at
-import time with the URI they ship. The substrate validates URI shape
+import time with the URI they ship. Mareforma validates URI shape
 (`urn:mareforma:predicate:<name>:v<N>`) but does not constrain payload
 semantics — adapters own the predicate body shape; this registry only
 asserts that the URI is well-formed and visible.
@@ -13,7 +13,7 @@ are available in the current Python environment without import-walking).
 
 Built-in URIs registered at import:
 
-* ``urn:mareforma:predicate:claim:v1`` — the substrate's default
+* ``urn:mareforma:predicate:claim:v1`` — mareforma's default
   single-claim envelope.
 * ``urn:mareforma:predicate:epistemic-graph:v1`` — the signed-bundle
   envelope produced by ``mareforma export --bundle``.
@@ -138,9 +138,9 @@ _URI_RE = re.compile(
 )
 
 
-# Built-in URIs the substrate ships with. Adapters MUST NOT
+# Built-in URIs mareforma ships with. Adapters MUST NOT
 # re-register these; doing so raises ``PredicateTypeError``.
-# Core substrate-owned URIs: writer lives in the substrate, so a
+# Core URIs owned by mareforma: writer lives in mareforma, so a
 # foreign re-registration is unambiguously wrong and raises hard.
 _CORE_BUILTIN_URIS: tuple[str, ...] = (
     "urn:mareforma:predicate:claim:v1",
@@ -150,14 +150,14 @@ _CORE_BUILTIN_URIS: tuple[str, ...] = (
 
 
 BUILTIN_URIS: tuple[str, ...] = (
-    # Core substrate predicates (writers live in the substrate itself).
+    # Core predicates (writers live in mareforma itself).
     "urn:mareforma:predicate:claim:v1",
     "urn:mareforma:predicate:epistemic-graph:v1",
     "urn:mareforma:predicate:claim-with-roles:v1",
-    # Reserved namespaces for upstream adapters. The substrate ships
+    # Reserved namespaces for upstream adapters. Mareforma ships
     # no writer for these; an adapter that emits one of these
     # predicateTypes opts into the shape contract documented in the
-    # adapter's own docs. Listed here so the substrate's URI registry
+    # adapter's own docs. Listed here so mareforma's URI registry
     # cannot be poisoned by a third-party module silently
     # re-registering one of these slots.
     "urn:mareforma:predicate:tool-call:v1",
@@ -170,7 +170,7 @@ BUILTIN_URIS: tuple[str, ...] = (
     "urn:mareforma:predicate:tournament-bracket:v1",
     # Reserve the parent slot too — leaving wet-lab-assay:v1 open
     # would let a third-party register the umbrella URI and poison
-    # the namespace the substrate clearly intends to own.
+    # the namespace mareforma clearly intends to own.
     "urn:mareforma:predicate:wet-lab-assay:v1",
     "urn:mareforma:predicate:wet-lab-assay/flow-cytometry:v1",
     "urn:mareforma:predicate:wet-lab-assay/sequencing:v1",
@@ -219,7 +219,7 @@ def register(uri: str, owner: str | None = None) -> None:
 
     ``owner`` is an optional human-readable hint about the adapter that
     ships this URI (e.g. ``"mareforma_tooluniverse 0.1.0"``). Stored
-    only for introspection; the substrate does not act on it.
+    only for introspection; mareforma does not act on it.
 
     Re-registering an already-known URI with the same ``owner`` is a
     no-op. Re-registering with a different ``owner`` raises
@@ -234,9 +234,9 @@ def register(uri: str, owner: str | None = None) -> None:
         if uri in BUILTIN_URIS and uri in _registry:
             existing = _registry[uri]
             if owner is not None and owner != existing:
-                # Core substrate-owned URIs (the original three)
-                # always raise — those slots have substrate-side
-                # writers and any third-party claim on them is wrong.
+                # Core URIs owned by mareforma (the original three)
+                # always raise — those slots have writers in mareforma
+                # and any third-party claim on them is wrong.
                 # Newly-reserved adapter URIs were previously open;
                 # foreign callers that registered them before
                 # promotion get a DeprecationWarning instead of a
@@ -244,15 +244,15 @@ def register(uri: str, owner: str | None = None) -> None:
                 if uri in _CORE_BUILTIN_URIS:
                     raise PredicateTypeError(
                         f"Cannot re-register built-in URI {uri!r} with "
-                        f"owner={owner!r} (substrate owns this URI)"
+                        f"owner={owner!r} (the core owns this URI)"
                     )
                 import warnings as _warnings
                 _warnings.warn(
-                    f"URI {uri!r} is now substrate-reserved; the next "
+                    f"URI {uri!r} is now core-reserved; the next "
                     f"release will refuse re-registration by owner "
                     f"{owner!r}. Pre-empt by dropping the register() "
                     "call from your adapter and treating the URI as "
-                    "substrate-owned.",
+                    "core-owned.",
                     DeprecationWarning,
                     stacklevel=3,
                 )

@@ -29,7 +29,7 @@ def _key(tmp_path: Path) -> Path:
 
 
 def _validator_key(tmp_path: Path) -> Path:
-    """A second key for validation — the substrate refuses self-validation,
+    """A second key for validation — the graph refuses self-validation,
     so promotion tests need a key distinct from the one signing claims."""
     key_path = tmp_path / "_validator_key"
     if not key_path.exists():
@@ -160,7 +160,7 @@ class TestBootstrapIntegration:
             g.enroll_validator(_validator_pem(tmp_path), identity="v")
 
         # Promote A to ESTABLISHED via validate() — under the validator key
-        # (the substrate refuses self-validation).
+        # (the graph refuses self-validation).
         with mareforma.open(tmp_path, key_path=_validator_key(tmp_path)) as g:
             g.validate(a)
             assert g.get_claim(a)["support_level"] == "ESTABLISHED"

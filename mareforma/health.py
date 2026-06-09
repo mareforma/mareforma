@@ -140,8 +140,8 @@ def append_health_event(
     verbatim — keep them small and JSON-encodable.
 
     Writes are best-effort: any permission / disk / encoding failure
-    is swallowed with a RuntimeWarning so the upstream substrate
-    operation always completes. The substrate's signed graph never
+    is swallowed with a RuntimeWarning so the upstream mareforma
+    operation always completes. Mareforma's signed graph never
     depends on this log being writable.
 
     Encoding: ``json.dumps(allow_nan=False)`` so NaN / Infinity
@@ -199,7 +199,7 @@ def compute_rolling_stats(
     * ``refresh_unresolved`` / ``refresh_unsigned`` → ``avg_succeeded``
 
     Missing or malformed lines are skipped without raising; the log
-    is operator-visible diagnostics, not a substrate-trust surface.
+    is operator-visible diagnostics, not a mareforma-trust surface.
     """
     path = _health_log_path(root)
     if not path.exists():

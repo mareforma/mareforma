@@ -122,7 +122,7 @@ def canonicalize(obj: Any) -> bytes:
         range that RFC 8785 forbids in canonical output (JCS verifiers
         in other languages would reject these too), OR if a dict
         contains two keys that NFC-normalize to the same string —
-        canonical JSON requires distinct keys and the substrate refuses
+        canonical JSON requires distinct keys and mareforma refuses
         to silently drop one value.
     """
     normalized = _normalize(obj)

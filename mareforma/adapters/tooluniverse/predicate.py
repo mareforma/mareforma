@@ -1,7 +1,7 @@
 """Predicate construction + decode + verification for `tool-call/v1`.
 
 Mareforma's outer envelope uses ``urn:mareforma:predicate:claim:v1`` —
-that's the substrate's signed predicate, binding `claim_id`, `text`,
+that's mareforma's signed predicate, binding `claim_id`, `text`,
 `classification`, `generated_by`, `supports`, `contradicts`,
 `source_name`, `artifact_hash`, `created_at`, and the GRADE evidence.
 
@@ -184,7 +184,7 @@ def verify_tool_call_envelope(
     2. :func:`decode_predicate_from_text` — confirms the embedded
        ``tool-call/v1`` predicate is well-formed.
 
-    Both must pass; the substrate guarantees layer 1, this module
+    Both must pass; mareforma guarantees layer 1, this module
     adds layer 2.
     """
 

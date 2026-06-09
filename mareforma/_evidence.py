@@ -13,7 +13,7 @@ predicate. The vector is *part of the signature* — values cannot be
 retroactively changed without producing a different statement_cid and
 a new signature.
 
-In the OSS substrate the EvidenceVector is constructed by the asserter (the
+In the OSS core the EvidenceVector is constructed by the asserter (the
 agent or human producing the claim). Future platform-layer evidence
 assistants may help authors fill it; the data model is the same.
 
@@ -106,7 +106,7 @@ class EvidenceVector:
     --------------------------
     The optional ``study_design`` field sets the baseline that
     :meth:`certainty` starts from before applying downgrades and
-    upgrades. The substrate ships with four labels:
+    upgrades. Mareforma ships with four labels:
 
     * ``randomised-trial``  → baseline 4 (HIGH)
     * ``observational``     → baseline 2 (LOW)
@@ -115,7 +115,7 @@ class EvidenceVector:
                               that are not empirical studies (analytical
                               derivations, tool outputs, asserter-level
                               assertions). Treating non-empirical claims
-                              as HIGH-by-default is a substrate
+                              as HIGH-by-default is a mareforma
                               convention, NOT a GRADE recommendation —
                               callers MUST set downgrade domains
                               explicitly when an asserter-level claim is
@@ -291,8 +291,8 @@ class EvidenceVector:
            AND the score has not been downgraded — GRADE forbids
            upgrading downgraded evidence):
 
-           * large_effect          → +1 (or +2 when very large; the
-                                         substrate exposes the single
+           * large_effect          → +1 (or +2 when very large;
+                                         mareforma exposes the single
                                          boolean only, so this is +1)
            * dose_response         → +1
            * opposing_confounding  → +1

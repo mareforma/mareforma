@@ -108,7 +108,7 @@ s["schema_version"]   # 1
 
 ## replication_verdicts table
 
-Signed replication verdicts produced by enrolled validators. The OSS substrate accepts verdicts from any enrolled identity; the predicates that GENERATE verdicts (semantic-cluster, cross-method, hash-match, shared-resolved-upstream) live outside the OSS and call `Graph.record_replication_verdict()` to write here. Append-only at the SQL layer — UPDATE on signed columns and DELETE are both refused by triggers.
+Signed replication verdicts produced by enrolled validators. The OSS core accepts verdicts from any enrolled identity; the predicates that GENERATE verdicts (semantic-cluster, cross-method, hash-match, shared-resolved-upstream) live outside the OSS and call `Graph.record_replication_verdict()` to write here. Append-only at the SQL layer: UPDATE on signed columns and DELETE are both refused by triggers.
 
 | Field | Type | Description |
 |---|---|---|

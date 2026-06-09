@@ -34,7 +34,7 @@ def _pem_of(key_path: Path) -> bytes:
 
 
 def _build_full_graph(tmp_path: Path) -> dict:
-    """Populate a project with the full substrate surface: root validator,
+    """Populate a project with the full graph surface: root validator,
     second validator, seed claim, REPLICATED pair, ESTABLISHED claim,
     one unsigned PRELIMINARY (in a separate unsigned-mode project).
 
@@ -359,7 +359,7 @@ class TestRestoreAdversarial:
     ) -> None:
         """A born-retracted ESTABLISHED seed (planted via a hand-edited
         claims.toml) is restorable — the seed envelope binds claim_id +
-        validator_keyid + seeded_at but NOT status. The substrate gate
+        validator_keyid + seeded_at but NOT status. The graph gate
         at _maybe_update_replicated_unlocked must refuse the retracted
         seed as an upstream anchor, blocking downstream REPLICATED."""
         ctx = self._setup_and_wipe(tmp_path)

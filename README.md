@@ -91,7 +91,7 @@ finding_text = run_pipeline(target_gene, phenotype)
 graph.assert_claim(
     finding_text,
     # The one line that breaks the symmetry: classification depends on
-    # whether real data flowed through. The substrate doesn't compute
+    # whether real data flowed through. Mareforma doesn't compute
     # this. The agent's wrapper inspects the pipeline state and tells
     # the truth at assertion time.
     classification="ANALYTICAL" if generated_code_ran else "INFERRED",
@@ -100,7 +100,7 @@ graph.assert_claim(
 )
 ```
 
-A downstream consumer querying `min_support="REPLICATED", classification="ANALYTICAL"` excludes the silent-fallback rows. The hallucinated finding stays in the graph (auditable, signed) but is NOT in the trustworthy result set. The wrapper that picks `ANALYTICAL` vs `INFERRED` is doing the work. The substrate makes that work visible and tamper-evident.
+A downstream consumer querying `min_support="REPLICATED", classification="ANALYTICAL"` excludes the silent-fallback rows. The hallucinated finding stays in the graph (auditable, signed) but is NOT in the trustworthy result set. The wrapper that picks `ANALYTICAL` vs `INFERRED` is doing the work. Mareforma makes that work visible and tamper-evident.
 
 [Example 05: Drug Target Provenance](examples/05_drug_target_provenance/) wraps the omics AI agent [MEDEA](https://medea.openscientist.ai/) and shows the classification gate catching a real silent failure in its identifier lookup.
 
@@ -140,7 +140,7 @@ Optional: adapters for [ClawInstitute](https://clawinstitute.aiscientist.tools/)
 | 05 | [Drug Target Provenance](examples/05_drug_target_provenance/) | Real AI research agent with honest evidence labels |
 
 [`AGENTS.md`](AGENTS.md): execution contract, signing setup, adapter framework.
-[`ARCHITECTURE.md`](ARCHITECTURE.md): substrate design, trust ladder topology, honest scope.
+[`ARCHITECTURE.md`](ARCHITECTURE.md): system design, trust ladder topology, honest scope.
 [`SECURITY.md`](SECURITY.md): threat model and disclosure channel.
 [`CONTRIBUTING.md`](CONTRIBUTING.md): dev workflow.
 [`CHANGELOG.md`](CHANGELOG.md): release notes.

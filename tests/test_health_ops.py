@@ -41,7 +41,7 @@ class TestExpandedBuiltinUris:
         assert expected_subhierarchy <= seen
 
     def test_core_builtin_uris_cannot_be_re_registered(self) -> None:
-        # Core substrate-owned URIs always raise.
+        # Core mareforma-owned URIs always raise.
         for uri in _pt._CORE_BUILTIN_URIS:
             with pytest.raises(mareforma.PredicateTypeError):
                 mareforma.register_predicate(uri, owner="adapter-x")
@@ -55,7 +55,7 @@ class TestExpandedBuiltinUris:
             u for u in _pt.BUILTIN_URIS if u not in _pt._CORE_BUILTIN_URIS
         ]
         for uri in non_core[:3]:  # spot-check; behaviour is uniform
-            with pytest.warns(DeprecationWarning, match="substrate-reserved"):
+            with pytest.warns(DeprecationWarning, match="core-reserved"):
                 mareforma.register_predicate(uri, owner="adapter-x")
 
 
@@ -130,7 +130,7 @@ class TestHealthEventLog:
         self, tmp_path: Path, monkeypatch,
     ) -> None:
         # Patch Path.open to raise OSError on the health log; the
-        # substrate must swallow via RuntimeWarning rather than
+        # graph must swallow via RuntimeWarning rather than
         # crashing the upstream op.
         real_open = Path.open
 
@@ -147,7 +147,7 @@ class TestHealthEventLog:
         self, tmp_path: Path,
     ) -> None:
         # A counter value like a set / datetime / bytes raises
-        # TypeError from json.dumps. The substrate must catch and
+        # TypeError from json.dumps. The graph must catch and
         # warn instead of letting the TypeError bubble into the
         # upstream operation's grounding-sensor handler.
         import datetime
@@ -256,7 +256,7 @@ class TestPredicateRegistryBackwardsCompat:
         # Adapter that registered tool-call:v1 before promotion gets
         # a DeprecationWarning, not a hard break, so pip-install -U
         # doesn't surprise downstream users mid-release.
-        with pytest.warns(DeprecationWarning, match="substrate-reserved"):
+        with pytest.warns(DeprecationWarning, match="core-reserved"):
             mareforma.register_predicate(
                 "urn:mareforma:predicate:tool-call:v1",
                 owner="legacy-adapter",

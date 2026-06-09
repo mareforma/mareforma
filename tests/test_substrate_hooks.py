@@ -1,4 +1,4 @@
-"""Tests for substrate hooks used by predicate-typed adapters.
+"""Tests for graph hooks used by predicate-typed adapters.
 
 Coverage:
 - ``predicate_payload`` TEXT column on claims table
@@ -379,7 +379,7 @@ class TestExportFormats:
 
     Build the format outputs by directly calling the exporter modules
     here (CLI-shell-level testing would need a click runner; the
-    substrate's existing test_cli.py tests cover the CLI plumbing).
+    existing test_cli.py tests cover the CLI plumbing).
     """
 
     def _seed_graph(self, tmp_path: Path) -> str:
@@ -486,7 +486,7 @@ class TestExportFormats:
 
 
 # ----------------------------------------------------------------------------
-# Hardening regressions (substrate-level integrity gates)
+# Hardening regressions (graph-level integrity gates)
 # ----------------------------------------------------------------------------
 
 
@@ -500,7 +500,7 @@ class TestReplicationVerdictIntegration:
         self, tmp_path: Path
     ) -> None:
         # Two separate keys: asserter (writes both claims) and verdict
-        # issuer (enrolled second; required because the substrate
+        # issuer (enrolled second; required because the graph
         # refuses self-verdicts).
         from mareforma import signing as _signing
         asserter_key = tmp_path / "asserter.key"

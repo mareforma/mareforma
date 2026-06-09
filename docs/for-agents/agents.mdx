@@ -10,7 +10,7 @@ description: "The full execution contract for AI agents using Mareforma."
   in the repo.
 </Info>
 
-Mareforma is a local epistemic substrate for AI-assisted research. It gives
+Mareforma is a local verification layer for AI-assisted research. It gives
 agents a graph for asserting claims with provenance, detecting convergence
 when independent agents reach the same conclusion through different data
 paths, and querying what has already been established before making new
@@ -262,7 +262,7 @@ response binding alone proves "Rekor returned an entry that records
 OUR hash + OUR signature." It does NOT prove "the log committed our
 entry and didn't tamper with it afterward." Closing that gap needs
 the log operator's public key — pass `rekor_log_pubkey_pem` (or
-`rekor_log_pubkey_path`) to `mareforma.open()` and the substrate
+`rekor_log_pubkey_path`) to `mareforma.open()` and mareforma
 re-fetches every submitted entry, walks the Merkle audit path from
 the leaf hash to the log's signed checkpoint, and refuses to set
 `transparency_logged=1` on verification failure. The same
@@ -685,7 +685,7 @@ claim_id = ing.ingest(
 
 Per-capability `REQUIRED_FIELDS` validates payload shape before `assert_claim` runs; string values flow through `sanitize_for_llm`; reserved keys (`predicate_type`, `capability`) are adapter-owned and a caller that tries to set them in `payload` raises `ValueError`.
 
-## Substrate primitives (v0.3.3)
+## Core primitives (v0.3.3)
 
 Two adjacent primitives ship in core for adapter authors:
 
@@ -695,9 +695,9 @@ Two adjacent primitives ship in core for adapter authors:
 Plus the public canonicalize registry and predicate-URI constants:
 
 - **`mareforma.canonicalize`** — `canonicalize(value, form=...)` with registered forms `json-c14n-v1` (default), `dsse-jcs-nfc-v1` (same bytes the envelope layer signs), plus specialty SMILES / FASTA / PDB canonicalizers registered on import.
-- **Capability URI constants** at `mareforma.predicate_types` (also re-exported at the top level): `TOOL_CALL_V1`, `CONTAINER_EXEC_V1`, `WORKSHOP_EVENT_V1`, `CODE_VARIATION_V1`, `HYPOTHESIS_V1`, `LITERATURE_INSIGHT_V1`, `SCIENCE_SKILL_V1`, `META_CLAIM_V1`, plus the substrate + wet-lab assay families. Use the constants instead of string literals so a typo fails at import.
+- **Capability URI constants** at `mareforma.predicate_types` (also re-exported at the top level): `TOOL_CALL_V1`, `CONTAINER_EXEC_V1`, `WORKSHOP_EVENT_V1`, `CODE_VARIATION_V1`, `HYPOTHESIS_V1`, `LITERATURE_INSIGHT_V1`, `SCIENCE_SKILL_V1`, `META_CLAIM_V1`, plus the core + wet-lab assay families. Use the constants instead of string literals so a typo fails at import.
 
-## Substrate-derived classification (`mareforma.derivation`)
+## Core-derived classification (`mareforma.derivation`)
 
 Deterministically derives `ANALYTICAL` vs `INFERRED` from a static profile of the agent's source code plus dynamic templates extracted from runtime logs (Drain parser). ANALYTICAL requires positive evidence from BOTH; INFERRED is the conservative default.
 

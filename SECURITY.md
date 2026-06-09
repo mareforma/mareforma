@@ -4,7 +4,7 @@ Mareforma is pre-1.0 software maintained by a single author. The threat model
 matters: mareforma builds the local epistemic record AI scientists rely on
 for cross-agent replication, so a defect that lets an attacker forge a
 `REPLICATED` claim, a signed envelope, or a validator enrollment is a
-trust-substrate failure, not a cosmetic bug. Reports here get priority.
+trust-layer failure, not a cosmetic bug. Reports here get priority.
 
 ## Supported versions
 
@@ -107,11 +107,11 @@ If you encounter a `mareforma`-adjacent package published by anyone
 other than this project, it is hostile — report it via the channel
 above.
 
-## Cryptographic substrate
+## Cryptographic core
 
 Mareforma 0.3.0 introduces local Ed25519 signing, Sigstore-Rekor
 transparency logging, validator enrollment, and SHA-256 artifact
-hashing. The substrate is documented in [AGENTS.md](AGENTS.md). Known
+hashing. The cryptographic core is documented in [AGENTS.md](AGENTS.md). Known
 trust boundaries:
 
 - The local signing key at `~/.config/mareforma/key` is mode `0600`.

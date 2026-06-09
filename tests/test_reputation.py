@@ -93,7 +93,7 @@ class TestIncludeUnverifiedFilter:
     def test_filter_only_applies_to_preliminary(self, tmp_path: Path) -> None:
         """REPLICATED claims are not subject to the include_unverified
         filter — they already require the enrolled-chain check via
-        REPLICATED's substrate gates."""
+        REPLICATED's graph gates."""
         root_key = _bootstrap_key(tmp_path, "root.key")
         with mareforma.open(tmp_path, key_path=root_key) as g:
             seed = g.assert_claim("seed", generated_by="seed", seed=True)

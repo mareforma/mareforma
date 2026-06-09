@@ -23,7 +23,7 @@ conclusion.
 Mareforma is that combination. It is **not** trying to replace:
 
 - W3C PROV-O (richer provenance vocabulary — mareforma is a runtime
-  substrate, not an RDF graph)
+  library, not an RDF graph)
 - FAIRSCAPE's EVI (research-evidence ontology — an EVI export adapter
   is on the deferred-features backlog and would map mareforma claims onto EVI Claim
   / EvidenceGraph / supports / challenges classes; the schema stays
@@ -39,7 +39,7 @@ Mareforma is that combination. It is **not** trying to replace:
 
 ## Rails, not trains
 
-Mareforma ships **the rails**: the storage substrate, the signing
+Mareforma ships **the rails**: the storage layer, the signing
 discipline, the trust-ladder state machine, the convergence-detection
 SQL, the restore-from-TOML recovery path. What it deliberately does
 **not** ship — the **trains** that produce verdicts — lives outside
@@ -56,9 +56,9 @@ the OSS:
 
 The verdict-issuer protocol in mareforma (`record_replication_verdict`
 and `record_contradiction_verdict`) is the public API that any of those
-trains can write to. The OSS substrate accepts any signed verdict from
+trains can write to. The OSS core accepts any signed verdict from
 an enrolled validator; the predicates that produce those verdicts are
-out of scope by design. The OSS substrate stays narrow and verifiable;
+out of scope by design. The OSS core stays narrow and verifiable;
 the trains plug in through the public protocol.
 
 ## Data flow
@@ -70,7 +70,7 @@ agent
   ▼
 EpistemicGraph (mareforma/_graph.py)
   │
-  │ ─ classifies (caller-supplied; substrate does not verify)
+  │ ─ classifies (caller-supplied; mareforma does not verify)
   │ ─ canonical_statement(claim_fields) → bytes (NFC + sorted keys + no whitespace)
   │ ─ in-toto Statement v1 wrapping (mareforma/_statement.py)
   │ ─ DSSE PAE encoding (mareforma/signing/core.py)
@@ -129,7 +129,7 @@ it is gated to enrolled human-typed validators only.
 
 Contradiction in mareforma is a **per-claim demotion**, not a
 transitive falsification. When an enrolled validator signs a
-`record_contradiction_verdict(member, other)`, the substrate sets
+`record_contradiction_verdict(member, other)`, mareforma sets
 `t_invalid` on the older of the two claims (lex-order tiebreak on
 identical timestamps). Default `query()` excludes invalidated claims;
 `include_invalidated=True` returns the full audit set.
@@ -186,7 +186,7 @@ What strict JCS gets us:
   (JCS §3.2.2.3). `1.0` renders as `1`; `1e10` renders as
   `10000000000`; exponent boundaries follow ES rules. This is the
   load-bearing difference vs. Python's stdlib `json.dumps`: the day
-  the substrate adds a float-valued field, a Go / Rust / JavaScript
+  mareforma adds a float-valued field, a Go / Rust / JavaScript
   verifier re-canonicalizing per RFC 8785 will produce the same bytes
   and verify the same signature.
 - `NaN` / `±Infinity` are rejected (JSON has no representation; RFC
@@ -214,7 +214,7 @@ digest (`sha256` over `text`) is canonical without depending on number
 serialization at all — it's the same bytes any in-toto verifier
 (`in-toto-golang`, the Sigstore stack) will produce.
 
-## Storage substrate
+## Storage layer
 
 SQLite, WAL mode, `check_same_thread=False`, `PRAGMA foreign_keys = ON`,
 minimum version 3.30.0 (enforced at `open_db()`).
@@ -295,9 +295,9 @@ the TOML. The perf rewrite addresses both the foreground-commit-
 path cost and the crash gap by moving to an append-only sidecar +
 periodic compaction model.
 
-## Substrate at a glance
+## Mareforma at a glance
 
-A 30-minute audit map. Each row links a substrate property to the
+A 30-minute audit map. Each row links a mareforma property to the
 exact mechanism that enforces it and the specific threat it
 defends against. Designed for the reader who wants to verify
 mareforma's invariants without scrolling through 4,600 lines of
@@ -380,17 +380,17 @@ on a signed row is refused at the SQL layer.
 | The row's signed fields match the envelope | trigger blocks mutation; row never drifts unless a SQL-tamper bypasses Python | yes — re-derives canonical bytes and compares to `predicate.*`, refuses on mismatch |
 | EvidenceVector hasn't been tampered after signing | trigger blocks `ev_*` and `evidence_json` mutation | yes — re-derives the canonical evidence dict and compares to `predicate.evidence` |
 | `statement_cid` cross-check | column never directly written by user code | yes — re-derives from the row's fields + evidence and compares to the stored `statement_cid` |
-| Validation envelope binds this claim | substrate gates: `_extract_validation_signer_keyid`, `_refuse_llm_validator`, `_refuse_self_validation`, `_verify_evidence_seen`, envelope/kwarg agreement; cryptographic verify on the envelope | yes — verifies the validation envelope's signature, then checks `claim_id` / `validator_keyid` / timestamp / `evidence_seen` fields against the row |
+| Validation envelope binds this claim | the gates: `_extract_validation_signer_keyid`, `_refuse_llm_validator`, `_refuse_self_validation`, `_verify_evidence_seen`, envelope/kwarg agreement; cryptographic verify on the envelope | yes — verifies the validation envelope's signature, then checks `claim_id` / `validator_keyid` / timestamp / `evidence_seen` fields against the row |
 | Contradiction verdict is signed by an enrolled validator | enforced at `record_contradiction_verdict`; chain walk via `is_enrolled` | yes — replays each verdict envelope in `created_at` order, verifies before INSERT, the contradiction trigger re-sets `t_invalid` |
 | Rekor inclusion proof is cryptographically valid | only when opt-in `rekor_log_pubkey_pem` was supplied at `mareforma.open()`; submit path + `refresh_unsigned()` verify the Merkle path against the signed checkpoint | yes (v0.3.2) — `rekor_inclusions` sidecar round-tripped through `claims.toml`; `restore()` replays entries and (when `rekor_log_pubkey_pem` supplied) re-verifies each inclusion proof against the pinned key. Pre-v0.3.2 TOML files restore with `RekorSidecarSectionAbsentWarning` |
 
 ### One-page threat model
 
-The substrate names what it does NOT prove right alongside what it
+Mareforma names what it does NOT prove right alongside what it
 does. Every gate in the code carries a comment to that effect;
 this is the consolidated view.
 
-| Threat the substrate DOES catch | Mechanism |
+| Threat mareforma DOES catch | Mechanism |
 |---|---|
 | Direct-SQL `UPDATE` of a signed claim's text / supports / evidence | `claims_signed_fields_no_laundering` trigger |
 | Direct-SQL `DELETE` of a signed claim | `claims_signed_no_delete` trigger |
@@ -409,7 +409,7 @@ this is the consolidated view.
 | Hostile Rekor returns a `logIndex` / `treeSize` that's a float or bool | strict int parsing surfaces as `malformed_proof` |
 | `rekor_url` pointing at loopback / private IP / non-HTTPS | `validate_rekor_url` SSRF defense; also called by `fetch_inclusion_proof` and `fetch_log_pubkey` |
 
-| Threat the substrate does NOT catch (deliberate scope) | Why |
+| Threat mareforma does NOT catch (deliberate scope) | Why |
 |---|---|
 | Colluding agents producing fake `REPLICATED` via two `generated_by` strings | `generated_by` is self-declared; no cross-org PKI |
 | Misclassified `INFERRED` / `ANALYTICAL` / `DERIVED` | declared by the agent, not verified |
@@ -428,7 +428,7 @@ For the reader who wants to read the actual enforcement:
   `claims_update_status_terminal`, `claims_signed_fields_no_laundering`,
   `claims_signed_no_delete`)
 - **Convergence detection** — `_maybe_update_replicated_unlocked` in [`mareforma/db/core.py`](mareforma/db/core.py)
-- **Validation gates** — `validate_claim` in `db/core.py` (substrate-bypass
+- **Validation gates** — `validate_claim` in `db/core.py` (core-bypass
   defense: cryptographic verify + LLM-type ceiling + self-validation
   refusal + payload field equality + evidence_seen citation gate)
 - **Verdict-issuer protocol** — `record_replication_verdict` /
@@ -448,39 +448,39 @@ For the reader who wants to read the actual enforcement:
 
 ## Adapter framework
 
-The substrate is intentionally agnostic about which AI platforms
+The core is intentionally agnostic about which AI platforms
 exist. `mareforma.adapters.*` is the opt-in extension point where
 platform-specific translation lives. Three load-bearing properties:
 
-- **Adapters live on top of the substrate, never inside it.** The
-  substrate ships the storage + signing + state-machine + invariants;
+- **Adapters live on top of the core, never inside it.** The
+  core ships the storage + signing + state-machine + invariants;
   adapters ship platform plumbing (HTTP clients, payload shapes,
   event semantics). A new adapter never modifies `mareforma.db`,
   `_graph`, or `_canonical`; it imports them.
 - **Opt-in by install extra.** `pip install mareforma` brings the
-  substrate alone. `pip install mareforma[clawinstitute]` /
+  core alone. `pip install mareforma[clawinstitute]` /
   `[tooluniverse]` / `[gemini]` / `[derivation]` adds the platform's
   runtime deps. Users pay for what they integrate.
 - **Convention surface, not framework.** Each adapter exposes the
   same minimum: a constructor taking `graph=`, `predicate_uris()`
   enumerating the URIs it may emit, `emit_sample()` for the
   cross-adapter coexistence test in
-  `tests/adapters/test_coexistence.py`. The substrate does not
+  `tests/adapters/test_coexistence.py`. The core does not
   prescribe HOW an adapter wraps its platform — only that any
   adapter writing into one graph composes with peers without
   predicate-URI collision.
 
-Substrate primitives `mareforma.events` (EventSource Protocol +
+Core primitives `mareforma.events` (EventSource Protocol +
 typed payloads + source-name constants) and `mareforma.tools` (Tool
 Protocol + ToolResult + ReplayResult) live alongside `_graph` /
-`_canonical` / `signing` because the contracts ARE substrate. They
+`_canonical` / `signing` because the contracts ARE core. They
 have no dependency on any adapter; an adapter that disappears does
 not break the contracts. URI constants live in
 `mareforma.predicate_types`: a single source of truth for the URIs
-the substrate reserves, re-exported at the top level for
-ergonomics. The five substrate primitives shipped in v0.3.3
+the core reserves, re-exported at the top level for
+ergonomics. The five core primitives shipped in v0.3.3
 (events, canonicalize, tools, derivation, hooks) each follow the
-same substrate-first rule.
+same core-first rule.
 
 The intentionally-deferred adapters (the full per-surface Gemini
 producers, a federation bundle exporter, an MCP server) sit one
@@ -493,16 +493,16 @@ follows adoption signal.
 Read [`README.md`](README.md#what-mareforma-is-not) for the bulleted
 "What mareforma is NOT" honesty section. The short version: trust is
 local to a project's enrolled validators; `classification` and
-`generated_by` are self-declared (the substrate is no stronger than
+`generated_by` are self-declared (mareforma is no stronger than
 agent discipline); Rekor inclusion is logged-not-proof-verified; DOIs
 are HEAD-checked-not-content-verified; contradiction is per-claim;
 `EvidenceVector` is GRADE-shaped storage, not GRADE evaluation; no
-automated fraud detection beyond the structural invariants the
-substrate enforces.
+automated fraud detection beyond the structural invariants
+mareforma enforces.
 
 ## Engineering discipline — code as audit trail
 
-The substrate carries its own design review forward in time. Three
+Mareforma carries its own design review forward in time. Three
 conventions, applied consistently:
 
 - **Every defensive measure names the threat it blocks.** Each SQL
@@ -515,29 +515,29 @@ conventions, applied consistently:
   contributor adding transitive falsification has to engage with the
   reasoning rather than discover it from a broken test.
 - **Every invariant names what it does NOT prove.** The
-  `evidence_seen` substrate check verifies that each cited claim
+  `evidence_seen` check verifies that each cited claim
   exists and predates the validation timestamp; the docstring
   immediately follows with *"this gate cannot prove the validator
   actually opened those claims, only that the claims they cited
-  exist and predate validation. That's the strongest property the
-  substrate can enforce; everything else rests on the validator's
+  exist and predate validation. That's the strongest property
+  mareforma can enforce; everything else rests on the validator's
   honesty."* The same pattern recurs in `_refuse_self_validation`,
   in `_maybe_update_replicated_unlocked`, and in the
   `claims_signed_fields_no_laundering` trigger.
-- **Substrate over surface.** When a defect is found, the fix lands
+- **Core over surface.** When a defect is found, the fix lands
   at the root layer (DB trigger, signed payload field set, state
   machine) rather than in the wrapper. The public Python API
   inherits the property; an in-process caller bypassing
   `EpistemicGraph.validate` and calling `mareforma.db.validate_claim`
   directly meets the same gates. The trust ladder is not bypassable
   via a public path the wrapper happens not to expose. See
-  [`CONTRIBUTING.md`](CONTRIBUTING.md#trust-substrate-changes) for
+  [`CONTRIBUTING.md`](CONTRIBUTING.md#trust-layer-changes) for
   the full rule.
 
 The result is that any future contributor reading the code reads the
 reasoning that produced it — including which properties are
 load-bearing and which are intentionally out of scope. This is the
-strongest single signal of how the substrate will age.
+strongest single signal of how mareforma will age.
 
 ## See also
 

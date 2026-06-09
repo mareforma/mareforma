@@ -809,7 +809,7 @@ class TestRefreshUnsignedDrift:
             assert graph.get_claim(claim_id)["transparency_logged"] == 0
 
         # Direct-SQL tamper on a signed claim's text is refused by the
-        # claims_signed_fields_no_laundering trigger — the substrate
+        # claims_signed_fields_no_laundering trigger — the database
         # gate is the primary defense. The Python-side drift check
         # in refresh_unsigned is a defense-in-depth backstop for
         # cases the trigger somehow doesn't catch (e.g. an attacker

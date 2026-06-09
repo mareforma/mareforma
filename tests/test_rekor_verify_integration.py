@@ -371,7 +371,7 @@ class TestOptInAndOptOut:
     def test_no_pubkey_means_no_verification_no_fetch(self, tmp_path, httpx_mock):
         """With ``rekor_url`` set but NO ``rekor_log_pubkey_pem`` /
         ``rekor_log_pubkey_path`` supplied (and no pinned file from a
-        prior session), the substrate does NOT auto-fetch the log
+        prior session), the graph does NOT auto-fetch the log
         pubkey and does NOT Merkle-verify inclusions. The claim still
         gets ``transparency_logged=1`` via the submit-time response
         binding, which catches the most common tampering classes; the
@@ -379,7 +379,7 @@ class TestOptInAndOptOut:
         documented opt-out posture in README "Limits of the Rekor
         integration". To opt in, pass ``rekor_log_pubkey_pem`` or
         ``rekor_log_pubkey_path``."""
-        log_key = Ed25519PrivateKey.generate()  # not used by substrate
+        log_key = Ed25519PrivateKey.generate()  # not used by mareforma
         _wire_rekor_mock(httpx_mock, log_key=log_key)
         key_path = _bootstrap_key(tmp_path)
         pin_path = tmp_path / ".mareforma" / "rekor_log_pubkey.pem"

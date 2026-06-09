@@ -73,7 +73,7 @@ def open_signed_graph(tmp_path: Path):
 def _bootstrap_validator_key(tmp_path: Path) -> Path:
     """Bootstrap a second signing key and return its path.
 
-    The substrate refuses self-validation, so tests that need to promote
+    The graph refuses self-validation, so tests that need to promote
     a REPLICATED claim under a key distinct from the one that signed the
     claim use this helper plus an explicit ``enroll_validator`` call.
     """
@@ -403,7 +403,7 @@ class TestGraphFragmentation:
         primitive was anti-epistemic: collapsing two labs' content into
         one row destroyed the second author's text + generated_by and
         broke REPLICATED detection (REPLICATED requires two distinct
-        rows with different generated_by). The substrate now refuses
+        rows with different generated_by). The graph now refuses
         the silent merge. The legitimate cross-lab convergence path is
         two separate claims that share an entry in ``supports[]`` —
         that fires REPLICATED honestly. See ``TestCrossLabConvergence``

@@ -1,6 +1,6 @@
-"""Mareforma — local epistemic substrate for AI-assisted research."""
+"""Mareforma — local verification layer for AI-assisted research."""
 
-__description__ = "Mareforma — local epistemic substrate for AI-assisted research."
+__description__ = "Mareforma: local verification layer for AI-assisted research."
 __version__ = "0.3.3"
 
 from pathlib import Path
@@ -87,7 +87,7 @@ def open(  # noqa: A001
         Rekor log operator's public key as PEM bytes. When supplied,
         every signed-claim submit and every restore cross-verifies the
         log's signed Merkle root via :func:`mareforma.signing.verify_rekor_inclusion`.
-        Without it, the substrate trusts only the submit-time response
+        Without it, mareforma trusts only the submit-time response
         binding — see "Limits of the Rekor integration" in the README.
         Accepts both Ed25519 (private Rekor deployments) and
         ECDSA-P256 (public Sigstore Rekor). Persisted on first use to

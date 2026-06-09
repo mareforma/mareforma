@@ -109,7 +109,7 @@ def bootstrap_cmd(key_path: str | None, overwrite: bool) -> None:
     _info("  • The first key opened against a project's graph auto-enrolls")
     _info("    as the root validator on that project.")
     _info("  • To promote a claim to ESTABLISHED you need a SECOND enrolled")
-    _info("    key (the substrate refuses self-validation). Have a")
+    _info("    key (mareforma refuses self-validation). Have a")
     _info("    collaborator run `mareforma bootstrap`, then run")
     _info("    `mareforma key show --pem > pubkey.pem` and send it to you;")
     _info("    enroll them with `mareforma validator add --pubkey pubkey.pem")
@@ -408,17 +408,17 @@ def status_cmd(as_json: bool) -> None:
 def activity_cmd(as_json: bool, last_n: int | None) -> None:
     """Show rolling operational rates from the activity log.
 
-    The activity log captures one JSONL line per substrate operation
+    The activity log captures one JSONL line per mareforma operation
     that produces operational signal: provenance queries, grounding
     sensor verdicts, DOI drift scans, refresh_unsigned /
     refresh_unresolved retries. ``mareforma activity`` aggregates the
     log and prints rolling rates (grounding-pass-rate, DOI-drift-rate,
-    Rekor-log-recovery-rate) so an operator can see how the
-    substrate is behaving over time without re-querying graph.db.
+    Rekor-log-recovery-rate) so an operator can see how mareforma
+    is behaving over time without re-querying graph.db.
 
     Distinct from ``mareforma status``: ``status`` is a snapshot of
-    graph state right now; ``activity`` is a rolling view of what the
-    substrate has been doing.
+    graph state right now; ``activity`` is a rolling view of what
+    mareforma has been doing.
 
     \b
     Examples:
@@ -719,8 +719,8 @@ def claim_add(text, classification, status, source_name, supports, contradicts,
 
     Routes through ``mareforma.open()`` so the XDG-default signing key
     is auto-loaded. A bootstrapped key produces a signed claim; an
-    unsigned graph (no key) produces an unsigned claim. The substrate
-    decides — the CLI does not bypass signing.
+    unsigned graph (no key) produces an unsigned claim. Mareforma
+    decides; the CLI does not bypass signing.
     """
     import mareforma
     from mareforma.db import DatabaseError, MareformaError
@@ -853,7 +853,7 @@ def claim_update(claim_id, status, text, supports, contradicts):
 
     Routes through ``mareforma.open()`` so the loaded-graph context
     (XDG key, signer enrollment) is consistent with the Python API.
-    The substrate's append-only triggers (claims_signed_fields_no_laundering)
+    Mareforma's append-only triggers (claims_signed_fields_no_laundering)
     block any update that would mutate signed predicate fields on a
     signed row — status-only updates remain allowed.
     """
@@ -919,7 +919,7 @@ def claim_validate(claim_id, validated_by):
         sys.exit(1)
     except SelfValidationError as exc:
         # Common first-run trip-up — the user opened the graph with the
-        # same key that signed the claim. Surface the substrate's
+        # same key that signed the claim. Surface mareforma's
         # explanation and the exact remediation command.
         _err(str(exc))
         _info("")
@@ -931,7 +931,7 @@ def claim_validate(claim_id, validated_by):
         _err(str(exc))
         sys.exit(1)
     except ValueError as exc:
-        # Substrate ValueErrors carry actionable text (wrong support_level,
+        # Mareforma ValueErrors carry actionable text (wrong support_level,
         # signer not enrolled, no signer loaded). Pass through verbatim.
         _err(str(exc))
         sys.exit(1)

@@ -2,7 +2,7 @@
 
 Any object satisfying :class:`Tool` can be wrapped by an adapter that
 emits ``tool-call/v1`` claims. The Protocol is structural; tools do
-not subclass anything to satisfy it. The substrate ships the contract
+not subclass anything to satisfy it. The core ships the contract
 here; adapters in :mod:`mareforma.adapters` ship the bindings.
 
 Three concepts:

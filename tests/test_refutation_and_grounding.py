@@ -423,7 +423,7 @@ class TestVerifierHardening:
     ) -> None:
         # A hostile or buggy verifier must NOT be able to rewrite the
         # asserter's supports[] citations between assert_claim and
-        # the signed envelope. The substrate hands the verifier a
+        # the signed envelope. The graph hands the verifier a
         # tuple, not the live list.
         captured: list[object] = []
 
@@ -456,7 +456,7 @@ class TestVerifierHardening:
     ) -> None:
         # Real verifiers raise OSError / ConnectionError / RuntimeError
         # routinely (model load failure, network blip, OOM). The
-        # substrate's contract is "claim still lands, score dropped."
+        # graph's contract is "claim still lands, score dropped."
         class _OSErrorVerifier:
             def grounding_score(self, claim, supports):
                 raise OSError("model file missing")
@@ -487,7 +487,7 @@ class TestVerifierHardening:
     def test_verifier_baseexception_propagates(
         self, tmp_path: Path,
     ) -> None:
-        # The substrate catches `Exception` (so a flaky NLI / network
+        # The graph catches `Exception` (so a flaky NLI / network
         # verifier degrades gracefully) but MUST NOT catch
         # `BaseException` subclasses — Ctrl-C during a long-running
         # assertion has to actually interrupt the process. Regression
@@ -504,7 +504,7 @@ class TestVerifierHardening:
         self, tmp_path: Path,
     ) -> None:
         # Coercing rationale via str() would silently sign garbage
-        # ("None", "b'abc'", "{...}"). The substrate now refuses
+        # ("None", "b'abc'", "{...}"). The graph now refuses
         # non-str rationale at the verifier-call site and falls
         # through to the warning path.
         class _BadRationale:

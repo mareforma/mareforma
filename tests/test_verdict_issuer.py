@@ -1,6 +1,6 @@
 """Verdict-issuer protocol tests.
 
-Covers the OSS substrate side of the inference layer:
+Covers the OSS core side of the inference layer:
   - record_replication_verdict / record_contradiction_verdict APIs
   - signature binding under DSSE PAE
   - issuer-must-be-enrolled gate

@@ -576,7 +576,7 @@ class TestValidateIdentityCheck:
     def test_validate_persists_signed_envelope(self, tmp_path: Path) -> None:
         # Generator key signs the REPLICATED claim; a separately-enrolled
         # validator key is the only one allowed to promote it. Same-key
-        # validation is refused by the substrate as self-promotion.
+        # validation is refused by the graph as self-promotion.
         root_key_path = _bootstrap_key(tmp_path, "root.key")
         validator_key_path = _bootstrap_key(tmp_path, "validator.key")
         validator_pubkey_pem = _signing.public_key_to_pem(
@@ -954,7 +954,7 @@ class TestCLIValidateProducesSignedEnvelope:
         # Root key signs the REPLICATED claim. Validator key (which lands
         # in XDG so the CLI picks it up) is enrolled separately and is
         # the one allowed to promote — same-key validation is refused by
-        # the substrate as self-promotion.
+        # the graph as self-promotion.
         root_key_path = _bootstrap_key(tmp_path, "root.key")
         validator_key_path = _bootstrap_key(tmp_path, "validator.key")
         validator_pubkey_pem = _signing.public_key_to_pem(

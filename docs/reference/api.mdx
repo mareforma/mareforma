@@ -247,7 +247,7 @@ Insert a signed replication verdict. The graph's loaded signer signs the
 verdict; its keyid must be enrolled in the project's `validators` table
 (chain walk back to a self-signed root, same gate as `validate()`).
 
-The OSS substrate accepts verdicts; the predicates that *generate* them
+The OSS core accepts verdicts; the predicates that *generate* them
 (semantic-cluster, cross-method, hash-match, shared-resolved-upstream)
 live outside the OSS and call this method to write their output. Any
 third-party verdict-issuer can integrate against this protocol.
@@ -425,7 +425,7 @@ The graph must have a loaded signer (from `mareforma bootstrap` or `mareforma.op
 
 `validated_by` is a cosmetic display label. The authenticated identity is the keyid embedded in the signed envelope.
 
-`evidence_seen` is an optional list of claim_ids the validator declares to have reviewed before signing. `None` is normalized to `[]` and bound into the signed envelope as a positive "I reviewed nothing" admission. Each cited entry must be a strict-v4 UUID matching an existing claim with `created_at <= validated_at`. The validator's enumeration is self-declared — the substrate cannot prove what was actually read — but the envelope shifts "a human pressed a button" to "a human pressed a button AND named the evidence they consulted."
+`evidence_seen` is an optional list of claim_ids the validator declares to have reviewed before signing. `None` is normalized to `[]` and bound into the signed envelope as a positive "I reviewed nothing" admission. Each cited entry must be a strict-v4 UUID matching an existing claim with `created_at <= validated_at`. The validator's enumeration is self-declared (mareforma cannot prove what was actually read), but the envelope shifts "a human pressed a button" to "a human pressed a button AND named the evidence they consulted."
 
 **Parameters**
 
@@ -435,7 +435,7 @@ The graph must have a loaded signer (from `mareforma bootstrap` or `mareforma.op
 | `validated_by` | `str \| None` | `None` | Display label of the human reviewer. The authoritative identity is the keyid in the signed envelope. |
 | `evidence_seen` | `list[str] \| None` | `None` | Claim_ids the reviewer consulted. Normalized to `[]` and always bound into the signed envelope. |
 
-When `validation_signature` is supplied directly to `db.validate_claim` (advanced/test path), the substrate also decodes the envelope's signed payload and refuses if its `evidence_seen` field disagrees with the `evidence_seen` kwarg. The signed envelope and the validated list must bind the same citations exactly (same items, same order); a direct caller cannot launder fraudulent citations through the on-disk envelope.
+When `validation_signature` is supplied directly to `db.validate_claim` (advanced/test path), mareforma also decodes the envelope's signed payload and refuses if its `evidence_seen` field disagrees with the `evidence_seen` kwarg. The signed envelope and the validated list must bind the same citations exactly (same items, same order); a direct caller cannot launder fraudulent citations through the on-disk envelope.
 
 **Raises**
 - `ClaimNotFoundError` — if the claim does not exist
@@ -446,7 +446,7 @@ When `validation_signature` is supplied directly to `db.validate_claim` (advance
 
 ### `health()`
 
-Single-call audit summary aggregating substrate counters. Pure observability over existing surfaces; no side effects.
+Single-call audit summary aggregating core counters. Pure observability over existing surfaces; no side effects.
 
 ```python
 h = graph.health()
@@ -506,7 +506,7 @@ result = graph.refresh_convergence()
 # {"checked": N, "promoted": M, "still_pending": K}
 ```
 
-The detection path runs after every successful claim INSERT. When a SQLite trigger or contention pattern causes that check to raise, the substrate swallows the error so writes never crash, logs a WARNING, and flags the claim for retry.
+The detection path runs after every successful claim INSERT. When a SQLite trigger or contention pattern causes that check to raise, mareforma swallows the error so writes never crash, logs a WARNING, and flags the claim for retry.
 
 **Returns** `dict` with keys `checked`, `promoted`, `still_pending`.
 
@@ -566,7 +566,7 @@ result = graph.classify_supports([
 # ]
 ```
 
-The substrate uses this same classification for cycle detection, REPLICATED anchoring, dangling-reference audit, and JSON-LD export. Exposed publicly so callers can introspect what the substrate sees for any candidate list before insertion.
+Mareforma uses this same classification for cycle detection, REPLICATED anchoring, dangling-reference audit, and JSON-LD export. Exposed publicly so callers can introspect what it sees for any candidate list before insertion.
 
 **Returns** `list[dict]` of `{"value", "type"}` dicts in input order.
 
@@ -591,7 +591,7 @@ graph.enroll_validator(bot_pem, identity="reviewer-bot", validator_type="llm")
 |---|---|---|---|
 | `pubkey_pem` | `bytes` | required | Ed25519 public key in PEM form. |
 | `identity` | `str` | required | Human-readable label. Capped at 256 chars; control characters and Unicode display-spoofing forms are rejected. |
-| `validator_type` | `str` | `"human"` | `"human"` or `"llm"`. Self-declared honesty signal, bound into the signed enrollment envelope. LLM-typed validators may sign validation envelopes but cannot promote a claim past REPLICATED — `validate()` refuses at the substrate. |
+| `validator_type` | `str` | `"human"` | `"human"` or `"llm"`. Self-declared honesty signal, bound into the signed enrollment envelope. LLM-typed validators may sign validation envelopes but cannot promote a claim past REPLICATED: `validate()` refuses at the core. |
 
 **Raises**
 - `ValueError` — no signer loaded, or the loaded signer is not enrolled
@@ -701,7 +701,7 @@ Every exception is re-exported at the top level so a caller can write
 submodule. The submodule paths in the table tell you where the source
 lives.
 
-Schema-mismatch message (raised when `open_db()` finds a graph.db whose `user_version` differs from the substrate's `_SCHEMA_VERSION`): `"graph.db has user_version=N but this mareforma expects user_version=M. The dev branch does not migrate schemas. Delete .mareforma/graph.db to start fresh; claims.toml is a human-readable record of the prior state."`
+Schema-mismatch message (raised when `open_db()` finds a graph.db whose `user_version` differs from mareforma's `_SCHEMA_VERSION`): `"graph.db has user_version=N but this mareforma expects user_version=M. The dev branch does not migrate schemas. Delete .mareforma/graph.db to start fresh; claims.toml is a human-readable record of the prior state."`
 
 ---
 
@@ -724,7 +724,7 @@ Used internally by the v0.3.3 CLI subcommands (`ingest`, `ask`, `narrative`) whe
 
 `mareforma.predicate_types` exposes URN-form constants for every reserved predicate. Re-exported at the top level so adapter authors can `from mareforma import TOOL_CALL_V1`.
 
-Substrate-owned (writer in the substrate):
+Core-owned (writer in the core):
 
 - `CLAIM_V1` — `urn:mareforma:predicate:claim:v1`
 - `EPISTEMIC_GRAPH_V1` — `urn:mareforma:predicate:epistemic-graph:v1`
@@ -799,7 +799,7 @@ Importing `mareforma.canonicalize` also registers the specialty forms `rdkit-can
 
 ### `mareforma.derivation`
 
-Substrate-derived classification. Deterministically derives `ANALYTICAL` vs `INFERRED` from a static source-code profile plus dynamic runtime-log templates.
+Core-derived classification. Deterministically derives `ANALYTICAL` vs `INFERRED` from a static source-code profile plus dynamic runtime-log templates.
 
 ```python
 from mareforma.derivation import (

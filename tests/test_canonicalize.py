@@ -13,7 +13,7 @@ Conceptual clusters:
 - :class:`TestSpecialtyForms` — RDKit / FASTA / PDB canonicalizers.
 - :class:`TestSpecialtyAutoImport` — docstring contract: importing the
   parent package registers the specialty forms.
-- :class:`TestDsseJcsNfcV1` — the substrate envelope canonicaliser
+- :class:`TestDsseJcsNfcV1` — the DSSE envelope canonicaliser
   exposed under a registered name, NFC normalising.
 """
 
@@ -159,7 +159,7 @@ class TestSpecialtyAutoImport:
 
 class TestDsseJcsNfcV1:
     def test_registered(self):
-        """The substrate envelope canonicaliser is exposed under a registered form."""
+        """The DSSE envelope canonicaliser is exposed under a registered form."""
         assert DSSE_JCS_NFC_V1 in registered_canonicalizers()
         # And it produces the same bytes as the private envelope canonicaliser.
         from mareforma._canonical import canonicalize as envelope

@@ -907,7 +907,7 @@ def _verify_claim_signatures_on_restore(
         # the remaining signatures and verify each one individually
         # against its claimed signer's enrolled pubkey. An attacker
         # who attached forged extra signatures would otherwise sneak
-        # them past restore and into substrate-trusted role
+        # them past restore and into core-trusted role
         # attestations.
         #
         # Enforce the same role contract sign_claim_with_roles /

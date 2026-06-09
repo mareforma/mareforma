@@ -91,7 +91,7 @@ class ProvenanceToolAdapter:
     parent_claim_id : str | None
         The upstream claim this tool call serves (typically the
         ``assert_claim`` for the reasoning step that decided to call
-        this tool). Recorded in the predicate AND in the substrate's
+        this tool). Recorded in the predicate AND in the graph's
         ``supports[]`` chain so lineage walks find both.
     role : str
         Logical role of this call (Phase 3 adds role attestations as
@@ -444,7 +444,7 @@ class ProvenanceToolAdapter:
 def _utc_now() -> str:
     """Return UTC ISO 8601 with `+00:00` suffix.
 
-    Mareforma's substrate convention (see /tmp/primario/context/architecture.md).
+    Mareforma's convention (see /tmp/primario/context/architecture.md).
     """
 
     return datetime.now(timezone.utc).isoformat()
@@ -472,7 +472,7 @@ def _sanitize_identity(value: str, *, field: str) -> str:
     identity strings (`tool_name`, `tool_version`) appear in:
 
     - the signed predicate's text
-    - the substrate-level `source_name` and `generated_by` fields
+    - the core-level `source_name` and `generated_by` fields
     - log lines and CLI output
 
     so a downstream operator must see a clean string regardless of
@@ -492,7 +492,7 @@ def _sanitize_identity(value: str, *, field: str) -> str:
 def _resolve_tool_version(tool: Any) -> str:
     """Return tool.version as a sanitised string, or "unknown" with warning.
 
-    Mirrors the substrate's posture for missing optional fields: honest
+    Mirrors mareforma's posture for missing optional fields: honest
     `unknown` signal with an audit-able warning. Replay's `tool_version`
     check then naturally surfaces the gap as a `diff_fields` entry.
     """

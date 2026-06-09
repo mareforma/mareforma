@@ -245,7 +245,7 @@ class TestClaimValidate:
 
         Claims are asserted under a generator key distinct from the XDG
         validator key, then XDG is enrolled as a second validator. The
-        substrate refuses self-validation; the CLI must run as a
+        graph refuses self-validation; the CLI must run as a
         different signer from the one that signed the claim.
         """
         import mareforma
@@ -395,7 +395,7 @@ class TestKeyShow:
         assert len(result.output.strip()) == 64
 
     def test_key_show_pem_matches_loaded_key(self, tmp_path: Path) -> None:
-        """The CLI must emit the SAME PEM the substrate computes for the
+        """The CLI must emit the SAME PEM mareforma computes for the
         same private key. Without this, `key show --pem | validator add
         --pubkey -` would silently enroll the wrong identity."""
         from mareforma import signing as _signing
@@ -468,7 +468,7 @@ class TestClaimValidateErrors:
                 assert g.get_claim(a)["support_level"] == "REPLICATED"
             result = runner.invoke(cli, ["claim", "validate", a])
         assert result.exit_code == 1
-        # Substrate's own message comes through (no traceback).
+        # The graph's own message comes through (no traceback).
         assert "self-promotion is refused" in result.output
         # CLI adds the resolution pointing at the relevant commands.
         assert "Resolution:" in result.output
@@ -529,7 +529,7 @@ class TestClaimCLISigningParity:
         self, tmp_path: Path,
     ) -> None:
         """Without ``mareforma bootstrap`` (no XDG key on disk), the
-        CLI produces an unsigned claim. The substrate decides; the CLI
+        CLI produces an unsigned claim. The graph decides; the CLI
         does not force signing."""
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
@@ -586,7 +586,7 @@ class TestClaimCLISigningParity:
         self, tmp_path: Path,
     ) -> None:
         """Mutating signed predicate fields on a signed row via the CLI
-        must surface the substrate's refusal cleanly, not a traceback."""
+        must surface the graph's refusal cleanly, not a traceback."""
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
             self._ensure_xdg_key()
@@ -603,7 +603,7 @@ class TestClaimCLISigningParity:
                 cli, ["claim", "update", claim_id, "--text", "tampered"],
             )
         assert result.exit_code == 1
-        # Substrate's typed refusal comes through (not a Python traceback).
+        # The graph's typed refusal comes through (not a Python traceback).
         # The Python-layer SignedClaimImmutableError fires before the SQL
         # trigger, with a precise field-list message.
         assert "is signed" in result.output

@@ -1,6 +1,6 @@
 # Mareforma — agent integration guide
 
-Mareforma is a local epistemic substrate for AI-assisted research. It gives
+Mareforma is a local verification layer for AI-assisted research. It gives
 agents a graph for asserting claims with provenance, detecting convergence
 when independent agents reach the same conclusion through different data
 paths, and querying what has already been established before making new
@@ -74,7 +74,7 @@ delete the pin file first. The first-pin write uses `O_CREAT|O_EXCL`,
 so two concurrent open() calls with different keys cannot silently
 clobber each other — the loser hits `SigningError("...pinned to a
 different key by a concurrent ... call")`. Without an explicit key,
-mareforma trusts only the submit-time response binding (the substrate
+mareforma trusts only the submit-time response binding (it
 confirms the returned entry records OUR hash + OUR signature; the
 residual "log forked after submit" risk is the documented opt-out
 posture in README "Limits of the Rekor integration").
@@ -227,12 +227,12 @@ into the signed envelope as a positive "I reviewed nothing" admission
 must be a strict-v4 UUID matching an existing claim with
 `created_at <= validated_at`; otherwise `EvidenceCitationError` is
 raised before any state change. The validator's enumeration is
-self-declared (the substrate cannot prove what was actually read), but
+self-declared (mareforma cannot prove what was actually read), but
 the envelope shifts "a human pressed a button" to "a human pressed a
 button AND named the evidence they consulted."
 
 When `validation_signature` is supplied directly to `db.validate_claim`
-(advanced/test path), the substrate also decodes the envelope's signed
+(advanced/test path), mareforma also decodes the envelope's signed
 payload and refuses if its `evidence_seen` field disagrees with the
 `evidence_seen` kwarg. The signed envelope and the validated list must
 bind the same citations exactly (same items, same order); a direct
@@ -254,7 +254,7 @@ Single-call audit summary. Returns
 `{"claim_count", "validator_count", "unsigned_claims",
 "unresolved_claims", "dangling_supports", "convergence_errors",
 "convergence_retry_pending"}` — int counts aggregating existing
-substrate surfaces. Pure observability, no side effects.
+core surfaces. Pure observability, no side effects.
 
 A "healthy" graph has zeros across the four drift counters
 (`unsigned_claims`, `unresolved_claims`, `dangling_supports`,
@@ -298,8 +298,8 @@ claim flagged `convergence_retry_needed=1`. Returns
 `{"checked", "promoted", "still_pending"}`.
 
 The detection path runs after every successful claim INSERT. When a
-SQLite trigger or contention pattern causes that check to raise, the
-substrate swallows the error so writes never crash, logs a WARNING,
+SQLite trigger or contention pattern causes that check to raise,
+mareforma swallows the error so writes never crash, logs a WARNING,
 and flags the claim for retry. Without this method, a swallowed
 error would leave the claim stuck at PRELIMINARY forever.
 
@@ -350,9 +350,9 @@ Classify each entry as `claim` | `doi` | `external`. Returns
 `[{"value", "type"}, ...]` in input order. Pure-function (no network,
 no DB read) — same input always yields the same tags.
 
-The substrate uses this same classification for cycle detection,
+Mareforma uses this same classification for cycle detection,
 REPLICATED anchoring, dangling-reference audit, and JSON-LD export.
-Exposed publicly so callers can introspect what the substrate sees
+Exposed publicly so callers can introspect what it sees
 for any candidate list before insertion.
 
 ---
@@ -555,7 +555,7 @@ response binding alone proves "Rekor returned an entry that records
 OUR hash + OUR signature." It does NOT prove "the log committed our
 entry and didn't tamper with it afterward." Closing that gap needs
 the log operator's public key — pass `rekor_log_pubkey_pem` (or
-`rekor_log_pubkey_path`) to `mareforma.open()` and the substrate
+`rekor_log_pubkey_path`) to `mareforma.open()` and mareforma
 re-fetches every submitted entry, walks the RFC 6962 Merkle audit
 path from the leaf hash to the log's signed checkpoint, and refuses
 to set `transparency_logged=1` on verification failure. The same
@@ -659,7 +659,7 @@ with mareforma.open() as graph:
 ```
 
 **Two-machine quickstart — first ESTABLISHED promotion, CLI only.**
-The substrate refuses self-validation (a validator cannot promote a
+Mareforma refuses self-validation (a validator cannot promote a
 claim it signed itself), so promoting any claim to ESTABLISHED needs
 two keys on two operators. Both run the same install; the orchestration
 is four CLI commands plus one file exchange.
@@ -692,7 +692,7 @@ bob$ mareforma claim validate <claim_id> --validated-by bob@lab.example
 If Alice (the signer of the claim) tries `mareforma claim validate`
 herself, the CLI surfaces `SelfValidationError` with a one-line
 resolution hint pointing at `validator add` and `key show`. The
-substrate path is the source of truth; the CLI just translates.
+mareforma path is the source of truth; the CLI just translates.
 
 Each enrollment is signed by the parent validator (root for the first
 additions, then any already-enrolled key thereafter). On read,
@@ -705,13 +705,13 @@ INSERT with a fabricated parent does not pass.
 self-declared `validator_type` field (`'human'` default, or `'llm'`),
 bound into the signed enrollment envelope. This is an honesty signal,
 not a security gate — there is no external attestation of whether a
-key is "really" a human or "really" a bot. The substrate uses it for
+key is "really" a human or "really" a bot. Mareforma uses it for
 one rule: a validator with `validator_type='llm'` may sign validation
-envelopes, but the substrate refuses to promote a claim to ESTABLISHED
+envelopes, but mareforma refuses to promote a claim to ESTABLISHED
 on its signature alone — both via `graph.validate()` (raises
 `LLMValidatorPromotionError`) and via the seed-claim bootstrap (same
 exception). To promote, an enrolled `human` validator must co-sign
-or re-sign. The substrate also refuses self-validation when the
+or re-sign. Mareforma also refuses self-validation when the
 calling signer's keyid equals the claim's `signature_bundle` signing
 keyid (raises `SelfValidationError`) — promotion is always an
 external-witnessing event, regardless of validator type.
@@ -750,7 +750,7 @@ keyid prefix against the one you intended before any further
 
 ## Verdict-issuer protocol
 
-The OSS substrate accepts **signed verdicts** from any enrolled
+The OSS core accepts **signed verdicts** from any enrolled
 validator. Verdicts come in two shapes:
 
 - `replication_verdicts` — asserts that two claims replicate one
@@ -764,10 +764,10 @@ validator. Verdicts come in two shapes:
   `t_invalid` on the older referenced claim; default `query()` /
   `search()` then excludes the invalidated claim.
 
-The substrate ratifies what enrolled identities sign. The predicates
+Mareforma ratifies what enrolled identities sign. The predicates
 that PRODUCE verdicts (semantic-cluster on BGE-M3 embeddings,
 contradiction-detection via bidirectional NLI, etc.) live outside the
-OSS substrate. Any third-party verdict-issuer can integrate against
+OSS core. Any third-party verdict-issuer can integrate against
 this protocol by calling `Graph.record_replication_verdict()` /
 `Graph.record_contradiction_verdict()`.
 
@@ -1023,12 +1023,12 @@ registered when it was not. Use a different `idempotency_key` or
 reconcile the conflict.
 
 **Not a convergence mechanism.** Two agents reaching the same conclusion
-must converge through the substrate's epistemic ladder, not by sharing a
+must converge through mareforma's epistemic ladder, not by sharing a
 key. The supported pattern: both cite the same `ESTABLISHED` upstream in
 `supports[]` with different `generated_by` values → `REPLICATED` fires
 automatically. `idempotency_key` collapsing two distinct findings into
-one row would erase the second agent's independent contribution; the
-substrate refuses that path on purpose.
+one row would erase the second agent's independent contribution;
+mareforma refuses that path on purpose.
 
 ---
 
@@ -1322,7 +1322,7 @@ runs; string values flow through `sanitize_for_llm`; reserved keys
 (`predicate_type`, `capability`) are adapter-owned and a caller
 that tries to set them in `payload` raises `ValueError`.
 
-## Substrate primitives (v0.3.3)
+## Core primitives (v0.3.3)
 
 Two adjacent primitives ship in core for adapter authors:
 

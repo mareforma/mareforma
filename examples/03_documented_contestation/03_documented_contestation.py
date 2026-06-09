@@ -62,7 +62,7 @@ tmp = Path(tempfile.mkdtemp())
 # `mareforma bootstrap` once and mareforma.open() picks the key up
 # from ~/.config/mareforma/key automatically. The first key opened
 # against a fresh graph auto-enrolls as the root validator. The
-# substrate refuses self-validation (a validator cannot promote a
+# mareforma refuses self-validation (a validator cannot promote a
 # claim it signed itself), so the reviewer is a separate enrolled key.
 agent_key_path = tmp / "_agent_key"
 reviewer_key_path = tmp / "_reviewer_key"
@@ -130,10 +130,10 @@ c_a = graph.get_claim(consensus_a)
 show("consensus_a support_level", c_a["support_level"] if c_a else "—")
 
 # Close and re-open under the reviewer key so the validator's signing identity
-# differs from the agent that signed consensus_a. The substrate refuses
+# differs from the agent that signed consensus_a. mareforma refuses
 # self-validation: a validator cannot promote a claim signed by its own key.
 # evidence_seen names the upstream claim_ids the reviewer consulted before
-# promoting — the substrate verifies each cited claim exists and predates
+# promoting, mareforma verifies each cited claim exists and predates
 # validation, and binds the list into the signed validation envelope so the
 # review-trail is independently verifiable.
 graph.close()

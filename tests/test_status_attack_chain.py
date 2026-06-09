@@ -7,7 +7,7 @@ The scenario these tests defend against:
      pointing at an ESTABLISHED upstream.
   2. An honest peer asserts the same upstream with a different
      generated_by, expecting their claim to REPLICATE off the upstream.
-  3. Without a status filter, the substrate would also promote the
+  3. Without a status filter, the graph would also promote the
      adversary's tainted claim to REPLICATED.
   4. validate() (or another adversary path) then promotes the tainted
      row to ESTABLISHED — usable as a fake upstream for further chains.
@@ -37,7 +37,7 @@ def _key(tmp_path: Path) -> Path:
 
 
 def _validator_key(tmp_path: Path) -> Path:
-    """Second key used for validation — the substrate refuses self-validation,
+    """Second key used for validation — mareforma refuses self-validation,
     so promotion tests need a key distinct from the one signing claims."""
     key_path = tmp_path / "_status_validator_key"
     if not key_path.exists():

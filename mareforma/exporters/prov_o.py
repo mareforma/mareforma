@@ -14,15 +14,15 @@ PRIVACY NOTE
 The exported document carries the first 120 characters of every
 claim's text verbatim as ``prov:label`` on the entity node, and the
 asserter's ``generated_by`` + validator's ``validated_by`` as agent
-labels. The substrate's posture is "your scientific findings stay
+labels. Mareforma's posture is "your scientific findings stay
 on your machine," but PROV-O export is the intended cross-boundary
 surface and text fragments DO leave the local store. Sensitive
 content (clinical notes, embargoed findings, PII) should be
 redacted before passing the exported document to a third-party
-consumer; the substrate does not redact for you.
+consumer; mareforma does not redact for you.
 
 The exporter is *one-way*. Re-importing PROV-O back into mareforma is
-out of scope — the PROV model carries less than the signed substrate
+out of scope — the PROV model carries less than the signed graph
 (no DSSE envelopes, no GRADE evidence vector, no hash chain), so a
 round-trip through PROV-O would drop integrity surface.
 
@@ -79,7 +79,7 @@ def _safe_agent_id(agent: str) -> str:
 def _require_uuid_claim_id(claim_id: str) -> str:
     """Guard against non-UUID claim_ids being spliced into URN @ids.
 
-    Federation imports can land non-UUID identifiers in the substrate;
+    Federation imports can land non-UUID identifiers in the graph;
     those must be remapped to UUIDs before export — otherwise we emit
     malformed JSON-LD ``@id`` values that downstream PROV-O tooling
     cannot parse. Mirror the RO-Crate exporter's posture: refuse,

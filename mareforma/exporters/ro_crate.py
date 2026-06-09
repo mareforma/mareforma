@@ -1,6 +1,6 @@
 """RO-Crate 1.2 export of the epistemic graph (Process Run Crate profile).
 
-Substrate-level adapter. Produces an ``ro-crate-metadata.json`` JSON-LD
+Core-level adapter. Produces an ``ro-crate-metadata.json`` JSON-LD
 document describing the whole graph as a Dataset of CreateAction
 entities (one per claim assertion). Each claim's signature envelope is
 attached to the CreateAction's ``signature`` property so signatures
@@ -44,7 +44,7 @@ PROCESS_RUN_CRATE_PROFILE = "https://w3id.org/ro/wfrun/process/0.5"
 
 
 # UUID-shape claim_ids only. Federation imports preserve foreign IDs in
-# the substrate; this exporter refuses to splice non-UUID values into
+# the graph; this exporter refuses to splice non-UUID values into
 # `urn:mareforma:claim:<id>` URIs because they would silently break
 # downstream URN parsing and JSON-LD @id resolution.
 _UUID_RE = re.compile(
@@ -75,7 +75,7 @@ def _claim_to_create_action(claim: dict) -> dict[str, Any]:
     MediaObject; ``signature`` carries the DSSE envelope if signed.
 
     Raises :class:`ValueError` on non-UUID claim_id — federation imports
-    can land foreign IDs in the substrate and splicing them unvalidated
+    can land foreign IDs in the graph and splicing them unvalidated
     into ``urn:mareforma:claim:<id>`` URIs would silently break URN /
     JSON-LD @id parsing downstream.
     """

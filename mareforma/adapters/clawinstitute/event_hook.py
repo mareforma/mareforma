@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 __all__ = ["EventHook"]
 
 
-# Substrate-side cap on per-post content size. Posts above this are
+# Core-side cap on per-post content size. Posts above this are
 # digest-only (the SHA-256 of the full raw content is still recorded
 # in the payload; the body is replaced with a truncation marker).
 # Sized to comfortably fit Claude / GPT context windows with headroom

@@ -90,7 +90,7 @@ def _serialize_predicate_payload(payload: dict | None) -> str:
     Raises :class:`TypeError` if payload is non-dict. Adapters MUST pass
     a JSON-object-shaped dict (the typed predicate body); passing a
     string, list, int, or other non-object JSON value would serialize
-    successfully but break the substrate's "predicate body is a dict"
+    successfully but break mareforma's "predicate body is a dict"
     contract that downstream consumers (eg. PROV-O exporter,
     role-attestation walker) assume.
     """
@@ -193,7 +193,7 @@ def open_db(root: Path) -> sqlite3.Connection:
         # is neither 0 nor _SCHEMA_VERSION was written by a different
         # build of the dev branch and may carry a partial schema (e.g.
         # a v2-stranded db is missing the retracted-is-terminal trigger
-        # that the substrate fix relies on, even though its column set
+        # that the fix relies on, even though its column set
         # happens to match). Refuse rather than open silently.
         if version != _SCHEMA_VERSION:
             conn.close()
@@ -473,7 +473,7 @@ def _is_claim_id(value: str) -> bool:
 
 
 # Three-way classification of ``supports[]`` and ``contradicts[]`` entries.
-# The flat string API stays — the substrate auto-classifies each entry so
+# The flat string API stays — mareforma auto-classifies each entry so
 # JSON-LD export, audit helpers, and future query surfaces can distinguish
 # the three semantic types without forcing callers to wrap strings.
 SUPPORT_TYPE_CLAIM = "claim"
@@ -1390,7 +1390,7 @@ def _maybe_update_replicated(
             )
             conn.commit()
         except (sqlite3.OperationalError, sqlite3.IntegrityError):
-            # If even the retry-flag UPDATE fails the substrate is in a
+            # If even the retry-flag UPDATE fails mareforma is in a
             # worse state than this helper can paper over. Log it, but
             # do not propagate — the originating write already committed
             # and the WARNING below makes the failure visible.
@@ -1442,7 +1442,7 @@ def find_dangling_supports(conn: sqlite3.Connection) -> list[dict]:
 
     A ``supports`` entry can be:
 
-      * a UUID-shaped string — interpreted by the substrate as a claim_id;
+      * a UUID-shaped string — interpreted by mareforma as a claim_id;
       * a DOI like ``10.1234/abc`` — an external reference;
       * any other free-form string — also treated as external.
 
@@ -1502,7 +1502,7 @@ def _extract_validation_signer_keyid(validation_signature: str) -> str | None:
     envelope is malformed.
 
     The envelope's ``signatures[0].keyid`` is the authoritative signer.
-    Malformed envelopes return None — the substrate gates short-circuit
+    Malformed envelopes return None — the gates short-circuit
     rather than failing closed on top of the (already-failing) signing
     layer; the underlying UPDATE will then proceed via the legacy path
     and the row's ``validation_signature`` column will carry the broken
@@ -1584,10 +1584,10 @@ def _canonical_envelope(envelope_str: str | None) -> str | None:
     reconciliation. Refuses non-JSON input and refuses JSON that
     isn't shaped like a DSSE envelope (top-level object with a
     ``signatures`` list of objects carrying ``keyid`` + ``sig``);
-    the substrate stores this on the federation-import path and
+    mareforma stores this on the federation-import path and
     callers who passed garbage previously got a silent fallback.
 
-    The substrate does NOT cross-verify the envelope against any
+    Mareforma does NOT cross-verify the envelope against any
     source-graph validator set — that is an adapter responsibility.
     Shape validation alone keeps tamperers from poisoning the
     column with non-DSSE content.
@@ -1715,7 +1715,7 @@ def _claim_signer_keyids(claim_signature_bundle: str | None) -> list[str]:
     signature) the result has one entry per role-actor (planner /
     executor / reviewer / validator).
 
-    Malformed bundles return an empty list — the substrate cannot
+    Malformed bundles return an empty list — mareforma cannot
     decide identity against a corrupted envelope, so downstream gates
     short-circuit and the row falls through to whatever pre-existing
     layer handles unsigned data. Same conservative posture as the
@@ -1835,7 +1835,7 @@ def _verify_evidence_seen(
     The validator's enumeration is self-declared — this gate cannot
     prove the validator actually opened those claims, only that the
     claims they cited exist and predate validation. That's the
-    strongest property the substrate can enforce; everything else
+    strongest property mareforma can enforce; everything else
     rests on the validator's honesty.
     """
     if not evidence_seen:
@@ -1912,15 +1912,15 @@ def validate_claim(
         visible in the audit trail rather than hidden by absence. Each
         cited entry must be a strict-v4 UUID matching an existing
         claim with ``created_at <= validated_at``. The validator's
-        enumeration is self-declared; the substrate cannot prove they
+        enumeration is self-declared; mareforma cannot prove they
         actually opened the cited claims, but it CAN verify the cited
         claims exist and predate validation.
 
-    Substrate gates
-    ---------------
-    When ``validation_signature`` is supplied, the substrate fires the
+    Verification gates
+    ------------------
+    When ``validation_signature`` is supplied, mareforma fires the
     following defense-in-depth gates before the row is updated. All
-    consult the substrate directly — calling :func:`validate_claim`
+    consult mareforma directly — calling :func:`validate_claim`
     bypassing :meth:`EpistemicGraph.validate` does not relax any of
     them, so a hostile in-process caller cannot route around them:
 
@@ -2004,7 +2004,7 @@ def validate_claim(
             "an invalidated claim to ESTABLISHED."
         )
 
-    # Substrate gates over the validation envelope.
+    # Verification gates over the validation envelope.
     #
     # validate_claim is a public-by-convention function (no leading
     # underscore) and is callable directly by any in-process code path —
@@ -2016,7 +2016,7 @@ def validate_claim(
     # Without cryptographic verification here, an enrolled LLM-typed
     # validator (or any in-process caller) could hand-craft an envelope
     # JSON claiming a human validator's keyid + a garbage signature,
-    # then call ``db.validate_claim`` directly. The substrate would
+    # then call ``db.validate_claim`` directly. Mareforma would
     # consult the CLAIMED keyid to enforce the trust-ladder gates
     # (LLM-type, self-validation), find them satisfied, and persist a
     # fraudulent ESTABLISHED row anchored by an envelope that does not
@@ -2036,7 +2036,7 @@ def validate_claim(
     #      validator_keyid because step 4 proved the signer actually
     #      holds the private key.
     #   6. Compare the envelope's payload fields against the row + the
-    #      kwargs the substrate is about to write — claim_id, the
+    #      kwargs mareforma is about to write — claim_id, the
     #      timestamp, validator_keyid, and evidence_seen all must
     #      agree byte-for-byte.
     #
@@ -2131,7 +2131,7 @@ def validate_claim(
         # it does NOT enforce that the payload bytes are well-formed.
         # An enrolled validator with a real key could (intentionally or
         # by bug) sign non-JSON bytes; without this try/except the
-        # InvalidEnvelopeError would propagate past the substrate's
+        # InvalidEnvelopeError would propagate past mareforma's
         # documented contract.
         try:
             env_payload = _signing.envelope_payload(env)
@@ -2167,7 +2167,7 @@ def validate_claim(
                 f"validation envelope's {timestamp_field} "
                 f"({env_payload.get(timestamp_field)!r}) does not match the "
                 f"validated_at value being written ({now!r}); envelope "
-                "timestamp must agree with the substrate write."
+                "timestamp must agree with mareforma's write."
             )
         # evidence_seen is bound only on validation envelopes; seed
         # envelopes have no analog. Skip the comparison for seeds.
@@ -2178,7 +2178,7 @@ def validate_claim(
                 raise EvidenceCitationError(
                     "validation envelope's evidence_seen "
                     f"({env_evidence!r}) does not match the evidence_seen "
-                    f"kwarg ({kwarg_evidence!r}); the substrate validates "
+                    f"kwarg ({kwarg_evidence!r}); mareforma validates "
                     "what the caller passed, and the signed envelope must "
                     "bind the same list — refusing to persist a divergent "
                     "envelope."
@@ -2601,7 +2601,7 @@ def mark_claim_logged(
     # bytes, signatures array, and payloadType — only the optional
     # top-level ``rekor`` block may differ. Without this check, a caller
     # could pass any DSSE-shaped envelope (different signer, freshly
-    # forged signatures, same predicate.claim_id) and the substrate
+    # forged signatures, same predicate.claim_id) and mareforma
     # would persist it, since the claims_signed_fields_no_laundering
     # trigger intentionally does not watch signature_bundle.
     try:
@@ -3028,7 +3028,7 @@ def _verdict_canonical_payload(
     claims share one canonicalization contract (sorted keys, NFC
     Unicode normalization, no whitespace, ``allow_nan=False``).
     A third-party verdict-issuer implementing against the same
-    canonical-JSON contract produces signatures the OSS substrate
+    canonical-JSON contract produces signatures the OSS core
     verifies; a confidence dict containing NaN / Inf is rejected at
     sign time rather than producing a payload some verifiers refuse.
     """
@@ -3096,9 +3096,9 @@ def record_replication_verdict(
     method, confidence)``. Restore re-derives this binding to catch
     TOML tampering of verdict rows.
 
-    The OSS substrate doesn't fire replication predicates itself —
+    The OSS core doesn't fire replication predicates itself —
     third-party verdict-issuers call this method after running their
-    predicate logic. The substrate just accepts the signed verdict and
+    predicate logic. Mareforma just accepts the signed verdict and
     triggers the support_level promotion.
     """
     from mareforma import signing as _signing
@@ -3599,7 +3599,7 @@ def query_claims(
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
-    # When include_unverified is False, the substrate-filter runs in
+    # When include_unverified is False, the verified-claim filter runs in
     # Python after the SQL fetch. A flat `LIMIT N` could return zero
     # results when the top-N rows are all unverified PRELIMINARY,
     # silently under-returning. Pull rows in batches and keep going

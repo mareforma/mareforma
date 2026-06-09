@@ -61,7 +61,7 @@ def open_signed_graph(tmp_path: Path):
 
 
 def _bootstrap_validator_key(tmp_path: Path) -> Path:
-    """Bootstrap a second signing key — the substrate refuses self-validation,
+    """Bootstrap a second signing key — the graph refuses self-validation,
     so promoting a REPLICATED claim needs a key distinct from the signer."""
     from mareforma import signing as _signing
     key_path = tmp_path / "validator.key"
@@ -218,7 +218,7 @@ class TestContradictAndSupport:
         self, tmp_path: Path
     ) -> None:
         """A claim that lists the same UUID upstream in both supports
-        and contradicts is logically incoherent — the substrate refuses
+        and contradicts is logically incoherent — the graph refuses
         it at write time so downstream readers never see undefined
         epistemic semantics.
         """
@@ -235,10 +235,10 @@ class TestContradictAndSupport:
 
 
 # ---------------------------------------------------------------------------
-# Launch ship-gate: substrate end-to-end story
+# Launch ship-gate: full-graph end-to-end story
 # ---------------------------------------------------------------------------
 #
-# These tests are the OSS substrate's ship gate. They exercise the
+# These tests are the OSS core's ship gate. They exercise the
 # complete trust-ladder story end-to-end:
 #
 #   - in-toto Statement v1 + DSSE envelope on every signed claim
@@ -248,15 +248,15 @@ class TestContradictAndSupport:
 #   - Restore round-trips claims + validators + verdicts
 #
 # The launch story DOES NOT include the inference layer (embedder, NLI,
-# semantic-cluster predicate). Those live outside the OSS substrate. Any
+# semantic-cluster predicate). Those live outside the OSS core. Any
 # external verdict-issuer calls the verdict-issuer protocol below; the
-# OSS substrate accepts the signed verdicts and gates the trust ladder
+# OSS core accepts the signed verdicts and gates the trust ladder
 # accordingly.
 
 
 class TestLaunchSubstrateShipGate:
-    """The substrate's launch ship gate. If everything here passes,
-    the substrate is launch-ready. Deeper coverage of each piece
+    """The graph's launch ship gate. If everything here passes,
+    mareforma is launch-ready. Deeper coverage of each piece
     lives in test_signing*.py, test_evidence.py, test_canonical.py,
     test_statement.py, test_verdict_issuer.py, test_restore.py,
     test_reputation.py, test_validator_type.py, test_search_fts5.py.
@@ -303,7 +303,7 @@ class TestLaunchSubstrateShipGate:
     ) -> None:
         """An enrolled validator's signed replication verdict promotes
         the referenced pair of claims from PRELIMINARY to REPLICATED.
-        The OSS substrate accepts the verdict; the predicate that
+        The OSS core accepts the verdict; the predicate that
         generates it (semantic-cluster, cross-method, hash-match,
         shared-resolved-upstream) lives outside the OSS."""
         from mareforma import signing as _signing
@@ -375,7 +375,7 @@ class TestLaunchSubstrateShipGate:
     def test_restore_round_trips_claims_validators_and_verdicts(
         self, tmp_path: Path,
     ) -> None:
-        """Substrate restore reconstructs the full graph from claims.toml:
+        """Graph restore reconstructs the full graph from claims.toml:
         validators, claims (with EvidenceVector + statement_cid),
         replication verdicts, contradiction verdicts. The trigger
         re-derives t_invalid from the replayed contradictions."""

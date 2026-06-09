@@ -41,7 +41,7 @@ DERIVATION_VERSION = "0.1.0"
 
 @dataclass
 class ClassificationResult:
-    """Result of substrate-derived classification with evidence binding.
+    """Result of core-derived classification with evidence binding.
 
     The evidence chain captures the full derivation path:
     source-profile digest + log-template digest + which source-level

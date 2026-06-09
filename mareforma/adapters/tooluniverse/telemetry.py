@@ -34,5 +34,5 @@ def append_event(path: Path, event: dict[str, Any]) -> None:
             fh.write(json.dumps(event, sort_keys=True))
             fh.write("\n")
     except OSError:
-        # Best-effort; substrate has the canonical record via the claim.
+        # Best-effort; mareforma has the canonical record via the claim.
         pass

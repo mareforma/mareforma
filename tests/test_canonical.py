@@ -224,7 +224,7 @@ class TestRfc8785ByteCompatWithNoFloats:
 
 class TestNfcKeyCollision:
     """Two dict keys that NFC-normalize to the same string would silently
-    overwrite each other in a naive dict comprehension. The substrate
+    overwrite each other in a naive dict comprehension. The canonicaliser
     needs determinism — same logical input → same canonical bytes — so
     collisions are surfaced as :class:`ValueError`, not papered over.
     """

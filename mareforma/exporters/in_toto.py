@@ -1,6 +1,6 @@
 """In-toto Statement v1 export of the whole epistemic graph.
 
-Substrate-level adapter (whole graph → in-toto v1 envelope). Distinct
+Core-level adapter (whole graph → in-toto v1 envelope). Distinct
 from :mod:`mareforma.export_bundle`: this module produces an **unsigned**
 Statement v1 dict, leaving signing + DSSE wrap to the caller. Use cases:
 
@@ -41,7 +41,7 @@ def build_statement(root: Path) -> dict[str, Any]:
     """Build an unsigned in-toto Statement v1 dict from the local graph.
 
     Re-uses :func:`mareforma.export_bundle.build_statement` so the
-    substrate has one canonical shape for "the graph as an in-toto
+    core has one canonical shape for "the graph as an in-toto
     Statement." The caller is responsible for signing (or not) the
     returned dict.
 

@@ -4,7 +4,7 @@ A separate table from the main ``claims`` table because tool-call
 activities are high-volume, low-semantic-density data: every Claude
 Code (or other agent) tool invocation produces a row, but most rows
 never escalate into signed claims. Keeping them out of the signed
-graph lets the substrate stay lean.
+graph lets mareforma stay lean.
 """
 
 from __future__ import annotations

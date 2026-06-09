@@ -1,4 +1,4 @@
-"""Substrate-derived classification.
+"""Core-derived classification.
 
 Deterministically derives a claim's ``classification`` (ANALYTICAL or
 INFERRED) from two evidence sources: a static profile of the agent's

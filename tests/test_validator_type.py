@@ -1,8 +1,8 @@
-"""validator_type substrate tests.
+"""validator_type graph tests.
 
 The validators table carries a ``validator_type`` column —
 ``'human'`` or ``'llm'`` — bound into the signed enrollment envelope.
-The substrate enforces two rules on top of the existing identity check:
+The graph enforces two rules on top of the existing identity check:
 
   1. LLM-typed validators may sign validation envelopes, but
      :func:`mareforma.db.validate_claim` refuses to promote a claim to
@@ -210,7 +210,7 @@ class TestSelfValidationRefused:
         self, tmp_path: Path,
     ) -> None:
         """The root key signs the claim (via _build_replicated) AND tries
-        to validate it. The substrate refuses self-promotion."""
+        to validate it. The graph refuses self-promotion."""
         root_key = _bootstrap_key(tmp_path, "root.key")
         with mareforma.open(tmp_path, key_path=root_key) as g:
             rep_id = _build_replicated(g)
@@ -222,7 +222,7 @@ class TestSelfValidationRefused:
             assert g.get_claim(rep_id)["support_level"] == "REPLICATED"
 
     def test_distinct_keys_promote_normally(self, tmp_path: Path) -> None:
-        """Sanity check: with two keys the substrate does not falsely
+        """Sanity check: with two keys the graph does not falsely
         refuse — only the equal-keyid case is blocked."""
         root_key = _bootstrap_key(tmp_path, "root.key")
         val_key = _bootstrap_key(tmp_path, "val.key")
@@ -250,7 +250,7 @@ class TestSelfValidationRefused:
             # second key first, then re-bootstrap with that second key
             # as 'llm', sign the REPLICATED chain with it.
             # The simplest construction: use bot as a generator that is
-            # also the would-be validator; the substrate gate raises
+            # also the would-be validator; the graph gate raises
             # SelfValidationError before reaching the LLM check.
             rep_id = _build_replicated(g)
             with pytest.raises((_db.SelfValidationError,
@@ -259,7 +259,7 @@ class TestSelfValidationRefused:
 
 
 # ---------------------------------------------------------------------------
-# LLM validator cannot seed ESTABLISHED (substrate parity with validate)
+# LLM validator cannot seed ESTABLISHED (graph parity with validate)
 # ---------------------------------------------------------------------------
 
 class TestLLMValidatorSeedRefused:

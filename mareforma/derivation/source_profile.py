@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 # case, but tree_sitter and tree_sitter_python release independently and
 # ABI/version mismatches surface as TypeError / RuntimeError / OSError
 # from Language(...) — none of which are ImportError subclasses. Catching
-# Exception keeps the substrate importable in any broken-extras state
+# Exception keeps mareforma importable in any broken-extras state
 # and routes the failure to _require_tree_sitter() with a clean install
 # hint.
 try:

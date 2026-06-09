@@ -95,10 +95,10 @@ class TestOpenWithSigning:
         """Direct-SQL text tamper on a signed claim is refused by the
         claims_signed_fields_no_laundering BEFORE UPDATE trigger.
 
-        Substrate-over-surface: a tampered Python interpreter that
+        Database-over-surface: a tampered Python interpreter that
         bypasses update_claim's signed-field check would otherwise be
         able to retroactively flip text under the original signature.
-        The trigger closes the substrate-level gap.
+        The trigger closes the database-level gap.
         """
         import sqlite3
 

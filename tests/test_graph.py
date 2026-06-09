@@ -803,7 +803,7 @@ class TestDoiResolution:
 
 
 class TestClaimIdRegexStrictV4:
-    """The substrate's claim_id pattern is strict UUIDv4 — version=4 in
+    """The graph's claim_id pattern is strict UUIDv4 — version=4 in
     the third group, variant in {8,9,a,b} in the fourth. Non-v4 UUIDs
     in ``supports[]`` are treated as external references (like DOIs),
     not as graph-node candidates."""
@@ -1790,7 +1790,7 @@ class TestValidationEnvelopeKwargAgreement:
     whose signed payload's ``evidence_seen`` disagrees with the
     ``evidence_seen`` kwarg. Closes the gap where a direct db.py caller
     could embed forged citations in the signed envelope while passing
-    an empty kwarg to bypass the substrate's evidence verification."""
+    an empty kwarg to bypass the graph's evidence verification."""
 
     def _setup_replicated(self, graph):
         seed = graph.assert_claim("anchor", generated_by="seed", seed=True)
@@ -1865,11 +1865,11 @@ class TestValidationEnvelopeKwargAgreement:
 # ---------------------------------------------------------------------------
 
 class TestValidationEnvelopeCryptographicVerification:
-    """``db.validate_claim`` is a public-by-convention substrate function.
+    """``db.validate_claim`` is a public-by-convention graph function.
     A direct caller (e.g. an enrolled LLM-typed agent looking for a way
     past its ceiling) cannot hand-craft a validation envelope CLAIMING a
     human validator's keyid and walk it through ``db.validate_claim``:
-    the substrate cryptographically verifies the envelope against the
+    the graph cryptographically verifies the envelope against the
     claimed signer's pubkey before applying any trust-ladder gate, and
     the payload's claim_id / validator_keyid / validated_at fields must
     agree with the row being promoted.
@@ -2051,7 +2051,7 @@ class TestValidationEnvelopeCryptographicVerification:
     def test_signed_non_object_payload_is_refused(self, tmp_path):
         """verify_envelope only checks the DSSE signature, not the
         payload shape. A validator with a real key could sign non-JSON
-        bytes (or a JSON scalar / array). The substrate must catch the
+        bytes (or a JSON scalar / array). The graph must catch the
         resulting :class:`signing.InvalidEnvelopeError` from
         envelope_payload and re-raise as
         :class:`InvalidValidationEnvelopeError` so the documented

@@ -1,4 +1,4 @@
-"""Schema DDL, column contract, and related constants for the substrate."""
+"""Schema DDL, column contract, and related constants for mareforma."""
 
 
 _SCHEMA_SQL = """
@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS claims (
     -- Convergence-detection retry flag. Set to 1 by
     -- _maybe_update_replicated when a SQLite trigger or contention
     -- pattern causes the post-INSERT promotion check to fail. The
-    -- substrate swallows the error so writes never crash, but a
+    -- mareforma swallows the error so writes never crash, but a
     -- swallowed error leaves the claim stuck at PRELIMINARY forever
     -- unless someone retries. EpistemicGraph.refresh_convergence()
     -- walks every flagged row, re-runs detection, and clears the flag
@@ -83,7 +83,7 @@ CREATE TABLE IF NOT EXISTS claims (
     -- Predicate-type-specific structured payload. Adapters that ship
     -- a distinct predicateType (tool-call/v1, ingested-trace/v1,
     -- gemini/*/v1, wet-lab-assay/*, review/v1, elo-match/v1, ...)
-    -- write their typed payload here so substrate queries can filter
+    -- write their typed payload here so mareforma queries can filter
     -- by predicate_type without parsing the claim text JSON. Default
     -- empty string keeps existing graphs forward-compatible.
     --
@@ -100,8 +100,8 @@ CREATE TABLE IF NOT EXISTS claims (
     -- signature envelope from the source graph is preserved here.
     -- The active ``signature_bundle`` column carries the receiver's
     -- re-signed envelope (different keyid, different claim_id under
-    -- substrate UUID re-mapping). Verifiers that want to reconstruct
-    -- the source-side proof read this column; the substrate's own
+    -- mareforma UUID re-mapping). Verifiers that want to reconstruct
+    -- the source-side proof read this column; mareforma's own
     -- verification path uses ``signature_bundle``. NULL on claims
     -- that were not federation-imported.
     --
@@ -285,11 +285,11 @@ END;
 -- Verdict-issuer protocol.
 --
 -- Every replication verdict and every contradiction verdict is a
--- signed row written by an enrolled validator. The OSS substrate
+-- signed row written by an enrolled validator. The OSS core
 -- accepts verdicts from any party in the ``validators`` table; the
 -- predicates that PRODUCE these verdicts (semantic-cluster,
 -- cross-method, contradiction-detection) live outside the OSS
--- substrate. Any third-party verdict-issuer can write to these
+-- core. Any third-party verdict-issuer can write to these
 -- tables via the Graph.record_*_verdict APIs.
 --
 -- The signed payload bound to ``signature`` is the canonical JSON
@@ -334,7 +334,7 @@ CREATE INDEX IF NOT EXISTS idx_contradiction_member
     ON contradiction_verdicts(member_claim_id);
 
 -- Rekor inclusion sidecar. Records every successful Rekor submission
--- the substrate witnessed, independent of whether the corresponding
+-- mareforma witnessed, independent of whether the corresponding
 -- claims-row UPDATE that attaches the rekor coords to
 -- ``signature_bundle`` succeeded. The two-write saga (sidecar INSERT
 -- then claim UPDATE) closes the divergence window where Rekor would

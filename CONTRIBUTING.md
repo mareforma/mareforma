@@ -1,7 +1,7 @@
 # Contributing to Mareforma
 
 Mareforma is the local epistemic graph AI scientists use to record
-findings with cryptographic provenance. The substrate (signing,
+findings with cryptographic provenance. The core (signing,
 validators, the REPLICATED trust ladder) decides what consumers can
 trust, so changes that touch it land differently from a bug fix.
 
@@ -39,7 +39,7 @@ Talk first, then PR:
 - New API surface on `EpistemicGraph` or new top-level helpers
 - New CLI subcommands
 - Schema changes
-- Anything touching the signing / validator / Rekor substrate
+- Anything touching the signing / validator / Rekor core
 
 Probably no:
 
@@ -113,7 +113,7 @@ These labels decay as plans shift and are noise for users trying to
 read the codebase as it stands. If a PR you're reviewing carries one,
 ask the author to rewrite it before merging.
 
-## Trust-substrate changes
+## Trust-layer changes
 
 Changes to the signing, validator-enrollment, Rekor, or
 state-machine paths require:
@@ -126,7 +126,7 @@ state-machine paths require:
   "Validators", or "Cycle / self-loop detection" sections as
   applicable
 
-Substrate over surface: when a defect surfaces, fix it at the root
+Core over surface: when a defect surfaces, fix it at the root
 layer (DB trigger, signing payload, state machine) rather than
 patching the wrapper. The trust ladder must not be bypassable via a
 public API path the wrapper happens to not expose.
@@ -160,13 +160,13 @@ graph.assert_claim("the claim", grounding_sensor=MockNLIVerifier(score=0.85))
 
 Rules of thumb:
 
-- Stubs return tuples, never coroutines (the substrate calls
+- Stubs return tuples, never coroutines (mareforma calls
   verifiers synchronously inside the BEGIN IMMEDIATE write
   transaction).
 - Stubs MUST be deterministic — random scores produce flaky tests.
 - Stubs SHOULD raise the same exception types real models raise
   (`OSError`, `RuntimeError`, `ConnectionError`) when you need to
-  test the substrate's fallback path; the assertion still lands and
+  test mareforma's fallback path; the assertion still lands and
   a `RuntimeWarning` surfaces.
 - Tests that need an actually-trained model must be guarded behind
   an opt-in marker (`@pytest.mark.requires_model`) and skipped by

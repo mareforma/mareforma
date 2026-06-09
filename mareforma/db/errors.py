@@ -1,4 +1,4 @@
-"""Exception hierarchy for the mareforma substrate."""
+"""Exception hierarchy for mareforma."""
 
 
 class MareformaError(Exception):
@@ -86,8 +86,8 @@ class EvidenceCitationError(MareformaError):
     """Raised when ``evidence_seen`` on a validation envelope is malformed.
 
     ``validate_claim`` accepts an ``evidence_seen`` list of claim_ids the
-    validator declares to have reviewed before signing the promotion. The
-    substrate cannot prove the validator actually opened those claims,
+    validator declares to have reviewed before signing the promotion.
+    Mareforma cannot prove the validator actually opened those claims,
     but it CAN verify that every cited entry is a strict-v4 UUID pointing
     at an existing claim with ``created_at <= validated_at``. Any failure
     in that check raises this exception:
@@ -100,7 +100,7 @@ class EvidenceCitationError(MareformaError):
         didn't exist yet),
       * envelope's ``evidence_seen`` field does not equal the
         ``evidence_seen`` kwarg passed alongside (the envelope's signed
-        citations must match the substrate-validated kwarg byte-for-byte).
+        citations must match the mareforma-validated kwarg byte-for-byte).
 
     The error message names the first failing entry so the caller can
     fix it without trial-and-error.
@@ -112,9 +112,9 @@ class InvalidValidationEnvelopeError(MareformaError):
     invalid.
 
     Distinct from :class:`EvidenceCitationError` (which is specifically
-    about evidence_seen citations failing the substrate's existence /
+    about evidence_seen citations failing mareforma's existence /
     timestamp check). This exception fires when the envelope itself
-    fails any of the substrate's defense-in-depth gates inside
+    fails any of mareforma's defense-in-depth gates inside
     :func:`validate_claim`:
 
       * envelope cannot be parsed as JSON or is missing required fields,
@@ -132,7 +132,7 @@ class InvalidValidationEnvelopeError(MareformaError):
 
     These checks make :func:`validate_claim` safe to call directly:
     bypassing :meth:`EpistemicGraph.validate` does not relax any
-    substrate-level invariant. A caller that hand-crafts an envelope to
+    mareforma-level invariant. A caller that hand-crafts an envelope to
     impersonate an enrolled human validator will fail one of these
     gates before any row is mutated.
     """

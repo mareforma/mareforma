@@ -16,7 +16,7 @@ from mareforma import _supports
 # ----------------------------------------------------------------------------
 #
 # The cache exists so REPLICATED queries don't degrade to a full
-# table scan as the graph grows. The pin documents the substrate's
+# table scan as the graph grows. The pin documents the graph's
 # scaling promise:
 #
 #   10k claims  → p99 < 100ms
@@ -138,7 +138,7 @@ def test_supports_cache_1k_walk_under_50ms(tmp_path: Path) -> None:
 # Cross-exporter conformance
 # ----------------------------------------------------------------------------
 #
-# The substrate ships four exporters: jsonld (mareforma-native), in-
+# mareforma ships four exporters: jsonld (mareforma-native), in-
 # toto-v1 (unsigned Statement v1), ro-crate-1.2 (RO-Crate Process Run
 # Crate), prov-o (W3C PROV-O). All four MUST encode the same claim_id
 # in the same URN shape so downstream consumers can join across

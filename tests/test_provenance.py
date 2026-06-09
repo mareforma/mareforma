@@ -569,7 +569,7 @@ class TestRestoreVerifiesEverySignatureInMultiSigEnvelope:
     """A multi-sig signature_bundle landing in graph.db must have EVERY
     signature verified by restore, not just signatures[0]. An attacker
     who attached forged extra signatures to a valid envelope would
-    otherwise sneak them past restore and into substrate role lookups.
+    otherwise sneak them past restore and into graph role lookups.
     """
 
     def _build_minimal_signed_graph(self, tmp_path: Path):

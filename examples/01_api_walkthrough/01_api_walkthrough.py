@@ -45,7 +45,7 @@ sep("1. Open")
 # In real use you would run `mareforma bootstrap` once to create
 # ~/.config/mareforma/key, then mareforma.open() picks it up automatically.
 # Passing key_path= here also auto-enrolls the key as root validator on
-# this fresh graph. The substrate refuses self-validation, so section 6
+# this fresh graph. mareforma refuses self-validation, so section 6
 # uses a separate enrolled reviewer key for the validate() call.
 agent_key_path = tmp / "_agent_key"
 reviewer_key_path = tmp / "_reviewer_key"
@@ -210,10 +210,10 @@ except ValueError as exc:
     show("validate(PRELIMINARY)", f"ValueError: {exc}")
 
 # Close and re-open under the reviewer key so the validator differs from the
-# signer of rep_a. The substrate refuses self-validation: a validator cannot
+# signer of rep_a. mareforma refuses self-validation: a validator cannot
 # promote a claim signed by its own key. Pass evidence_seen=[...] to
 # name the upstream claims the reviewer actually consulted before
-# pressing the validate button — the substrate verifies each cited
+# pressing the validate button, mareforma verifies each cited
 # claim exists and predates validation, and binds the list into the
 # signed validation envelope.
 graph.close()
@@ -238,7 +238,7 @@ sep("7. Operational surfaces")
 
 # graph.health() — single-call audit summary. Operators inspect this
 # instead of writing N separate queries. Non-zero values flag work to
-# do; the substrate doesn't decide if anything is wrong, it just
+# do; mareforma doesn't decide if anything is wrong, it just
 # reports the counters.
 h = graph.health()
 show("claim_count", h["claim_count"])
@@ -249,7 +249,7 @@ show("dangling_supports", h["dangling_supports"])
 show("convergence_errors", h["convergence_errors"])
 show("convergence_retry_pending", h["convergence_retry_pending"])
 
-# graph.classify_supports() — see how the substrate routes each entry
+# graph.classify_supports() — see how the graph routes each entry
 # in a supports[] / contradicts[] list. Three buckets: claim (strict
 # v4 UUID — a graph-node candidate), doi (Crossref/DataCite syntax —
 # external citation, resolved at assert time), external (anything
@@ -260,7 +260,7 @@ for entry in graph.classify_supports(mixed):
 
 
 # ---------------------------------------------------------------------------
-# 8. Anti-patterns — the failure modes the substrate cannot catch for you
+# 8. Anti-patterns — the failure modes mareforma cannot catch for you
 # ---------------------------------------------------------------------------
 sep("8. Anti-patterns")
 

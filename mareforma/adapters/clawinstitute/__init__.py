@@ -16,7 +16,7 @@ environment when not given explicitly.
 Untrusted workspace content (post bodies, attachments) flows through
 three layers of sanitisation before any handler sees it:
 
-1. :func:`mareforma.sanitize_for_llm` strips NULs and substrate
+1. :func:`mareforma.sanitize_for_llm` strips NULs and mareforma
    boundary tokens.
 2. A 16 MiB cap rejects payloads that would otherwise blow agent
    context windows.

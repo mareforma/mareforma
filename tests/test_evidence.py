@@ -193,7 +193,7 @@ class TestRoundTrip:
 #
 # Earlier shapes plumbed EvidenceVector through the
 # entire signing stack but had no user-facing parameter — every signed
-# claim carried the default all-zeros vector. The substrate signed a
+# claim carried the default all-zeros vector. The graph signed a
 # story it didn't let callers tell. These tests cover the new parameter
 # surface end-to-end: caller-supplied vectors land in the signed
 # predicate, the ev_* columns, and survive restore round-trip.
