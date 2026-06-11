@@ -801,6 +801,190 @@ class EpistemicGraph:
         self._check_open()
         return _db.get_claim(self._conn, claim_id)
 
+    # ------------------------------------------------------------------
+    # Trust layer: propositions, findings, derived Status
+    # ------------------------------------------------------------------
+
+    def register_proposition(self, proposition: "Proposition") -> str:
+        """Register a falsifiable :class:`mareforma.trust.Proposition`.
+
+        Returns the ``content_id`` and is idempotent on it (re-registering the
+        same proposition returns the existing node). A non-falsifiable
+        proposition (no direction or empty scope) is refused, because it forbids
+        no observation and cannot anchor evidence.
+        """
+        self._check_open()
+        from mareforma.db.core import _now
+        from mareforma.trust import NonFalsifiablePropositionError, _store
+
+        if not proposition.is_falsifiable():
+            raise NonFalsifiablePropositionError(
+                "proposition must commit to a direction and a non-empty scope; "
+                f"got direction={proposition.direction.value}, "
+                f"scope={dict(proposition.scope)!r}"
+            )
+        now = _now()
+        with self._conn:
+            return _store.register_proposition(self._conn, proposition, now)
+
+    def assert_finding(
+        self,
+        proposition: "Proposition",
+        prediction: "Prediction",
+        estimate: "EffectEstimate",
+        *,
+        data_id: str,
+        generated_by: str | None = None,
+        control_type: "ControlType | str | None" = None,
+        modality: str | None = None,
+        provenance_id: str | None = None,
+        design_type: str | None = None,
+        code_ref: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict:
+        """Record a finding: a computed bearing of an outcome on a proposition.
+
+        The minimal write: a structured Proposition, a pre-registered Prediction,
+        the result numbers (an :class:`EffectEstimate`), and a content-addressed
+        ``data_id`` for the dataset. mareforma computes the Bearing (never
+        declared), persists the single-line evidence tree, writes a signed claim
+        as the attestation, and derives the proposition's count-based Status from
+        the independent lines.
+
+        Idempotent on (``content_id``, ``data_id``): re-asserting the same
+        finding on the same dataset returns the prior finding rather than
+        double-counting it.
+
+        All input validation (falsifiability, estimate consistency, the gate)
+        runs before the signed claim is written, so a rejected finding never
+        leaves an orphan claim. The structured rows are then written in one
+        transaction after the claim; their CHECK constraints mirror the already
+        validated Python values, so a failure there is not expected. If one did
+        occur the claim would remain as an attestation with no finding, and a
+        retry would reuse that claim idempotently rather than duplicate it.
+        """
+        self._check_open()
+        from mareforma.db.core import _now
+        from mareforma.trust import (
+            Contrast,
+            ControlType,
+            EvidenceLine,
+            NonFalsifiablePropositionError,
+            _store,
+            compute_bearing,
+        )
+
+        if not proposition.is_falsifiable():
+            raise NonFalsifiablePropositionError(
+                "proposition must commit to a direction and a non-empty scope; "
+                f"got direction={proposition.direction.value}, "
+                f"scope={dict(proposition.scope)!r}"
+            )
+
+        ct = control_type if control_type is not None else ControlType.NEGATIVE
+        # Building the line validates the estimate/data_id; computing the bearing
+        # validates the gate (e.g. a mismatched CI level raises here). Both run
+        # before the signed claim is written.
+        line = EvidenceLine(
+            estimate=estimate,
+            data_id=data_id,
+            contrast=Contrast(ct),
+            modality=modality,
+            provenance_id=provenance_id,
+            design_type=design_type,
+        )
+        bearing = compute_bearing(estimate, prediction)
+        cid = proposition.content_id()
+
+        existing = _store.find_existing_finding(self._conn, cid, data_id)
+        if existing is not None:
+            view = _store.proposition_status(self._conn, cid)
+            return {
+                "finding_id": existing["finding_id"],
+                "content_id": cid,
+                "plan_id": existing["plan_id"],
+                "claim_id": existing["claim_id"],
+                "bearing": bearing.to_dict(),
+                "status": view["status"] if view else None,
+                "idempotent": True,
+                "proposition_status": view,
+            }
+
+        claim_id = self.assert_claim(
+            proposition.text(),
+            generated_by=generated_by,
+            idempotency_key=idempotency_key or f"finding:{cid}:{data_id}",
+            predicate_payload={
+                "trust": "finding/v1",
+                "content_id": cid,
+                "frame_id": proposition.frame_id(),
+                "data_id": data_id,
+                "code_ref": code_ref,
+                "bearing": bearing.direction.value,
+            },
+        )
+
+        now = _now()
+        with self._conn:
+            _store.register_proposition(self._conn, proposition, now)
+            plan_id = _store.register_plan(self._conn, cid, prediction, now)
+            finding_id = _store.insert_finding(
+                self._conn, cid, plan_id, claim_id, bearing, line, now
+            )
+
+        view = _store.proposition_status(self._conn, cid)
+        return {
+            "finding_id": finding_id,
+            "content_id": cid,
+            "plan_id": plan_id,
+            "claim_id": claim_id,
+            "bearing": bearing.to_dict(),
+            "status": view["status"],
+            "idempotent": False,
+            "proposition_status": view,
+        }
+
+    def proposition_status(self, proposition_or_content_id) -> dict | None:
+        """The retrieval view for one proposition: derived Status, independence
+        counts, and the frame-level contest. Accepts a content_id or a
+        :class:`Proposition`. Returns None if the proposition is not registered.
+        """
+        self._check_open()
+        from mareforma.trust import _store
+
+        cid = (
+            proposition_or_content_id
+            if isinstance(proposition_or_content_id, str)
+            else proposition_or_content_id.content_id()
+        )
+        return _store.proposition_status(self._conn, cid)
+
+    def get_proposition(self, content_id: str) -> dict | None:
+        """Return the stored proposition row as a dict, or None."""
+        self._check_open()
+        from mareforma.trust import _store
+
+        row = _store.get_proposition_row(self._conn, content_id)
+        return dict(row) if row is not None else None
+
+    def query_frame(
+        self, frame_id_or_proposition, *, min_status: str | None = None
+    ) -> list[dict]:
+        """Everything known about a question (frame_id), each with its derived
+        view. Accepts a frame_id or a :class:`Proposition`. ``min_status``
+        filters to propositions meeting a support floor on the
+        UNTESTED < PRELIMINARY < CORROBORATED ladder.
+        """
+        self._check_open()
+        from mareforma.trust import _store
+
+        fid = (
+            frame_id_or_proposition
+            if isinstance(frame_id_or_proposition, str)
+            else frame_id_or_proposition.frame_id()
+        )
+        return _store.query_frame(self._conn, fid, min_status=min_status)
+
     def query_for_llm(
         self,
         text: str | None = None,
