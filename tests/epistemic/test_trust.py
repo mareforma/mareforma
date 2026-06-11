@@ -213,6 +213,17 @@ class TestGate:
         assert compute_bearing(_smd(+2.9, p=0.002), pred).direction is BearingDirection.REFUTES
         assert compute_bearing(_smd(-2.6, p=0.20), pred).direction is BearingDirection.NEUTRAL
 
+    def test_superiority_pvalue_is_two_sided_at_one_sided_alpha(self) -> None:
+        # The supplied p is two-sided; the gate is one-sided at alpha, so the
+        # significance bar is 2*alpha. A two-sided p in (alpha, 2*alpha) clears
+        # it, and the p path agrees with the (1 - 2*alpha) CI path.
+        pred = _superiority(DirectionOfInterest.INCREASE, alpha=0.05)
+        assert compute_bearing(_smd(0.6, p=0.08), pred).significant is True
+        assert compute_bearing(_smd(0.6, p=0.08), pred).direction is BearingDirection.SUPPORTS
+        assert compute_bearing(_smd(0.6, p=0.12), pred).significant is False
+        ci_sig = _smd(0.6, ci=(0.01, 1.19), ci_level=0.90)  # excludes the null
+        assert compute_bearing(ci_sig, pred).significant is True
+
     def test_superiority_ci_significance_requires_matching_level(self) -> None:
         pred = _superiority(DirectionOfInterest.INCREASE, alpha=0.05)
         ok = EffectEstimate(2.0, EffectType.MD, ci_lower=0.5, ci_upper=3.5, ci_level=0.90)

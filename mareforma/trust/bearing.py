@@ -41,7 +41,10 @@ def compute_bearing(estimate: EffectEstimate, prediction: Prediction) -> Bearing
 
     Superiority gate
     ----------------
-    significance = ``p_value < alpha`` when a p-value is supplied, else the CI
+    The test is one-sided at ``alpha`` (the predicted direction is
+    pre-registered). significance = ``p_value < 2*alpha`` when a p-value is
+    supplied (the p is two-sided by the metafor/escalc convention, so the
+    one-sided alpha level is ``2*alpha``), else the ``(1 - 2*alpha)`` CI
     excludes the null. ``direction`` compares ``sign(estimate - null)`` against
     the pre-registered ``direction_of_interest`` -> SUPPORTS / REFUTES /
     NEUTRAL.
@@ -64,7 +67,13 @@ def _superiority(estimate: EffectEstimate, prediction: Prediction) -> Bearing:
     # Significance: prefer the p-value when present; otherwise the CI must
     # exclude the null on one side.
     if estimate.p_value is not None:
-        significant = estimate.p_value < prediction.alpha
+        # The supplied p-value follows the metafor/escalc convention: it is
+        # two-sided. The gate is a one-sided test at alpha (the predicted
+        # direction is pre-registered), so a two-sided p reaches the one-sided
+        # alpha level when p < 2*alpha. This matches the CI path below, which
+        # reads a two-sided (1 - 2*alpha) interval for the same one-sided test.
+        # Direction (supports vs refutes) is resolved separately, from the sign.
+        significant = estimate.p_value < 2.0 * prediction.alpha
     else:
         # No p-value: significance comes from the CI excluding the null. The CI
         # must be at the level the test's alpha implies, or "excludes the null"
