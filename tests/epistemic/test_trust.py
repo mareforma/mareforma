@@ -310,6 +310,12 @@ class TestInputConsistency:
             EffectEstimate(1.5, EffectType.MD, ci_lower=2.0, ci_upper=1.0, ci_level=0.95)
         with pytest.raises(InconsistentEstimateError):  # n_total <= 0
             EffectEstimate(1.0, EffectType.SMD, p_value=0.01, n_total=0)
+        with pytest.raises(InconsistentEstimateError):  # non-finite p_value
+            EffectEstimate(1.0, EffectType.SMD, p_value=float("nan"))
+        with pytest.raises(InconsistentEstimateError):  # +inf CI bound
+            EffectEstimate(1.0, EffectType.MD, ci_lower=0.5, ci_upper=float("inf"), ci_level=0.95)
+        with pytest.raises(InconsistentEstimateError):  # -inf CI bound slips past the bracket test
+            EffectEstimate(1.0, EffectType.MD, ci_lower=float("-inf"), ci_upper=2.0, ci_level=0.95)
 
     def test_estimate_valid_constructions(self) -> None:
         EffectEstimate(1.0, EffectType.SMD, p_value=0.01)  # p only

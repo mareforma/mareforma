@@ -939,7 +939,7 @@ class EpistemicGraph:
             "plan_id": plan_id,
             "claim_id": claim_id,
             "bearing": bearing.to_dict(),
-            "status": view["status"],
+            "status": view["status"] if view else None,
             "idempotent": False,
             "proposition_status": view,
         }

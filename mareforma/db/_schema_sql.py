@@ -664,7 +664,7 @@ CREATE TABLE IF NOT EXISTS findings (
     content_id        TEXT NOT NULL REFERENCES propositions(content_id),
     plan_id           TEXT NOT NULL REFERENCES predictions(plan_id),
     claim_id          TEXT NOT NULL REFERENCES claims(claim_id),
-    bearing_direction TEXT CHECK (bearing_direction IN ('supports','refutes','neutral')),
+    bearing_direction TEXT NOT NULL CHECK (bearing_direction IN ('supports','refutes','neutral')),
     created_at        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_find_content ON findings(content_id);

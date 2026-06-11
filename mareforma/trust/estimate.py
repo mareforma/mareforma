@@ -118,6 +118,18 @@ class EffectEstimate:
                 "estimate_value must be a finite number (not NaN or infinity)"
             )
 
+        # Every supplied numeric field must be finite. The all-or-none and
+        # bracket checks below do not catch a NaN or +/-inf bound on their own
+        # (NaN comparisons are silently False, and an infinite bound passes the
+        # bracket test), so an unchecked non-finite CI value would poison the
+        # gate's comparisons downstream.
+        for _name in ("ci_lower", "ci_upper", "ci_level", "p_value"):
+            _val = getattr(self, _name)
+            if _val is not None and not math.isfinite(_val):
+                raise InconsistentEstimateError(
+                    f"{_name}, when given, must be a finite number (not NaN or infinity)"
+                )
+
         ci_parts = (self.ci_lower, self.ci_upper, self.ci_level)
         ci_given = [p is not None for p in ci_parts]
         if any(ci_given) and not all(ci_given):
