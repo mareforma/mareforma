@@ -1,20 +1,31 @@
 # AI Agent Drug Target
 
-[MEDEA](https://github.com/mims-harvard/Medea) is an AI scientist that identifies drug targets from multi-omics data.
-This example runs MEDEA as an agent and records every finding via the
-mareforma EpistemicGraph, giving each hypothesis a verifiable epistemic status.
+[MEDEA](https://github.com/mims-harvard/Medea) is an AI scientist that identifies
+drug targets from multi-omics data. This example runs MEDEA as an agent and
+records every finding via the mareforma `EpistemicGraph`, giving each hypothesis
+a verifiable epistemic status.
+
+The driver is [`run_experiment.py`](run_experiment.py). Each step below is its
+code followed by the console output it prints.
+
+> **This example is not re-run on every change.** It needs the MEDEA package, a
+> GPU-class machine, ~21 GB of MedeaDB, and an LLM API key. The output blocks
+> below are from the recorded **Case B** run, where MEDEA's data pipeline
+> returned `null`. The classification → support-level → warning are exactly what
+> the code prints for that case; the hypothesis text and claim ids are run-specific
+> and shown elided.
 
 ## The epistemic question
 
-When an AI scientist returns a drug target candidate, the key question is not
-"what did it find?" but "how did it find it?":
+When an AI scientist returns a drug-target candidate, the question is not "what
+did it find?" but "how did it find it?":
 
 - Did MEDEA actually query MedeaDB and analyse omics data? → `ANALYTICAL`
-- Or did the data pipeline fail silently and the answer came from LLM prior knowledge? → `INFERRED`
+- Or did the data pipeline fail silently and the answer come from LLM prior
+  knowledge? → `INFERRED`
 
-Mareforma records this distinction permanently at assertion time. An `INFERRED`
-finding and an `ANALYTICAL` finding can look identical as text. The graph
-is what makes the difference visible.
+An `INFERRED` finding and an `ANALYTICAL` finding can read identically. The graph
+records the distinction permanently, at assertion time.
 
 ## Two forks
 
@@ -23,50 +34,9 @@ is what makes the difference visible.
 | `ra_cd4` | Rheumatoid Arthritis | CD4+ T cells |
 | `sle_cd4` | Systemic Lupus Erythematosus | CD4+ T cells |
 
-Everything else is identical: same model, same panelists, same debate rounds.
-One variable changed: the disease.
+Same model, same panelists, same debate rounds. One variable changed: the disease.
 
-## What mareforma adds
-
-**Classification at assertion time.** After each MEDEA run, `run_experiment.py`
-inspects `generated_code` from the output. If it is null, the data pipeline
-failed, and the claim is recorded as `INFERRED`. If real code ran and returned
-output, it is recorded as `ANALYTICAL`.
-
-```python
-classification = "ANALYTICAL" if generated_code else "INFERRED"
-graph.assert_claim(
-    final_hypothesis,
-    classification=classification,
-    generated_by="medea/gpt-4o/ra_cd4",
-    source_name="medeadb",
-)
-```
-
-**Query-before-assert.** Before running MEDEA, `run_experiment.py` checks the
-graph for prior `REPLICATED` findings. If they exist, MEDEA can build on them
-rather than starting from scratch.
-
-**Independent replication.** The two forks run with different `generated_by`
-values (`ra_cd4` vs `sle_cd4`). If both cite the same `ESTABLISHED` upstream
-claim in their `supports[]` and reach the same conclusion, `REPLICATED`
-fires automatically, no extra step. (`REPLICATED` requires an `ESTABLISHED`
-upstream, matching Cochrane/GRADE evidence-chain methodology. Bootstrap one
-with `seed=True` on a fresh graph; see Example 03 for the full pattern.)
-
-## What we found when we ran this
-
-**Case B: data pipeline failed silently:**
-
-Both forks returned `generated_code = null`. The final hypotheses still looked
-different, but both came from LLM prior knowledge, not from MedeaDB. Mareforma
-recorded both as `INFERRED`. The classification made the silent failure visible
-immediately, before anyone acted on the results.
-
-This led directly to a bug report in MEDEA's EFO ID lookup:
-[mims-harvard/Medea#6](https://github.com/mims-harvard/Medea/pull/6).
-
-## Setup
+## Setup and run
 
 ```bash
 # 1. Install and download data
@@ -76,33 +46,91 @@ python 05_drug_target_provenance.py --data    # ~21 GB, takes a while
 # 2. Configure API access
 cp Medea/env_template.txt .env
 # Edit .env: set OPENAI_API_KEY and MEDEADB_PATH=data/medeadb/raw
-```
 
-## Run
-
-```bash
+# 3. Run both forks
 python 05_drug_target_provenance.py --run
-
-# Inspect the epistemic status of findings
-mareforma claim list
-mareforma status
 ```
 
-## Interpreting the claims
+## Query-before-assert
 
-After the run, `claims.toml` contains one claim per fork.
+```python
+with mareforma.open(HERE) as graph:
+    # Check for prior REPLICATED findings before running — MEDEA can build on
+    # them rather than starting from scratch.
+    prior = graph.query("drug target", min_support="REPLICATED")
+```
 
-If `classification = "INFERRED"`, the data pipeline did not run. The finding
-is LLM prior knowledge. It is recorded, not discarded, but treated as
-`PRELIMINARY` until independently replicated with real data.
+```
+  No prior REPLICATED findings — running both forks fresh.
+```
 
-If `classification = "ANALYTICAL"`, MEDEA queried MedeaDB and produced
-output. The finding is grounded in omics data and the provenance chain
-is complete.
+## One fork — run, classify, record
 
-To upgrade a finding to `REPLICATED`, two conditions must both hold:
-(1) a different `generated_by` fork reaches the same conclusion, and
-(2) both forks cite the same `ESTABLISHED` upstream claim in `supports[]`.
-Without an `ESTABLISHED` anchor, mareforma keeps both findings at
-`PRELIMINARY` rather than promoting noise. See Example 03 for the
-seed-then-converge pattern.
+```python
+def _classify(result: dict) -> str:
+    """ANALYTICAL if MEDEA's data pipeline ran, else INFERRED."""
+    return "ANALYTICAL" if result.get("generated_code") else "INFERRED"
+
+ra_result = _run_medea_fork(disease="rheumatoid arthritis", cell_type="CD4")
+ra_classification = _classify(ra_result)   # null generated_code → INFERRED
+
+# The classification is decided by what actually ran, then frozen into the claim.
+ra_claim_id = graph.assert_claim(
+    ra_result["final_hypothesis"],
+    classification=ra_classification,
+    generated_by="medea/gpt-4o/ra_cd4",
+    source_name="medeadb",
+)
+```
+
+```
+  [1/2] Running MEDEA — Rheumatoid Arthritis / CD4+ T cells ...
+    Classification: INFERRED
+    Finding: <MEDEA's final hypothesis>
+    Recorded claim: <claim-id>
+```
+
+The SLE fork is identical with `generated_by="medea/gpt-4o/sle_cd4"`.
+
+## Epistemic status
+
+```python
+ra_claim  = graph.get_claim(ra_claim_id)
+sle_claim = graph.get_claim(sle_claim_id)
+print(f"  RA fork:   {ra_classification:10}  →  {ra_claim['support_level']}")
+print(f"  SLE fork:  {sle_classification:10}  →  {sle_claim['support_level']}")
+
+if ra_result["generated_code"] is None or sle_result["generated_code"] is None:
+    # The data pipeline did not run — both findings are LLM prior knowledge.
+    ...
+```
+
+```
+  ============================================================
+  EPISTEMIC STATUS
+  ============================================================
+    RA fork:   INFERRED    →  PRELIMINARY
+    SLE fork:  INFERRED    →  PRELIMINARY
+
+    ⚠  One or both forks returned null generated_code.
+       Both findings are INFERRED — the data pipeline did not run.
+       This was Case B in the original run. See the README for context.
+```
+
+## What this caught
+
+Both forks returned `generated_code = null`. The final hypotheses still read
+differently, but both came from LLM prior knowledge, not MedeaDB. mareforma
+recorded both as `INFERRED`, making the silent failure visible immediately —
+before anyone acted on the results. That led directly to a bug report in MEDEA's
+EFO ID lookup: [mims-harvard/Medea#6](https://github.com/mims-harvard/Medea/pull/6).
+
+## Promoting a finding
+
+An `INFERRED` finding is recorded, not discarded, and held at `PRELIMINARY`
+until independently replicated with real data. To reach `REPLICATED`, two
+conditions must both hold: a different `generated_by` fork reaches the same
+conclusion, **and** both forks cite the same `ESTABLISHED` upstream claim in
+`supports[]`. Without an `ESTABLISHED` anchor, mareforma keeps both at
+`PRELIMINARY` rather than promoting noise. See
+[Example 03](../03_documented_contestation/) for the seed-then-converge pattern.
