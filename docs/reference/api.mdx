@@ -852,7 +852,7 @@ Three opt-in adapter packages — see [Mareforma adapters](../for-agents/agents)
 The trust layer turns a free-text claim into a structured finding: a
 content-addressed proposition, a pre-registered prediction, a computed bearing,
 and a derived status. See [Findings](/concepts/findings) for the narrative. It
-is additive — every finding still rides a signed claim, so it appears in
+is additive: every finding still rides a signed claim, so it appears in
 `query()` with a `support_level` like any other claim.
 
 ```python
@@ -872,15 +872,15 @@ Frozen, value-typed, content-addressed claim about the world.
 
 | Method | Returns | Description |
 |---|---|---|
-| `content_id()` | `str` | `sha256` over normalized `(subject, relation, object, scope, direction, magnitude)` — the *answer*. Same truth conditions → same id. |
-| `frame_id()` | `str` | Same hash with `direction` and `magnitude` dropped — the *question*. |
+| `content_id()` | `str` | `sha256` over normalized `(subject, relation, object, scope, direction, magnitude)`, the *answer*. Same truth conditions give the same id. |
+| `frame_id()` | `str` | Same hash with `direction` and `magnitude` dropped, the *question*. |
 | `is_falsifiable()` | `bool` | `True` iff `direction` is committed (not `UNSPECIFIED`) and `scope` is non-empty. |
 | `same_as(other)` | `bool` | Equal `content_id`. |
 | `contradicts(other)` | `bool` | Same `frame_id`, contrary directions. |
 | `to_dict()` / `from_dict(d)` | `dict` / `Proposition` | Round-trip serialization. |
 
 `Direction` enum: `INCREASES`, `DECREASES`, `NO_EFFECT` (one contrary family),
-`PRESENT`, `ABSENT` (a second), `UNSPECIFIED` (the rejection sentinel — never
+`PRESENT`, `ABSENT` (a second), `UNSPECIFIED` (the rejection sentinel, never
 stored). `REGISTRABLE_DIRECTIONS` is the closed set of the five storable values.
 `normalize_token(s)` exposes the NFC + casefold + whitespace-collapse used at
 identity time.
@@ -900,10 +900,10 @@ raises `InconsistentEstimateError` for a non-finite value, a partial CI triple,
 `p_value` outside `[0, 1]`, `ci_level` outside `(0, 1)`, a CI that does not
 bracket the estimate, or a non-positive `n_total`.
 
-- `EffectType` — `SMD`, `Hedges_g`, `OR`, `logOR`, `RR`, `HR`, `COR`, `ZCOR`,
+- `EffectType`: `SMD`, `Hedges_g`, `OR`, `logOR`, `RR`, `HR`, `COR`, `ZCOR`,
   `MD`, `ROM`, `beta`, `log2FC`, `GEN` (metafor `measure` values).
-- `Scale` — `raw` / `log`.
-- `null_value(effect_type, scale)` — the "no effect" value: `1` for raw-scale
+- `Scale`: `raw` / `log`.
+- `null_value(effect_type, scale)`: the "no effect" value: `1` for raw-scale
   ratio types (`OR`/`RR`/`HR`/`ROM`), `0` otherwise.
 - `Contrast(control_type=ControlType.NEGATIVE)` and
   `EvidenceLine(estimate, data_id, contrast=…, modality=…, provenance_id=…, design_type=…)`
@@ -952,7 +952,7 @@ result = graph.assert_finding(
 )
 ```
 
-**Returns** `dict` — `finding_id`, `content_id`, `plan_id`, `claim_id`,
+**Returns** `dict` with `finding_id`, `content_id`, `plan_id`, `claim_id`,
 `bearing` (`{"direction", "significant"}`), `status`, `idempotent` (bool), and
 `proposition_status` (the full view below).
 
@@ -967,7 +967,7 @@ an orphan claim. Raises `NonFalsifiablePropositionError` /
 The retrieval view for one proposition. Accepts a `content_id` or a
 `Proposition`. `None` if not registered.
 
-**Returns** `dict` — `content_id`, `frame_id`, `direction`, `status`,
+**Returns** `dict` with `content_id`, `frame_id`, `direction`, `status`,
 `independent_support`, `independent_refute`, `frame_status`, `status_policy`.
 
 #### `get_proposition(content_id) -> dict | None`

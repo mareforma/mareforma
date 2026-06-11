@@ -125,6 +125,42 @@ directly. It exists to break the chicken-and-egg of "REPLICATED needs
 an ESTABLISHED upstream that doesn't exist on a fresh graph yet" — and
 it is gated to enrolled human-typed validators only.
 
+## Trust layer
+
+The trust ladder above derives a claim's `support_level` from provenance. The
+trust layer (`mareforma.trust`) adds a parallel, structured model for a single
+content-addressed proposition. It is additive: six new tables, schema stays at
+v1, and every finding still rides a signed claim.
+
+```
+Proposition (content_id, frame_id)
+  ├─ Prediction (the pre-registered rule, append-only)
+  └─ Finding ──▶ signed claim
+        └─ EvidenceLine (data_id) ──▶ Contrast ──▶ EffectEstimate
+```
+
+Three rules:
+
+1. **The bearing is computed, not declared.** `compute_bearing(estimate, prediction)`
+   in [`mareforma/trust/bearing.py`](mareforma/trust/bearing.py) returns
+   supports / refutes / neutral from the pre-registered rule and the realised
+   numbers. An agent cannot relabel a refutation as support.
+2. **Status is a count over independent data.** `compute_status` in
+   [`mareforma/trust/status.py`](mareforma/trust/status.py) reads distinct
+   `data_id` counts (UNTESTED, PRELIMINARY, CORROBORATED, REFUTED, CONTESTED).
+   It is a versioned policy (`status_policy@v1`) over stored counts, recomputed
+   on read, never baked into the schema.
+3. **Identity is the frozen kernel.** `content_id` (the answer) and `frame_id`
+   (the question) are sha256 over RFC 8785 canonical bytes of normalized tokens
+   ([`mareforma/trust/proposition.py`](mareforma/trust/proposition.py)). Same
+   truth conditions collapse to one node; contrary directions on a shared frame
+   contradict.
+
+The graph methods (`register_proposition`, `assert_finding`, `proposition_status`,
+`query_frame`) live in [`mareforma/_graph.py`](mareforma/_graph.py); the SQL is
+in [`mareforma/trust/_store.py`](mareforma/trust/_store.py) and the six tables in
+`db/_schema_sql.py`.
+
 ## Contestation model
 
 Contradiction in mareforma is a **per-claim demotion**, not a

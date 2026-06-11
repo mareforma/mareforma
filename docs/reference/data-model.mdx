@@ -185,8 +185,8 @@ Removal is intentionally unsupported currently — validator history is append-o
 
 The trust layer (see [Findings](/concepts/findings)) adds six tables for
 structured findings. They are **additive**: `CREATE TABLE IF NOT EXISTS`, no
-migration, `user_version` stays `1`. A finding is an evidence tree —
-`finding → evidence_lines → contrasts → effect_estimates` — anchored to a
+migration, `user_version` stays `1`. A finding is an evidence tree
+(`finding → evidence_lines → contrasts → effect_estimates`), anchored to a
 content-addressed `proposition` and a pre-registered `prediction`, and attested
 by an existing signed `claim`.
 
@@ -245,7 +245,7 @@ One attestation plus its computed bearing on a proposition under a plan.
 | `finding_id` | TEXT (PK) | UUID |
 | `content_id` | TEXT | FK to `propositions(content_id)`. Indexed (`idx_find_content`) |
 | `plan_id` | TEXT | FK to `predictions(plan_id)` |
-| `claim_id` | TEXT | FK to `claims(claim_id)` — the signed attestation |
+| `claim_id` | TEXT | FK to `claims(claim_id)`, the signed attestation |
 | `bearing_direction` | TEXT | NOT NULL CHECK enum `supports` / `refutes` / `neutral`. Computed by the gate, denormalized here for Status counting |
 | `created_at` | TEXT | UTC ISO 8601 |
 
@@ -286,7 +286,7 @@ The estimate the gate reads. Minimal metafor-named field set.
 | `ci_lower` / `ci_upper` / `ci_level` | REAL | Confidence interval (all-or-none) |
 | `n_total` | INTEGER | Optional total N |
 
-The `Status` of a proposition is not stored — it is derived on read from the
+The `Status` of a proposition is not stored. It is derived on read from the
 independent supporting / refuting line counts (`status_policy@v1`), so improving
 the rule later is a new policy over the same data, not a migration.
 

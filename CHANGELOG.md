@@ -2,6 +2,55 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.4] - 2026-06-11
+
+The trust layer: structured findings with a computed bearing and a derived
+status. A free-text claim becomes a content-addressed proposition bound to a
+pre-registered prediction; the direction of evidence is computed from the
+registered rule and the result, never self-declared; and a count over
+independent data derives the status. Additive only: six new tables, schema
+stays at v1, and every finding still rides a signed claim as its attestation.
+
+### Added
+
+- **`mareforma.trust`**: the trust layer.
+  - `Proposition`: a content-addressed, falsifiable claim. `content_id` is
+    the answer (subject, relation, object, scope, direction, magnitude);
+    `frame_id` is the question (direction and magnitude dropped). The same
+    truth conditions collapse to one node across hosts and languages
+    (NFC + casefold + whitespace, RFC 8785 bytes). `contradicts` is decidable:
+    same frame, contrary directions.
+  - `Prediction`: a pre-registered decision rule, bound to a proposition
+    before the numbers are seen. Superiority (a predicted side of the null)
+    and equivalence (TOST) gates.
+  - `EffectEstimate` / `EvidenceLine` / `Contrast`: the one-line evidence
+    tree, with metafor-named effect fields. Rejects inconsistent input
+    (non-finite values, a confidence interval that does not bracket the
+    estimate, an out-of-range p-value).
+  - `compute_bearing`: the gate. Returns supports / refutes / neutral,
+    computed from the prediction and the estimate rather than declared.
+  - `compute_status` / `compute_frame_status`: the count-based status
+    (`UNTESTED`, `PRELIMINARY`, `CORROBORATED`, `REFUTED`, `CONTESTED`) over
+    independent data, plus the frame-level contest. Versioned as a policy
+    (`status_policy@v1`) over stored counts, not baked into the schema.
+- **`EpistemicGraph` trust methods**: `register_proposition`,
+  `assert_finding`, `proposition_status`, `get_proposition`, `query_frame`.
+  `assert_finding` validates the input, computes the bearing, writes a signed
+  claim, persists the evidence tree, and derives the status in one call;
+  idempotent on `(content_id, data_id)`.
+- **Schema**: six additive tables (`propositions`, `predictions`, `findings`,
+  `evidence_lines`, `contrasts`, `effect_estimates`), with the prediction table
+  append-only. Schema stays at v1; an existing v0.3.3 `graph.db` gains them on
+  next `open_db()`.
+- **Docs**: a Findings concept page, the trust API surface, and the six tables
+  in the data model.
+
+### Notes
+
+- The superiority gate is one-sided at `alpha`. A supplied p-value is read as
+  two-sided (the metafor/escalc convention), so significance is `p < 2*alpha`,
+  matching the `(1 - 2*alpha)` confidence-interval path.
+
 ## [0.3.3] - 2026-05-29
 
 Adapter framework and substrate primitives. Five new primitives in

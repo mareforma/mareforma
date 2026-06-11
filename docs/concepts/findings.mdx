@@ -11,9 +11,9 @@ and the graph records it faithfully.
 
 The trust layer (`mareforma.trust`) closes that gap. The same assertion is
 expressed as a falsifiable **proposition**, bound to a pre-registered
-**prediction**, measured by an **effect estimate**, and the direction of
-evidence — the **bearing** — is *computed*, never declared. A count over
-independent data then derives a **status**.
+**prediction**, measured by an **effect estimate**. The direction of evidence
+(the **bearing**) is *computed*, never declared. A count over independent data
+then derives a **status**.
 
 It is additive. Every finding still rides a signed claim as its attestation
 (who asserted it, when), so it appears in `query()` with a `support_level`
@@ -28,7 +28,7 @@ Bearing  =  gate(estimate, prediction)        ◄── COMPUTED, not declared
 Status   =  count over independent supporting / refuting data
 ```
 
-## The proposition — the unit of sameness
+## The proposition: the unit of sameness
 
 A `Proposition` is a truth-apt, observer-independent claim about the world,
 built from typed parts rather than a sentence:
@@ -48,12 +48,12 @@ prop = Proposition(
 It is **content-addressed**. Two agents who assert the same thing in different
 words converge on one node:
 
-- `content_id` is the *answer* — `sha256` over the normalized
+- `content_id` is the *answer*: `sha256` over the normalized
   `(subject, relation, object, scope, direction, magnitude)`. Same truth
   conditions produce the same id, on any host, in any language (tokens are
   NFC-normalized, casefolded, whitespace-collapsed; the byte serialization is
   RFC 8785).
-- `frame_id` is the *question* — the same hash with `direction` and `magnitude`
+- `frame_id` is the *question*: the same hash with `direction` and `magnitude`
   dropped. Two propositions share a frame when they are about the same
   question. They are the **same** proposition when their direction and
   magnitude also match; they **contradict** when their directions are
@@ -69,7 +69,7 @@ A proposition must be **falsifiable** to anchor evidence: it must commit to a
 direction (not `UNSPECIFIED`) and state a non-empty scope. An unscoped,
 directionless assertion forbids no observation and is refused.
 
-## The prediction — a pre-registered rule
+## The prediction: a pre-registered rule
 
 A `Prediction` is the decision rule, bound to the proposition *before* the
 numbers are seen. It is what makes the bearing earned rather than chosen.
@@ -94,7 +94,7 @@ cross-host float drift):
   (`equivalence_lower` / `equivalence_upper`) around the null, for testing a
   `NO_EFFECT` proposition.
 
-## The estimate — a value plus its uncertainty
+## The estimate: a value plus its uncertainty
 
 An `EffectEstimate` carries the result and exactly what the gate needs:
 
@@ -114,10 +114,10 @@ estimate runs its own consistency checks on construction and refuses
 inconsistent input (a CI that does not bracket the estimate, a non-finite
 bound, a `p_value` outside `[0, 1]`) rather than storing it.
 
-## The bearing — computed, not declared
+## The bearing: computed, not declared
 
 `compute_bearing` is the gate. It reads the pre-registered rule and the realised
-estimate and returns `supports` / `refutes` / `neutral` — the agent never picks
+estimate and returns `supports` / `refutes` / `neutral`. The agent never picks
 the label.
 
 ```python
@@ -128,16 +128,18 @@ bearing.direction   # BearingDirection.SUPPORTS
 bearing.significant  # True
 ```
 
-For superiority, the estimate is significant when `p_value < alpha` (or the CI
-excludes the null at the level the test's alpha implies), and the sign of
-`estimate - null` is compared against the pre-registered direction. For
+The test is one-sided at `alpha` (the direction is pre-registered). The estimate
+is significant when `p_value < 2*alpha` (the supplied p is two-sided by the
+metafor/escalc convention, so the one-sided `alpha` level is `2*alpha`), or,
+with no p, when the `(1 - 2*alpha)` CI excludes the null. The sign of
+`estimate - null` is then compared against the pre-registered direction. For
 equivalence, a CI lying entirely inside the region supports the no-effect
 proposition, entirely outside refutes it, and straddling a margin is neutral.
 
 Because the label is a function of the registered rule and the number, an agent
 cannot relabel a refutation as support.
 
-## The status — derived from independent data
+## The status: derived from independent data
 
 `Status` is a count over independent lines of evidence on a single
 `content_id`, not an assertion of truth and not a human gate. Independence is a
@@ -178,8 +180,8 @@ result = graph.assert_finding(
     data_id="dataset_alpha",
     generated_by="analyst/model-a/lab_a",
 )
-result["bearing"]["direction"]   # "supports" — computed
-result["status"]                  # "PRELIMINARY" — one independent line
+result["bearing"]["direction"]   # "supports", computed
+result["status"]                  # "PRELIMINARY", one independent line
 ```
 
 A second independent dataset on the same proposition lifts it to
@@ -202,9 +204,10 @@ The two layers answer different questions and run side by side:
 - **`support_level`** (`PRELIMINARY` / `REPLICATED` / `ESTABLISHED`, see
   [Trust](/concepts/trust)) is about a *claim's* provenance: did independent
   agents converge on a shared upstream, and did a human validate it.
-- **`Status`** (`CORROBORATED`, `REFUTED`, `CONTESTED`, …) is about a
-  *proposition's* evidence: how many independent datasets support or refute it,
-  with the direction of each computed from a pre-registered rule.
+- **`Status`** (`UNTESTED`, `PRELIMINARY`, `CORROBORATED`, `REFUTED`,
+  `CONTESTED`) is about a *proposition's* evidence: how many independent
+  datasets support or refute it, with the direction of each computed from a
+  pre-registered rule.
 
 A finding has both. The claim records who asserted what; the trust layer records
 whether the data earns it.
