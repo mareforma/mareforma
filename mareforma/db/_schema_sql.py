@@ -585,6 +585,131 @@ CREATE TABLE IF NOT EXISTS agent_activities (
     started_at  TEXT NOT NULL,
     prov_type   TEXT NOT NULL DEFAULT 'prov:Activity'
 );
+
+-- Trust layer: the structured meaning above the signed claim graph. A finding
+-- rides a signed claim (the attestation: who asserted it, when, chained), and
+-- these tables carry what was asserted (a content-addressed proposition), the
+-- pre-registered plan, the evidence tree, and the computed bearing. The
+-- identity hash and the proposition field set are frozen; Status is a versioned
+-- policy computed at read time from the independent lines, not stored. Every
+-- CHECK mirrors a closed Python enum in
+-- mareforma.trust so a direct-SQL write is rejected at the storage layer like
+-- everything else. These tables are additive: existing graphs gain them on
+-- open with no migration, and the legacy free-text surface is untouched.
+
+-- The unit of sameness. content_id is the answer (subject, relation, object,
+-- scope, direction, magnitude); frame_id is the question (drops direction and
+-- magnitude). UNSPECIFIED is absent from the direction CHECK because a
+-- non-falsifiable proposition is refused at registration and never stored.
+CREATE TABLE IF NOT EXISTS propositions (
+    content_id        TEXT PRIMARY KEY,
+    frame_id          TEXT NOT NULL,
+    subject           TEXT NOT NULL,
+    relation          TEXT NOT NULL,
+    object            TEXT NOT NULL,
+    direction         TEXT NOT NULL CHECK (direction IN
+                          ('INCREASES','DECREASES','NO_EFFECT','PRESENT','ABSENT')),
+    scope_json        TEXT NOT NULL,
+    magnitude         TEXT,
+    content_id_policy  TEXT NOT NULL DEFAULT 'content_id@v1',
+    schema_version    TEXT NOT NULL DEFAULT 'trust@v1',
+    created_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_prop_frame     ON propositions(frame_id);
+CREATE INDEX IF NOT EXISTS idx_prop_frame_dir ON propositions(frame_id, direction);
+
+-- The pre-registered plan, bound to one proposition and immutable once
+-- registered (see the append-only trigger below). assert_finding registers it
+-- inline today; a later release exposes a register-plan-then-submit split,
+-- which becomes additive because the plan already stands alone here.
+CREATE TABLE IF NOT EXISTS predictions (
+    plan_id               TEXT PRIMARY KEY,
+    content_id            TEXT NOT NULL REFERENCES propositions(content_id),
+    inference_regime      TEXT NOT NULL DEFAULT 'frequentist'
+                              CHECK (inference_regime IN ('frequentist')),
+    test_type             TEXT NOT NULL
+                              CHECK (test_type IN ('superiority','equivalence')),
+    direction_of_interest TEXT CHECK (direction_of_interest IN ('increase','decrease')),
+    equivalence_lower     REAL,
+    equivalence_upper     REAL,
+    alpha                 REAL NOT NULL CHECK (alpha > 0 AND alpha < 1),
+    preregistered         INTEGER NOT NULL DEFAULT 0 CHECK (preregistered IN (0, 1)),
+    registered_at         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pred_content ON predictions(content_id);
+
+-- A registered plan is append-only: refuse any UPDATE of its immutable columns
+-- and any DELETE, so the gap between registration and evidence is a real
+-- pre-registration guarantee. Mirrors the verdict tables' append-only protection.
+CREATE TRIGGER IF NOT EXISTS predictions_append_only
+BEFORE UPDATE OF
+    content_id, inference_regime, test_type, direction_of_interest,
+    equivalence_lower, equivalence_upper, alpha, preregistered, registered_at
+ON predictions
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:prediction_locked');
+END;
+CREATE TRIGGER IF NOT EXISTS predictions_no_delete
+BEFORE DELETE ON predictions
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:prediction_delete_blocked');
+END;
+
+-- A finding: one attestation (claim_id) plus its computed bearing_direction on
+-- a proposition under a plan. The direction is denormalised here for queryable
+-- Status counting; the gate inputs are persisted on the estimate so any reader
+-- can recompute it and catch drift.
+CREATE TABLE IF NOT EXISTS findings (
+    finding_id        TEXT PRIMARY KEY,
+    content_id        TEXT NOT NULL REFERENCES propositions(content_id),
+    plan_id           TEXT NOT NULL REFERENCES predictions(plan_id),
+    claim_id          TEXT NOT NULL REFERENCES claims(claim_id),
+    bearing_direction TEXT CHECK (bearing_direction IN ('supports','refutes','neutral')),
+    created_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_find_content ON findings(content_id);
+
+-- One independent line of evidence. data_id is the distinct-artifact key the
+-- independence heuristic counts over: two lines are independent iff their
+-- data_id differs. The current cut fills one line per finding.
+CREATE TABLE IF NOT EXISTS evidence_lines (
+    line_id        TEXT PRIMARY KEY,
+    finding_id     TEXT NOT NULL REFERENCES findings(finding_id),
+    modality       TEXT,
+    provenance_id  TEXT,
+    design_type    TEXT,
+    data_id        TEXT NOT NULL,
+    created_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_line_finding ON evidence_lines(finding_id);
+CREATE INDEX IF NOT EXISTS idx_line_data    ON evidence_lines(data_id);
+
+-- The comparison a line quantifies. It carries only the control type today.
+CREATE TABLE IF NOT EXISTS contrasts (
+    contrast_id    TEXT PRIMARY KEY,
+    line_id        TEXT NOT NULL REFERENCES evidence_lines(line_id),
+    control_type   TEXT NOT NULL DEFAULT 'negative' CHECK (control_type IN
+                       ('positive','negative','vehicle','sham','comparative'))
+);
+
+-- The effect estimate the gate reads. Minimal field set (metafor field
+-- names); variance, IRIs, test statistics, per-group n, and 2x2 cells are
+-- deferred. effect_type is the stable, identity-relevant enum.
+CREATE TABLE IF NOT EXISTS effect_estimates (
+    estimate_id    TEXT PRIMARY KEY,
+    contrast_id    TEXT NOT NULL REFERENCES contrasts(contrast_id),
+    estimate_value REAL NOT NULL,
+    effect_type    TEXT NOT NULL CHECK (effect_type IN
+                       ('SMD','Hedges_g','OR','logOR','RR','HR','COR','ZCOR',
+                        'MD','ROM','beta','log2FC','GEN')),
+    scale          TEXT NOT NULL CHECK (scale IN ('raw','log')),
+    p_value        REAL CHECK (p_value IS NULL OR (p_value >= 0 AND p_value <= 1)),
+    ci_lower       REAL,
+    ci_upper       REAL,
+    ci_level       REAL,
+    n_total        INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_estimate_contrast ON effect_estimates(contrast_id);
 """
 
 
