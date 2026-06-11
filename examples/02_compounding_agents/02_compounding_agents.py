@@ -22,6 +22,16 @@ Two agents work sequentially on the same research question.
   The result: Agent B's conclusion is traceable to raw data.
   Knowledge accumulates instead of evaporating between agent runs.
 
+The trust layer — earned support
+--------------------------------
+Above, support rises from self-declared edges: each agent picks its own
+classification and supports[] list. The closing act tells the same compounding
+story with the trust layer, where the support is earned. The question becomes a
+falsifiable Proposition; each analyst registers a Prediction BEFORE seeing the
+numbers; mareforma COMPUTES the bearing from the result (never declared) and
+DERIVES status from independent datasets: one line is PRELIMINARY, two
+independent lines are CORROBORATED.
+
 LangChain integration
 ---------------------
 graph.get_tools(generated_by="...") returns [query_graph, assert_finding] as plain
@@ -43,6 +53,15 @@ from pathlib import Path
 
 import mareforma
 from mareforma import signing as _signing
+from mareforma.trust import (
+    Direction,
+    DirectionOfInterest,
+    EffectEstimate,
+    EffectType,
+    Prediction,
+    Proposition,
+    TestType,
+)
 from langchain_core.tools import tool
 
 
@@ -189,6 +208,100 @@ print("  prior reference → ANALYTICAL (×2, independent) → REPLICATED → DE
 print()
 print("  Without querying the graph, Agent B would have asserted from scratch.")
 print("  The graph is what makes findings compound instead of evaporate.")
+
+
+# ---------------------------------------------------------------------------
+# The trust layer — support that is earned, not declared
+# ---------------------------------------------------------------------------
+# The claim graph above tracks who asserted what. The trust layer makes the
+# support earned: the same question becomes a falsifiable Proposition, each
+# analyst registers a Prediction before seeing the numbers, mareforma computes
+# the bearing from the result, and status derives from independent datasets.
+
+sep("The trust layer — earned support")
+
+# The same research question, now as a truth-apt, falsifiable claim.
+prop = Proposition(
+    subject="cell type A",
+    relation="inhibitory connectivity onto",
+    object="cell type B",
+    direction=Direction.INCREASES,
+    scope={"region": "cortex", "species": "mouse"},
+)
+
+# A pre-registered decision rule bound to the proposition before any data is
+# seen: if it holds, the effect lands on the INCREASE side of the null.
+plan = Prediction(
+    test_type=TestType.SUPERIORITY,
+    direction_of_interest=DirectionOfInterest.INCREASE,
+    alpha=0.05,
+    preregistered=True,
+)
+
+show("frame_id (the question)", prop.frame_id()[:8] + "…")
+show("content_id (the answer)", prop.content_id()[:8] + "…")
+
+# Analyst A on dataset_alpha: a standardised mean difference, positive, with a
+# 90% CI excluding zero (the one-sided test at alpha=0.05).
+result_a = graph.assert_finding(
+    prop,
+    plan,
+    EffectEstimate(
+        estimate_value=0.42,
+        effect_type=EffectType.SMD,
+        ci_lower=0.18,
+        ci_upper=0.66,
+        ci_level=0.90,
+        n_total=842,
+    ),
+    data_id="dataset_alpha",
+    generated_by="analyst/model-a/lab_a",
+)
+show("alpha bearing (computed)", result_a["bearing"]["direction"])
+show("alpha status (derived)", result_a["status"])
+
+# Analyst B's independent run on dataset_beta. A distinct data_id is a second
+# independent line of support for the same proposition.
+result_b = graph.assert_finding(
+    prop,
+    plan,
+    EffectEstimate(
+        estimate_value=0.51,
+        effect_type=EffectType.SMD,
+        ci_lower=0.20,
+        ci_upper=0.82,
+        ci_level=0.90,
+        n_total=1104,
+    ),
+    data_id="dataset_beta",
+    generated_by="analyst/model-b/lab_b",
+)
+show("beta bearing (computed)", result_b["bearing"]["direction"])
+show("beta status (derived)", result_b["status"])
+
+print()
+print("  Neither agent declared 'supports'. mareforma computed each bearing")
+print("  from the pre-registered rule and derived CORROBORATED from two")
+print("  independent datasets.")
+
+
+# ---------------------------------------------------------------------------
+# Synthesizer — query the frame (the question, not the wording)
+# ---------------------------------------------------------------------------
+
+sep("Synthesizer — query the frame")
+
+views = graph.query_frame(prop, min_status="PRELIMINARY")
+print(f"  query_frame(prop, min_status='PRELIMINARY') → {len(views)} proposition(s)")
+for v in views:
+    show("status", v["status"])
+    show("independent support lines", v["independent_support"])
+    show("frame contest", v["frame_status"])
+
+print()
+print("  The bearing is a function of the registered rule and the realised")
+print("  numbers, so a refutation cannot be relabelled as support. Status is")
+print("  a count over independent data, not a self-declared label.")
 
 
 # ---------------------------------------------------------------------------
