@@ -181,6 +181,115 @@ The first key opened against a fresh `graph.db` auto-enrolls as the root with a 
 
 Removal is intentionally unsupported currently — validator history is append-only.
 
+## Trust layer tables
+
+The trust layer (see [Findings](/concepts/findings)) adds six tables for
+structured findings. They are **additive**: `CREATE TABLE IF NOT EXISTS`, no
+migration, `user_version` stays `1`. A finding is an evidence tree
+(`finding → evidence_lines → contrasts → effect_estimates`), anchored to a
+content-addressed `proposition` and a pre-registered `prediction`, and attested
+by an existing signed `claim`.
+
+```
+proposition (content_id)
+   ├── prediction (plan_id)        the pre-registered rule
+   └── finding (finding_id) ──► claim_id        the signed attestation
+          └── evidence_line (line_id, data_id)
+                 └── contrast (contrast_id)
+                        └── effect_estimate (estimate_id)
+```
+
+### propositions table
+
+The content-addressed unit of sameness. `content_id` (PK) is the answer hash;
+`frame_id` is the question hash.
+
+| Field | Type | Notes |
+|---|---|---|
+| `content_id` | TEXT (PK) | `sha256` over normalized `(subject, relation, object, scope, direction, magnitude)` |
+| `frame_id` | TEXT | Question hash (direction + magnitude dropped). Indexed |
+| `subject` / `relation` / `object` | TEXT | The typed parts of the assertion |
+| `direction` | TEXT | CHECK enum `INCREASES` / `DECREASES` / `NO_EFFECT` / `PRESENT` / `ABSENT` (`UNSPECIFIED` is never stored) |
+| `scope_json` | TEXT | Canonical JSON of the scope map |
+| `magnitude` | TEXT | Optional quantitative refinement; participates in `content_id` |
+| `content_id_policy` | TEXT | Identity-policy stamp, default `content_id@v1` |
+| `schema_version` | TEXT | Trust-schema stamp, default `trust@v1` |
+| `created_at` | TEXT | UTC ISO 8601 |
+
+Indexes: `idx_prop_frame` (`frame_id`), `idx_prop_frame_dir` (`frame_id, direction`).
+
+### predictions table
+
+The pre-registered plan, bound to one proposition. `plan_id` (PK) is content-addressed over `(content_id, prediction fields)`, so registering the same plan twice is a no-op.
+
+| Field | Type | Notes |
+|---|---|---|
+| `plan_id` | TEXT (PK) | Content-addressed plan id |
+| `content_id` | TEXT | FK to `propositions(content_id)`. Indexed (`idx_pred_content`) |
+| `inference_regime` | TEXT | CHECK enum `frequentist` |
+| `test_type` | TEXT | CHECK enum `superiority` / `equivalence` |
+| `direction_of_interest` | TEXT | CHECK enum `increase` / `decrease` (superiority only) |
+| `equivalence_lower` / `equivalence_upper` | REAL | Equivalence region (TOST only) |
+| `alpha` | REAL | CHECK `alpha > 0 AND alpha < 1` |
+| `preregistered` | INTEGER | CHECK `IN (0, 1)` |
+| `registered_at` | TEXT | UTC ISO 8601 |
+
+A registered plan is **append-only**: `predictions_append_only` (BEFORE UPDATE of every immutable column) and `predictions_no_delete` (BEFORE DELETE) raise `mareforma:append_only:prediction_locked` / `prediction_delete_blocked`, so the gap between registration and evidence is a real pre-registration guarantee.
+
+### findings table
+
+One attestation plus its computed bearing on a proposition under a plan.
+
+| Field | Type | Notes |
+|---|---|---|
+| `finding_id` | TEXT (PK) | UUID |
+| `content_id` | TEXT | FK to `propositions(content_id)`. Indexed (`idx_find_content`) |
+| `plan_id` | TEXT | FK to `predictions(plan_id)` |
+| `claim_id` | TEXT | FK to `claims(claim_id)`, the signed attestation |
+| `bearing_direction` | TEXT | NOT NULL CHECK enum `supports` / `refutes` / `neutral`. Computed by the gate, denormalized here for Status counting |
+| `created_at` | TEXT | UTC ISO 8601 |
+
+### evidence_lines table
+
+One independent line of evidence. `data_id` is the distinct-artifact key the independence heuristic counts over.
+
+| Field | Type | Notes |
+|---|---|---|
+| `line_id` | TEXT (PK) | UUID |
+| `finding_id` | TEXT | FK to `findings(finding_id)`. Indexed (`idx_line_finding`) |
+| `data_id` | TEXT | The independence key; two lines are independent iff this differs. Indexed (`idx_line_data`) |
+| `modality` / `provenance_id` / `design_type` | TEXT | Optional descriptors |
+| `created_at` | TEXT | UTC ISO 8601 |
+
+### contrasts table
+
+The comparison a line quantifies (control type only, for now).
+
+| Field | Type | Notes |
+|---|---|---|
+| `contrast_id` | TEXT (PK) | UUID |
+| `line_id` | TEXT | FK to `evidence_lines(line_id)` |
+| `control_type` | TEXT | CHECK enum `positive` / `negative` / `vehicle` / `sham` / `comparative` |
+
+### effect_estimates table
+
+The estimate the gate reads. Minimal metafor-named field set.
+
+| Field | Type | Notes |
+|---|---|---|
+| `estimate_id` | TEXT (PK) | UUID |
+| `contrast_id` | TEXT | FK to `contrasts(contrast_id)`. Indexed (`idx_estimate_contrast`) |
+| `estimate_value` | REAL | The point estimate |
+| `effect_type` | TEXT | CHECK enum of 13 metafor `measure` values (`SMD`, `OR`, `logOR`, `RR`, `HR`, `ROM`, …) |
+| `scale` | TEXT | CHECK enum `raw` / `log` |
+| `p_value` | REAL | CHECK `NULL OR (0 ≤ p_value ≤ 1)` |
+| `ci_lower` / `ci_upper` / `ci_level` | REAL | Confidence interval (all-or-none) |
+| `n_total` | INTEGER | Optional total N |
+
+The `Status` of a proposition is not stored. It is derived on read from the
+independent supporting / refuting line counts (`status_policy@v1`), so improving
+the rule later is a new policy over the same data, not a migration.
+
 ## Schema versioning
 
 The schema version is stored in SQLite's `user_version` pragma.

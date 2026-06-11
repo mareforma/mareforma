@@ -842,3 +842,142 @@ Three opt-in adapter packages — see [Mareforma adapters](../for-agents/agents)
 | `mareforma.adapters.clawinstitute` | `pip install mareforma[clawinstitute]` | Workshop-event hook with HttpxClient, EventSource Protocol implementation, 3-layer content sanitisation, 8 typed exceptions. |
 | `mareforma.adapters.tooluniverse` | `pip install mareforma[tooluniverse]` | `ProvenanceToolAdapter` wraps any `mareforma.tools.Tool`; each call records a signed `tool-call:v1` claim. Container-exec class tools route to `container-exec:v1`. |
 | `mareforma.adapters.gemini` | `pip install mareforma[gemini]` | Read-only `OutputIngester` for 4 Gemini for Science capabilities. Per-capability `REQUIRED_FIELDS` validation; string payload values sanitised. |
+
+---
+
+## v0.3.4 surface
+
+### `mareforma.trust`
+
+The trust layer turns a free-text claim into a structured finding: a
+content-addressed proposition, a pre-registered prediction, a computed bearing,
+and a derived status. See [Findings](/concepts/findings) for the narrative. It
+is additive: every finding still rides a signed claim, so it appears in
+`query()` with a `support_level` like any other claim.
+
+```python
+from mareforma.trust import (
+    Proposition, Direction,
+    Prediction, TestType, DirectionOfInterest, InferenceRegime,
+    EffectEstimate, EffectType, Scale, ControlType, Contrast, EvidenceLine,
+    Bearing, BearingDirection, compute_bearing,
+    Status, FrameStatus, compute_status, compute_frame_status, STATUS_POLICY,
+    null_value,
+)
+```
+
+#### `Proposition(subject, relation, object, direction=Direction.UNSPECIFIED, scope={}, magnitude=None)`
+
+Frozen, value-typed, content-addressed claim about the world.
+
+| Method | Returns | Description |
+|---|---|---|
+| `content_id()` | `str` | `sha256` over normalized `(subject, relation, object, scope, direction, magnitude)`, the *answer*. Same truth conditions give the same id. |
+| `frame_id()` | `str` | Same hash with `direction` and `magnitude` dropped, the *question*. |
+| `is_falsifiable()` | `bool` | `True` iff `direction` is committed (not `UNSPECIFIED`) and `scope` is non-empty. |
+| `same_as(other)` | `bool` | Equal `content_id`. |
+| `contradicts(other)` | `bool` | Same `frame_id`, contrary directions. |
+| `to_dict()` / `from_dict(d)` | `dict` / `Proposition` | Round-trip serialization. |
+
+`Direction` enum: `INCREASES`, `DECREASES`, `NO_EFFECT` (one contrary family),
+`PRESENT`, `ABSENT` (a second), `UNSPECIFIED` (the rejection sentinel, never
+stored). `REGISTRABLE_DIRECTIONS` is the closed set of the five storable values.
+`normalize_token(s)` exposes the NFC + casefold + whitespace-collapse used at
+identity time.
+
+#### `Prediction(test_type, alpha=0.05, *, direction_of_interest=None, equivalence_lower=None, equivalence_upper=None, preregistered=False, inference_regime=InferenceRegime.FREQUENTIST)`
+
+The pre-registered decision rule. `TestType.SUPERIORITY` requires
+`direction_of_interest` (`DirectionOfInterest.INCREASE` / `DECREASE`);
+`TestType.EQUIVALENCE` requires `equivalence_lower < equivalence_upper`. Raises
+`ValueError` on an inconsistent combination.
+
+#### `EffectEstimate(estimate_value, effect_type, scale=Scale.RAW, *, p_value=None, ci_lower=None, ci_upper=None, ci_level=None, n_total=None)`
+
+A point estimate plus the uncertainty the gate needs. Supply a `p_value`, a full
+`(ci_lower, ci_upper, ci_level)` triple, or both. Validates on construction and
+raises `InconsistentEstimateError` for a non-finite value, a partial CI triple,
+`p_value` outside `[0, 1]`, `ci_level` outside `(0, 1)`, a CI that does not
+bracket the estimate, or a non-positive `n_total`.
+
+- `EffectType`: `SMD`, `Hedges_g`, `OR`, `logOR`, `RR`, `HR`, `COR`, `ZCOR`,
+  `MD`, `ROM`, `beta`, `log2FC`, `GEN` (metafor `measure` values).
+- `Scale`: `raw` / `log`.
+- `null_value(effect_type, scale)`: the "no effect" value: `1` for raw-scale
+  ratio types (`OR`/`RR`/`HR`/`ROM`), `0` otherwise.
+- `Contrast(control_type=ControlType.NEGATIVE)` and
+  `EvidenceLine(estimate, data_id, contrast=…, modality=…, provenance_id=…, design_type=…)`
+  are the one-line evidence tree. `data_id` is the distinct-artifact key the
+  independence heuristic counts over.
+
+#### `compute_bearing(estimate, prediction) -> Bearing`
+
+The gate. Returns a frozen `Bearing(direction, significant)` where `direction`
+is `BearingDirection.SUPPORTS` / `REFUTES` / `NEUTRAL`. Raises
+`InconsistentEstimateError` when the estimate cannot drive the requested gate
+(e.g. an equivalence test with no CI, or a CI at the wrong level for the
+prediction's alpha).
+
+#### `compute_status(independent_support, independent_refute) -> Status`
+
+The state machine: `UNTESTED` (0, 0); `CONTESTED` (≥1 support and ≥1 refute);
+`REFUTED` (≥1 refute, 0 support); `CORROBORATED` (≥2 support, 0 refute);
+`PRELIMINARY` (exactly 1 support, 0 refute). `compute_frame_status(contrary_independent_support)`
+returns `FrameStatus.CONTESTED` when a contrary proposition in the same frame
+has ≥1 independent supporting line, else `CONSISTENT`. `STATUS_POLICY` is the
+policy stamp (`"status_policy@v1"`), independent of the package version.
+
+Errors: `TrustError` (base), `NonFalsifiablePropositionError`,
+`InconsistentEstimateError`.
+
+### EpistemicGraph trust methods
+
+#### `register_proposition(proposition) -> str`
+
+Register a falsifiable `Proposition`; returns its `content_id`. Idempotent on
+`content_id`. Raises `NonFalsifiablePropositionError` if the proposition has no
+direction or an empty scope.
+
+#### `assert_finding(proposition, prediction, estimate, *, data_id, generated_by=None, control_type=None, modality=None, provenance_id=None, design_type=None, code_ref=None, idempotency_key=None) -> dict`
+
+Record a finding: validate the inputs, compute the bearing, write a signed claim
+as the attestation, persist the single-line evidence tree, and derive the
+proposition's status.
+
+```python
+result = graph.assert_finding(
+    prop, plan, estimate,
+    data_id="dataset_alpha",
+    generated_by="analyst/model-a/lab_a",
+)
+```
+
+**Returns** `dict` with `finding_id`, `content_id`, `plan_id`, `claim_id`,
+`bearing` (`{"direction", "significant"}`), `status`, `idempotent` (bool), and
+`proposition_status` (the full view below).
+
+Idempotent on `(content_id, data_id)`: re-asserting the same finding on the same
+dataset returns the prior finding rather than double-counting it. All validation
+runs **before** the signed claim is written, so a rejected finding never leaves
+an orphan claim. Raises `NonFalsifiablePropositionError` /
+`InconsistentEstimateError` on bad input.
+
+#### `proposition_status(proposition_or_content_id) -> dict | None`
+
+The retrieval view for one proposition. Accepts a `content_id` or a
+`Proposition`. `None` if not registered.
+
+**Returns** `dict` with `content_id`, `frame_id`, `direction`, `status`,
+`independent_support`, `independent_refute`, `frame_status`, `status_policy`.
+
+#### `get_proposition(content_id) -> dict | None`
+
+The stored proposition row as a dict, or `None`.
+
+#### `query_frame(frame_id_or_proposition, *, min_status=None) -> list[dict]`
+
+Everything known about a question (frame), each entry a `proposition_status`
+view. Accepts a `frame_id` or a `Proposition`. `min_status` filters to a floor on
+the `UNTESTED < PRELIMINARY < CORROBORATED` ladder (the only valid floors;
+`REFUTED` / `CONTESTED` are off the ladder and excluded by any floor). Raises
+`ValueError` on an invalid floor.

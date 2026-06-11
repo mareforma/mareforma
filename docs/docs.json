@@ -63,7 +63,8 @@
             "pages": [
               "concepts/trust",
               "concepts/origin",
-              "concepts/the-graph"
+              "concepts/the-graph",
+              "concepts/findings"
             ]
           },
           {

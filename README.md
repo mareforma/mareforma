@@ -64,6 +64,8 @@ graph LR
 
 **Classification.** Declared by the agent, records what kind of work produced it: `INFERRED` (LLM reasoning), `ANALYTICAL` (deterministic analysis against source data), `DERIVED` (built on `ESTABLISHED` or `REPLICATED` claims). Trust level and classification are independent axes. Query both: `graph.query(text, min_support="REPLICATED", classification="ANALYTICAL")`.
 
+**Findings: earned, not declared.** The trust ladder above is read from provenance. The trust layer (`mareforma.trust`) goes one step further. It turns a claim into a content-addressed `Proposition` bound to a pre-registered `Prediction`, computes the direction of evidence with `compute_bearing` instead of letting the agent declare it, and derives a count-based `Status` (`PRELIMINARY` to `CORROBORATED`) from independent datasets. A finding rides a signed claim, so it is additive. See [Findings](https://docs.mareforma.com/concepts/findings) and [Example 02](examples/02_compounding_agents).
+
 ### Core surface
 
 ```python
@@ -71,6 +73,10 @@ graph.assert_claim(text, classification, supports=[...])
 graph.query(text, min_support="REPLICATED")
 graph.query_provenance(claim_id, depth=4)
 graph.validate(claim_id, evidence_seen=[...])
+
+# Trust layer: a computed bearing and a derived status
+graph.assert_finding(proposition, prediction, estimate, data_id="...")
+graph.proposition_status(proposition)   # derived Status + independence counts
 ```
 
 ```bash

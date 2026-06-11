@@ -450,6 +450,54 @@ graph.assert_claim(
 
 ---
 
+## Trust layer (`mareforma.trust`)
+
+Support level is read from provenance. The trust layer adds a structured model
+where the direction of evidence is computed, not declared. Express the claim as
+a falsifiable `Proposition`, bind a pre-registered `Prediction`, supply the
+result as an `EffectEstimate`, and call `assert_finding`. mareforma computes the
+bearing, writes a signed claim as the attestation, and derives a count-based
+`Status` from independent datasets.
+
+```python
+from mareforma.trust import (
+    Proposition, Direction, Prediction, TestType, DirectionOfInterest,
+    EffectEstimate, EffectType,
+)
+
+prop = Proposition(
+    subject="cell type A", relation="inhibitory connectivity onto",
+    object="cell type B", direction=Direction.INCREASES,
+    scope={"region": "cortex", "species": "mouse"},
+)
+plan = Prediction(
+    test_type=TestType.SUPERIORITY,
+    direction_of_interest=DirectionOfInterest.INCREASE, alpha=0.05,
+)
+est = EffectEstimate(
+    estimate_value=0.42, effect_type=EffectType.SMD,
+    ci_lower=0.18, ci_upper=0.66, ci_level=0.90, n_total=842,
+)
+
+result = graph.assert_finding(prop, plan, est, data_id="dataset_alpha",
+                              generated_by="analyst/model-a/lab_a")
+result["bearing"]["direction"]   # "supports", computed by the gate
+result["status"]                  # "PRELIMINARY" (one independent line)
+
+# A second independent dataset on the same proposition lifts it to CORROBORATED.
+graph.proposition_status(prop)["status"]
+```
+
+Methods: `register_proposition(proposition)`,
+`assert_finding(proposition, prediction, estimate, *, data_id, ...)`,
+`proposition_status(proposition_or_content_id)`, `get_proposition(content_id)`,
+`query_frame(frame_id_or_proposition, *, min_status=None)`. `assert_finding` is
+idempotent on `(content_id, data_id)`. Full reference:
+[docs.mareforma.com](https://docs.mareforma.com/reference/api) and the
+[Findings](https://docs.mareforma.com/concepts/findings) concept page.
+
+---
+
 ## Claim status
 
 Status is an editorial signal, separate from support level.
