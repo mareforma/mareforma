@@ -131,11 +131,13 @@ class TestResolveDoi:
 class TestResolveDoisWithCache:
     def test_cache_hit_avoids_network(self, tmp_path: Path, httpx_mock) -> None:
         conn = open_db(tmp_path)
-        # Pre-populate cache as resolved.
+        # Pre-populate cache as resolved, within the 30-day TTL. The timestamp is
+        # relative to now so the test does not rot as wall-clock time advances.
+        fresh = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
         conn.execute(
             "INSERT INTO doi_cache (doi, resolved, registry, last_checked_at) "
-            "VALUES (?, 1, 'crossref', '2026-05-12T00:00:00+00:00')",
-            ("10.1038/cached",),
+            "VALUES (?, 1, 'crossref', ?)",
+            ("10.1038/cached", fresh),
         )
         conn.commit()
 
