@@ -1,0 +1,213 @@
+---
+title: "Findings"
+description: "Structured findings: a content-addressed proposition, a pre-registered prediction, a computed bearing, and a derived status."
+---
+
+A claim is free text with a self-declared `classification` and self-declared
+`supports[]` / `contradicts[]` edges. That is enough to track provenance, but
+it cannot answer one question: **does the result actually support or contradict
+the hypothesis?** An agent can write a refutation next to a confirming number
+and the graph records it faithfully.
+
+The trust layer (`mareforma.trust`) closes that gap. The same assertion is
+expressed as a falsifiable **proposition**, bound to a pre-registered
+**prediction**, measured by an **effect estimate**, and the direction of
+evidence — the **bearing** — is *computed*, never declared. A count over
+independent data then derives a **status**.
+
+It is additive. Every finding still rides a signed claim as its attestation
+(who asserted it, when), so it appears in `query()` with a `support_level`
+exactly like any other claim. The trust layer adds the structured meaning on
+top.
+
+```
+Proposition H   ──states──►  Prediction: "if H, the effect lands on the
+                              expected side of the null"   (pre-registered)
+Procedure runs  ─────────►  EffectEstimate: a value + uncertainty
+Bearing  =  gate(estimate, prediction)        ◄── COMPUTED, not declared
+Status   =  count over independent supporting / refuting data
+```
+
+## The proposition — the unit of sameness
+
+A `Proposition` is a truth-apt, observer-independent claim about the world,
+built from typed parts rather than a sentence:
+
+```python
+from mareforma.trust import Proposition, Direction
+
+prop = Proposition(
+    subject="cell type A",
+    relation="inhibitory connectivity onto",
+    object="cell type B",
+    direction=Direction.INCREASES,
+    scope={"region": "cortex", "species": "mouse"},
+)
+```
+
+It is **content-addressed**. Two agents who assert the same thing in different
+words converge on one node:
+
+- `content_id` is the *answer* — `sha256` over the normalized
+  `(subject, relation, object, scope, direction, magnitude)`. Same truth
+  conditions produce the same id, on any host, in any language (tokens are
+  NFC-normalized, casefolded, whitespace-collapsed; the byte serialization is
+  RFC 8785).
+- `frame_id` is the *question* — the same hash with `direction` and `magnitude`
+  dropped. Two propositions share a frame when they are about the same
+  question. They are the **same** proposition when their direction and
+  magnitude also match; they **contradict** when their directions are
+  contraries (`INCREASES` vs `DECREASES`, `PRESENT` vs `ABSENT`).
+
+```python
+prop.content_id()   # the answer
+prop.frame_id()     # the question
+prop.contradicts(other_prop)   # decidable: same frame, contrary directions
+```
+
+A proposition must be **falsifiable** to anchor evidence: it must commit to a
+direction (not `UNSPECIFIED`) and state a non-empty scope. An unscoped,
+directionless assertion forbids no observation and is refused.
+
+## The prediction — a pre-registered rule
+
+A `Prediction` is the decision rule, bound to the proposition *before* the
+numbers are seen. It is what makes the bearing earned rather than chosen.
+
+```python
+from mareforma.trust import Prediction, TestType, DirectionOfInterest
+
+plan = Prediction(
+    test_type=TestType.SUPERIORITY,
+    direction_of_interest=DirectionOfInterest.INCREASE,
+    alpha=0.05,
+    preregistered=True,
+)
+```
+
+Two gate types ship today, both closed-form (no iterative estimation, so no
+cross-host float drift):
+
+- **Superiority** declares the predicted side of the null
+  (`direction_of_interest`).
+- **Equivalence (TOST)** declares an equivalence region
+  (`equivalence_lower` / `equivalence_upper`) around the null, for testing a
+  `NO_EFFECT` proposition.
+
+## The estimate — a value plus its uncertainty
+
+An `EffectEstimate` carries the result and exactly what the gate needs:
+
+```python
+from mareforma.trust import EffectEstimate, EffectType
+
+est = EffectEstimate(
+    estimate_value=0.42,
+    effect_type=EffectType.SMD,   # field names follow the metafor/escalc convention
+    ci_lower=0.18, ci_upper=0.66, ci_level=0.90,
+    n_total=842,
+)
+```
+
+Supply a `p_value`, a full `(ci_lower, ci_upper, ci_level)` triple, or both. The
+estimate runs its own consistency checks on construction and refuses
+inconsistent input (a CI that does not bracket the estimate, a non-finite
+bound, a `p_value` outside `[0, 1]`) rather than storing it.
+
+## The bearing — computed, not declared
+
+`compute_bearing` is the gate. It reads the pre-registered rule and the realised
+estimate and returns `supports` / `refutes` / `neutral` — the agent never picks
+the label.
+
+```python
+from mareforma.trust import compute_bearing
+
+bearing = compute_bearing(est, plan)
+bearing.direction   # BearingDirection.SUPPORTS
+bearing.significant  # True
+```
+
+For superiority, the estimate is significant when `p_value < alpha` (or the CI
+excludes the null at the level the test's alpha implies), and the sign of
+`estimate - null` is compared against the pre-registered direction. For
+equivalence, a CI lying entirely inside the region supports the no-effect
+proposition, entirely outside refutes it, and straddling a margin is neutral.
+
+Because the label is a function of the registered rule and the number, an agent
+cannot relabel a refutation as support.
+
+## The status — derived from independent data
+
+`Status` is a count over independent lines of evidence on a single
+`content_id`, not an assertion of truth and not a human gate. Independence is a
+distinct-artifact heuristic: two findings count as independent when their
+`data_id` differs.
+
+| Status | Meaning |
+|---|---|
+| `UNTESTED` | No supporting or refuting lines yet. |
+| `PRELIMINARY` | Exactly one independent supporting line. |
+| `CORROBORATED` | Two or more independent supporting lines, none refuting. |
+| `REFUTED` | At least one independent refuting line, none supporting. |
+| `CONTESTED` | Independent support **and** independent refute on the same proposition. |
+
+`REFUTED` and `CONTESTED` are derived labels, not auto-refutation: `REFUTED`
+means "no surviving independent support," not "this proposition is false."
+
+Status is a **versioned policy** (`status_policy@v1`) over durable stored
+counts, never baked into the schema. Improving the rule later is a new policy
+over the same data, not a migration.
+
+### Frame-level contest
+
+Separately from a proposition's own status, its **frame** is contested when a
+*contrary* proposition in the same frame has at least one independent
+supporting line. The contest is surfaced at read time; it does not silently
+corroborate or refute either side.
+
+## Recording a finding
+
+`assert_finding` ties it together in one call: it validates the inputs, computes
+the bearing, writes a signed claim as the attestation, persists the evidence
+tree, and derives the status.
+
+```python
+result = graph.assert_finding(
+    prop, plan, est,
+    data_id="dataset_alpha",
+    generated_by="analyst/model-a/lab_a",
+)
+result["bearing"]["direction"]   # "supports" — computed
+result["status"]                  # "PRELIMINARY" — one independent line
+```
+
+A second independent dataset on the same proposition lifts it to
+`CORROBORATED`:
+
+```python
+graph.assert_finding(prop, plan, est_beta, data_id="dataset_beta",
+                     generated_by="analyst/model-b/lab_b")
+graph.proposition_status(prop)["status"]   # "CORROBORATED"
+```
+
+`assert_finding` is idempotent on `(content_id, data_id)`: re-asserting the same
+finding on the same dataset returns the prior finding rather than double-counting
+it.
+
+## How this relates to support levels
+
+The two layers answer different questions and run side by side:
+
+- **`support_level`** (`PRELIMINARY` / `REPLICATED` / `ESTABLISHED`, see
+  [Trust](/concepts/trust)) is about a *claim's* provenance: did independent
+  agents converge on a shared upstream, and did a human validate it.
+- **`Status`** (`CORROBORATED`, `REFUTED`, `CONTESTED`, …) is about a
+  *proposition's* evidence: how many independent datasets support or refute it,
+  with the direction of each computed from a pre-registered rule.
+
+A finding has both. The claim records who asserted what; the trust layer records
+whether the data earns it.
+
+See the [API reference](/reference/api) for full signatures and the
+[data model](/reference/data-model) for the stored tables.
