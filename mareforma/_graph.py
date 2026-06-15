@@ -951,8 +951,12 @@ class EpistemicGraph:
         self._check_open()
         from mareforma.db.core import _now
         from mareforma.trust import (
+            Contrast,
+            ControlType,
+            EvidenceLine,
             NonFalsifiablePropositionError,
             _store,
+            compute_bearing,
         )
 
         if not proposition.is_falsifiable():
@@ -961,6 +965,22 @@ class EpistemicGraph:
                 f"got direction={proposition.direction.value}, "
                 f"scope={dict(proposition.scope)!r}"
             )
+
+        # Validate the gate inputs (estimate/data_id consistency, then the gate)
+        # BEFORE writing anything, so a rejected one-shot finding leaves no
+        # dangling proposition/plan behind — preserving v0.3.4's all-or-nothing
+        # behaviour. submit_finding re-runs these cheaply; the duplication buys
+        # atomicity at the convenience layer.
+        ct = control_type if control_type is not None else ControlType.NEGATIVE
+        EvidenceLine(
+            estimate=estimate,
+            data_id=data_id,
+            contrast=Contrast(ct),
+            modality=modality,
+            provenance_id=provenance_id,
+            design_type=design_type,
+        )
+        compute_bearing(estimate, prediction)
 
         cid = proposition.content_id()
         # Synthesise the proposition + a non-pre-registered plan, then submit

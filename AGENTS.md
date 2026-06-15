@@ -489,10 +489,17 @@ graph.proposition_status(prop)["status"]
 ```
 
 Methods: `register_proposition(proposition)`,
+`register_plan(proposition, prediction)`,
+`submit_finding(proposition, prediction, estimate, *, data_id, ...)`,
 `assert_finding(proposition, prediction, estimate, *, data_id, ...)`,
 `proposition_status(proposition_or_content_id)`, `get_proposition(content_id)`,
 `query_frame(frame_id_or_proposition, *, min_status=None)`. `assert_finding` is
-idempotent on `(content_id, data_id)`. Full reference:
+idempotent on `(content_id, data_id)`. Since v0.3.5 you can split the one-shot
+into its two earned steps: `register_plan` pre-registers the decision rule
+(writing its own signed plan attestation) before the numbers are seen, then
+`submit_finding` binds the outcome to that plan and signs the plan → finding
+edge into the finding claim's `supports[]`. `assert_finding` is the one-shot
+that composes both. Full reference:
 [docs.mareforma.com](https://docs.mareforma.com/reference/api) and the
 [Findings](https://docs.mareforma.com/concepts/findings) concept page.
 
