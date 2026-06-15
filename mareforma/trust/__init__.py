@@ -32,6 +32,7 @@ from .estimate import (
     Scale,
     null_value,
 )
+from .gates import Gate, evaluate_gates, gates_for
 from .prediction import (
     DirectionOfInterest,
     InferenceRegime,
@@ -75,6 +76,10 @@ __all__ = [
     "Bearing",
     "BearingDirection",
     "compute_bearing",
+    # decision-rule gates[] chain
+    "Gate",
+    "gates_for",
+    "evaluate_gates",
     # status
     "Status",
     "FrameStatus",
