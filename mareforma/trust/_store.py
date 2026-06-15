@@ -72,20 +72,71 @@ def register_proposition(conn: sqlite3.Connection, prop: Proposition, now: str) 
     return cid
 
 
-def register_plan(
-    conn: sqlite3.Connection, content_id: str, prediction: Prediction, now: str
-) -> str:
-    """Register a pre-registered plan bound to content_id; return its plan_id.
+def compute_plan_id(content_id: str, prediction: Prediction) -> str:
+    """Content-addressed plan_id over (content_id + the prediction's identity).
 
-    The plan_id is content-addressed over (content_id + the prediction fields),
-    so registering the same plan twice is a no-op (ON CONFLICT DO NOTHING). A
-    retry after a partially-written finding cannot create a duplicate,
-    un-deletable plan row.
+    The plan_id is the identity of a decision *rule*: it hashes the gate-bearing
+    fields (test_type, direction_of_interest, the equivalence margins, alpha,
+    inference_regime) bound to a proposition. ``preregistered`` is deliberately
+    EXCLUDED — it is provenance metadata about how the row was created (a real
+    pre-registration vs a one-shot synthesised by ``assert_finding``), not part
+    of the rule's identity. Two callers asserting the same rule must land on the
+    same plan_id whether or not either flagged it pre-registered, so a finding
+    can bind to a pre-registered plan regardless of the flag. Pure function: no
+    DB read, deterministic across hosts (RFC 8785 bytes).
+    """
+    ident = {k: v for k, v in prediction.to_dict().items() if k != "preregistered"}
+    return hashlib.sha256(
+        canonicalize({"content_id": content_id, **ident})
+    ).hexdigest()
+
+
+def plan_exists(conn: sqlite3.Connection, plan_id: str) -> bool:
+    """True iff a registered plan (predictions row) with this plan_id exists."""
+    row = conn.execute(
+        "SELECT 1 FROM predictions WHERE plan_id = ? LIMIT 1", (plan_id,)
+    ).fetchone()
+    return row is not None
+
+
+def get_plan_claim_id(conn: sqlite3.Connection, plan_id: str) -> Optional[str]:
+    """The claim_id of the plan attestation written by ``register_plan``.
+
+    The plan claim is written via ``assert_claim`` under the idempotency key
+    ``plan:{plan_id}``; this looks it up so a finding can cite it in its signed
+    ``supports[]``. Returns None when no such claim exists (e.g. a predictions
+    row planted directly by SQL without going through ``register_plan``).
+    """
+    row = conn.execute(
+        "SELECT claim_id FROM claims WHERE idempotency_key = ? LIMIT 1",
+        (f"plan:{plan_id}",),
+    ).fetchone()
+    return row["claim_id"] if row is not None else None
+
+
+def register_plan(
+    conn: sqlite3.Connection,
+    content_id: str,
+    prediction: Prediction,
+    now: str,
+    *,
+    preregistered: bool,
+) -> str:
+    """Register a plan bound to content_id; return its plan_id.
+
+    The plan_id is content-addressed (see :func:`compute_plan_id`), so
+    registering the same plan twice is a no-op (ON CONFLICT DO NOTHING). A retry
+    after a partially-written finding cannot create a duplicate, un-deletable
+    plan row.
+
+    ``preregistered`` is set explicitly by the caller (1 for an up-front
+    ``register_plan`` call, 0 for the plan ``assert_finding`` synthesises in its
+    one-shot path) and is NOT part of the plan_id, so the row's flag and the
+    rule's identity are decoupled. The flag is append-only: the first writer
+    wins it; a later registration of the same plan_id leaves it unchanged.
     """
     p = prediction
-    plan_id = hashlib.sha256(
-        canonicalize({"content_id": content_id, **p.to_dict()})
-    ).hexdigest()
+    plan_id = compute_plan_id(content_id, prediction)
     conn.execute(
         "INSERT INTO predictions "
         "(plan_id, content_id, inference_regime, test_type, direction_of_interest, "
@@ -101,7 +152,7 @@ def register_plan(
             p.equivalence_lower,
             p.equivalence_upper,
             p.alpha,
-            1 if p.preregistered else 0,
+            1 if preregistered else 0,
             now,
         ),
     )

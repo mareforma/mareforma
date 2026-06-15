@@ -17,7 +17,9 @@ from __future__ import annotations
 
 from .bearing import Bearing, BearingDirection, compute_bearing
 from .errors import (
+    FindingPlanForkError,
     InconsistentEstimateError,
+    NoRegisteredPlanError,
     NonFalsifiablePropositionError,
     TrustError,
 )
@@ -82,5 +84,7 @@ __all__ = [
     # errors
     "TrustError",
     "NonFalsifiablePropositionError",
+    "NoRegisteredPlanError",
+    "FindingPlanForkError",
     "InconsistentEstimateError",
 ]
