@@ -1179,6 +1179,10 @@ class EpistemicGraph:
                 )
                 result_claim_id = claim_id
                 idempotent = False
+            # Read the derived status inside the transaction so the returned dict
+            # is an isolated snapshot of the graph immediately after this write,
+            # not a post-commit read that a concurrent finding could have moved.
+            view = _store.proposition_status(conn, cid)
             if _own_txn:
                 conn.commit()
         except BaseException:
@@ -1193,7 +1197,6 @@ class EpistemicGraph:
             idempotent=idempotent,
         )
 
-        view = _store.proposition_status(self._conn, cid)
         return {
             "finding_id": finding_id,
             "content_id": cid,

@@ -84,32 +84,16 @@ class TestSingleElementChain:
         assert direct.direction is expected  # sanity: the v0.3.4 path agrees
         assert via_chain == direct
 
-    def test_chain_short_circuits_on_first_firing_gate(self) -> None:
-        """A chain returns the first gate that fires (non-NEUTRAL) and ignores
-        the rest; when no gate fires the rule is NEUTRAL."""
-        decrease_gate = Gate(
+    def test_multi_gate_chain_is_rejected(self) -> None:
+        """Multi-gate chains raise until their precedence semantics are designed,
+        so an undecided rule can never silently apply."""
+        gate = Gate(
             test_type=TestType.SUPERIORITY,
             alpha=0.05,
             direction_of_interest=DirectionOfInterest.DECREASE,
         )
-        # A significant decrease fires the first gate -> SUPPORTS, short-circuit
-        # (the second gate, which would REFUTE, is never reached).
-        increase_gate = Gate(
-            test_type=TestType.SUPERIORITY,
-            alpha=0.05,
-            direction_of_interest=DirectionOfInterest.INCREASE,
-        )
-        sig_decrease = _smd(-2.6, p=0.003)
-        assert (
-            evaluate_gates(sig_decrease, [decrease_gate, increase_gate]).direction
-            is BearingDirection.SUPPORTS
-        )
-        # A non-significant estimate fires no gate -> NEUTRAL overall.
-        ns = _smd(-0.3, p=0.40)
-        assert (
-            evaluate_gates(ns, [decrease_gate, decrease_gate]).direction
-            is BearingDirection.NEUTRAL
-        )
+        with pytest.raises(NotImplementedError):
+            evaluate_gates(_smd(-2.6, p=0.003), [gate, gate])
 
     def test_empty_chain_raises(self) -> None:
         with pytest.raises(ValueError):

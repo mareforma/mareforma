@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .bearing import Bearing, BearingDirection, compute_bearing
+from .bearing import Bearing, compute_bearing
 from .estimate import EffectEstimate
 from .prediction import DirectionOfInterest, Prediction, TestType
 
@@ -85,23 +85,23 @@ def gates_for(prediction: Prediction) -> list[Gate]:
 
 
 def evaluate_gates(estimate: EffectEstimate, gates: list[Gate]) -> Bearing:
-    """Evaluate a gates[] chain as a short-circuit rule.
+    """Evaluate a single-gate decision-rule chain.
 
-    Walk the gates in order; the first that *fires* — returns a non-NEUTRAL
-    bearing (SUPPORTS or REFUTES) — decides the finding and short-circuits the
-    rest. If no gate fires, the rule is NEUTRAL. For the one-element chain this
-    returns that single gate's bearing, identical to
+    A chain is one gate today: this returns that gate's Bearing, identical to
     :func:`mareforma.trust.compute_bearing` on the equivalent Prediction.
+
+    Multi-gate chains are rejected. The precedence between gates (whether an
+    earlier REFUTES short-circuits a later SUPPORTS, or all gates are evaluated
+    and combined) is an undecided decision-rule semantics question; it is
+    designed when the deferred regimes (multiplicity, non-inferiority,
+    dose-response) are authored, not inherited from an implementation accident.
     """
     if not gates:
         raise ValueError("a decision rule needs at least one gate")
-    last: Bearing | None = None
-    for gate in gates:
-        bearing = gate.evaluate(estimate)
-        if bearing.direction is not BearingDirection.NEUTRAL:
-            return bearing
-        last = bearing
-    # No gate fired: the rule is inconclusive. Return the final gate's NEUTRAL
-    # bearing (a NEUTRAL bearing always carries significant=False).
-    assert last is not None  # guaranteed: gates is non-empty
-    return last
+    if len(gates) > 1:
+        raise NotImplementedError(
+            "multi-gate decision rules are not yet supported: the precedence "
+            "between gates is undecided. Pass a single gate, or design the "
+            "precedence before composing a chain."
+        )
+    return gates[0].evaluate(estimate)
