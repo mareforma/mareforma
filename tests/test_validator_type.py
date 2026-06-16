@@ -32,18 +32,12 @@ import mareforma
 from mareforma import db as _db
 from mareforma import signing as _signing
 from mareforma import validators as _validators
-from tests._helpers import _bootstrap_key
+from tests._helpers import _bootstrap_key, _pem_of
 
 
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
-
-
-def _pem_of(key_path: Path) -> bytes:
-    return _signing.public_key_to_pem(
-        _signing.load_private_key(key_path).public_key(),
-    )
 
 
 def _build_replicated(graph) -> str:

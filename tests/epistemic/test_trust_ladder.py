@@ -43,38 +43,12 @@ from mareforma.db import open_db, add_claim, update_claim
 # Helpers
 # ---------------------------------------------------------------------------
 
-def open_graph(tmp_path: Path):
-    """Open with a bootstrapped key so seed=True works."""
-    from mareforma import signing as _signing
-    key_path = tmp_path / "_test_key"
-    if not key_path.exists():
-        _signing.bootstrap_key(key_path)
-    return mareforma.open(tmp_path, key_path=key_path)
-
-
-def open_signed_graph(tmp_path: Path):
-    """Open a graph with a bootstrapped signing key (auto-enrolled as root)."""
-    from mareforma import signing as _signing
-    key_path = tmp_path / "mareforma.key"
-    _signing.bootstrap_key(key_path)
-    return mareforma.open(tmp_path, key_path=key_path)
-
-
-def _bootstrap_validator_key(tmp_path: Path) -> Path:
-    """Bootstrap a second signing key — the graph refuses self-validation,
-    so promoting a REPLICATED claim needs a key distinct from the signer."""
-    from mareforma import signing as _signing
-    key_path = tmp_path / "validator.key"
-    if not key_path.exists():
-        _signing.bootstrap_key(key_path)
-    return key_path
-
-
-def _validator_pubkey_pem(key_path: Path) -> bytes:
-    from mareforma import signing as _signing
-    return _signing.public_key_to_pem(
-        _signing.load_private_key(key_path).public_key(),
-    )
+from tests._helpers import _pem_of, _wipe_db
+from tests.epistemic._builders import (
+    _bootstrap_validator_key,
+    open_graph,
+    open_signed_graph,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +82,7 @@ class TestTrustLaundering:
             claim = g.get_claim(id_a)
             assert claim["support_level"] == "REPLICATED"
             g.enroll_validator(
-                _validator_pubkey_pem(validator_key_path), identity="v",
+                _pem_of(validator_key_path), identity="v",
             )
 
         # The label "attacker@example.org" is stored verbatim in
@@ -130,7 +104,7 @@ class TestTrustLaundering:
             rep_id = g.assert_claim("finding", supports=[upstream], generated_by="A")
             g.assert_claim("finding", supports=[upstream], generated_by="B")
             g.enroll_validator(
-                _validator_pubkey_pem(validator_key_path), identity="v",
+                _pem_of(validator_key_path), identity="v",
             )
 
         with mareforma.open(tmp_path, key_path=validator_key_path) as g:
@@ -403,10 +377,7 @@ class TestLaunchSubstrateShipGate:
                 confidence={"stance": "refutes"},
             )
         # Wipe graph.db; restore from claims.toml.
-        for fname in ("graph.db", "graph.db-wal", "graph.db-shm"):
-            p = tmp_path / ".mareforma" / fname
-            if p.exists():
-                p.unlink()
+        _wipe_db(tmp_path)
         result = mareforma.restore(tmp_path)
         assert result["claims_restored"] == 3
         assert result["validators_restored"] >= 2

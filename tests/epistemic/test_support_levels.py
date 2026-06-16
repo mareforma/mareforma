@@ -43,52 +43,12 @@ from mareforma.db import ClaimNotFoundError
 # Helpers
 # ---------------------------------------------------------------------------
 
-def open_graph(tmp_path: Path):
-    """Open a graph with a bootstrapped key so seed=True works.
-
-    ESTABLISHED-upstream is the default rule for REPLICATED promotion,
-    so REPLICATED tests need seed=True on the upstream — which in turn
-    requires a loaded signing key. The local helper bootstraps one
-    transparently."""
-    from mareforma import signing as _signing
-    key_path = tmp_path / "_test_key"
-    if not key_path.exists():
-        _signing.bootstrap_key(key_path)
-    return mareforma.open(tmp_path, key_path=key_path)
-
-
-def open_signed_graph(tmp_path: Path):
-    """Open a graph with a bootstrapped signing key.
-
-    Required for tests that exercise ``graph.validate()`` — the loaded
-    key auto-enrolls as the root validator, which is the prerequisite
-    for promoting a claim to ESTABLISHED.
-    """
-    from mareforma import signing as _signing
-    key_path = tmp_path / "mareforma.key"
-    _signing.bootstrap_key(key_path)
-    return mareforma.open(tmp_path, key_path=key_path)
-
-
-def _bootstrap_validator_key(tmp_path: Path) -> Path:
-    """Bootstrap a second signing key and return its path.
-
-    The graph refuses self-validation, so tests that need to promote
-    a REPLICATED claim under a key distinct from the one that signed the
-    claim use this helper plus an explicit ``enroll_validator`` call.
-    """
-    from mareforma import signing as _signing
-    key_path = tmp_path / "validator.key"
-    if not key_path.exists():
-        _signing.bootstrap_key(key_path)
-    return key_path
-
-
-def _validator_pubkey_pem(key_path: Path) -> bytes:
-    from mareforma import signing as _signing
-    return _signing.public_key_to_pem(
-        _signing.load_private_key(key_path).public_key(),
-    )
+from tests._helpers import _pem_of
+from tests.epistemic._builders import (
+    _bootstrap_validator_key,
+    open_graph,
+    open_signed_graph,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -504,7 +464,7 @@ class TestEstablishedGate:
             )
             # id_a is now REPLICATED
             graph.enroll_validator(
-                _validator_pubkey_pem(validator_key_path), identity="v",
+                _pem_of(validator_key_path), identity="v",
             )
 
         with mareforma.open(tmp_path, key_path=validator_key_path) as graph:

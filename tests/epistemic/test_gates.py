@@ -23,14 +23,7 @@ from mareforma.trust import (
 )
 
 
-def _smd(value, *, p=None, ci=None, ci_level=None):
-    kw: dict = {}
-    if p is not None:
-        kw["p_value"] = p
-    if ci is not None:
-        kw["ci_lower"], kw["ci_upper"] = ci
-        kw["ci_level"] = ci_level
-    return EffectEstimate(value, EffectType.SMD, **kw)
+from tests.epistemic._builders import _smd
 
 
 class TestSingleElementChain:

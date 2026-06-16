@@ -17,7 +17,6 @@ from pathlib import Path
 
 import pytest
 
-import mareforma
 from mareforma.trust import (
     Direction,
     DirectionOfInterest,
@@ -26,51 +25,11 @@ from mareforma.trust import (
     FindingPlanForkError,
     NoRegisteredPlanError,
     NonFalsifiablePropositionError,
-    Prediction,
     Status,
-    TestType,
 )
 from mareforma.trust import _store
 
-
-def open_graph(tmp_path: Path):
-    from mareforma import signing as _signing
-    key_path = tmp_path / "_test_key"
-    if not key_path.exists():
-        _signing.bootstrap_key(key_path)
-    return mareforma.open(tmp_path, key_path=key_path)
-
-
-def _prop(direction: Direction = Direction.DECREASES, **scope):
-    from mareforma.trust import Proposition
-    return Proposition(
-        subject="BRCA1",
-        relation="affects",
-        object="tumour growth",
-        direction=direction,
-        scope=scope or {"population": "TNBC", "condition": "in vitro"},
-    )
-
-
-def _superiority(direction=DirectionOfInterest.DECREASE, alpha=0.05, preregistered=False):
-    return Prediction(
-        TestType.SUPERIORITY,
-        direction_of_interest=direction,
-        alpha=alpha,
-        preregistered=preregistered,
-    )
-
-
-def _smd(value, *, p=None, ci=None, ci_level=None, n=None):
-    kw: dict = {}
-    if p is not None:
-        kw["p_value"] = p
-    if ci is not None:
-        kw["ci_lower"], kw["ci_upper"] = ci
-        kw["ci_level"] = ci_level
-    if n is not None:
-        kw["n_total"] = n
-    return EffectEstimate(value, EffectType.SMD, **kw)
+from tests.epistemic._builders import _prop, _smd, _superiority, open_graph
 
 
 # ---------------------------------------------------------------------------

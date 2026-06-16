@@ -9,7 +9,6 @@ a re-export.
 
 from __future__ import annotations
 
-import ast
 import importlib
 import inspect
 from pathlib import Path
@@ -17,22 +16,7 @@ from pathlib import Path
 import pytest
 
 import mareforma.db as db_pkg
-
-
-def _module_level_names(source_path: Path) -> list[str]:
-    """Return every top-level name defined in *source_path*."""
-    tree = ast.parse(source_path.read_text(encoding="utf-8"))
-    names: list[str] = []
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            names.append(node.name)
-        elif isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    names.append(target.id)
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            names.append(node.target.id)
-    return [n for n in names if not n.startswith("__")]
+from tests._helpers import _module_level_names
 
 
 _CORE = Path(inspect.getfile(importlib.import_module("mareforma.db.core")))

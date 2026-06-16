@@ -41,7 +41,6 @@ from pathlib import Path
 
 import pytest
 
-import mareforma
 from mareforma.trust import (
     BearingDirection,
     Contrast,
@@ -68,34 +67,7 @@ from mareforma.trust import (
 
 # ---------------------------------------------------------------------------
 
-def open_graph(tmp_path: Path):
-    """Open a graph with a bootstrapped key.
-
-    assert_finding writes a signed claim as the attestation, so a loaded
-    signing key is needed; the local helper bootstraps one transparently,
-    matching the pattern in test_support_levels.py.
-    """
-    from mareforma import signing as _signing
-    key_path = tmp_path / "_test_key"
-    if not key_path.exists():
-        _signing.bootstrap_key(key_path)
-    return mareforma.open(tmp_path, key_path=key_path)
-
-
-def _prop(direction: Direction = Direction.DECREASES, **scope) -> Proposition:
-    return Proposition(
-        subject="BRCA1",
-        relation="affects",
-        object="tumour growth",
-        direction=direction,
-        scope=scope or {"population": "TNBC", "condition": "in vitro"},
-    )
-
-
-def _superiority(
-    direction: DirectionOfInterest = DirectionOfInterest.DECREASE, alpha: float = 0.05
-) -> Prediction:
-    return Prediction(TestType.SUPERIORITY, direction_of_interest=direction, alpha=alpha)
+from tests.epistemic._builders import _prop, _smd, _superiority, open_graph
 
 
 def _equivalence(lower: float = -0.1, upper: float = 0.1, alpha: float = 0.05) -> Prediction:
@@ -105,18 +77,6 @@ def _equivalence(lower: float = -0.1, upper: float = 0.1, alpha: float = 0.05) -
         equivalence_upper=upper,
         alpha=alpha,
     )
-
-
-def _smd(value: float, *, p=None, ci=None, ci_level=None, n=None) -> EffectEstimate:
-    kw: dict = {}
-    if p is not None:
-        kw["p_value"] = p
-    if ci is not None:
-        kw["ci_lower"], kw["ci_upper"] = ci
-        kw["ci_level"] = ci_level
-    if n is not None:
-        kw["n_total"] = n
-    return EffectEstimate(value, EffectType.SMD, **kw)
 
 
 # ---------------------------------------------------------------------------

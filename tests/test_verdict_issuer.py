@@ -23,6 +23,7 @@ import pytest
 import mareforma
 from mareforma import db as _db
 from mareforma import signing as _signing
+from tests._helpers import _wipe_db
 
 
 # ---------------------------------------------------------------------------
@@ -718,12 +719,6 @@ class TestChainInputEqualsSignedPayload:
 # ---------------------------------------------------------------------------
 
 class TestRestoreVerdicts:
-    def _wipe_db(self, tmp_path: Path) -> None:
-        for fname in ("graph.db", "graph.db-wal", "graph.db-shm"):
-            p = tmp_path / ".mareforma" / fname
-            if p.exists():
-                p.unlink()
-
     def test_round_trip_preserves_verdicts(self, tmp_path: Path) -> None:
         root_key, issuer_key, a, b, _, _ = _seed_two_claims(tmp_path)
         with mareforma.open(tmp_path, key_path=issuer_key) as g:
@@ -738,7 +733,7 @@ class TestRestoreVerdicts:
                 member_claim_id=a, other_claim_id=b,
                 confidence={"stance": "refutes"},
             )
-        self._wipe_db(tmp_path)
+        _wipe_db(tmp_path)
         mareforma.restore(tmp_path)
         with mareforma.open(tmp_path, key_path=root_key) as g:
             # Both claims are now invalidated by the contradiction
@@ -777,7 +772,7 @@ class TestRestoreVerdicts:
             {"cosine": 0.42}, sort_keys=True, separators=(",", ":"),
         )
         toml_path.write_bytes(tomli_w.dumps(data).encode("utf-8"))
-        self._wipe_db(tmp_path)
+        _wipe_db(tmp_path)
         with pytest.raises(_db.RestoreError) as exc:
             mareforma.restore(tmp_path)
         assert exc.value.kind == "claim_unverified"
@@ -804,7 +799,7 @@ class TestRestoreVerdicts:
             b"\x00" * 64,
         ).decode("ascii")
         toml_path.write_bytes(tomli_w.dumps(data).encode("utf-8"))
-        self._wipe_db(tmp_path)
+        _wipe_db(tmp_path)
         with pytest.raises(_db.RestoreError) as exc:
             mareforma.restore(tmp_path)
         assert exc.value.kind == "claim_unverified"
@@ -831,7 +826,7 @@ class TestRestoreVerdicts:
         # Swap to root's keyid, which IS enrolled but did not sign.
         data["replication_verdicts"]["rv_swap"]["issuer_keyid"] = root_keyid
         toml_path.write_bytes(tomli_w.dumps(data).encode("utf-8"))
-        self._wipe_db(tmp_path)
+        _wipe_db(tmp_path)
         with pytest.raises(_db.RestoreError) as exc:
             mareforma.restore(tmp_path)
         assert exc.value.kind == "claim_unverified"
@@ -865,10 +860,7 @@ class TestVerdictFieldTamperOnRestore:
         data["replication_verdicts"]["rv_t"][field] = new_value
         toml_path.write_bytes(tomli_w.dumps(data).encode("utf-8"))
         # Wipe + try restore.
-        for fname in ("graph.db", "graph.db-wal", "graph.db-shm"):
-            p = tmp_path / ".mareforma" / fname
-            if p.exists():
-                p.unlink()
+        _wipe_db(tmp_path)
 
     def test_tampered_cluster_id_rejected(self, tmp_path: Path) -> None:
         from mareforma import db as _db
@@ -914,10 +906,7 @@ class TestRestoreDowngradesTransparencyWithoutRekor:
         data["claims"][cid]["transparency_logged"] = True
         toml_path.write_bytes(tomli_w.dumps(data).encode("utf-8"))
         # Wipe + restore.
-        for fname in ("graph.db", "graph.db-wal", "graph.db-shm"):
-            p = tmp_path / ".mareforma" / fname
-            if p.exists():
-                p.unlink()
+        _wipe_db(tmp_path)
         mareforma.restore(tmp_path)
         with mareforma.open(tmp_path, key_path=root_key) as g:
             row = g.get_claim(cid)
