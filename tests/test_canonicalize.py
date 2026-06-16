@@ -134,23 +134,14 @@ class TestSpecialtyForms:
 
 class TestSpecialtyAutoImport:
     def test_auto_imported_on_package_import(self):
-        """Importing mareforma.canonicalize alone registers the specialty forms.
+        """Importing mareforma.canonicalize registers the specialty forms.
 
-        Verifies the static import statement in __init__.py drags the
-        specialty submodule in. The reload caveat (re-running __init__
-        creates a new _REGISTRY but specialty.py keeps its old reference)
-        makes a runtime-reload test unreliable; instead we read the source
-        and assert the import line is present.
+        The static import in __init__.py drags the specialty submodule in, so
+        its forms are registered without the caller discovering the import. We
+        assert the live registration directly: reading the source text instead
+        would still pass even if the import line were unreachable.
         """
-        import inspect
         import mareforma.canonicalize as can
-        src = inspect.getsource(can)
-        assert "from mareforma.canonicalize import specialty" in src, (
-            "mareforma/canonicalize/__init__.py must auto-import the "
-            "specialty submodule so its forms are registered without the "
-            "caller having to discover the import"
-        )
-        # And in the live import, all three forms are registered.
         names = set(can.registered_canonicalizers())
         assert "rdkit-canonical-smiles-v1" in names
         assert "fasta-nfc-v1" in names

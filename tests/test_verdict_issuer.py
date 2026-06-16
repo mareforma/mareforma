@@ -477,57 +477,32 @@ class TestTriggerIdempotencyAndOrdering:
             second = g.get_claim(a)["t_invalid"]
         assert first == second  # idempotent — earlier timestamp preserved
 
-    def test_argument_order_does_not_change_invalidation(
+    def test_invalidation_independent_of_argument_order(
         self, tmp_path: Path,
     ) -> None:
-        """For identical created_at, the trigger's tie-break is
-        lex-smaller claim_id — not the verdict's argument order.
-        Two graphs differing only in (member, other) swap must
-        invalidate the same claim."""
-        root_key_x = _bootstrap(tmp_path / "x", "root.key")
-        issuer_key_x = _bootstrap(tmp_path / "x", "issuer.key")
-        with mareforma.open(tmp_path / "x", key_path=root_key_x) as g:
+        """The older claim is invalidated regardless of the verdict's
+        (member, other) argument order. created_at increases per insert, so
+        the claim inserted first is the one the trigger marks t_invalid,
+        whichever side of the verdict it is passed on."""
+        root_key = _bootstrap(tmp_path, "root.key")
+        issuer_key = _bootstrap(tmp_path, "issuer.key")
+        with mareforma.open(tmp_path, key_path=root_key) as g:
             issuer_pem = _signing.public_key_to_pem(
-                _signing.load_private_key(issuer_key_x).public_key(),
+                _signing.load_private_key(issuer_key).public_key(),
             )
             g.enroll_validator(issuer_pem, identity="i")
             a = g.assert_claim("alpha")
             b = g.assert_claim("beta")
-        with mareforma.open(tmp_path / "x", key_path=issuer_key_x) as g:
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            # Pass the older claim (a) as other_claim_id, not member.
             g.record_contradiction_verdict(
-                verdict_id="cv", member_claim_id=a, other_claim_id=b,
+                verdict_id="cv", member_claim_id=b, other_claim_id=a,
                 confidence={},
             )
-            invalidated_x = (
-                a if g.get_claim(a)["t_invalid"] is not None else b
-            )
-        # Second graph in a separate dir: swap argument order.
-        root_key_y = _bootstrap(tmp_path / "y", "root.key")
-        issuer_key_y = _bootstrap(tmp_path / "y", "issuer.key")
-        with mareforma.open(tmp_path / "y", key_path=root_key_y) as g:
-            issuer_pem = _signing.public_key_to_pem(
-                _signing.load_private_key(issuer_key_y).public_key(),
-            )
-            g.enroll_validator(issuer_pem, identity="i")
-            # Use deterministic claim_ids — pin the texts the same.
-            a2 = g.assert_claim("alpha")
-            b2 = g.assert_claim("beta")
-        # The IDs differ across the two graphs (uuid4), so this test
-        # checks the trigger's invariant on a single graph: assert
-        # that the older claim is invalidated regardless of argument
-        # order. With created_at strictly increasing per insert, the
-        # tie-break clause is exercised when both rows share a
-        # microsecond — relatively rare but the deterministic clause
-        # makes it predictable when it does happen.
-        with mareforma.open(tmp_path / "y", key_path=issuer_key_y) as g:
-            g.record_contradiction_verdict(
-                verdict_id="cv2", member_claim_id=b2, other_claim_id=a2,
-                confidence={},
-            )
-            # a2 was inserted first → it's the older one → it gets
-            # invalidated regardless of argument order.
-            assert g.get_claim(a2)["t_invalid"] is not None
-            assert g.get_claim(b2)["t_invalid"] is None
+            # a was inserted first, so it is the older one and is invalidated
+            # regardless of which argument position it was passed in.
+            assert g.get_claim(a)["t_invalid"] is not None
+            assert g.get_claim(b)["t_invalid"] is None
 
 
 # ---------------------------------------------------------------------------

@@ -473,7 +473,6 @@ class TestDerivedChain:
             )
             c_broken = graph.get_claim(broken)
 
-        import json
         supports = json.loads(c_broken["supports_json"])
         assert c_broken["classification"] == "DERIVED"
         assert supports == []   # chain is broken — detectable but not prevented

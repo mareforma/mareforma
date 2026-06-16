@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
+
 import pytest
 
 from mareforma._evidence import EvidenceVector, EvidenceVectorError
@@ -28,7 +30,7 @@ class TestDefaults:
 
     def test_frozen(self) -> None:
         ev = EvidenceVector()
-        with pytest.raises(Exception):
+        with pytest.raises(FrozenInstanceError):
             ev.risk_of_bias = -1  # type: ignore[misc]
 
 

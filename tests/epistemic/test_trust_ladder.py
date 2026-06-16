@@ -222,7 +222,6 @@ class TestContradictAndSupport:
         it at write time so downstream readers never see undefined
         epistemic semantics.
         """
-        import pytest
         with open_graph(tmp_path) as g:
             upstream = g.assert_claim("upstream", generated_by="seed")
             with pytest.raises(ValueError, match="same upstream"):

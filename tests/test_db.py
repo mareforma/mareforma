@@ -66,10 +66,17 @@ class TestOpenDb:
         assert version == _SCHEMA_VERSION
 
     def test_idempotent_second_open(self, tmp_path: Path) -> None:
+        from mareforma.db import _SCHEMA_VERSION
         conn1 = _open(tmp_path)
         conn1.close()
         conn2 = _open(tmp_path)
-        conn2.close()
+        try:
+            # Reopening an existing graph.db must not re-initialise it: the
+            # schema version survives the second open.
+            version = conn2.execute("PRAGMA user_version").fetchone()[0]
+        finally:
+            conn2.close()
+        assert version == _SCHEMA_VERSION
 
     def test_missing_columns_raises(self, tmp_path: Path) -> None:
         """A db with user_version != 0 but missing claims columns is rejected.

@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 
 import mareforma
-from mareforma import signing as _signing
 from tests._helpers import _bootstrap_key
 
 
