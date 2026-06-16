@@ -241,6 +241,47 @@ class TestSubmitFinding:
         assert status["status"] == Status.UNTESTED.value
         assert status["independent_support"] == 0
 
+    def test_concurrent_fork_does_not_strand_claim(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A fork seen only in-transaction (a concurrent writer landed a finding
+        under a different plan between the pre-flight check and the write) must
+        roll the finding claim back, never strand it on the chain."""
+        h = _prop(Direction.DECREASES)
+        pred = _superiority()
+        with open_graph(tmp_path) as graph:
+            graph.register_plan(h, pred)
+            before = graph._conn.execute(
+                "SELECT COUNT(*) FROM claims"
+            ).fetchone()[0]
+
+            calls = {"n": 0}
+
+            def racing_find(conn, content_id, data_id):
+                # Pre-flight sees nothing; the in-transaction re-check sees a
+                # finding a concurrent writer landed under a DIFFERENT plan.
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return None
+                return {
+                    "plan_id": "deadbeef" * 8,
+                    "finding_id": "concurrent",
+                    "claim_id": "concurrent-claim",
+                }
+
+            monkeypatch.setattr(_store, "find_existing_finding", racing_find)
+            with pytest.raises(FindingPlanForkError):
+                graph.submit_finding(
+                    h, pred, _smd(-2.6, p=0.003),
+                    data_id="dataA", generated_by="lab_a",
+                )
+            monkeypatch.undo()
+            after = graph._conn.execute(
+                "SELECT COUNT(*) FROM claims"
+            ).fetchone()[0]
+        # The refused fork wrote no claim: the transaction rolled it back.
+        assert after == before
+
 
 class TestSignedEdgeRoundTrip:
     def test_plan_to_finding_supports_edge_verifies(self, tmp_path: Path) -> None:

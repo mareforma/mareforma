@@ -1119,35 +1119,19 @@ class EpistemicGraph:
                 "the one-shot path that registers the plan for you."
             )
 
-        # Cite the plan attestation in the finding's SIGNED supports[] so the
-        # plan -> finding edge is cryptographic, not just denormalised metadata.
-        plan_claim_id = _store.get_plan_claim_id(self._conn, plan_id)
-        supports = [plan_claim_id] if plan_claim_id else None
-
-        claim_id = self.assert_claim(
-            proposition.text(),
-            generated_by=generated_by,
-            supports=supports,
-            idempotency_key=idempotency_key or f"finding:{cid}:{data_id}",
-            predicate_payload={
-                "trust": "finding/v1",
-                "content_id": cid,
-                "frame_id": proposition.frame_id(),
-                "plan_id": plan_id,
-                "data_id": data_id,
-                "code_ref": code_ref,
-                "bearing": bearing.direction.value,
-            },
-        )
-
-        # Authoritative existence check + writes in ONE transaction (no TOCTOU).
-        # If a concurrent writer landed the finding between the pre-flight and
-        # here, the in-transaction check catches it and we return idempotently
-        # rather than double-inserting; the finding claim we wrote above shares
-        # the (content_id, data_id) idempotency key, so it is reused, not orphaned.
+        # Authoritative existence + fork + plan checks AND all writes run in one
+        # transaction (BEGIN IMMEDIATE). The finding claim is written INSIDE this
+        # transaction via assert_claim, which joins an open transaction
+        # (conn.in_transaction) rather than committing its own — so a fork or
+        # existence race that takes a non-insert branch rolls the claim back
+        # instead of stranding a committed, signed claim on the chain.
         now = _now()
-        with self._conn:
-            existing = _store.find_existing_finding(self._conn, cid, data_id)
+        conn = self._conn
+        _own_txn = not conn.in_transaction
+        if _own_txn:
+            conn.execute("BEGIN IMMEDIATE")
+        try:
+            existing = _store.find_existing_finding(conn, cid, data_id)
             if existing is not None:
                 if existing["plan_id"] != plan_id:
                     raise _fork_error(existing["plan_id"])
@@ -1155,17 +1139,45 @@ class EpistemicGraph:
                 result_claim_id = existing["claim_id"]
                 idempotent = True
             else:
-                if not _store.plan_exists(self._conn, plan_id):
+                if not _store.plan_exists(conn, plan_id):
                     # The plan is append-only, so this is unreachable in practice;
                     # the re-check keeps the FK insert from ever failing opaquely.
                     raise NoRegisteredPlanError(
                         f"plan {plan_id[:12]}… disappeared between check and write"
                     )
+                # Cite the plan attestation in the finding's SIGNED supports[] so
+                # the plan -> finding edge is cryptographic, not just denormalised
+                # metadata. supports=None is correct for the one-shot assert_finding
+                # path, whose synthesised plan (preregistered=0) has no attestation
+                # claim; the signed edge exists only when register_plan wrote one.
+                plan_claim_id = _store.get_plan_claim_id(conn, plan_id)
+                supports = [plan_claim_id] if plan_claim_id else None
+                claim_id = self.assert_claim(
+                    proposition.text(),
+                    generated_by=generated_by,
+                    supports=supports,
+                    idempotency_key=idempotency_key or f"finding:{cid}:{data_id}",
+                    predicate_payload={
+                        "trust": "finding/v1",
+                        "content_id": cid,
+                        "frame_id": proposition.frame_id(),
+                        "plan_id": plan_id,
+                        "data_id": data_id,
+                        "code_ref": code_ref,
+                        "bearing": bearing.direction.value,
+                    },
+                )
                 finding_id = _store.insert_finding(
-                    self._conn, cid, plan_id, claim_id, bearing, line, now
+                    conn, cid, plan_id, claim_id, bearing, line, now
                 )
                 result_claim_id = claim_id
                 idempotent = False
+            if _own_txn:
+                conn.commit()
+        except BaseException:
+            if _own_txn:
+                conn.rollback()
+            raise
 
         from mareforma import health as _health
         _health.append_health_event(
