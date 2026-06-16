@@ -102,6 +102,6 @@ def evaluate_gates(estimate: EffectEstimate, gates: list[Gate]) -> Bearing:
             return bearing
         last = bearing
     # No gate fired: the rule is inconclusive. Return the final gate's NEUTRAL
-    # bearing (its significance flag is the most-specific one evaluated).
+    # bearing (a NEUTRAL bearing always carries significant=False).
     assert last is not None  # guaranteed: gates is non-empty
     return last

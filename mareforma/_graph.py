@@ -1100,6 +1100,13 @@ class EpistemicGraph:
         if existing is not None:
             if existing["plan_id"] != plan_id:
                 raise _fork_error(existing["plan_id"])
+            # Emit here too, so an idempotent re-submit is logged whether it is
+            # detected on this fast path or in the in-transaction re-check.
+            from mareforma import health as _health
+            _health.append_health_event(
+                self._root, "submit_finding",
+                bearing=bearing.direction.value, idempotent=True,
+            )
             view = _store.proposition_status(self._conn, cid)
             return {
                 "finding_id": existing["finding_id"],
