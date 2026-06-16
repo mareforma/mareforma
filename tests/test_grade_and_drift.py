@@ -11,6 +11,37 @@ from mareforma._evidence import EvidenceVector, EvidenceVectorError
 from mareforma import doi_resolver as _doi
 
 
+def _drop_columns(conn: sqlite3.Connection, table: str, columns: list[str]) -> None:
+    """Drop *columns* from *table* portably, on every SQLite version.
+
+    ``ALTER TABLE ... DROP COLUMN`` only exists on SQLite 3.35+, so doing it
+    directly would silently skip the legacy-upgrade tests on older builds —
+    exactly the migration path that matters there. The rebuild idiom (copy
+    the surviving columns into a new table, swap it in) works everywhere.
+    It keeps only column data, not triggers/CHECKs, which is all the
+    column-presence migration under test inspects. The dropped columns are
+    query-side denormalisations, never referenced by a trigger, so nothing
+    downstream breaks.
+    """
+    drop = set(columns)
+    keep = [
+        row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        if row[1] not in drop
+    ]
+    keep_csv = ", ".join(keep)
+    # legacy_alter_table makes RENAME a pure rename — it won't try to rewrite
+    # references to the table in other triggers (a trigger on the verdict
+    # tables references claims, which would otherwise abort the rename once
+    # the original table is gone). foreign_keys off lets the swap proceed
+    # without cascade checks on the throwaway connection.
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute("PRAGMA legacy_alter_table=ON")
+    conn.execute(f"CREATE TABLE _migrate_tmp AS SELECT {keep_csv} FROM {table}")
+    conn.execute(f"DROP TABLE {table}")
+    conn.execute(f"ALTER TABLE _migrate_tmp RENAME TO {table}")
+    conn.execute("PRAGMA legacy_alter_table=OFF")
+
+
 # ----------------------------------------------------------------------------
 # EvidenceVector.study_design
 # ----------------------------------------------------------------------------
@@ -178,18 +209,12 @@ class TestDoiCacheContentDigestColumn:
         db_path = tmp_path / ".mareforma" / "graph.db"
         conn = sqlite3.connect(str(db_path))
         try:
-            conn.execute(
-                "ALTER TABLE claims DROP COLUMN predicate_payload"
+            _drop_columns(
+                conn, "claims",
+                ["predicate_payload", "original_signature_bundle"],
             )
-            conn.execute(
-                "ALTER TABLE claims DROP COLUMN original_signature_bundle"
-            )
-            conn.execute(
-                "ALTER TABLE doi_cache DROP COLUMN content_digest"
-            )
+            _drop_columns(conn, "doi_cache", ["content_digest"])
             conn.commit()
-        except sqlite3.OperationalError:
-            pytest.skip("SQLite < 3.35 cannot DROP COLUMN; test n/a")
         finally:
             conn.close()
         # Confirm the simulated legacy state.
@@ -228,17 +253,14 @@ class TestDoiCacheContentDigestColumn:
         assert "content_digest" in doi_cols_after
 
     def test_column_added_to_legacy_db(self, tmp_path: Path) -> None:
-        # Simulate a legacy DB by opening once, dropping the column via
-        # raw SQL (SQLite ALTER TABLE DROP COLUMN requires 3.35+), then
+        # Simulate a legacy DB by opening once, dropping the column, then
         # reopening and confirming the column is auto-added.
         with mareforma.open(tmp_path) as graph:
             pass
         conn = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
         try:
-            conn.execute("ALTER TABLE doi_cache DROP COLUMN content_digest")
+            _drop_columns(conn, "doi_cache", ["content_digest"])
             conn.commit()
-        except sqlite3.OperationalError:
-            pytest.skip("SQLite < 3.35 cannot DROP COLUMN; test n/a")
         finally:
             conn.close()
         # Re-open: the column-presence check should re-add it.
