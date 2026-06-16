@@ -22,12 +22,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from pathlib import Path
 
 import pytest
 
 import mareforma
-from mareforma.db import DatabaseError, ClaimNotFoundError
+from mareforma.db import ClaimNotFoundError
 from tests._helpers import _bootstrap_key, _pem_of
 
 

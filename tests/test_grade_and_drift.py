@@ -1,14 +1,12 @@
 """Tests for GRADE certainty + DOI drift detection."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 import sqlite3
 
 import mareforma
-from mareforma import _evidence
 from mareforma._evidence import EvidenceVector, EvidenceVectorError
 from mareforma import doi_resolver as _doi
 

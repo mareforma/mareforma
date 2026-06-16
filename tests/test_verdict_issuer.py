@@ -519,7 +519,6 @@ class TestInvalidatedClaimRefusesValidation:
     the signed contradiction."""
 
     def test_validate_refuses_t_invalid_claim(self, tmp_path: Path) -> None:
-        from mareforma import db as _db
         root_key, issuer_key, a, b, _, _ = _seed_two_claims(tmp_path)
         # Promote (a, b) to REPLICATED via a replication verdict.
         with mareforma.open(tmp_path, key_path=issuer_key) as g:
@@ -617,8 +616,6 @@ class TestVerdictPayloadNoNanInf:
     def test_nan_in_confidence_rejected_at_sign_time(
         self, tmp_path: Path,
     ) -> None:
-        import math
-        from mareforma._canonical import canonicalize
         _, issuer_key, a, b, _, _ = _seed_two_claims(tmp_path)
         with mareforma.open(tmp_path, key_path=issuer_key) as g:
             with pytest.raises(ValueError):

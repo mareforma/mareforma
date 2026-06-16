@@ -6,8 +6,6 @@ import json
 import sqlite3
 from pathlib import Path
 
-import pytest
-
 from mareforma.db import add_claim, open_db
 from mareforma.exporters.jsonld import JSONLDExporter
 

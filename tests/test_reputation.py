@@ -10,10 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 import mareforma
-from mareforma import db as _db
 from mareforma import signing as _signing
 from tests._helpers import _bootstrap_key, _pem_of
 

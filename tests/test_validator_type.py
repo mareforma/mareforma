@@ -21,7 +21,6 @@ keyid=...``) breaks ``verify_enrollment`` — the chain walk in
 
 from __future__ import annotations
 
-import base64
 import json
 import sqlite3
 from pathlib import Path

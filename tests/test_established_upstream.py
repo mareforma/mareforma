@@ -17,7 +17,6 @@ from pathlib import Path
 import pytest
 
 import mareforma
-from mareforma import db as _db
 from mareforma import signing as _signing
 
 

@@ -24,14 +24,10 @@ import pytest
 import mareforma
 from mareforma import db as _db
 from mareforma.db import (
-    ChainIntegrityError,
     IllegalStateTransitionError,
-    _CLAIM_COLUMNS,
-    _compute_prev_hash,
     add_claim,
     open_db,
     update_claim,
-    validate_claim,
 )
 
 

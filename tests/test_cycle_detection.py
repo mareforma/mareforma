@@ -17,7 +17,6 @@ Covers:
 
 from __future__ import annotations
 
-import json
 import uuid
 from pathlib import Path
 
@@ -27,9 +26,7 @@ import mareforma
 from mareforma.db import (
     CycleDetectedError,
     SignedClaimImmutableError,
-    _CYCLE_MAX_DEPTH,
     _check_no_cycle,
-    add_claim,
     open_db,
     update_claim,
 )

@@ -14,15 +14,12 @@ Covers:
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
-import pytest
 
 from mareforma.db import open_db
-from mareforma import doi_resolver
 from mareforma.doi_resolver import (
     clear_unresolved_cache,
     extract_dois,
