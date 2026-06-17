@@ -15,8 +15,8 @@ from typing import Optional
 
 from mareforma._canonical import canonicalize
 
-from .bearing import Bearing
-from .estimate import EvidenceLine
+from .bearing import Bearing, BearingDirection, compute_bearing
+from .estimate import EffectEstimate, EvidenceLine
 from .prediction import Prediction
 from .proposition import Direction, Proposition
 from .status import STATUS_POLICY, FrameStatus, Status, compute_status
@@ -164,57 +164,72 @@ def insert_finding(
     content_id: str,
     plan_id: str,
     claim_id: str,
-    bearing: Bearing,
-    line: EvidenceLine,
+    bearings: list[Bearing],
+    lines: list[EvidenceLine],
     now: str,
 ) -> str:
-    """Write the finding plus its single-line evidence tree; return finding_id."""
+    """Write the finding plus its N-line evidence tree; return finding_id.
+
+    ``lines`` and ``bearings`` are parallel: ``bearings[i]`` is the gate output
+    for ``lines[i].estimate`` under the finding's one prediction. The single-line
+    case is ``len(lines) == 1``. ``findings.bearing_direction`` is a denormalised
+    per-finding cache of the FIRST line's bearing (the column is NOT NULL). It is
+    correct for single-line findings, where it equals the one line's bearing. The
+    authoritative per-line bearings are the gate output over each stored estimate;
+    :func:`independence_counts` recomputes them on read so that a multi-line
+    finding whose lines disagree is counted per line, not off this cache.
+    """
+    if not lines:
+        raise ValueError("a finding must carry at least one evidence line")
+    if len(bearings) != len(lines):
+        raise ValueError("bearings and lines must be parallel (same length)")
     finding_id = _uuid()
     conn.execute(
         "INSERT INTO findings "
         "(finding_id, content_id, plan_id, claim_id, bearing_direction, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?)",
-        (finding_id, content_id, plan_id, claim_id, bearing.direction.value, now),
+        (finding_id, content_id, plan_id, claim_id, bearings[0].direction.value, now),
     )
-    line_id = _uuid()
-    conn.execute(
-        "INSERT INTO evidence_lines "
-        "(line_id, finding_id, modality, provenance_id, design_type, data_id, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (
-            line_id,
-            finding_id,
-            line.modality,
-            line.provenance_id,
-            line.design_type,
-            line.data_id,
-            now,
-        ),
-    )
-    contrast_id = _uuid()
-    conn.execute(
-        "INSERT INTO contrasts (contrast_id, line_id, control_type) VALUES (?, ?, ?)",
-        (contrast_id, line_id, line.contrast.control_type.value),
-    )
-    est = line.estimate
-    conn.execute(
-        "INSERT INTO effect_estimates "
-        "(estimate_id, contrast_id, estimate_value, effect_type, scale, p_value, "
-        " ci_lower, ci_upper, ci_level, n_total) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            _uuid(),
-            contrast_id,
-            est.estimate_value,
-            est.effect_type.value,
-            est.scale.value,
-            est.p_value,
-            est.ci_lower,
-            est.ci_upper,
-            est.ci_level,
-            est.n_total,
-        ),
-    )
+    for line in lines:
+        line_id = _uuid()
+        conn.execute(
+            "INSERT INTO evidence_lines "
+            "(line_id, finding_id, modality, provenance_id, design_type, data_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                line_id,
+                finding_id,
+                line.modality,
+                line.provenance_id,
+                line.design_type,
+                line.data_id,
+                now,
+            ),
+        )
+        contrast_id = _uuid()
+        conn.execute(
+            "INSERT INTO contrasts (contrast_id, line_id, control_type) VALUES (?, ?, ?)",
+            (contrast_id, line_id, line.contrast.control_type.value),
+        )
+        est = line.estimate
+        conn.execute(
+            "INSERT INTO effect_estimates "
+            "(estimate_id, contrast_id, estimate_value, effect_type, scale, p_value, "
+            " ci_lower, ci_upper, ci_level, n_total) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                _uuid(),
+                contrast_id,
+                est.estimate_value,
+                est.effect_type.value,
+                est.scale.value,
+                est.p_value,
+                est.ci_lower,
+                est.ci_upper,
+                est.ci_level,
+                est.n_total,
+            ),
+        )
     return finding_id
 
 
@@ -238,23 +253,119 @@ def find_existing_finding(
     ).fetchone()
 
 
-def independence_counts(conn: sqlite3.Connection, content_id: str) -> tuple[int, int]:
-    """(independent_support, independent_refute) over distinct data_ids.
+def finding_data_ids(conn: sqlite3.Connection, finding_id: str) -> set[str]:
+    """The set of distinct ``data_id`` values on a finding's evidence lines.
 
-    Count distinct data_ids among supporting lines and among refuting lines on
-    this content_id (the distinct-artifact independence heuristic).
+    The multi-line idempotency anchor: a finding's identity within a
+    ``content_id`` is its full data_id set, so a re-submission is idempotent only
+    when it carries the same set under the same plan (see ``submit_finding``).
     """
-    row = conn.execute(
-        "SELECT "
-        " COUNT(DISTINCT CASE WHEN f.bearing_direction = 'supports' "
-        "                     THEN el.data_id END) AS support, "
-        " COUNT(DISTINCT CASE WHEN f.bearing_direction = 'refutes' "
-        "                     THEN el.data_id END) AS refute "
-        "FROM findings f JOIN evidence_lines el ON el.finding_id = f.finding_id "
+    rows = conn.execute(
+        "SELECT DISTINCT data_id FROM evidence_lines WHERE finding_id = ?",
+        (finding_id,),
+    ).fetchall()
+    return {r["data_id"] for r in rows}
+
+
+def _count_run_distinct(pairs: list[tuple[str, str]]) -> int:
+    """Independent count over (run, dataset) pairs, run-distinct policy.
+
+    A unit of independent evidence requires BOTH a fresh run (``generated_by``)
+    AND a fresh dataset (``data_id``): one run contributes at most one unit (so a
+    single run cannot self-certify), and the same dataset counts once even if it
+    re-appears (the ``data_id`` guard).
+
+    The count is order-free. Each dataset is attributed to exactly one run (the
+    smallest token, a deterministic tie-break), then the answer is the number of
+    distinct runs that own at least one dataset. Under the write-time invariant
+    (``submit_finding``'s fork-guard makes every ``data_id`` belong to exactly one
+    finding, hence one run) this is exactly "distinct runs among the lines"; the
+    per-dataset attribution only matters as defence-in-depth if a future path
+    (e.g. federation import) ever lets one dataset appear under two runs, in which
+    case it stays deterministic and conservative rather than order-dependent.
+    """
+    run_of_dataset: dict[str, str] = {}
+    for run, data_id in pairs:
+        prior = run_of_dataset.get(data_id)
+        if prior is None or run < prior:
+            run_of_dataset[data_id] = run
+    return len(set(run_of_dataset.values()))
+
+
+def independence_counts(conn: sqlite3.Connection, content_id: str) -> tuple[int, int]:
+    """(independent_support, independent_refute) by distinct run, with a data_id guard.
+
+    Per-line bearing is recomputed on read: each evidence line's stored estimate
+    is gated against its finding's stored prediction (the gate inputs are
+    persisted precisely so a reader can recompute and catch drift), so a
+    multi-line finding whose lines disagree is counted line by line, never off
+    the finding's denormalised ``bearing_direction`` cache.
+
+    Independence is then counted by distinct ``generated_by`` (run) with a
+    ``data_id`` guard (see :func:`_count_run_distinct`): one run yields at most
+    one independent support and one independent refute. For single-line findings
+    from distinct runs this reduces to the prior distinct-dataset behaviour; what
+    changes is that distinct datasets from the SAME run no longer count as
+    independent (status_policy@v2).
+    """
+    rows = conn.execute(
+        "SELECT el.data_id AS data_id, cl.generated_by AS generated_by, "
+        " est.estimate_value, est.effect_type, est.scale, est.p_value, "
+        " est.ci_lower, est.ci_upper, est.ci_level, est.n_total, "
+        " pr.test_type, pr.direction_of_interest, pr.equivalence_lower, "
+        " pr.equivalence_upper, pr.alpha, pr.inference_regime "
+        "FROM findings f "
+        "JOIN evidence_lines el ON el.finding_id = f.finding_id "
+        "JOIN contrasts c ON c.line_id = el.line_id "
+        "JOIN effect_estimates est ON est.contrast_id = c.contrast_id "
+        "JOIN predictions pr ON pr.plan_id = f.plan_id "
+        "JOIN claims cl ON cl.claim_id = f.claim_id "
         "WHERE f.content_id = ?",
         (content_id,),
-    ).fetchone()
-    return int(row["support"] or 0), int(row["refute"] or 0)
+    ).fetchall()
+
+    supports: list[tuple[str, str]] = []
+    refutes: list[tuple[str, str]] = []
+    for r in rows:
+        # Recompute the per-line bearing from stored inputs. Every row written by
+        # submit_finding was gated at write, so this is total for normal data. A
+        # row that no longer reconstructs into a gateable bearing (drift,
+        # corruption, or a direct/foreign writer landing a non-numeric column) is
+        # skipped rather than allowed to raise: one un-gateable line must not deny
+        # reads for the whole proposition (and its frame's contraries). The catch
+        # is broad on purpose: the failure can surface as ValueError (enum / range),
+        # TypeError (non-numeric column reaching math.isfinite), or
+        # InconsistentEstimateError (the gate). Writes are gated by EffectEstimate /
+        # compute_bearing before persistence, so a broad skip here cannot mask a
+        # write bug.
+        try:
+            estimate = EffectEstimate(
+                estimate_value=r["estimate_value"],
+                effect_type=r["effect_type"],
+                scale=r["scale"],
+                p_value=r["p_value"],
+                ci_lower=r["ci_lower"],
+                ci_upper=r["ci_upper"],
+                ci_level=r["ci_level"],
+                n_total=r["n_total"],
+            )
+            prediction = Prediction(
+                test_type=r["test_type"],
+                alpha=r["alpha"],
+                direction_of_interest=r["direction_of_interest"],
+                equivalence_lower=r["equivalence_lower"],
+                equivalence_upper=r["equivalence_upper"],
+                inference_regime=r["inference_regime"],
+            )
+            direction = compute_bearing(estimate, prediction).direction
+        except Exception:
+            continue
+        pair = (r["generated_by"], r["data_id"])
+        if direction is BearingDirection.SUPPORTS:
+            supports.append(pair)
+        elif direction is BearingDirection.REFUTES:
+            refutes.append(pair)
+    return _count_run_distinct(supports), _count_run_distinct(refutes)
 
 
 def get_proposition_row(

@@ -908,8 +908,9 @@ bracket the estimate, or a non-positive `n_total`.
   ratio types (`OR`/`RR`/`HR`/`ROM`), `0` otherwise.
 - `Contrast(control_type=ControlType.NEGATIVE)` and
   `EvidenceLine(estimate, data_id, contrast=…, modality=…, provenance_id=…, design_type=…)`
-  are the one-line evidence tree. `data_id` is the distinct-artifact key the
-  independence heuristic counts over.
+  build the evidence tree; a finding may carry several lines. `data_id` is the
+  dataset guard the run-distinct independence count uses so the same dataset is
+  not counted twice.
 
 #### `compute_bearing(estimate, prediction) -> Bearing`
 
@@ -930,8 +931,10 @@ The state machine: `UNTESTED` (0, 0); `CONTESTED` (≥1 support and ≥1 refute)
 `REFUTED` (≥1 refute, 0 support); `CORROBORATED` (≥2 support, 0 refute);
 `PRELIMINARY` (exactly 1 support, 0 refute). `compute_frame_status(contrary_independent_support)`
 returns `FrameStatus.CONTESTED` when a contrary proposition in the same frame
-has ≥1 independent supporting line, else `CONSISTENT`. `STATUS_POLICY` is the
-policy stamp (`"status_policy@v1"`), independent of the package version.
+has ≥1 independent supporting line, else `CONSISTENT`. Independence is counted by
+distinct run (`generated_by`) with a `data_id` guard, so one run yields at most
+one support and one refute. `STATUS_POLICY` is the policy stamp
+(`"status_policy@v2"`), independent of the package version.
 
 Errors: `TrustError` (base), `NonFalsifiablePropositionError`,
 `InconsistentEstimateError`, `NoRegisteredPlanError`, `FindingPlanForkError`.
@@ -954,22 +957,25 @@ Returns the content-addressed `plan_id`. Idempotent: re-registering the same
 prediction is a no-op on both the row and the claim. Raises
 `NonFalsifiablePropositionError` on a non-falsifiable proposition.
 
-#### `submit_finding(proposition, prediction, estimate, *, data_id, generated_by=None, control_type=None, modality=None, provenance_id=None, design_type=None, code_ref=None, idempotency_key=None) -> dict`
+#### `submit_finding(proposition, prediction, estimate=None, *, data_id=None, lines=None, generated_by=None, control_type=None, modality=None, provenance_id=None, design_type=None, code_ref=None, idempotency_key=None) -> dict`
 
 Submit a finding against an already-registered plan. Same shape and return as
 `assert_finding`, with one difference: the plan must already exist (else
 `NoRegisteredPlanError`), and the finding's signed `supports[]` cites the plan
 attestation's `claim_id`, so the plan → finding edge is cryptographic, not
-denormalised metadata. A finding already recorded for `(content_id, data_id)`
-under a *different* `plan_id` raises `FindingPlanForkError` rather than silently
-returning the prior bearing. The existence check and the writes run in one
-transaction.
+denormalised metadata. The finding's identity is its full `data_id` set: a
+re-submission carrying a partial overlap or a different plan raises
+`FindingPlanForkError` rather than silently returning the prior bearing. The
+existence check and the writes run in one transaction.
 
-#### `assert_finding(proposition, prediction, estimate, *, data_id, generated_by=None, control_type=None, modality=None, provenance_id=None, design_type=None, code_ref=None, idempotency_key=None) -> dict`
+#### `assert_finding(proposition, prediction, estimate=None, *, data_id=None, lines=None, generated_by=None, control_type=None, modality=None, provenance_id=None, design_type=None, code_ref=None, idempotency_key=None) -> dict`
 
-Record a finding: validate the inputs, compute the bearing, write a signed claim
-as the attestation, persist the single-line evidence tree, and derive the
-proposition's status.
+Record a finding: validate the inputs, compute a bearing per line, write a signed
+claim as the attestation, persist the evidence tree, and derive the proposition's
+status. Pass either `estimate` + `data_id` (one line) or `lines` (a sequence of
+`EvidenceLine`, the multi-line evidence tree), never both. A finding with no
+lines raises `ValueError`; a `generated_by` that is blank or whitespace raises
+`ValueError`, since independence is counted by run.
 
 ```python
 result = graph.assert_finding(
@@ -980,13 +986,14 @@ result = graph.assert_finding(
 ```
 
 **Returns** `dict` with `finding_id`, `content_id`, `plan_id`, `claim_id`,
-`bearing` (`{"direction", "significant"}`), `status`, `idempotent` (bool), and
+`bearing` (`{"direction", "significant"}`), `bearings` (the per-line list, one
+entry for a single-line finding), `status`, `idempotent` (bool), and
 `proposition_status` (the full view below).
 
-Idempotent on `(content_id, data_id)`: re-asserting the same finding on the same
-dataset returns the prior finding rather than double-counting it. All validation
-runs **before** the signed claim is written, so a rejected finding never leaves
-an orphan claim. Raises `NonFalsifiablePropositionError` /
+Idempotent on the finding's `data_id` set: re-asserting the same dataset(s)
+returns the prior finding rather than double-counting it. All validation runs
+**before** the signed claim is written, so a rejected finding never leaves an
+orphan claim. Raises `NonFalsifiablePropositionError` /
 `InconsistentEstimateError` on bad input.
 
 The one-shot composes `register_plan` + `submit_finding` internally; its

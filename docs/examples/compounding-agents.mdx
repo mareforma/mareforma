@@ -7,7 +7,7 @@ description: "Two agents work sequentially. Knowledge accumulates in the graph i
   `examples/02_compounding_agents/`
 </Card>
 
-Agent A analyses two independent datasets, citing the same upstream evidence.
+Agent A analyses two independent runs on distinct datasets, citing the same upstream evidence.
 Agent B queries the graph before asserting, finds the REPLICATED findings, and
 builds a DERIVED synthesis on top. The closing act tells the same story with the
 trust layer, where the support is earned rather than declared.
@@ -48,7 +48,7 @@ def assert_finding(text: str, classification: str, supports: list[str]) -> str:
 
 The same question, now as a structured finding. Each analyst registers a
 prediction before seeing the numbers; mareforma computes the bearing and derives
-the status from independent datasets.
+the status from independent runs.
 
 ```python
 from mareforma.trust import (
@@ -72,7 +72,7 @@ graph.assert_finding(prop, plan,
                    ci_lower=0.18, ci_upper=0.66, ci_level=0.90, n_total=842),
     data_id="dataset_alpha", generated_by="analyst/model-a/lab_a")
 
-# Analyst B on dataset_beta: a distinct data_id is a second independent line.
+# Analyst B is a distinct run on a distinct dataset: a second independent line.
 graph.assert_finding(prop, plan,
     EffectEstimate(estimate_value=0.51, effect_type=EffectType.SMD,
                    ci_lower=0.20, ci_upper=0.82, ci_level=0.90, n_total=1104),
@@ -82,5 +82,5 @@ graph.query_frame(prop, min_status="PRELIMINARY")[0]["status"]   # "CORROBORATED
 ```
 
 Neither agent declared support. The bearing is computed from the pre-registered
-rule, and `CORROBORATED` is derived from two independent datasets. See
+rule, and `CORROBORATED` is derived from two independent runs. See
 [Findings](/concepts/findings).

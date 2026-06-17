@@ -2,6 +2,45 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.6] - 2026-06-17
+
+The multi-line evidence tree. A finding can now carry several evidence lines
+instead of one, and Status counts independence by distinct run rather than
+distinct dataset. Additive on the schema (stays at v1, no migration). The
+single-line API is unchanged, and so are its Status outcomes for findings from
+distinct runs.
+
+### Added
+
+- **Multi-line findings.** `submit_finding` and `assert_finding` take a
+  `lines=[EvidenceLine, ...]` argument in place of the single `estimate` +
+  `data_id` pair. One finding then records several datasets or arms under one
+  proposition and prediction. The two forms are mutually exclusive. A finding
+  with no lines raises `ValueError`; a finding where any line fails the gate
+  rolls back whole, leaving no claim and no rows. A finding's identity is its
+  full `data_id` set: re-submitting the same set is idempotent, a partial overlap
+  or a different plan raises `FindingPlanForkError`. The return dict gains
+  `bearings`, the per-line bearing list (a single-line finding carries one entry).
+- **Per-line bearing.** Each evidence line's bearing is recomputed on read from
+  its stored estimate and the finding's prediction. A multi-line finding whose
+  lines disagree reads as CONTESTED, not as one finding-level label.
+
+### Changed
+
+- **Status independence is now run-distinct.** `independent_support` and
+  `independent_refute` count distinct `generated_by` (run) with a `data_id`
+  guard, in place of the distinct-`data_id` count. One run contributes at most
+  one support and one refute, so a single run cannot reach CORROBORATED by
+  submitting several datasets and a multi-line finding cannot self-corroborate.
+  Corroboration accrues across runs. Two findings on one proposition from the
+  *same* run that previously read CORROBORATED now read PRELIMINARY; findings
+  from distinct runs are unaffected. The policy version moves from
+  `status_policy@v1` to `status_policy@v2`. Status is recomputed on read, so
+  stored findings pick up the new count without a migration.
+- **`generated_by` is checked at the finding write.** A blank or whitespace-only
+  run token raises `ValueError`; a missing or default token writes but emits a
+  health event, because distinct-run independence needs a real per-run identity.
+
 ## [0.3.5] - 2026-06-15
 
 The pre-registration split. v0.3.4 shipped the trust layer as a single

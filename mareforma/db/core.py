@@ -135,13 +135,6 @@ def open_db(root: Path) -> sqlite3.Connection:
     ``_CLAIM_COLUMNS`` is the source of truth for what the schema must
     contain.
 
-    No in-place schema migrations in this release development. Adding a
-    column or trigger means updating ``_SCHEMA_SQL`` in place; existing
-    dev-branch databases get the schema-validation error and the user
-    deletes graph.db (``claims.toml`` is the human-readable backup).
-    Versioned migrations become relevant only after a 1.0 release
-    establishes a stable schema with real users on it.
-
     Raises
     ------
     DatabaseError

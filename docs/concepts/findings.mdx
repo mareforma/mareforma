@@ -143,8 +143,11 @@ cannot relabel a refutation as support.
 
 `Status` is a count over independent lines of evidence on a single
 `content_id`, not an assertion of truth and not a human gate. Independence is a
-distinct-artifact heuristic: two findings count as independent when their
-`data_id` differs.
+distinct-run heuristic: two supporting lines count as independent when they come
+from different runs (`generated_by`) and different datasets (`data_id`). One run
+contributes at most one independent support and one independent refute, so a
+single run cannot reach `CORROBORATED` on its own. A finding may carry several
+evidence lines, and each line's bearing is recomputed on read.
 
 | Status | Meaning |
 |---|---|
@@ -157,7 +160,7 @@ distinct-artifact heuristic: two findings count as independent when their
 `REFUTED` and `CONTESTED` are derived labels, not auto-refutation: `REFUTED`
 means "no surviving independent support," not "this proposition is false."
 
-Status is a **versioned policy** (`status_policy@v1`) over durable stored
+Status is a **versioned policy** (`status_policy@v2`) over durable stored
 counts, never baked into the schema. Improving the rule later is a new policy
 over the same data, not a migration.
 
@@ -184,8 +187,8 @@ result["bearing"]["direction"]   # "supports", computed
 result["status"]                  # "PRELIMINARY", one independent line
 ```
 
-A second independent dataset on the same proposition lifts it to
-`CORROBORATED`:
+A second independent run on the same proposition, on a distinct dataset, lifts
+it to `CORROBORATED`:
 
 ```python
 graph.assert_finding(prop, plan, est_beta, data_id="dataset_beta",

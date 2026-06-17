@@ -905,9 +905,10 @@ class EpistemicGraph:
         self,
         proposition: "Proposition",
         prediction: "Prediction",
-        estimate: "EffectEstimate",
+        estimate: "EffectEstimate | None" = None,
         *,
-        data_id: str,
+        data_id: str | None = None,
+        lines: "Sequence[EvidenceLine] | None" = None,
         generated_by: str | None = None,
         control_type: "ControlType | str | None" = None,
         modality: str | None = None,
@@ -919,34 +920,32 @@ class EpistemicGraph:
         """Record a finding: a computed bearing of an outcome on a proposition.
 
         The minimal write: a structured Proposition, a pre-registered Prediction,
-        the result numbers (an :class:`EffectEstimate`), and a content-addressed
-        ``data_id`` for the dataset. mareforma computes the Bearing (never
-        declared), persists the single-line evidence tree, writes a signed claim
-        as the attestation, and derives the proposition's count-based Status from
-        the independent lines.
+        and the evidence. Pass either ``estimate`` + ``data_id`` (one line) or
+        ``lines`` (the multi-line evidence tree), never both. mareforma computes
+        a Bearing per line (never declared), persists the evidence tree, writes a
+        signed claim as the attestation, and derives the proposition's count-based
+        Status from the independent lines.
 
-        Idempotent on (``content_id``, ``data_id``): re-asserting the same
-        finding on the same dataset returns the prior finding rather than
+        Idempotent on the finding's ``data_id`` set: re-asserting the same
+        finding on the same dataset(s) returns the prior finding rather than
         double-counting it.
 
-        All input validation (falsifiability, estimate consistency, the gate)
-        runs before the signed claim is written, so a rejected finding never
-        leaves an orphan claim. The structured rows are then written in one
+        All input validation (falsifiability, estimate consistency, each line's
+        gate) runs before the signed claim is written, so a rejected finding
+        never leaves an orphan claim. The structured rows are then written in one
         transaction after the claim; their CHECK constraints mirror the already
         validated Python values, so a failure there is not expected. If one did
         occur the claim would remain as an attestation with no finding, and a
         retry would reuse that claim idempotently rather than duplicate it.
 
-        One-shot convenience. Since v0.3.5 this composes the two earned steps:
-        it registers the proposition and a synthesised plan (``preregistered=0``,
-        so a real :meth:`register_plan` pre-registration stays distinguishable),
-        then delegates to :meth:`submit_finding`. The return shape, idempotency
-        on (``content_id``, ``data_id``), atomicity, and derived Status are all
-        preserved unchanged. A one-shot finding does not separately attest its
-        plan, so (matching the v0.3.4 one-shot) its signed ``supports[]`` carries
-        no plan edge; use the explicit :meth:`register_plan` /
-        :meth:`submit_finding` split when you want the signed plan -> finding
-        edge.
+        One-shot convenience. This composes the two earned steps: it registers
+        the proposition and a synthesised plan (``preregistered=0``, so a real
+        :meth:`register_plan` pre-registration stays distinguishable), then
+        delegates to :meth:`submit_finding`. The return shape, idempotency,
+        atomicity, and derived Status are all preserved. A one-shot finding does
+        not separately attest its plan, so its signed ``supports[]`` carries no
+        plan edge; use the explicit :meth:`register_plan` / :meth:`submit_finding`
+        split when you want the signed plan -> finding edge.
         """
         self._check_open()
         from mareforma.db.core import _now
@@ -967,20 +966,37 @@ class EpistemicGraph:
             )
 
         # Validate the gate inputs (estimate/data_id consistency, then the gate)
-        # BEFORE writing anything, so a rejected one-shot finding leaves no
-        # dangling proposition/plan behind — preserving v0.3.4's all-or-nothing
-        # behaviour. submit_finding re-runs these cheaply; the duplication buys
-        # atomicity at the convenience layer.
-        ct = control_type if control_type is not None else ControlType.NEGATIVE
-        EvidenceLine(
-            estimate=estimate,
-            data_id=data_id,
-            contrast=Contrast(ct),
-            modality=modality,
-            provenance_id=provenance_id,
-            design_type=design_type,
-        )
-        compute_bearing(estimate, prediction)
+        # for EVERY line BEFORE writing anything, so a rejected one-shot finding
+        # leaves no dangling proposition/plan behind, preserving the
+        # all-or-nothing behaviour. submit_finding re-runs these cheaply; the
+        # duplication buys atomicity at the convenience layer.
+        if lines is not None:
+            if estimate is not None or data_id is not None:
+                raise ValueError(
+                    "pass either (estimate + data_id) or lines, not both"
+                )
+            pre_lines = list(lines)
+            if not pre_lines:
+                raise ValueError("a finding must carry at least one evidence line")
+            for ln in pre_lines:
+                if not isinstance(ln, EvidenceLine):
+                    raise TypeError("every item in lines must be an EvidenceLine")
+                compute_bearing(ln.estimate, prediction)
+        else:
+            if estimate is None or data_id is None:
+                raise ValueError(
+                    "single-line mode requires both estimate and data_id"
+                )
+            ct = control_type if control_type is not None else ControlType.NEGATIVE
+            EvidenceLine(
+                estimate=estimate,
+                data_id=data_id,
+                contrast=Contrast(ct),
+                modality=modality,
+                provenance_id=provenance_id,
+                design_type=design_type,
+            )
+            compute_bearing(estimate, prediction)
 
         cid = proposition.content_id()
         # Synthesise the proposition + a non-pre-registered plan, then submit
@@ -999,6 +1015,7 @@ class EpistemicGraph:
             prediction,
             estimate,
             data_id=data_id,
+            lines=lines,
             generated_by=generated_by,
             control_type=control_type,
             modality=modality,
@@ -1012,9 +1029,10 @@ class EpistemicGraph:
         self,
         proposition: "Proposition",
         prediction: "Prediction",
-        estimate: "EffectEstimate",
+        estimate: "EffectEstimate | None" = None,
         *,
-        data_id: str,
+        data_id: str | None = None,
+        lines: "Sequence[EvidenceLine] | None" = None,
         generated_by: str | None = None,
         control_type: "ControlType | str | None" = None,
         modality: str | None = None,
@@ -1028,23 +1046,35 @@ class EpistemicGraph:
         The second half of the register-plan-then-submit split. Computes the
         ``plan_id`` from the proposition + prediction and REQUIRES that plan to
         already exist (via :meth:`register_plan`), else raises
-        :class:`NoRegisteredPlanError`. Then it computes the Bearing, writes the
-        finding's signed claim whose ``supports[]`` cites the plan attestation's
-        claim_id (so the plan -> finding edge is *signed*, not merely
-        denormalised), persists the single-line evidence tree, and derives the
+        :class:`NoRegisteredPlanError`. Then it computes a Bearing per evidence
+        line, writes the finding's signed claim whose ``supports[]`` cites the
+        plan attestation's claim_id (so the plan -> finding edge is *signed*, not
+        merely denormalised), persists the evidence tree, and derives the
         proposition's Status.
 
-        Idempotent on (``content_id``, ``data_id``): re-submitting the same
-        dataset returns the prior finding. **Fork-guard:** if a finding already
-        exists for (``content_id``, ``data_id``) but under a *different* plan_id
-        than the prediction now passed, this raises
-        :class:`FindingPlanForkError` rather than silently returning the prior
-        bearing: a changed decision rule must not be swallowed by the
-        (``content_id``, ``data_id``) idempotency anchor.
+        Single- vs multi-line input. Pass either ``estimate`` + ``data_id`` (one
+        line) OR ``lines`` (a sequence of pre-built :class:`EvidenceLine`, the
+        multi-line evidence tree), never both. In multi-line mode the per-line
+        attributes (``control_type``, ``modality``, ``provenance_id``,
+        ``design_type``) live on each line and must not be passed as scalars.
 
-        All input validation (falsifiability, estimate consistency, the gate)
-        runs before the signed claim is written, so a rejected finding never
-        leaves an orphan claim. The authoritative existence check and the
+        Idempotency anchor. A finding's identity within a ``content_id`` is its
+        full ``data_id`` set: re-submitting the same set under the same plan
+        returns the prior finding. **Fork-guard:** if the submitted datasets
+        already belong to a finding under a *different* plan, span more than one
+        existing finding, or differ from an existing finding's set, this raises
+        :class:`FindingPlanForkError` rather than silently returning a prior
+        bearing.
+
+        Independence note. Status counts independent support/refute by distinct
+        *run* (``generated_by``) with a ``data_id`` guard (see
+        :func:`mareforma.trust._store.independence_counts`), so the run token
+        must be per-run-unique; a default/None token is flagged as a health event
+        because it collapses independence.
+
+        All input validation (falsifiability, estimate consistency, each line's
+        gate) runs before the signed claim is written, so a rejected finding
+        never leaves an orphan claim. The authoritative existence check and the
         structured-row writes run inside one transaction (no TOCTOU); a retry
         reuses the finding claim idempotently rather than duplicating it.
         """
@@ -1068,44 +1098,107 @@ class EpistemicGraph:
                 f"scope={dict(proposition.scope)!r}"
             )
 
-        ct = control_type if control_type is not None else ControlType.NEGATIVE
-        # Building the line validates the estimate/data_id; computing the bearing
-        # validates the gate (e.g. a mismatched CI level raises here). Both run
-        # before the signed claim is written.
-        line = EvidenceLine(
-            estimate=estimate,
-            data_id=data_id,
-            contrast=Contrast(ct),
-            modality=modality,
-            provenance_id=provenance_id,
-            design_type=design_type,
-        )
-        bearing = compute_bearing(estimate, prediction)
+        # Resolve single-line vs multi-line input into a list of EvidenceLine.
+        # Building each line validates its estimate/data_id before any write.
+        if lines is not None:
+            if estimate is not None or data_id is not None:
+                raise ValueError(
+                    "pass either (estimate + data_id) or lines, not both"
+                )
+            if any(
+                v is not None
+                for v in (control_type, modality, provenance_id, design_type)
+            ):
+                raise ValueError(
+                    "in multi-line mode the per-line attributes (control_type, "
+                    "modality, provenance_id, design_type) belong on each "
+                    "EvidenceLine, not as scalar arguments"
+                )
+            evidence_lines = list(lines)
+            if not evidence_lines:
+                raise ValueError("a finding must carry at least one evidence line")
+            if any(not isinstance(ln, EvidenceLine) for ln in evidence_lines):
+                raise TypeError("every item in lines must be an EvidenceLine")
+        else:
+            if estimate is None or data_id is None:
+                raise ValueError(
+                    "single-line mode requires both estimate and data_id"
+                )
+            ct = control_type if control_type is not None else ControlType.NEGATIVE
+            evidence_lines = [
+                EvidenceLine(
+                    estimate=estimate,
+                    data_id=data_id,
+                    contrast=Contrast(ct),
+                    modality=modality,
+                    provenance_id=provenance_id,
+                    design_type=design_type,
+                )
+            ]
+
+        # One Bearing per line (gate validation runs here, before any write).
+        bearings = [compute_bearing(ln.estimate, prediction) for ln in evidence_lines]
+        primary_bearing = bearings[0]
+        # A run token that is present but blank is a caller error: independence
+        # is counted by distinct run, so an empty/whitespace token would silently
+        # collapse it. None is allowed (it defaults downstream and is warned
+        # below); an explicit blank is rejected.
+        if generated_by is not None and not generated_by.strip():
+            raise ValueError(
+                "generated_by must be a non-empty run token (or None to default); "
+                "a blank token collapses distinct-run independence"
+            )
+
         cid = proposition.content_id()
         plan_id = _store.compute_plan_id(cid, prediction)
+        data_id_set = {ln.data_id for ln in evidence_lines}
+        # Single-line identity tracks the DATASET set, not the raw line count:
+        # a finding with two lines over one dataset (e.g. two contrasts) is still
+        # one independent dataset, so it keeps the single-line idempotency key
+        # and back-compat scalar data_id.
+        single_line = len(data_id_set) == 1
 
-        def _fork_error(existing_plan_id: str) -> FindingPlanForkError:
+        def _fork_error(reason: str) -> FindingPlanForkError:
             return FindingPlanForkError(
-                f"a finding for (content_id={cid[:12]}…, data_id={data_id!r}) "
-                f"already exists under plan {existing_plan_id[:12]}…, but the "
-                f"prediction now passed resolves to plan {plan_id[:12]}…. The "
-                "same dataset stands under exactly one plan for a proposition; "
-                "re-submitting under a changed rule is refused, not silently "
-                "ignored."
+                f"a finding for content_id={cid[:12]}… cannot be written: {reason}. "
+                "Within a proposition a dataset set stands under exactly one plan; "
+                "re-submitting under a changed rule or a different set is refused, "
+                "not silently ignored."
             )
+
+        def _resolve(conn) -> tuple[str, object]:
+            """('idempotent', row) | ('new', None); raises FindingPlanForkError."""
+            touched: dict[str, object] = {}
+            for d in data_id_set:
+                row = _store.find_existing_finding(conn, cid, d)
+                if row is not None:
+                    touched[row["finding_id"]] = row
+            if not touched:
+                return ("new", None)
+            if len(touched) > 1:
+                raise _fork_error(
+                    "the submitted datasets already span more than one finding"
+                )
+            (row,) = touched.values()
+            if row["plan_id"] != plan_id:
+                raise _fork_error(
+                    f"its datasets already stand under plan {row['plan_id'][:12]}…, "
+                    f"but the prediction now passed resolves to plan {plan_id[:12]}…"
+                )
+            if _store.finding_data_ids(conn, row["finding_id"]) != data_id_set:
+                raise _fork_error(
+                    "the submitted dataset set differs from the existing finding's"
+                )
+            return ("idempotent", row)
 
         # Pre-flight (fast path, clean errors). The authoritative checks repeat
         # in-transaction below to close the TOCTOU window.
-        existing = _store.find_existing_finding(self._conn, cid, data_id)
-        if existing is not None:
-            if existing["plan_id"] != plan_id:
-                raise _fork_error(existing["plan_id"])
-            # Emit here too, so an idempotent re-submit is logged whether it is
-            # detected on this fast path or in the in-transaction re-check.
+        kind, existing = _resolve(self._conn)
+        if kind == "idempotent":
             from mareforma import health as _health
             _health.append_health_event(
                 self._root, "submit_finding",
-                bearing=bearing.direction.value, idempotent=True,
+                bearing=primary_bearing.direction.value, idempotent=True,
             )
             view = _store.proposition_status(self._conn, cid)
             return {
@@ -1113,7 +1206,8 @@ class EpistemicGraph:
                 "content_id": cid,
                 "plan_id": existing["plan_id"],
                 "claim_id": existing["claim_id"],
-                "bearing": bearing.to_dict(),
+                "bearing": primary_bearing.to_dict(),
+                "bearings": [b.to_dict() for b in bearings],
                 "status": view["status"] if view else None,
                 "idempotent": True,
                 "proposition_status": view,
@@ -1125,6 +1219,19 @@ class EpistemicGraph:
                 "prediction) before submit_finding, or use assert_finding for "
                 "the one-shot path that registers the plan for you."
             )
+
+        # The claim idempotency_key: keep the exact single-line form for parity;
+        # multi-line keys on a stable hash of the sorted dataset set.
+        if idempotency_key is not None:
+            finding_key = idempotency_key
+        elif single_line:
+            finding_key = f"finding:{cid}:{next(iter(data_id_set))}"
+        else:
+            import hashlib
+            digest = hashlib.sha256(
+                "\x00".join(sorted(data_id_set)).encode()
+            ).hexdigest()
+            finding_key = f"finding:{cid}:set:{digest}"
 
         # Authoritative existence + fork + plan checks AND all writes run in one
         # transaction (BEGIN IMMEDIATE). The finding claim is written INSIDE this
@@ -1138,10 +1245,8 @@ class EpistemicGraph:
         if _own_txn:
             conn.execute("BEGIN IMMEDIATE")
         try:
-            existing = _store.find_existing_finding(conn, cid, data_id)
-            if existing is not None:
-                if existing["plan_id"] != plan_id:
-                    raise _fork_error(existing["plan_id"])
+            kind, existing = _resolve(conn)
+            if kind == "idempotent":
                 finding_id = existing["finding_id"]
                 result_claim_id = existing["claim_id"]
                 idempotent = True
@@ -1157,25 +1262,39 @@ class EpistemicGraph:
                 # metadata. supports=None is correct for the one-shot assert_finding
                 # path, whose synthesised plan (preregistered=0) has no attestation
                 # claim; the signed edge exists only when register_plan wrote one.
+                # Run-token precondition: distinct-run independence is
+                # meaningless when the run token is the default/None. Flag it
+                # loudly (non-blocking) only here, on an actual new write, not
+                # on idempotent re-submits or calls about to fork/raise.
+                if not generated_by or generated_by == "agent":
+                    from mareforma import health as _health
+                    _health.append_health_event(
+                        self._root, "submit_finding",
+                        generated_by_default=True, content_id=cid[:12],
+                    )
                 plan_claim_id = _store.get_plan_claim_id(conn, plan_id)
                 supports = [plan_claim_id] if plan_claim_id else None
                 claim_id = self.assert_claim(
                     proposition.text(),
                     generated_by=generated_by,
                     supports=supports,
-                    idempotency_key=idempotency_key or f"finding:{cid}:{data_id}",
+                    idempotency_key=finding_key,
                     predicate_payload={
                         "trust": "finding/v1",
                         "content_id": cid,
                         "frame_id": proposition.frame_id(),
                         "plan_id": plan_id,
-                        "data_id": data_id,
+                        # Back-compat scalar for single-line readers; the full set
+                        # is always in data_ids.
+                        "data_id": next(iter(data_id_set)) if single_line else None,
+                        "data_ids": sorted(data_id_set),
                         "code_ref": code_ref,
-                        "bearing": bearing.direction.value,
+                        "bearing": primary_bearing.direction.value,
+                        "bearings": [b.direction.value for b in bearings],
                     },
                 )
                 finding_id = _store.insert_finding(
-                    conn, cid, plan_id, claim_id, bearing, line, now
+                    conn, cid, plan_id, claim_id, bearings, evidence_lines, now
                 )
                 result_claim_id = claim_id
                 idempotent = False
@@ -1193,7 +1312,7 @@ class EpistemicGraph:
         from mareforma import health as _health
         _health.append_health_event(
             self._root, "submit_finding",
-            bearing=bearing.direction.value,
+            bearing=primary_bearing.direction.value,
             idempotent=idempotent,
         )
 
@@ -1202,7 +1321,8 @@ class EpistemicGraph:
             "content_id": cid,
             "plan_id": plan_id,
             "claim_id": result_claim_id,
-            "bearing": bearing.to_dict(),
+            "bearing": primary_bearing.to_dict(),
+            "bearings": [b.to_dict() for b in bearings],
             "status": view["status"] if view else None,
             "idempotent": idempotent,
             "proposition_status": view,
