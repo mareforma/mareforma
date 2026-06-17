@@ -6,6 +6,37 @@ description: "Notable changes across Mareforma releases."
 The authoritative changelog lives in [CHANGELOG.md](https://github.com/mareforma/mareforma/blob/main/CHANGELOG.md).
 This page mirrors it.
 
+## v0.3.6 - 2026-06-17
+
+The multi-line evidence tree. A finding can now carry several evidence lines
+instead of one, and `Status` counts independence by distinct run rather than
+distinct dataset. Additive on the schema (stays at v1, no migration). The
+single-line API is unchanged, and so are its `Status` outcomes for findings from
+distinct runs. See [Findings](/concepts/findings).
+
+### Added
+
+- `submit_finding` / `assert_finding` take a `lines=[EvidenceLine, ...]` argument
+  in place of the single `estimate` + `data_id` pair, recording several datasets
+  or arms under one proposition and prediction. A finding with no lines raises
+  `ValueError`; a finding where any line fails the gate rolls back whole. The
+  finding's identity is its full `data_id` set. The return dict gains `bearings`,
+  the per-line bearing list.
+- Per-line bearing: each line's bearing is recomputed on read, so a multi-line
+  finding whose lines disagree reads as `CONTESTED`.
+
+### Changed
+
+- `Status` independence is now run-distinct: support and refute count distinct
+  `generated_by` (run) with a `data_id` guard. One run contributes at most one
+  support and one refute, so a single run cannot reach `CORROBORATED` on its own.
+  Two findings on one proposition from the same run that previously read
+  `CORROBORATED` now read `PRELIMINARY`; findings from distinct runs are
+  unaffected. Policy stamp moves to `status_policy@v2`, recomputed on read with
+  no migration.
+- A blank or whitespace `generated_by` is rejected at the finding write; a
+  missing or default token writes but emits a health event.
+
 ## v0.3.5 - 2026-06-15
 
 The pre-registration split. v0.3.4 shipped the trust layer as a single

@@ -136,23 +136,34 @@ v1, and every finding still rides a signed claim.
 Proposition (content_id, frame_id)
   ├─ Prediction (the pre-registered rule, append-only)
   └─ Finding ──▶ signed claim
-        └─ EvidenceLine (data_id) ──▶ Contrast ──▶ EffectEstimate
+        └─ EvidenceLine[] (data_id) ──▶ Contrast ──▶ EffectEstimate
 ```
+
+A finding carries one evidence line or many. The single-line case is the common
+one; a multi-line finding records several datasets or arms under one proposition
+and prediction.
 
 Three rules:
 
 1. **The bearing is computed, not declared.** `compute_bearing(estimate, prediction)`
    in [`mareforma/trust/bearing.py`](mareforma/trust/bearing.py) returns
    supports / refutes / neutral from the pre-registered rule and the realised
-   numbers. An agent cannot relabel a refutation as support. The rule is also
-   expressible as an ordered short-circuit `gates[]` chain (`gates_for`,
-   `evaluate_gates`) over the existing prediction columns; the single binary
-   gate is the one-element chain, bearing-identical to `compute_bearing`.
-2. **Status is a count over independent data.** `compute_status` in
-   [`mareforma/trust/status.py`](mareforma/trust/status.py) reads distinct
-   `data_id` counts (UNTESTED, PRELIMINARY, CORROBORATED, REFUTED, CONTESTED).
-   It is a versioned policy (`status_policy@v1`) over stored counts, recomputed
-   on read, never baked into the schema.
+   numbers. An agent cannot relabel a refutation as support. Each evidence line
+   gets its own bearing, recomputed on read, so a multi-line finding whose lines
+   disagree is counted line by line, not off a single per-finding label. The rule
+   is also expressible as an ordered short-circuit `gates[]` chain (`gates_for`,
+   `evaluate_gates`) over the existing prediction columns; the single binary gate
+   is the one-element chain, bearing-identical to `compute_bearing`.
+2. **Status counts independent runs, not raw datasets.** `compute_status` in
+   [`mareforma/trust/status.py`](mareforma/trust/status.py) reads
+   `independent_support` and `independent_refute` (UNTESTED, PRELIMINARY,
+   CORROBORATED, REFUTED, CONTESTED). Independence is counted by distinct run
+   (`generated_by`) with a `data_id` guard: one run contributes at most one
+   support and one refute, so a single run cannot reach CORROBORATED on its own,
+   and re-running the same dataset adds nothing. Corroboration accrues across
+   runs. The run token must be per-run-unique; a blank token is rejected at write
+   and a default one is flagged. It is a versioned policy (`status_policy@v2`),
+   recomputed on read, never baked into the schema.
 3. **Identity is the frozen kernel.** `content_id` (the answer) and `frame_id`
    (the question) are sha256 over RFC 8785 canonical bytes of normalized tokens
    ([`mareforma/trust/proposition.py`](mareforma/trust/proposition.py)). Same

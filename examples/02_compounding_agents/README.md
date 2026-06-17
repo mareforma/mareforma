@@ -134,7 +134,7 @@ The claim graph above tracks *who asserted what*: each agent picks its own
 classification and `supports[]` list. The trust layer makes the support
 *earned*. The question becomes a falsifiable `Proposition`; each analyst
 registers a `Prediction` **before** seeing the numbers; mareforma **computes**
-the bearing from the result and **derives** the status from independent data.
+the bearing from the result and **derives** the status from independent runs.
 
 ```python
 # The same research question, now as a truth-apt, falsifiable claim.
@@ -155,7 +155,8 @@ result_a = graph.assert_finding(
                    ci_lower=0.18, ci_upper=0.66, ci_level=0.90, n_total=842),
     data_id="dataset_alpha", generated_by="analyst/model-a/lab_a",
 )
-# Analyst B on dataset_beta: a distinct data_id is a second independent line.
+# Analyst B is a distinct run (generated_by) on a distinct dataset: a second
+# independent line.
 result_b = graph.assert_finding(
     prop, plan,
     EffectEstimate(estimate_value=0.51, effect_type=EffectType.SMD,
@@ -174,7 +175,7 @@ result_b = graph.assert_finding(
 ```
 
 Neither agent declared `supports`. mareforma computed each bearing from the
-pre-registered rule and derived `CORROBORATED` from two independent datasets.
+pre-registered rule and derived `CORROBORATED` from two independent runs.
 
 ## Synthesizer: query the frame
 

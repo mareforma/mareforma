@@ -251,13 +251,15 @@ One attestation plus its computed bearing on a proposition under a plan.
 
 ### evidence_lines table
 
-One independent line of evidence. `data_id` is the distinct-artifact key the independence heuristic counts over.
+One line of evidence; a finding may carry several. Independence is counted by
+distinct run (`generated_by`), with `data_id` as a guard so the same dataset is
+not counted twice.
 
 | Field | Type | Notes |
 |---|---|---|
 | `line_id` | TEXT (PK) | UUID |
 | `finding_id` | TEXT | FK to `findings(finding_id)`. Indexed (`idx_line_finding`) |
-| `data_id` | TEXT | The independence key; two lines are independent iff this differs. Indexed (`idx_line_data`) |
+| `data_id` | TEXT | Dataset key; guards against counting the same dataset twice across runs. Indexed (`idx_line_data`) |
 | `modality` / `provenance_id` / `design_type` | TEXT | Optional descriptors |
 | `created_at` | TEXT | UTC ISO 8601 |
 
@@ -287,8 +289,9 @@ The estimate the gate reads. Minimal metafor-named field set.
 | `n_total` | INTEGER | Optional total N |
 
 The `Status` of a proposition is not stored. It is derived on read from the
-independent supporting / refuting line counts (`status_policy@v1`), so improving
-the rule later is a new policy over the same data, not a migration.
+independent supporting / refuting line counts, counted by distinct run
+(`status_policy@v2`), so improving the rule later is a new policy over the same
+data, not a migration.
 
 ## Schema versioning
 
