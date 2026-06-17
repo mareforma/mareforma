@@ -39,10 +39,10 @@ class Tool(Protocol):
 
     Minimum contract:
 
-    - ``name`` — stable identifier for this tool.
-    - ``version`` — version string (typically the source package's
+    - ``name``: stable identifier for this tool.
+    - ``version``: version string (typically the source package's
       ``__version__``).
-    - ``call(**kwargs) -> ToolResult`` — synchronous invocation.
+    - ``call(**kwargs) -> ToolResult``: synchronous invocation.
 
     A tool that has these attributes/methods satisfies the Protocol
     without inheriting from it (``@runtime_checkable`` makes

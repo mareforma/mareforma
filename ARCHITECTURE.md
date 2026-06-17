@@ -1,4 +1,4 @@
-# Mareforma — Architecture
+# Mareforma: Architecture
 
 ## In one sentence
 
@@ -10,7 +10,7 @@ writes to as it works.
 ## The lane
 
 Every individual capability mareforma uses exists in mature form
-elsewhere — Ed25519 signing (`cryptography`), DSSE envelopes (`in-toto`),
+elsewhere: Ed25519 signing (`cryptography`), DSSE envelopes (`in-toto`),
 Sigstore transparency (`rekor`), JSON canonicalization (RFC 8785-style),
 local-first SQLite (Datasette ecosystem), GRADE evidence grading
 (Cochrane). What is missing in the OSS landscape is the **combination**:
@@ -22,19 +22,19 @@ conclusion.
 
 Mareforma is that combination. It is **not** trying to replace:
 
-- W3C PROV-O (richer provenance vocabulary — mareforma is a runtime
+- W3C PROV-O (richer provenance vocabulary, mareforma is a runtime
   library, not an RDF graph)
-- FAIRSCAPE's EVI (research-evidence ontology — an EVI export adapter
+- FAIRSCAPE's EVI (research-evidence ontology, an EVI export adapter
   is on the deferred-features backlog and would map mareforma claims onto EVI Claim
   / EvidenceGraph / supports / challenges classes; the schema stays
   mareforma-native, the export is the interop surface)
-- IETF SCITT (federated supply-chain transparency — a SCITT submission
+- IETF SCITT (federated supply-chain transparency, a SCITT submission
   path alongside Rekor is on the deferred-features backlog)
-- Sigstore (transparency for software artifacts — mareforma uses Rekor
+- Sigstore (transparency for software artifacts, mareforma uses Rekor
   for claim transparency; the protocols are the same shape)
-- RO-Crate (FAIR research-object packaging — an RO-Crate 1.2 export
+- RO-Crate (FAIR research-object packaging, an RO-Crate 1.2 export
   from `export_bundle.py` is on the deferred-features backlog)
-- MLflow / DVC / W&B (run + dataset versioning — orthogonal; those
+- MLflow / DVC / W&B (run + dataset versioning, orthogonal; those
   track artifacts, mareforma tracks claims)
 
 ## Rails, not trains
@@ -42,15 +42,15 @@ Mareforma is that combination. It is **not** trying to replace:
 Mareforma ships **the rails**: the storage layer, the signing
 discipline, the trust-ladder state machine, the convergence-detection
 SQL, the restore-from-TOML recovery path. What it deliberately does
-**not** ship — the **trains** that produce verdicts — lives outside
+**not** ship, the **trains** that produce verdicts, lives outside
 the OSS:
 
 - **Semantic-cluster verdicts** (which embedding model, which similarity
-  threshold, which clustering algorithm — research-domain specific)
+  threshold, which clustering algorithm, research-domain specific)
 - **Cross-method verdicts** (when do two analytical pipelines count as
-  "different methods" — domain-specific)
+  "different methods", domain-specific)
 - **Contradiction-detection verdicts via NLI** (which NLI model, which
-  contradiction threshold — research-domain specific)
+  contradiction threshold, research-domain specific)
 - **Sakana / FutureHouse-style end-to-end AI scientist agents** (those
   consume mareforma; they don't live in it)
 
@@ -110,7 +110,7 @@ Three rules:
    `ESTABLISHED` upstream in `supports[]`, must have different
    `generated_by`, and (if both supply `artifact_hash`) must agree on
    the hash. Status, transparency log, and DOI resolution gates apply
-   too — see `_maybe_update_replicated_unlocked` in db/core.py.
+   too; see `_maybe_update_replicated_unlocked` in db/core.py.
 2. **REPLICATED → ESTABLISHED is human-only.** `graph.validate()`
    requires an enrolled validator key whose `validator_type` is
    `'human'`. LLM-typed validators may sign validations but cannot
@@ -122,7 +122,7 @@ Three rules:
 
 The `seed=True` bootstrap is the only way to insert at ESTABLISHED
 directly. It exists to break the chicken-and-egg of "REPLICATED needs
-an ESTABLISHED upstream that doesn't exist on a fresh graph yet" — and
+an ESTABLISHED upstream that doesn't exist on a fresh graph yet", and
 it is gated to enrolled human-typed validators only.
 
 ## Trust layer
@@ -206,15 +206,15 @@ body)`) with these payload types:
 The bundle export (`export_bundle.py`) signs the entire JSON-LD graph
 under a separate `application/vnd.mareforma.graph-bundle+json` payload
 type. The bundle signature attests "this set of claims was bundled by
-this key" — it does **not** re-attest the per-claim signatures. To
+this key". It does **not** re-attest the per-claim signatures. To
 verify per-claim signatures end-to-end, use the `claims.toml` backup,
 which preserves each row's `signature_bundle` field.
 
-### Canonicalization — RFC 8785 strict
+### Canonicalization: RFC 8785 strict
 
 `canonicalize` (in [`mareforma/_canonical.py`](mareforma/_canonical.py))
 normalizes every string in the payload to Unicode NFC, then serializes
-via the `rfc8785` library — a strict implementation of RFC 8785 (JSON
+via the `rfc8785` library, a strict implementation of RFC 8785 (JSON
 Canonicalization Scheme, JCS). The `rfc8785` dependency is what makes
 the output JCS-strict; earlier the code used
 `json.dumps(sort_keys=True, ...)`, which was only JCS-shaped, not
@@ -238,7 +238,7 @@ What strict JCS gets us:
 - Integers outside the IEEE-754 double-precision safe-integer range
   are rejected (JCS would otherwise lose precision on round-trip).
 - Dict keys that NFC-normalize to the same string raise `ValueError`
-  rather than silently dropping a value — canonical JSON requires
+  rather than silently dropping a value. Canonical JSON requires
   distinct keys, and dropping one would produce a non-deterministic
   envelope under adversarial input.
 
@@ -255,7 +255,7 @@ For cross-tool verification: use any RFC 8785 implementation
 mareforma signed, then verify the DSSE envelope's PAE signature with
 the signer's Ed25519 public key. The in-toto Statement v1 subject
 digest (`sha256` over `text`) is canonical without depending on number
-serialization at all — it's the same bytes any in-toto verifier
+serialization at all. It's the same bytes any in-toto verifier
 (`in-toto-golang`, the Sigstore stack) will produce.
 
 ## Storage layer
@@ -265,17 +265,17 @@ minimum version 3.30.0 (enforced at `open_db()`).
 
 Tables:
 
-- `claims` — every assertion. Includes denormalized `ev_*` columns for
+- `claims`: every assertion. Includes denormalized `ev_*` columns for
   query, the full `evidence_json` for round-trip, the
   `signature_bundle` DSSE envelope, a `prev_hash` chain link, and the
   `convergence_retry_needed` flag set by `_maybe_update_replicated`
   when a swallowed error needs operator follow-up.
-- `validators` — per-project enrolled-validator chain, rooted at a
+- `validators`: per-project enrolled-validator chain, rooted at a
   self-signed row. Singleton-root invariant: more than one self-signed
   row → entire chain forfeit.
-- `replication_verdicts` / `contradiction_verdicts` — signed verdicts
+- `replication_verdicts` / `contradiction_verdicts`: signed verdicts
   from enrolled issuers. Append-only at the trigger level.
-- `rekor_inclusions` — sidecar recording every successful Rekor
+- `rekor_inclusions`: sidecar recording every successful Rekor
   submission, independent of whether the claims-row UPDATE that
   attaches the rekor coords to `signature_bundle` succeeded. Closes
   the divergence window where Rekor would have a permanent public
@@ -285,9 +285,9 @@ Tables:
   at the trigger level (UPDATE and DELETE both refused), so a
   SQL-writer cannot launder forged Rekor coords through the replay
   path.
-- `claims_fts` — FTS5 virtual table (independent of `claims`, not
+- `claims_fts`: FTS5 virtual table (independent of `claims`, not
   `content=` linked) for substring + tokenized search.
-- `doi_cache` — 30-day positive / 24-hour negative cache for DOI HEAD
+- `doi_cache`: 30-day positive / 24-hour negative cache for DOI HEAD
   checks against Crossref + DataCite.
 - `literature_claims`: paper-abstract claim drafts from `mareforma
   ingest`, kept separate from the signed `claims` table so ingested
@@ -308,7 +308,7 @@ relax these rules.
 
 ## What survives restore
 
-`claims.toml` is the canonical source for `mareforma.restore(project_root)` —
+`claims.toml` is the canonical source for `mareforma.restore(project_root)`:
 canonical for rebuilding `graph.db` and re-verifying signatures,
 **derived** for the `prev_hash` chain (regenerated, not preserved).
 
@@ -321,7 +321,7 @@ The restore path:
 3. Re-derives `statement_cid` from the claim's canonical statement and
    cross-checks against the stored value.
 4. Re-derives `prev_hash` chain in claim order. Note: this is regeneration,
-   not preservation — see below.
+   not preservation; see below.
 5. Replays all verdicts in chronological order so the
    `contradiction_invalidates_older` trigger sets earliest-first.
 
@@ -335,7 +335,7 @@ is on the deferred-features backlog.
 reorders claims (swap two `created_at` values) restores to a different
 but internally-consistent chain. The signatures bind canonical statement
 bytes, not chain position. For tamper-evidence across restore boundaries,
-the per-claim Rekor entry is the external anchor — though Merkle
+the per-claim Rekor entry is the external anchor, though Merkle
 inclusion proof verification is itself on the deferred-features backlog.
 
 **The TOML write lags the SQLite commit.** `_backup_claims_toml` runs
@@ -392,8 +392,8 @@ cannot bypass them.
 
 | Table | Trigger | Refuses |
 |---|---|---|
-| `rekor_inclusions` | `rekor_inclusions_append_only` + `rekor_inclusions_no_delete` | any UPDATE or DELETE — once Rekor witnessed a claim, the saga's step-3 record is immutable; SQL writers cannot launder forged Rekor coords through the recovery path |
-| `replication_verdicts` | `replication_verdicts_append_only` + `replication_verdicts_no_delete` | UPDATE of signed columns; DELETE of any row — verdicts are signed evidence, not editable records |
+| `rekor_inclusions` | `rekor_inclusions_append_only` + `rekor_inclusions_no_delete` | any UPDATE or DELETE; once Rekor witnessed a claim, the saga's step-3 record is immutable; SQL writers cannot launder forged Rekor coords through the recovery path |
+| `replication_verdicts` | `replication_verdicts_append_only` + `replication_verdicts_no_delete` | UPDATE of signed columns; DELETE of any row; verdicts are signed evidence, not editable records |
 | `contradiction_verdicts` | `contradiction_verdicts_append_only` + `contradiction_verdicts_no_delete` | same; plus the `contradiction_invalidates_older` AFTER INSERT trigger that sets `t_invalid` on the older of two referenced claims (lex-tie-break, idempotent via `WHERE t_invalid IS NULL`) |
 
 ### Signed-fields vs mutable-fields
@@ -405,35 +405,35 @@ on a signed row is refused at the SQL layer.
 
 | Field | Signed (predicate) | Mutable on a signed row |
 |---|---|---|
-| `claim_id` | ✓ | — |
-| `text` | ✓ | — |
-| `classification` | ✓ | — |
-| `generated_by` | ✓ | — |
-| `supports_json` | ✓ | — |
-| `contradicts_json` | ✓ | — |
-| `source_name` | ✓ | — |
-| `artifact_hash` | ✓ | — |
-| `created_at` | ✓ | — |
-| `evidence_json` + `ev_*` | ✓ | — |
-| `statement_cid` | derived from signed bytes | — |
-| `prev_hash` | derived (chain link) | — |
+| `claim_id` | ✓ | no |
+| `text` | ✓ | no |
+| `classification` | ✓ | no |
+| `generated_by` | ✓ | no |
+| `supports_json` | ✓ | no |
+| `contradicts_json` | ✓ | no |
+| `source_name` | ✓ | no |
+| `artifact_hash` | ✓ | no |
+| `created_at` | ✓ | no |
+| `evidence_json` + `ev_*` | ✓ | no |
+| `statement_cid` | derived from signed bytes | no |
+| `prev_hash` | derived (chain link) | no |
 | `status` | not signed | ✓ (one-way: open → contested → retracted) |
 | `support_level` | not signed | ✓ (one-way ladder) |
 | `validated_by` / `validated_at` / `validation_signature` / `validator_keyid` | not signed (validation is its own envelope) | written by `validate_claim` only |
 | `signature_bundle` | self-referential | only rewritten by `mark_claim_logged` to attach a Rekor block; payload + signatures bytes must be byte-identical to the existing value, only the optional `rekor` top-level key may differ |
-| `unresolved` / `transparency_logged` / `convergence_retry_needed` / `t_invalid` | not signed (operational flags) | ✓ (gated mutations — `t_invalid` by trigger only) |
+| `unresolved` / `transparency_logged` / `convergence_retry_needed` / `t_invalid` | not signed (operational flags) | ✓ (gated mutations, `t_invalid` by trigger only) |
 
 ### What `restore()` proves vs what the live DB proves
 
 | Property | Proved by live DB | Proved by `restore()` |
 |---|---|---|
-| The claim was signed by an enrolled key at insert time | yes (`signature_bundle` set + validator chain walk) | yes — re-verifies every envelope against the validator's PEM, refuses orphan signers |
-| The row's signed fields match the envelope | trigger blocks mutation; row never drifts unless a SQL-tamper bypasses Python | yes — re-derives canonical bytes and compares to `predicate.*`, refuses on mismatch |
-| EvidenceVector hasn't been tampered after signing | trigger blocks `ev_*` and `evidence_json` mutation | yes — re-derives the canonical evidence dict and compares to `predicate.evidence` |
-| `statement_cid` cross-check | column never directly written by user code | yes — re-derives from the row's fields + evidence and compares to the stored `statement_cid` |
-| Validation envelope binds this claim | the gates: `_extract_validation_signer_keyid`, `_refuse_llm_validator`, `_refuse_self_validation`, `_verify_evidence_seen`, envelope/kwarg agreement; cryptographic verify on the envelope | yes — verifies the validation envelope's signature, then checks `claim_id` / `validator_keyid` / timestamp / `evidence_seen` fields against the row |
-| Contradiction verdict is signed by an enrolled validator | enforced at `record_contradiction_verdict`; chain walk via `is_enrolled` | yes — replays each verdict envelope in `created_at` order, verifies before INSERT, the contradiction trigger re-sets `t_invalid` |
-| Rekor inclusion proof is cryptographically valid | only when opt-in `rekor_log_pubkey_pem` was supplied at `mareforma.open()`; submit path + `refresh_unsigned()` verify the Merkle path against the signed checkpoint | yes (v0.3.2) — `rekor_inclusions` sidecar round-tripped through `claims.toml`; `restore()` replays entries and (when `rekor_log_pubkey_pem` supplied) re-verifies each inclusion proof against the pinned key. Pre-v0.3.2 TOML files restore with `RekorSidecarSectionAbsentWarning` |
+| The claim was signed by an enrolled key at insert time | yes (`signature_bundle` set + validator chain walk) | yes, re-verifies every envelope against the validator's PEM, refuses orphan signers |
+| The row's signed fields match the envelope | trigger blocks mutation; row never drifts unless a SQL-tamper bypasses Python | yes, re-derives canonical bytes and compares to `predicate.*`, refuses on mismatch |
+| EvidenceVector hasn't been tampered after signing | trigger blocks `ev_*` and `evidence_json` mutation | yes, re-derives the canonical evidence dict and compares to `predicate.evidence` |
+| `statement_cid` cross-check | column never directly written by user code | yes, re-derives from the row's fields + evidence and compares to the stored `statement_cid` |
+| Validation envelope binds this claim | the gates: `_extract_validation_signer_keyid`, `_refuse_llm_validator`, `_refuse_self_validation`, `_verify_evidence_seen`, envelope/kwarg agreement; cryptographic verify on the envelope | yes, verifies the validation envelope's signature, then checks `claim_id` / `validator_keyid` / timestamp / `evidence_seen` fields against the row |
+| Contradiction verdict is signed by an enrolled validator | enforced at `record_contradiction_verdict`; chain walk via `is_enrolled` | yes, replays each verdict envelope in `created_at` order, verifies before INSERT, the contradiction trigger re-sets `t_invalid` |
+| Rekor inclusion proof is cryptographically valid | only when opt-in `rekor_log_pubkey_pem` was supplied at `mareforma.open()`; submit path + `refresh_unsigned()` verify the Merkle path against the signed checkpoint | yes (v0.3.2), `rekor_inclusions` sidecar round-tripped through `claims.toml`; `restore()` replays entries and (when `rekor_log_pubkey_pem` supplied) re-verifies each inclusion proof against the pinned key. Pre-v0.3.2 TOML files restore with `RekorSidecarSectionAbsentWarning` |
 
 ### One-page threat model
 
@@ -450,7 +450,7 @@ this is the consolidated view.
 | Same-agent self-replication | `c.generated_by != ?` clause in REPLICATED detection |
 | Self-validation (validator signs the claim they are validating) | `_refuse_self_validation` |
 | LLM-typed validator promoting past REPLICATED | `_refuse_llm_validator` (also applies to contradictions: `_refuse_llm_contradiction_issuer`) |
-| Validator who didn't review the cited evidence | `_verify_evidence_seen` — each cited claim_id must exist in the graph with `created_at <= validated_at` |
+| Validator who didn't review the cited evidence | `_verify_evidence_seen`, each cited claim_id must exist in the graph with `created_at <= validated_at` |
 | Forged validation envelope (different signer, same claim_id) | `db.validate_claim` now `verify_envelope`s against the claimed signer's pubkey from the validators table before any gate fires |
 | Replay of a validation envelope onto a different claim | envelope payload-field equality check refuses `claim_id` mismatch |
 | Tampered TOML in restore (any signed field, any verdict field, any evidence value) | restore re-derives canonical bytes and refuses on mismatch |
@@ -474,27 +474,27 @@ this is the consolidated view.
 
 For the reader who wants to read the actual enforcement:
 
-- **State-machine triggers** — [`mareforma/db/_schema_sql.py`](mareforma/db/_schema_sql.py) `_SCHEMA_SQL`
+- **State-machine triggers**: [`mareforma/db/_schema_sql.py`](mareforma/db/_schema_sql.py) `_SCHEMA_SQL`
   (search for `claims_insert_state_check`, `claims_update_state_check`,
   `claims_update_status_terminal`, `claims_signed_fields_no_laundering`,
   `claims_signed_no_delete`)
-- **Convergence detection** — `_maybe_update_replicated_unlocked` in [`mareforma/db/core.py`](mareforma/db/core.py)
-- **Validation gates** — `validate_claim` in `db/core.py` (core-bypass
+- **Convergence detection**: `_maybe_update_replicated_unlocked` in [`mareforma/db/core.py`](mareforma/db/core.py)
+- **Validation gates**: `validate_claim` in `db/core.py` (core-bypass
   defense: cryptographic verify + LLM-type ceiling + self-validation
   refusal + payload field equality + evidence_seen citation gate)
-- **Verdict-issuer protocol** — `record_replication_verdict` /
+- **Verdict-issuer protocol**: `record_replication_verdict` /
   `record_contradiction_verdict` in `db/core.py`; trigger
   `contradiction_invalidates_older`
-- **Restore proofs** — `_verify_claim_signatures_on_restore`,
+- **Restore proofs**: `_verify_claim_signatures_on_restore`,
   `_verify_and_insert_replication_verdict`,
   `_verify_and_insert_contradiction_verdict` in [`mareforma/db/restore.py`](mareforma/db/restore.py)
-- **Rekor inclusion verification** — `verify_rekor_inclusion`,
+- **Rekor inclusion verification**: `verify_rekor_inclusion`,
   `verify_merkle_inclusion_proof`, `verify_rekor_checkpoint`,
   `fetch_inclusion_proof`, `fetch_log_pubkey` in
   [`mareforma/signing/rekor.py`](mareforma/signing/rekor.py)
-- **TOFU pubkey pinning** — `_pem_canonical_der` +
+- **TOFU pubkey pinning**: `_pem_canonical_der` +
   `O_CREAT|O_EXCL` write in [`mareforma/__init__.py`](mareforma/__init__.py)
-- **Validator chain walk** — `_verify_chain`, `is_enrolled` in
+- **Validator chain walk**: `_verify_chain`, `is_enrolled` in
   [`mareforma/validators.py`](mareforma/validators.py)
 
 ## Adapter framework
@@ -517,7 +517,7 @@ platform-specific translation lives. Three load-bearing properties:
   enumerating the URIs it may emit, `emit_sample()` for the
   cross-adapter coexistence test in
   `tests/adapters/test_coexistence.py`. The core does not
-  prescribe HOW an adapter wraps its platform — only that any
+  prescribe HOW an adapter wraps its platform, only that any
   adapter writing into one graph composes with peers without
   predicate-URI collision.
 
@@ -549,14 +549,14 @@ are HEAD-checked-not-content-verified; contradiction is per-claim;
 automated fraud detection beyond the structural invariants
 mareforma enforces.
 
-## Engineering discipline — code as audit trail
+## Engineering discipline: code as audit trail
 
 Mareforma carries its own design review forward in time. Three
 conventions, applied consistently:
 
 - **Every defensive measure names the threat it blocks.** Each SQL
   trigger comment names the attack chain its `RAISE(ABORT, ...)`
-  refuses — e.g. `claims_signed_no_delete` documents that without
+  refuses, e.g. `claims_signed_no_delete` documents that without
   the trigger "an adversary could wipe a Rekor-logged ESTABLISHED
   claim and rewrite claims.toml as if it never existed." The
   contradiction-invalidates trigger carries a `DESIGN RULE — DO NOT
@@ -584,14 +584,14 @@ conventions, applied consistently:
   the full rule.
 
 The result is that any future contributor reading the code reads the
-reasoning that produced it — including which properties are
+reasoning that produced it, including which properties are
 load-bearing and which are intentionally out of scope. This is the
 strongest single signal of how mareforma will age.
 
 ## See also
 
-- [`README.md`](README.md) — user-facing pitch + honesty section
-- [`AGENTS.md`](AGENTS.md) — agent integration guide (the contract
+- [`README.md`](README.md): user-facing pitch + honesty section
+- [`AGENTS.md`](AGENTS.md): agent integration guide (the contract
   agents follow when writing to the graph)
-- [`SECURITY.md`](SECURITY.md) — threat model + responsible disclosure
-- [`CHANGELOG.md`](CHANGELOG.md) — release notes
+- [`SECURITY.md`](SECURITY.md): threat model + responsible disclosure
+- [`CHANGELOG.md`](CHANGELOG.md): release notes

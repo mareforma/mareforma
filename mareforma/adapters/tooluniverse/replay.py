@@ -1,4 +1,4 @@
-"""Replay-from-claim — verify a tool call byte-for-byte from its signed claim alone.
+"""Replay-from-claim: verify a tool call byte-for-byte from its signed claim alone.
 
 Phase 1 ships the single-claim case: given a claim_id and a runtime
 tool registry, look up the tool, re-execute the call with the
@@ -52,7 +52,7 @@ def replay_from_claim(
     instance. The version is checked against the predicate's pinned
     ``tool_version`` and surfaces as ``diff_fields`` on mismatch.
 
-    ``expected_tool_config_fingerprint`` (Phase 4) — when supplied,
+    ``expected_tool_config_fingerprint`` (Phase 4): when supplied,
     the replayer compares it against the predicate's pinned
     ``tool_config_fingerprint``. Mismatch adds
     ``"tool_config_fingerprint"`` to ``diff_fields``. This is the

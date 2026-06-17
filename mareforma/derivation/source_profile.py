@@ -1,5 +1,5 @@
 """
-source_profile — tree-sitter-based source-profile extraction.
+source_profile: tree-sitter-based source-profile extraction.
 
 Uses tree-sitter-python to parse Python source code into an AST and
 identify data-access patterns (database, HTTP, file I/O) and LLM-call
@@ -288,7 +288,7 @@ def _collect_dead_zones(root_node) -> list[tuple[int, int]]:  # noqa: ANN001
     - Body of `if False:` blocks
     - Code after unconditional `return` in the same block
 
-    Exception handler bodies are NOT dead code — except clauses run
+    Exception handler bodies are NOT dead code: except clauses run
     when the matching exception is raised. A common idiom is to put
     fallback data-access (e.g. ``except ConnectionError:
     requests.get(backup_url)``) in the except body; classifying that

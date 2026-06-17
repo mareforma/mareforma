@@ -2,16 +2,16 @@
 
 Two submodules:
 
-- :mod:`mareforma.signing.core` — key management, canonical Statement v1
+- :mod:`mareforma.signing.core`: key management, canonical Statement v1
   build, DSSE v1 envelope sign/verify (claim, validator-enrollment,
   validation, seed-claim payload types), and the ``bootstrap_key``
   entry point used by ``mareforma bootstrap``.
-- :mod:`mareforma.signing.rekor` — transparency-log submission, RFC 6962
+- :mod:`mareforma.signing.rekor`: transparency-log submission, RFC 6962
   Merkle inclusion-proof verification, signed-checkpoint parsing, log
   pubkey fetch, and SSRF defense on the Rekor URL.
 
 Every name documented as ``mareforma.signing.X`` continues to be
-importable at this level after the split — the submodule layout is an
+importable at this level after the split: the submodule layout is an
 internal organisation, not a public API change.
 """
 

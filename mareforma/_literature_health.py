@@ -1,10 +1,10 @@
 """
-health_extension.py — Contradiction detection extension for health.py (Step 3).
+health_extension.py: Contradiction detection extension for health.py (Step 3).
 
 Adds detect_contradictions() to the end of the health report.
 Two modes:
-  1. Structural — explicit contradicts[] JSON links between claims.
-  2. Heuristic  — polarity mismatch on shared key terms across documents.
+  1. Structural: explicit contradicts[] JSON links between claims.
+  2. Heuristic:  polarity mismatch on shared key terms across documents.
 
 Zero extra dependencies. Integration: import and call at the end of
 the existing health report in health.py.

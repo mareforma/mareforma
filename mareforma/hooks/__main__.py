@@ -1,4 +1,4 @@
-"""``python -m mareforma.hooks`` — the Claude Code PreToolUse entry point."""
+"""``python -m mareforma.hooks``: the Claude Code PreToolUse entry point."""
 
 from __future__ import annotations
 

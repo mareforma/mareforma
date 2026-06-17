@@ -1,4 +1,4 @@
-"""Gemini-for-Science adapter — read-only ingest of public outputs.
+"""Gemini-for-Science adapter: read-only ingest of public outputs.
 
 Gemini for Science (AlphaEvolve+ERA, Co-Scientist, NotebookLM,
 Antigravity Science Skills) is a closed platform with no upstream
@@ -8,14 +8,14 @@ INFERRED claims so downstream agents can reason about provenance.
 
 The v0.3.3 surface is intentionally minimal:
 
-- :class:`OutputIngester` — accepts a single Gemini output dict
+- :class:`OutputIngester`: accepts a single Gemini output dict
   (capability + payload). Per-capability required-field validation
   catches malformed inputs at ingest time; string payload values
   flow through :func:`mareforma.sanitize_for_llm` so prompt-injection
   vectors cannot survive into the claim. One INFERRED claim is
   asserted with a predicate URI matching the capability.
 
-- URI constants — re-exported from :mod:`mareforma.predicate_types`
+- URI constants: re-exported from :mod:`mareforma.predicate_types`
   for ergonomic import:
 
   * ``CODE_VARIATION_V1`` (AlphaEvolve+ERA)
@@ -118,8 +118,8 @@ _RESERVED_PAYLOAD_KEYS: frozenset[str] = frozenset({
 def _sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Recursively apply sanitize_for_llm to every string in ``payload``.
 
-    Sanitisation runs on string values only — digests, version
-    strings, and free-text summaries — leaving numbers, bools, and
+    Sanitisation runs on string values only (digests, version
+    strings, and free-text summaries), leaving numbers, bools, and
     nested digest lists untouched. Mirrors the clawinstitute
     sanitisation contract so all adapters scrub external content
     before it reaches the signed envelope.
@@ -149,12 +149,12 @@ class OutputIngester:
     1. Validates the capability against :data:`SUPPORTED_CAPABILITIES`.
     2. Validates required fields against :data:`REQUIRED_FIELDS`.
     3. Refuses payloads that try to set reserved keys (predicate_type,
-       capability) — those are adapter-owned.
+       capability): those are adapter-owned.
     4. Sanitises every string in the payload via
        :func:`mareforma.sanitize_for_llm`.
     5. Asserts ONE INFERRED claim under the matching capability URI.
 
-    Claims are INFERRED by default — a Gemini output is a single
+    Claims are INFERRED by default: a Gemini output is a single
     source's claim, not a cross-host replication. Downstream code is
     responsible for promoting findings that converge with claims from
     other sources.

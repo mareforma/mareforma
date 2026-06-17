@@ -29,7 +29,7 @@ class IdempotencyConflictError(MareformaError):
     """Raised when an idempotency_key replay arrives with conflicting fields.
 
     Idempotency means "same logical operation." A retry that supplies a
-    different ``artifact_hash`` is not a retry — it is a different claim
+    different ``artifact_hash`` is not a retry: it is a different claim
     that happens to share a key. Silently returning the first claim_id
     would let a caller believe their new hash was registered when it was
     not, losing tamper-evidence in the process. Surface the inconsistency.
@@ -52,8 +52,8 @@ class ChainIntegrityError(MareformaError):
 
     The chain hash is computed under ``BEGIN IMMEDIATE`` to serialize
     writers, and the ``prev_hash`` column carries a ``UNIQUE`` index.
-    If a second writer races past the lock — or a raw-SQL tamper
-    re-uses an existing chain link — the UNIQUE violation surfaces
+    If a second writer races past the lock, or a raw-SQL tamper
+    re-uses an existing chain link, the UNIQUE violation surfaces
     here. Treat it as a corruption signal, not a retry.
     """
 
@@ -144,13 +144,13 @@ class RestoreError(MareformaError):
     The ``kind`` attribute lets callers pattern-match on the failure
     mode without parsing the message string:
 
-      - ``'graph_not_empty'``        — existing graph.db has claims
-      - ``'toml_not_found'``         — claims.toml does not exist
-      - ``'toml_malformed'``         — TOML parse error
-      - ``'enrollment_unverified'``  — enrollment envelope fails verify
-      - ``'claim_unverified'``       — claim signature fails verify
-      - ``'mode_inconsistent'``      — signed-mode graph with unsigned claim
-      - ``'orphan_signer'``          — claim signed by an unenrolled keyid
+      - ``'graph_not_empty'``        : existing graph.db has claims
+      - ``'toml_not_found'``         : claims.toml does not exist
+      - ``'toml_malformed'``         : TOML parse error
+      - ``'enrollment_unverified'``  : enrollment envelope fails verify
+      - ``'claim_unverified'``       : claim signature fails verify
+      - ``'mode_inconsistent'``      : signed-mode graph with unsigned claim
+      - ``'orphan_signer'``          : claim signed by an unenrolled keyid
     """
 
     def __init__(self, message: str, *, kind: str) -> None:

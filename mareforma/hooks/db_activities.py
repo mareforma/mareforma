@@ -1,4 +1,4 @@
-"""``agent_activities`` table — PROV-O Activity rows for tool calls.
+"""``agent_activities`` table: PROV-O Activity rows for tool calls.
 
 A separate table from the main ``claims`` table because tool-call
 activities are high-volume, low-semantic-density data: every Claude

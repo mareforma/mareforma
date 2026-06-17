@@ -4,7 +4,7 @@ Adapters (`mareforma_tooluniverse`, `mareforma_gemini`, `mareforma_wet_lab`,
 `mareforma_peer_review`, `mareforma_elo`, ...) call :func:`register` at
 import time with the URI they ship. Mareforma validates URI shape
 (`urn:mareforma:predicate:<name>:v<N>`) but does not constrain payload
-semantics — adapters own the predicate body shape; this registry only
+semantics: adapters own the predicate body shape; this registry only
 asserts that the URI is well-formed and visible.
 
 :func:`predicates` returns the full list of registered URIs for
@@ -13,11 +13,11 @@ are available in the current Python environment without import-walking).
 
 Built-in URIs registered at import:
 
-* ``urn:mareforma:predicate:claim:v1`` — mareforma's default
+* ``urn:mareforma:predicate:claim:v1``: mareforma's default
   single-claim envelope.
-* ``urn:mareforma:predicate:epistemic-graph:v1`` — the signed-bundle
+* ``urn:mareforma:predicate:epistemic-graph:v1``: the signed-bundle
   envelope produced by ``mareforma export --bundle``.
-* ``urn:mareforma:predicate:claim-with-roles:v1`` — the multi-signature
+* ``urn:mareforma:predicate:claim-with-roles:v1``: the multi-signature
   variant; the actual writer lives in ``mareforma.signing``, this
   module reserves the URI.
 
@@ -284,7 +284,7 @@ def unregister(uri: str) -> None:
     """Remove a URI from the registry.
 
     Refuses to remove built-in URIs. Intended for test setup/teardown,
-    not production use — adapters that go out of scope generally leave
+    not production use; adapters that go out of scope generally leave
     their URIs registered.
     """
     if uri in BUILTIN_URIS:

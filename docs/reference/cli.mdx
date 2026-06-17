@@ -59,7 +59,7 @@ mareforma bootstrap
 
 ## validator
 
-Manage the per-project validators table — who may promote claims to `ESTABLISHED`.
+Manage the per-project validators table: who may promote claims to `ESTABLISHED`.
 
 ```bash
 mareforma validator [SUBCOMMAND]
@@ -134,11 +134,11 @@ mareforma claim add TEXT [OPTIONS]
 |---|---|---|
 | `--classification` | `INFERRED` | `INFERRED` \| `ANALYTICAL` \| `DERIVED` |
 | `--status` | `open` | `open` \| `contested` \| `retracted` |
-| `--source TEXT` | — | Data source name |
-| `--supports ID_OR_DOI` | — | Upstream claim_id or DOI (repeatable) |
-| `--contradicts ID_OR_DOI` | — | Claim_id this finding contests (repeatable) |
+| `--source TEXT` | none | Data source name |
+| `--supports ID_OR_DOI` | none | Upstream claim_id or DOI (repeatable) |
+| `--contradicts ID_OR_DOI` | none | Claim_id this finding contests (repeatable) |
 | `--generated-by TEXT` | `agent` | Agent identifier |
-| `--artifact-hash TEXT` | — | SHA-256 hex digest of the output bytes backing the claim. Bound into the signed payload; converging peers must match when both supply a hash |
+| `--artifact-hash TEXT` | none | SHA-256 hex digest of the output bytes backing the claim. Bound into the signed payload; converging peers must match when both supply a hash |
 
 **Examples**
 
@@ -173,8 +173,8 @@ mareforma claim list [OPTIONS]
 
 | Option | Default | Description |
 |---|---|---|
-| `--status TEXT` | — | Filter by status: `open`, `contested`, `retracted` |
-| `--source TEXT` | — | Filter by source name |
+| `--status TEXT` | none | Filter by status: `open`, `contested`, `retracted` |
+| `--source TEXT` | none | Filter by source name |
 | `--json` | `False` | Emit JSON to stdout |
 
 **Examples**
@@ -220,7 +220,7 @@ mareforma claim update CLAIM_ID [OPTIONS]
 | `--supports ID_OR_DOI` | Replace supports list (rejected on signed claims) |
 | `--contradicts ID_OR_DOI` | Replace contradicts list (rejected on signed claims) |
 
-Signed claims (those with a non-NULL `signature_bundle`) refuse mutation of `text` / `supports` / `contradicts` — these are part of the signed payload and silent mutation would invalidate the signature. To revise a signed claim, retract it (`--status retracted`) and assert a new one citing the old via `--contradicts <old_claim_id>`. `status` remains editable since it is not part of the signed payload.
+Signed claims (those with a non-NULL `signature_bundle`) refuse mutation of `text` / `supports` / `contradicts`; these are part of the signed payload and silent mutation would invalidate the signature. To revise a signed claim, retract it (`--status retracted`) and assert a new one citing the old via `--contradicts <old_claim_id>`. `status` remains editable since it is not part of the signed payload.
 
 ---
 
@@ -281,7 +281,7 @@ Export all claims as a JSON-LD document, optionally as a SCITT-style signed bund
 mareforma export [OPTIONS]
 ```
 
-**Plain JSON-LD** (default). Writes `ontology.jsonld` in the mareforma-native vocabulary (`@type=mare:Graph`, media type `application/x-mareforma-graph+json`). The export is NOT PROV-O-conformant — earlier versions name-dropped PROV-O without populating the full graph; the current export uses an honest mareforma-native vocabulary instead. Each claim node carries every `SIGNED_FIELDS` member so a bundle verifier can re-derive `canonical_payload` from a node alone.
+**Plain JSON-LD** (default). Writes `ontology.jsonld` in the mareforma-native vocabulary (`@type=mare:Graph`, media type `application/x-mareforma-graph+json`). The export is NOT PROV-O-conformant. Earlier versions name-dropped PROV-O without populating the full graph; the current export uses an honest mareforma-native vocabulary instead. Each claim node carries every `SIGNED_FIELDS` member so a bundle verifier can re-derive `canonical_payload` from a node alone.
 
 **Signed bundle** (`--bundle`). Wraps the JSON-LD export in an in-toto Statement v1 envelope and signs it with the local Ed25519 key. The bundle includes one subject entry per claim (`urn:mareforma:claim:<uuid>`) with a SHA-256 of the claim's `canonical_payload`, plus a bundle-level DSSE signature. Requires a bootstrapped XDG key.
 
@@ -338,7 +338,7 @@ mareforma verify mareforma-bundle.json
 
 ## restore
 
-Rebuild `graph.db` from `claims.toml` for catastrophic-loss recovery. Refuses to run if the project's `graph.db` already contains claims — fresh-only, not merge. Every signature is verified before any row is inserted; fail-all-or-nothing.
+Rebuild `graph.db` from `claims.toml` for catastrophic-loss recovery. Refuses to run if the project's `graph.db` already contains claims: fresh-only, not merge. Every signature is verified before any row is inserted; fail-all-or-nothing.
 
 ```bash
 mareforma restore [CLAIMS_TOML_PATH]
@@ -368,7 +368,7 @@ Since v0.3.2, `claims.toml` includes a `[rekor_inclusions]` section. Pre-v0.3.2 
 
 ## ingest
 
-Added in v0.3.3. Read a paper abstract from disk, extract claim drafts, and write them to the project's `literature_claims` table (separate from the signed `claims` table — most drafts stay drafts pending review).
+Added in v0.3.3. Read a paper abstract from disk, extract claim drafts, and write them to the project's `literature_claims` table (separate from the signed `claims` table, since most drafts stay drafts pending review).
 
 ```bash
 mareforma ingest <FILE> [--db PATH] [--llm] [--model MODEL]
@@ -384,7 +384,7 @@ mareforma ingest <FILE> [--db PATH] [--llm] [--model MODEL]
 
 | Option | Default | Description |
 |---|---|---|
-| `--db PATH` | `.mareforma/graph.db` | Path to the graph DB. Honours the literal filename — non-conventional paths are NOT silently rewritten under `.mareforma/`. |
+| `--db PATH` | `.mareforma/graph.db` | Path to the graph DB. Honours the literal filename; non-conventional paths are NOT silently rewritten under `.mareforma/`. |
 | `--llm` | off | Use the Anthropic Claude API to extract claims from arbitrary text. Requires `pip install anthropic`. |
 | `--model MODEL` | `claude-opus-4-7` | Anthropic model name when `--llm` is set. |
 

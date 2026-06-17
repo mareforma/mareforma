@@ -1,4 +1,4 @@
-"""Mareforma — local verification layer for AI-assisted research."""
+"""Mareforma: local verification layer for AI-assisted research."""
 
 __description__ = "Mareforma: local verification layer for AI-assisted research."
 __version__ = "0.3.5"
@@ -12,7 +12,7 @@ def _pem_canonical_der(pem_bytes: bytes) -> bytes:
     """Return the DER (SubjectPublicKeyInfo) bytes of a PEM public key.
 
     Used to compare two PEMs for semantic equality independent of
-    line-wrap width, trailing newlines, or CRLF vs LF encoding —
+    line-wrap width, trailing newlines, or CRLF vs LF encoding,
     properties that text-level comparison treats as inequality but
     that don't change the key the bytes represent.
 
@@ -70,7 +70,7 @@ def open(  # noqa: A001
         Submission failure persists the claim with ``transparency_logged=0``
         and blocks REPLICATED promotion (mirrors the DOI ``unresolved``
         pattern). ``EpistemicGraph.refresh_unsigned()`` retries the
-        pending entries. ``None`` (default) disables Rekor entirely — signed
+        pending entries. ``None`` (default) disables Rekor entirely: signed
         claims still REPLICATE based on the local signature alone.
         Use :data:`mareforma.signing.PUBLIC_REKOR_URL` for the public
         sigstore instance.
@@ -88,7 +88,7 @@ def open(  # noqa: A001
         every signed-claim submit and every restore cross-verifies the
         log's signed Merkle root via :func:`mareforma.signing.verify_rekor_inclusion`.
         Without it, mareforma trusts only the submit-time response
-        binding — see "Limits of the Rekor integration" in the README.
+        binding, see "Limits of the Rekor integration" in the README.
         Accepts both Ed25519 (private Rekor deployments) and
         ECDSA-P256 (public Sigstore Rekor). Persisted on first use to
         ``<root>/.mareforma/rekor_log_pubkey.pem``; a mismatch on
@@ -233,7 +233,7 @@ def open(  # noqa: A001
 
 
 def schema() -> dict:
-    """Return the mareforma epistemic schema — valid values and state transitions.
+    """Return the mareforma epistemic schema: valid values and state transitions.
 
     Intended for agents that need to reason about the system before calling it.
     The returned dict is stable across patch releases; fields are only added,
@@ -242,12 +242,12 @@ def schema() -> dict:
     Returns
     -------
     dict with keys:
-        schema_version  : int — schema version stored in graph.db
-        classifications : list[str] — valid classification values
-        support_levels  : list[str] — valid support_level values, ordered low→high
-        statuses        : list[str] — valid claim status values
-        defaults        : dict — default value for each field at assert_claim() time
-        transitions     : list[dict] — valid support_level state transitions
+        schema_version  : int, schema version stored in graph.db
+        classifications : list[str], valid classification values
+        support_levels  : list[str], valid support_level values, ordered low→high
+        statuses        : list[str], valid claim status values
+        defaults        : dict, default value for each field at assert_claim() time
+        transitions     : list[dict], valid support_level state transitions
 
     Example
     -------
@@ -308,14 +308,14 @@ def restore(
 
     Catastrophic-loss recovery: the project's ``graph.db`` is missing
     or corrupt, the operator has a recent ``claims.toml``, and the
-    graph must be reconstructed. Restore is **fresh-only** — it
+    graph must be reconstructed. Restore is **fresh-only**: it
     refuses to run when the target ``graph.db`` already contains
     claims. Wipe ``graph.db`` first if overwriting is the intent.
 
     Every signature is verified: validator enrollment envelopes
     against their parent keys, claim signature bundles against the
     enrolled signer keys, and validation envelopes against the
-    validator keys. Any failure rolls back the entire transaction —
+    validator keys. Any failure rolls back the entire transaction:
     fail-all-or-nothing.
 
     Parameters

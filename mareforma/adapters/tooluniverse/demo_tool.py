@@ -6,7 +6,7 @@ pinned response. This module ships that tool so the CLI is callable
 without the test fixtures at runtime.
 
 The pinned response payload is duplicated from
-``tests/conftest.py::MOCK_OPEN_TARGETS_PAYLOAD`` deliberately — the
+``tests/conftest.py::MOCK_OPEN_TARGETS_PAYLOAD`` deliberately: the
 test fixture is a test-only artifact, while this demo tool ships with
 the package for runtime use.
 """

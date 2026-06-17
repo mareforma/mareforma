@@ -1,4 +1,4 @@
-"""Selective tool wrapping — which tools get provenance, which pass through.
+"""Selective tool wrapping: which tools get provenance, which pass through.
 
 Phase 2 ships the substantive / skip / unknown three-bucket rule. Tools
 declare a ``category`` attribute (matching ToolUniverse's tool_config
@@ -62,7 +62,7 @@ class UnknownCategoryWarning(UserWarning):
     """Emitted when a tool's category is not in either bucket.
 
     The selector defaults to *wrapping* unknown categories (safer
-    default — record provenance for tools we don't yet recognise), but
+    default, record provenance for tools we don't yet recognise), but
     the warning lets the operator audit the gap and either add the
     category to SUBSTANTIVE_CATEGORIES or override the selector.
     """
@@ -79,7 +79,7 @@ def default_should_wrap(tool: Any) -> bool:
     - ``True`` with an :class:`UnknownCategoryWarning` if the category
       is unknown OR the tool has no category attribute.
 
-    The third bucket is the safer default — record provenance for what
+    The third bucket is the safer default: record provenance for what
     we don't recognise; operators can override the selector per call site
     when they decide a category is genuinely skip-class.
     """

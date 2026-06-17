@@ -1,4 +1,4 @@
-"""ProvenanceToolAdapter — the load-bearing wedge primitive.
+"""ProvenanceToolAdapter: the load-bearing wedge primitive.
 
 Wraps any object satisfying the :class:`Tool` protocol so each
 ``.call(**kwargs)`` produces a signed mareforma claim with a
@@ -56,7 +56,7 @@ MAX_RESULT_BYTES_DEFAULT = 10 * 1024 * 1024
 class ResultTooLargeError(ValueError):
     """Raised when a tool result's canonical bytes exceed ``max_result_bytes``.
 
-    The adapter refuses to sign over-cap results — slicing
+    The adapter refuses to sign over-cap results: slicing
     canonicalised JSON at an arbitrary byte boundary would produce
     bytes no replay tool can re-derive. Raise the cap if the upstream
     tool can be trusted to return honestly large payloads.
@@ -112,7 +112,7 @@ class ProvenanceToolAdapter:
         instances expose this via their underlying tool's ``tool_config``
         attribute. Passing ``None`` produces a fingerprint over an
         empty dict (records ``sha256:`` of an empty JCS-c14n empty
-        object) — honest signal that the config was unavailable.
+        object): honest signal that the config was unavailable.
     """
 
     def __init__(
@@ -161,7 +161,7 @@ class ProvenanceToolAdapter:
 
         Raises :class:`ToolCallError` if the underlying tool's
         ``.call(**kwargs)`` raises. The signed claim is NOT written
-        in that case — failed calls produce no provenance row by
+        in that case: failed calls produce no provenance row by
         default; Phase 4 may introduce a failure-class predicate
         if a use case emerges.
         """
@@ -202,7 +202,7 @@ class ProvenanceToolAdapter:
         works.
 
         Failed awaits surface as :class:`ToolCallError` with no
-        claim written — same posture as sync ``.call``.
+        claim written: same posture as sync ``.call``.
         """
 
         started_at = _utc_now()

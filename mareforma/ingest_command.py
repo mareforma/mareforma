@@ -1,9 +1,9 @@
-"""``mareforma ingest`` — read a literature file, extract claim drafts.
+"""``mareforma ingest``: read a literature file, extract claim drafts.
 
 Two modes:
 
 - Default (structured): parses files with explicit ``TITLE:`` / ``DOI:``
-  / ``CLAIMS:`` sections. Pure stdlib + ``click`` + ``rich`` — no
+  / ``CLAIMS:`` sections. Pure stdlib + ``click`` + ``rich``, no
   external service.
 - ``--llm``: gated on a local ``anthropic`` install. Extracts claims
   from arbitrary text via the Claude API. Exits with a clear message

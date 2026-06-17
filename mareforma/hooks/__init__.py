@@ -5,7 +5,7 @@ that records every tool invocation as a ``prov:Activity`` row in the
 project's ``.mareforma/graph.db``. Opt-in via ``.claude/settings.json``
 (snippet in ``mareforma.hooks.agent_hook`` docstring).
 
-Recorded activities live in the ``agent_activities`` table — separate
+Recorded activities live in the ``agent_activities`` table, separate
 from the signed ``claims`` table because per-call activities are
 high-volume, low-semantic-density data that most never escalate into
 signed claims.

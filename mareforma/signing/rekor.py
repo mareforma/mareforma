@@ -1,5 +1,5 @@
 """
-rekor.py — Sigstore-Rekor transparency-log integration.
+rekor.py: Sigstore-Rekor transparency-log integration.
 
 Mareforma submits each signed claim envelope to a Rekor instance for
 public, tamper-evident witnessing. The submit path verifies the response
@@ -83,7 +83,7 @@ def _b64_decode_tolerant(s: str) -> Optional[bytes]:
     Internals: ``urlsafe_b64decode`` translates ``_``→``/`` and ``-``→``+``
     before delegating to the standard decoder, so it transparently accepts
     inputs in either alphabet. The standard decoder is permissive of
-    non-alphabet bytes by default, which is intentional here — garbage
+    non-alphabet bytes by default, which is intentional here: garbage
     inputs decode to wrong bytes and the downstream equality check
     rejects them.
     """
@@ -117,7 +117,7 @@ def validate_rekor_url(url: str, *, allow_insecure: bool = False) -> None:
 
     DNS hostnames that don't look like loopback shortcuts are accepted;
     defending against a DNS rebind at connect-time would need ahead-of-time
-    resolution which is fragile — TLS at the registry host is the actual
+    resolution which is fragile: TLS at the registry host is the actual
     authentication boundary.
 
     Pass ``allow_insecure=True`` to skip all checks (only useful for
@@ -211,7 +211,7 @@ def submit_to_rekor(
     -------------
     Network errors, timeouts, non-2xx, oversized responses, and Rekor
     responses that fail body-matches-submission verification all return
-    ``(False, None)`` — never raise. Caller persists the claim with
+    ``(False, None)``, never raise. Caller persists the claim with
     ``transparency_logged=0`` and retries later via ``refresh_unsigned()``.
     """
     try:
@@ -340,7 +340,7 @@ def attach_rekor_entry(
 
     The block is a future-compatible carrier for the transparency-log
     coordinates. It does NOT replace or modify the original payload or
-    signatures — the envelope still verifies via :func:`verify_envelope`.
+    signatures: the envelope still verifies via :func:`verify_envelope`.
     """
     augmented = dict(envelope)
     augmented["rekor"] = {
@@ -402,17 +402,17 @@ class RekorInclusionError(SigningError):
     The ``reason`` attribute carries a short stable token so callers can
     pattern-match without parsing English messages:
 
-      - ``"missing_proof"``        — entry body lacks ``verification.inclusionProof``
-      - ``"malformed_proof"``      — proof block is not the expected shape
-      - ``"bad_root_hex"``         — rootHash is not parseable hex
-      - ``"bad_proof_hex"``        — one of the sibling hashes is unparseable
-      - ``"merkle_root_mismatch"`` — recomputed root != claimed root
-      - ``"checkpoint_missing"``   — signed-note text not supplied
-      - ``"checkpoint_malformed"`` — signed-note doesn't match the format
-      - ``"checkpoint_root_mismatch"`` — checkpoint's root != proof's root
-      - ``"checkpoint_unsigned"``  — no signature lines in the note
-      - ``"checkpoint_bad_sig"``   — ECDSA/Ed25519 verify failed
-      - ``"unsupported_key"``      — log pubkey is neither Ed25519 nor ECDSA P-256
+      - ``"missing_proof"``:        entry body lacks ``verification.inclusionProof``
+      - ``"malformed_proof"``:      proof block is not the expected shape
+      - ``"bad_root_hex"``:         rootHash is not parseable hex
+      - ``"bad_proof_hex"``:        one of the sibling hashes is unparseable
+      - ``"merkle_root_mismatch"``: recomputed root != claimed root
+      - ``"checkpoint_missing"``:   signed-note text not supplied
+      - ``"checkpoint_malformed"``: signed-note doesn't match the format
+      - ``"checkpoint_root_mismatch"``: checkpoint's root != proof's root
+      - ``"checkpoint_unsigned"``:  no signature lines in the note
+      - ``"checkpoint_bad_sig"``:   ECDSA/Ed25519 verify failed
+      - ``"unsupported_key"``:      log pubkey is neither Ed25519 nor ECDSA P-256
     """
 
     def __init__(self, message: str, *, reason: str) -> None:
@@ -451,7 +451,7 @@ def verify_merkle_inclusion_proof(
 
     The algorithm is RFC 6962 §2.1.1 (a.k.a. the Trillian
     ``proof.VerifyInclusion`` recipe). Even on a perfectly-balanced
-    tree, the path may include "fold-up" steps near tree boundaries —
+    tree, the path may include "fold-up" steps near tree boundaries:
     the algorithm handles both balanced and unbalanced subtrees.
     """
     if tree_size <= 0:
@@ -544,11 +544,11 @@ def parse_rekor_checkpoint(checkpoint_text: str) -> dict[str, Any]:
 
     Returns a dict with:
 
-      - ``origin`` (str) — log identity
+      - ``origin`` (str): log identity
       - ``tree_size`` (int)
       - ``root_hash`` (bytes, 32 bytes)
-      - ``signed_body`` (bytes) — the bytes the signature covers
-      - ``signatures`` (list[(name, key_hash, sig_bytes)]) — every
+      - ``signed_body`` (bytes): the bytes the signature covers
+      - ``signatures`` (list[(name, key_hash, sig_bytes)]): every
         signature line in the note. ``key_hash`` is a 4-byte prefix
         derived by Trillian as ``SHA-256("<name>\\nA<pubkey-bytes>")[:4]``;
         we don't use it for verification but expose it for inspection.
@@ -673,7 +673,7 @@ def _verify_with_pubkey(public_key: Any, signed_body: bytes, sig: bytes) -> bool
     """Verify *signed_body* with *public_key* (Ed25519 or ECDSA P-256).
 
     Returns False on any verify failure or unsupported key type rather
-    than raising — callers wrap the False return in their own typed
+    than raising: callers wrap the False return in their own typed
     error if they want a raise contract.
     """
     if isinstance(public_key, Ed25519PublicKey):
@@ -719,7 +719,7 @@ def verify_rekor_checkpoint(
     checkpoint_text:
         The checkpoint string as returned by Rekor (typically inside
         ``verification.inclusionProof.checkpoint``, sometimes itself
-        base64-encoded — caller decodes first).
+        base64-encoded, caller decodes first).
     log_pubkey_pem:
         PEM-encoded Ed25519 or ECDSA P-256 public key of the log
         operator. mareforma does not hardcode the public Sigstore
@@ -798,7 +798,7 @@ def verify_rekor_inclusion(
 ) -> bool:
     """Verify a Rekor entry's full inclusion proof end-to-end.
 
-    *rekor_body* is the FULL Rekor entry dict — the value side of the
+    *rekor_body* is the FULL Rekor entry dict, the value side of the
     ``{uuid: entry}`` map Rekor returns. It must contain a ``body``
     field (base64-encoded canonical record) AND a
     ``verification.inclusionProof`` block with ``logIndex``,
@@ -959,7 +959,7 @@ def fetch_inclusion_proof(
     uuid:
         Rekor entry uuid (from ``rekor_inclusions.uuid``).
     rekor_url:
-        Base Rekor API URL — typically the same value passed to
+        Base Rekor API URL, typically the same value passed to
         ``mareforma.open(rekor_url=...)``. The GET URL is constructed
         by appending ``/<uuid>`` to this.
     timeout:

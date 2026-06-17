@@ -1,5 +1,5 @@
 """
-core.py — Ed25519 claim signing, key management, and DSSE envelope build / verify.
+core.py: Ed25519 claim signing, key management, and DSSE envelope build / verify.
 
 Every claim in the epistemic graph is signed locally before INSERT. The
 signature is stored alongside the claim as a DSSE v1 envelope so that the
@@ -8,7 +8,7 @@ on-disk format is the same whether or not a transparency log is in use.
 Key lifecycle
 -------------
 - One Ed25519 keypair per user. Private key at ``~/.config/mareforma/key``
-  (XDG-compliant, mode 0600 — POSIX). On Windows, file-mode bits are mostly
+  (XDG-compliant, mode 0600, POSIX). On Windows, file-mode bits are mostly
   advisory; mareforma issues a warning when loading a key on a non-POSIX
   platform because the on-disk perm guarantees do not hold.
 - ``mareforma bootstrap`` generates the key once at install time, atomically
@@ -27,7 +27,7 @@ treat ``created_at`` as the agent's claim about when the assertion was made
 and ``integratedTime`` as a third party's claim about when the log first
 observed it.
 
-Envelope format — DSSE v1 with in-toto Statement v1
+Envelope format: DSSE v1 with in-toto Statement v1
 ----------------------------------------------------
 Every claim envelope is a DSSE v1 envelope whose payload is a
 canonical in-toto Statement v1::
@@ -72,7 +72,7 @@ signature verification.
 
 Auxiliary envelopes (validator enrollment, validation events, seed
 attestations) reuse the DSSE PAE envelope but with mareforma-specific
-payload types and flat record payloads — they are not in-toto Statements.
+payload types and flat record payloads, they are not in-toto Statements.
 """
 
 from __future__ import annotations
@@ -221,7 +221,7 @@ def save_private_key(
     Parameters
     ----------
     exclusive:
-        If True, open *path* itself with ``O_CREAT|O_EXCL`` — the call
+        If True, open *path* itself with ``O_CREAT|O_EXCL``: the call
         raises ``FileExistsError`` if *path* already exists. Use this for
         first-time bootstrap to close the TOCTOU race between an
         ``exists()`` check and the rename. If False (default), the write
@@ -371,7 +371,7 @@ def dsse_pae(payload_type: str, body: bytes) -> bytes:
     """Pre-Authentication Encoding per DSSE v1 spec.
 
     Returns ``b"DSSEv1 <len(type)> <type> <len(body)> <body>"``. The
-    signature covers these bytes — never the payload alone — so an
+    signature covers these bytes, never the payload alone, so an
     attacker cannot take a valid signature on (typeA, payload) and
     re-attribute it as a signature on (typeB, payload).
 
@@ -392,7 +392,7 @@ def canonical_statement(
     """Canonical bytes of the in-toto Statement v1 for a claim.
 
     These bytes are what gets signed (after DSSE PAE wrap) and what
-    chain_hash binds. Same input → same bytes — across Python versions,
+    chain_hash binds. Same input → same bytes, across Python versions,
     dict orderings, and Unicode normalization forms.
 
     Callers: ``sign_claim`` for envelope construction; ``db._chain_input_for_claim``
@@ -437,8 +437,8 @@ def sign_claim_with_roles(
     -----------------------------------
     The ``role`` string lives on the signature entry, **not** inside
     the canonical Statement v1 payload. The DSSE pre-authentication
-    encoding (PAE) covers only ``(payloadType, payload)`` — identical
-    bytes for every signer — so a signer signing as ``"executor"``
+    encoding (PAE) covers only ``(payloadType, payload)``, identical
+    bytes for every signer, so a signer signing as ``"executor"``
     produces bytes indistinguishable from the same key signing as
     ``"planner"``. The keyid in each signature **is** cryptographically
     bound (the verifier checks ``pubkey.verify(sig, PAE)``); the role
@@ -461,7 +461,7 @@ def sign_claim_with_roles(
     role_signers
         Non-empty list of ``(private_key, role)`` tuples. Each role
         must be in :data:`VALID_CLAIM_ROLES`. Roles must be unique
-        within one envelope — two signatures sharing a role is a
+        within one envelope: two signatures sharing a role is a
         malformed role attestation (the verifier would not know
         which key to use).
     evidence
@@ -473,7 +473,7 @@ def sign_claim_with_roles(
         DSSE envelope with N signature entries, each carrying
         ``{"keyid", "sig", "role"}``. The payload bytes (and therefore
         the chain hash + Statement v1 CID) are identical regardless of
-        signature count — adding role signatures does not perturb the
+        signature count: adding role signatures does not perturb the
         signed bytes.
 
     Raises
@@ -531,7 +531,7 @@ def verify_envelope_multi(
 
     Returns True iff every signature in the envelope verifies under
     the keyed role. Legacy single-sig envelopes (no ``role`` field on
-    the entry) are explicitly rejected — callers verifying those must
+    the entry) are explicitly rejected: callers verifying those must
     use :func:`verify_envelope` for backwards compatibility.
 
     Raises
@@ -738,14 +738,14 @@ def verify_envelope(
     Returns True iff the envelope is well-formed, names this public key
     (by keyid), and the signature matches the payload bytes.
 
-    Does NOT decode the payload or re-validate semantic fields — those are
+    Does NOT decode the payload or re-validate semantic fields: those are
     the caller's concern. The contract here is purely cryptographic.
 
     Parameters
     ----------
     expected_payload_type:
         The envelope's ``payloadType`` must match this exact value.
-        Defaults to the claim payload type — the most common case —
+        Defaults to the claim payload type, the most common case,
         so callers that omit the kwarg get type-safe behavior. Pass
         :data:`PAYLOAD_TYPE_VALIDATOR_ENROLLMENT` or
         :data:`PAYLOAD_TYPE_VALIDATION` explicitly when verifying
@@ -800,7 +800,7 @@ def envelope_payload(envelope: dict[str, Any]) -> dict[str, Any]:
     For validation / enrollment / seed envelopes the result is the flat
     record (claim_id, validator_keyid, ...).
 
-    Does NOT verify the signature — that is :func:`verify_envelope`'s job.
+    Does NOT verify the signature: that is :func:`verify_envelope`'s job.
     Use after a successful verify, or for structural inspection only.
 
     Raises
@@ -828,7 +828,7 @@ def claim_predicate_from_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
 
     The predicate carries the SIGNED_FIELDS values + ``evidence``. Use
     this whenever a caller previously did ``envelope_payload(env)[key]``
-    on a claim envelope — after Statement v1 the keys live one level
+    on a claim envelope: after Statement v1 the keys live one level
     deeper.
 
     Also enforces subject-vs-predicate consistency:
@@ -839,7 +839,7 @@ def claim_predicate_from_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
     Without these checks, a signer could issue an envelope whose
     in-toto ``subject`` (the part standard tooling like ``cosign``
     and GUAC keys off) names a different claim than the predicate
-    asserts — the bytes verify but the two halves of the envelope
+    asserts: the bytes verify but the two halves of the envelope
     disagree about what is being attested. Catching it here makes
     every claim envelope structurally honest before any downstream
     consumer sees it.
@@ -921,7 +921,7 @@ def bootstrap_key(
     Overwrite mode is destructive in two ways
     -----------------------------------------
     1. **Verification:** every claim signed with the prior key becomes
-       unverifiable from this machine — the old public key is gone, so
+       unverifiable from this machine: the old public key is gone, so
        :func:`verify_envelope` will see ``keyid`` mismatches forever.
     2. **Rekor stranding:** any signed claim that has not yet been
        submitted to Rekor (``transparency_logged=0``) becomes permanently

@@ -1,5 +1,5 @@
 """
-deriver — Classification derivation engine with evidence binding.
+deriver: Classification derivation engine with evidence binding.
 
 Combines log-template extraction and source-profile analysis to
 deterministically derive a classification (ANALYTICAL or INFERRED)

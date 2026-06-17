@@ -1,4 +1,4 @@
-"""Role attestations — per-actor signed sub-attestations on a tool-call envelope.
+"""Role attestations: per-actor signed sub-attestations on a tool-call envelope.
 
 Each tool-call envelope carries a primary DSSE signature from the
 calling identity. Roles attach SECONDARY signed attestations as a
@@ -9,19 +9,19 @@ The signed bytes for a role attestation are::
 
     DSSE-PAE("application/x-mareforma-role+json", canonical-bytes(payload))
 
-— so the signing covers the role+payload pair, not raw payload bytes,
+so the signing covers the role+payload pair, not raw payload bytes,
 preventing role-confusion across attestation types.
 
 Phase 3 ships four roles, mirroring the agent-native maqueta's
 ``claim-with-roles/v1`` predicate variant:
 
-- ``tool``       — the tool itself attests its own identity (name,
+- ``tool``       : the tool itself attests its own identity (name,
                    version, config_fingerprint) at call time.
-- ``executor``   — the adapter signs the call envelope (args_digest,
+- ``executor``   : the adapter signs the call envelope (args_digest,
                    result_digest, completed_at, cache_hit).
-- ``summarizer`` — when a hook reduces output for the LLM context,
+- ``summarizer`` : when a hook reduces output for the LLM context,
                    the hook signs (original_digest, summary_digest).
-- ``reviewer``   — a critic agent's verdict signature; multiple
+- ``reviewer``   : a critic agent's verdict signature; multiple
                    reviewer attestations per claim are allowed.
 """
 
@@ -67,7 +67,7 @@ def _canonical_payload_bytes(role: str, payload: dict[str, Any]) -> bytes:
     """Canonicalise the role-attestation payload to deterministic bytes.
 
     Uses JSON-with-sorted-keys (the same byte-stable shape mareforma's
-    own signed predicate uses). NaN/Inf rejected — we want the same
+    own signed predicate uses). NaN/Inf rejected: we want the same
     finiteness guarantees as the rest of the maqueta.
     """
 
@@ -172,7 +172,7 @@ def attach_role_attestation(
     """Append ``attestation`` to ``envelope["role_attestations"]``.
 
     Returns a new envelope dict (does not mutate the input). The outer
-    DSSE-signed bytes (``payload``, ``signatures``) are untouched —
+    DSSE-signed bytes (``payload``, ``signatures``) are untouched:
     role attestations live on a sidecar key, so attaching one cannot
     break the outer signature.
     """

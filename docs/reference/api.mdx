@@ -36,21 +36,21 @@ with mareforma.open() as graph:
 **Returns** `EpistemicGraph`
 
 **Raises**
-- `DatabaseError` — if the database cannot be opened or the schema cannot migrate
-- `KeyNotFoundError` — if `require_signed=True` and no key is found
-- `SigningError` — if `require_rekor=True` and the Rekor URL is unset or unreachable; or if the supplied Rekor log pubkey conflicts with the TOFU pin on `.mareforma/rekor_log_pubkey.pem`
-- `ValueError` — if both `rekor_log_pubkey_pem` and `rekor_log_pubkey_path` are supplied (mutually exclusive)
+- `DatabaseError`: if the database cannot be opened or the schema cannot migrate
+- `KeyNotFoundError`: if `require_signed=True` and no key is found
+- `SigningError`: if `require_rekor=True` and the Rekor URL is unset or unreachable; or if the supplied Rekor log pubkey conflicts with the TOFU pin on `.mareforma/rekor_log_pubkey.pem`
+- `ValueError`: if both `rekor_log_pubkey_pem` and `rekor_log_pubkey_path` are supplied (mutually exclusive)
 
 First-time setup: run `mareforma bootstrap` once to generate an Ed25519 keypair at
 `~/.config/mareforma/key`. After that, every `assert_claim` auto-signs.
 
-**TOFU pin behavior.** When `rekor_log_pubkey_pem` (or `rekor_log_pubkey_path`) is supplied, the canonical DER bytes of the public key are persisted to `.mareforma/rekor_log_pubkey.pem`. Every subsequent `mareforma.open()` on the same project compares the supplied key against the pinned PEM and refuses silent rotation — you must delete the pin file to intentionally rotate. The first-pin write uses `O_CREAT|O_EXCL`, so two concurrent open() calls with different keys cannot race past existence checks and silently overwrite each other; the loser raises `SigningError("...pinned to a different key by a concurrent ... call")`.
+**TOFU pin behavior.** When `rekor_log_pubkey_pem` (or `rekor_log_pubkey_path`) is supplied, the canonical DER bytes of the public key are persisted to `.mareforma/rekor_log_pubkey.pem`. Every subsequent `mareforma.open()` on the same project compares the supplied key against the pinned PEM and refuses silent rotation; you must delete the pin file to intentionally rotate. The first-pin write uses `O_CREAT|O_EXCL`, so two concurrent open() calls with different keys cannot race past existence checks and silently overwrite each other; the loser raises `SigningError("...pinned to a different key by a concurrent ... call")`.
 
 ---
 
 ## `mareforma.schema()`
 
-Return the epistemic schema — valid values, defaults, and state transitions.
+Return the epistemic schema: valid values, defaults, and state transitions.
 
 ```python
 s = mareforma.schema()
@@ -62,14 +62,14 @@ s["defaults"]          # {'classification': 'INFERRED', 'support_level': 'PRELIM
 s["transitions"]       # list of state transition dicts
 ```
 
-**Returns** `dict` — stable across patch releases within a major version.
+**Returns** `dict`: stable across patch releases within a major version.
 
 ---
 
 ## `mareforma.restore(project_root, *, claims_toml=None, rekor_log_pubkey_pem=None)`
 
 Rebuild a fresh `graph.db` from `claims.toml` for catastrophic-loss
-recovery. Fresh-only — refuses to run if `graph.db` already has any
+recovery. Fresh-only: refuses to run if `graph.db` already has any
 claims. Every signature is verified before any row is inserted;
 fail-all-or-nothing.
 
@@ -133,35 +133,35 @@ claim_id = graph.assert_claim(
 | `supports` | `list[str] \| None` | `None` | Upstream claim_ids or DOIs this claim rests on. Cycles are rejected (`CycleDetectedError`). |
 | `contradicts` | `list[str] \| None` | `None` | Claim_ids this finding is in explicit tension with. |
 | `source_name` | `str \| None` | `None` | Data source. Stored as-is; required for ANALYTICAL to be meaningful. |
-| `idempotency_key` | `str \| None` | `None` | Unique key — same key returns existing `claim_id`, no INSERT. |
+| `idempotency_key` | `str \| None` | `None` | Unique key: same key returns existing `claim_id`, no INSERT. |
 | `status` | `str` | `"open"` | `open` \| `contested` \| `retracted` |
 | `artifact_hash` | `str \| None` | `None` | SHA-256 hex digest of the output bytes backing the claim. When both converging peers supply a hash, the hashes must match for REPLICATED. |
 | `seed` | `bool` | `False` | Insert directly at `ESTABLISHED` with a signed seed envelope. Only an enrolled validator can produce a seed. Used to bootstrap the ESTABLISHED-upstream chain on a fresh project. |
 
-**Returns** `str` — `claim_id` UUID
+**Returns** `str`: `claim_id` UUID
 
 **Raises**
-- `ValueError` — if `text` is empty, `classification` is invalid, `status` is invalid, or text exceeds 100k chars
-- `CycleDetectedError` — if `supports[]` would create a cycle (`A → ... → A`)
-- `IdempotencyConflictError` — if the same `idempotency_key` replays with a different `artifact_hash`
-- `IllegalStateTransitionError` — if a transition violates the state-machine triggers
-- `ChainIntegrityError` — if the `prev_hash` append-only chain check fails
-- `DatabaseError` — on SQLite write failure
+- `ValueError`: if `text` is empty, `classification` is invalid, `status` is invalid, or text exceeds 100k chars
+- `CycleDetectedError`: if `supports[]` would create a cycle (`A → ... → A`)
+- `IdempotencyConflictError`: if the same `idempotency_key` replays with a different `artifact_hash`
+- `IllegalStateTransitionError`: if a transition violates the state-machine triggers
+- `ChainIntegrityError`: if the `prev_hash` append-only chain check fails
+- `DatabaseError`: on SQLite write failure
 
-**Side effect** — if ≥2 claims now share the same upstream in `supports[]` with different `generated_by` values, all are promoted to `REPLICATED`. The promotion fires only when at least one upstream is itself `ESTABLISHED` (Cochrane / GRADE evidence chain — strict by default). When both peers supply `artifact_hash`, the hashes must match.
+**Side effect**: if ≥2 claims now share the same upstream in `supports[]` with different `generated_by` values, all are promoted to `REPLICATED`. The promotion fires only when at least one upstream is itself `ESTABLISHED` (Cochrane / GRADE evidence chain, strict by default). When both peers supply `artifact_hash`, the hashes must match.
 
 #### Idempotency
 
 `idempotency_key` solves two distinct problems:
 
-**Retry safety** — same key returns the existing `claim_id` with no INSERT. Use whenever a run may be interrupted and retried:
+**Retry safety**: same key returns the existing `claim_id` with no INSERT. Use whenever a run may be interrupted and retried:
 
 ```python
 claim_id = graph.assert_claim("...", idempotency_key="run_abc_claim_1")
 # On retry — same claim_id returned, graph unchanged
 ```
 
-**Convergence convention** — two agents using the same structured key converge on the same `claim_id` even with different text, without needing explicit `supports=` links:
+**Convergence convention**: two agents using the same structured key converge on the same `claim_id` even with different text, without needing explicit `supports=` links:
 
 ```python
 # Lab A
@@ -197,7 +197,7 @@ for r in results:
 | `include_unverified` | `bool` | `False` | When `False`, PRELIMINARY claims whose signing key is not in the validators table are excluded. Pass `True` to surface unverified preliminary claims. |
 | `include_invalidated` | `bool` | `False` | When `False`, claims marked invalid by a signed `contradiction_verdicts` row (`t_invalid IS NOT NULL`) are excluded. Pass `True` for audit / history queries. |
 
-**Returns** `list[dict]` — each dict contains:
+**Returns** `list[dict]`: each dict contains:
 `claim_id`, `text`, `classification`, `support_level`, `idempotency_key`,
 `validated_by`, `validated_at`, `status`, `source_name`, `generated_by`,
 `supports_json`, `contradicts_json`, `comparison_summary`, `branch_id`,
@@ -207,9 +207,9 @@ for r in results:
 `ev_imprecision`, `ev_pub_bias`, `evidence_json`, `statement_cid`,
 `t_invalid`, `created_at`, `updated_at`. Plus two reputation projections computed at query time:
 
-- `validator_reputation: int` — for ESTABLISHED rows, the count of
+- `validator_reputation: int`: for ESTABLISHED rows, the count of
   ESTABLISHED claims signed by the same validator. `0` otherwise.
-- `generator_enrolled: bool` — `True` iff the claim's signing keyid
+- `generator_enrolled: bool`: `True` iff the claim's signing keyid
   is in the validators table.
 
 **Raises** `ValueError` if `min_support` or `classification` is invalid.
@@ -230,10 +230,10 @@ hits = graph.search("gene*")
 hits = graph.search("dopamine NEAR receptor")
 ```
 
-Pure-wildcard queries (`"*"`, `"**"`) are refused — they would scan
+Pure-wildcard queries (`"*"`, `"**"`) are refused; they would scan
 the whole table.
 
-**Parameters** — same as `query()` except `text` becomes `query` and is
+**Parameters**: same as `query()` except `text` becomes `query` and is
 required (must be a non-empty FTS5 MATCH expression). `include_invalidated`
 applies identically.
 
@@ -274,12 +274,12 @@ graph.record_replication_verdict(
 | `method` | `str` | required | One of `hash-match` / `semantic-cluster` / `shared-resolved-upstream` / `cross-method`. |
 | `confidence` | `dict \| None` | `None` | Confidence values keyed by guard (e.g. `cosine`, `nli_forward`). Never fused into a single score. |
 
-**Side effect** — promotes the referenced claims from `PRELIMINARY` to
+**Side effect**: promotes the referenced claims from `PRELIMINARY` to
 `REPLICATED` (only when still `PRELIMINARY AND status='open' AND
 t_invalid IS NULL`). INSERT + promotion run in one `BEGIN IMMEDIATE`
 transaction so a concurrent contradiction cannot land between the writes.
 
-**Raises** `VerdictIssuerError` — no signer loaded, signer's keyid not
+**Raises** `VerdictIssuerError`: no signer loaded, signer's keyid not
 enrolled (or chain broken), method not in the allowed enum, referenced
 `claim_id` missing.
 
@@ -307,10 +307,10 @@ graph.record_contradiction_verdict(
 |---|---|---|---|
 | `verdict_id` | `str` | required | Caller-supplied unique id. |
 | `member_claim_id` | `str` | required | First claim in the contradiction. |
-| `other_claim_id` | `str` | required | Second claim. Must differ — self-contradiction (`member == other`) is refused at the Python layer AND by a SQL CHECK constraint. |
+| `other_claim_id` | `str` | required | Second claim. Must differ; self-contradiction (`member == other`) is refused at the Python layer AND by a SQL CHECK constraint. |
 | `confidence` | `dict \| None` | `None` | Confidence values describing the contradiction. |
 
-**Raises** `VerdictIssuerError` — same gates as `record_replication_verdict`,
+**Raises** `VerdictIssuerError`: same gates as `record_replication_verdict`,
 plus self-contradiction.
 
 ---
@@ -324,11 +324,11 @@ for v in graph.replication_verdicts(member_claim_id=claim_id):
     print(v["method"], v["confidence_json"])
 ```
 
-By default, verdicts referencing an invalidated claim are excluded — same
+By default, verdicts referencing an invalidated claim are excluded, same
 visibility surface as `query()`. Pass `include_invalidated=True` for
 audit-mode listings.
 
-**Returns** `list[dict]` — each dict carries `verdict_id`, `cluster_id`,
+**Returns** `list[dict]`: each dict carries `verdict_id`, `cluster_id`,
 `member_claim_id`, `other_claim_id`, `method`, `confidence_json`,
 `issuer_keyid`, `signature` (raw bytes), `created_at`.
 
@@ -346,10 +346,10 @@ for v in graph.contradiction_verdicts(claim_id=cid):
 
 By default, contradiction verdicts referencing an invalidated claim are
 excluded. Most callers want `include_invalidated=True` since the
-contradiction verdict IS the evidence for invalidation — auditing "why
+contradiction verdict IS the evidence for invalidation; auditing "why
 was this invalidated" requires audit mode.
 
-**Returns** `list[dict]` — each dict carries `verdict_id`,
+**Returns** `list[dict]`: each dict carries `verdict_id`,
 `member_claim_id`, `other_claim_id`, `confidence_json`, `issuer_keyid`,
 `signature`, `created_at`.
 
@@ -360,7 +360,7 @@ was this invalidated" requires audit mode.
 Returns `{validator_keyid: count}` for every enrolled validator. Count
 is the number of ESTABLISHED claims whose validation envelope was
 signed by that keyid. Validators with zero promotions appear with
-`count=0`. Derived state — recomputed on every call.
+`count=0`. Derived state, recomputed on every call.
 
 ```python
 reputation = graph.get_validator_reputation()
@@ -373,7 +373,7 @@ top = sorted(reputation.items(), key=lambda kv: -kv[1])[:5]
 
 Same shape as `query()` with two changes: the `text` and `comparison_summary` fields are sanitized (zero-width / bidi / control characters stripped, length capped) AND wrapped in `<untrusted_data>...</untrusted_data>` delimiters; metadata labels (`source_name`, `generated_by`, `validated_by`) are sanitized but not wrapped.
 
-Use this when retrieved claims will be spliced into an LLM prompt — claim text is written by *earlier* agents and may contain stored prompt-injection payloads.
+Use this when retrieved claims will be spliced into an LLM prompt: claim text is written by *earlier* agents and may contain stored prompt-injection payloads.
 
 ```python
 findings = graph.query_for_llm("topic X", min_support="REPLICATED")
@@ -405,7 +405,7 @@ if claim:
 
 **Parameters** `claim_id: str`
 
-**Returns** `dict | None` — `None` if not found. Same field shape as `query()`.
+**Returns** `dict | None`: `None` if not found. Same field shape as `query()`.
 
 ---
 
@@ -438,9 +438,9 @@ The graph must have a loaded signer (from `mareforma bootstrap` or `mareforma.op
 When `validation_signature` is supplied directly to `db.validate_claim` (advanced/test path), mareforma also decodes the envelope's signed payload and refuses if its `evidence_seen` field disagrees with the `evidence_seen` kwarg. The signed envelope and the validated list must bind the same citations exactly (same items, same order); a direct caller cannot launder fraudulent citations through the on-disk envelope.
 
 **Raises**
-- `ClaimNotFoundError` — if the claim does not exist
-- `ValueError` — if `support_level` is not `REPLICATED`, no signer is loaded, or the loaded signer is not an enrolled validator
-- `EvidenceCitationError` — if any `evidence_seen` entry is not a strict-v4 UUID, does not point to an existing claim, post-dates `validated_at`, or disagrees with the validation envelope's signed `evidence_seen` field
+- `ClaimNotFoundError`: if the claim does not exist
+- `ValueError`: if `support_level` is not `REPLICATED`, no signer is loaded, or the loaded signer is not an enrolled validator
+- `EvidenceCitationError`: if any `evidence_seen` entry is not a strict-v4 UUID, does not point to an existing claim, post-dates `validated_at`, or disagrees with the validation envelope's signed `evidence_seen` field
 
 ---
 
@@ -461,7 +461,7 @@ h = graph.health()
 # }
 ```
 
-A "healthy" graph has zeros across the four drift counters. Non-zero values don't by themselves indicate a defect — they indicate something the operator should look at.
+A "healthy" graph has zeros across the four drift counters. Non-zero values don't by themselves indicate a defect; they indicate something the operator should look at.
 
 **Returns** `dict[str, int]` with the seven keys above.
 
@@ -491,7 +491,7 @@ result = graph.refresh_all_dois()
 # {"checked": N, "still_resolved": M, "now_unresolved": K, "newly_failed": F}
 ```
 
-`newly_failed` counts DOIs whose cache state flipped from resolved to unresolved (the drift signal operators usually want). Does NOT mutate `support_level` or per-claim `unresolved` flags — re-running a HEAD check is not strong enough evidence to demote across the trust ladder.
+`newly_failed` counts DOIs whose cache state flipped from resolved to unresolved (the drift signal operators usually want). Does NOT mutate `support_level` or per-claim `unresolved` flags; re-running a HEAD check is not strong enough evidence to demote across the trust ladder.
 
 **Returns** `dict` with keys `checked`, `still_resolved`, `now_unresolved`, `newly_failed`.
 
@@ -525,10 +525,10 @@ No-op when `rekor_url` is unset.
 
 Two recovery paths:
 
-- **Sidecar replay** — when the original Rekor submission succeeded but the claims-row UPDATE failed (recorded in `rekor_inclusions`), the stored coords are re-attached to the row in a single local UPDATE. No network call, no duplicate Rekor entry.
-- **Re-submit** — when no sidecar row exists, the envelope is submitted to Rekor again. Used only when the original submission has no persisted record.
+- **Sidecar replay**: when the original Rekor submission succeeded but the claims-row UPDATE failed (recorded in `rekor_inclusions`), the stored coords are re-attached to the row in a single local UPDATE. No network call, no duplicate Rekor entry.
+- **Re-submit**: when no sidecar row exists, the envelope is submitted to Rekor again. Used only when the original submission has no persisted record.
 
-Each retry first compares the envelope's signed payload against the live row — a tampered row is quarantined rather than cementing a stale signature in the public log, regardless of which recovery path applied. An envelope whose keyid no longer matches the current signer (key was rotated since `assert_claim`) is skipped with a warning.
+Each retry first compares the envelope's signed payload against the live row; a tampered row is quarantined rather than cementing a stale signature in the public log, regardless of which recovery path applied. An envelope whose keyid no longer matches the current signer (key was rotated since `assert_claim`) is skipped with a warning.
 
 **Returns** `dict` with keys `checked`, `logged`, `still_unlogged`.
 
@@ -543,7 +543,7 @@ dangling = graph.find_dangling_supports()
 # [{"claim_id": "...", "dangling_ref": "..."}, ...]
 ```
 
-REPLICATED detection already refuses to promote on a dangling reference — this helper is for auditing integrity, not for blocking writes.
+REPLICATED detection already refuses to promote on a dangling reference; this helper is for auditing integrity, not for blocking writes.
 
 **Returns** `list[dict]` of `{"claim_id", "dangling_ref"}` dicts sorted deterministically. Empty list when the graph is clean.
 
@@ -594,10 +594,10 @@ graph.enroll_validator(bot_pem, identity="reviewer-bot", validator_type="llm")
 | `validator_type` | `str` | `"human"` | `"human"` or `"llm"`. Self-declared honesty signal, bound into the signed enrollment envelope. LLM-typed validators may sign validation envelopes but cannot promote a claim past REPLICATED: `validate()` refuses at the core. |
 
 **Raises**
-- `ValueError` — no signer loaded, or the loaded signer is not enrolled
-- `InvalidIdentityError` — identity contains rejected characters
-- `InvalidValidatorTypeError` — `validator_type` is not `'human'` or `'llm'`
-- `ValidatorAlreadyEnrolledError` — key already enrolled (the message distinguishes a normal duplicate from a chain-broken row)
+- `ValueError`: no signer loaded, or the loaded signer is not enrolled
+- `InvalidIdentityError`: identity contains rejected characters
+- `InvalidValidatorTypeError`: `validator_type` is not `'human'` or `'llm'`
+- `ValidatorAlreadyEnrolledError`: key already enrolled (the message distinguishes a normal duplicate from a chain-broken row)
 
 ---
 
@@ -610,7 +610,7 @@ for row in graph.list_validators():
     print(row["identity"], row["validator_type"], row["keyid"])
 ```
 
-**Returns** `list[dict]` — each dict carries `keyid`, `pubkey_pem`, `identity`, `validator_type`, `enrolled_at`, `enrolled_by_keyid`, `enrollment_envelope`.
+**Returns** `list[dict]`: each dict carries `keyid`, `pubkey_pem`, `identity`, `validator_type`, `enrolled_at`, `enrolled_by_keyid`, `enrollment_envelope`.
 
 ---
 
@@ -632,10 +632,10 @@ lc_tools = [tool(fn) for fn in tools]
 |---|---|---|---|
 | `generated_by` | `str` | `"agent"` | Agent identifier baked into the closure. Set this to the calling agent's identity so REPLICATED detection works across independent runs. |
 
-**Returns** `list` — `[query_graph, assert_finding]`
+**Returns** `list`: `[query_graph, assert_finding]`
 
-- `query_graph(topic, min_support="PRELIMINARY") -> str` — routes through `query_for_llm`. Returns a JSON string of matching claims with free-text fields sanitized and wrapped in `<untrusted_data>...</untrusted_data>`.
-- `assert_finding(text, classification="INFERRED", supports=None, contradicts=None, source="") -> str` — returns `claim_id`.
+- `query_graph(topic, min_support="PRELIMINARY") -> str`: routes through `query_for_llm`. Returns a JSON string of matching claims with free-text fields sanitized and wrapped in `<untrusted_data>...</untrusted_data>`.
+- `assert_finding(text, classification="INFERRED", supports=None, contradicts=None, source="") -> str`: returns `claim_id`.
 
 See [Framework integrations](/for-agents/agents#framework-integrations) for per-framework wrapping.
 
@@ -649,7 +649,7 @@ Close the graph database connection.
 graph.close()
 ```
 
-Not required when using the context manager — `__exit__` calls `close()` automatically.
+Not required when using the context manager; `__exit__` calls `close()` automatically.
 
 ---
 
@@ -726,23 +726,23 @@ Used internally by the v0.3.3 CLI subcommands (`ingest`, `ask`, `narrative`) whe
 
 Core-owned (writer in the core):
 
-- `CLAIM_V1` — `urn:mareforma:predicate:claim:v1`
-- `EPISTEMIC_GRAPH_V1` — `urn:mareforma:predicate:epistemic-graph:v1`
-- `CLAIM_WITH_ROLES_V1` — `urn:mareforma:predicate:claim-with-roles:v1`
+- `CLAIM_V1`: `urn:mareforma:predicate:claim:v1`
+- `EPISTEMIC_GRAPH_V1`: `urn:mareforma:predicate:epistemic-graph:v1`
+- `CLAIM_WITH_ROLES_V1`: `urn:mareforma:predicate:claim-with-roles:v1`
 
 Adapter-owned (writer in `mareforma.adapters.*` or a third-party adapter):
 
-- `TOOL_CALL_V1` — `urn:mareforma:predicate:tool-call:v1`
-- `CONTAINER_EXEC_V1` — `urn:mareforma:predicate:container-exec:v1`
-- `CODE_VARIATION_V1` — `urn:mareforma:predicate:code-variation:v1`
-- `HYPOTHESIS_V1` — `urn:mareforma:predicate:hypothesis:v1`
-- `LITERATURE_INSIGHT_V1` — `urn:mareforma:predicate:literature-insight:v1`
-- `SCIENCE_SKILL_V1` — `urn:mareforma:predicate:science-skill:v1`
-- `META_CLAIM_V1` — `urn:mareforma:predicate:meta-claim:v1`
-- `WORKSHOP_EVENT_V1` — `urn:mareforma:predicate:workshop-event:v1`
+- `TOOL_CALL_V1`: `urn:mareforma:predicate:tool-call:v1`
+- `CONTAINER_EXEC_V1`: `urn:mareforma:predicate:container-exec:v1`
+- `CODE_VARIATION_V1`: `urn:mareforma:predicate:code-variation:v1`
+- `HYPOTHESIS_V1`: `urn:mareforma:predicate:hypothesis:v1`
+- `LITERATURE_INSIGHT_V1`: `urn:mareforma:predicate:literature-insight:v1`
+- `SCIENCE_SKILL_V1`: `urn:mareforma:predicate:science-skill:v1`
+- `META_CLAIM_V1`: `urn:mareforma:predicate:meta-claim:v1`
+- `WORKSHOP_EVENT_V1`: `urn:mareforma:predicate:workshop-event:v1`
 - `AGENT_TRACE_V1`, `INGESTED_TRACE_V1`, `LLM_OUTPUT_V1`,
   `REVIEW_V1`, `PEER_REVIEW_V1`, `ELO_MATCH_V1`,
-  `TOURNAMENT_BRACKET_V1` — additional reserved namespaces.
+  `TOURNAMENT_BRACKET_V1`: additional reserved namespaces.
 - Wet-lab assay family: `WET_LAB_ASSAY_V1` plus
   `_FLOW_CYTOMETRY`, `_SEQUENCING`, `_IMAGING`, `_PROTEOMICS`,
   `_ELECTROPHYSIOLOGY` siblings.
@@ -763,7 +763,7 @@ from mareforma.events import (
 )
 ```
 
-`EventSource` and `EventHandler` are `@runtime_checkable` Protocols — `isinstance(obj, EventSource)` at adapter construction time fails loudly on a missing `subscribe` / `unsubscribe` / `handle_event` attribute. `EventPayload` and `ClaimResult` are TypedDicts. Source-name constants prevent string-typo dispatch bugs.
+`EventSource` and `EventHandler` are `@runtime_checkable` Protocols: `isinstance(obj, EventSource)` at adapter construction time fails loudly on a missing `subscribe` / `unsubscribe` / `handle_event` attribute. `EventPayload` and `ClaimResult` are TypedDicts. Source-name constants prevent string-typo dispatch bugs.
 
 ### `mareforma.tools`
 
@@ -783,7 +783,7 @@ assert isinstance(MyTool(), Tool)
 
 ### `mareforma.canonicalize`
 
-Registry-based canonicalizer surface for adapter authors. Distinct from the internal envelope canonicaliser (`mareforma._canonical`) — adapters use the public registry so claim `result_canonical_form` fields can name forms by registered string.
+Registry-based canonicalizer surface for adapter authors. Distinct from the internal envelope canonicaliser (`mareforma._canonical`); adapters use the public registry so claim `result_canonical_form` fields can name forms by registered string.
 
 ```python
 from mareforma.canonicalize import (
@@ -835,7 +835,7 @@ Opt in via `.claude/settings.json`:
 
 ### `mareforma.adapters.*`
 
-Three opt-in adapter packages — see [Mareforma adapters](../for-agents/agents) (under the *Adapter framework* section) for full integration examples. Quick reference:
+Three opt-in adapter packages: see [Mareforma adapters](../for-agents/agents) (under the *Adapter framework* section) for full integration examples. Quick reference:
 
 | Package | Install | What it does |
 |---|---|---|

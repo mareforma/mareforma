@@ -22,14 +22,14 @@ redacted before passing the exported document to a third-party
 consumer; mareforma does not redact for you.
 
 The exporter is *one-way*. Re-importing PROV-O back into mareforma is
-out of scope — the PROV model carries less than the signed graph
+out of scope: the PROV model carries less than the signed graph
 (no DSSE envelopes, no GRADE evidence vector, no hash chain), so a
 round-trip through PROV-O would drop integrity surface.
 
 The four-invariant validator :func:`validate_prov_o` runs over the
 exported document and raises :class:`ProvOValidationError` on
 structural violations. It is a hand-rolled schema check, not a full
-SHACL or OWL validator — the four invariants are the minimum a
+SHACL or OWL validator: the four invariants are the minimum a
 consumer needs to walk the document without nil-pointer surprises.
 """
 
@@ -80,7 +80,7 @@ def _require_uuid_claim_id(claim_id: str) -> str:
     """Guard against non-UUID claim_ids being spliced into URN @ids.
 
     Federation imports can land non-UUID identifiers in the graph;
-    those must be remapped to UUIDs before export — otherwise we emit
+    those must be remapped to UUIDs before export; otherwise we emit
     malformed JSON-LD ``@id`` values that downstream PROV-O tooling
     cannot parse. Mirror the RO-Crate exporter's posture: refuse,
     don't sanitise.

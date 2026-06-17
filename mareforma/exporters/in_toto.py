@@ -14,12 +14,12 @@ Statement v1 dict, leaving signing + DSSE wrap to the caller. Use cases:
 For a signed bundle ready to verify with ``mareforma verify``, use
 :mod:`mareforma.export_bundle` (`mareforma export --bundle`).
 
-Predicate type: ``urn:mareforma:predicate:epistemic-graph:v1`` — the
+Predicate type: ``urn:mareforma:predicate:epistemic-graph:v1``: the
 same predicate the signed-bundle path uses, so a verifier that knows
 how to read a signed bundle reads the unsigned form unchanged.
 Each claim appears as a subject under
 ``urn:mareforma:claim:<uuid>`` with a SHA-256 of the canonical
-Statement v1 bytes — same shape :mod:`mareforma.export_bundle` already
+Statement v1 bytes: same shape :mod:`mareforma.export_bundle` already
 uses, so verifiers that already know the signed-bundle shape need no
 new code path.
 """

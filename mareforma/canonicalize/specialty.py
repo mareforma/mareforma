@@ -1,4 +1,4 @@
-"""Specialty canonicalizers — domain-specific byte-stable forms.
+"""Specialty canonicalizers: domain-specific byte-stable forms.
 
 Importing this module registers ``rdkit-canonical-smiles-v1``,
 ``fasta-nfc-v1``, and ``pdb-atom-sorted-v1`` with the central

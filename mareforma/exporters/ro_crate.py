@@ -74,7 +74,7 @@ def _claim_to_create_action(claim: dict) -> dict[str, Any]:
     (``generated_by``); ``result`` references the claim text as a
     MediaObject; ``signature`` carries the DSSE envelope if signed.
 
-    Raises :class:`ValueError` on non-UUID claim_id — federation imports
+    Raises :class:`ValueError` on non-UUID claim_id: federation imports
     can land foreign IDs in the graph and splicing them unvalidated
     into ``urn:mareforma:claim:<id>`` URIs would silently break URN /
     JSON-LD @id parsing downstream.
@@ -164,7 +164,7 @@ def _claim_to_media_object(claim: dict) -> dict[str, Any]:
     Claim text is asserter-controlled and passes through mareforma's
     ``sanitize_for_llm`` filter on write (zero-width / RTL / control-
     char stripping). The text is still embedded raw in the JSON-LD
-    payload here — RO-Crate consumers that render this surface in a
+    payload here: RO-Crate consumers that render this surface in a
     browser UI MUST treat it as untrusted (Galaxy / Workbench /
     EuroScienceGateway viewers all do safe-render by default).
     """

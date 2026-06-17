@@ -1,5 +1,5 @@
 """
-prompt_safety.py — sanitize-and-wrap helpers for feeding claim text to an LLM.
+prompt_safety.py: sanitize-and-wrap helpers for feeding claim text to an LLM.
 
 When an agent retrieves claims via :meth:`mareforma.EpistemicGraph.query`
 and feeds the results back into an LLM prompt, the claim text was written
@@ -24,9 +24,9 @@ fields and sanitizes-only on the short metadata labels.
 
 Threat model
 ------------
-The wrapper is one half of a contract. The other half — telling the
+The wrapper is one half of a contract. The other half, telling the
 LLM that everything inside ``<untrusted_data>`` is data, not
-instructions — lives in the caller's system prompt. Anthropic's prompt
+instructions, lives in the caller's system prompt. Anthropic's prompt
 guidance documents the pattern; we provide the wrapping primitive,
 not the system prompt.
 """
@@ -115,15 +115,15 @@ def sanitize_for_llm(text: str | None) -> str | None:
     - C0 (``< 0x20``) and C1 (``0x7F-0x9F``) control characters,
       except ``\\n`` and ``\\t`` which are kept (legitimate claim
       text contains them)
-    - Fullwidth ``<``, ``>``, ``/`` — would NFKC-fold to ASCII and
+    - Fullwidth ``<``, ``>``, ``/``: would NFKC-fold to ASCII and
       reconstruct a forged delimiter post-wrap
     - Variation selectors (U+FE00-FE0F, U+E0100-E01EF, U+180B-180D)
     - Interlinear annotation anchors (U+FFF9-FFFB)
-    - **Tag plane (U+E0000-E007F)** — Goodside's "ASCII smuggler"
+    - **Tag plane (U+E0000-E007F)**: Goodside's "ASCII smuggler"
       prompt-injection vector. Invisible to a human reader, present
       in the LLM token stream.
 
-    Returns ``None`` for ``None`` input — callers can pass an optional
+    Returns ``None`` for ``None`` input: callers can pass an optional
     field through without conditionals.
 
     Idempotent: ``sanitize_for_llm(sanitize_for_llm(x)) == sanitize_for_llm(x)``.
@@ -198,7 +198,7 @@ def wrap_untrusted(text: str | None, *, tag: str = "untrusted_data") -> str:
 
 
 def safe_for_llm(text: str | None, *, tag: str = "untrusted_data") -> str:
-    """Sanitize *then* wrap *text* — the recommended one-call entry point.
+    """Sanitize *then* wrap *text*: the recommended one-call entry point.
 
     Composes :func:`sanitize_for_llm` (strips zero-width / bidi /
     steganographic codepoints) with :func:`wrap_untrusted` (strips
@@ -207,7 +207,7 @@ def safe_for_llm(text: str | None, *, tag: str = "untrusted_data") -> str:
     needs to land in an LLM context window.
 
     ``None`` is treated as an empty string so the result is always a
-    fully-formed wrapped block — useful when splicing into a prompt
+    fully-formed wrapped block, useful when splicing into a prompt
     template that expects the tag to be present even for missing data.
     """
     return wrap_untrusted(sanitize_for_llm(text), tag=tag)

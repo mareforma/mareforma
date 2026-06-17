@@ -1,4 +1,4 @@
-"""ClawInstitute adapter — workshop events → signed mareforma claims.
+"""ClawInstitute adapter: workshop events → signed mareforma claims.
 
 The adapter is generic: ClawInstitute hosts many applications, and
 any of them produces workshop posts. ``EventHook`` polls a workspace

@@ -1,5 +1,5 @@
 """
-validators.py — Per-project validator enrollment.
+validators.py: Per-project validator enrollment.
 
 A validator is a public key permitted to call ``graph.validate()`` and
 promote a REPLICATED claim to ESTABLISHED. The set of permitted keys is
@@ -13,7 +13,7 @@ The first key opened against a fresh project ``graph.db`` auto-enrolls
 as the root validator with a self-signed enrollment envelope.
 Subsequent validators are added by an already-enrolled validator via
 ``enroll_validator()`` or the ``mareforma validator add`` CLI. Removal
-is intentionally not supported currently — append-only validator
+is intentionally not supported currently: append-only validator
 history mirrors the append-only claim history.
 
 Enrollment payload
@@ -62,8 +62,8 @@ class InvalidIdentityError(ValidatorError):
 class InvalidValidatorTypeError(ValidatorError):
     """Raised when an enrollment receives an unknown validator_type.
 
-    The validator_type field is a self-declared honesty signal — 'human'
-    or 'llm' — bound into the signed enrollment envelope. Unknown values
+    The validator_type field is a self-declared honesty signal, 'human'
+    or 'llm', bound into the signed enrollment envelope. Unknown values
     are refused at enroll time so a malformed type never reaches the
     persisted row (and the chain walk that consults it).
     """
@@ -165,7 +165,7 @@ def _conn_cache(conn: sqlite3.Connection) -> set[str]:
     a self-signed root within this session.
 
     Stored as an attribute on the connection object so it dies with the
-    connection — avoids the stale-cache hazard of an id()-keyed module
+    connection, avoids the stale-cache hazard of an id()-keyed module
     dict where a recycled object id picks up a previous conn's set.
     """
     cache = getattr(conn, _CACHE_ATTR, None)
@@ -192,22 +192,22 @@ def invalidate_conn_cache(conn: sqlite3.Connection) -> None:
     ground truth until the connection is reopened.
 
     Public (no leading underscore) because the canonical write paths
-    live outside this module — the restore path in ``db.py`` and any
+    live outside this module: the restore path in ``db.py`` and any
     future validator-management surface need to call it directly.
 
     Where this matters
     ------------------
     Stdlib ``sqlite3.Connection`` does NOT allow arbitrary attributes,
     so :func:`_conn_cache` falls through to its "fresh set every call"
-    safe-but-slow branch. On stdlib this function is therefore a no-op
-    — there is nothing to drop, and nothing was cached in the first
+    safe-but-slow branch. On stdlib this function is therefore a no-op:
+    there is nothing to drop, and nothing was cached in the first
     place. The invalidation is **load-bearing** for any Connection
     wrapper (apsw, certain SQLAlchemy adapters, future subclasses) that
-    DOES accept attribute writes — there, the cache persists across
+    DOES accept attribute writes: there, the cache persists across
     calls and stale entries are a real consistency hazard.
 
     Raw-SQL mutations from outside our Python paths (e.g. a sqlite
-    shell ``UPDATE``) bypass this — there is no SQLite-side trigger we
+    shell ``UPDATE``) bypass this: there is no SQLite-side trigger we
     can attach that flips a Python-process attribute. The cache's
     correctness boundary is "we trust our own writes"; raw-SQL
     attackers are already inside the trust model and the
@@ -250,7 +250,7 @@ def _verify_chain(conn: sqlite3.Connection, keyid: str) -> bool:
     matches the parent's pubkey, and (d) terminates in a row where
     ``keyid == enrolled_by_keyid`` (the self-signed root), AND (e) that
     self-signed root is the unique such row in the table (singleton-root
-    invariant — see :func:`_count_self_signed_rows`).
+    invariant, see :func:`_count_self_signed_rows`).
 
     A tampered row (manual sqlite INSERT with a fabricated parent, a
     bogus envelope, or an alternate self-signed root) fails one of these
@@ -319,7 +319,7 @@ def is_enrolled(conn: sqlite3.Connection, keyid: str) -> bool:
     A row whose envelope doesn't verify against its parent (e.g. manual
     sqlite INSERT with a fabricated parent or a bogus envelope) is NOT
     considered enrolled. SQLite doesn't enforce the logical foreign key
-    on ``enrolled_by_keyid`` — the chain walk is what gives the
+    on ``enrolled_by_keyid``: the chain walk is what gives the
     validators table its trust property.
 
     Results are cached per-connection so repeated calls during a session
@@ -387,7 +387,7 @@ def auto_enroll_root(
     -----------
     Two simultaneous processes opening a fresh ``graph.db`` with
     DIFFERENT keys could each pass a naive ``count == 0`` check and
-    both insert a self-signed root — keyid is the PK, so distinct keys
+    both insert a self-signed root: keyid is the PK, so distinct keys
     don't collide and you'd end up with two roots. The check + insert
     therefore runs inside ``BEGIN IMMEDIATE``: SQLite blocks the second
     writer until the first commits, after which the second's re-check
@@ -493,8 +493,8 @@ def enroll_validator(
 
     The parent must already be enrolled. Returns the new validator row.
 
-    ``validator_type`` is a self-declared honesty signal — ``'human'``
-    or ``'llm'`` — bound into the signed enrollment envelope. There is
+    ``validator_type`` is a self-declared honesty signal, ``'human'``
+    or ``'llm'``, bound into the signed enrollment envelope. There is
     no external verification; the value reflects what the parent signed
     off on at enroll time. ``'llm'`` validators are subject to the
     promotion ceiling enforced by :func:`mareforma.db.validate_claim`
@@ -583,7 +583,7 @@ def verify_enrollment(validator_row: dict, parent_pubkey_pem: bytes) -> bool:
     AND every field in the signed payload (keyid, pubkey_pem, identity,
     enrolled_at, enrolled_by_keyid) equals the corresponding row column.
 
-    Binding all fields — not just ``keyid`` — gives defense in depth:
+    Binding all fields, not just ``keyid``, gives defense in depth:
     an attacker who swaps ``identity`` or ``pubkey_pem`` in the row
     breaks verification even if they could somehow reuse a legitimate
     envelope.

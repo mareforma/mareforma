@@ -16,7 +16,7 @@ python 04_private_data_public_findings.py
 
 No API key required.
 
-## Setup — a shared graph, plus a provenance-trace tool
+## Setup: a shared graph, plus a provenance-trace tool
 
 ```python
 query_graph, assert_finding_a = [tool(fn) for fn in graph.get_tools(
@@ -38,7 +38,7 @@ def get_provenance_trace(claim_id: str) -> dict:
     }
 ```
 
-## Lab A — discovery and trace publication
+## Lab A: discovery and trace publication
 
 ```python
 # An ESTABLISHED upstream both labs cite (seed=True). Lab A then runs a
@@ -69,7 +69,7 @@ step_2 = assert_finding_a.invoke({
   The trace — sources, steps, upstream evidence — is in the shared graph.
 ```
 
-## Lab B — reads the trace, replicates independently
+## Lab B: reads the trace, replicates independently
 
 ```python
 # Lab B reads Lab A's trace from the shared graph — the experimental logic,
@@ -106,7 +106,7 @@ rep_2 = assert_finding_b.invoke({
   rep_2 id: d61246e7…
 ```
 
-## Q1 — Independent data paths?
+## Q1: Independent data paths?
 
 ```python
 all_claims = graph.query("Target T")
@@ -123,7 +123,7 @@ agents  = {c.get("generated_by") for c in all_claims if c.get("generated_by")}
     If they converged, the finding is not a dataset artifact.
 ```
 
-## Q2 — Genuinely reproducible?
+## Q2: Genuinely reproducible?
 
 ```python
 for c in graph.query("Target T"):
@@ -139,13 +139,13 @@ for c in graph.query("Target T"):
     The finding holds across datasets. Genuine replication.
 ```
 
-## Q3 — Provenance distance, and the spurious-replication trap
+## Q3: Provenance distance, and the spurious-replication trap
 
 Provenance distance measures how far a conclusion is from raw data: short chains
 of ANALYTICAL steps are strong; long chains of INFERRED steps are fragile. Both
 labs' chains are anchored in ANALYTICAL findings from independent sources.
 
-The contrast that makes the example worth reading — two agents repeating the
+The contrast that makes the example worth reading: two agents repeating the
 same LLM prior with **no data behind either**:
 
 ```python

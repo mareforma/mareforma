@@ -8,16 +8,16 @@ conservative default.
 
 The public surface:
 
-- :func:`derive_classification` — produce a :class:`ClassificationResult`
+- :func:`derive_classification`: produce a :class:`ClassificationResult`
   from source + logs.
-- :func:`verify_classification` — re-derive and compare against a
+- :func:`verify_classification`: re-derive and compare against a
   claimed classification; flag tamper if evidence drifts.
-- :func:`extract_source_profile` / :func:`extract_directory_profile`
-  — static source profilers (require the ``[derivation]`` extra:
+- :func:`extract_source_profile` / :func:`extract_directory_profile`:
+  static source profilers (require the ``[derivation]`` extra:
   ``pip install mareforma[derivation]``).
-- :func:`extract_templates` — runtime-log template extraction via
+- :func:`extract_templates`: runtime-log template extraction via
   Drain parser.
-- :data:`DERIVATION_VERSION` — version of the derivation algorithm.
+- :data:`DERIVATION_VERSION`: version of the derivation algorithm.
   Bumped when the evidence format changes.
 """
 

@@ -1,4 +1,4 @@
-"""health.py — Epistemic health report for mareforma status.
+"""health.py: Epistemic health report for mareforma status.
 
 Traffic light (claim-based)
 ---------------------------
@@ -137,7 +137,7 @@ def append_health_event(
     ``"doi_drift_scan"``, ``"refresh_unresolved"``,
     ``"refresh_unsigned"``). ``outcome`` is ``"ok"`` / ``"fail"`` /
     ``"partial"``. Extra ``counters`` are merged into the JSON line
-    verbatim — keep them small and JSON-encodable.
+    verbatim: keep them small and JSON-encodable.
 
     Writes are best-effort: any permission / disk / encoding failure
     is swallowed with a RuntimeWarning so the upstream mareforma
@@ -155,7 +155,7 @@ def append_health_event(
     Concurrency: on POSIX (Linux + macOS), ``open(path, "a")`` uses
     ``O_APPEND`` which guarantees atomic line-sized writes up to
     ``PIPE_BUF`` (4 KB). Event lines are well under that. On
-    Windows, append atomicity across processes is not guaranteed —
+    Windows, append atomicity across processes is not guaranteed;
     operators running mareforma cross-process on Windows must
     serialise health-log writes externally.
     """

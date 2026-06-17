@@ -6,11 +6,11 @@ are closed-form CI / p-value arithmetic derived from first principles: no
 GPL/Cochrane code is transcribed.
 
 On determinism: the gate DOES compare floats (``p_value``, the CI bounds,
-``alpha``). That is not a cross-host hazard — IEEE-754 specifies each primitive
+``alpha``). That is not a cross-host hazard: IEEE-754 specifies each primitive
 operation (compare, add, multiply by 2.0) as a single correctly-rounded result,
 so the comparisons here yield the same answer on any conformant host. The real
-divergence risk is *accumulated* or *transcendental* computation — the kind of
-iterative pooling / variance estimation a meta-analysis does — where rounding
+divergence risk is *accumulated* or *transcendental* computation, the kind of
+iterative pooling / variance estimation a meta-analysis does, where rounding
 compounds and library math functions are not bit-identical across platforms.
 v0.3.5 does none of that: there is no pooling, no I2/tau2, no transcendental
 math in the gate, so the bearing is reproducible across hosts.

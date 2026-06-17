@@ -1,15 +1,15 @@
 """
-_evidence.py — GRADE 5-domain EvidenceVector.
+_evidence.py: GRADE 5-domain EvidenceVector.
 
 The GRADE framework (Grading of Recommendations, Assessment, Development,
-and Evaluations — the de-facto medical-evidence standard) scores evidence
+and Evaluations, the de-facto medical-evidence standard) scores evidence
 along five orthogonal *downgrade* domains and three *upgrade* booleans.
 Each downgrade domain is a non-positive integer in [-2, 0]; nonzero
 values require a written rationale (anti-handwaving rule from the GRADE
 handbook).
 
 mareforma stores an EvidenceVector inside every signed Statement v1
-predicate. The vector is *part of the signature* — values cannot be
+predicate. The vector is *part of the signature*: values cannot be
 retroactively changed without producing a different statement_cid and
 a new signature.
 
@@ -19,26 +19,26 @@ assistants may help authors fill it; the data model is the same.
 
 Domains
 -------
-risk_of_bias      — methodological flaws (allocation, blinding, attrition)
-inconsistency     — heterogeneity in effect across studies
-indirectness      — population / intervention / outcome mismatch
-imprecision       — wide confidence intervals / small N
-publication_bias  — selective reporting / file-drawer effect
+risk_of_bias      : methodological flaws (allocation, blinding, attrition)
+inconsistency     : heterogeneity in effect across studies
+indirectness      : population / intervention / outcome mismatch
+imprecision       : wide confidence intervals / small N
+publication_bias  : selective reporting / file-drawer effect
 
 Each domain: 0 = no concern, -1 = serious concern, -2 = very serious.
 
 Upgrade booleans
 ----------------
-large_effect          — magnitude survives plausible confounding
-dose_response         — clear dose-response gradient observed
-opposing_confounding  — known confounders bias against the observed effect
+large_effect          : magnitude survives plausible confounding
+dose_response         : clear dose-response gradient observed
+opposing_confounding  : known confounders bias against the observed effect
 
 (GRADE permits upgrades for observational evidence when these conditions
 hold; they raise the certainty estimate above what RoB alone implies.)
 
 References
 ----------
-Guyatt et al. 2008, BMJ 336:924 — GRADE: an emerging consensus.
+Guyatt et al. 2008, BMJ 336:924. GRADE: an emerging consensus.
 Schünemann et al. 2013, GRADE Handbook §5–9.
 """
 
@@ -94,8 +94,8 @@ class EvidenceVector:
     """GRADE 5-domain evidence vector with upgrade flags + rationales.
 
     Defaults to all-zeros (every domain unflagged, no upgrades). A default
-    EvidenceVector means "the asserter did not flag any quality concerns"
-    — equivalent to GRADE "high certainty" before any context-specific
+    EvidenceVector means "the asserter did not flag any quality concerns",
+    equivalent to GRADE "high certainty" before any context-specific
     downgrade. The graph still labels the claim PRELIMINARY until the
     trust-ladder gates fire; this vector is orthogonal to the ladder.
 
@@ -116,7 +116,7 @@ class EvidenceVector:
                               derivations, tool outputs, asserter-level
                               assertions). Treating non-empirical claims
                               as HIGH-by-default is a mareforma
-                              convention, NOT a GRADE recommendation —
+                              convention, NOT a GRADE recommendation:
                               callers MUST set downgrade domains
                               explicitly when an asserter-level claim is
                               not actually high-certainty.
@@ -283,12 +283,12 @@ class EvidenceVector:
         Algorithm (GRADE handbook §5):
 
         1. Baseline = :data:`_STUDY_DESIGN_BASELINE[study_design]`.
-           Falls back to ``4`` (HIGH) when ``study_design`` is None —
+           Falls back to ``4`` (HIGH) when ``study_design`` is None:
            legacy claims that did not declare a design are treated as
            asserter-level HIGH and only the downgrade signal applies.
         2. Sum the five downgrade domains (each in [-2, 0]).
         3. Add upgrade points (only when the design is observational
-           AND the score has not been downgraded — GRADE forbids
+           AND the score has not been downgraded, GRADE forbids
            upgrading downgraded evidence):
 
            * large_effect          → +1 (or +2 when very large;

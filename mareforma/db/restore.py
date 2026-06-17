@@ -1,4 +1,4 @@
-"""Restore a graph from claims.toml — catastrophic-loss recovery path.
+"""Restore a graph from claims.toml: catastrophic-loss recovery path.
 
 This module contains the ``restore()`` function and its verification
 helpers. The restore path is fail-all-or-nothing: every enrollment
@@ -40,7 +40,7 @@ def _restore_predicate_payload(c: dict, claim_id: str) -> str:
     Restore must be at least as strict; a tampered TOML carrying an int
     or list for this field would otherwise land as ``""`` (silent data
     loss). Either the field is a string (passed through) or absent
-    (default empty) — anything else is a malformed TOML and aborts.
+    (default empty); anything else is a malformed TOML and aborts.
     """
     val = c.get("predicate_payload")
     if val is None:
@@ -96,7 +96,7 @@ def restore(
         replayed unverified (matching the submit-path opt-in posture).
 
     The rebuild is **fresh-only**. ``restore`` refuses to run if
-    ``.mareforma/graph.db`` already contains claims — merge semantics
+    ``.mareforma/graph.db`` already contains claims; merge semantics
     are out of scope for the current release (status drift, supports[] divergence,
     and validator chain conflicts have no clean answers). Wipe
     ``graph.db`` first if you really mean to overwrite.
@@ -105,7 +105,7 @@ def restore(
     envelope is verified against its parent key; every claim
     ``signature_bundle`` is verified against the enrolled signer key;
     every ``validation_signature`` is verified against its signer key.
-    The first failure rolls back the entire transaction — the project
+    The first failure rolls back the entire transaction: the project
     stays in its pre-restore state.
 
     Parameters

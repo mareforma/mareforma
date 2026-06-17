@@ -1,5 +1,5 @@
 """
-log_templates — Drain-style log-template extraction engine.
+log_templates: Drain-style log-template extraction engine.
 
 Production-grade pure-Python Drain algorithm (He et al., ICWS 2017) that
 reduces unstructured log lines to parameterized templates deterministically.

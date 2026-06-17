@@ -1,5 +1,5 @@
 """
-_graph.py — EpistemicGraph: agent-native interface to the mareforma epistemic graph.
+_graph.py: EpistemicGraph, agent-native interface to the mareforma epistemic graph.
 
 Usage
 -----
@@ -24,7 +24,7 @@ Flow
     └─ SELECT via db.query_claims() with text/support/classification filters
 
   validate()
-    └─ UPDATE via db.validate_claim() — requires REPLICATED, sets ESTABLISHED
+    └─ UPDATE via db.validate_claim(): requires REPLICATED, sets ESTABLISHED
 """
 
 from __future__ import annotations
@@ -75,7 +75,7 @@ def _format_row_for_llm(row: dict, prompt_safety) -> dict:
 class EpistemicGraph:
     """Agent-native interface to a local mareforma epistemic graph.
 
-    Do not instantiate directly — use mareforma.open().
+    Do not instantiate directly: use mareforma.open().
     """
 
     def __init__(
@@ -215,12 +215,12 @@ class EpistemicGraph:
             ``claim_id`` only when EVERY semantic field also matches
             (text, classification, generated_by, supports, contradicts,
             source_name, artifact_hash). Any mismatch raises
-            :class:`mareforma.db.IdempotencyConflictError` — silent
+            :class:`mareforma.db.IdempotencyConflictError`. Silently
             merging two different claims would discard the second
             author's content and break REPLICATED detection. For
             cross-lab convergence, assert two separate claims that
             share an entry in ``supports[]`` with different
-            ``generated_by`` values — that's the path that fires
+            ``generated_by`` values: that's the path that fires
             REPLICATED honestly.
         generated_by:
             Agent identifier. Use ``"model/version/context"`` format.
@@ -251,7 +251,7 @@ class EpistemicGraph:
             ``indirectness``, ``imprecision``, ``publication_bias``),
             three upgrade flags (``large_effect``, ``dose_response``,
             ``opposing_confounding``), a ``rationale`` dict (required for
-            any nonzero domain — the GRADE anti-handwaving rule), and a
+            any nonzero domain, the GRADE anti-handwaving rule), and a
             ``reporting_compliance`` list. Bound into the signed
             predicate and denormalized into the ``ev_*`` columns for
             queryable filters. Defaults to all-zeros (the asserter
@@ -409,7 +409,7 @@ class EpistemicGraph:
 
         Returns claim dicts with the raw ``text`` field. **If the
         caller plans to splice these into an LLM prompt context,
-        use** :meth:`query_for_llm` **instead** — it wraps the text in
+        use** :meth:`query_for_llm` **instead**: it wraps the text in
         ``<untrusted_data>...</untrusted_data>`` markers so the LLM
         treats retrieved content as data, not instructions
         (Greshake et al., AISec '23, arXiv:2302.12173). This method
@@ -442,16 +442,16 @@ class EpistemicGraph:
             ``"contradicted"`` / ``"contested"`` / ``"retracted"`` /
             ``"any"``. Composes with the other filters via AND:
 
-            * ``"clean"`` — restrict to ``t_invalid IS NULL`` AND
+            * ``"clean"``: restrict to ``t_invalid IS NULL`` AND
               ``status = 'open'`` (the strictest "nothing wrong"
               cohort).
-            * ``"contradicted"`` — restrict to ``t_invalid IS NOT
+            * ``"contradicted"``: restrict to ``t_invalid IS NOT
               NULL``; overrides the default ``include_invalidated``
               gate so contradicted rows surface even when the flag
               wasn't flipped.
-            * ``"contested"`` — restrict to ``status = 'contested'``.
-            * ``"retracted"`` — restrict to ``status = 'retracted'``.
-            * ``"any"`` — surface every refutation state; implies
+            * ``"contested"``: restrict to ``status = 'contested'``.
+            * ``"retracted"``: restrict to ``status = 'retracted'``.
+            * ``"any"``: surface every refutation state; implies
               ``include_invalidated=True``.
 
             Composition examples::
@@ -521,13 +521,13 @@ class EpistemicGraph:
         ``status`` and ``comparison_summary`` are always editable.
         ``text`` / ``supports`` / ``contradicts`` are part of the signed
         payload and refuse to mutate when the claim carries a signature
-        bundle — use a retraction-plus-new-assertion flow on those
+        bundle: use a retraction-plus-new-assertion flow on those
         cases.
 
         Trust model on ``status`` mutations
         -----------------------------------
         A status change (open / contested / retracted) is an EDITORIAL
-        action — it produces no signed envelope, requires no validator
+        action: it produces no signed envelope, requires no validator
         keyid, and is not round-tripped through the signature-verify
         layer. An ESTABLISHED claim can be flipped to ``retracted`` by
         any process with DB write access; nothing in mareforma
@@ -601,7 +601,7 @@ class EpistemicGraph:
         """FTS5 full-text search over claim text.
 
         Returns claim dicts ordered by FTS5 rank (best match first).
-        Parameters mirror :meth:`query` — same filters, same per-row
+        Parameters mirror :meth:`query`: same filters, same per-row
         projection (``validator_reputation``, ``generator_enrolled``),
         same ``include_unverified`` semantics. The difference is the
         underlying engine: :meth:`query` uses LIKE substring matching;
@@ -613,14 +613,14 @@ class EpistemicGraph:
         query:
             FTS5 MATCH expression. Examples:
 
-            - ``"gene"`` — single token
-            - ``"\\"epistemic graph\\""`` — phrase (note: escape quotes
+            - ``"gene"``: single token
+            - ``"\\"epistemic graph\\""``: phrase (note: escape quotes
               in Python source)
-            - ``"gene*"`` — prefix
-            - ``"gene OR pathway"`` — boolean
-            - ``"gene NEAR pathway"`` — proximity
+            - ``"gene*"``: prefix
+            - ``"gene OR pathway"``: boolean
+            - ``"gene NEAR pathway"``: proximity
 
-            Pure-wildcard queries (``"*"``) are refused — they would
+            Pure-wildcard queries (``"*"``) are refused: they would
             scan the entire table.
         min_support, classification, limit, include_unverified:
             See :meth:`query`.
@@ -684,7 +684,7 @@ class EpistemicGraph:
             ``shared-resolved-upstream``, ``cross-method``.
         confidence
             Optional dict of confidence values (e.g.
-            ``{"cosine": 0.92, "nli_forward": 0.88}``) — never fused
+            ``{"cosine": 0.92, "nli_forward": 0.88}``), never fused
             into a single score per the report.
 
         Raises
@@ -756,7 +756,7 @@ class EpistemicGraph:
         """List signed replication verdicts, optionally filtered.
 
         By default, verdicts whose member or other claim has been
-        invalidated by a signed contradiction verdict are excluded —
+        invalidated by a signed contradiction verdict are excluded,
         same surface as :meth:`query`. Pass ``include_invalidated=True``
         for audit / history queries.
         """
@@ -775,7 +775,7 @@ class EpistemicGraph:
         """List signed contradiction verdicts, optionally filtered.
 
         By default, verdicts on invalidated claims are excluded; pass
-        ``include_invalidated=True`` for audit-mode listings — the
+        ``include_invalidated=True`` for audit-mode listings, the
         typical use, since a contradiction verdict IS the evidence
         for invalidation.
         """
@@ -790,8 +790,8 @@ class EpistemicGraph:
 
         Count is the number of ESTABLISHED claims whose validation
         envelope was signed by that keyid. Validators with zero
-        ESTABLISHED validations appear with ``count=0``. Derived state
-        — recomputed on every call from the claims table; never cached.
+        ESTABLISHED validations appear with ``count=0``. Derived state,
+        recomputed on every call from the claims table; never cached.
         """
         self._check_open()
         return _db.get_validator_reputation(self._conn)
@@ -836,13 +836,13 @@ class EpistemicGraph:
     ) -> str:
         """Pre-register a :class:`mareforma.trust.Prediction` against a proposition.
 
-        Binds the decision rule to the proposition *before the numbers are seen*
-        — the load-bearing move of the hypothetico-deductive method. Three
+        Binds the decision rule to the proposition *before the numbers are seen*:
+        the load-bearing move of the hypothetico-deductive method. Three
         effects, idempotent together:
 
         1. Registers the proposition (idempotent on ``content_id``).
         2. Writes the append-only ``predictions`` row with ``preregistered=1``.
-        3. Writes its own signed claim — the **plan attestation** — via the
+        3. Writes its own signed claim, the **plan attestation**, via the
            normal :meth:`assert_claim` path under idempotency key
            ``plan:{plan_id}``, carrying a ``plan/v1`` predicate payload. This
            claim is an ordinary signed claim, so it is Rekor-anchorable like any
@@ -937,8 +937,8 @@ class EpistemicGraph:
         occur the claim would remain as an attestation with no finding, and a
         retry would reuse that claim idempotently rather than duplicate it.
 
-        One-shot convenience. Since v0.3.5 this composes the two earned steps
-        — it registers the proposition and a synthesised plan (``preregistered=0``,
+        One-shot convenience. Since v0.3.5 this composes the two earned steps:
+        it registers the proposition and a synthesised plan (``preregistered=0``,
         so a real :meth:`register_plan` pre-registration stays distinguishable),
         then delegates to :meth:`submit_finding`. The return shape, idempotency
         on (``content_id``, ``data_id``), atomicity, and derived Status are all
@@ -1039,7 +1039,7 @@ class EpistemicGraph:
         exists for (``content_id``, ``data_id``) but under a *different* plan_id
         than the prediction now passed, this raises
         :class:`FindingPlanForkError` rather than silently returning the prior
-        bearing — a changed decision rule must not be swallowed by the
+        bearing: a changed decision rule must not be swallowed by the
         (``content_id``, ``data_id``) idempotency anchor.
 
         All input validation (falsifiability, estimate consistency, the gate)
@@ -1265,7 +1265,7 @@ class EpistemicGraph:
         capped at 100k chars) AND wrapped in
         ``<untrusted_data>...</untrusted_data>`` delimiters. The short
         metadata fields ``source_name``, ``generated_by``, ``validated_by``
-        are sanitized but not wrapped — they are short labels, not
+        are sanitized but not wrapped: they are short labels, not
         free-form text. Other fields (``claim_id``, ``support_level``,
         timestamps) pass through unchanged.
 
@@ -1327,8 +1327,8 @@ class EpistemicGraph:
             :class:`mareforma.db.EvidenceCitationError` is raised before
             any state change.
 
-            The validator's enumeration is self-declared — mareforma
-            cannot prove the validator actually opened the cited claims —
+            The validator's enumeration is self-declared. mareforma
+            cannot prove the validator actually opened the cited claims,
             but the field shifts "a human pressed a button" to "a human
             pressed a button AND named the evidence they consulted." A
             validator who consistently signs ``evidence_seen=[]`` leaves
@@ -1351,15 +1351,15 @@ class EpistemicGraph:
             (malformed payload, non-enrolled signer, wrong payloadType,
             signature verification failure, or payload-field mismatch
             against the row being promoted). Should not fire on the
-            standard wrapper path — the wrapper builds the envelope
-            from the same kwargs it threads through — but is listed
+            standard wrapper path (the wrapper builds the envelope
+            from the same kwargs it threads through), but is listed
             for completeness because the underlying
             :func:`mareforma.db.validate_claim` defends against
             a bypass at this layer too.
         LLMValidatorPromotionError
             If the loaded signer is enrolled with ``validator_type='llm'``.
             LLM-typed validators can sign validation envelopes but
-            cannot promote past REPLICATED — have a human-typed
+            cannot promote past REPLICATED. Have a human-typed
             validator call :meth:`validate` instead.
         SelfValidationError
             If the loaded signer's keyid equals the claim's
@@ -1429,7 +1429,7 @@ class EpistemicGraph:
         :meth:`validate` on this project's claims.
 
         The new row is committed before this method returns. There is no
-        rollback path — append-only validator history mirrors the
+        rollback path: append-only validator history mirrors the
         append-only claim history.
 
         Parameters
@@ -1445,7 +1445,7 @@ class EpistemicGraph:
             ``'human'`` (default) or ``'llm'``. Self-declared honesty
             signal bound into the signed enrollment envelope. LLM-typed
             validators may sign validation envelopes but cannot promote
-            a claim past REPLICATED — :meth:`validate` refuses them in
+            a claim past REPLICATED: :meth:`validate` refuses them in
             mareforma.
 
         Raises
@@ -1492,7 +1492,7 @@ class EpistemicGraph:
         DOIs are deduped across all unresolved claims and resolved exactly
         once per call, bypassing the cache (``force=True``). The cache is
         then overwritten with the fresh result. Shared DOIs across many
-        claims therefore generate one HTTP request, not N — and the negative
+        claims therefore generate one HTTP request, not N, and the negative
         cache is never wiped wholesale.
 
         No-DOI claims
@@ -1504,7 +1504,7 @@ class EpistemicGraph:
         Returns
         -------
         dict
-            ``{"checked": N, "resolved": M, "still_unresolved": K}`` — counts
+            ``{"checked": N, "resolved": M, "still_unresolved": K}``: counts
             of claims processed and outcomes.
         """
         self._check_open()
@@ -1586,7 +1586,7 @@ class EpistemicGraph:
         case where a previously-resolved DOI has since failed.
 
         This method does **not** mutate ``support_level`` or the per-claim
-        ``unresolved`` flag — re-running a HEAD check is not strong enough
+        ``unresolved`` flag: re-running a HEAD check is not strong enough
         evidence to demote across the trust ladder, and the no-back-
         transitions invariant is intentional. To find claims affected by
         a newly-failing DOI, run::
@@ -1601,7 +1601,7 @@ class EpistemicGraph:
         -------
         dict
             ``{"checked", "still_resolved", "now_unresolved",
-            "newly_failed"}`` — int counts. ``newly_failed`` is the number
+            "newly_failed"}``: int counts. ``newly_failed`` is the number
             of DOIs whose cache state flipped from resolved to unresolved
             (the drift signal the operator usually wants).
         """
@@ -1672,7 +1672,7 @@ class EpistemicGraph:
         digest differs from the one stored at last resolution.
 
         First-seen rows (no stored digest) are seeded with the current
-        digest and excluded from the result — they're a baseline, not
+        digest and excluded from the result: they're a baseline, not
         drift. Returns ``[]`` when httpx is unavailable or no drift is
         detected.
 
@@ -1691,7 +1691,7 @@ class EpistemicGraph:
         -------
         list[dict]
             ``[{"doi", "stored_digest", "current_digest",
-            "last_checked_at"}, ...]`` — one entry per drifted DOI.
+            "last_checked_at"}, ...]``: one entry per drifted DOI.
         """
         self._check_open()
         from mareforma import health as _health
@@ -1729,7 +1729,7 @@ class EpistemicGraph:
         Returns
         -------
         dict
-            ``{"checked", "promoted", "still_pending"}`` — int counts.
+            ``{"checked", "promoted", "still_pending"}``: int counts.
             ``checked`` is the total rows examined; ``promoted`` is the
             number that ran detection cleanly this pass (the flag was
             cleared); ``still_pending`` is the number that errored
@@ -2007,14 +2007,14 @@ class EpistemicGraph:
         A "dangling" reference is a UUID-shaped entry in some claim's
         ``supports[]`` whose claim_id does not exist in this graph. DOIs
         and other free-form strings are external references and are NOT
-        flagged — only UUID-shaped strings that look like local claim_ids
+        flagged: only UUID-shaped strings that look like local claim_ids
         but resolve to no row.
 
         Returns ``[{"claim_id", "dangling_ref"}, ...]`` sorted
         deterministically. Empty list when the graph is clean.
 
         Mareforma accepts dangling references at assertion time by
-        design — a ``supports`` entry could legitimately reference a
+        design: a ``supports`` entry could legitimately reference a
         claim from another project or a not-yet-asserted upstream. This
         helper is for auditing integrity, not for blocking writes.
         REPLICATED detection already refuses to promote on a dangling
@@ -2261,7 +2261,7 @@ class EpistemicGraph:
         """Return agent tool callables pre-bound to this graph.
 
         Returns two plain Python functions that any agent framework can wrap.
-        ``generated_by`` is baked into the closure — set it to the calling
+        ``generated_by`` is baked into the closure: set it to the calling
         agent's identifier so REPLICATED detection works across independent runs.
 
         Parameters
@@ -2286,7 +2286,7 @@ class EpistemicGraph:
         >>> tools = graph.get_tools(generated_by="agent/claude-sonnet-4-6/lab_a")
         >>> # LangChain
         >>> lc_tools = [tool(fn) for fn in tools]
-        >>> # Anthropic SDK — pass to tools= in client.messages.create()
+        >>> # Anthropic SDK: pass to tools= in client.messages.create()
         """
         self._check_open()
 
@@ -2310,7 +2310,7 @@ class EpistemicGraph:
                 JSON array of claim dicts with keys: text, support_level,
                 classification, status, claim_id. The ``text`` field is
                 sanitized and wrapped in
-                ``<untrusted_data>...</untrusted_data>`` — this tool is
+                ``<untrusted_data>...</untrusted_data>``: this tool is
                 consumed by an LLM, so it routes through the same
                 prompt-safety layer as :meth:`query_for_llm`. ``status``
                 is surfaced so the LLM can spot editorial taint
@@ -2339,7 +2339,7 @@ class EpistemicGraph:
 
             Use ANALYTICAL only if a real data pipeline ran and returned output.
             Asserting ANALYTICAL on null data is permanently recorded as such.
-            Use DERIVED when building explicitly on existing graph claims — cite
+            Use DERIVED when building explicitly on existing graph claims: cite
             their claim_ids in supports=[]. Use INFERRED for all LLM reasoning.
             Use contradicts= to document explicit tension with existing claims.
 
@@ -2399,34 +2399,34 @@ class EpistemicGraph:
         Aggregates the counters operators inspect when they want a
         snapshot of "what's the graph telling me right now?" without
         having to write multiple queries. Pure observability over
-        existing surfaces — no side effects.
+        existing surfaces, no side effects.
 
         Returns
         -------
         dict[str, int]
-            ``claim_count`` — total claims in the graph (signed and
+            ``claim_count``: total claims in the graph (signed and
             unsigned, all support levels, all statuses).
-            ``validator_count`` — total rows in the validators table
+            ``validator_count``: total rows in the validators table
             (every enrolled identity, including LLM-typed).
-            ``unresolved_claims`` — claims flagged ``unresolved=1``
+            ``unresolved_claims``: claims flagged ``unresolved=1``
             (DOI HEAD-check failed at some point; blocks REPLICATED
             promotion until ``refresh_unresolved()`` clears them).
-            ``unsigned_claims`` — claims with ``signature_bundle IS
+            ``unsigned_claims``: claims with ``signature_bundle IS
             NULL`` (no Ed25519 envelope; blocks REPLICATED promotion
             and any cross-restore verification).
-            ``dangling_supports`` — count of UUID-shaped ``supports[]``
+            ``dangling_supports``: count of UUID-shaped ``supports[]``
             entries pointing to claims that do not exist in the graph
             (returned in detail by :meth:`find_dangling_supports`).
-            ``convergence_errors`` — current value of the swallowed-
+            ``convergence_errors``: current value of the swallowed-
             error counter (see :attr:`convergence_errors`).
-            ``convergence_retry_pending`` — claims with
+            ``convergence_retry_pending``: claims with
             ``convergence_retry_needed=1`` waiting for
             :meth:`refresh_convergence` to re-run detection.
 
         A "healthy" graph has zeros across ``unresolved_claims``,
         ``unsigned_claims``, ``dangling_supports``,
         ``convergence_errors``, and ``convergence_retry_pending``.
-        Non-zero values do not by themselves indicate a defect — they
+        Non-zero values do not by themselves indicate a defect: they
         indicate something the operator should look at.
         """
         self._check_open()

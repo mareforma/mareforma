@@ -19,7 +19,7 @@ Generates an Ed25519 keypair at `~/.config/mareforma/key` (mode `0600`).
 Optional but recommended: with a key, every claim is signed and the first
 project you open will auto-enroll you as its root validator (the only
 identity allowed to promote claims to `ESTABLISHED`). Without a key, the
-graph still works — claims are just stored unsigned.
+graph still works: claims are just stored unsigned.
 
 ## Open a graph
 
@@ -44,14 +44,14 @@ claim_id = graph.assert_claim(
 ```
 
 `claim_id` is a UUID. The claim is immediately persisted to `graph.db` and
-backed up to `claims.toml` — a human-readable TOML file written after every
+backed up to `claims.toml`, a human-readable TOML file written after every
 mutation. If `graph.db` is ever deleted or corrupted, `claims.toml` preserves
 the full record.
 
 A claim is a falsifiable assertion with provenance: what was asserted,
 how the knowledge was derived (`classification`), from which data source,
-and building on which upstream claims (`supports`). Claims are append-only
-— once recorded, a claim is built upon, contradicted, or retracted, never
+and building on which upstream claims (`supports`). Claims are append-only:
+once recorded, a claim is built upon, contradicted, or retracted, never
 overwritten.
 
 ## Query what is already known
@@ -63,19 +63,19 @@ for r in results:
 ```
 
 Always query before asserting. If the graph already has a REPLICATED or
-ESTABLISHED finding on your topic, build on it — don't duplicate it.
+ESTABLISHED finding on your topic, build on it; don't duplicate it.
 
 When the results will be spliced into an LLM prompt, use
-`graph.query_for_llm(...)` instead — it sanitizes free-text fields and
+`graph.query_for_llm(...)` instead: it sanitizes free-text fields and
 wraps them in `<untrusted_data>...</untrusted_data>` delimiters so
 stored prompt-injection in earlier claim text cannot escape.
 
 ## Bootstrap an ESTABLISHED upstream
 
 REPLICATED requires at least one `ESTABLISHED` claim in the converging
-peers' `supports[]` (Cochrane / GRADE evidence-chain methodology — stops
+peers' `supports[]` (Cochrane / GRADE evidence-chain methodology, stops
 replication-of-noise). On a fresh project, no claim is yet ESTABLISHED, so
-the first thing the root validator does is assert a *seed claim* — a claim
+the first thing the root validator does is assert a *seed claim*: a claim
 that goes directly to `ESTABLISHED` via a signed seed envelope.
 
 ```python
@@ -137,7 +137,7 @@ table. The validation event itself is signed and persisted to the claim's
 graph.close()
 ```
 
-Or use a context manager — it closes automatically on exit:
+Or use a context manager; it closes automatically on exit:
 
 ```python
 with mareforma.open() as graph:
@@ -151,7 +151,7 @@ with mareforma.open() as graph:
     What is trust, what is origin, what is the graph.
   </Card>
   <Card title="For agents" icon="robot" href="/for-agents/agents">
-    Full execution contract — methods, patterns, forbidden patterns.
+    Full execution contract: methods, patterns, forbidden patterns.
   </Card>
   <Card title="API reference" icon="code" href="/reference/api">
     Complete method signatures and return types.

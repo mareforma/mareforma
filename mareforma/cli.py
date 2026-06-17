@@ -1,5 +1,5 @@
 """
-cli.py — Mareforma command-line interface.
+cli.py: Mareforma command-line interface.
 
 Commands
 --------
@@ -89,7 +89,7 @@ def bootstrap_cmd(key_path: str | None, overwrite: bool) -> None:
     needs to validate your output.
 
     ``--overwrite`` is destructive: it strands every claim signed by the
-    prior key — both for verification and for any pending Rekor submission.
+    prior key, both for verification and for any pending Rekor submission.
     See ``mareforma.signing.bootstrap_key`` for the safe rotation path.
     """
     from mareforma import signing as _signing
@@ -146,7 +146,7 @@ def key_show(key_path: str | None, as_pem: bool, as_keyid: bool) -> None:
 
     The private key never leaves the file at ``--key-path`` (or
     ``~/.config/mareforma/key``). What this command emits is the
-    PUBLIC half — safe to email, paste, or pipe.
+    PUBLIC half: safe to email, paste, or pipe.
 
     \b
     Examples:
@@ -228,7 +228,7 @@ def validator_add(pubkey_arg: str, identity: str, validator_type: str) -> None:
     The currently loaded signing key (from ``~/.config/mareforma/key`` or
     the path passed to ``mareforma.open(key_path=...)``) signs the
     enrollment and becomes the parent of the new validator. The signer
-    must already be enrolled — typically because they were the first key
+    must already be enrolled, typically because they were the first key
     opened against this project's graph.db and auto-enrolled as the root.
 
     \b
@@ -855,7 +855,7 @@ def claim_update(claim_id, status, text, supports, contradicts):
     (XDG key, signer enrollment) is consistent with the Python API.
     Mareforma's append-only triggers (claims_signed_fields_no_laundering)
     block any update that would mutate signed predicate fields on a
-    signed row — status-only updates remain allowed.
+    signed row: status-only updates remain allowed.
     """
     import mareforma
     from mareforma.db import (
@@ -965,7 +965,7 @@ def restore_cmd(claims_toml_path: Path | None) -> None:
 
     Reads the TOML state file written by every claim/validator mutation
     and rebuilds the project's graph.db from scratch. The command
-    refuses to run if graph.db already contains claims — restore is
+    refuses to run if graph.db already contains claims: restore is
     fresh-only, not merge.
 
     Every signature is verified before any row is inserted: enrollment

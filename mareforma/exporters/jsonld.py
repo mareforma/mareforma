@@ -1,5 +1,5 @@
 """
-exporters/jsonld.py — Export claims as a mareforma-native JSON-LD document.
+exporters/jsonld.py: Export claims as a mareforma-native JSON-LD document.
 
 Output structure
 ----------------
@@ -15,8 +15,8 @@ Output structure
 Vocabulary
 ----------
 The export uses mareforma's own ``mare:`` vocabulary plus schema.org
-for cross-tool friendliness. PROV-O references were removed currently
-— the previous JSON-LD context name-dropped ``prov:wasGeneratedBy``
+for cross-tool friendliness. PROV-O references were removed currently.
+The previous JSON-LD context name-dropped ``prov:wasGeneratedBy``
 and ``prov:used`` without populating the full PROV-O graph (no
 prov:Activity, no prov:wasAssociatedWith, no model identity, no
 prompt/response hashes). Consumers integrating against the export

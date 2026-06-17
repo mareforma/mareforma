@@ -1,4 +1,4 @@
-"""ToolUniverse adapter — wrap any Tool so each call emits a signed claim.
+"""ToolUniverse adapter: wrap any Tool so each call emits a signed claim.
 
 ToolUniverse exposes 600+ biomedical tools as callables; this adapter
 wraps any object satisfying :class:`mareforma.tools.Tool` so each
@@ -8,16 +8,16 @@ fingerprint, timing, and optional role.
 
 Public surface:
 
-- :class:`ProvenanceToolAdapter` — the load-bearing wrapper. Wrap a
+- :class:`ProvenanceToolAdapter`: the load-bearing wrapper. Wrap a
   Tool with this and use it as you would the underlying tool;
   ``.call(**kwargs)`` returns the same ``ToolResult`` shape while
   asserting a signed claim as a side effect.
 - :func:`build_tool_call_predicate` / :func:`encode_predicate_into_text` /
-  :func:`decode_predicate_from_text` — for callers constructing or
+  :func:`decode_predicate_from_text`: for callers constructing or
   verifying the embedded predicate by hand.
-- :func:`verify_tool_call_envelope` — re-verify a recorded tool-call
+- :func:`verify_tool_call_envelope`: re-verify a recorded tool-call
   claim's DSSE envelope and assert the predicate is well-formed.
-- :class:`ToolCallRecorder` — minimal shim around ProvenanceToolAdapter
+- :class:`ToolCallRecorder`: minimal shim around ProvenanceToolAdapter
   for the cross-adapter coexistence test (uses an in-memory demo Tool).
 
 Install: ``pip install mareforma[tooluniverse]``.

@@ -1,25 +1,25 @@
-"""Exec-class routing — exec tools delegate to the container-exec predicate.
+"""Exec-class routing: exec tools delegate to the container-exec predicate.
 
 Exec-class ToolUniverse tools (Python execution, code execution) need
 hardened sandboxing AND a different attestation shape than retrieval
 tools. The dep maqueta `sandboxed-provenance-aware-execution` shipped
-`ContainerExecutorTool` for this — a Tool-protocol-conforming class
+`ContainerExecutorTool` for this, a Tool-protocol-conforming class
 that runs user code in a hardened container and asserts a
 ``container-exec/v1`` claim.
 
 This module:
 
-- Provides ``is_exec_class(tool)`` — detection via `tool.category`.
-- Provides ``build_container_exec_predicate(...)`` — assembles the
+- Provides ``is_exec_class(tool)``: detection via `tool.category`.
+- Provides ``build_container_exec_predicate(...)``: assembles the
   ``container-exec/v1`` predicate dict from the metadata an
   exec-class tool reports.
 - Provides ``encode_container_exec_predicate_into_text(...)`` and
-  ``decode_container_exec_predicate(...)`` — same byte-stuffing-safe
+  ``decode_container_exec_predicate(...)``: same byte-stuffing-safe
   envelope shape as the tool-call/v1 path.
 
 The full container-exec executor (real Docker, real isolation) lives
 in the dep maqueta. This module's job is the *routing decision* and
-the *attestation shape* — when the routing target is the dep
+the *attestation shape*: when the routing target is the dep
 maqueta's ContainerExecutorTool, the import + delegate happens; when
 it's a mock (Phase 3 tests; production callers that don't need real
 isolation for some reason), the same predicate shape lands in the

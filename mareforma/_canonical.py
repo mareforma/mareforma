@@ -1,8 +1,8 @@
 """
-_canonical.py — RFC 8785 canonical JSON for signed envelopes.
+_canonical.py: RFC 8785 canonical JSON for signed envelopes.
 
 The signed payload of every claim is canonicalized before signing so the
-same logical object always produces the same bytes — independent of
+same logical object always produces the same bytes, independent of
 Python version, dict-insertion order, language of the verifier, or
 whitespace conventions.
 
@@ -12,10 +12,10 @@ Output bytes follow RFC 8785 (JSON Canonicalization Scheme, JCS):
 
 - Keys sorted lexicographically by UTF-16 code unit at every nesting
   level (RFC 8785 §3.2.3).
-- ``separators=(",", ":")`` — no whitespace (RFC 8785 §3.2.2).
+- ``separators=(",", ":")``: no whitespace (RFC 8785 §3.2.2).
 - UTF-8 output with the minimal JSON string escape set (RFC 8785 §3.2.1).
 - Numbers serialized per the ECMAScript ``Number.prototype.toString``
-  algorithm (RFC 8785 §3.2.2.3) — ``1.0`` becomes ``1``, ``1e10`` becomes
+  algorithm (RFC 8785 §3.2.2.3): ``1.0`` becomes ``1``, ``1e10`` becomes
   ``10000000000``, exponent boundaries follow ES rules. This is the
   load-bearing difference vs. Python's ``json.dumps``: a verifier in
   Go / Rust / JavaScript that re-canonicalizes per RFC 8785 produces
@@ -26,7 +26,7 @@ Output bytes follow RFC 8785 (JSON Canonicalization Scheme, JCS):
 NFC normalization
 -----------------
 We apply Unicode Normalization Form C to every string *before* passing
-the tree to ``rfc8785.dumps``. RFC 8785 does not mandate NFC — the spec
+the tree to ``rfc8785.dumps``. RFC 8785 does not mandate NFC; the spec
 operates on whatever code points the input contains. We add NFC so that
 visually-identical text with different code-point decomposition (e.g.
 ``é`` as U+00E9 vs ``e`` + U+0301) produces the same canonical bytes.
@@ -59,7 +59,7 @@ def _normalize(obj: Any) -> Any:
 
     Numbers, booleans, and None pass through unchanged. Sequences become
     lists; mappings become dicts. The caller is responsible for refusing
-    non-JSON types (functions, classes, etc.) — ``rfc8785.dumps`` will
+    non-JSON types (functions, classes, etc.): ``rfc8785.dumps`` will
     raise a domain-specific error on those, which is the right behavior.
 
     Dict-key NFC collisions
@@ -121,8 +121,8 @@ def canonicalize(obj: Any) -> bytes:
         integer outside the IEEE-754 double-precision safe-integer
         range that RFC 8785 forbids in canonical output (JCS verifiers
         in other languages would reject these too), OR if a dict
-        contains two keys that NFC-normalize to the same string —
-        canonical JSON requires distinct keys and mareforma refuses
+        contains two keys that NFC-normalize to the same string.
+        Canonical JSON requires distinct keys and mareforma refuses
         to silently drop one value.
     """
     normalized = _normalize(obj)

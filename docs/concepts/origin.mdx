@@ -3,8 +3,8 @@ title: "Origin"
 description: "How Mareforma records where a claim came from: LLM reasoning, real analysis, or built on the graph. Distinct from how much to trust it."
 ---
 
-Origin is orthogonal to trust. It records where a claim came from —
-**how it was derived** — not how much it should be trusted.
+Origin is orthogonal to trust. It records where a claim came from,
+**how it was derived**, not how much it should be trusted.
 
 An ANALYTICAL claim can be PRELIMINARY. An INFERRED claim can be ESTABLISHED.
 They measure different things.
@@ -19,7 +19,7 @@ The API field is `classification`. This page explains what its values mean.
 
     Correct to use even for sophisticated reasoning, as long as it is not
     grounded in data that actually ran. If the model is drawing on training
-    knowledge, synthesising across papers, or extrapolating from context —
+    knowledge, synthesising across papers, or extrapolating from context,
     it is INFERRED.
   </Accordion>
   <Accordion title="ANALYTICAL">
@@ -27,14 +27,14 @@ The API field is `classification`. This page explains what its values mean.
 
     Only use this when a real data pipeline ran and produced real output.
     If the pipeline failed silently and the agent fell back to LLM knowledge,
-    the classification is still INFERRED — asserting ANALYTICAL on null data
+    the classification is still INFERRED: asserting ANALYTICAL on null data
     is an epistemic lie that the graph will permanently record.
   </Accordion>
   <Accordion title="DERIVED">
     Explicitly built on ESTABLISHED or REPLICATED claims already in the graph.
 
     The `supports[]` field must point to those claims. A DERIVED claim with
-    empty `supports[]` is unverifiable — the graph cannot validate the chain.
+    empty `supports[]` is unverifiable: the graph cannot validate the chain.
   </Accordion>
 </AccordionGroup>
 
@@ -65,7 +65,7 @@ is grounded in data and one is not.
 
 The most dangerous misuse of Mareforma is asserting `ANALYTICAL` when the
 data pipeline returned null and the agent fell back to LLM knowledge. The
-graph records this permanently — future agents may build on it, reviewers
+graph records this permanently: future agents may build on it, reviewers
 may validate it, and the epistemic chain will be wrong at the root.
 
 The rule: if you did not run deterministic code against real data and

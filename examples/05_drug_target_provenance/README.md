@@ -64,7 +64,7 @@ with mareforma.open(HERE) as graph:
   No prior REPLICATED findings — running both forks fresh.
 ```
 
-## One fork — run, classify, record
+## One fork: run, classify, record
 
 ```python
 def _classify(result: dict) -> str:
@@ -121,7 +121,7 @@ if ra_result["generated_code"] is None or sle_result["generated_code"] is None:
 
 Both forks returned `generated_code = null`. The final hypotheses still read
 differently, but both came from LLM prior knowledge, not MedeaDB. mareforma
-recorded both as `INFERRED`, making the silent failure visible immediately —
+recorded both as `INFERRED`, making the silent failure visible immediately,
 before anyone acted on the results. That led directly to a bug report in MEDEA's
 EFO ID lookup: [mims-harvard/Medea#6](https://github.com/mims-harvard/Medea/pull/6).
 

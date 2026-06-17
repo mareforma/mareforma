@@ -36,7 +36,7 @@ Generates an Ed25519 keypair at `~/.config/mareforma/key` (XDG-compliant,
 mode `0600`). After this, every `assert_claim` auto-signs and the first
 project you open auto-enrolls you as its root validator (the only
 identity allowed to promote claims to `ESTABLISHED`). Without a key the
-graph still works — claims are stored unsigned.
+graph still works: claims are stored unsigned.
 
 ## Core pattern
 
@@ -112,7 +112,7 @@ Assert a claim. Returns `claim_id` (UUID).
 | `seed` | `bool` | `False` | Insert directly at `ESTABLISHED` with a signed seed envelope. Only enrolled validators can produce seeds. |
 
 **Side effect:** if ≥2 claims now share the same upstream in `supports[]`
-with different `generated_by`, all are promoted to `REPLICATED` — provided
+with different `generated_by`, all are promoted to `REPLICATED`, provided
 at least one upstream is itself `ESTABLISHED` (Cochrane / GRADE evidence
 chain) and any `artifact_hash` constraint matches.
 
@@ -122,7 +122,7 @@ chain) and any `artifact_hash` constraint matches.
 
 | Method | Purpose |
 |---|---|
-| `graph.query(text=None, *, min_support=None, classification=None, limit=20)` | Plain read — returns full claim dicts. |
+| `graph.query(text=None, *, min_support=None, classification=None, limit=20)` | Plain read: returns full claim dicts. |
 | `graph.query_for_llm(...)` | Same shape as `query()` with free-text fields sanitized and wrapped in `<untrusted_data>...</untrusted_data>`. Use whenever results will be spliced into an LLM prompt. |
 | `graph.get_claim(claim_id)` | Single claim dict or `None`. |
 | `graph.validate(claim_id, *, validated_by=None)` | Promote `REPLICATED` → `ESTABLISHED`. Identity-gated. |
@@ -140,17 +140,17 @@ runtime for valid values and state transitions.
 
 ## Origin (`classification`)
 
-The `classification` field encodes a claim's origin — how knowledge was derived.
+The `classification` field encodes a claim's origin: how knowledge was derived.
 It is separate from trust level, which is graph-derived.
 
 | Value | Use when |
 |---|---|
-| `INFERRED` | LLM reasoning, synthesis, extrapolation — default |
+| `INFERRED` | LLM reasoning, synthesis, extrapolation: default |
 | `ANALYTICAL` | Deterministic analysis ran against source data and produced output |
 | `DERIVED` | Explicitly built on `ESTABLISHED` or `REPLICATED` claims in the graph |
 
 `DERIVED` incentivises agents to query the graph before asserting. A `DERIVED`
-claim without `supports=` is unverifiable — the chain is broken.
+claim without `supports=` is unverifiable: the chain is broken.
 
 ---
 
@@ -160,7 +160,7 @@ claim without `supports=` is unverifiable — the chain is broken.
 |---|---|---|
 | `PRELIMINARY` | One agent claimed it | Automatic on first assertion |
 | `REPLICATED` | ≥2 independent agents converged on the same upstream | Automatic at INSERT |
-| `ESTABLISHED` | Human-validated | `graph.validate()` only — requires REPLICATED first |
+| `ESTABLISHED` | Human-validated | `graph.validate()` only, requires REPLICATED first |
 
 `REPLICATED` fires automatically when ≥2 claims share the same upstream
 claim_id in `supports[]` and have different `generated_by` values **AND**
@@ -170,7 +170,7 @@ self-promote to `ESTABLISHED`.
 ### ESTABLISHED-upstream rule
 
 REPLICATED requires an ESTABLISHED claim in the converging `supports[]`.
-Matches Cochrane / GRADE evidence chains — replication-of-noise is not
+Matches Cochrane / GRADE evidence chains: replication-of-noise is not
 replication. Strict by default. To bootstrap a fresh graph, an enrolled
 validator asserts a *seed claim*:
 
@@ -198,7 +198,7 @@ hops. DOI strings in `supports[]` are not graph nodes and skipped.
 ### Artifact-hash gate
 
 When two converging peers BOTH supply `artifact_hash` (a SHA-256 hex
-digest of the output bytes — figure, CSV, model), the hashes must match
+digest of the output bytes, figure, CSV, model), the hashes must match
 for `REPLICATED` to fire. When either peer omits the hash, the gate is
 bypassed and identity-only `REPLICATED` applies. The hash is part of the
 signed payload, so an attacker who edits the column without the private
@@ -221,7 +221,7 @@ graph.assert_claim(
 ## Signing and transparency log
 
 Mareforma can attach a verifiable cryptographic signature to every claim
-and (optionally) log it to a public transparency log. Both are opt-in —
+and (optionally) log it to a public transparency log. Both are opt-in;
 agents that don't need them keep the default behavior.
 
 **Local signing.** Run `mareforma bootstrap` once to generate an Ed25519
@@ -229,7 +229,7 @@ keypair at `~/.config/mareforma/key` (mode `0600`). After that, every
 `assert_claim` auto-signs and persists the signature envelope to the
 `signature_bundle` field. The signed payload binds `claim_id`, `text`,
 `classification`, `generated_by`, `supports`, `contradicts`,
-`source_name`, `artifact_hash`, and `created_at` — any tamper breaks
+`source_name`, `artifact_hash`, and `created_at`. Any tamper breaks
 verification.
 
 **Append-only invariant.** Signed claims refuse mutation of any
@@ -261,7 +261,7 @@ with mareforma.open(rekor_url=PUBLIC_REKOR_URL, require_signed=True) as graph:
 response binding alone proves "Rekor returned an entry that records
 OUR hash + OUR signature." It does NOT prove "the log committed our
 entry and didn't tamper with it afterward." Closing that gap needs
-the log operator's public key — pass `rekor_log_pubkey_pem` (or
+the log operator's public key: pass `rekor_log_pubkey_pem` (or
 `rekor_log_pubkey_path`) to `mareforma.open()` and mareforma
 re-fetches every submitted entry, walks the Merkle audit path from
 the leaf hash to the log's signed checkpoint, and refuses to set
@@ -334,7 +334,7 @@ with mareforma.open() as graph:
 Each enrollment is signed by the parent validator. On read,
 `graph.validate()` walks the chain back to a self-signed root and
 verifies every link's enrollment envelope against the parent's pubkey
-before accepting the validator — a row planted via direct sqlite INSERT
+before accepting the validator: a row planted via direct sqlite INSERT
 with a fabricated parent does not pass. Singleton-root invariant +
 64-hop walk cap defend against DoS-by-planted-chain.
 
@@ -388,8 +388,8 @@ mareforma verify mareforma-bundle.json # → "verified: N claim subjects match"
 
 `predicateType` is `urn:mareforma:predicate:epistemic-graph:v1`. URN
 namespacing means schema evolution to v2 carries a new predicate type
-without breaking v1 verifiers. Tampered claim text — or even a re-signed
-bundle whose predicate was edited — fails the per-claim subject digest
+without breaking v1 verifiers. Tampered claim text, or even a re-signed
+bundle whose predicate was edited, fails the per-claim subject digest
 check.
 
 ---
@@ -398,7 +398,7 @@ check.
 
 When a new finding is in tension with an existing claim, assert with
 `contradicts=` pointing to the existing claim. Both coexist in the graph
-with an explicit link — neither is overwritten.
+with an explicit link: neither is overwritten.
 
 ```python
 prior = graph.query("Treatment X", min_support="ESTABLISHED")
@@ -480,7 +480,7 @@ claim_id = graph.assert_claim("...", idempotency_key="run_abc_claim_1")
 
 **Convergence convention.** Agents running the same conceptual query
 should use a structured key that encodes the semantic content of the
-claim — not a random run ID. Two agents using the same key converge on
+claim, not a random run ID. Two agents using the same key converge on
 the same `claim_id` even with different text:
 
 ```python
@@ -500,7 +500,7 @@ graph.assert_claim(
 ```
 
 **Hash conflicts raise.** A replay that supplies a different
-`artifact_hash` than the original is not a retry — it is a different
+`artifact_hash` than the original is not a retry: it is a different
 claim that happens to share a key. `assert_claim` raises
 `IdempotencyConflictError` rather than silently dropping the new hash.
 
@@ -578,7 +578,7 @@ graph.assert_claim("...", classification="DERIVED", supports=[upstream_id])
 
 `graph.get_tools(generated_by="...")` returns `[query_graph, assert_finding]`
 as plain Python callables. Wrap them in one line for any agent framework.
-`generated_by` is baked into the closure — set it to the agent's identity
+`generated_by` is baked into the closure: set it to the agent's identity
 so REPLICATED detection works correctly across independent runs.
 `query_graph` routes through `query_for_llm`, so the JSON it returns has
 free-text fields sanitized and wrapped in
@@ -596,8 +596,8 @@ free-text fields sanitized and wrapped in
 | **PydanticAI** | `tools = graph.get_tools(generated_by="...")` then `agent.tool(fn)` |
 | **Smol Agents** | `tools = [Tool.from_function(fn) for fn in graph.get_tools(generated_by="...")]` |
 
-Tracing tools (LangSmith, Langfuse, W&B) record execution traces — what
-the agent did. Mareforma records epistemic state — what was found, how
+Tracing tools (LangSmith, Langfuse, W&B) record execution traces: what
+the agent did. Mareforma records epistemic state: what was found, how
 it was derived, how much independent evidence backs it. Use both. They
 are parallel, not overlapping.
 
@@ -663,7 +663,7 @@ result = adapter.call(target="EGFR")
 claim_id = result["metadata"]["mareforma_claim_id"]
 ```
 
-Container-exec class tools (category matches `python_exec` / `code_execution` / `exec`) route to `container-exec:v1` with the same envelope shape. Results above `max_result_bytes` raise `ResultTooLargeError` — truncating canonical bytes mid-string would produce a digest no replayer can re-derive.
+Container-exec class tools (category matches `python_exec` / `code_execution` / `exec`) route to `container-exec:v1` with the same envelope shape. Results above `max_result_bytes` raise `ResultTooLargeError`: truncating canonical bytes mid-string would produce a digest no replayer can re-derive.
 
 ### `mareforma.adapters.gemini`
 
@@ -689,12 +689,12 @@ Per-capability `REQUIRED_FIELDS` validates payload shape before `assert_claim` r
 
 Two adjacent primitives ship in core for adapter authors:
 
-- **`mareforma.events`** — `EventSource` / `EventHandler` Protocols plus typed `EventPayload` and `ClaimResult`. Source-name constants (`SOURCE_CLAWINSTITUTE`, `SOURCE_TOOLUNIVERSE`, `SOURCE_GEMINI`, `SOURCE_CLAUDE_CODE_PRETOOLUSE`) prevent string-typo dispatch bugs.
-- **`mareforma.tools`** — `Tool` Protocol (`name`, `version`, `call(**kwargs) -> ToolResult`), `ToolResult` TypedDict, `ReplayResult` dataclass.
+- **`mareforma.events`**: `EventSource` / `EventHandler` Protocols plus typed `EventPayload` and `ClaimResult`. Source-name constants (`SOURCE_CLAWINSTITUTE`, `SOURCE_TOOLUNIVERSE`, `SOURCE_GEMINI`, `SOURCE_CLAUDE_CODE_PRETOOLUSE`) prevent string-typo dispatch bugs.
+- **`mareforma.tools`**: `Tool` Protocol (`name`, `version`, `call(**kwargs) -> ToolResult`), `ToolResult` TypedDict, `ReplayResult` dataclass.
 
 Plus the public canonicalize registry and predicate-URI constants:
 
-- **`mareforma.canonicalize`** — `canonicalize(value, form=...)` with registered forms `json-c14n-v1` (default), `dsse-jcs-nfc-v1` (same bytes the envelope layer signs), plus specialty SMILES / FASTA / PDB canonicalizers registered on import.
+- **`mareforma.canonicalize`**: `canonicalize(value, form=...)` with registered forms `json-c14n-v1` (default), `dsse-jcs-nfc-v1` (same bytes the envelope layer signs), plus specialty SMILES / FASTA / PDB canonicalizers registered on import.
 - **Capability URI constants** at `mareforma.predicate_types` (also re-exported at the top level): `TOOL_CALL_V1`, `CONTAINER_EXEC_V1`, `WORKSHOP_EVENT_V1`, `CODE_VARIATION_V1`, `HYPOTHESIS_V1`, `LITERATURE_INSIGHT_V1`, `SCIENCE_SKILL_V1`, `META_CLAIM_V1`, plus the core + wet-lab assay families. Use the constants instead of string literals so a typo fails at import.
 
 ## Core-derived classification (`mareforma.derivation`)
@@ -713,7 +713,7 @@ graph.assert_claim(
 )
 ```
 
-Source-profile extraction requires the `[derivation]` extra (`pip install mareforma[derivation]`) — gates `tree_sitter` + `tree_sitter_python`. Log-template extraction is pure stdlib and available unconditionally.
+Source-profile extraction requires the `[derivation]` extra (`pip install mareforma[derivation]`); it gates `tree_sitter` + `tree_sitter_python`. Log-template extraction is pure stdlib and available unconditionally.
 
 ## Claude Code hook (`mareforma.hooks`)
 

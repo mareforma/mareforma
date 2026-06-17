@@ -1,5 +1,5 @@
 """
-export_bundle.py — SCITT-style signed export bundle.
+export_bundle.py: SCITT-style signed export bundle.
 
 Wraps the JSON-LD graph export in an in-toto Statement v1 envelope:
 
@@ -29,7 +29,7 @@ Design choices (one-way doors, locked currently):
   ``mareforma.dev`` for schema dereferencing. Evolution to v2 carries
   a new predicateType, leaving v1 verifiers intact.
 - **Predicate body**: the existing JSON-LD export. No additional
-  PROV-O modelling — the JSON-LD scoping rationale already covers
+  PROV-O modelling: the JSON-LD scoping rationale already covers
   why (see ``mareforma/exporters/jsonld.py`` module docstring).
 
 The schema lives in ``docs/reference/scitt-bundle.md``.
@@ -58,7 +58,7 @@ def _subject_for_claim(claim: dict) -> dict[str, Any]:
     Hash material: the canonical Statement v1 bytes of the claim (the
     same bytes the per-claim signature is computed over via DSSE PAE).
     Reusing ``signing.canonical_statement`` keeps bundle digests
-    aligned with per-claim signatures — a downstream tool that
+    aligned with per-claim signatures: a downstream tool that
     re-derives the digest from the row's fields + evidence_json must
     agree with the bundle.
     """
@@ -88,7 +88,7 @@ def _subject_for_claim(claim: dict) -> dict[str, Any]:
 def build_statement(root: Path) -> dict[str, Any]:
     """Build the in-toto Statement v1 for the graph at *root*.
 
-    The Statement is unsigned — call :func:`sign_bundle` to produce
+    The Statement is unsigned: call :func:`sign_bundle` to produce
     the DSSE envelope.
     """
     from mareforma.db import open_db, list_claims
@@ -175,7 +175,7 @@ def verify_bundle(
     type wrong, signature mismatch, predicateType skew, per-claim
     digest mismatch, per-claim signature failure).
 
-    A per-claim signature failure raises immediately — partial
+    A per-claim signature failure raises immediately: partial
     verification doesn't surface "you have an authenticated bundle
     that contains some invalid claims" as success.
     """

@@ -1,5 +1,5 @@
 """
-_statement.py — in-toto Statement v1 envelope for mareforma claims.
+_statement.py: in-toto Statement v1 envelope for mareforma claims.
 
 Every signed claim is wrapped in an in-toto Statement v1 (the de-facto
 standard for signed software-supply-chain attestations, also used by
@@ -29,9 +29,9 @@ own" at face value.
 
 predicateType
 -------------
-``urn:mareforma:predicate:claim:v1`` — versioned. A future v2 predicate
+``urn:mareforma:predicate:claim:v1`` is versioned. A future v2 predicate
 schema (e.g. adding new evidence dimensions) gets a new predicateType;
-v1 stays valid forever for already-signed claims. URN (not DNS) — the
+v1 stays valid forever for already-signed claims. URN (not DNS): the
 identifier is a stable name, not a fetched document, and avoids a
 perpetual-ownership commitment on any DNS name.
 """

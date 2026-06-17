@@ -27,7 +27,7 @@ Reporting:
 
 If the form is unavailable (PVR not yet enabled, GitHub outage, etc.),
 the fallback is to open an empty public issue titled "Security contact
-needed" — the maintainer will respond with a private channel within 72
+needed", the maintainer will respond with a private channel within 72
 hours. Do not include exploit details in the public issue.
 
 ### What to include
@@ -62,7 +62,7 @@ Releases to PyPI are published via OIDC-based GitHub Actions, not
 long-lived API tokens. The workflow is in
 [.github/workflows/publish.yml](.github/workflows/publish.yml) and uses
 `pypa/gh-action-pypi-publish` pinned to a specific commit SHA (not a
-floating tag). The PyPI project is bound to the GitHub repo —
+floating tag). The PyPI project is bound to the GitHub repo:
 `mareforma` on PyPI can only be published from this repo's release
 workflow.
 
@@ -78,7 +78,7 @@ python -m pip show mareforma           # confirms the installed version
 ```
 
 If you find a `mareforma` package on PyPI whose attestation chain does
-**not** lead back to this repository, that is a supply-chain incident —
+**not** lead back to this repository, that is a supply-chain incident,
 report it via the channel above.
 
 ### Typosquat reservation
@@ -98,13 +98,13 @@ Reserved names:
 Names too close to `mareforma` to register at all (PyPI rejects new
 registrations with *"too similar to an existing project"*):
 
-- `mare-forma` / `mare_forma` / `mare.forma` — all PEP-503-collapse to
+- `mare-forma` / `mare_forma` / `mare.forma`: all PEP-503-collapse to
   `mare-forma`, which PyPI blocks as confusable with `mareforma`. No
   defensive claim was possible; PyPI's confusable-name check provides
   the defense automatically.
 
 If you encounter a `mareforma`-adjacent package published by anyone
-other than this project, it is hostile — report it via the channel
+other than this project, it is hostile, report it via the channel
 above.
 
 ## Cryptographic core

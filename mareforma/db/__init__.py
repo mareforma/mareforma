@@ -2,14 +2,14 @@
 
 Submodules:
 
-- :mod:`core` — live-write path (claim CRUD, convergence detection,
+- :mod:`core`: live-write path (claim CRUD, convergence detection,
   validation gates, Rekor saga, verdict protocol, FTS search, TOML backup)
-- :mod:`_schema_sql` — DDL constant and column contract
-- :mod:`errors` — exception hierarchy
-- :mod:`restore` — ``restore()`` disaster-recovery path
+- :mod:`_schema_sql`: DDL constant and column contract
+- :mod:`errors`: exception hierarchy
+- :mod:`restore`: ``restore()`` disaster-recovery path
 
 Every name previously importable as ``from mareforma.db import X``
-continues to work after the carve — the submodule layout is an
+continues to work after the carve: the submodule layout is an
 internal organisation, not a public API change.
 """
 

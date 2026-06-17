@@ -1,7 +1,7 @@
 # Documented Contestation
 
 An agent finds an `ESTABLISHED` consensus in tension with its own results. It
-does not discard its finding — it names the tension with `contradicts=` and
+does not discard its finding. It names the tension with `contradicts=` and
 publishes a stronger, better-powered claim alongside the existing one. Both
 coexist in the graph. `ESTABLISHED` means human-validated evidence, not settled
 truth.
@@ -17,7 +17,7 @@ python 03_documented_contestation.py
 
 No API key required.
 
-## Setup — establish the prior consensus
+## Setup: establish the prior consensus
 
 ```python
 # Two enrolled keys: one signs the claims, one validates them (mareforma
@@ -55,7 +55,7 @@ graph = mareforma.open(tmp, key_path=agent_key_path)
   after validate()             ESTABLISHED
 ```
 
-## New agent — larger analysis, different result
+## New agent: larger analysis, different result
 
 ```python
 # Step 1: query what is already established on this topic.
@@ -89,7 +89,7 @@ Prior literature: Treatment X is studied in popu…
   contradicts                  2 established claim(s)
 ```
 
-## Graph state — consensus and challenge coexist
+## Graph state: consensus and challenge coexist
 
 ```python
 all_claims = graph.query()

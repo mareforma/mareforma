@@ -3,7 +3,7 @@
 A :class:`mareforma.trust.Prediction` carries the gate-bearing columns the
 substrate stores today (test_type, direction_of_interest, alpha, the
 equivalence margins). This module re-expresses that same rule as an ordered
-list of :class:`Gate` — a short-circuit chain — *as a pure Python structure
+list of :class:`Gate`, a short-circuit chain, *as a pure Python structure
 over the existing columns*. There is no new schema column and no migration: a
 Gate is reconstructed from a stored Prediction, never persisted on its own.
 
@@ -17,7 +17,7 @@ same Prediction (parity-tested).
 
 Only the regimes already expressible from the existing columns ship here.
 Multiplicity, magnitude bands, non-inferiority, dose-response, and Bayesian
-regimes are deferred — they need fields the schema does not carry, and adding
+regimes are deferred: they need fields the schema does not carry, and adding
 them would be a migration this release does not do.
 """
 from __future__ import annotations
@@ -50,7 +50,7 @@ class Gate:
         """The single-test Prediction this gate stands for.
 
         Reusing the Prediction constructor means the gate inherits the exact
-        validation and the exact gate arithmetic of the shipped path — there is
+        validation and the exact gate arithmetic of the shipped path: there is
         no second, drifting implementation of the rule.
         """
         return Prediction(
@@ -71,7 +71,7 @@ def gates_for(prediction: Prediction) -> list[Gate]:
 
     Today every Prediction is a single binary gate, so the chain has exactly
     one element. This is the seam a later release grows a multi-gate rule
-    through without a schema change — the chain representation already exists.
+    through without a schema change: the chain representation already exists.
     """
     return [
         Gate(

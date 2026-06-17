@@ -1,10 +1,10 @@
-"""Claude Code PreToolUse hook — record agent tool calls as PROV-O activities.
+"""Claude Code PreToolUse hook: record agent tool calls as PROV-O activities.
 
 Reads a JSON event from stdin, walks up from CWD to find
 ``.mareforma/graph.db``, writes one ``prov:Activity`` row via
 :mod:`mareforma.hooks.db_activities`.
 
-Invocation contract — Claude Code wires this hook in via
+Invocation contract: Claude Code wires this hook in via
 ``.claude/settings.json``:
 
     {
@@ -24,7 +24,7 @@ Invocation contract — Claude Code wires this hook in via
     }
 
 Exit behaviour: always exits 0. Failures are logged to stderr but
-never propagated — a non-zero exit would interrupt Claude Code's tool
+never propagated: a non-zero exit would interrupt Claude Code's tool
 call.
 """
 

@@ -45,7 +45,7 @@ Probably no:
 
 - Adding dependencies for marginal convenience
 - Wrapper layers over the existing API ("Mareforma but Async", "Mareforma
-  for Django", etc.) — these belong in a separate package
+  for Django", etc.), these belong in a separate package
 - Stylistic refactors without a behavioural reason
 
 ## Security
@@ -58,7 +58,7 @@ Reporting channel and the response targets.
 
 1. Branch from `main`.
 2. Make the change with tests.
-3. `pytest` — must be green.
+3. `pytest`: must be green.
 4. Self-review the full diff against the checklist below.
 5. Update any docs that describe the changed surface (`AGENTS.md`,
    `docs/reference/*.mdx`, `CHANGELOG.md`).
@@ -96,7 +96,7 @@ parameter on assert_claim, gated by validator enrollment.
 
 Prefixes in use: `feat:`, `fix:`, `docs:`, `chore:`, `refactor:`,
 `revert:`. Pick the one that describes the **primary** intent of the
-diff — a refactor that ships a bug fix is still `fix:`.
+diff: a refactor that ships a bug fix is still `fix:`.
 
 ## Internal labels
 
@@ -163,14 +163,14 @@ Rules of thumb:
 - Stubs return tuples, never coroutines (mareforma calls
   verifiers synchronously inside the BEGIN IMMEDIATE write
   transaction).
-- Stubs MUST be deterministic — random scores produce flaky tests.
+- Stubs MUST be deterministic, random scores produce flaky tests.
 - Stubs SHOULD raise the same exception types real models raise
   (`OSError`, `RuntimeError`, `ConnectionError`) when you need to
   test mareforma's fallback path; the assertion still lands and
   a `RuntimeWarning` surfaces.
 - Tests that need an actually-trained model must be guarded behind
   an opt-in marker (`@pytest.mark.requires_model`) and skipped by
-  default — running the full suite must not download anything.
+  default; running the full suite must not download anything.
 
 ## Examples
 
@@ -180,7 +180,7 @@ Examples in `examples/` must:
   what their own README documents (and the API keys their own README
   declares as required)
 - Fail fast with a clear message when a required external resource
-  (API key, dataset, model weights) is missing — see
+  (API key, dataset, model weights) is missing; see
   `examples/05_drug_target_provenance/run_experiment.py:_require_llm_key`
   for the pattern
 - Use `seed=True` to bootstrap an ESTABLISHED upstream when the

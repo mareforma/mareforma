@@ -8,7 +8,7 @@ console output it prints.
 python 01_api_walkthrough.py
 ```
 
-No external dependencies. Uses a temporary directory — safe to run anywhere.
+No external dependencies. Uses a temporary directory, safe to run anywhere.
 (`sep` and `show` in the listings are tiny print helpers; see the script.)
 
 ## 1. Open
@@ -121,7 +121,7 @@ id_b = graph.assert_claim(
   same id?               True
 ```
 
-## 5. REPLICATED — automatic convergence
+## 5. REPLICATED: automatic convergence
 
 ```python
 # REPLICATED fires when ≥2 claims share the same upstream in supports[] AND
@@ -153,7 +153,7 @@ rep_b = graph.assert_claim(
   REPLICATED count       3
 ```
 
-## 6. ESTABLISHED — human validation only
+## 6. ESTABLISHED: human validation only
 
 ```python
 # validate() requires support_level == REPLICATED. No agent can self-promote.
@@ -229,5 +229,5 @@ graph.assert_claim(
 The script names three more anti-patterns in comments: correlated agents
 (same model + data) do not produce genuine REPLICATED, `DERIVED` with no
 `supports=` is unverifiable, and a shared *hallucinated* upstream produces a
-false REPLICATED signal. The graph records what agents assert, not what is true
-— `validate()` exists precisely so a human reviews the chain before ESTABLISHED.
+false REPLICATED signal. The graph records what agents assert, not what is true.
+`validate()` exists precisely so a human reviews the chain before ESTABLISHED.

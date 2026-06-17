@@ -1,4 +1,4 @@
-"""Event Protocol types — see :mod:`mareforma.events` for the contract."""
+"""Event Protocol types: see :mod:`mareforma.events` for the contract."""
 
 from __future__ import annotations
 

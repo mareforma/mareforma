@@ -1,5 +1,5 @@
 """
-core.py — live-write path, queries, verdicts, and TOML backup.
+core.py: live-write path, queries, verdicts, and TOML backup.
 
 Schema DDL in ``_schema_sql.py``; exceptions in ``errors.py``;
 ``restore()`` in ``restore.py``. Everything else stays here because
@@ -274,8 +274,8 @@ def open_db_from_db_path(db_path: "str | Path") -> sqlite3.Connection:
     file path can use it without silently rewriting it.
 
     Accepted shapes:
-      - ``<root>/.mareforma/graph.db`` — opens ``<root>`` as project root.
-      - any other path — opens the DB file directly; the user supplied
+      - ``<root>/.mareforma/graph.db``: opens ``<root>`` as project root.
+      - any other path: opens the DB file directly; the user supplied
         a non-conventional location and we honour it. The parent
         directory becomes the "project root" for cache lookups, and the
         DB lives at the supplied path (NOT at ``<parent>/.mareforma/``).
@@ -415,7 +415,7 @@ def _chain_input_for_claim(
 ) -> bytes:
     """Canonical bytes for the chain hash on a single claim row.
 
-    Uses the in-toto Statement v1 canonical bytes — the exact same
+    Uses the in-toto Statement v1 canonical bytes: the exact same
     bytes that get signed (after DSSE PAE wrap). Chain integrity and
     signature integrity bind to one authoritative byte sequence.
     EvidenceVector is part of the Statement, so it is part of the
@@ -435,7 +435,7 @@ def _compute_prev_hash(
     The new chain link is ``sha256(prev_chain_link || canonical_statement_bytes)``.
     For the genesis row (no prior rows), the prior link is empty bytes.
 
-    MUST be called inside ``BEGIN IMMEDIATE`` — the SELECT-then-INSERT
+    MUST be called inside ``BEGIN IMMEDIATE``: the SELECT-then-INSERT
     pattern depends on the write lock to prevent two writers from
     branching the chain on the same predecessor.
     """
@@ -492,17 +492,17 @@ def classify_support(value: str) -> str:
 
     Three buckets:
 
-      * ``"claim"`` — strict UUIDv4 shape, candidate graph-node edge.
+      * ``"claim"``: strict UUIDv4 shape, candidate graph-node edge.
         REPLICATED detection and cycle detection walk these.
-      * ``"doi"`` — DOI form (``10.<registrant>/<suffix>``) per Crossref +
+      * ``"doi"``: DOI form (``10.<registrant>/<suffix>``) per Crossref +
         DataCite syntax. Resolved against the DOI registry at assert
         time; ineligible as a REPLICATED anchor (the upstream is not a
         local claim).
-      * ``"external"`` — anything else. Free-form strings (URLs, ORCID
+      * ``"external"``: anything else. Free-form strings (URLs, ORCID
         ids, lab-internal references). Stored verbatim, not walked, not
         resolved.
 
-    Classification is deterministic and regex-only — no network, no
+    Classification is deterministic and regex-only: no network, no
     database lookup. The same string always yields the same tag.
     """
     if not isinstance(value, str):
@@ -529,7 +529,7 @@ def classify_supports(values: list[str]) -> list[dict[str, str]]:
         predicate (``mare:supportsClaim``, ``mare:supportsDoi``,
         ``mare:supportsReference``) so consumers can distinguish a
         local graph edge from an external citation;
-      * operator audits — pair with :func:`find_dangling_supports` for a
+      * operator audits: pair with :func:`find_dangling_supports` for a
         complete view of which entries are graph nodes, which are
         external references, and which are dangling claim_ids that point
         nowhere.
@@ -557,7 +557,7 @@ def _check_no_cycle(
     each support entry is sufficient. For ``update_claim``, the new
     edge is the changed ``supports[]``; same algorithm applies.
 
-    DOI strings in ``supports[]`` are external references — skipped
+    DOI strings in ``supports[]`` are external references, skipped
     in the walk.
     """
     if not supports:
@@ -621,7 +621,7 @@ def _state_error_from_integrity(
     """Translate trigger / UNIQUE violations into mareforma exceptions.
 
     Returns ``None`` if the IntegrityError is not one of the patterns
-    we own — callers should re-raise as ``DatabaseError`` then.
+    we own; callers should re-raise as ``DatabaseError`` then.
     """
     msg = str(exc)
     if "mareforma:state:" in msg:
@@ -666,7 +666,7 @@ def normalize_artifact_hash(value: str | None) -> str | None:
     when two peers cite the same upstream and both supply a hash, the
     hashes must match for REPLICATED to fire.
 
-    Accepts canonical hex digests only — no ``sha256:`` prefix, no
+    Accepts canonical hex digests only: no ``sha256:`` prefix, no
     base64, no whitespace. Case is normalised to lowercase so two
     spellings of the same digest compare equal in the REPLICATED query.
     """
@@ -710,7 +710,7 @@ def _reconcile_idempotency_row(
 
     Called from two places:
 
-    1. The pre-INSERT idempotency SELECT — the happy path. Catches the
+    1. The pre-INSERT idempotency SELECT, the happy path. Catches the
        common case where a deterministic agent retries an in-flight
        assertion after a crash.
     2. The post-INSERT race-recovery path. The pre-SELECT runs outside
@@ -798,7 +798,7 @@ def add_claim(
     classification:
         'INFERRED' | 'ANALYTICAL' | 'DERIVED'
     idempotency_key:
-        Retry-safe writes — same key returns the same claim_id.
+        Retry-safe writes: same key returns the same claim_id.
     supports:
         Upstream claim_ids or DOIs this claim is grounded in.
     contradicts:
@@ -1225,7 +1225,7 @@ def _maybe_update_replicated_unlocked(
     generated_by: str,
     artifact_hash: str | None = None,
 ) -> None:
-    """REPLICATED-detection SQL without a commit — caller controls the txn.
+    """REPLICATED-detection SQL without a commit: caller controls the txn.
 
     Used by ``mark_claim_resolved`` so the unresolved-flag clear and the
     REPLICATED promotion land in the same SQLite transaction.
@@ -1353,18 +1353,18 @@ def _maybe_update_replicated(
     for correct JSON array element extraction (no fragile LIKE).
 
     Called immediately after a successful INSERT in add_claim().
-    Failures are swallowed — convergence detection must not crash writes.
+    Failures are swallowed: convergence detection must not crash writes.
 
     ``own_transaction`` mirrors ``add_claim``'s flag: when ``False`` the caller
     already holds an open transaction (e.g. ``submit_finding``'s BEGIN
     IMMEDIATE), so this helper makes its convergence + retry-flag writes but
-    does NOT commit — the caller's outer commit flushes them, keeping the
+    does NOT commit: the caller's outer commit flushes them, keeping the
     claim INSERT and the finding write atomic. Committing here would strand a
     signed claim if a later step in the caller's transaction rolls back.
 
     Returns ``True`` if detection ran cleanly, ``False`` if a SQLite
     error was swallowed. When ``on_error`` is supplied, the exception is
-    handed to that callback before the WARNING is logged — caller can
+    handed to that callback before the WARNING is logged; caller can
     increment a counter or surface the failure however it sees fit.
     """
     try:
@@ -1439,7 +1439,7 @@ def clear_convergence_retry_flag(
 ) -> None:
     """Clear ``convergence_retry_needed`` on a single claim after retry.
 
-    Mirrors :func:`mark_claim_resolved` — flag-flip + TOML mirror update.
+    Mirrors :func:`mark_claim_resolved`: flag-flip + TOML mirror update.
     """
     conn.execute(
         "UPDATE claims SET convergence_retry_needed = 0 "
@@ -1455,13 +1455,13 @@ def find_dangling_supports(conn: sqlite3.Connection) -> list[dict]:
 
     A ``supports`` entry can be:
 
-      * a UUID-shaped string — interpreted by mareforma as a claim_id;
-      * a DOI like ``10.1234/abc`` — an external reference;
-      * any other free-form string — also treated as external.
+      * a UUID-shaped string: interpreted by mareforma as a claim_id;
+      * a DOI like ``10.1234/abc``: an external reference;
+      * any other free-form string: also treated as external.
 
     Only UUID-shaped entries can plausibly point at a local claim and so
     only those are checked. A dangling reference is not necessarily a
-    bug — it could legitimately reference a claim from another project,
+    bug: it could legitimately reference a claim from another project,
     a not-yet-asserted upstream, or a DOI mistyped as a UUID. But
     operators auditing graph integrity want a single query that surfaces
     every such hanging arrow, so they can decide case by case.
@@ -1515,7 +1515,7 @@ def _extract_validation_signer_keyid(validation_signature: str) -> str | None:
     envelope is malformed.
 
     The envelope's ``signatures[0].keyid`` is the authoritative signer.
-    Malformed envelopes return None — the gates short-circuit
+    Malformed envelopes return None: the gates short-circuit
     rather than failing closed on top of the (already-failing) signing
     layer; the underlying UPDATE will then proceed via the legacy path
     and the row's ``validation_signature`` column will carry the broken
@@ -1533,7 +1533,7 @@ def _refuse_llm_validator(conn: sqlite3.Connection, validator_keyid: str) -> Non
     enrolled validator whose ``validator_type`` is ``'llm'``.
 
     A keyid that is not enrolled (no row in validators) does not trip
-    this gate — that case is the enrollment check in
+    this gate; that case is the enrollment check in
     ``_graph.validate`` and need not be re-litigated here.
     """
     row = conn.execute(
@@ -1559,12 +1559,12 @@ def _refuse_llm_contradiction_issuer(
 
     Symmetric to :func:`_refuse_llm_validator`. A signed contradiction
     sets ``t_invalid`` on the older of two claims via the
-    ``contradiction_invalidates_older`` trigger — that is equivalent in
+    ``contradiction_invalidates_older`` trigger; that is equivalent in
     blast radius to demoting a human-validated ESTABLISHED claim (it
     drops from default ``query()`` results). The human-only rule must
     apply to both directions of the trust ladder: humans-only-to-promote
     AND humans-only-to-demote. Without this gate an enrolled LLM key
-    could mark down any ESTABLISHED claim by signing a contradiction —
+    could mark down any ESTABLISHED claim by signing a contradiction,
     breaking the README's "promotion requires a human" framing in the
     opposite direction.
 
@@ -1601,7 +1601,7 @@ def _canonical_envelope(envelope_str: str | None) -> str | None:
     callers who passed garbage previously got a silent fallback.
 
     Mareforma does NOT cross-verify the envelope against any
-    source-graph validator set — that is an adapter responsibility.
+    source-graph validator set; that is an adapter responsibility.
     Shape validation alone keeps tamperers from poisoning the
     column with non-DSSE content.
     """
@@ -1660,7 +1660,7 @@ def _refuse_self_verdict(
     ``claim-with-roles:v1`` envelope cannot also issue a replication
     or contradiction verdict on the same claim.
 
-    Unsigned claims (``signature_bundle IS NULL``) pass the gate — same
+    Unsigned claims (``signature_bundle IS NULL``) pass the gate: same
     posture as :func:`_refuse_self_validation`. The gate is layered
     AFTER the enrollment check, so a non-enrolled key was already
     rejected; here the issuer is enrolled and we just check role
@@ -1724,11 +1724,11 @@ def _claim_signer_keyids(claim_signature_bundle: str | None) -> list[str]:
     """Return every keyid that signed the claim envelope.
 
     For ``claim:v1`` envelopes (single signature) the result has one
-    entry — the asserter. For ``claim-with-roles:v1`` envelopes (multi-
+    entry, the asserter. For ``claim-with-roles:v1`` envelopes (multi-
     signature) the result has one entry per role-actor (planner /
     executor / reviewer / validator).
 
-    Malformed bundles return an empty list — mareforma cannot
+    Malformed bundles return an empty list: mareforma cannot
     decide identity against a corrupted envelope, so downstream gates
     short-circuit and the row falls through to whatever pre-existing
     layer handles unsigned data. Same conservative posture as the
@@ -1768,7 +1768,7 @@ def _refuse_self_validation(
     """Raise :class:`SelfValidationError` if the validator signed ANY
     role on the claim envelope.
 
-    Walks every keyid in ``signature_bundle.signatures[*].keyid`` —
+    Walks every keyid in ``signature_bundle.signatures[*].keyid``:
     the primary asserter AND any role-attestation signer (planner /
     executor / reviewer / validator on a ``claim-with-roles:v1``
     envelope). Promotion to ESTABLISHED requires a witnessing
@@ -1845,7 +1845,7 @@ def _verify_evidence_seen(
     An empty list is the explicit "I reviewed nothing" admission and
     passes the gate without inspection.
 
-    The validator's enumeration is self-declared — this gate cannot
+    The validator's enumeration is self-declared: this gate cannot
     prove the validator actually opened those claims, only that the
     claims they cited exist and predate validation. That's the
     strongest property mareforma can enforce; everything else
@@ -1916,11 +1916,11 @@ def validate_claim(
         timestamp, the SAME timestamp must be threaded through here so
         the envelope's ``validated_at`` matches the row's
         ``validated_at`` byte-for-byte. If ``None``, a fresh timestamp
-        is generated — appropriate only for the legacy unsigned path.
+        is generated, appropriate only for the legacy unsigned path.
     evidence_seen:
         Optional list of claim_ids the validator declares to have
         reviewed before signing the promotion. ``None`` is normalized
-        to ``[]`` and bound into the signed envelope — a positive
+        to ``[]`` and bound into the signed envelope: a positive
         statement that the validator reviewed nothing, which is then
         visible in the audit trail rather than hidden by absence. Each
         cited entry must be a strict-v4 UUID matching an existing
@@ -1933,7 +1933,7 @@ def validate_claim(
     ------------------
     When ``validation_signature`` is supplied, mareforma fires the
     following defense-in-depth gates before the row is updated. All
-    consult mareforma directly — calling :func:`validate_claim`
+    consult mareforma directly, calling :func:`validate_claim`
     bypassing :meth:`EpistemicGraph.validate` does not relax any of
     them, so a hostile in-process caller cannot route around them:
 
@@ -2396,7 +2396,7 @@ def _record_rekor_inclusion(
 
     Called after Rekor returns a `(logged=True, entry)` response and
     before the claims-row UPDATE. The sidecar is the durable record of
-    "Rekor witnessed this claim" — when the row UPDATE later fails,
+    "Rekor witnessed this claim"; when the row UPDATE later fails,
     :meth:`refresh_unsigned` consults this table to replay the UPDATE
     instead of re-submitting.
 
@@ -2405,12 +2405,12 @@ def _record_rekor_inclusion(
     identically to what the original UPDATE would have written.
 
     Returns ``True`` on success. On failure, emits a WARNING and returns
-    ``False`` — the caller skips the subsequent UPDATE so we don't end
+    ``False``: the caller skips the subsequent UPDATE so we don't end
     up with `transparency_logged=1` but no sidecar record (the inverse
     of the gap this saga closes). The Rekor entry exists publicly; the
     operator must run :meth:`refresh_unsigned` which will detect the
     missing-sidecar-but-unflagged state and re-submit (creating a
-    duplicate entry — the only recovery available when we have no
+    duplicate entry, the only recovery available when we have no
     record of the original inclusion).
     """
     try:
@@ -2517,7 +2517,7 @@ def list_unlogged_claims(conn: sqlite3.Connection) -> list[dict]:
     """Return signed claims still awaiting Rekor inclusion.
 
     A claim is "unlogged" when ``signature_bundle`` is non-NULL but
-    ``transparency_logged`` is 0. Unsigned claims are excluded — they have
+    ``transparency_logged`` is 0. Unsigned claims are excluded: they have
     no envelope to submit.
     """
     rows = conn.execute(
@@ -2547,7 +2547,7 @@ def mark_claim_logged(
 
     1. The row must already carry a non-NULL ``signature_bundle``.
        mark_claim_logged attaches a Rekor block to an existing
-       envelope — it is not a path to sign an unsigned claim.
+       envelope; it is not a path to sign an unsigned claim.
     2. The supplied bundle must be JSON.
     3. The bundle must be a structurally-valid claim envelope and its
        ``predicate.claim_id`` must equal the row's ``claim_id``. A buggy
@@ -2761,7 +2761,7 @@ def update_claim(
 
     Signed claims are append-only across the signed surface. If the row
     carries a non-NULL ``signature_bundle``, this call refuses to mutate
-    ``text`` / ``supports`` / ``contradicts`` — those fields are part of
+    ``text`` / ``supports`` / ``contradicts``: those fields are part of
     the signed payload and editing them would silently invalidate the
     signature while leaving ``transparency_logged=1`` and the Rekor entry
     in place. ``status`` and ``comparison_summary`` remain editable since
@@ -3056,7 +3056,7 @@ def _require_enrolled_issuer(
     """Refuse the verdict if issuer_keyid is not an enrolled validator.
 
     Walks the enrollment chain back to a self-signed root via
-    ``validators.is_enrolled`` — same gate the seed-claim path and
+    ``validators.is_enrolled``: same gate the seed-claim path and
     ``graph.validate()`` use. A row that exists in the validators
     table but whose enrollment_envelope does not verify against its
     parent (e.g. a tampered DB or a partial restore) is rejected.
@@ -3109,7 +3109,7 @@ def record_replication_verdict(
     method, confidence)``. Restore re-derives this binding to catch
     TOML tampering of verdict rows.
 
-    The OSS core doesn't fire replication predicates itself —
+    The OSS core doesn't fire replication predicates itself:
     third-party verdict-issuers call this method after running their
     predicate logic. Mareforma just accepts the signed verdict and
     triggers the support_level promotion.
@@ -3323,7 +3323,7 @@ def list_replication_verdicts(
     """List signed replication verdicts, optionally filtered.
 
     By default, verdicts whose member or other claim has been
-    invalidated (``claims.t_invalid IS NOT NULL``) are excluded — same
+    invalidated (``claims.t_invalid IS NOT NULL``) are excluded: same
     surface as :func:`query_claims`. Pass ``include_invalidated=True``
     for audit-mode listings.
     """
@@ -3365,7 +3365,7 @@ def list_contradiction_verdicts(
 
     By default, contradiction verdicts whose claims have been
     invalidated are excluded. Pass ``include_invalidated=True`` for
-    audit-mode listings (the typical use — a contradiction verdict
+    audit-mode listings (the typical use, since a contradiction verdict
     is the EVIDENCE for invalidation, so callers inspecting "why was
     this invalidated" need audit mode).
     """
@@ -3421,9 +3421,9 @@ def refutation_status(row: dict) -> dict:
 
     Returns a dict with three fields:
 
-      * ``state``  — one of :data:`REFUTATION_STATES`
-      * ``reason`` — short human-readable explanation
-      * ``signal`` — ``"signed-verdict"`` if backed by a cryptographic
+      * ``state``: one of :data:`REFUTATION_STATES`
+      * ``reason``: short human-readable explanation
+      * ``signal``: ``"signed-verdict"`` if backed by a cryptographic
                      verdict, ``"editorial"`` if backed only by a
                      status flag, or ``"none"`` for clean claims
 
@@ -3433,7 +3433,7 @@ def refutation_status(row: dict) -> dict:
     :meth:`EpistemicGraph.contradiction_verdicts`).
 
     Raises :class:`ValueError` when *row* lacks the required
-    ``status`` field — a hand-crafted partial dict would otherwise
+    ``status`` field: a hand-crafted partial dict would otherwise
     fall through to a falsely-confident ``"clean"`` verdict.
     """
     if not isinstance(row, dict):
@@ -3492,7 +3492,7 @@ def query_claims(
     limit:
         Maximum number of claims to return. Default 10.
     text:
-        Optional substring filter — case-insensitive LIKE match on claim text.
+        Optional substring filter: case-insensitive LIKE match on claim text.
     min_support:
         Minimum support level: 'PRELIMINARY' | 'REPLICATED' | 'ESTABLISHED'.
     classification:
@@ -3506,7 +3506,7 @@ def query_claims(
         unverified preliminary claims (e.g. inspection of pending work).
     include_invalidated:
         When False (default), claims with non-NULL ``t_invalid`` are
-        excluded — a contradiction_verdicts row from an enrolled
+        excluded: a contradiction_verdicts row from an enrolled
         validator has marked them invalid. Pass ``True`` for audit /
         history queries where you want to see contradicted claims too.
 
@@ -3686,7 +3686,7 @@ def _extract_signature_bundle_keyid(bundle_json: str | None) -> str | None:
 def _enrolled_validator_keyids(conn: sqlite3.Connection) -> set[str]:
     """Return the set of keyids currently in the validators table.
 
-    Membership only — does NOT walk the enrollment chain. The chain
+    Membership only: does NOT walk the enrollment chain. The chain
     walk in :func:`mareforma.validators.is_enrolled` is the
     authoritative check for individual validations; this set is a
     cheap pre-filter used by :func:`query_claims` to decide whether a
@@ -3704,7 +3704,7 @@ def _compute_validator_reputation(
 
     Count is the number of ESTABLISHED rows whose ``validator_keyid``
     equals the key. Validators with zero ESTABLISHED rows are omitted
-    from the dict (caller defaults to 0). Derived state — recomputed
+    from the dict (caller defaults to 0). Derived state, recomputed
     on every call, never cached.
     """
     rows = conn.execute(
@@ -3721,7 +3721,7 @@ def _validate_fts5_query(query: str) -> str:
 
     Refuses empty strings and queries consisting entirely of wildcards
     (e.g. ``"*"``, ``"* **"``). FTS5 prefix syntax is ``term*`` and the
-    leading-``*`` form is not valid syntax anyway — but a user who
+    leading-``*`` form is not valid syntax anyway, but a user who
     expects shell-glob semantics deserves a clear error instead of
     SQLite's terse ``fts5: syntax error near "*"``.
     """
@@ -3760,9 +3760,9 @@ def search_claims(
     filters apply identically.
 
     The ``query`` string is passed through to SQLite's FTS5 MATCH
-    operator. FTS5 syntax — phrase matching with double quotes, prefix
+    operator. FTS5 syntax (phrase matching with double quotes, prefix
     search with trailing ``*``, ``AND``/``OR``/``NOT`` operators, and
-    parentheses — works as documented in SQLite. Pure-wildcard queries
+    parentheses) works as documented in SQLite. Pure-wildcard queries
     are refused (see :func:`_validate_fts5_query`).
     """
     fts_query = _validate_fts5_query(query)
@@ -3881,7 +3881,7 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
     Called after every claim or validator mutation. The TOML file is
     the source of truth for ``mareforma restore`` after catastrophic
     loss of ``graph.db``. Failure is non-fatal: an error line is
-    printed to stderr but the exception is not raised — graph.db is
+    printed to stderr but the exception is not raised: graph.db is
     still authoritative and the next successful mutation will rewrite
     the file. Stderr-ERROR (not ``warnings.warn``, which production
     callers often suppress) so divergence is visible by default.

@@ -1,4 +1,4 @@
-"""Canonicalization — byte-stable forms for arbitrary Python values.
+"""Canonicalization: byte-stable forms for arbitrary Python values.
 
 The default canonicalizer (``json-c14n-v1``) is JCS (RFC 8785) via the
 ``rfc8785`` package: a number's encoding does not depend on whether it
@@ -147,7 +147,7 @@ def fingerprint_tool_config(config: dict[str, Any]) -> str:
 # (the canonical envelope canonicaliser) — keeps a single
 # implementation; this is just an alias under a registered name.
 def _canonicalize_dsse_jcs_nfc_v1(value: Any) -> bytes:
-    """NFC-normalising JCS — same bytes as the signed-envelope layer."""
+    """NFC-normalising JCS: same bytes as the signed-envelope layer."""
     from mareforma._canonical import canonicalize as _envelope_canonicalize
     return _envelope_canonicalize(value)
 

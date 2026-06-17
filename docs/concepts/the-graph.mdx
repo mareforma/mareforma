@@ -17,12 +17,12 @@ upstream_ref ──► ANALYTICAL claim (lab_b)  ──┘
 
 Trust is derived from this structure. The more independent paths converge
 on the same upstream evidence, the higher the support level. A single agent
-asserting the same claim a thousand times is still PRELIMINARY — independence
+asserting the same claim a thousand times is still PRELIMINARY: independence
 of provenance paths is what matters.
 
 ## supports[]
 
-`supports[]` is the provenance chain. It records what a claim rests on —
+`supports[]` is the provenance chain. It records what a claim rests on:
 upstream claim_ids or reference strings (e.g. DOIs).
 
 ```python
@@ -40,7 +40,7 @@ what the finding is explicitly grounded in.
 ## contradicts[]
 
 `contradicts[]` documents explicit tension. When a new finding is in conflict
-with an existing one, both coexist in the graph — neither is silently
+with an existing one, both coexist in the graph; neither is silently
 overwritten.
 
 ```python
@@ -56,7 +56,7 @@ graph.assert_claim(
 ```
 
 Science advances by documented contestation. ESTABLISHED means
-human-validated evidence — not settled truth.
+human-validated evidence, not settled truth.
 
 ## Epistemic distance
 
@@ -65,8 +65,8 @@ A short chain of ANALYTICAL steps close to raw data is more trustworthy
 than a long chain of INFERRED steps, even if each step looks locally valid.
 
 The pessimistic rule: one INFERRED step in a chain means the full chain
-carries INFERRED-level epistemic fragility. Origin does not average
-— it takes the weakest link.
+carries INFERRED-level epistemic fragility. Origin does not average;
+it takes the weakest link.
 
 ```
 raw data → ANALYTICAL → ANALYTICAL → INFERRED → conclusion
@@ -86,5 +86,5 @@ fires because the graph cannot detect convergence without a shared anchor.
 
 The mitigation: `idempotency_key` as a convergence convention. Two
 agents using the same structured key converge on the same `claim_id`
-even with different text, without needing explicit `supports=` links —
+even with different text, without needing explicit `supports=` links;
 see the API reference [`assert_claim` → Idempotency](/reference/api#idempotency).

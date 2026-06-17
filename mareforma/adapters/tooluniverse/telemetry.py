@@ -1,4 +1,4 @@
-"""Telemetry — append-only health.jsonl writer.
+"""Telemetry: append-only health.jsonl writer.
 
 Each completed tool call appends one line documenting the call's
 shape. The maqueta's `health.jsonl` aggregates one entry per phase

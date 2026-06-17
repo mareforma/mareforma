@@ -1,5 +1,5 @@
 """
-doi_resolver.py — DOI resolution via Crossref and DataCite.
+doi_resolver.py: DOI resolution via Crossref and DataCite.
 
 DOIs in claim ``supports[]`` and ``contradicts[]`` are HEAD-checked against
 public registries at assertion time. Unresolved DOIs mark the claim as
@@ -153,7 +153,7 @@ def resolve_doi(
         ``resolved`` is True iff the DOI returned 2xx from either registry
         (no redirects followed). ``registry`` is ``"crossref"`` or
         ``"datacite"`` on success, ``None`` on failure. ``rate_limited`` is
-        True if ANY registry returned 429 — callers should refrain from
+        True if ANY registry returned 429, so callers should refrain from
         caching the result, since a transient rate-limit incident would
         otherwise poison the cache for the full negative-TTL.
 
@@ -196,7 +196,7 @@ def resolve_doi(
 def _is_fresh(last_checked_at: str, resolved: bool) -> bool:
     """Return True if a cache entry is still within its TTL.
 
-    Tolerates ``Z`` UTC suffix in addition to ``+00:00`` — Python 3.10's
+    Tolerates ``Z`` UTC suffix in addition to ``+00:00``. Python 3.10's
     ``datetime.fromisoformat`` doesn't parse the ``Z`` form (3.11+ does),
     so an external tool that admin-loads a cache row with a ``Z``-suffixed
     timestamp would otherwise silently fail the parse and look expired.
@@ -280,8 +280,8 @@ def _extract_metadata_subset(
     the registries. The ``registry`` arg selects the right shape.
     When unspecified, both shapes are tried with Crossref first.
 
-    Returns ``None`` when every extracted field is empty/None —
-    refuses to seed an effectively-empty digest that would collide
+    Returns ``None`` when every extracted field is empty/None,
+    refusing to seed an effectively-empty digest that would collide
     with every other empty-metadata DOI.
     """
     import unicodedata
@@ -385,7 +385,7 @@ def _compute_content_digest(
 
     ``registry`` selects the field shape (``"crossref"`` or
     ``"datacite"``); pass ``None`` to try both. Returns ``None`` when
-    the input is non-dict or the extracted subset is entirely empty —
+    the input is non-dict or the extracted subset is entirely empty;
     callers should treat that as "fetch indeterminate, try again".
 
     Strings are NFC-normalised before hashing so a registry that
@@ -416,7 +416,7 @@ def fetch_doi_metadata(
 
     Used by :func:`find_drifted_dois` to recompute the content digest
     of a previously-cached DOI. When ``registry`` is given (``"crossref"``
-    or ``"datacite"``), only that registry is contacted — pin to the
+    or ``"datacite"``), only that registry is contacted: pin to the
     registry where the row was originally resolved to avoid producing
     false drift when Crossref blips and DataCite has the same DOI in a
     different shape. When ``None``, Crossref is tried first, then
@@ -496,18 +496,18 @@ def find_drifted_dois(
     originally resolved the DOI when known), recomputes the digest,
     and appends an entry to the result when the two differ. DOIs that
     have never been digested (legacy rows) are also fetched and
-    seeded with the current digest — those count as "first seen", not
+    seeded with the current digest; those count as "first seen", not
     drifted, and are NOT included in the returned list.
 
     Returns ``(drifted, walked, aborted_rate_limited)``:
 
-    * ``drifted`` — list of ``{doi, stored_digest, current_digest,
+    * ``drifted``: list of ``{doi, stored_digest, current_digest,
       last_checked_at}`` dicts for DOIs whose digest moved.
-    * ``walked`` — number of cache rows the helper successfully
+    * ``walked``: number of cache rows the helper successfully
       fetched from the registry before returning (lets the caller
       distinguish "0 drifted in 100 inspected" from "0 drifted,
       walk aborted at 5 inspected").
-    * ``aborted_rate_limited`` — True when the walk stopped early
+    * ``aborted_rate_limited``: True when the walk stopped early
       because a registry returned 429. Callers that emit health
       events should mark the result ``outcome="partial"`` in that
       case.

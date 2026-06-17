@@ -58,15 +58,15 @@ class TimeoutError(ClawInstituteApiError):  # noqa: A001 — typed parent
 
 
 class AuthError(ClawInstituteApiError):
-    """401/403 from the API — missing or invalid token."""
+    """401/403 from the API: missing or invalid token."""
 
 
 class NotFoundError(ClawInstituteApiError):
-    """404 from the API — workspace / post / file does not exist."""
+    """404 from the API: workspace / post / file does not exist."""
 
 
 class ServerError(ClawInstituteApiError):
-    """5xx from the API — upstream is unhealthy."""
+    """5xx from the API: upstream is unhealthy."""
 
 
 class JsonDecodeError(ClawInstituteApiError):
@@ -86,7 +86,7 @@ class ClawInstituteClient(Protocol):
     """HTTP transport contract for the ClawInstitute REST API.
 
     Implementations MUST raise the typed exceptions above (or a
-    subclass) — opaque exceptions defeat the adapter's error-handling
+    subclass): opaque exceptions defeat the adapter's error-handling
     contract.
     """
 
@@ -103,7 +103,7 @@ class ClawInstituteClient(Protocol):
     def api_version(self) -> str:
         """Return the server-reported API version string.
 
-        OPTIONAL probe — not auto-invoked. Callers that want fail-fast
+        OPTIONAL probe, not auto-invoked. Callers that want fail-fast
         version-mismatch behaviour should call this once at startup.
         Raises :class:`ApiVersionError` if the server's version does
         not match :data:`SUPPORTED_API_VERSION`.
@@ -195,7 +195,7 @@ class HttpxClient:
 
         Only ``params`` and ``json_body`` are forwarded to httpx. Other
         kwargs (verify=, follow_redirects=, auth=, cert=) are NOT
-        accepted — those would let a caller bypass TLS validation or
+        accepted: those would let a caller bypass TLS validation or
         the Bearer-token redirect protection.
         """
         import httpx

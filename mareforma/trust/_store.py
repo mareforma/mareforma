@@ -78,7 +78,7 @@ def compute_plan_id(content_id: str, prediction: Prediction) -> str:
     The plan_id is the identity of a decision *rule*: it hashes the gate-bearing
     fields (test_type, direction_of_interest, the equivalence margins, alpha,
     inference_regime) bound to a proposition. ``preregistered`` is deliberately
-    EXCLUDED — it is provenance metadata about how the row was created (a real
+    EXCLUDED: it is provenance metadata about how the row was created (a real
     pre-registration vs a one-shot synthesised by ``assert_finding``), not part
     of the rule's identity. Two callers asserting the same rule must land on the
     same plan_id whether or not either flagged it pre-registered, so a finding

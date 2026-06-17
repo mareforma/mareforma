@@ -16,7 +16,7 @@ python 02_compounding_agents.py
 
 No API key required.
 
-## Setup — a shared graph and per-agent tools
+## Setup: a shared graph and per-agent tools
 
 ```python
 import json, tempfile
@@ -45,7 +45,7 @@ _, assert_finding_synth = [tool(fn) for fn in graph.get_tools(
     generated_by="synthesizer/model-c/lab_b")]
 ```
 
-## Agent A — two independent runs
+## Agent A: two independent runs
 
 ```python
 # Shared upstream anchor. seed=True asserts directly at ESTABLISHED with a
@@ -76,7 +76,7 @@ finding_b = assert_finding_b.invoke({
   Two independent agents, shared upstream → REPLICATED fires automatically.
 ```
 
-## Agent B — Synthesizer
+## Agent B: Synthesizer
 
 ```python
 # Query before asserting — the standard agent pattern. query_graph returns
@@ -106,7 +106,7 @@ Cell type A forms the majority of inhibitory con…
   synthesis supports         3
 ```
 
-## Graph state — the knowledge chain
+## Graph state: the knowledge chain
 
 ```python
 all_claims = graph.query()
@@ -128,7 +128,7 @@ The chain is the point: `prior reference → ANALYTICAL (×2, independent) →
 REPLICATED → DERIVED`. Without querying first, Agent B would have asserted from
 scratch.
 
-## The trust layer — earned support
+## The trust layer: earned support
 
 The claim graph above tracks *who asserted what*: each agent picks its own
 classification and `supports[]` list. The trust layer makes the support
@@ -176,7 +176,7 @@ result_b = graph.assert_finding(
 Neither agent declared `supports`. mareforma computed each bearing from the
 pre-registered rule and derived `CORROBORATED` from two independent datasets.
 
-## Synthesizer — query the frame
+## Synthesizer: query the frame
 
 ```python
 # The frame is the question, not the wording. min_status filters on the

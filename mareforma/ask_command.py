@@ -1,4 +1,4 @@
-"""``mareforma ask`` — FTS5 BM25 search over ingested literature claims.
+"""``mareforma ask``: FTS5 BM25 search over ingested literature claims.
 
 Sanitises input (quote each token) so hyphens and special characters
 are treated as literals, not FTS5 operators. Returns hits ranked by

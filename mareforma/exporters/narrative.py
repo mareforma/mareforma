@@ -2,7 +2,7 @@
 
 Groups claims by source document. Flags contradictions inline via the
 literature-contradiction detector (structural + polarity heuristic).
-Pairs with ``mareforma ingest`` — ingest extracts; this exporter
+Pairs with ``mareforma ingest``: ingest extracts; this exporter
 renders.
 """
 

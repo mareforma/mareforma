@@ -1,6 +1,6 @@
 """Predicate construction + decode + verification for `tool-call/v1`.
 
-Mareforma's outer envelope uses ``urn:mareforma:predicate:claim:v1`` —
+Mareforma's outer envelope uses ``urn:mareforma:predicate:claim:v1``,
 that's mareforma's signed predicate, binding `claim_id`, `text`,
 `classification`, `generated_by`, `supports`, `contradicts`,
 `source_name`, `artifact_hash`, `created_at`, and the GRADE evidence.
@@ -13,12 +13,12 @@ substring scan; encode refuses ambiguous boundary characters
 
 Public:
 
-- :data:`PREDICATE_TYPE_V1` — the URI reserved by this maqueta.
-- :data:`PREDICATE_TAG_OPEN` / :data:`PREDICATE_TAG_CLOSE` — boundary tags.
-- :func:`build_tool_call_predicate` — assembles the predicate dict.
-- :func:`encode_predicate_into_text` — writes the tagged block.
-- :func:`decode_predicate_from_text` — strict inverse of the encode.
-- :func:`verify_tool_call_envelope` — verify a claim's DSSE envelope
+- :data:`PREDICATE_TYPE_V1`: the URI reserved by this maqueta.
+- :data:`PREDICATE_TAG_OPEN` / :data:`PREDICATE_TAG_CLOSE`: boundary tags.
+- :func:`build_tool_call_predicate`: assembles the predicate dict.
+- :func:`encode_predicate_into_text`: writes the tagged block.
+- :func:`decode_predicate_from_text`: strict inverse of the encode.
+- :func:`verify_tool_call_envelope`: verify a claim's DSSE envelope
   AND assert its embedded `tool-call/v1` predicate is well-formed.
 """
 
@@ -125,7 +125,7 @@ def encode_predicate_into_text(predicate: dict[str, Any], summary: str) -> str:
     """Write the predicate as a tagged JSON block, then the summary line.
 
     Matches the dependency maqueta's pattern. Refuses to encode a
-    predicate whose JSON form contains the boundary marker — that's a
+    predicate whose JSON form contains the boundary marker: that's a
     tamper signal, raise rather than silently writing ambiguous text.
     """
 
@@ -179,9 +179,9 @@ def verify_tool_call_envelope(
 
     Two layers of verification:
 
-    1. ``mareforma.signing.verify_envelope`` — confirms the DSSE
+    1. ``mareforma.signing.verify_envelope``: confirms the DSSE
        signature over the outer in-toto Statement v1.
-    2. :func:`decode_predicate_from_text` — confirms the embedded
+    2. :func:`decode_predicate_from_text`: confirms the embedded
        ``tool-call/v1`` predicate is well-formed.
 
     Both must pass; mareforma guarantees layer 1, this module
