@@ -22,13 +22,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from pathlib import Path
 
 import pytest
 
 import mareforma
-from mareforma.db import DatabaseError, ClaimNotFoundError
-from tests._helpers import _bootstrap_key
+from mareforma.db import ClaimNotFoundError
+from tests._helpers import _bootstrap_key, _pem_of
 
 
 # ---------------------------------------------------------------------------
@@ -289,14 +288,6 @@ def test_get_claim_nonexistent_returns_none(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _validator_pubkey_pem(key_path):
-    """Load a private key from disk and return its PEM-encoded public key."""
-    from mareforma import signing as _signing
-    return _signing.public_key_to_pem(
-        _signing.load_private_key(key_path).public_key(),
-    )
-
-
 def test_validate_replicated_to_established(tmp_path):
     root_key = _bootstrap_key(tmp_path, "root.key")
     validator_key = _bootstrap_key(tmp_path, "validator.key")
@@ -304,7 +295,7 @@ def test_validate_replicated_to_established(tmp_path):
         prior = graph.assert_claim("prior", generated_by="seed", seed=True)
         id1 = graph.assert_claim("finding", supports=[prior], generated_by="A")
         id2 = graph.assert_claim("finding", supports=[prior], generated_by="B")
-        graph.enroll_validator(_validator_pubkey_pem(validator_key), identity="v")
+        graph.enroll_validator(_pem_of(validator_key), identity="v")
     with mareforma.open(tmp_path, key_path=validator_key) as graph:
         graph.validate(id1)
         claim = graph.get_claim(id1)
@@ -318,7 +309,7 @@ def test_validate_stores_validated_by(tmp_path):
         prior = graph.assert_claim("prior", generated_by="seed", seed=True)
         id1 = graph.assert_claim("finding", supports=[prior], generated_by="A")
         graph.assert_claim("finding", supports=[prior], generated_by="B")
-        graph.enroll_validator(_validator_pubkey_pem(validator_key), identity="v")
+        graph.enroll_validator(_pem_of(validator_key), identity="v")
     with mareforma.open(tmp_path, key_path=validator_key) as graph:
         graph.validate(id1, validated_by="jane@lab.org")
         claim = graph.get_claim(id1)
@@ -1646,7 +1637,7 @@ class TestEvidenceSeenBinding:
         with mareforma.open(tmp_path, key_path=root_key) as g:
             _, cid_b = self._setup_replicated(g, root_key)
             g.enroll_validator(
-                _validator_pubkey_pem(other_key),
+                _pem_of(other_key),
                 identity="reviewer",
             )
 
@@ -1666,7 +1657,7 @@ class TestEvidenceSeenBinding:
         with mareforma.open(tmp_path, key_path=root_key) as g:
             seed, cid_b = self._setup_replicated(g, root_key)
             g.enroll_validator(
-                _validator_pubkey_pem(other_key),
+                _pem_of(other_key),
                 identity="reviewer",
             )
 
@@ -1687,7 +1678,7 @@ class TestEvidenceSeenBinding:
         with mareforma.open(tmp_path, key_path=root_key) as g:
             _, cid_b = self._setup_replicated(g, root_key)
             g.enroll_validator(
-                _validator_pubkey_pem(other_key),
+                _pem_of(other_key),
                 identity="reviewer",
             )
 
@@ -1705,7 +1696,7 @@ class TestEvidenceSeenBinding:
         with mareforma.open(tmp_path, key_path=root_key) as g:
             _, cid_b = self._setup_replicated(g, root_key)
             g.enroll_validator(
-                _validator_pubkey_pem(other_key),
+                _pem_of(other_key),
                 identity="reviewer",
             )
 
@@ -1725,7 +1716,7 @@ class TestEvidenceSeenBinding:
         with mareforma.open(tmp_path, key_path=root_key) as g:
             _, cid_b = self._setup_replicated(g, root_key)
             g.enroll_validator(
-                _validator_pubkey_pem(other_key),
+                _pem_of(other_key),
                 identity="reviewer",
             )
 
@@ -1742,7 +1733,7 @@ class TestEvidenceSeenBinding:
         with mareforma.open(tmp_path, key_path=root_key) as g:
             _, cid_b = self._setup_replicated(g, root_key)
             g.enroll_validator(
-                _validator_pubkey_pem(other_key),
+                _pem_of(other_key),
                 identity="reviewer",
             )
 
@@ -1765,7 +1756,7 @@ class TestEvidenceSeenBinding:
         with mareforma.open(tmp_path, key_path=root_key) as g:
             seed, cid_b = self._setup_replicated(g, root_key)
             g.enroll_validator(
-                _validator_pubkey_pem(other_key),
+                _pem_of(other_key),
                 identity="reviewer",
             )
 
@@ -1807,7 +1798,7 @@ class TestValidationEnvelopeKwargAgreement:
         with mareforma.open(tmp_path, key_path=root_key) as g:
             seed, cid_b = self._setup_replicated(g)
             g.enroll_validator(
-                _validator_pubkey_pem(other_key), identity="reviewer",
+                _pem_of(other_key), identity="reviewer",
             )
 
         with mareforma.open(tmp_path, key_path=other_key) as g:
@@ -1852,7 +1843,7 @@ class TestValidationEnvelopeKwargAgreement:
         with mareforma.open(tmp_path, key_path=root_key) as g:
             seed, cid_b = self._setup_replicated(g)
             g.enroll_validator(
-                _validator_pubkey_pem(other_key), identity="reviewer",
+                _pem_of(other_key), identity="reviewer",
             )
 
         with mareforma.open(tmp_path, key_path=other_key) as g:
@@ -1897,7 +1888,7 @@ class TestValidationEnvelopeCryptographicVerification:
         with mareforma.open(tmp_path, key_path=root_key) as g:
             seed, cid_b = self._setup_replicated(g)
             g.enroll_validator(
-                _validator_pubkey_pem(validator_key), identity="reviewer",
+                _pem_of(validator_key), identity="reviewer",
             )
 
         from mareforma.signing import load_private_key, sign_validation
@@ -1990,7 +1981,7 @@ class TestValidationEnvelopeCryptographicVerification:
             seed, cid_b = self._setup_replicated(g)
             cid_a = g.assert_claim("a-prime", generated_by="lab_a", supports=[seed])
             g.enroll_validator(
-                _validator_pubkey_pem(validator_key), identity="reviewer",
+                _pem_of(validator_key), identity="reviewer",
             )
 
         from mareforma.signing import load_private_key, sign_validation
@@ -2065,7 +2056,7 @@ class TestValidationEnvelopeCryptographicVerification:
         with mareforma.open(tmp_path, key_path=root_key) as g:
             seed, cid_b = self._setup_replicated(g)
             g.enroll_validator(
-                _validator_pubkey_pem(validator_key), identity="reviewer",
+                _pem_of(validator_key), identity="reviewer",
             )
 
         from mareforma.signing import load_private_key, dsse_pae, public_key_id
@@ -2115,7 +2106,7 @@ class TestValidationEnvelopeCryptographicVerification:
         with mareforma.open(tmp_path, key_path=root_key) as g:
             seed, cid_b = self._setup_replicated(g)
             g.enroll_validator(
-                _validator_pubkey_pem(validator_key), identity="reviewer",
+                _pem_of(validator_key), identity="reviewer",
             )
 
         from mareforma.signing import load_private_key, sign_validation

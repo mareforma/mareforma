@@ -1,7 +1,6 @@
 """Perf-pin + cross-conformance tests."""
 from __future__ import annotations
 
-import json
 import time
 from pathlib import Path
 
@@ -100,15 +99,21 @@ def _percentile(samples: list[float], q: float) -> float:
     return s[lo] + frac * (s[hi] - s[lo])
 
 
-def test_supports_cache_1k_walk_under_50ms(tmp_path: Path) -> None:
+def test_supports_cache_1k_walk_stays_subgraph_bounded(tmp_path: Path) -> None:
     """1k-scale pin runs in the default suite so the regression is
     caught on every CI invocation.
 
-    Methodology: 1000 sample iterations, first 50 discarded as cache
-    warmup, p99 computed via linear interpolation across the
-    remaining 950. A generous 50ms ceiling absorbs CI shared-runner
-    jitter; a regression that pushes p99 past 50ms is unambiguously
-    architectural, not noise.
+    ``walk_upstream(depth=4)`` is a recursive CTE over the *indexed*
+    supports cache, so its cost is bounded by the reachable subgraph
+    (~fanout**depth), not the total claim count. The guard against a
+    regression to an O(N) scan is expressed *relative* to a same-machine
+    primary-key lookup rather than as an absolute wall-clock: a PK lookup
+    rides a different index, so it won't share a supports-cache
+    regression, yet it tracks the machine's general speed. Under a slow
+    or contended runner both measurements rise together and the ratio
+    holds — which is what lets this run in the default suite without
+    flaking. The healthy ratio is ~10x; an O(N) regression at n=1000
+    would push it into the hundreds.
     """
     n = 1_000
     with mareforma.open(tmp_path) as graph:
@@ -116,21 +121,34 @@ def test_supports_cache_1k_walk_under_50ms(tmp_path: Path) -> None:
 
     with mareforma.open(tmp_path) as graph:
         leaf = ids[-1]
+        conn = graph._conn
         warmup = 50
         samples = 1000
-        latencies: list[float] = []
+        walk_latencies: list[float] = []
+        ref_latencies: list[float] = []
         for i in range(warmup + samples):
             t0 = time.perf_counter()
-            _supports.walk_upstream(graph._conn, leaf, depth=4)
-            elapsed = time.perf_counter() - t0
+            _supports.walk_upstream(conn, leaf, depth=4)
+            walk = time.perf_counter() - t0
+            t0 = time.perf_counter()
+            conn.execute(
+                "SELECT 1 FROM claims WHERE claim_id = ?", (leaf,)
+            ).fetchone()
+            ref = time.perf_counter() - t0
             if i >= warmup:
-                latencies.append(elapsed)
-        p50 = _percentile(latencies, 0.50)
-        p95 = _percentile(latencies, 0.95)
-        p99 = _percentile(latencies, 0.99)
-        assert p99 < 0.05, (
-            f"1k-claim walk_upstream p99={p99*1000:.2f}ms (p95="
-            f"{p95*1000:.2f}ms, p50={p50*1000:.2f}ms) exceeds 50ms"
+                walk_latencies.append(walk)
+                ref_latencies.append(ref)
+        walk_p99 = _percentile(walk_latencies, 0.99)
+        ref_p99 = _percentile(ref_latencies, 0.99)
+        # 40x the PK-lookup floor (~4x over the healthy ~10x ratio) absorbs
+        # jitter; the additive 0.5ms cushion guards the degenerate case
+        # where the floor is too small to measure. An O(N) walk regression
+        # blows far past this.
+        ceiling = ref_p99 * 40 + 0.0005
+        assert walk_p99 < ceiling, (
+            f"walk_upstream p99={walk_p99*1000:.3f}ms exceeds "
+            f"{ceiling*1000:.3f}ms (PK-lookup p99={ref_p99*1000:.3f}ms × 40 "
+            f"+ 0.5ms) — walk is no longer subgraph-bounded"
         )
 
 

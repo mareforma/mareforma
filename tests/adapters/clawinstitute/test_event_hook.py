@@ -20,24 +20,13 @@ Conceptual clusters:
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
 from typing import Any
 
 import pytest
 
-import mareforma
 from mareforma.adapters.clawinstitute import EventHook
 from mareforma.events import EventSource, SOURCE_CLAWINSTITUTE
 from mareforma.predicate_types import WORKSHOP_EVENT_V1
-
-
-@pytest.fixture()
-def graph(tmp_path: Path):
-    from mareforma import signing as _signing
-    key_path = tmp_path / "key"
-    _signing.bootstrap_key(key_path)
-    with mareforma.open(tmp_path, key_path=key_path) as g:
-        yield g
 
 
 def _captured_handler():

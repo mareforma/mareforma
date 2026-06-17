@@ -17,7 +17,9 @@ from __future__ import annotations
 
 from .bearing import Bearing, BearingDirection, compute_bearing
 from .errors import (
+    FindingPlanForkError,
     InconsistentEstimateError,
+    NoRegisteredPlanError,
     NonFalsifiablePropositionError,
     TrustError,
 )
@@ -30,6 +32,7 @@ from .estimate import (
     Scale,
     null_value,
 )
+from .gates import Gate, evaluate_gates, gates_for
 from .prediction import (
     DirectionOfInterest,
     InferenceRegime,
@@ -73,6 +76,10 @@ __all__ = [
     "Bearing",
     "BearingDirection",
     "compute_bearing",
+    # decision-rule gates[] chain
+    "Gate",
+    "gates_for",
+    "evaluate_gates",
     # status
     "Status",
     "FrameStatus",
@@ -82,5 +89,7 @@ __all__ = [
     # errors
     "TrustError",
     "NonFalsifiablePropositionError",
+    "NoRegisteredPlanError",
+    "FindingPlanForkError",
     "InconsistentEstimateError",
 ]

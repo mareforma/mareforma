@@ -99,3 +99,14 @@ def open_graph(tmp_path: Path):
         _signing.bootstrap_key(key_path)
     with mareforma.open(tmp_path, key_path=key_path) as graph:
         yield graph
+
+
+@pytest.fixture()
+def graph(open_graph):
+    """Alias for ``open_graph``.
+
+    The adapter and federation tests request the graph under the name
+    ``graph``; each used to define a byte-identical local fixture. They
+    all share this one now.
+    """
+    return open_graph

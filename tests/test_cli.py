@@ -11,6 +11,15 @@ from click.testing import CliRunner
 from mareforma.cli import cli
 
 
+def _extract_claim_id(output: str) -> str:
+    """Pull the claim id from ``claim add`` output (the ``ID: <uuid>`` line)."""
+    return next(
+        line.split("ID:")[-1].strip()
+        for line in output.splitlines()
+        if "ID:" in line
+    )
+
+
 # ---------------------------------------------------------------------------
 # claim add
 # ---------------------------------------------------------------------------
@@ -98,11 +107,7 @@ class TestClaimList:
 class TestClaimShow:
     def _add_and_get_id(self, runner: CliRunner, text: str) -> str:
         result = runner.invoke(cli, ["claim", "add", text], catch_exceptions=False)
-        return next(
-            line.split("ID:")[-1].strip()
-            for line in result.output.splitlines()
-            if "ID:" in line
-        )
+        return _extract_claim_id(result.output)
 
     def test_show_exits_0_for_existing_claim(self, tmp_path: Path) -> None:
         runner = CliRunner()
@@ -136,11 +141,7 @@ class TestClaimShow:
 class TestClaimUpdate:
     def _add_and_get_id(self, runner: CliRunner, text: str) -> str:
         result = runner.invoke(cli, ["claim", "add", text], catch_exceptions=False)
-        return next(
-            line.split("ID:")[-1].strip()
-            for line in result.output.splitlines()
-            if "ID:" in line
-        )
+        return _extract_claim_id(result.output)
 
     def test_update_status_exits_0(self, tmp_path: Path) -> None:
         runner = CliRunner()
@@ -288,11 +289,7 @@ class TestClaimValidate:
             self._ensure_xdg_key()
             add = runner.invoke(cli, ["claim", "add", "only one agent"],
                                 catch_exceptions=False)
-            claim_id = next(
-                line.split("ID:")[-1].strip()
-                for line in add.output.splitlines()
-                if "ID:" in line
-            )
+            claim_id = _extract_claim_id(add.output)
             result = runner.invoke(cli, ["claim", "validate", claim_id])
         assert result.exit_code == 1
         assert "REPLICATED" in result.output
@@ -510,11 +507,7 @@ class TestClaimCLISigningParity:
                 catch_exceptions=False,
             )
             assert result.exit_code == 0
-            claim_id = next(
-                line.split("ID:")[-1].strip()
-                for line in result.output.splitlines()
-                if "ID:" in line
-            )
+            claim_id = _extract_claim_id(result.output)
             show = runner.invoke(
                 cli, ["claim", "show", claim_id, "--json"],
                 catch_exceptions=False,
@@ -539,11 +532,7 @@ class TestClaimCLISigningParity:
                 catch_exceptions=False,
             )
             assert result.exit_code == 0
-            claim_id = next(
-                line.split("ID:")[-1].strip()
-                for line in result.output.splitlines()
-                if "ID:" in line
-            )
+            claim_id = _extract_claim_id(result.output)
             show = runner.invoke(
                 cli, ["claim", "show", claim_id, "--json"],
                 catch_exceptions=False,
@@ -563,11 +552,7 @@ class TestClaimCLISigningParity:
                 cli, ["claim", "add", "signed row"],
                 catch_exceptions=False,
             )
-            claim_id = next(
-                line.split("ID:")[-1].strip()
-                for line in add.output.splitlines()
-                if "ID:" in line
-            )
+            claim_id = _extract_claim_id(add.output)
             result = runner.invoke(
                 cli, ["claim", "update", claim_id, "--status", "contested"],
                 catch_exceptions=False,
@@ -594,11 +579,7 @@ class TestClaimCLISigningParity:
                 cli, ["claim", "add", "signed row"],
                 catch_exceptions=False,
             )
-            claim_id = next(
-                line.split("ID:")[-1].strip()
-                for line in add.output.splitlines()
-                if "ID:" in line
-            )
+            claim_id = _extract_claim_id(add.output)
             result = runner.invoke(
                 cli, ["claim", "update", claim_id, "--text", "tampered"],
             )

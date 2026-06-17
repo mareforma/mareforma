@@ -82,7 +82,7 @@ graph.proposition_status(proposition)   # derived Status + independence counts
 ```bash
 mareforma bootstrap            # generate Ed25519 signing key
 mareforma --help               # all subcommands
-mareforma ingest paper.md      # paper-abstract claim drafts (v0.3.3)
+mareforma ingest paper.md      # paper-abstract claim drafts
 ```
 
 Full API and CLI reference: [docs.mareforma.com](https://docs.mareforma.com). Opt-in components (DSSE signing, Sigstore-Rekor transparency, RFC 6962 inclusion proofs, DOI HEAD-checks against Crossref/DataCite, grounding sensors): see [AGENTS.md](AGENTS.md). Storage is local SQLite, WAL mode, ACID. Network calls only for the opt-ins above.

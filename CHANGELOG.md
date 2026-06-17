@@ -2,6 +2,74 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.5] - 2026-06-15
+
+The pre-registration split. v0.3.4 shipped the trust layer as a single
+`assert_finding` call. v0.3.5 separates the two earned steps of the
+hypothetico-deductive method: register the decision rule *before* the numbers
+are seen, then submit the outcome against it. This makes the plan → finding edge
+cryptographic. Additive only: no schema migration, schema stays at v1, and
+`assert_finding` / `assert_claim` keep working unchanged.
+
+### Added
+
+- **`EpistemicGraph.register_plan(proposition, prediction)`** — pre-register a
+  decision rule against a proposition. Registers the proposition, writes the
+  append-only `predictions` row with `preregistered=1`, and writes its own
+  signed claim (the **plan attestation**) via the normal `assert_claim` path
+  under idempotency key `plan:{plan_id}`. The plan claim is Rekor-anchorable
+  like any other claim (no special-casing). Idempotent: re-registering the same
+  prediction is a no-op on both the claim and the row. Returns the
+  content-addressed `plan_id`.
+- **`EpistemicGraph.submit_finding(proposition, prediction, estimate, *, data_id,
+  ...)`** — submit a finding against an already-registered plan. Computes the
+  `plan_id` and requires the plan to exist (else `NoRegisteredPlanError`),
+  computes the Bearing, and writes the finding's signed claim whose `supports[]`
+  cites the **plan attestation's claim_id**, so the plan → finding edge is
+  signed, not merely denormalised metadata. **Fork-guard:** a finding already
+  recorded for `(content_id, data_id)` but under a *different* `plan_id` raises
+  `FindingPlanForkError` rather than silently returning the prior bearing. The
+  authoritative existence check and the row writes run in one transaction (no
+  TOCTOU).
+- **`mareforma.trust` errors** `NoRegisteredPlanError` and `FindingPlanForkError`
+  (both subclass `TrustError`).
+- **`mareforma.trust` gates[] chain** — `Gate`, `gates_for(prediction)`, and
+  `evaluate_gates(estimate, gates)` re-express the DecisionRule as an ordered
+  short-circuit chain over the existing prediction columns. The single binary
+  gate shipped in v0.3.4 is the one-element chain; a one-element chain produces a
+  Bearing identical to `compute_bearing` for superiority and for equivalence/TOST
+  (parity-tested). A pure Python structure: no new schema column, no migration.
+
+### Changed
+
+- **`assert_finding` now composes `register_plan` + `submit_finding`
+  internally.** It synthesises a plan flagged `preregistered=0` (so a genuine
+  up-front pre-registration stays distinguishable from a one-shot) and delegates.
+  Its return shape, idempotency on `(content_id, data_id)`, atomicity, and
+  derived Status are all preserved unchanged.
+- **The previously-unused `predictions.preregistered` column is now set:** `1`
+  by `register_plan`, `0` by the plan `assert_finding` synthesises.
+- **`plan_id` is content-addressed over the prediction's identity fields,
+  excluding `preregistered`.** The flag is provenance about how a row was
+  created, not part of the decision rule's identity, so a finding binds to a
+  pre-registered plan regardless of the flag.
+- **`register_plan` and `submit_finding` emit to the health/activity log**
+  (`.mareforma/health.jsonl`), alongside the existing operational signals.
+
+### Notes
+
+- **Float determinism.** The gate compares floats (`p_value`, CI bounds,
+  `alpha`), but that is not a cross-host hazard: each IEEE-754 primitive op is a
+  single correctly-rounded result. Divergence risk comes from accumulated
+  computation (the pooling a meta-analysis does), which v0.3.5 does not perform.
+  The `abs(ci_level - expected_level) > 1e-9` check is a float-equality guard on
+  caller input, not a status-driving reduction: it never softens or flips a
+  bearing.
+- Single-line evidence model only. Multi-line evidence trees, per-line bearing,
+  pooling / I2 / tau2, GRADE certainty, and the deferred gate regimes
+  (multiplicity, magnitude bands, non-inferiority, dose-response, Bayesian) are
+  not in this release.
+
 ## [0.3.4] - 2026-06-11
 
 The trust layer: structured findings with a computed bearing and a derived

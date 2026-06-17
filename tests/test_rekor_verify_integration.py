@@ -14,13 +14,9 @@ known log key. Verifies:
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
-from pathlib import Path
 
 import pytest
-from cryptography.hazmat.primitives import hashes as crypto_hashes
-from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -34,17 +30,9 @@ _TEST_REKOR_URL = "https://rekor.test.example/api/v1/log/entries"
 # Reuse the Merkle helpers from the unit-test file.
 from tests._helpers import _bootstrap_key
 from tests.test_rekor_verify import (
-    _leaf_hash, _node_hash, _merkle_root, _merkle_inclusion_path,
+    _merkle_root, _merkle_inclusion_path,
     _sign_checkpoint_ed25519, _sign_checkpoint_ecdsa, _pubkey_pem,
 )
-
-
-def _hash_and_sig(envelope: dict) -> tuple[str, str]:
-    payload_bytes = base64.standard_b64decode(envelope["payload"])
-    return (
-        hashlib.sha256(payload_bytes).hexdigest(),
-        envelope["signatures"][0]["sig"],
-    )
 
 
 def _build_rekor_post_response(

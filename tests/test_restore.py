@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import base64
 import json
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -19,18 +18,12 @@ import pytest
 import mareforma
 from mareforma import db as _db
 from mareforma import signing as _signing
-from tests._helpers import _bootstrap_key
+from tests._helpers import _bootstrap_key, _pem_of
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _pem_of(key_path: Path) -> bytes:
-    return _signing.public_key_to_pem(
-        _signing.load_private_key(key_path).public_key(),
-    )
 
 
 def _build_full_graph(tmp_path: Path) -> dict:

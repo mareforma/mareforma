@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
+
 import pytest
 
 from mareforma._evidence import EvidenceVector, EvidenceVectorError
+from tests._helpers import _wipe_db
 
 
 # ---------------------------------------------------------------------------
@@ -28,7 +31,7 @@ class TestDefaults:
 
     def test_frozen(self) -> None:
         ev = EvidenceVector()
-        with pytest.raises(Exception):
+        with pytest.raises(FrozenInstanceError):
             ev.risk_of_bias = -1  # type: ignore[misc]
 
 
@@ -298,10 +301,7 @@ class TestAssertClaimEvidenceParameter:
                 },
             )
         # Wipe and restore.
-        for fname in ("graph.db", "graph.db-wal", "graph.db-shm"):
-            p = tmp_path / ".mareforma" / fname
-            if p.exists():
-                p.unlink()
+        _wipe_db(tmp_path)
         mareforma.restore(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as g:
             row = g.get_claim(cid)

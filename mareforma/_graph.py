@@ -827,6 +827,80 @@ class EpistemicGraph:
         with self._conn:
             return _store.register_proposition(self._conn, proposition, now)
 
+    def register_plan(
+        self,
+        proposition: "Proposition",
+        prediction: "Prediction",
+        *,
+        generated_by: str | None = None,
+    ) -> str:
+        """Pre-register a :class:`mareforma.trust.Prediction` against a proposition.
+
+        Binds the decision rule to the proposition *before the numbers are seen*
+        — the load-bearing move of the hypothetico-deductive method. Three
+        effects, idempotent together:
+
+        1. Registers the proposition (idempotent on ``content_id``).
+        2. Writes the append-only ``predictions`` row with ``preregistered=1``.
+        3. Writes its own signed claim — the **plan attestation** — via the
+           normal :meth:`assert_claim` path under idempotency key
+           ``plan:{plan_id}``, carrying a ``plan/v1`` predicate payload. This
+           claim is an ordinary signed claim, so it is Rekor-anchorable like any
+           other (no special-casing).
+
+        Returns the content-addressed ``plan_id`` (see
+        :func:`mareforma.trust._store.compute_plan_id`). Re-registering the same
+        prediction is a no-op: the claim's idempotency key returns the existing
+        attestation and both the proposition and prediction rows hit
+        ``ON CONFLICT DO NOTHING``, so no duplicate claim or row is written.
+
+        Raises :class:`NonFalsifiablePropositionError` for a proposition that
+        commits to no direction or has an empty scope.
+
+        The plan claim is committed before the structured rows (same ordering as
+        :meth:`assert_finding`); a retry reuses the claim idempotently rather
+        than orphaning it.
+        """
+        self._check_open()
+        from mareforma.db.core import _now
+        from mareforma.trust import NonFalsifiablePropositionError, _store
+
+        if not proposition.is_falsifiable():
+            raise NonFalsifiablePropositionError(
+                "proposition must commit to a direction and a non-empty scope; "
+                f"got direction={proposition.direction.value}, "
+                f"scope={dict(proposition.scope)!r}"
+            )
+
+        cid = proposition.content_id()
+        plan_id = _store.compute_plan_id(cid, prediction)
+
+        claim_id = self.assert_claim(
+            proposition.text(),
+            generated_by=generated_by,
+            idempotency_key=f"plan:{plan_id}",
+            predicate_payload={
+                "trust": "plan/v1",
+                "content_id": cid,
+                "frame_id": proposition.frame_id(),
+                "plan_id": plan_id,
+                **prediction.to_dict(),
+            },
+        )
+
+        now = _now()
+        with self._conn:
+            _store.register_proposition(self._conn, proposition, now)
+            _store.register_plan(
+                self._conn, cid, prediction, now, preregistered=True
+            )
+
+        from mareforma import health as _health
+        _health.append_health_event(
+            self._root, "register_plan", plan_claim=claim_id,
+        )
+        return plan_id
+
     def assert_finding(
         self,
         proposition: "Proposition",
@@ -862,6 +936,17 @@ class EpistemicGraph:
         validated Python values, so a failure there is not expected. If one did
         occur the claim would remain as an attestation with no finding, and a
         retry would reuse that claim idempotently rather than duplicate it.
+
+        One-shot convenience. Since v0.3.5 this composes the two earned steps
+        — it registers the proposition and a synthesised plan (``preregistered=0``,
+        so a real :meth:`register_plan` pre-registration stays distinguishable),
+        then delegates to :meth:`submit_finding`. The return shape, idempotency
+        on (``content_id``, ``data_id``), atomicity, and derived Status are all
+        preserved unchanged. A one-shot finding does not separately attest its
+        plan, so (matching the v0.3.4 one-shot) its signed ``supports[]`` carries
+        no plan edge; use the explicit :meth:`register_plan` /
+        :meth:`submit_finding` split when you want the signed plan -> finding
+        edge.
         """
         self._check_open()
         from mareforma.db.core import _now
@@ -869,6 +954,108 @@ class EpistemicGraph:
             Contrast,
             ControlType,
             EvidenceLine,
+            NonFalsifiablePropositionError,
+            _store,
+            compute_bearing,
+        )
+
+        if not proposition.is_falsifiable():
+            raise NonFalsifiablePropositionError(
+                "proposition must commit to a direction and a non-empty scope; "
+                f"got direction={proposition.direction.value}, "
+                f"scope={dict(proposition.scope)!r}"
+            )
+
+        # Validate the gate inputs (estimate/data_id consistency, then the gate)
+        # BEFORE writing anything, so a rejected one-shot finding leaves no
+        # dangling proposition/plan behind — preserving v0.3.4's all-or-nothing
+        # behaviour. submit_finding re-runs these cheaply; the duplication buys
+        # atomicity at the convenience layer.
+        ct = control_type if control_type is not None else ControlType.NEGATIVE
+        EvidenceLine(
+            estimate=estimate,
+            data_id=data_id,
+            contrast=Contrast(ct),
+            modality=modality,
+            provenance_id=provenance_id,
+            design_type=design_type,
+        )
+        compute_bearing(estimate, prediction)
+
+        cid = proposition.content_id()
+        # Synthesise the proposition + a non-pre-registered plan, then submit
+        # against them. preregistered=0 marks this as a one-shot rather than a
+        # genuine up-front pre-registration. ON CONFLICT DO NOTHING keeps it
+        # idempotent and never upgrades an existing pre-registered plan's flag.
+        now = _now()
+        with self._conn:
+            _store.register_proposition(self._conn, proposition, now)
+            _store.register_plan(
+                self._conn, cid, prediction, now, preregistered=False
+            )
+
+        return self.submit_finding(
+            proposition,
+            prediction,
+            estimate,
+            data_id=data_id,
+            generated_by=generated_by,
+            control_type=control_type,
+            modality=modality,
+            provenance_id=provenance_id,
+            design_type=design_type,
+            code_ref=code_ref,
+            idempotency_key=idempotency_key,
+        )
+
+    def submit_finding(
+        self,
+        proposition: "Proposition",
+        prediction: "Prediction",
+        estimate: "EffectEstimate",
+        *,
+        data_id: str,
+        generated_by: str | None = None,
+        control_type: "ControlType | str | None" = None,
+        modality: str | None = None,
+        provenance_id: str | None = None,
+        design_type: str | None = None,
+        code_ref: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict:
+        """Submit a finding against a plan that was already pre-registered.
+
+        The second half of the register-plan-then-submit split. Computes the
+        ``plan_id`` from the proposition + prediction and REQUIRES that plan to
+        already exist (via :meth:`register_plan`), else raises
+        :class:`NoRegisteredPlanError`. Then it computes the Bearing, writes the
+        finding's signed claim whose ``supports[]`` cites the plan attestation's
+        claim_id (so the plan -> finding edge is *signed*, not merely
+        denormalised), persists the single-line evidence tree, and derives the
+        proposition's Status.
+
+        Idempotent on (``content_id``, ``data_id``): re-submitting the same
+        dataset returns the prior finding. **Fork-guard:** if a finding already
+        exists for (``content_id``, ``data_id``) but under a *different* plan_id
+        than the prediction now passed, this raises
+        :class:`FindingPlanForkError` rather than silently returning the prior
+        bearing — a changed decision rule must not be swallowed by the
+        (``content_id``, ``data_id``) idempotency anchor.
+
+        All input validation (falsifiability, estimate consistency, the gate)
+        runs before the signed claim is written, so a rejected finding never
+        leaves an orphan claim. The authoritative existence check and the
+        structured-row writes run inside one transaction (no TOCTOU); a retry
+        reuses the finding claim idempotently rather than duplicating it.
+        """
+        self._check_open()
+        from mareforma.db.core import _now
+        from mareforma.trust import (
+            Contrast,
+            ControlType,
+            EvidenceLine,
+            FindingPlanForkError,
+            NoRegisteredPlanError,
             NonFalsifiablePropositionError,
             _store,
             compute_bearing,
@@ -895,9 +1082,31 @@ class EpistemicGraph:
         )
         bearing = compute_bearing(estimate, prediction)
         cid = proposition.content_id()
+        plan_id = _store.compute_plan_id(cid, prediction)
 
+        def _fork_error(existing_plan_id: str) -> FindingPlanForkError:
+            return FindingPlanForkError(
+                f"a finding for (content_id={cid[:12]}…, data_id={data_id!r}) "
+                f"already exists under plan {existing_plan_id[:12]}…, but the "
+                f"prediction now passed resolves to plan {plan_id[:12]}…. The "
+                "same dataset stands under exactly one plan for a proposition; "
+                "re-submitting under a changed rule is refused, not silently "
+                "ignored."
+            )
+
+        # Pre-flight (fast path, clean errors). The authoritative checks repeat
+        # in-transaction below to close the TOCTOU window.
         existing = _store.find_existing_finding(self._conn, cid, data_id)
         if existing is not None:
+            if existing["plan_id"] != plan_id:
+                raise _fork_error(existing["plan_id"])
+            # Emit here too, so an idempotent re-submit is logged whether it is
+            # detected on this fast path or in the in-transaction re-check.
+            from mareforma import health as _health
+            _health.append_health_event(
+                self._root, "submit_finding",
+                bearing=bearing.direction.value, idempotent=True,
+            )
             view = _store.proposition_status(self._conn, cid)
             return {
                 "finding_id": existing["finding_id"],
@@ -909,38 +1118,93 @@ class EpistemicGraph:
                 "idempotent": True,
                 "proposition_status": view,
             }
-
-        claim_id = self.assert_claim(
-            proposition.text(),
-            generated_by=generated_by,
-            idempotency_key=idempotency_key or f"finding:{cid}:{data_id}",
-            predicate_payload={
-                "trust": "finding/v1",
-                "content_id": cid,
-                "frame_id": proposition.frame_id(),
-                "data_id": data_id,
-                "code_ref": code_ref,
-                "bearing": bearing.direction.value,
-            },
-        )
-
-        now = _now()
-        with self._conn:
-            _store.register_proposition(self._conn, proposition, now)
-            plan_id = _store.register_plan(self._conn, cid, prediction, now)
-            finding_id = _store.insert_finding(
-                self._conn, cid, plan_id, claim_id, bearing, line, now
+        if not _store.plan_exists(self._conn, plan_id):
+            raise NoRegisteredPlanError(
+                f"no registered plan for (content_id={cid[:12]}…, "
+                f"plan_id={plan_id[:12]}…). Call register_plan(proposition, "
+                "prediction) before submit_finding, or use assert_finding for "
+                "the one-shot path that registers the plan for you."
             )
 
-        view = _store.proposition_status(self._conn, cid)
+        # Authoritative existence + fork + plan checks AND all writes run in one
+        # transaction (BEGIN IMMEDIATE). The finding claim is written INSIDE this
+        # transaction via assert_claim, which joins an open transaction
+        # (conn.in_transaction) rather than committing its own — so a fork or
+        # existence race that takes a non-insert branch rolls the claim back
+        # instead of stranding a committed, signed claim on the chain.
+        now = _now()
+        conn = self._conn
+        _own_txn = not conn.in_transaction
+        if _own_txn:
+            conn.execute("BEGIN IMMEDIATE")
+        try:
+            existing = _store.find_existing_finding(conn, cid, data_id)
+            if existing is not None:
+                if existing["plan_id"] != plan_id:
+                    raise _fork_error(existing["plan_id"])
+                finding_id = existing["finding_id"]
+                result_claim_id = existing["claim_id"]
+                idempotent = True
+            else:
+                if not _store.plan_exists(conn, plan_id):
+                    # The plan is append-only, so this is unreachable in practice;
+                    # the re-check keeps the FK insert from ever failing opaquely.
+                    raise NoRegisteredPlanError(
+                        f"plan {plan_id[:12]}… disappeared between check and write"
+                    )
+                # Cite the plan attestation in the finding's SIGNED supports[] so
+                # the plan -> finding edge is cryptographic, not just denormalised
+                # metadata. supports=None is correct for the one-shot assert_finding
+                # path, whose synthesised plan (preregistered=0) has no attestation
+                # claim; the signed edge exists only when register_plan wrote one.
+                plan_claim_id = _store.get_plan_claim_id(conn, plan_id)
+                supports = [plan_claim_id] if plan_claim_id else None
+                claim_id = self.assert_claim(
+                    proposition.text(),
+                    generated_by=generated_by,
+                    supports=supports,
+                    idempotency_key=idempotency_key or f"finding:{cid}:{data_id}",
+                    predicate_payload={
+                        "trust": "finding/v1",
+                        "content_id": cid,
+                        "frame_id": proposition.frame_id(),
+                        "plan_id": plan_id,
+                        "data_id": data_id,
+                        "code_ref": code_ref,
+                        "bearing": bearing.direction.value,
+                    },
+                )
+                finding_id = _store.insert_finding(
+                    conn, cid, plan_id, claim_id, bearing, line, now
+                )
+                result_claim_id = claim_id
+                idempotent = False
+            # Read the derived status inside the transaction so the returned dict
+            # is an isolated snapshot of the graph immediately after this write,
+            # not a post-commit read that a concurrent finding could have moved.
+            view = _store.proposition_status(conn, cid)
+            if _own_txn:
+                conn.commit()
+        except BaseException:
+            if _own_txn:
+                conn.rollback()
+            raise
+
+        from mareforma import health as _health
+        _health.append_health_event(
+            self._root, "submit_finding",
+            bearing=bearing.direction.value,
+            idempotent=idempotent,
+        )
+
         return {
             "finding_id": finding_id,
             "content_id": cid,
             "plan_id": plan_id,
-            "claim_id": claim_id,
+            "claim_id": result_claim_id,
             "bearing": bearing.to_dict(),
             "status": view["status"] if view else None,
-            "idempotent": False,
+            "idempotent": idempotent,
             "proposition_status": view,
         }
 
@@ -2180,7 +2444,7 @@ class EpistemicGraph:
             "SELECT COUNT(*) FROM claims WHERE signature_bundle IS NULL"
         )
 
-        # The column is part of the the current schema and ``open_db``
+        # The column is part of the current schema and ``open_db``
         # column-presence-checks every open, so any reachable conn
         # here has the column. No defensive try/except needed — a
         # missing column would mean a corrupt graph.db, which is the

@@ -21,11 +21,9 @@ Conceptual clusters:
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
-import mareforma
 from mareforma.adapters.gemini import (
     CODE_VARIATION_V1,
     HYPOTHESIS_V1,
@@ -35,15 +33,6 @@ from mareforma.adapters.gemini import (
     OutputIngester,
     SUPPORTED_CAPABILITIES,
 )
-
-
-@pytest.fixture()
-def graph(tmp_path: Path):
-    from mareforma import signing as _signing
-    key_path = tmp_path / "key"
-    _signing.bootstrap_key(key_path)
-    with mareforma.open(tmp_path, key_path=key_path) as g:
-        yield g
 
 
 # Reusable per-capability payload fixtures that satisfy REQUIRED_FIELDS.

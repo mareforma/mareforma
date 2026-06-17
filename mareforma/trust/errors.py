@@ -26,6 +26,29 @@ class NonFalsifiablePropositionError(TrustError):
     """
 
 
+class NoRegisteredPlanError(TrustError):
+    """A finding was submitted against a plan that was never registered.
+
+    Raised by :meth:`EpistemicGraph.submit_finding` when the plan_id computed
+    from the supplied proposition + prediction has no ``predictions`` row.
+    ``submit_finding`` requires the plan to be pre-registered first (via
+    :meth:`EpistemicGraph.register_plan`) so the prediction is bound before the
+    numbers are seen; the one-shot :meth:`EpistemicGraph.assert_finding` path
+    registers the plan for you and never raises this.
+    """
+
+
+class FindingPlanForkError(TrustError):
+    """A finding already exists for (content_id, data_id) under a different plan.
+
+    The finding idempotency anchor is (content_id, data_id), which is orthogonal
+    to plan_id. Re-submitting on the same dataset under a *changed* prediction
+    would silently return the prior bearing and quietly drop the new decision
+    rule. Rather than launder a fork, :meth:`EpistemicGraph.submit_finding`
+    raises: the same dataset can stand under exactly one plan for a proposition.
+    """
+
+
 class InconsistentEstimateError(TrustError):
     """An EffectEstimate failed an input-consistency check.
 

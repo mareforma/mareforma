@@ -9,9 +9,7 @@ distinguish "section absent (upgrade)" from "entry missing (suspicious)".
 from __future__ import annotations
 
 import json
-import shutil
 import warnings
-from pathlib import Path
 
 import pytest
 

@@ -31,6 +31,41 @@ HASH_A = hashlib.sha256(b"artifact-a").hexdigest()
 HASH_B = hashlib.sha256(b"artifact-b").hexdigest()
 
 
+class _MissingFirstSelect:
+    """A connection wrapper that forces the FIRST idempotency SELECT to
+    miss, then delegates everything else to the real connection.
+
+    Used to drive the race-recovery branch in ``assert_claim``: the
+    pre-INSERT idempotency probe returns nothing (as if no row existed),
+    so the INSERT proceeds and trips the UNIQUE constraint a concurrent
+    writer would have created.
+    """
+
+    def __init__(self, real):
+        self._real = real
+        self._missed = False
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def execute(self, sql, params=()):
+        if (
+            not self._missed
+            and "WHERE idempotency_key = ?" in sql
+            and "FROM claims" in sql
+        ):
+            self._missed = True
+            class _Empty:
+                def fetchone(_self):
+                    return None
+            return _Empty()
+        return self._real.execute(sql, params)
+
+    @property
+    def in_transaction(self):
+        return self._real.in_transaction
+
+
 # ---------------------------------------------------------------------------
 # Hash format validation
 # ---------------------------------------------------------------------------
@@ -477,31 +512,6 @@ class TestIdempotencyStrictContract:
 
         # Re-open and force the FIRST idempotency SELECT to miss, then
         # let the INSERT proceed to trip UNIQUE.
-        class _MissingFirstSelect:
-            def __init__(self, real):
-                self._real = real
-                self._missed = False
-
-            def __getattr__(self, name):
-                return getattr(self._real, name)
-
-            def execute(self, sql, params=()):
-                if (
-                    not self._missed
-                    and "WHERE idempotency_key = ?" in sql
-                    and "FROM claims" in sql
-                ):
-                    self._missed = True
-                    class _Empty:
-                        def fetchone(_self):
-                            return None
-                    return _Empty()
-                return self._real.execute(sql, params)
-
-            @property
-            def in_transaction(self):
-                return self._real.in_transaction
-
         with mareforma.open(tmp_path) as g:
             real_conn = g._conn
             wrapped = _MissingFirstSelect(real_conn)
@@ -524,31 +534,6 @@ class TestIdempotencyStrictContract:
                 classification="ANALYTICAL", generated_by="lab/a",
                 source_name="dataset_alpha",
             )
-
-        class _MissingFirstSelect:
-            def __init__(self, real):
-                self._real = real
-                self._missed = False
-
-            def __getattr__(self, name):
-                return getattr(self._real, name)
-
-            def execute(self, sql, params=()):
-                if (
-                    not self._missed
-                    and "WHERE idempotency_key = ?" in sql
-                    and "FROM claims" in sql
-                ):
-                    self._missed = True
-                    class _Empty:
-                        def fetchone(_self):
-                            return None
-                    return _Empty()
-                return self._real.execute(sql, params)
-
-            @property
-            def in_transaction(self):
-                return self._real.in_transaction
 
         with mareforma.open(tmp_path) as g:
             monkeypatch.setattr(g, "_conn", _MissingFirstSelect(g._conn))

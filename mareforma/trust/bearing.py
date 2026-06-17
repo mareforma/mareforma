@@ -3,8 +3,17 @@
 The bearing is computed from the pre-registered rule and the realised outcome,
 never declared, so an agent cannot relabel a refutation as support. Both gates
 are closed-form CI / p-value arithmetic derived from first principles: no
-GPL/Cochrane code is transcribed, and there is no iterative estimation (hence no
-cross-host float-determinism problem).
+GPL/Cochrane code is transcribed.
+
+On determinism: the gate DOES compare floats (``p_value``, the CI bounds,
+``alpha``). That is not a cross-host hazard — IEEE-754 specifies each primitive
+operation (compare, add, multiply by 2.0) as a single correctly-rounded result,
+so the comparisons here yield the same answer on any conformant host. The real
+divergence risk is *accumulated* or *transcendental* computation — the kind of
+iterative pooling / variance estimation a meta-analysis does — where rounding
+compounds and library math functions are not bit-identical across platforms.
+v0.3.5 does none of that: there is no pooling, no I2/tau2, no transcendental
+math in the gate, so the bearing is reproducible across hosts.
 """
 from __future__ import annotations
 
@@ -84,6 +93,10 @@ def _superiority(estimate: EffectEstimate, prediction: Prediction) -> Bearing:
         # matches a one-sided p < alpha. __post_init__ guarantees a full CI
         # triple exists when p_value is None.
         expected_level = 1.0 - 2.0 * prediction.alpha
+        # The 1e-9 tolerance is a float-equality GUARD on caller-supplied input
+        # (it tolerates 0.90 vs 0.9000000001), not a status-driving reduction:
+        # it never softens or flips a bearing, it only rejects a CI reported at
+        # the wrong confidence level before the gate runs.
         if abs(estimate.ci_level - expected_level) > 1e-9:
             raise InconsistentEstimateError(
                 "superiority significance from a confidence interval requires a "

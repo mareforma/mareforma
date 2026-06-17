@@ -32,11 +32,6 @@ class TestContent:
         assert "10.1234/study-a-2024" in md
         assert "10.5678/study-b-2025" in md
 
-    def test_contains_doi(self, populated_db):
-        from mareforma.exporters.narrative import export_narrative
-        md = export_narrative(populated_db)
-        assert "10.1234/study-a-2024" in md
-
     def test_contains_claim_text(self, populated_db):
         from mareforma.exporters.narrative import export_narrative
         md = export_narrative(populated_db)

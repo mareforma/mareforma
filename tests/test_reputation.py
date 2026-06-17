@@ -10,23 +10,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 import mareforma
-from mareforma import db as _db
 from mareforma import signing as _signing
-from tests._helpers import _bootstrap_key
-
-
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
-
-
-def _pem_of(key_path: Path) -> bytes:
-    return _signing.public_key_to_pem(
-        _signing.load_private_key(key_path).public_key(),
-    )
+from tests._helpers import _bootstrap_key, _pem_of
 
 
 # ---------------------------------------------------------------------------

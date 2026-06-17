@@ -11,21 +11,7 @@ Conceptual clusters:
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import pytest
-
-import mareforma
 from mareforma.predicate_types import TOOL_CALL_V1
-
-
-@pytest.fixture()
-def graph(tmp_path: Path):
-    from mareforma import signing as _signing
-    key_path = tmp_path / "key"
-    _signing.bootstrap_key(key_path)
-    with mareforma.open(tmp_path, key_path=key_path) as g:
-        yield g
 
 
 class TestUriForm:

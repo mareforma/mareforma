@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import hashlib
 
+import httpx
 import pytest
 from cryptography.hazmat.primitives import hashes as crypto_hashes
 from cryptography.hazmat.primitives import serialization
@@ -661,31 +662,41 @@ class TestM4UuidValidation:
             )
         assert exc_info.value.reason == "malformed_proof"
 
-    def test_uuid_hex_with_tree_id_accepted(self) -> None:
+    def test_uuid_hex_with_tree_id_accepted(self, monkeypatch) -> None:
         """The tree-id-prefixed form ``<treehex>-<entryhex>`` is the
-        Rekor shard-aware uuid shape and must NOT be rejected by the
-        validator."""
-        # Construct a valid hex tree-id-prefixed uuid; the actual
-        # network call will fail (no mock) — we only test that it
-        # passes the regex.
-        import httpx as _httpx
-        try:
+        Rekor shard-aware uuid shape and must pass the validator's uuid
+        regex — it should reach the HTTP fetch, not be refused as
+        malformed.
+
+        The HTTP layer is mocked so the test isolates the regex decision:
+        an accepted uuid calls ``httpx.stream`` with the uuid appended to
+        the fetch URL; a rejected one raises ``malformed_proof`` before any
+        network attempt, so ``stream`` would never be called.
+        """
+        valid_uuid = "1234567890abcdef-fedcba0987654321"
+        seen: dict[str, str] = {}
+
+        def fake_stream(method, url, **kwargs):
+            seen["url"] = url
+            raise httpx.ConnectError("network disabled in test")
+
+        monkeypatch.setattr(
+            "mareforma.signing.rekor.httpx.stream", fake_stream,
+        )
+
+        with pytest.raises(_signing.RekorInclusionError) as exc_info:
             _signing.fetch_inclusion_proof(
-                "1234567890abcdef-fedcba0987654321",
+                valid_uuid,
                 "https://rekor.test.example/api/v1/log/entries",
             )
-        except _signing.RekorInclusionError as exc:
-            # Must be a network failure (missing_proof), not a
-            # malformed_proof from regex refusal.
-            assert exc.reason in ("missing_proof", "malformed_proof"), (
-                f"expected network failure, got reason={exc.reason!r}"
-            )
-            # If it's malformed_proof, it must not be from the uuid
-            # regex — message text should NOT mention uuid format.
-            if exc.reason == "malformed_proof":
-                assert "hex string" not in str(exc), (
-                    f"valid tree-id uuid was rejected by regex: {exc}"
-                )
+        # The regex accepted the uuid: the fetch was reached with the uuid
+        # appended, and the only failure is the mocked network error —
+        # a regex refusal would never call stream and would carry
+        # reason "malformed_proof".
+        assert seen["url"] == (
+            "https://rekor.test.example/api/v1/log/entries/" + valid_uuid
+        )
+        assert exc_info.value.reason == "missing_proof"
 
 
 class TestL1RekorUrlRevalidation:
