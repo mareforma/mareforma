@@ -1211,6 +1211,7 @@ def add_claim(
         _maybe_update_replicated(
             conn, claim_id, supports or [], generated_by, artifact_hash,
             on_error=on_convergence_error,
+            own_transaction=_own_transaction,
         )
 
     _backup_claims_toml(conn, root)
@@ -1342,6 +1343,8 @@ def _maybe_update_replicated(
     generated_by: str,
     artifact_hash: str | None = None,
     on_error: "Callable[[Exception], None] | None" = None,
+    *,
+    own_transaction: bool = True,
 ) -> bool:
     """Promote claims to REPLICATED when convergence is detected.
 
@@ -1352,6 +1355,13 @@ def _maybe_update_replicated(
     Called immediately after a successful INSERT in add_claim().
     Failures are swallowed — convergence detection must not crash writes.
 
+    ``own_transaction`` mirrors ``add_claim``'s flag: when ``False`` the caller
+    already holds an open transaction (e.g. ``submit_finding``'s BEGIN
+    IMMEDIATE), so this helper makes its convergence + retry-flag writes but
+    does NOT commit — the caller's outer commit flushes them, keeping the
+    claim INSERT and the finding write atomic. Committing here would strand a
+    signed claim if a later step in the caller's transaction rolls back.
+
     Returns ``True`` if detection ran cleanly, ``False`` if a SQLite
     error was swallowed. When ``on_error`` is supplied, the exception is
     handed to that callback before the WARNING is logged — caller can
@@ -1361,7 +1371,8 @@ def _maybe_update_replicated(
         _maybe_update_replicated_unlocked(
             conn, new_claim_id, supports, generated_by, artifact_hash,
         )
-        conn.commit()
+        if own_transaction:
+            conn.commit()
         return True
     except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
         # Convergence detection is best-effort — never crash a write.
@@ -1388,12 +1399,14 @@ def _maybe_update_replicated(
                 "WHERE claim_id = ?",
                 (new_claim_id,),
             )
-            conn.commit()
+            if own_transaction:
+                conn.commit()
         except (sqlite3.OperationalError, sqlite3.IntegrityError):
             # If even the retry-flag UPDATE fails mareforma is in a
             # worse state than this helper can paper over. Log it, but
-            # do not propagate — the originating write already committed
-            # and the WARNING below makes the failure visible.
+            # do not propagate — when we own the transaction the originating
+            # write already committed; when we don't, the caller's rollback
+            # cleans up. The WARNING below makes the failure visible.
             pass
         import logging
         logging.getLogger("mareforma").warning(

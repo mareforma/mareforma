@@ -241,6 +241,38 @@ class TestSubmitFinding:
         # The refused fork wrote no claim: the transaction rolled it back.
         assert after == before
 
+    def test_post_claim_write_failure_rolls_back_claim(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A failure AFTER the signed claim is written (here: insert_finding
+        raises) must roll the claim back, not leave it committed and stranded.
+        Regression: convergence detection used to commit the claim
+        mid-transaction, so submit_finding's rollback was a no-op for it."""
+        h = _prop(Direction.DECREASES)
+        pred = _superiority()
+        with open_graph(tmp_path) as graph:
+            graph.register_plan(h, pred)
+            before = graph._conn.execute(
+                "SELECT COUNT(*) FROM claims"
+            ).fetchone()[0]
+
+            def boom(*args, **kwargs):
+                raise RuntimeError("simulated failure after the claim write")
+
+            monkeypatch.setattr(_store, "insert_finding", boom)
+            with pytest.raises(RuntimeError, match="after the claim write"):
+                graph.submit_finding(
+                    h, pred, _smd(-2.6, p=0.003),
+                    data_id="dataA", generated_by="lab_a",
+                )
+            monkeypatch.undo()
+            after = graph._conn.execute(
+                "SELECT COUNT(*) FROM claims"
+            ).fetchone()[0]
+        # The claim was written inside submit_finding's transaction; the
+        # post-write failure rolled it back rather than committing under it.
+        assert after == before
+
 
 class TestSignedEdgeRoundTrip:
     def test_plan_to_finding_supports_edge_verifies(self, tmp_path: Path) -> None:
