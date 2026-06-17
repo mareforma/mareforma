@@ -6,12 +6,15 @@ durable stored inputs (stamped :data:`STATUS_POLICY`), never baked into the
 schema. Improving the rule later is a new policy over the same data, not a
 migration.
 
-Independence is a distinct-artifact heuristic, not proof: two single-line
-findings count as independent support iff their ``data_id`` differs. A
-**refute line** is a finding on the SAME ``content_id`` whose computed
-``Bearing.direction == refutes``. The counts the state machine reads are
-``independent_support`` (distinct ``data_id`` over supporting lines) and
-``independent_refute`` (distinct ``data_id`` over refuting lines).
+Independence is a distinct-run heuristic, not proof: two supporting lines count
+as independent support iff they come from different runs (``generated_by``) AND
+different datasets (``data_id``). One run contributes at most one independent
+support (so a single run cannot self-certify) and at most one independent refute;
+re-running the identical dataset under a new run token adds nothing. A **refute
+line** is an evidence line whose recomputed ``Bearing.direction == refutes``. The
+counts the state machine reads are ``independent_support`` and
+``independent_refute``, both computed run-distinct (see
+:func:`mareforma.trust._store.independence_counts`).
 
 REFUTED / CONTESTED are derived labels, not auto-refutation: a REFUTED status
 means "no surviving independent support," not "this proposition is false."
@@ -24,7 +27,7 @@ from enum import Enum
 # when the status computation itself changes, not on every release. A finding's
 # Status carries the policy that computed it, so a later policy change stays
 # identifiable on old rows.
-STATUS_POLICY = "status_policy@v1"
+STATUS_POLICY = "status_policy@v2"
 
 
 class Status(str, Enum):
