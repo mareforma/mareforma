@@ -2444,7 +2444,7 @@ class EpistemicGraph:
             "SELECT COUNT(*) FROM claims WHERE signature_bundle IS NULL"
         )
 
-        # The column is part of the the current schema and ``open_db``
+        # The column is part of the current schema and ``open_db``
         # column-presence-checks every open, so any reachable conn
         # here has the column. No defensive try/except needed — a
         # missing column would mean a corrupt graph.db, which is the

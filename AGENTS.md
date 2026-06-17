@@ -77,7 +77,7 @@ different key by a concurrent ... call")`. Without an explicit key,
 mareforma trusts only the submit-time response binding (it
 confirms the returned entry records OUR hash + OUR signature; the
 residual "log forked after submit" risk is the documented opt-out
-posture in README "Limits of the Rekor integration").
+posture; see "RFC 6962 inclusion-proof verification" below).
 
 ```python
 graph = mareforma.open()                                # cwd, unsigned if no key
@@ -256,7 +256,7 @@ Single-call audit summary. Returns
 "convergence_retry_pending"}` — int counts aggregating existing
 core surfaces. Pure observability, no side effects.
 
-A "healthy" graph has zeros across the four drift counters
+A "healthy" graph has zeros across the five drift counters
 (`unsigned_claims`, `unresolved_claims`, `dangling_supports`,
 `convergence_errors`, `convergence_retry_pending`). Non-zero values
 do not by themselves indicate a defect — they indicate something
@@ -494,7 +494,7 @@ Methods: `register_proposition(proposition)`,
 `assert_finding(proposition, prediction, estimate, *, data_id, ...)`,
 `proposition_status(proposition_or_content_id)`, `get_proposition(content_id)`,
 `query_frame(frame_id_or_proposition, *, min_status=None)`. `assert_finding` is
-idempotent on `(content_id, data_id)`. Since v0.3.5 you can split the one-shot
+idempotent on `(content_id, data_id)`. You can split the one-shot
 into its two earned steps: `register_plan` pre-registers the decision rule
 (writing its own signed plan attestation) before the numbers are seen, then
 `submit_finding` binds the outcome to that plan and signs the plan → finding
@@ -642,8 +642,8 @@ silently clobber each other. Verification failure raises
 `RekorInclusionError` with a stable `.reason` token (`missing_proof`,
 `malformed_proof`, `merkle_root_mismatch`, `checkpoint_bad_sig`,
 `checkpoint_root_mismatch`, `unsupported_key`, ...) so callers can
-pattern-match on failure modes without parsing English. Since v0.3.2
-the `rekor_inclusions` sidecar round-trips through `claims.toml` —
+pattern-match on failure modes without parsing English. The
+`rekor_inclusions` sidecar round-trips through `claims.toml`.
 `restore()` replays entries and (when `rekor_log_pubkey_pem` is
 supplied) re-verifies each inclusion proof against the pinned key.
 Pre-v0.3.2 TOML files restore with a `RekorSidecarSectionAbsentWarning`;
@@ -1377,7 +1377,7 @@ runs; string values flow through `sanitize_for_llm`; reserved keys
 (`predicate_type`, `capability`) are adapter-owned and a caller
 that tries to set them in `payload` raises `ValueError`.
 
-## Core primitives (v0.3.3)
+## Core primitives
 
 Two adjacent primitives ship in core for adapter authors:
 
@@ -1444,8 +1444,9 @@ mareforma narrative -o out.md    # Markdown summary, ⚠ contradiction flags
 
 The `--db` flag accepts the full path to the `graph.db` file
 (`mareforma.db.open_db_from_db_path` honours the supplied filename
-instead of re-deriving `.mareforma/graph.db`). Existing v0.3.2 graphs
-auto-create the new tables on next `open_db()` without a schema bump.
+instead of re-deriving `.mareforma/graph.db`). Existing graphs
+auto-create any missing additive tables on next `open_db()` without a
+schema bump.
 
 ---
 

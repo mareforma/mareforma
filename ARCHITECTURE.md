@@ -144,7 +144,10 @@ Three rules:
 1. **The bearing is computed, not declared.** `compute_bearing(estimate, prediction)`
    in [`mareforma/trust/bearing.py`](mareforma/trust/bearing.py) returns
    supports / refutes / neutral from the pre-registered rule and the realised
-   numbers. An agent cannot relabel a refutation as support.
+   numbers. An agent cannot relabel a refutation as support. The rule is also
+   expressible as an ordered short-circuit `gates[]` chain (`gates_for`,
+   `evaluate_gates`) over the existing prediction columns; the single binary
+   gate is the one-element chain, bearing-identical to `compute_bearing`.
 2. **Status is a count over independent data.** `compute_status` in
    [`mareforma/trust/status.py`](mareforma/trust/status.py) reads distinct
    `data_id` counts (UNTESTED, PRELIMINARY, CORROBORATED, REFUTED, CONTESTED).
@@ -156,10 +159,14 @@ Three rules:
    truth conditions collapse to one node; contrary directions on a shared frame
    contradict.
 
-The graph methods (`register_proposition`, `assert_finding`, `proposition_status`,
-`query_frame`) live in [`mareforma/_graph.py`](mareforma/_graph.py); the SQL is
-in [`mareforma/trust/_store.py`](mareforma/trust/_store.py) and the six tables in
-`db/_schema_sql.py`.
+The graph methods (`register_proposition`, `register_plan`, `submit_finding`,
+`assert_finding`, `proposition_status`, `query_frame`) live in
+[`mareforma/_graph.py`](mareforma/_graph.py); the SQL is in
+[`mareforma/trust/_store.py`](mareforma/trust/_store.py) and the six tables in
+`db/_schema_sql.py`. `register_plan` pre-registers the decision rule as its own
+signed plan attestation before the numbers are seen, and `submit_finding` binds
+an outcome to it, signing the plan → finding edge into the finding claim's
+`supports[]`; `assert_finding` is the one-shot that composes both.
 
 ## Contestation model
 
@@ -208,9 +215,10 @@ which preserves each row's `signature_bundle` field.
 `canonicalize` (in [`mareforma/_canonical.py`](mareforma/_canonical.py))
 normalizes every string in the payload to Unicode NFC, then serializes
 via the `rfc8785` library — a strict implementation of RFC 8785 (JSON
-Canonicalization Scheme, JCS). The dependency was added currently;
-prior versions used `json.dumps(sort_keys=True, ...)` and were only
-JCS-shaped, not JCS-strict.
+Canonicalization Scheme, JCS). The `rfc8785` dependency is what makes
+the output JCS-strict; earlier the code used
+`json.dumps(sort_keys=True, ...)`, which was only JCS-shaped, not
+JCS-strict.
 
 What strict JCS gets us:
 
@@ -281,6 +289,15 @@ Tables:
   `content=` linked) for substring + tokenized search.
 - `doi_cache` — 30-day positive / 24-hour negative cache for DOI HEAD
   checks against Crossref + DataCite.
+- `literature_claims`: paper-abstract claim drafts from `mareforma
+  ingest`, kept separate from the signed `claims` table so ingested
+  assertions stay drafts pending review.
+- `agent_activities`: `prov:Activity` rows written by the
+  `mareforma.hooks` Claude Code PreToolUse recorder.
+
+The six trust-layer tables (`propositions`, `predictions`, `findings`,
+`evidence_lines`, `contrasts`, `effect_estimates`) are described in the
+Trust layer section above.
 
 SQL triggers enforce the state machine, the append-only invariants on
 signed predicate fields, the no-delete rule on signed claims, the
@@ -327,16 +344,14 @@ inclusion proof verification is itself on the deferred-features backlog.
 from `claims.toml`. The next mutation rewrites the TOML from current DB
 state, so the crash window closes on the next successful write. For a
 clean recovery snapshot, finish any in-flight writes before snapshotting
-the TOML. The perf rewrite addresses both the foreground-commit-
-path cost and the crash gap by moving to an append-only sidecar +
-periodic compaction model.
+the TOML.
 
 ## Mareforma at a glance
 
 A 30-minute audit map. Each row links a mareforma property to the
 exact mechanism that enforces it and the specific threat it
 defends against. Designed for the reader who wants to verify
-mareforma's invariants without scrolling through 4,600 lines of
+mareforma's invariants without scrolling through thousands of lines of
 `db/core.py`.
 
 ### State-machine transitions
@@ -514,20 +529,18 @@ have no dependency on any adapter; an adapter that disappears does
 not break the contracts. URI constants live in
 `mareforma.predicate_types`: a single source of truth for the URIs
 the core reserves, re-exported at the top level for
-ergonomics. The five core primitives shipped in v0.3.3
-(events, canonicalize, tools, derivation, hooks) each follow the
-same core-first rule.
+ergonomics. The five core primitives (events, canonicalize, tools,
+derivation, hooks) each follow the same core-first rule.
 
 The intentionally-deferred adapters (the full per-surface Gemini
 producers, a federation bundle exporter, an MCP server) sit one
-altitude up: they need richer platform integration than v0.3.3
-ships. v0.3.3 ships the framework + three adapters; the rest
+altitude up: they need richer platform integration than the core
+provides. The core ships the framework + three adapters; the rest
 follows adoption signal.
 
 ## Honest scope
 
-Read [`README.md`](README.md#what-mareforma-is-not) for the bulleted
-"What mareforma is NOT" honesty section. The short version: trust is
+What mareforma is NOT: trust is
 local to a project's enrolled validators; `classification` and
 `generated_by` are self-declared (mareforma is no stronger than
 agent discipline); Rekor inclusion is logged-not-proof-verified; DOIs
