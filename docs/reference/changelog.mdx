@@ -6,6 +6,45 @@ description: "Notable changes across Mareforma releases."
 The authoritative changelog lives in [CHANGELOG.md](https://github.com/mareforma/mareforma/blob/main/CHANGELOG.md).
 This page mirrors it.
 
+## v0.3.5 - 2026-06-15
+
+The pre-registration split. v0.3.4 shipped the trust layer as a single
+`assert_finding` call. v0.3.5 separates the two earned steps of the
+hypothetico-deductive method: register the decision rule *before* the numbers
+are seen, then submit the outcome against it. The plan → finding edge becomes
+cryptographic. Additive only: no schema migration, schema stays at v1, and
+`assert_finding` / `assert_claim` keep working unchanged. See
+[Findings](/concepts/findings).
+
+### Added
+
+- `EpistemicGraph.register_plan(proposition, prediction)`: pre-register a
+  decision rule. Writes the `predictions` row (`preregistered=1`) and its own
+  signed **plan attestation** claim under idempotency key `plan:{plan_id}`,
+  Rekor-anchorable like any other claim. Idempotent. Returns the
+  content-addressed `plan_id`.
+- `EpistemicGraph.submit_finding(proposition, prediction, estimate, *, data_id, ...)`:
+  submit a finding against an already-registered plan. Requires the plan to
+  exist (`NoRegisteredPlanError`), computes the bearing, and writes the
+  finding's signed claim whose `supports[]` cites the plan attestation, so the
+  plan → finding edge is signed, not denormalised metadata. A finding already
+  recorded for `(content_id, data_id)` under a *different* `plan_id` raises
+  `FindingPlanForkError`.
+- `mareforma.trust` errors `NoRegisteredPlanError` and `FindingPlanForkError`.
+- `mareforma.trust` gates chain: `Gate`, `gates_for(prediction)`, and
+  `evaluate_gates(estimate, gates)` re-express the decision rule as an ordered
+  short-circuit chain over the existing prediction columns. A one-element chain
+  is bearing-identical to `compute_bearing`. Pure Python, no new schema column.
+
+### Changed
+
+- `assert_finding` now composes `register_plan` + `submit_finding` internally.
+  Its synthesised plan is flagged `preregistered=0`, so a genuine up-front
+  pre-registration stays distinguishable from a one-shot. Return shape,
+  idempotency on `(content_id, data_id)`, atomicity, and derived status are
+  unchanged.
+- `register_plan` and `submit_finding` emit to the health/activity log.
+
 ## v0.3.4 - 2026-06-11
 
 The trust layer: structured findings with a computed bearing and a derived

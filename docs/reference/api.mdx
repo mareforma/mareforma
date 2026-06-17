@@ -673,7 +673,7 @@ from mareforma.validators import InvalidIdentityError, ValidatorAlreadyEnrolledE
 from mareforma.export_bundle import BundleVerificationError
 ```
 
-Every exception is also re-exported at the top level (since v0.3.0) so
+Every exception is also re-exported at the top level so
 catching looks like `from mareforma import RekorInclusionError`.
 
 | Exception | Module | Raised by | Meaning |
@@ -861,6 +861,7 @@ from mareforma.trust import (
     Prediction, TestType, DirectionOfInterest, InferenceRegime,
     EffectEstimate, EffectType, Scale, ControlType, Contrast, EvidenceLine,
     Bearing, BearingDirection, compute_bearing,
+    Gate, gates_for, evaluate_gates,
     Status, FrameStatus, compute_status, compute_frame_status, STATUS_POLICY,
     null_value,
 )
@@ -918,6 +919,11 @@ is `BearingDirection.SUPPORTS` / `REFUTES` / `NEUTRAL`. Raises
 (e.g. an equivalence test with no CI, or a CI at the wrong level for the
 prediction's alpha).
 
+`gates_for(prediction)` returns the same decision rule as an ordered
+short-circuit `gates[]` chain, and `evaluate_gates(estimate, gates)` runs it.
+A one-element chain is bearing-identical to `compute_bearing`; a multi-gate
+chain raises `NotImplementedError` until its precedence is designed.
+
 #### `compute_status(independent_support, independent_refute) -> Status`
 
 The state machine: `UNTESTED` (0, 0); `CONTESTED` (≥1 support and ≥1 refute);
@@ -928,7 +934,7 @@ has ≥1 independent supporting line, else `CONSISTENT`. `STATUS_POLICY` is the
 policy stamp (`"status_policy@v1"`), independent of the package version.
 
 Errors: `TrustError` (base), `NonFalsifiablePropositionError`,
-`InconsistentEstimateError`.
+`InconsistentEstimateError`, `NoRegisteredPlanError`, `FindingPlanForkError`.
 
 ### EpistemicGraph trust methods
 
@@ -937,6 +943,27 @@ Errors: `TrustError` (base), `NonFalsifiablePropositionError`,
 Register a falsifiable `Proposition`; returns its `content_id`. Idempotent on
 `content_id`. Raises `NonFalsifiablePropositionError` if the proposition has no
 direction or an empty scope.
+
+#### `register_plan(proposition, prediction, *, generated_by=None) -> str`
+
+Pre-register a decision rule against a proposition, *before* the numbers are
+seen. Registers the proposition, writes the `predictions` row with
+`preregistered=1`, and writes its own signed **plan attestation** claim (under
+idempotency key `plan:{plan_id}`, Rekor-anchorable like any other claim).
+Returns the content-addressed `plan_id`. Idempotent: re-registering the same
+prediction is a no-op on both the row and the claim. Raises
+`NonFalsifiablePropositionError` on a non-falsifiable proposition.
+
+#### `submit_finding(proposition, prediction, estimate, *, data_id, generated_by=None, control_type=None, modality=None, provenance_id=None, design_type=None, code_ref=None, idempotency_key=None) -> dict`
+
+Submit a finding against an already-registered plan. Same shape and return as
+`assert_finding`, with one difference: the plan must already exist (else
+`NoRegisteredPlanError`), and the finding's signed `supports[]` cites the plan
+attestation's `claim_id`, so the plan → finding edge is cryptographic, not
+denormalised metadata. A finding already recorded for `(content_id, data_id)`
+under a *different* `plan_id` raises `FindingPlanForkError` rather than silently
+returning the prior bearing. The existence check and the writes run in one
+transaction.
 
 #### `assert_finding(proposition, prediction, estimate, *, data_id, generated_by=None, control_type=None, modality=None, provenance_id=None, design_type=None, code_ref=None, idempotency_key=None) -> dict`
 
@@ -961,6 +988,10 @@ dataset returns the prior finding rather than double-counting it. All validation
 runs **before** the signed claim is written, so a rejected finding never leaves
 an orphan claim. Raises `NonFalsifiablePropositionError` /
 `InconsistentEstimateError` on bad input.
+
+The one-shot composes `register_plan` + `submit_finding` internally; its
+synthesised plan is flagged `preregistered=0`, so a genuine up-front
+pre-registration via `register_plan` stays distinguishable from it.
 
 #### `proposition_status(proposition_or_content_id) -> dict | None`
 

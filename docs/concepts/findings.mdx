@@ -197,6 +197,28 @@ graph.proposition_status(prop)["status"]   # "CORROBORATED"
 finding on the same dataset returns the prior finding rather than double-counting
 it.
 
+### Pre-registering the plan
+
+`assert_finding` is the one-shot. When the pre-registration should be real (the
+decision rule committed and signed *before* the numbers exist), split it into
+its two earned steps:
+
+```python
+plan_id = graph.register_plan(prop, plan, generated_by="analyst/model-a/lab_a")
+# ... run the procedure, obtain the estimate ...
+result = graph.submit_finding(prop, plan, est, data_id="dataset_alpha",
+                              generated_by="analyst/model-a/lab_a")
+```
+
+`register_plan` writes the prediction with `preregistered=1` and a signed **plan
+attestation** claim of its own. `submit_finding` then binds the outcome to that
+plan: the finding's signed `supports[]` cites the plan attestation, so the
+plan → finding edge is cryptographic rather than denormalised metadata. The gap
+between committing the rule and seeing the result becomes a verifiable
+pre-registration, not a convention. `assert_finding` composes both in one call
+and flags its synthesised plan `preregistered=0`, so a genuine up-front
+pre-registration stays distinguishable from a one-shot.
+
 ## How this relates to support levels
 
 The two layers answer different questions and run side by side:
