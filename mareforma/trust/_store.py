@@ -16,7 +16,6 @@ from typing import Optional
 from mareforma._canonical import canonicalize
 
 from .bearing import Bearing, BearingDirection, compute_bearing
-from .errors import InconsistentEstimateError
 from .estimate import EffectEstimate, EvidenceLine
 from .prediction import Prediction
 from .proposition import Direction, Proposition
@@ -330,9 +329,15 @@ def independence_counts(conn: sqlite3.Connection, content_id: str) -> tuple[int,
     for r in rows:
         # Recompute the per-line bearing from stored inputs. Every row written by
         # submit_finding was gated at write, so this is total for normal data. A
-        # row that no longer gates (drift, or a direct/foreign writer) is skipped
-        # rather than allowed to raise: one un-gateable line must not deny reads
-        # for the whole proposition (and its frame's contraries).
+        # row that no longer reconstructs into a gateable bearing (drift,
+        # corruption, or a direct/foreign writer landing a non-numeric column) is
+        # skipped rather than allowed to raise: one un-gateable line must not deny
+        # reads for the whole proposition (and its frame's contraries). The catch
+        # is broad on purpose: the failure can surface as ValueError (enum / range),
+        # TypeError (non-numeric column reaching math.isfinite), or
+        # InconsistentEstimateError (the gate). Writes are gated by EffectEstimate /
+        # compute_bearing before persistence, so a broad skip here cannot mask a
+        # write bug.
         try:
             estimate = EffectEstimate(
                 estimate_value=r["estimate_value"],
@@ -353,7 +358,7 @@ def independence_counts(conn: sqlite3.Connection, content_id: str) -> tuple[int,
                 inference_regime=r["inference_regime"],
             )
             direction = compute_bearing(estimate, prediction).direction
-        except (InconsistentEstimateError, ValueError):
+        except Exception:
             continue
         pair = (r["generated_by"], r["data_id"])
         if direction is BearingDirection.SUPPORTS:

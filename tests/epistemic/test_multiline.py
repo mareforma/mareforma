@@ -209,6 +209,34 @@ class TestCountRunDistinct:
         assert _count_run_distinct(pairs) == _count_run_distinct(list(reversed(pairs)))
 
 
+class TestReadPathSurvivesUngateableRow:
+    def test_non_numeric_stored_estimate_does_not_deny_reads(self, tmp_path: Path) -> None:
+        """A row that no longer reconstructs into a gateable bearing (here a
+        non-numeric estimate_value smuggled past SQLite's weak REAL affinity) is
+        skipped on read, not raised: it must not deny status reads for the
+        proposition or roll back unrelated writes via the frame contest."""
+        h = _prop()
+        with open_graph(tmp_path) as g:
+            g.assert_finding(h, _superiority(), _smd(-2.6, p=0.003), data_id="dA", generated_by="run1")
+            g.assert_finding(h, _superiority(), _smd(-2.4, p=0.01), data_id="dB", generated_by="run2")
+            # Corrupt only run1's stored estimate to a non-numeric value (direct
+            # SQL, the "foreign/direct writer" case the read-path guard exists
+            # for). math.isfinite on it raises TypeError on recompute.
+            g._conn.execute(
+                "UPDATE effect_estimates SET estimate_value = 'CORRUPT' "
+                "WHERE contrast_id IN ("
+                "  SELECT c.contrast_id FROM contrasts c "
+                "  JOIN evidence_lines el ON el.line_id = c.line_id "
+                "  WHERE el.data_id = 'dA')"
+            )
+            g._conn.commit()
+            status = g.proposition_status(h)  # must not raise
+        assert status is not None
+        # The poisoned row is skipped; the valid run2/dB line still counts.
+        assert status["independent_support"] == 1
+        assert status["status"] == Status.PRELIMINARY.value
+
+
 class TestGeneratedByPrecondition:
     def test_blank_token_rejected(self, tmp_path: Path) -> None:
         h = _prop()
