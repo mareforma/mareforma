@@ -309,12 +309,14 @@ class TestAssertFindingRegression:
                 h, _superiority(), _smd(-2.6, p=0.003, n=842),
                 data_id="dataA", generated_by="lab_a",
             )
-        # Exact return shape preserved from v0.3.4.
+        # Return shape: the prior keys plus the additive per-line "bearings".
+        # A single-line finding carries one entry.
         assert set(result) == {
             "finding_id", "content_id", "plan_id", "claim_id",
-            "bearing", "status", "idempotent", "proposition_status",
+            "bearing", "bearings", "status", "idempotent", "proposition_status",
         }
         assert result["bearing"]["direction"] == "supports"
+        assert result["bearings"] == [{"direction": "supports", "significant": True}]
         assert result["idempotent"] is False
         assert result["status"] == Status.PRELIMINARY.value
 
