@@ -212,7 +212,13 @@ def open_db(root: Path) -> sqlite3.Connection:
         # additive migration that preserves every existing row's signed
         # bytes. Concurrent first-opens hit a "duplicate column name" race
         # we treat as benign.
-        _ensure_claims_columns_for_upgrade(conn, existing_cols)
+        added_cols = _ensure_claims_columns_for_upgrade(conn, existing_cols)
+        # The open that first adds asserter_keyid grandfathers every existing
+        # REPLICATED row (all promoted under the retired generated_by rule)
+        # with a one-time durable health event. Runs once: subsequent opens
+        # already have the column and skip the ALTER.
+        if "asserter_keyid" in added_cols:
+            _grandfather_legacy_replicated(conn, root)
         existing_cols = {
             row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()
         }
@@ -297,14 +303,19 @@ def open_db_from_db_path(db_path: "str | Path") -> sqlite3.Connection:
 
 def _ensure_claims_columns_for_upgrade(
     conn: sqlite3.Connection, existing_cols: set[str],
-) -> None:
+) -> set[str]:
     """Auto-add the claims-table columns introduced in this release.
 
-    Both ``predicate_payload`` and ``original_signature_bundle`` are
-    query-side fields that are NOT part of the signed envelope or the
-    chain hash. ALTER TABLE ADD COLUMN with the documented defaults
-    leaves every existing row's signed bytes byte-identical, so the
-    migration is safe to run on any legacy graph.db.
+    Returns the set of columns this call actually added (empty when the db
+    is already current, or when a concurrent opener won every ALTER race).
+    The caller uses an ``asserter_keyid`` entry to fire the one-time
+    legacy-promotion grandfather event exactly once.
+
+    ``predicate_payload``, ``original_signature_bundle``, and
+    ``asserter_keyid`` are query-side fields that are NOT part of the
+    signed envelope or the chain hash. ALTER TABLE ADD COLUMN with the
+    documented defaults leaves every existing row's signed bytes
+    byte-identical, so the migration is safe to run on any legacy graph.db.
 
     Concurrent first-opens race the ALTER: SQLite serialises writes;
     the loser's ALTER fails with ``duplicate column name`` and we
@@ -314,7 +325,8 @@ def _ensure_claims_columns_for_upgrade(
     # let the column-set validation below surface the schema-mismatch
     # error with its actionable message.
     if not existing_cols:
-        return
+        return set()
+    added: set[str] = set()
     upgrades = [
         ("predicate_payload",
          "ALTER TABLE claims ADD COLUMN predicate_payload "
@@ -333,10 +345,12 @@ def _ensure_claims_columns_for_upgrade(
         try:
             conn.execute(alter_sql)
             conn.commit()
+            added.add(col)
         except sqlite3.OperationalError as exc:
             # Re-check: a concurrent process may have won the ALTER
             # race. Duplicate-column-name is benign; any other failure
-            # is real.
+            # is real. The race-loser did NOT add the column, so it is
+            # left out of ``added`` and never fires the grandfather event.
             cols_after = {
                 row[1]
                 for row in conn.execute("PRAGMA table_info(claims)").fetchall()
@@ -365,6 +379,39 @@ def _ensure_claims_columns_for_upgrade(
             # optimisation, not a correctness gate, so a transient failure
             # here must not block the open. The next open retries.
             pass
+
+    return added
+
+
+def _grandfather_legacy_replicated(
+    conn: sqlite3.Connection, root: Path,
+) -> int:
+    """Grandfather REPLICATED rows that predate the asserter_keyid rule.
+
+    Runs exactly once, in the same open that first adds ``asserter_keyid``
+    (its column is brand-new, so every existing REPLICATED row was promoted
+    under the old ``generated_by`` rule and now carries a NULL keyid). Those
+    rows keep their level: the new rule never re-promotes a NULL-keyid row,
+    so nothing downgrades them, and the read-path verify gate exempts them
+    because they carry no participant signature to check. We record a durable
+    ``legacy_promotion`` health event so the grandfathered set stays
+    distinguishable from rows promoted under the new rule. Returns the count.
+
+    A REPLICATED row with a NULL ``asserter_keyid`` is, by construction, a
+    legacy promotion: the current promotion query refuses to promote a
+    NULL-keyid row, so no post-build row can land in this state.
+    """
+    from mareforma.health import append_health_event
+    n = conn.execute(
+        "SELECT COUNT(*) AS n FROM claims "
+        "WHERE support_level = 'REPLICATED' AND asserter_keyid IS NULL"
+    ).fetchone()["n"]
+    if n:
+        append_health_event(
+            root, "legacy_promotion", outcome="ok",
+            replicated_grandfathered=int(n),
+        )
+    return int(n)
 
 
 def _ensure_doi_cache_columns(conn: sqlite3.Connection) -> None:
@@ -1254,13 +1301,23 @@ def _maybe_update_replicated_unlocked(
     Used by ``mark_claim_resolved`` so the unresolved-flag clear and the
     REPLICATED promotion land in the same SQLite transaction.
 
-    Artifact-hash gating
-    --------------------
-    When BOTH the new claim and a candidate peer carry a non-NULL
-    ``artifact_hash``, the hashes must match for the peer to count
-    toward convergence. When either side is NULL (the back-compat
-    case), behaviour falls back to identity-only REPLICATED: the
-    hash signal is opt-in, not retroactive.
+    Independence axis: distinct asserter_keyid
+    ------------------------------------------
+    Two converging claims count as independent lines only when they carry
+    **distinct, non-NULL** ``asserter_keyid`` values (the WHO of the claim,
+    denormalized from the signature_bundle). A NULL asserter_keyid is "not a
+    valid distinct signer": the new claim is not promoted at all, and two
+    legacy NULL-keyid rows never read as two distinct signers. ``generated_by``
+    is a display label and plays no part in the gate.
+
+    Data is a secondary collapse, never a gate
+    ------------------------------------------
+    Distinct asserter_keyid alone promotes. Where output data exists on BOTH
+    sides and is **equal**, the two lines collapse to one (a byte-identical
+    rerun is the same output, not corroboration) and do not promote on their
+    own. Absent data (NULL ``artifact_hash`` on either side) never blocks: the
+    pair promotes on the keyid axis. So a double-NULL pair with distinct
+    signers promotes on the signer axis, never "on hash alone."
 
     ESTABLISHED-upstream requirement
     --------------------------------
@@ -1281,9 +1338,18 @@ def _maybe_update_replicated_unlocked(
     # below). Short-circuit before the SELECT so neither the new row
     # nor any open peer is promoted.
     new_status_row = conn.execute(
-        "SELECT status FROM claims WHERE claim_id = ?", (new_claim_id,),
+        "SELECT status, asserter_keyid FROM claims WHERE claim_id = ?",
+        (new_claim_id,),
     ).fetchone()
     if new_status_row is None or new_status_row["status"] != "open":
+        return
+    # The new claim must carry a non-NULL asserter_keyid to enter the new
+    # promotion rule. An unsigned / legacy row is not a valid distinct signer,
+    # so it cannot start a convergence and cannot ride a peer's promotion.
+    # (Legacy REPLICATED rows keep their level via the one-time grandfather;
+    # they are never re-promoted here.)
+    new_asserter_keyid = new_status_row["asserter_keyid"]
+    if new_asserter_keyid is None:
         return
 
     # Shared-anchor rule: the converged-on-same-upstream contract requires
@@ -1324,22 +1390,23 @@ def _maybe_update_replicated_unlocked(
     # for further chains).
     rows = conn.execute(
         f"""
-        SELECT DISTINCT c.claim_id, c.generated_by
+        SELECT DISTINCT c.claim_id, c.asserter_keyid
         FROM claims c, json_each(c.supports_json) j
         WHERE j.value IN ({placeholders})
           AND c.claim_id != ?
-          AND c.generated_by != ?
+          AND c.asserter_keyid IS NOT NULL
+          AND c.asserter_keyid != ?
           AND c.support_level != 'ESTABLISHED'
           AND c.status = 'open'
           AND c.unresolved = 0
           AND c.transparency_logged = 1
-          AND (
-              c.artifact_hash IS NULL
-              OR ? IS NULL
-              OR c.artifact_hash = ?
+          AND NOT (
+              c.artifact_hash IS NOT NULL
+              AND ? IS NOT NULL
+              AND c.artifact_hash = ?
           )
         """,
-        (*established_anchors, new_claim_id, generated_by,
+        (*established_anchors, new_claim_id, new_asserter_keyid,
          artifact_hash, artifact_hash),
     ).fetchall()
 
@@ -1372,9 +1439,10 @@ def _maybe_update_replicated(
 ) -> bool:
     """Promote claims to REPLICATED when convergence is detected.
 
-    Convergence: ≥2 claims share the same upstream claim_id in their
-    supports[] and have different generated_by values. Uses json_each()
-    for correct JSON array element extraction (no fragile LIKE).
+    Convergence: ≥2 claims share the same ESTABLISHED upstream claim_id in
+    their supports[] and carry distinct, non-NULL ``asserter_keyid`` values
+    (equal output artifacts collapse to one line). Uses json_each() for
+    correct JSON array element extraction (no fragile LIKE).
 
     Called immediately after a successful INSERT in add_claim().
     Failures are swallowed: convergence detection must not crash writes.

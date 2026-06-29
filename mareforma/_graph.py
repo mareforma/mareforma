@@ -219,12 +219,15 @@ class EpistemicGraph:
             merging two different claims would discard the second
             author's content and break REPLICATED detection. For
             cross-lab convergence, assert two separate claims that
-            share an entry in ``supports[]`` with different
-            ``generated_by`` values: that's the path that fires
-            REPLICATED honestly.
+            share an ``ESTABLISHED`` entry in ``supports[]`` and are
+            signed by two distinct keys (distinct ``asserter_keyid``):
+            that's the path that fires REPLICATED honestly. Pass a
+            per-call ``signer`` for each distinct asserter.
         generated_by:
             Agent identifier. Use ``"model/version/context"`` format.
-            Defaults to ``'agent'``.
+            Defaults to ``'agent'``. A display label only: it does not
+            decide REPLICATED convergence (the ``asserter_keyid`` from
+            the signature does).
         source_name:
             Data source this claim derives from. Required for ANALYTICAL
             classification to be meaningful.
@@ -237,10 +240,12 @@ class EpistemicGraph:
         artifact_hash:
             SHA256 hex digest of the output artifact (figure, CSV, model)
             backing this claim. When supplied it is bound into the signed
-            payload and used as a parallel REPLICATED signal: two peers
-            citing the same upstream that BOTH supply a hash must agree
-            on the hash before they converge. Compute with
-            ``hashlib.sha256(bytes).hexdigest()``.
+            payload and used as a secondary collapse on REPLICATED: two
+            peers citing the same upstream that BOTH supply an EQUAL hash
+            are the same output, so they collapse to one line and do not
+            converge on their own. Distinct hashes, or an absent hash on
+            either side, do not block the distinct-signer convergence.
+            Compute with ``hashlib.sha256(bytes).hexdigest()``.
         evidence:
             Optional GRADE 5-domain ``EvidenceVector`` declaring the
             asserter's confidence in the evidence backing this claim.
