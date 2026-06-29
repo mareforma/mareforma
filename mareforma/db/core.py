@@ -321,6 +321,11 @@ def _ensure_claims_columns_for_upgrade(
          "TEXT NOT NULL DEFAULT ''"),
         ("original_signature_bundle",
          "ALTER TABLE claims ADD COLUMN original_signature_bundle TEXT"),
+        # Denormalized asserter keyid. New rows populate it at write from the
+        # signature_bundle; legacy rows stay NULL (not backfilled) so the
+        # promotion query's NULL guard treats them as "not a distinct signer."
+        ("asserter_keyid",
+         "ALTER TABLE claims ADD COLUMN asserter_keyid TEXT"),
     ]
     for col, alter_sql in upgrades:
         if col in existing_cols:
@@ -341,6 +346,25 @@ def _ensure_claims_columns_for_upgrade(
             raise DatabaseError(
                 f"Could not add claims.{col} column: {exc}"
             ) from exc
+
+    # The partial index on asserter_keyid lives in _SCHEMA_SQL, which only
+    # runs on a fresh db. An upgraded db gets the column via the ALTER above
+    # but never re-runs _SCHEMA_SQL, so create the index here too. IF NOT
+    # EXISTS keeps it a no-op once present.
+    if "asserter_keyid" in existing_cols or any(
+        col == "asserter_keyid" for col, _ in upgrades
+    ):
+        try:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_claims_asserter_keyid "
+                "ON claims(asserter_keyid) WHERE asserter_keyid IS NOT NULL"
+            )
+            conn.commit()
+        except sqlite3.OperationalError:
+            # A concurrent opener may be mid-ALTER; the index is a perf
+            # optimisation, not a correctness gate, so a transient failure
+            # here must not block the open. The next open retries.
+            pass
 
 
 def _ensure_doi_cache_columns(conn: sqlite3.Connection) -> None:
@@ -1089,6 +1113,11 @@ def add_claim(
     initial_validator_keyid = (
         signer_keyid if seed and signer is not None else None
     )
+    # Denormalize the asserter keyid from the signed envelope so the
+    # REPLICATED promotion query and the trust-layer independence count read
+    # an indexed column rather than walking the bundle JSON. The
+    # signature_bundle stays authoritative. NULL on unsigned claims.
+    asserter_keyid = _extract_signature_bundle_keyid(signature_bundle)
     try:
         if _own_transaction:
             conn.execute("BEGIN IMMEDIATE")
@@ -1100,14 +1129,15 @@ def add_claim(
                  status, source_name, generated_by,
                  supports_json, contradicts_json, unresolved,
                  signature_bundle, transparency_logged,
-                 validation_signature, validator_keyid, validated_at,
+                 validation_signature, validator_keyid, asserter_keyid,
+                 validated_at,
                  artifact_hash, prev_hash,
                  ev_risk_of_bias, ev_inconsistency, ev_indirectness,
                  ev_imprecision, ev_pub_bias,
                  evidence_json, statement_cid,
                  predicate_payload, original_signature_bundle,
                  created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
@@ -1116,6 +1146,7 @@ def add_claim(
                 supports_json, contradicts_json, 1 if unresolved else 0,
                 signature_bundle, transparency_logged,
                 initial_validation_signature, initial_validator_keyid,
+                asserter_keyid,
                 initial_validated_at,
                 artifact_hash, prev_hash,
                 evidence_obj.risk_of_bias, evidence_obj.inconsistency,
