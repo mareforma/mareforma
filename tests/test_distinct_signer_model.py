@@ -467,3 +467,51 @@ class TestSingleTrustDomain:
             assert _validators.single_trust_domain(g._conn) is True
             assert _validators.trust_domain_root(g._conn) is not None
             assert len(_validators.enrollment_roots(g._conn)) == 1
+
+
+class TestVerifyOnReadCacheBinding:
+    """Regression: the verify-on-read cache must key on the per-row identity.
+
+    The ESTABLISHED verify result depends on a payload-binds-this-claim check, so
+    the cache key must include the row's claim_id. Without it, an attacker who
+    copies a genuine validation_signature onto a second row (which they sort
+    first via a chosen created_at) would poison the shared query cache and censor
+    the legitimate ESTABLISHED claim.
+    """
+
+    def test_copied_validation_signature_does_not_censor_the_real_row(
+        self, tmp_path
+    ):
+        import uuid
+
+        kv = tmp_path / "mareforma.key"
+        _signing.bootstrap_key(kv)
+        sa, sb = _two_signers(tmp_path)
+        with mareforma.open(tmp_path, key_path=kv) as g:
+            up = g.assert_claim("anchor", generated_by="seed", seed=True)
+            a = g.assert_claim("legit A", generated_by="x", supports=[up], signer=sa)
+            g.assert_claim("peer B", generated_by="y", supports=[up], signer=sb)
+            g.validate(a)  # A -> ESTABLISHED
+            vs_a = g.get_claim(a)["validation_signature"]
+
+        # Forge a second ESTABLISHED row that reuses A's validation envelope and
+        # sorts FIRST by carrying a far-future created_at.
+        conn = sqlite3.connect(tmp_path / ".mareforma" / "graph.db")
+        conn.execute(
+            "INSERT INTO claims (claim_id, text, support_level, status, "
+            "validation_signature, created_at, updated_at) "
+            "VALUES (?, ?, 'ESTABLISHED', 'open', ?, ?, ?)",
+            (str(uuid.uuid4()), "forged F", vs_a,
+             "2099-01-01T00:00:00+00:00", "2099-01-01T00:00:00+00:00"),
+        )
+        conn.commit()
+        conn.close()
+
+        with mareforma.open(tmp_path, key_path=kv) as g:
+            texts = {c["text"] for c in g.query(limit=99)}
+            # The forged row is excluded (its envelope does not bind its claim_id)
+            assert "forged F" not in texts
+            # ...and the legitimate ESTABLISHED claim is NOT censored by the
+            # forged row sharing its envelope bytes.
+            assert "legit A" in texts
+            assert g.get_claim(a)["verified"] is True

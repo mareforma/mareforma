@@ -3148,7 +3148,16 @@ def _verify_validation_on_read(
         declared = env["payloadType"]
     except (json.JSONDecodeError, KeyError, IndexError, TypeError):
         return False
-    ck = ("V", keyid, hashlib.sha256(vs.encode("utf-8")).hexdigest())
+    # The cache value depends on the per-row claim_id binding check below, so
+    # claim_id MUST be part of the key. Without it, two rows that carry the same
+    # validation_signature bytes (an attacker copies a genuine envelope onto a
+    # second row) would share a cache entry: the row evaluated first — sorted by
+    # created_at, which the attacker controls — caches its result and poisons
+    # the second, so a forged row could censor the legitimate ESTABLISHED claim.
+    ck = (
+        "V", keyid, row.get("claim_id"),
+        hashlib.sha256(vs.encode("utf-8")).hexdigest(),
+    )
     if ck in cache:
         return cache[ck]
     from mareforma import signing as _signing
