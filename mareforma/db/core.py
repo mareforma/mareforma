@@ -1919,6 +1919,61 @@ def _refuse_self_validation(
         )
 
 
+def _refuse_self_validation_across_set(
+    conn: sqlite3.Connection, claim_id: str, validator_keyid: str,
+) -> None:
+    """Refuse a validator that asserted ANY claim in the converging set.
+
+    The claim being promoted is REPLICATED: it converged with peer claims
+    that share an ESTABLISHED+open anchor and carry distinct asserter keyids.
+    A validator whose keyid equals the ``asserter_keyid`` of any claim in that
+    set is a participant witnessing its own convergence into ESTABLISHED, so
+    the promotion is refused. :func:`_refuse_self_validation` already covers
+    the claim's own signers; this extends the refusal to the converging peers.
+    """
+    sup_row = conn.execute(
+        "SELECT supports_json FROM claims WHERE claim_id = ?", (claim_id,),
+    ).fetchone()
+    if sup_row is None:
+        return
+    try:
+        supports = json.loads(sup_row["supports_json"] or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return
+    if not supports:
+        return
+    sup_placeholders = ",".join("?" * len(supports))
+    anchors = [
+        r["claim_id"] for r in conn.execute(
+            f"SELECT claim_id FROM claims "
+            f"WHERE claim_id IN ({sup_placeholders}) "
+            f"AND support_level = 'ESTABLISHED' AND status = 'open'",
+            supports,
+        ).fetchall()
+    ]
+    if not anchors:
+        return
+    placeholders = ",".join("?" * len(anchors))
+    peer_keyids = {
+        r["asserter_keyid"] for r in conn.execute(
+            f"SELECT DISTINCT c.asserter_keyid "
+            f"FROM claims c, json_each(c.supports_json) j "
+            f"WHERE j.value IN ({placeholders}) "
+            f"AND c.support_level = 'REPLICATED' "
+            f"AND c.status = 'open' "
+            f"AND c.asserter_keyid IS NOT NULL",
+            anchors,
+        ).fetchall()
+    }
+    if validator_keyid in peer_keyids:
+        raise SelfValidationError(
+            f"Validator {validator_keyid[:12]}… asserted a claim in the "
+            f"converging set behind '{claim_id}'; a participant cannot "
+            "witness its own convergence into ESTABLISHED. Have an "
+            "independent enrolled key call graph.validate(...)."
+        )
+
+
 def _verify_evidence_seen(
     conn: sqlite3.Connection,
     promoted_claim_id: str,
@@ -2217,6 +2272,7 @@ def validate_claim(
         _refuse_self_validation(
             claim_id, row["signature_bundle"], validator_keyid,
         )
+        _refuse_self_validation_across_set(conn, claim_id, validator_keyid)
 
     now = validated_at if validated_at is not None else _now()
 
@@ -3017,8 +3073,139 @@ def delete_claim(conn: sqlite3.Connection, root: Path, claim_id: str) -> None:
     _backup_claims_toml(conn, root)
 
 
+# -- verify-on-read for high-trust rows --------------------------------------
+#
+# Persisted ``support_level`` is not signed: a process with DB write access can
+# flip a row to REPLICATED/ESTABLISHED or tamper its envelope. The read path
+# therefore re-verifies the row's signatures before serving a high-trust row.
+# query_* EXCLUDES a row that fails; get_claim RETURNS it flagged
+# verified=False. Neither ever raises — a verification miss must degrade the
+# read, not crash it.
+#
+# Pubkey sourcing (the two tiers):
+#   * ESTABLISHED (validator side): the validation envelope's keyid MUST be an
+#     enrolled validator (revocation is out of scope, so a legitimately-signed
+#     row's key persists through key rotation). A keyid absent from the
+#     validators table, or a signature that does not verify, is a forgery and
+#     the row is excluded.
+#   * REPLICATED (participant side): the asserter need not be an enrolled
+#     validator. When the asserter keyid IS enrolled, the bundle signature is
+#     verified against that pubkey and a forged signature excludes the row.
+#     When it is NOT enrolled there is no pubkey to check against (the lean
+#     model carries no participant registry), so the row is verify-exempt:
+#     detection where a key is available, never a false exclusion. Legacy
+#     REPLICATED rows (NULL asserter_keyid, no bundle) are always exempt.
+#
+# The cache is a caller-owned dict keyed on (tier, keyid, digest): one
+# verification per distinct signature within a bulk query. It is passed in
+# rather than stored on the connection because stdlib sqlite3.Connection
+# rejects arbitrary attributes (see validators._conn_cache), so a per-query
+# local dict is the only cache that actually persists across rows on stdlib.
+
+def _row_verified_on_read(
+    conn: sqlite3.Connection, row: dict, cache: dict,
+) -> bool:
+    """True iff *row* may be served at its persisted support_level.
+
+    PRELIMINARY and below are not gated here (they have their own
+    enrolled-generator filter in query_claims) and pass through True.
+    """
+    level = row.get("support_level")
+    if level == "ESTABLISHED":
+        return _verify_validation_on_read(conn, row, cache)
+    if level == "REPLICATED":
+        return _verify_participant_bundle_on_read(conn, row, cache)
+    return True
+
+
+def _verify_validation_on_read(
+    conn: sqlite3.Connection, row: dict, cache: dict,
+) -> bool:
+    """Re-verify an ESTABLISHED row's validation envelope (validator side)."""
+    vs = row.get("validation_signature")
+    if not vs:
+        # An ESTABLISHED row with no validation envelope violates the schema
+        # CHECK; reaching here means a direct tamper. Refuse to serve it.
+        return False
+    try:
+        env = json.loads(vs)
+        keyid = env["signatures"][0]["keyid"]
+        declared = env["payloadType"]
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+        return False
+    ck = ("V", keyid, hashlib.sha256(vs.encode("utf-8")).hexdigest())
+    if ck in cache:
+        return cache[ck]
+    from mareforma import signing as _signing
+    from mareforma import validators as _validators
+    ok = False
+    if declared in (_signing.PAYLOAD_TYPE_VALIDATION, _signing.PAYLOAD_TYPE_SEED):
+        signer_row = _validators.get_validator(conn, keyid)
+        if signer_row is not None:
+            try:
+                pem = base64.standard_b64decode(signer_row["pubkey_pem"])
+                pub = _signing.public_key_from_pem(pem)
+                if _signing.verify_envelope(
+                    env, pub, expected_payload_type=declared,
+                ):
+                    # The signature is genuine; confirm the signed payload
+                    # binds THIS claim so a valid envelope from another claim
+                    # cannot be replayed onto this row.
+                    payload = json.loads(
+                        base64.standard_b64decode(env["payload"])
+                    )
+                    ok = payload.get("claim_id") == row.get("claim_id")
+            except Exception:
+                ok = False
+        # signer_row is None -> the validator keyid is not enrolled. An
+        # ESTABLISHED promotion can only come from an enrolled validator, so
+        # this is a forged row: leave ok False (excluded).
+    cache[ck] = ok
+    return ok
+
+
+def _verify_participant_bundle_on_read(
+    conn: sqlite3.Connection, row: dict, cache: dict,
+) -> bool:
+    """Re-verify a REPLICATED row's asserter bundle signature (participant side).
+
+    Legacy (NULL asserter_keyid / no bundle) rows are verify-exempt. A row
+    whose asserter keyid is an enrolled validator is verified against that
+    pubkey; a forged or tampered bundle excludes the row. A row whose asserter
+    is not enrolled is exempt (no pubkey to check against in the lean model).
+    """
+    ak = row.get("asserter_keyid")
+    bundle_json = row.get("signature_bundle")
+    if ak is None or not bundle_json:
+        return True
+    ck = ("P", ak, hashlib.sha256(bundle_json.encode("utf-8")).hexdigest())
+    if ck in cache:
+        return cache[ck]
+    from mareforma import signing as _signing
+    from mareforma import validators as _validators
+    ok = True  # exempt by default: no enrolled pubkey -> cannot prove forgery
+    signer_row = _validators.get_validator(conn, ak)
+    if signer_row is not None:
+        ok = False
+        try:
+            env = json.loads(bundle_json)
+            pem = base64.standard_b64decode(signer_row["pubkey_pem"])
+            pub = _signing.public_key_from_pem(pem)
+            ok = bool(_signing.verify_envelope(env, pub))
+        except Exception:
+            ok = False
+    cache[ck] = ok
+    return ok
+
+
 def get_claim(conn: sqlite3.Connection, claim_id: str) -> dict | None:
-    """Return a claim dict or None if not found."""
+    """Return a claim dict or None if not found.
+
+    High-trust rows (REPLICATED / ESTABLISHED) carry a ``verified`` boolean:
+    the read path re-verifies the row's signatures and flags the result rather
+    than excluding the row, so an auditor can still see a tampered row and know
+    it failed. PRELIMINARY rows are always ``verified=True`` here.
+    """
     try:
         row = conn.execute(
             f"SELECT {_CLAIM_SELECT} FROM claims WHERE claim_id = ?",
@@ -3026,7 +3213,11 @@ def get_claim(conn: sqlite3.Connection, claim_id: str) -> dict | None:
         ).fetchone()
     except sqlite3.OperationalError as exc:
         raise DatabaseError(f"Failed to fetch claim '{claim_id}': {exc}") from exc
-    return dict(row) if row else None
+    if not row:
+        return None
+    d = dict(row)
+    d["verified"] = _row_verified_on_read(conn, d, {})
+    return d
 
 
 def list_claims(
@@ -3723,6 +3914,9 @@ def query_claims(
 
     results: list[dict] = []
     offset = 0
+    # One verify cache for the whole query: at most one signature check per
+    # distinct (tier, keyid, digest) across every batch this call fetches.
+    verify_cache: dict = {}
     # Fetch in batches sized to the caller's limit. For verified-heavy
     # projects the first batch is usually enough; for projects with
     # heavy unverified PRELIMINARY traffic the loop keeps pulling
@@ -3753,11 +3947,21 @@ def query_claims(
                     if (d["support_level"] == "PRELIMINARY"
                             and not d["generator_enrolled"]):
                         continue
+                # Re-verify high-trust rows on read: a REPLICATED/ESTABLISHED
+                # row whose signature does not verify is a tamper and is
+                # excluded from query results entirely (get_claim is the
+                # surface that still returns it, flagged). include_unverified
+                # is about unenrolled PRELIMINARY generators, NOT about
+                # serving a forged high-trust row, so it does not relax this.
+                if not _row_verified_on_read(conn, d, verify_cache):
+                    continue
                 results.append(d)
                 if len(results) >= limit:
                     break
-            if include_unverified:
-                break  # one batch suffices; no filter dropping rows
+            # No early break on include_unverified: the high-trust verify
+            # filter can still drop rows, so keep batching until we have
+            # `limit` survivors or the table is exhausted (the while + the
+            # empty-rows break above bound the loop).
     except sqlite3.OperationalError as exc:
         raise DatabaseError(f"Failed to query claims: {exc}") from exc
     return results

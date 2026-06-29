@@ -128,6 +128,7 @@ from .core import (
     refutation_status,
     query_claims,
     search_claims,
+    _row_verified_on_read,
     _extract_signature_bundle_keyid,
     _enrolled_validator_keyids,
     _compute_validator_reputation,
@@ -154,6 +155,7 @@ __all__ = [
     "_ADDITIVE_TABLES_SQL",
     "_CLAIM_COLUMNS",
     "_CLAIM_SELECT",
+    "_row_verified_on_read",
     # Exceptions.
     "MareformaError",
     "DatabaseError",

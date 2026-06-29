@@ -2029,6 +2029,12 @@ class EpistemicGraph:
             if depth >= 1 else []
         )
 
+        # query_provenance is an audit surface, so it FLAGS each high-trust
+        # row's verify-on-read result rather than excluding a tampered row:
+        # an auditor must be able to see a forged ESTABLISHED/REPLICATED row
+        # and know it failed verification. One cache for the whole walk.
+        prov_verify_cache: dict = {}
+
         def _hydrate(edges: list[dict]) -> list[dict]:
             if not edges:
                 return []
@@ -2047,7 +2053,11 @@ class EpistemicGraph:
                     chunk,
                 )
                 for row in cursor.fetchall():
-                    rows_by_id[row["claim_id"]] = dict(row)
+                    rd = dict(row)
+                    rd["verified"] = _db._row_verified_on_read(
+                        self._conn, rd, prov_verify_cache,
+                    )
+                    rows_by_id[row["claim_id"]] = rd
             return [
                 {
                     "claim_id": e["claim_id"],
