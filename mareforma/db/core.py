@@ -3118,6 +3118,21 @@ def _row_verified_on_read(
     return True
 
 
+def _trust_domain_disclosure(conn: sqlite3.Connection) -> tuple[bool, str | None]:
+    """(single_trust_domain, trust_domain_root) for this graph's validators.
+
+    A graph-global property of the validator topology, attached per
+    ESTABLISHED row so a consumer reading one promoted claim sees whether all
+    validators trace to one root of trust. It discloses trust-domain
+    concentration; it is NOT a Sybil guard over the participant topology.
+    """
+    from mareforma import validators as _validators
+    return (
+        _validators.single_trust_domain(conn),
+        _validators.trust_domain_root(conn),
+    )
+
+
 def _verify_validation_on_read(
     conn: sqlite3.Connection, row: dict, cache: dict,
 ) -> bool:
@@ -3217,6 +3232,10 @@ def get_claim(conn: sqlite3.Connection, claim_id: str) -> dict | None:
         return None
     d = dict(row)
     d["verified"] = _row_verified_on_read(conn, d, {})
+    if d.get("support_level") == "ESTABLISHED":
+        std, root_kid = _trust_domain_disclosure(conn)
+        d["single_trust_domain"] = std
+        d["trust_domain_root"] = root_kid
     return d
 
 
@@ -3904,6 +3923,8 @@ def query_claims(
     # at the exact limit is enough.
     reputation = _compute_validator_reputation(conn)
     enrolled_keyids = _enrolled_validator_keyids(conn)
+    # Graph-global trust-domain disclosure, attached to each ESTABLISHED row.
+    _std, _trust_root = _trust_domain_disclosure(conn)
 
     base_sql = (
         f"SELECT {_CLAIM_SELECT} FROM claims {where} "
@@ -3955,6 +3976,9 @@ def query_claims(
                 # serving a forged high-trust row, so it does not relax this.
                 if not _row_verified_on_read(conn, d, verify_cache):
                     continue
+                if d["support_level"] == "ESTABLISHED":
+                    d["single_trust_domain"] = _std
+                    d["trust_domain_root"] = _trust_root
                 results.append(d)
                 if len(results) >= limit:
                     break

@@ -130,6 +130,7 @@ class EpistemicGraph:
                 self._conn,
                 signer,
                 identity=signer_identity or "root",
+                root=self._root,
             )
             keyid = _signing.public_key_id(signer.public_key())
             if not _validators.is_enrolled(self._conn, keyid):
