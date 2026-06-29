@@ -43,7 +43,7 @@ from mareforma.db import ClaimNotFoundError
 # Helpers
 # ---------------------------------------------------------------------------
 
-from tests._helpers import _pem_of
+from tests._helpers import _pem_of, _two_signers
 from tests.epistemic._builders import (
     _bootstrap_validator_key,
     open_graph,
@@ -59,6 +59,7 @@ class TestReplicatedGenuine:
     def test_replicated_fires_when_two_independent_agents_share_upstream(
         self, tmp_path: Path
     ) -> None:
+        sa, sb = _two_signers(tmp_path)
         with open_graph(tmp_path) as graph:
             upstream = graph.assert_claim("upstream finding", generated_by="seed", seed=True)
 
@@ -67,12 +68,14 @@ class TestReplicatedGenuine:
                 classification="ANALYTICAL",
                 generated_by="agent/model-a/lab_a",
                 supports=[upstream],
+                signer=sa,
             )
             id_b = graph.assert_claim(
                 "finding from agent B",
                 classification="ANALYTICAL",
                 generated_by="agent/model-b/lab_b",
                 supports=[upstream],
+                signer=sb,
             )
 
             c_a = graph.get_claim(id_a)
@@ -134,17 +137,20 @@ class TestReplicatedGenuine:
         self, tmp_path: Path
     ) -> None:
         """REPLICATED fires as soon as the second independent agent asserts."""
+        sa, sb = _two_signers(tmp_path)
         with open_graph(tmp_path) as graph:
             upstream = graph.assert_claim("upstream", generated_by="seed", seed=True)
 
             id_a = graph.assert_claim(
-                "claim A", generated_by="agent/model-a/lab_a", supports=[upstream]
+                "claim A", generated_by="agent/model-a/lab_a", supports=[upstream],
+                signer=sa,
             )
             # After one claim: still PRELIMINARY
             assert graph.get_claim(id_a)["support_level"] == "PRELIMINARY"
 
             id_b = graph.assert_claim(
-                "claim B", generated_by="agent/model-b/lab_b", supports=[upstream]
+                "claim B", generated_by="agent/model-b/lab_b", supports=[upstream],
+                signer=sb,
             )
             # After second independent agent: REPLICATED
             assert graph.get_claim(id_a)["support_level"] == "REPLICATED"
@@ -202,6 +208,7 @@ class TestReplicatedGenuine:
         one of them is shared between the two converging claims.
         Regression guard against over-tightening: the SQL fix must not
         reject legitimate convergence that happens to cite extra anchors."""
+        sa, sb = _two_signers(tmp_path)
         with open_graph(tmp_path) as graph:
             shared = graph.assert_claim(
                 "shared anchor", generated_by="seed", seed=True,
@@ -212,10 +219,12 @@ class TestReplicatedGenuine:
             id_a = graph.assert_claim(
                 "A finding", supports=[shared, other],
                 generated_by="agent/model-a/lab_a",
+                signer=sa,
             )
             id_b = graph.assert_claim(
                 "B finding", supports=[shared],
                 generated_by="agent/model-b/lab_b",
+                signer=sb,
             )
             assert graph.get_claim(id_a)["support_level"] == "REPLICATED"
             assert graph.get_claim(id_b)["support_level"] == "REPLICATED"
@@ -235,6 +244,7 @@ class TestReplicatedSpurious:
         the graph topology is satisfied — but both claims are INFERRED with
         no source_name. The graph makes this detectable.
         """
+        sa, sb = _two_signers(tmp_path)
         with open_graph(tmp_path) as graph:
             upstream = graph.assert_claim("prior literature ref", generated_by="seed", seed=True)
 
@@ -244,6 +254,7 @@ class TestReplicatedSpurious:
                 generated_by="agent/model-a/lab_a",
                 supports=[upstream],
                 source_name=None,               # no source
+                signer=sa,
             )
             id_b = graph.assert_claim(
                 "target T is likely relevant (LLM prior)",
@@ -251,6 +262,7 @@ class TestReplicatedSpurious:
                 generated_by="agent/model-b/lab_b",
                 supports=[upstream],
                 source_name=None,
+                signer=sb,
             )
 
             c_a = graph.get_claim(id_a)
@@ -270,6 +282,7 @@ class TestReplicatedSpurious:
         self, tmp_path: Path
     ) -> None:
         """ANALYTICAL + source_name distinguishes genuine from spurious REPLICATED."""
+        sa, sb = _two_signers(tmp_path)
         with open_graph(tmp_path) as graph:
             upstream = graph.assert_claim("upstream", generated_by="seed", seed=True)
 
@@ -280,6 +293,7 @@ class TestReplicatedSpurious:
                 generated_by="agent/model-a/lab_a",
                 supports=[upstream],
                 source_name="dataset_alpha",
+                signer=sa,
             )
             genuine_b = graph.assert_claim(
                 "finding B (data-driven)",
@@ -287,6 +301,7 @@ class TestReplicatedSpurious:
                 generated_by="agent/model-b/lab_b",
                 supports=[upstream],
                 source_name="dataset_beta",
+                signer=sb,
             )
 
             # Spurious: LLM prior
@@ -295,12 +310,14 @@ class TestReplicatedSpurious:
                 classification="INFERRED",
                 generated_by="agent/model-a/lab_a",
                 supports=[upstream],
+                signer=sa,
             )
             spurious_b = graph.assert_claim(
                 "finding B (LLM prior)",
                 classification="INFERRED",
                 generated_by="agent/model-b/lab_b",
                 supports=[upstream],
+                signer=sb,
             )
 
             all_replicated = graph.query(min_support="REPLICATED")
@@ -454,13 +471,16 @@ class TestEstablishedGate:
 
     def test_validate_on_replicated_succeeds(self, tmp_path: Path) -> None:
         validator_key_path = _bootstrap_validator_key(tmp_path)
+        sa, sb = _two_signers(tmp_path)
         with open_signed_graph(tmp_path) as graph:
             upstream = graph.assert_claim("upstream", generated_by="seed", seed=True)
             id_a = graph.assert_claim(
-                "claim A", generated_by="agent/model-a/lab_a", supports=[upstream]
+                "claim A", generated_by="agent/model-a/lab_a", supports=[upstream],
+                signer=sa,
             )
             graph.assert_claim(
-                "claim B", generated_by="agent/model-b/lab_b", supports=[upstream]
+                "claim B", generated_by="agent/model-b/lab_b", supports=[upstream],
+                signer=sb,
             )
             # id_a is now REPLICATED
             graph.enroll_validator(

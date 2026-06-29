@@ -18,6 +18,31 @@ def _bootstrap_key(tmp_path: Path, name: str = "mareforma.key") -> Path:
     return key_path
 
 
+def _load_signer(key_path: Path):
+    """Load and return the Ed25519 private key object at *key_path*."""
+    from mareforma import signing as _signing
+    return _signing.load_private_key(key_path)
+
+
+def _two_signers(tmp_path: Path):
+    """Bootstrap two distinct signing keys and return loaded signer objects.
+
+    Under the v0.3.7 model, REPLICATED convergence keys on two distinct,
+    non-NULL ``asserter_keyid`` values (the per-claim signer keyid), not on
+    distinct ``generated_by``. Tests that want two converging claims to
+    promote must sign each with a distinct key. This returns ``(sa, sb)``,
+    two loaded private-key objects to thread through ``assert_claim(signer=...)``.
+    """
+    from mareforma import signing as _signing
+    ka = tmp_path / "_signer_a.key"
+    kb = tmp_path / "_signer_b.key"
+    if not ka.exists():
+        _signing.bootstrap_key(ka)
+    if not kb.exists():
+        _signing.bootstrap_key(kb)
+    return _signing.load_private_key(ka), _signing.load_private_key(kb)
+
+
 def _pem_of(key_path: Path) -> bytes:
     """Return the PEM-encoded public key for the private key at ``key_path``.
 
