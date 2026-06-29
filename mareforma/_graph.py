@@ -913,6 +913,7 @@ class EpistemicGraph:
         estimate: "EffectEstimate | None" = None,
         *,
         data_id: str | None = None,
+        data_bytes: bytes | None = None,
         lines: "Sequence[EvidenceLine] | None" = None,
         generated_by: str | None = None,
         control_type: "ControlType | str | None" = None,
@@ -969,6 +970,18 @@ class EpistemicGraph:
                 f"got direction={proposition.direction.value}, "
                 f"scope={dict(proposition.scope)!r}"
             )
+
+        # When the caller supplies dataset bytes, content-address them into the
+        # data_id so the independence guard collapses byte-identical reruns and
+        # cannot be fooled by a fabricated string. Bytes and an explicit
+        # string data_id are mutually exclusive.
+        if data_bytes is not None:
+            if data_id is not None:
+                raise ValueError(
+                    "pass either data_id (a string) or data_bytes (hashed), "
+                    "not both"
+                )
+            data_id = _store.content_address_data_id(data_bytes)
 
         # Validate the gate inputs (estimate/data_id consistency, then the gate)
         # for EVERY line BEFORE writing anything, so a rejected one-shot finding
@@ -1037,6 +1050,7 @@ class EpistemicGraph:
         estimate: "EffectEstimate | None" = None,
         *,
         data_id: str | None = None,
+        data_bytes: bytes | None = None,
         lines: "Sequence[EvidenceLine] | None" = None,
         generated_by: str | None = None,
         control_type: "ControlType | str | None" = None,
@@ -1103,6 +1117,18 @@ class EpistemicGraph:
                 f"scope={dict(proposition.scope)!r}"
             )
 
+        # When the caller supplies dataset bytes, content-address them into the
+        # data_id so the independence guard collapses byte-identical reruns and
+        # cannot be fooled by a fabricated string. Bytes and an explicit
+        # string data_id are mutually exclusive.
+        if data_bytes is not None:
+            if data_id is not None:
+                raise ValueError(
+                    "pass either data_id (a string) or data_bytes (hashed), "
+                    "not both"
+                )
+            data_id = _store.content_address_data_id(data_bytes)
+
         # Resolve single-line vs multi-line input into a list of EvidenceLine.
         # Building each line validates its estimate/data_id before any write.
         if lines is not None:
@@ -1152,6 +1178,17 @@ class EpistemicGraph:
             raise ValueError(
                 "generated_by must be a non-empty run token (or None to default); "
                 "a blank token collapses distinct-run independence"
+            )
+
+        # Flag string-fallback data_ids: a line whose data_id was NOT
+        # content-addressed from bytes is agent-attested, so its distinctness
+        # is soft. Surface it as a durable health event rather than silently
+        # treating it as content-addressed.
+        if any(not _store.is_content_addressed(ln.data_id) for ln in evidence_lines):
+            from mareforma import health as _health
+            _health.append_health_event(
+                self._root, "data_id_string_fallback",
+                content_id=proposition.content_id(),
             )
 
         cid = proposition.content_id()

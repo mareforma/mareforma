@@ -42,6 +42,33 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
+# data_id content-addressing -------------------------------------------------
+#
+# A finding's independence guard counts distinct datasets by data_id. When the
+# agent supplies the dataset bytes, mareforma hashes them itself so two
+# findings over byte-identical data collapse to one line (a re-run is not a
+# second dataset) and an agent cannot fabricate distinctness with a made-up
+# string. The ``sha256:`` prefix makes the content-addressed value
+# self-describing: a data_id without it is an agent-attested string fallback,
+# which a consumer can discount.
+
+_CONTENT_ADDRESS_PREFIX = "sha256:"
+
+
+def content_address_data_id(data_bytes: bytes) -> str:
+    """Return the content-addressed data_id for *data_bytes* (``sha256:<hex>``)."""
+    if not isinstance(data_bytes, (bytes, bytearray)):
+        raise TypeError(
+            f"data_bytes must be bytes, got {type(data_bytes).__name__}"
+        )
+    return _CONTENT_ADDRESS_PREFIX + hashlib.sha256(bytes(data_bytes)).hexdigest()
+
+
+def is_content_addressed(data_id: str) -> bool:
+    """True iff *data_id* was content-addressed from dataset bytes."""
+    return isinstance(data_id, str) and data_id.startswith(_CONTENT_ADDRESS_PREFIX)
+
+
 # -- writes ------------------------------------------------------------------
 
 def register_proposition(conn: sqlite3.Connection, prop: Proposition, now: str) -> str:
