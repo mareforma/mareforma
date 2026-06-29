@@ -80,7 +80,8 @@ db.add_claim (mareforma/db/core.py)
   │
   │ ─ BEGIN IMMEDIATE
   │ ─ prev_hash chain extension under lock
-  │ ─ INSERT INTO claims (signed envelope + ev_* columns + statement_cid)
+  │ ─ INSERT INTO claims (signed envelope + ev_* columns + statement_cid
+  │                       + asserter_keyid denormalized from the envelope)
   │ ─ COMMIT
   │ ─ optionally submit to Rekor (if rekor_url= was passed)
   │ ─ _maybe_update_replicated() — detect convergence
@@ -100,21 +101,33 @@ or `mareforma claim add ...` from the CLI. Both go through
 ## Trust ladder
 
 ```
-PRELIMINARY ──(≥2 agents share ESTABLISHED upstream)──▶ REPLICATED ──(graph.validate())──▶ ESTABLISHED
+PRELIMINARY ──(≥2 distinct signers share ESTABLISHED upstream)──▶ REPLICATED ──(graph.validate())──▶ ESTABLISHED
 ```
 
 Three rules:
 
 1. **PRELIMINARY → REPLICATED is automatic, structural, and gated.**
    The new claim and a candidate peer must share at least one
-   `ESTABLISHED` upstream in `supports[]`, must have different
-   `generated_by`, and (if both supply `artifact_hash`) must agree on
-   the hash. Status, transparency log, and DOI resolution gates apply
-   too; see `_maybe_update_replicated_unlocked` in db/core.py.
+   `ESTABLISHED` upstream in `supports[]` and must carry **distinct,
+   non-NULL `asserter_keyid`** values: the signer keyid denormalized from
+   each claim's signature_bundle. An unsigned (NULL keyid) claim is not a
+   distinct signer and is never promoted, so two legacy NULL-keyid rows do
+   not read as two signers. `generated_by` is a display label only and
+   plays no part in the gate. `artifact_hash` is a secondary equal-data
+   collapse: two converging claims that carry the same non-NULL hash are a
+   byte-identical rerun, so they collapse to one line and do not promote on
+   their own; a distinct hash, or an absent hash on either side, does not
+   block the distinct-signer convergence. Status, transparency log, and DOI
+   resolution gates apply too; see `_maybe_update_replicated_unlocked` in
+   db/core.py. Distinct keys are a cryptographic distinctness signal, NOT a
+   proof of apparatus independence. REPLICATED is a convergence signal, not
+   a truth claim.
 2. **REPLICATED → ESTABLISHED is human-only.** `graph.validate()`
    requires an enrolled validator key whose `validator_type` is
    `'human'`. LLM-typed validators may sign validations but cannot
-   promote past REPLICATED.
+   promote past REPLICATED. A validator keyid that equals ANY
+   `asserter_keyid` in the converging set is refused: a participant cannot
+   witness its own convergence into ESTABLISHED.
 3. **No back-transitions.** The state-machine triggers refuse any
    ESTABLISHED → REPLICATED or REPLICATED → PRELIMINARY UPDATE. Status
    changes (open / contested / retracted) live on a separate axis
@@ -154,16 +167,20 @@ Three rules:
    is also expressible as an ordered short-circuit `gates[]` chain (`gates_for`,
    `evaluate_gates`) over the existing prediction columns; the single binary gate
    is the one-element chain, bearing-identical to `compute_bearing`.
-2. **Status counts independent runs, not raw datasets.** `compute_status` in
+2. **Status counts independent signers, not raw datasets.** `compute_status` in
    [`mareforma/trust/status.py`](mareforma/trust/status.py) reads
    `independent_support` and `independent_refute` (UNTESTED, PRELIMINARY,
-   CORROBORATED, REFUTED, CONTESTED). Independence is counted by distinct run
-   (`generated_by`) with a `data_id` guard: one run contributes at most one
-   support and one refute, so a single run cannot reach CORROBORATED on its own,
-   and re-running the same dataset adds nothing. Corroboration accrues across
-   runs. The run token must be per-run-unique; a blank token is rejected at write
-   and a default one is flagged. It is a versioned policy (`status_policy@v2`),
-   recomputed on read, never baked into the schema.
+   CORROBORATED, REFUTED, CONTESTED). Independence is counted by distinct signer
+   (the finding claim's `asserter_keyid`, the same WHO axis the REPLICATED
+   promotion keys on, so promotion and counting agree by construction) with a
+   `data_id` guard: one signer contributes at most one support and one refute, so
+   a single signer cannot reach CORROBORATED on its own, and re-running the same
+   dataset adds nothing. Where dataset bytes are supplied the `data_id` is
+   content-addressed (`sha256:`); a string `data_id` stays a flagged fallback.
+   Legacy findings whose claim predates the keyid column (NULL `asserter_keyid`)
+   fall back to the retired `generated_by` run axis so their counts are
+   preserved. It is a versioned policy (`status_policy@v3`), recomputed on read,
+   never baked into the schema.
 3. **Identity is the frozen kernel.** `content_id` (the answer) and `frame_id`
    (the question) are sha256 over RFC 8785 canonical bytes of normalized tokens
    ([`mareforma/trust/proposition.py`](mareforma/trust/proposition.py)). Same
@@ -375,8 +392,8 @@ mareforma's invariants without scrolling through thousands of lines of
               │ ESTABLISHED │ ◄───────── │ REPLICATED  │
               └─────────────┘            └─────────────┘
                                               ▲
-                                              │ ≥2 claims, different
-                                              │ generated_by, sharing
+                                              │ ≥2 claims, distinct
+                                              │ asserter_keyid, sharing
                                               │ ESTABLISHED upstream
                                               │
                                          ┌─────────────┐
@@ -431,6 +448,7 @@ on a signed row is refused at the SQL layer.
 | `status` | not signed | ✓ (one-way: open → contested → retracted) |
 | `support_level` | not signed | ✓ (one-way ladder) |
 | `validated_by` / `validated_at` / `validation_signature` / `validator_keyid` | not signed (validation is its own envelope) | written by `validate_claim` only |
+| `asserter_keyid` | not signed (denormalized from the signature_bundle's asserter signature) | written at insert only; the envelope stays authoritative |
 | `signature_bundle` | self-referential | only rewritten by `mark_claim_logged` to attach a Rekor block; payload + signatures bytes must be byte-identical to the existing value, only the optional `rekor` top-level key may differ |
 | `unresolved` / `transparency_logged` / `convergence_retry_needed` / `t_invalid` | not signed (operational flags) | ✓ (gated mutations, `t_invalid` by trigger only) |
 
@@ -458,12 +476,14 @@ this is the consolidated view.
 | Direct-SQL `DELETE` of a signed claim | `claims_signed_no_delete` trigger |
 | Resurrection of a retracted claim by flipping status | `claims_update_status_terminal` trigger |
 | Born-retracted ESTABLISHED seed riding an honest peer into REPLICATED | `_maybe_update_replicated_unlocked` filters peers AND new claim on `status='open'`; ESTABLISHED-upstream + open required |
-| Same-agent self-replication | `c.generated_by != ?` clause in REPLICATED detection |
+| Same-signer self-replication | distinct, non-NULL `asserter_keyid` required in REPLICATED detection; a single signer's two claims share one keyid and do not converge |
 | Self-validation (validator signs the claim they are validating) | `_refuse_self_validation` |
+| Self-validation across the converging set (a participant validating its own convergence) | `_refuse_self_validation_across_set` refuses a validator keyid equal to any `asserter_keyid` in the converging set |
 | LLM-typed validator promoting past REPLICATED | `_refuse_llm_validator` (also applies to contradictions: `_refuse_llm_contradiction_issuer`) |
 | Validator who didn't review the cited evidence | `_verify_evidence_seen`, each cited claim_id must exist in the graph with `created_at <= validated_at` |
-| Forged validation envelope (different signer, same claim_id) | `db.validate_claim` now `verify_envelope`s against the claimed signer's pubkey from the validators table before any gate fires |
+| Forged validation envelope (different signer, same claim_id) | `db.validate_claim` `verify_envelope`s against the claimed signer's pubkey from the validators table before any gate fires |
 | Replay of a validation envelope onto a different claim | envelope payload-field equality check refuses `claim_id` mismatch |
+| Direct-SQL forgery of a high-trust row served from the read path | verify-on-read: `get_claim` / `query` / `query_provenance` re-verify the validation envelope (ESTABLISHED) and the asserter bundle (REPLICATED, enrolled asserter); a forged or tampered signature is excluded from `query` and flagged `verified=false` from `get_claim`, never raising. Legacy unsigned REPLICATED rows are verify-exempt |
 | Tampered TOML in restore (any signed field, any verdict field, any evidence value) | restore re-derives canonical bytes and refuses on mismatch |
 | SQL-injected parallel root validator | singleton-root invariant: any second self-signed root breaks `is_enrolled` for every key |
 | Rekor log operator mutates / removes / repositions an entry after submit | opt-in inclusion-proof verification re-derives the Merkle root and checks against the log's signed checkpoint |
@@ -473,7 +493,7 @@ this is the consolidated view.
 
 | Threat mareforma does NOT catch (deliberate scope) | Why |
 |---|---|
-| Colluding agents producing fake `REPLICATED` via two `generated_by` strings | `generated_by` is self-declared; no cross-org PKI |
+| Colluding agents producing fake `REPLICATED` via two signing keys | distinct `asserter_keyid` is a cryptographic distinctness signal, not a proof of apparatus independence: one party can hold two keys. REPLICATED is a convergence signal, not a truth claim; the real trust anchor is human-validated ESTABLISHED. `single_trust_domain` discloses when all validators share one root, but does not prevent Sybils |
 | Misclassified `INFERRED` / `ANALYTICAL` / `DERIVED` | declared by the agent, not verified |
 | Fabricated DOI content (publisher silently replaces PDF) | DOIs are HEAD-checked, not content-verified |
 | Colluding log operator publishing two checkpoints to different audiences | needs gossip / witness protocols, out of scope for the single-checkpoint trust model |
@@ -489,10 +509,14 @@ For the reader who wants to read the actual enforcement:
   (search for `claims_insert_state_check`, `claims_update_state_check`,
   `claims_update_status_terminal`, `claims_signed_fields_no_laundering`,
   `claims_signed_no_delete`)
-- **Convergence detection**: `_maybe_update_replicated_unlocked` in [`mareforma/db/core.py`](mareforma/db/core.py)
+- **Convergence detection**: `_maybe_update_replicated_unlocked` in [`mareforma/db/core.py`](mareforma/db/core.py) (distinct `asserter_keyid` + equal-data collapse)
+- **Verify-on-read**: `_row_verified_on_read`, `_verify_validation_on_read`,
+  `_verify_participant_bundle_on_read` in `db/core.py`, wired into `get_claim`,
+  `query_claims`, and `query_provenance`
 - **Validation gates**: `validate_claim` in `db/core.py` (core-bypass
   defense: cryptographic verify + LLM-type ceiling + self-validation
-  refusal + payload field equality + evidence_seen citation gate)
+  refusal + converging-set self-validation refusal + payload field
+  equality + evidence_seen citation gate)
 - **Verdict-issuer protocol**: `record_replication_verdict` /
   `record_contradiction_verdict` in `db/core.py`; trigger
   `contradiction_invalidates_older`
