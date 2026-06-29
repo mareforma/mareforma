@@ -28,7 +28,7 @@ from mareforma import signing as _signing
 from mareforma import validators as _validators
 from mareforma.cli import cli as mareforma_cli
 from mareforma.db import open_db
-from tests._helpers import _bootstrap_key
+from tests._helpers import _bootstrap_key, _two_signers
 
 
 class TestAutoEnrollRoot:
@@ -524,14 +524,20 @@ class TestIdentityUnicodeSpoofing:
 # ---------------------------------------------------------------------------
 
 class TestValidateIdentityCheck:
-    def _setup_replicated(self, graph) -> str:
-        """Helper: assert seed + 2 agents to produce a REPLICATED claim."""
+    def _setup_replicated(self, graph, tmp_path: Path) -> str:
+        """Helper: assert seed + 2 distinct-signer agents -> REPLICATED.
+
+        Under the v0.3.7 model REPLICATED keys on two distinct, non-NULL
+        asserter_keyid values (the per-claim signer), so each converging
+        peer must be signed by its own key.
+        """
+        sa, sb = _two_signers(tmp_path)
         seed = graph.assert_claim("seed", generated_by="seed", seed=True)
         id_a = graph.assert_claim(
-            "finding", supports=[seed], generated_by="agent-A",
+            "finding", supports=[seed], generated_by="agent-A", signer=sa,
         )
         graph.assert_claim(
-            "finding", supports=[seed], generated_by="agent-B",
+            "finding", supports=[seed], generated_by="agent-B", signer=sb,
         )
         assert graph.get_claim(id_a)["support_level"] == "REPLICATED"
         return id_a
@@ -542,7 +548,7 @@ class TestValidateIdentityCheck:
         # validate() refuses on the loaded-signer gate.
         key_path = _bootstrap_key(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as graph:
-            id_a = self._setup_replicated(graph)
+            id_a = self._setup_replicated(graph, tmp_path)
         with mareforma.open(tmp_path, key_path=tmp_path / "absent") as graph:
             with pytest.raises(ValueError, match="loaded signing key"):
                 graph.validate(id_a)
@@ -559,7 +565,7 @@ class TestValidateIdentityCheck:
         """
         key_a = _bootstrap_key(tmp_path, "a.key")
         with mareforma.open(tmp_path, key_path=key_a) as graph:
-            id_a = self._setup_replicated(graph)
+            id_a = self._setup_replicated(graph, tmp_path)
 
         key_b = _bootstrap_key(tmp_path, "b.key")
         with mareforma.open(tmp_path, key_path=key_b) as graph:
@@ -583,7 +589,7 @@ class TestValidateIdentityCheck:
         )
 
         with mareforma.open(tmp_path, key_path=root_key_path) as graph:
-            id_a = self._setup_replicated(graph)
+            id_a = self._setup_replicated(graph, tmp_path)
             graph.enroll_validator(
                 validator_pubkey_pem, identity="validator@lab.example",
             )
@@ -625,10 +631,15 @@ class TestValidationTimestampParity:
             _signing.load_private_key(validator_key_path).public_key(),
         )
 
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=root_key_path) as graph:
             upstream = graph.assert_claim("u", generated_by="seed", seed=True)
-            id_a = graph.assert_claim("f", supports=[upstream], generated_by="A")
-            graph.assert_claim("f", supports=[upstream], generated_by="B")
+            id_a = graph.assert_claim(
+                "f", supports=[upstream], generated_by="A", signer=sa,
+            )
+            graph.assert_claim(
+                "f", supports=[upstream], generated_by="B", signer=sb,
+            )
             graph.enroll_validator(validator_pubkey_pem, identity="v@lab")
 
         with mareforma.open(tmp_path, key_path=validator_key_path) as graph:
@@ -962,10 +973,15 @@ class TestCLIValidateProducesSignedEnvelope:
 
         # Build the REPLICATED claim using the root key, then enroll the
         # validator key under root.
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=root_key_path) as graph:
             upstream = graph.assert_claim("u", generated_by="seed", seed=True)
-            rep_id = graph.assert_claim("f", supports=[upstream], generated_by="A")
-            graph.assert_claim("f", supports=[upstream], generated_by="B")
+            rep_id = graph.assert_claim(
+                "f", supports=[upstream], generated_by="A", signer=sa,
+            )
+            graph.assert_claim(
+                "f", supports=[upstream], generated_by="B", signer=sb,
+            )
             graph.enroll_validator(validator_pubkey_pem, identity="cli-validator")
 
         # Stage the validator key as the XDG default so the CLI finds it.

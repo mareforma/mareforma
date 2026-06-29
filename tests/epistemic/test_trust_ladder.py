@@ -43,7 +43,7 @@ from mareforma.db import open_db, add_claim, update_claim
 # Helpers
 # ---------------------------------------------------------------------------
 
-from tests._helpers import _pem_of, _wipe_db
+from tests._helpers import _pem_of, _two_signers, _wipe_db
 from tests.epistemic._builders import (
     _bootstrap_validator_key,
     open_graph,
@@ -67,17 +67,23 @@ class TestTrustLaundering:
         table if they want to know who actually validated.
         """
         validator_key_path = _bootstrap_validator_key(tmp_path)
+        # v0.3.7 keys REPLICATED on two distinct non-NULL asserter_keyids, not
+        # on distinct generated_by. Sign the two converging peers with distinct
+        # keys so the pair promotes (generated_by stays a display label).
+        sa, sb = _two_signers(tmp_path)
         with open_signed_graph(tmp_path) as g:
             upstream = g.assert_claim("upstream reference", generated_by="seed", seed=True)
             id_a = g.assert_claim(
                 "Drug X causes effect Y",
                 supports=[upstream],
                 generated_by="agent-A",
+                signer=sa,
             )
             g.assert_claim(
                 "Drug X causes effect Y",
                 supports=[upstream],
                 generated_by="agent-B",
+                signer=sb,
             )
             claim = g.get_claim(id_a)
             assert claim["support_level"] == "REPLICATED"
@@ -99,10 +105,13 @@ class TestTrustLaundering:
     def test_validate_accepts_any_validated_by_string(self, tmp_path: Path) -> None:
         """validate() stores whatever display string is passed."""
         validator_key_path = _bootstrap_validator_key(tmp_path)
+        # Distinct signers on the two converging peers so the pair reaches
+        # REPLICATED under the v0.3.7 asserter-keyid axis (see the test above).
+        sa, sb = _two_signers(tmp_path)
         with open_signed_graph(tmp_path) as g:
             upstream = g.assert_claim("prior", generated_by="seed", seed=True)
-            rep_id = g.assert_claim("finding", supports=[upstream], generated_by="A")
-            g.assert_claim("finding", supports=[upstream], generated_by="B")
+            rep_id = g.assert_claim("finding", supports=[upstream], generated_by="A", signer=sa)
+            g.assert_claim("finding", supports=[upstream], generated_by="B", signer=sb)
             g.enroll_validator(
                 _pem_of(validator_key_path), identity="v",
             )

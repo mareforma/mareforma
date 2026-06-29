@@ -256,10 +256,26 @@ class TestClaimValidate:
         if not gen_key_path.exists():
             _signing.bootstrap_key(gen_key_path)
 
+        # The two converging peers need distinct, non-NULL asserter_keyid
+        # values to reach REPLICATED (v0.3.7). Sign each with its own key,
+        # both distinct from the XDG validator key that will promote it.
+        sa_path = Path("_signer_a.key")
+        sb_path = Path("_signer_b.key")
+        if not sa_path.exists():
+            _signing.bootstrap_key(sa_path)
+        if not sb_path.exists():
+            _signing.bootstrap_key(sb_path)
+        sa = _signing.load_private_key(sa_path)
+        sb = _signing.load_private_key(sb_path)
+
         with mareforma.open(key_path=gen_key_path) as g:
             prior = g.assert_claim("upstream reference", generated_by="seed", seed=True)
-            rep_id = g.assert_claim("finding A", supports=[prior], generated_by="agent-A")
-            g.assert_claim("finding B", supports=[prior], generated_by="agent-B")
+            rep_id = g.assert_claim(
+                "finding A", supports=[prior], generated_by="agent-A", signer=sa,
+            )
+            g.assert_claim(
+                "finding B", supports=[prior], generated_by="agent-B", signer=sb,
+            )
             xdg_pem = _signing.public_key_to_pem(
                 _signing.load_private_key(_signing.default_key_path()).public_key(),
             )
@@ -448,19 +464,27 @@ class TestClaimValidateErrors:
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
             _signing.bootstrap_key(_signing.default_key_path())
-            # Build a REPLICATED claim signed by the XDG key (the same
-            # key the CLI will load when we invoke `claim validate`).
+            # Build a REPLICATED claim where one converging peer is signed
+            # by the XDG key (the same key the CLI loads for `claim
+            # validate`) and the other by a distinct key — so the pair has
+            # two distinct asserter_keyid (reaches REPLICATED) AND the
+            # validating XDG key is itself an asserter (triggers the
+            # self-validation refusal on validate).
+            xdg_signer = _signing.load_private_key(_signing.default_key_path())
+            other_path = Path("_other_signer.key")
+            _signing.bootstrap_key(other_path)
+            other_signer = _signing.load_private_key(other_path)
             with mareforma.open() as g:
                 prior = g.assert_claim(
                     "upstream", generated_by="seed", seed=True,
                 )
                 a = g.assert_claim(
                     "shared finding", supports=[prior],
-                    generated_by="agent-A",
+                    generated_by="agent-A", signer=xdg_signer,
                 )
                 g.assert_claim(
                     "shared finding restated", supports=[prior],
-                    generated_by="agent-B",
+                    generated_by="agent-B", signer=other_signer,
                 )
                 assert g.get_claim(a)["support_level"] == "REPLICATED"
             result = runner.invoke(cli, ["claim", "validate", a])

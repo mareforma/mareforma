@@ -103,12 +103,14 @@ class TestUpdateTrigger:
     def test_preliminary_to_replicated_allowed(self, tmp_path: Path) -> None:
         # The auto-promotion path that _maybe_update_replicated takes.
         from mareforma import signing as _sig
+        from tests._helpers import _two_signers
         key = tmp_path / "k"
         _sig.bootstrap_key(key)
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=key) as g:
             upstream = g.assert_claim("upstream", generated_by="seed", seed=True)
-            a = g.assert_claim("a", supports=[upstream], generated_by="A")
-            b = g.assert_claim("b", supports=[upstream], generated_by="B")
+            a = g.assert_claim("a", supports=[upstream], generated_by="A", signer=sa)
+            b = g.assert_claim("b", supports=[upstream], generated_by="B", signer=sb)
             assert g.get_claim(a)["support_level"] == "REPLICATED"
             assert g.get_claim(b)["support_level"] == "REPLICATED"
 
@@ -135,6 +137,7 @@ class TestUpdateTrigger:
 
     def test_established_downgrade_rejected(self, tmp_path: Path) -> None:
         from mareforma import signing as _sig
+        from tests._helpers import _two_signers
         gen_key = tmp_path / "gen.key"
         val_key = tmp_path / "val.key"
         if not gen_key.exists():
@@ -144,10 +147,11 @@ class TestUpdateTrigger:
         val_pem = _sig.public_key_to_pem(
             _sig.load_private_key(val_key).public_key(),
         )
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=gen_key) as g:
             upstream = g.assert_claim("upstream", generated_by="seed", seed=True)
-            id_a = g.assert_claim("a", supports=[upstream], generated_by="A")
-            g.assert_claim("b", supports=[upstream], generated_by="B")
+            id_a = g.assert_claim("a", supports=[upstream], generated_by="A", signer=sa)
+            g.assert_claim("b", supports=[upstream], generated_by="B", signer=sb)
             g.enroll_validator(val_pem, identity="v")
         with mareforma.open(tmp_path, key_path=val_key) as g:
             g.validate(id_a)
@@ -204,10 +208,12 @@ class TestCheckConstraint:
         val_pem = _sig.public_key_to_pem(
             _sig.load_private_key(val_key).public_key(),
         )
+        from tests._helpers import _two_signers
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=gen_key) as g:
             upstream = g.assert_claim("upstream", generated_by="seed", seed=True)
-            id_a = g.assert_claim("a", supports=[upstream], generated_by="A")
-            g.assert_claim("b", supports=[upstream], generated_by="B")
+            id_a = g.assert_claim("a", supports=[upstream], generated_by="A", signer=sa)
+            g.assert_claim("b", supports=[upstream], generated_by="B", signer=sb)
             g.enroll_validator(val_pem, identity="v")
         with mareforma.open(tmp_path, key_path=val_key) as g:
             g.validate(id_a)
@@ -227,9 +233,9 @@ class TestCheckConstraint:
 class TestPrevHashChain:
     def test_chain_populated_on_every_claim(self, tmp_path: Path) -> None:
         with mareforma.open(tmp_path) as g:
-            a = g.assert_claim("claim a")
-            b = g.assert_claim("claim b")
-            c = g.assert_claim("claim c")
+            g.assert_claim("claim a")
+            g.assert_claim("claim b")
+            g.assert_claim("claim c")
         conn = open_db(tmp_path)
         try:
             rows = conn.execute(
@@ -248,7 +254,7 @@ class TestPrevHashChain:
         the row's stored evidence_json must be threaded through too.
         """
         with mareforma.open(tmp_path) as g:
-            ids = [g.assert_claim(f"claim {i}") for i in range(5)]
+            [g.assert_claim(f"claim {i}") for i in range(5)]
         conn = open_db(tmp_path)
         try:
             rows = conn.execute(
@@ -317,12 +323,14 @@ class TestStatusOnlyEditsBypassTrigger:
         """A REPLICATED claim's status can be set to retracted without
         the state-machine trigger firing (it fires on OF support_level)."""
         from mareforma import signing as _sig
+        from tests._helpers import _two_signers
         key = tmp_path / "k"
         _sig.bootstrap_key(key)
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=key) as g:
             up = g.assert_claim("up", generated_by="seed", seed=True)
-            a = g.assert_claim("a", supports=[up], generated_by="A")
-            g.assert_claim("b", supports=[up], generated_by="B")
+            a = g.assert_claim("a", supports=[up], generated_by="A", signer=sa)
+            g.assert_claim("b", supports=[up], generated_by="B", signer=sb)
             assert g.get_claim(a)["support_level"] == "REPLICATED"
             update_claim(g._conn, tmp_path, a, status="retracted")
             row = g.get_claim(a)

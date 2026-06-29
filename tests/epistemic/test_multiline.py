@@ -157,8 +157,12 @@ class TestRunDistinct:
         assert status["status"] == Status.PRELIMINARY.value
 
     def test_cross_run_corroborates(self, tmp_path: Path) -> None:
+        import mareforma
         h = _prop()
-        with open_graph(tmp_path) as g:
+        # Unsigned graph (no key): findings carry NULL asserter_keyid, so
+        # independence counts on the legacy generated_by run axis. Two
+        # distinct runs on distinct datasets are two independent supports.
+        with mareforma.open(tmp_path) as g:
             g.assert_finding(h, _superiority(), _smd(-2.6, p=0.003), data_id="dA", generated_by="run1")
             g.assert_finding(h, _superiority(), _smd(-2.4, p=0.01), data_id="dB", generated_by="run2")
             status = g.proposition_status(h)
@@ -279,8 +283,11 @@ class TestMultiLineIdempotencyAndFork:
 class TestSingleLineParity:
     def test_distinct_run_single_lines_still_corroborate(self, tmp_path: Path) -> None:
         """Findings from distinct runs still corroborate (prior behaviour kept)."""
+        import mareforma
         h = _prop()
-        with open_graph(tmp_path) as g:
+        # Unsigned graph (no key): NULL asserter_keyid falls back to the
+        # legacy generated_by run axis, so two distinct labs corroborate.
+        with mareforma.open(tmp_path) as g:
             g.assert_finding(h, _superiority(), _smd(-2.6, p=0.003), data_id="dataA", generated_by="lab_a")
             g.assert_finding(h, _superiority(), _smd(-2.4, p=0.01), data_id="dataB", generated_by="lab_b")
             status = g.proposition_status(h)

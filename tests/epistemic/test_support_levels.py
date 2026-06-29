@@ -287,7 +287,7 @@ class TestReplicatedSpurious:
             upstream = graph.assert_claim("upstream", generated_by="seed", seed=True)
 
             # Genuine: data-driven
-            genuine_a = graph.assert_claim(
+            graph.assert_claim(
                 "finding A (data-driven)",
                 classification="ANALYTICAL",
                 generated_by="agent/model-a/lab_a",
@@ -295,7 +295,7 @@ class TestReplicatedSpurious:
                 source_name="dataset_alpha",
                 signer=sa,
             )
-            genuine_b = graph.assert_claim(
+            graph.assert_claim(
                 "finding B (data-driven)",
                 classification="ANALYTICAL",
                 generated_by="agent/model-b/lab_b",
@@ -305,14 +305,14 @@ class TestReplicatedSpurious:
             )
 
             # Spurious: LLM prior
-            spurious_a = graph.assert_claim(
+            graph.assert_claim(
                 "finding A (LLM prior)",
                 classification="INFERRED",
                 generated_by="agent/model-a/lab_a",
                 supports=[upstream],
                 signer=sa,
             )
-            spurious_b = graph.assert_claim(
+            graph.assert_claim(
                 "finding B (LLM prior)",
                 classification="INFERRED",
                 generated_by="agent/model-b/lab_b",

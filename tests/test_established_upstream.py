@@ -64,11 +64,13 @@ class TestEstablishedUpstreamRule:
     def test_replicated_fires_when_upstream_is_established(
         self, tmp_path: Path,
     ) -> None:
+        from tests._helpers import _two_signers
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
             up = g.assert_claim("seeded", generated_by="seed", seed=True)
             assert g.get_claim(up)["support_level"] == "ESTABLISHED"
-            a = g.assert_claim("a", supports=[up], generated_by="A")
-            b = g.assert_claim("b", supports=[up], generated_by="B")
+            a = g.assert_claim("a", supports=[up], generated_by="A", signer=sa)
+            b = g.assert_claim("b", supports=[up], generated_by="B", signer=sb)
             assert g.get_claim(a)["support_level"] == "REPLICATED"
             assert g.get_claim(b)["support_level"] == "REPLICATED"
 
@@ -76,14 +78,16 @@ class TestEstablishedUpstreamRule:
         self, tmp_path: Path,
     ) -> None:
         """Multiple upstreams; only ONE needs to be ESTABLISHED."""
+        from tests._helpers import _two_signers
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
             estd = g.assert_claim("seeded", generated_by="seed", seed=True)
             prelim = g.assert_claim("plain upstream", generated_by="seed")
             a = g.assert_claim(
-                "a", supports=[estd, prelim], generated_by="A",
+                "a", supports=[estd, prelim], generated_by="A", signer=sa,
             )
             b = g.assert_claim(
-                "b", supports=[estd, prelim], generated_by="B",
+                "b", supports=[estd, prelim], generated_by="B", signer=sb,
             )
             assert g.get_claim(a)["support_level"] == "REPLICATED"
             assert g.get_claim(b)["support_level"] == "REPLICATED"
@@ -151,10 +155,12 @@ class TestBootstrapIntegration:
     def test_full_chain_seed_then_replicate_then_validate(
         self, tmp_path: Path,
     ) -> None:
+        from tests._helpers import _two_signers
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
             root = g.assert_claim("root of trust", generated_by="seed", seed=True)
-            a = g.assert_claim("finding", supports=[root], generated_by="A")
-            b = g.assert_claim("finding", supports=[root], generated_by="B")
+            a = g.assert_claim("finding", supports=[root], generated_by="A", signer=sa)
+            g.assert_claim("finding", supports=[root], generated_by="B", signer=sb)
             assert g.get_claim(a)["support_level"] == "REPLICATED"
             g.enroll_validator(_validator_pem(tmp_path), identity="v")
 
@@ -168,7 +174,7 @@ class TestBootstrapIntegration:
         # downstream peers — REPLICATED chain continues from it. New
         # claims are asserted by the root key again.
         with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
-            d = g.assert_claim("downstream", supports=[a], generated_by="D")
-            e = g.assert_claim("downstream", supports=[a], generated_by="E")
+            d = g.assert_claim("downstream", supports=[a], generated_by="D", signer=sa)
+            e = g.assert_claim("downstream", supports=[a], generated_by="E", signer=sb)
             assert g.get_claim(d)["support_level"] == "REPLICATED"
             assert g.get_claim(e)["support_level"] == "REPLICATED"

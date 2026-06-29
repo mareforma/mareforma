@@ -41,6 +41,7 @@ from pathlib import Path
 
 import pytest
 
+import mareforma
 from mareforma.trust import (
     BearingDirection,
     Contrast,
@@ -353,7 +354,14 @@ class TestSuccessCriteria:
 
     def test_two_independent_lines_reach_corroborated(self, tmp_path: Path) -> None:
         h = _prop(Direction.DECREASES)
-        with open_graph(tmp_path) as graph:
+        # v0.3.7 counts independent support by distinct asserter_keyid (the
+        # finding-claim signer). assert_finding signs with the graph's loaded
+        # key, so two findings through ONE signed handle share one keyid and
+        # count once. Open UNSIGNED so asserter_keyid is NULL and the legacy
+        # generated_by axis applies: two unsigned findings with distinct
+        # generated_by + distinct data_id are two independent lines — the two
+        # labs this test models.
+        with mareforma.open(tmp_path) as graph:
             graph.assert_finding(h, _superiority(), _smd(-2.6, p=0.003), data_id="dataA", generated_by="lab_a")
             graph.assert_finding(h, _superiority(), _smd(-2.4, p=0.01), data_id="dataB", generated_by="lab_b")
             status = graph.proposition_status(h)
@@ -456,7 +464,10 @@ class TestGraphBehaviour:
 
     def test_query_frame_min_status_filter(self, tmp_path: Path) -> None:
         h = _prop(Direction.DECREASES)
-        with open_graph(tmp_path) as graph:
+        # Unsigned graph so the two findings count as two independent lines
+        # (legacy generated_by axis) — see test_two_independent_lines_reach_
+        # corroborated. CORROBORATED is what the min_status floor checks here.
+        with mareforma.open(tmp_path) as graph:
             graph.assert_finding(h, _superiority(), _smd(-2.6, p=0.003), data_id="dataA", generated_by="lab_a")
             preliminary_floor = graph.query_frame(h.frame_id(), min_status="PRELIMINARY")
             corroborated_floor = graph.query_frame(h.frame_id(), min_status="CORROBORATED")

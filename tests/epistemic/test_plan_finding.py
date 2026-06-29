@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+import mareforma
 from mareforma.trust import (
     Direction,
     DirectionOfInterest,
@@ -183,7 +184,13 @@ class TestSubmitFinding:
     def test_two_independent_lines_corroborate(self, tmp_path: Path) -> None:
         h = _prop(Direction.DECREASES)
         pred = _superiority()
-        with open_graph(tmp_path) as graph:
+        # v0.3.7 counts independent support by distinct asserter_keyid (the
+        # finding-claim signer). submit_finding signs with the graph's loaded
+        # key, so two findings through ONE signed handle share one keyid and
+        # count once. Open UNSIGNED so asserter_keyid is NULL and the legacy
+        # generated_by axis applies: two unsigned findings with distinct
+        # generated_by + distinct data_id are the two independent lines.
+        with mareforma.open(tmp_path) as graph:
             graph.register_plan(h, pred)
             graph.submit_finding(h, pred, _smd(-2.6, p=0.003), data_id="dataA", generated_by="lab_a")
             graph.submit_finding(h, pred, _smd(-2.4, p=0.01), data_id="dataB", generated_by="lab_b")
