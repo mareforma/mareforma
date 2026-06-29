@@ -293,7 +293,7 @@ def _count_run_distinct(pairs: list[tuple[str, str]]) -> int:
 
 
 def independence_counts(conn: sqlite3.Connection, content_id: str) -> tuple[int, int]:
-    """(independent_support, independent_refute) by distinct run, with a data_id guard.
+    """(independent_support, independent_refute) by distinct signer, data_id guard.
 
     Per-line bearing is recomputed on read: each evidence line's stored estimate
     is gated against its finding's stored prediction (the gate inputs are
@@ -301,15 +301,21 @@ def independence_counts(conn: sqlite3.Connection, content_id: str) -> tuple[int,
     multi-line finding whose lines disagree is counted line by line, never off
     the finding's denormalised ``bearing_direction`` cache.
 
-    Independence is then counted by distinct ``generated_by`` (run) with a
-    ``data_id`` guard (see :func:`_count_run_distinct`): one run yields at most
-    one independent support and one independent refute. For single-line findings
-    from distinct runs this reduces to the prior distinct-dataset behaviour; what
-    changes is that distinct datasets from the SAME run no longer count as
-    independent (status_policy@v2).
+    Independence is then counted by distinct **signer** (the claim's
+    ``asserter_keyid``) with a ``data_id`` guard (see
+    :func:`_count_run_distinct`): one signer yields at most one independent
+    support and one independent refute. This is the same WHO axis the
+    REPLICATED promotion query keys on, read from the same denormalised claim
+    column, so promotion and trust counting can never disagree. Legacy
+    evidence lines whose claim predates the keyid column (NULL
+    ``asserter_keyid``) fall back to the retired ``generated_by`` run axis so
+    they keep their count instead of silently collapsing two NULL signers to
+    one (status_policy@v3). The two axes are namespaced (``k:`` vs ``g:``) so a
+    keyid can never alias a run label.
     """
     rows = conn.execute(
         "SELECT el.data_id AS data_id, cl.generated_by AS generated_by, "
+        " cl.asserter_keyid AS asserter_keyid, "
         " est.estimate_value, est.effect_type, est.scale, est.p_value, "
         " est.ci_lower, est.ci_upper, est.ci_level, est.n_total, "
         " pr.test_type, pr.direction_of_interest, pr.equivalence_lower, "
@@ -360,7 +366,13 @@ def independence_counts(conn: sqlite3.Connection, content_id: str) -> tuple[int,
             direction = compute_bearing(estimate, prediction).direction
         except Exception:
             continue
-        pair = (r["generated_by"], r["data_id"])
+        # Independence axis = distinct signer (asserter_keyid), the same WHO
+        # the REPLICATED promotion keys on. Legacy lines whose claim has no
+        # keyid fall back to the retired generated_by run axis so they keep
+        # their count; the k:/g: namespace stops a keyid aliasing a run label.
+        keyid = r["asserter_keyid"]
+        run_token = f"k:{keyid}" if keyid is not None else f"g:{r['generated_by']}"
+        pair = (run_token, r["data_id"])
         if direction is BearingDirection.SUPPORTS:
             supports.append(pair)
         elif direction is BearingDirection.REFUTES:
