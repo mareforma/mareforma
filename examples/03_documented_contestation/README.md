@@ -19,13 +19,20 @@ No API key required.
 
 ## Setup: establish the prior consensus
 
+REPLICATED keys on the signing key (`asserter_keyid`), so the two converging
+claims must sign with distinct keys. `generated_by` is a display label and does
+not drive promotion. The langchain tools sign with the single loaded key, so the
+two consensus claims go through `graph.assert_claim(signer=...)` under two
+distinct lab keys instead. The reviewer/validator key is distinct from both
+(mareforma refuses self-validation).
+
 ```python
-# Two enrolled keys: one signs the claims, one validates them (mareforma
-# refuses self-validation). get_tools() gives each agent its own tool set.
-query_graph, assert_finding_a = [tool(fn) for fn in graph.get_tools(
+# query_graph and the challenge agent's tool come from get_tools(). The two
+# converging consensus claims do not: they sign with distinct keys directly.
+lab_a_priv = _signing.load_private_key(lab_a_key_path)
+lab_b_priv = _signing.load_private_key(lab_b_key_path)
+query_graph, _ = [tool(fn) for fn in graph.get_tools(
     generated_by="agent_lab_a/model-a")]
-_, assert_finding_b = [tool(fn) for fn in graph.get_tools(
-    generated_by="agent_lab_b/model-b")]
 _, assert_finding_c = [tool(fn) for fn in graph.get_tools(
     generated_by="agent_lab_c/model-c")]
 
@@ -34,12 +41,15 @@ upstream_ref = graph.assert_claim(
     "Prior literature: Treatment X is studied in population P",
     classification="DERIVED", generated_by="agent_seed/literature", seed=True,
 )
-consensus_a = assert_finding_a.invoke({
-    "text": "Treatment X reduces outcome Y in population P (cohort_1, n=500, p=0.003)",
-    "classification": "ANALYTICAL", "supports": [upstream_ref], "source": "dataset_alpha"})
-consensus_b = assert_finding_b.invoke({
-    "text": "Treatment X reduces outcome Y in population P (cohort_2, n=480, p=0.011)",
-    "classification": "ANALYTICAL", "supports": [upstream_ref], "source": "dataset_beta"})
+# Same upstream, distinct signing keys → REPLICATED fires.
+consensus_a = graph.assert_claim(
+    "Treatment X reduces outcome Y in population P (cohort_1, n=500, p=0.003)",
+    classification="ANALYTICAL", generated_by="agent_lab_a/model-a",
+    supports=[upstream_ref], source_name="dataset_alpha", signer=lab_a_priv)
+consensus_b = graph.assert_claim(
+    "Treatment X reduces outcome Y in population P (cohort_2, n=480, p=0.011)",
+    classification="ANALYTICAL", generated_by="agent_lab_b/model-b",
+    supports=[upstream_ref], source_name="dataset_beta", signer=lab_b_priv)
 
 # Re-open under the reviewer key and validate → ESTABLISHED. evidence_seen names
 # the upstream the reviewer consulted; mareforma binds it into the signed envelope.

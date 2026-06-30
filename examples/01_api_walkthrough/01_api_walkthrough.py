@@ -49,8 +49,14 @@ sep("1. Open")
 # uses a separate enrolled reviewer key for the validate() call.
 agent_key_path = tmp / "_agent_key"
 reviewer_key_path = tmp / "_reviewer_key"
+# Two distinct lab keys for the converging claims in section 5: REPLICATED
+# keys on the signing key, so the two peers must sign with different keys.
+lab_a_key_path = tmp / "_lab_a_key"
+lab_b_key_path = tmp / "_lab_b_key"
 _signing.bootstrap_key(agent_key_path)
 _signing.bootstrap_key(reviewer_key_path)
+_signing.bootstrap_key(lab_a_key_path)
+_signing.bootstrap_key(lab_b_key_path)
 
 graph = mareforma.open(tmp, key_path=agent_key_path)
 # Enroll the reviewer as a second validator (signed by the loaded agent key).
@@ -159,18 +165,22 @@ show("same id?", id_a == id_b)
 # ---------------------------------------------------------------------------
 sep("5. REPLICATED (automatic)")
 
-# REPLICATED fires when ≥2 claims share the same upstream in supports[]
-# AND have different generated_by values AND the shared upstream is
-# itself ESTABLISHED. The third condition (Cochrane/GRADE methodology —
-# replication-of-noise is not replication) is satisfied here by asserting
-# the upstream as a seed claim, which inserts it directly at ESTABLISHED
-# with a signed seed envelope.
+# REPLICATED fires when >=2 claims share the same upstream in supports[],
+# are signed by DISTINCT keys, and the shared upstream is itself
+# ESTABLISHED. The signing key is the independence unit; generated_by is a
+# display label and does not drive promotion. The ESTABLISHED-upstream
+# condition (Cochrane / GRADE methodology: replication-of-noise is not
+# replication) is satisfied here by asserting the upstream as a seed claim,
+# inserted directly at ESTABLISHED with a signed seed envelope.
+
+lab_a_priv = _signing.load_private_key(lab_a_key_path)
+lab_b_priv = _signing.load_private_key(lab_b_key_path)
 
 upstream = graph.assert_claim(
     "Property X is elevated in compartment Y",
     classification="DERIVED",
     generated_by="agent_seed/model-a",
-    seed=True,                    # ← directly ESTABLISHED, anchors the chain
+    seed=True,                    # directly ESTABLISHED, anchors the chain
 )
 
 rep_a = graph.assert_claim(
@@ -179,14 +189,16 @@ rep_a = graph.assert_claim(
     generated_by="agent_lab_a/model-a",
     supports=[upstream],
     source_name="dataset_alpha",
+    signer=lab_a_priv,            # signed by lab A's key
 )
 
 rep_b = graph.assert_claim(
     "Cell type A preferentially targets compartment Y (lab_b, n=1100)",
     classification="ANALYTICAL",
     generated_by="agent_lab_b/model-b",
-    supports=[upstream],          # same upstream, different agent → REPLICATED fires
+    supports=[upstream],          # same upstream, distinct key: REPLICATED fires
     source_name="dataset_beta",
+    signer=lab_b_priv,            # signed by lab B's key
 )
 
 c_rep_a = graph.get_claim(rep_a)

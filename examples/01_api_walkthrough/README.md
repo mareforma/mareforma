@@ -28,8 +28,14 @@ tmp = Path(tempfile.mkdtemp())
 # auto-enrolls the key as root validator on this fresh graph.
 agent_key_path = tmp / "_agent_key"
 reviewer_key_path = tmp / "_reviewer_key"
+# Two distinct lab keys for the converging claims in section 5: REPLICATED keys
+# on the signing key, so the two peers must sign with different keys.
+lab_a_key_path = tmp / "_lab_a_key"
+lab_b_key_path = tmp / "_lab_b_key"
 _signing.bootstrap_key(agent_key_path)
 _signing.bootstrap_key(reviewer_key_path)
+_signing.bootstrap_key(lab_a_key_path)
+_signing.bootstrap_key(lab_b_key_path)
 
 graph = mareforma.open(tmp, key_path=agent_key_path)
 
@@ -124,26 +130,33 @@ id_b = graph.assert_claim(
 ## 5. REPLICATED: automatic convergence
 
 ```python
-# REPLICATED fires when ≥2 claims share the same upstream in supports[] AND
-# have different generated_by values AND that upstream is itself ESTABLISHED
-# (Cochrane/GRADE methodology — replication-of-noise is not replication).
-# seed=True inserts the upstream directly at ESTABLISHED via a signed envelope.
+# REPLICATED fires when >=2 claims share the same upstream in supports[], are
+# signed by DISTINCT keys, and that upstream is itself ESTABLISHED (Cochrane /
+# GRADE methodology: replication-of-noise is not replication). The signing key
+# is the independence unit; generated_by is a display label and does not drive
+# promotion. seed=True inserts the upstream directly at ESTABLISHED via a
+# signed envelope.
+lab_a_priv = _signing.load_private_key(lab_a_key_path)
+lab_b_priv = _signing.load_private_key(lab_b_key_path)
+
 upstream = graph.assert_claim(
     "Property X is elevated in compartment Y",
     classification="DERIVED",
     generated_by="agent_seed/model-a",
-    seed=True,                    # ← directly ESTABLISHED, anchors the chain
+    seed=True,                    # directly ESTABLISHED, anchors the chain
 )
 
 rep_a = graph.assert_claim(
     "Cell type A preferentially targets compartment Y (lab_a, n=800)",
     classification="ANALYTICAL", generated_by="agent_lab_a/model-a",
     supports=[upstream], source_name="dataset_alpha",
+    signer=lab_a_priv,            # signed by lab A's key
 )
 rep_b = graph.assert_claim(
     "Cell type A preferentially targets compartment Y (lab_b, n=1100)",
     classification="ANALYTICAL", generated_by="agent_lab_b/model-b",
-    supports=[upstream], source_name="dataset_beta",   # same upstream, different agent
+    supports=[upstream], source_name="dataset_beta",   # same upstream, distinct key
+    signer=lab_b_priv,            # signed by lab B's key
 )
 ```
 
