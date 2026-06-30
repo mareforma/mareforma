@@ -108,13 +108,15 @@ Assert a claim. Returns `claim_id` (UUID).
 | `contradicts` | `list[str] \| None` | `None` | Claim_ids this finding is in explicit tension with. |
 | `source_name` | `str \| None` | `None` | Data source name. Required for ANALYTICAL to be meaningful. |
 | `idempotency_key` | `str \| None` | `None` | Retry-safe key. Same key → same claim_id, no INSERT. |
-| `artifact_hash` | `str \| None` | `None` | SHA-256 hex digest of the output bytes (figure, CSV, model). When both converging peers supply a hash, the hashes must match for REPLICATED. |
+| `artifact_hash` | `str \| None` | `None` | SHA-256 hex digest of the output bytes (figure, CSV, model). Secondary collapse check: equal data collapses two peers to one line (a byte-identical rerun is not corroboration), distinct data counts as independent, absent data never blocks. |
 | `seed` | `bool` | `False` | Insert directly at `ESTABLISHED` with a signed seed envelope. Only enrolled validators can produce seeds. |
 
 **Side effect:** if ≥2 claims now share the same upstream in `supports[]`
-with different `generated_by`, all are promoted to `REPLICATED`, provided
+signed by distinct keys, all are promoted to `REPLICATED`, provided
 at least one upstream is itself `ESTABLISHED` (Cochrane / GRADE evidence
-chain) and any `artifact_hash` constraint matches.
+chain). When both peers supply `artifact_hash`, equal data collapses the
+pair to one line and does not promote on data alone; distinct data counts
+as independent; absent data never blocks.
 
 ---
 
@@ -159,11 +161,11 @@ claim without `supports=` is unverifiable: the chain is broken.
 | Level | Meaning | How reached |
 |---|---|---|
 | `PRELIMINARY` | One agent claimed it | Automatic on first assertion |
-| `REPLICATED` | ≥2 independent agents converged on the same upstream | Automatic at INSERT |
+| `REPLICATED` | ≥2 claims under distinct signing keys converged on the same upstream | Automatic at INSERT |
 | `ESTABLISHED` | Human-validated | `graph.validate()` only, requires REPLICATED first |
 
 `REPLICATED` fires automatically when ≥2 claims share the same upstream
-claim_id in `supports[]` and have different `generated_by` values **AND**
+claim_id in `supports[]` and are signed by distinct keys **AND**
 at least one of those upstreams is itself `ESTABLISHED`. No agent can
 self-promote to `ESTABLISHED`.
 
@@ -195,14 +197,16 @@ Asserting or updating a claim whose `supports[]` would create a cycle
 (`A → ... → A`) raises `CycleDetectedError`. Walk is depth-capped at 1024
 hops. DOI strings in `supports[]` are not graph nodes and skipped.
 
-### Artifact-hash gate
+### Artifact-hash collapse
 
-When two converging peers BOTH supply `artifact_hash` (a SHA-256 hex
-digest of the output bytes, figure, CSV, model), the hashes must match
-for `REPLICATED` to fire. When either peer omits the hash, the gate is
-bypassed and identity-only `REPLICATED` applies. The hash is part of the
-signed payload, so an attacker who edits the column without the private
-key breaks verification.
+Independence runs on the signing key: two peers under distinct keys
+promote to `REPLICATED`. `artifact_hash` (a SHA-256 hex digest of the
+output bytes, figure, CSV, model) is a secondary collapse check. When two
+peers carry equal hashes they are the same data and collapse to one line;
+when the hashes differ they are independent; when either peer omits the
+hash it never blocks promotion. The hash is part of the signed payload,
+so an attacker who edits the column without the private key breaks
+verification.
 
 ```python
 import hashlib
@@ -508,10 +512,12 @@ claim that happens to share a key. `assert_claim` raises
 
 ## generated_by convention
 
-`generated_by` is the independence signal. `REPLICATED` fires only when
-two claims have **different** `generated_by` values.
+The independence signal is the signing key (`asserter_keyid`).
+`generated_by` is a display label: a provenance annotation recording
+model, version, and context. It no longer drives `REPLICATED`.
 
-Use a structured string encoding model + version + context:
+Still set a meaningful `generated_by` for provenance. Use a structured
+string encoding model + version + context:
 
 ```
 "gpt-4o-2024-11/lab_a"     ✓ model + version + context
@@ -555,7 +561,7 @@ graph.assert_claim("...", classification="DERIVED")
 graph.assert_claim("...", classification="DERIVED", supports=[upstream_id])
 ```
 
-**Use unstructured `generated_by`.** `"agent"` makes independence tracking meaningless.
+**Use unstructured `generated_by`.** `"agent"` makes provenance unreadable.
 
 **Treat REPLICATED as proof of truth.** Two INFERRED claims from the same LLM prior can still trigger REPLICATED if they share an ESTABLISHED upstream. Always check `classification` alongside `support_level`.
 
@@ -579,7 +585,7 @@ graph.assert_claim("...", classification="DERIVED", supports=[upstream_id])
 `graph.get_tools(generated_by="...")` returns `[query_graph, assert_finding]`
 as plain Python callables. Wrap them in one line for any agent framework.
 `generated_by` is baked into the closure: set it to the agent's identity
-so REPLICATED detection works correctly across independent runs.
+so each line carries readable provenance.
 `query_graph` routes through `query_for_llm`, so the JSON it returns has
 free-text fields sanitized and wrapped in
 `<untrusted_data>...</untrusted_data>`.

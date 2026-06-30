@@ -438,14 +438,15 @@ graph.assert_claim("finding B", supports=[root], generated_by="agent-B")
 `CycleDetectedError`. Walk is depth-capped at 1024 hops. DOI strings
 in supports[] are not graph nodes and skipped.
 
-**Artifact-hash gate.** When two converging peers BOTH supply
-`artifact_hash` (a SHA256 hex digest of the output bytes: figure, CSV,
-model), the hashes must match for `REPLICATED` to fire. Identity
-convergence alone is no longer enough in that case. When either peer
-omits the hash, the gate is bypassed and identity-only `REPLICATED`
-applies as before; the signal is opt-in, not retroactive. The hash is
-part of the signed payload, so an attacker who edits the column without
-the private key breaks verification.
+**Artifact-hash collapse.** `artifact_hash` (a SHA256 hex digest of the
+output bytes: figure, CSV, model) is a secondary collapse check, not a
+match requirement. When two converging peers BOTH supply a hash and the
+hashes are EQUAL, the two lines collapse to one: a byte-identical rerun is
+the same output, not corroboration, so an equal-hash pair does not promote
+on data alone. Distinct hashes count as two independent lines. When either
+peer omits the hash, data never blocks: distinct signing keys alone promote.
+The hash is part of the signed payload, so an attacker who edits the column
+without the private key breaks verification.
 
 ```python
 import hashlib
@@ -746,7 +747,7 @@ alice$ mareforma validator add \
            --identity bob@lab.example
 alice$ mareforma validator list                # confirms both enrolled
 # Alice asserts a claim and gets it to REPLICATED through the usual
-# convergence path (different generated_by, shared ESTABLISHED upstream).
+# convergence path (distinct signing keys, shared ESTABLISHED upstream).
 
 # --- Back on Bob's machine -------------------------------------------------
 bob$ cd ~/shared/my-project                    # same project root
@@ -1091,7 +1092,7 @@ reconcile the conflict.
 **Not a convergence mechanism.** Two agents reaching the same conclusion
 must converge through mareforma's epistemic ladder, not by sharing a
 key. The supported pattern: both cite the same `ESTABLISHED` upstream in
-`supports[]` with different `generated_by` values → `REPLICATED` fires
+`supports[]` and sign with distinct keys, so `REPLICATED` fires
 automatically. `idempotency_key` collapsing two distinct findings into
 one row would erase the second agent's independent contribution;
 mareforma refuses that path on purpose.
@@ -1100,9 +1101,11 @@ mareforma refuses that path on purpose.
 
 ## generated_by convention
 
-`generated_by` is the independence signal. `REPLICATED` fires only when two
-claims have **different** `generated_by` values. If both claims share the same
-identifier, convergence is not detected regardless of how different the text is.
+`generated_by` is a display and provenance label, not the independence signal.
+`REPLICATED` keys on the signing key (`asserter_keyid`): two claims signed by
+**distinct keys**, citing the same `ESTABLISHED` upstream, converge. Two claims
+signed by the same key do not, regardless of their `generated_by` strings. Still
+set `generated_by` to a meaningful identifier so provenance stays auditable.
 
 Use a structured string encoding model + version + context:
 

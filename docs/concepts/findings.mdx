@@ -143,10 +143,12 @@ cannot relabel a refutation as support.
 
 `Status` is a count over independent lines of evidence on a single
 `content_id`, not an assertion of truth and not a human gate. Independence is a
-distinct-run heuristic: two supporting lines count as independent when they come
-from different runs (`generated_by`) and different datasets (`data_id`). One run
-contributes at most one independent support and one independent refute, so a
-single run cannot reach `CORROBORATED` on its own. A finding may carry several
+distinct-signer heuristic: two supporting lines count as independent when they
+come from different signers (the claim's signing key) and different datasets
+(`data_id`). Unsigned lines fall back to distinct `generated_by` run. One
+signer (or, for unsigned lines, one run) contributes at most one independent
+support and one independent refute, so a single signer cannot reach
+`CORROBORATED` on its own. A finding may carry several
 evidence lines, and each line's bearing is recomputed on read.
 
 | Status | Meaning |

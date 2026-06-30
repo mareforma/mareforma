@@ -129,13 +129,13 @@ claim_id = graph.assert_claim(
 |---|---|---|---|
 | `text` | `str` | required | Falsifiable assertion. Cannot be empty or whitespace. Capped at 100,000 characters. |
 | `classification` | `str` | `"INFERRED"` | `INFERRED` \| `ANALYTICAL` \| `DERIVED` |
-| `generated_by` | `str \| None` | `"agent"` | Agent identifier. Independence signal for REPLICATED detection. |
+| `generated_by` | `str \| None` | `"agent"` | Display label. REPLICATED independence keys on the signing key, not this field. |
 | `supports` | `list[str] \| None` | `None` | Upstream claim_ids or DOIs this claim rests on. Cycles are rejected (`CycleDetectedError`). |
 | `contradicts` | `list[str] \| None` | `None` | Claim_ids this finding is in explicit tension with. |
 | `source_name` | `str \| None` | `None` | Data source. Stored as-is; required for ANALYTICAL to be meaningful. |
 | `idempotency_key` | `str \| None` | `None` | Unique key: same key returns existing `claim_id`, no INSERT. |
 | `status` | `str` | `"open"` | `open` \| `contested` \| `retracted` |
-| `artifact_hash` | `str \| None` | `None` | SHA-256 hex digest of the output bytes backing the claim. When both converging peers supply a hash, the hashes must match for REPLICATED. |
+| `artifact_hash` | `str \| None` | `None` | SHA-256 hex digest of the output bytes backing the claim. Secondary collapse check: equal data collapses two peers to one line (a byte-identical rerun is not corroboration), distinct data counts as independent, absent data (NULL) never blocks. |
 | `seed` | `bool` | `False` | Insert directly at `ESTABLISHED` with a signed seed envelope. Only an enrolled validator can produce a seed. Used to bootstrap the ESTABLISHED-upstream chain on a fresh project. |
 
 **Returns** `str`: `claim_id` UUID
@@ -148,7 +148,7 @@ claim_id = graph.assert_claim(
 - `ChainIntegrityError`: if the `prev_hash` append-only chain check fails
 - `DatabaseError`: on SQLite write failure
 
-**Side effect**: if ≥2 claims now share the same upstream in `supports[]` with different `generated_by` values, all are promoted to `REPLICATED`. The promotion fires only when at least one upstream is itself `ESTABLISHED` (Cochrane / GRADE evidence chain, strict by default). When both peers supply `artifact_hash`, the hashes must match.
+**Side effect**: if ≥2 claims now share the same upstream in `supports[]` signed by distinct keys, all are promoted to `REPLICATED`. The promotion fires only when at least one upstream is itself `ESTABLISHED` (Cochrane / GRADE evidence chain, strict by default). When both peers supply `artifact_hash`, equal data collapses the pair to one line and does not promote on data alone; distinct data counts as independent; absent data never blocks.
 
 #### Idempotency
 
@@ -213,6 +213,10 @@ for r in results:
   is in the validators table.
 
 **Raises** `ValueError` if `min_support` or `classification` is invalid.
+
+REPLICATED / ESTABLISHED rows are re-verified on read: a row whose signature fails to verify is excluded from the result. Never raises.
+
+For ESTABLISHED rows, each result also carries `single_trust_domain: bool`, a disclosure of whether all validators trace to one root of trust. It is a disclosure, not a Sybil guard.
 
 ---
 
@@ -405,7 +409,7 @@ if claim:
 
 **Parameters** `claim_id: str`
 
-**Returns** `dict | None`: `None` if not found. Same field shape as `query()`.
+**Returns** `dict | None`: `None` if not found. Same field shape as `query()`. A REPLICATED / ESTABLISHED row is re-verified on read; if its signature fails to verify the dict is returned with `verified=False` rather than excluded. Never raises.
 
 ---
 

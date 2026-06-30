@@ -115,8 +115,9 @@ graph.get_claim(id_a)["support_level"]  # → "REPLICATED"
 graph.get_claim(id_b)["support_level"]  # → "REPLICATED"
 ```
 
-Two independent agents, shared ESTABLISHED upstream, different
-`generated_by` → `REPLICATED` is set automatically at INSERT time. No
+Two agents under distinct signing keys, shared ESTABLISHED upstream →
+`REPLICATED` is set automatically at INSERT time. Independence is the
+signing key (`asserter_keyid`); `generated_by` is a display label. No
 extra step required.
 
 ## Promote to ESTABLISHED
