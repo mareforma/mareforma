@@ -6,6 +6,45 @@ description: "Notable changes across Mareforma releases."
 The authoritative changelog lives in [CHANGELOG.md](https://github.com/mareforma/mareforma/blob/main/CHANGELOG.md).
 This page mirrors it.
 
+## v0.3.7 - 2026-06-30
+
+Verified independence. `REPLICATED` now keys on the signing key, not a free-text
+`generated_by` string: two claims converge only when distinct keys sign them. And
+high-trust rows are re-verified on read, so a forged `REPLICATED` or `ESTABLISHED`
+row in a shared `graph.db` is caught at query time. Additive on the schema (one new
+nullable column, no migration); existing `REPLICATED` rows are grandfathered. See
+[Trust](/concepts/trust).
+
+### Added
+
+- Verify on read: `get_claim`, `query_claims`, and `query_provenance` re-verify a
+  `REPLICATED` or `ESTABLISHED` row's signatures before serving it. `query_*`
+  excludes a row whose signature does not verify; `get_claim` flags it
+  `verified=False`. Neither raises. The check binds the signed payload to the row.
+- `single_trust_domain` disclosure on each `ESTABLISHED` row in query results and
+  the exported bundle: whether every validator traces to one root of trust. A
+  disclosure, not a Sybil guard.
+- `asserter_keyid` column, denormalized from the signature bundle and read by both
+  the promotion query and the trust-layer count. Added to existing graphs by
+  `ALTER TABLE ADD COLUMN` on first open.
+
+### Changed
+
+- `REPLICATED` keys on the signing key, not `generated_by`. Two claims sharing an
+  `ESTABLISHED` upstream converge only when distinct keys sign them. `generated_by`
+  becomes a display label. Existing `REPLICATED` rows are grandfathered with a
+  `legacy_promotion` health event. A convergence signal, not proof: distinct keys
+  do not prove the data is independent.
+- `Status` independence keys on the signing key (the same axis as promotion), with
+  a `data_id` guard; unsigned lines fall back to the retired distinct-`generated_by`
+  run axis. Policy moves from `status_policy@v2` to `status_policy@v3`, recomputed
+  on read.
+- `artifact_hash` is a collapse check, not a match requirement: equal data collapses
+  two peers to one line, distinct data counts as two, absent data never blocks. This
+  reverses the prior rule.
+- `data_id` is content-addressed (`sha256:` prefix) when the finding supplies the
+  dataset bytes, so equal data collapses and an agent cannot fabricate distinctness.
+
 ## v0.3.6 - 2026-06-17
 
 The multi-line evidence tree. A finding can now carry several evidence lines

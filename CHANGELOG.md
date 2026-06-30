@@ -2,6 +2,59 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.7] - 2026-06-30
+
+Verified independence. REPLICATED now keys on the signing key, not a free-text
+`generated_by` string: two claims converge only when distinct keys sign them, so
+a single operator can no longer manufacture REPLICATED with a string trick. And
+high-trust rows are re-verified on read, so a forged REPLICATED or ESTABLISHED row
+in a shared `graph.db` is caught at query time instead of trusted. Additive on the
+schema (one new nullable column, no migration); existing REPLICATED rows are
+grandfathered, not downgraded.
+
+### Added
+
+- **Verify on read.** `get_claim`, `query_claims`, and `query_provenance` re-verify
+  a REPLICATED or ESTABLISHED row's signatures before serving it. `query_*` excludes
+  a row whose signature does not verify; `get_claim` returns it flagged
+  `verified=False`. Neither raises: a verification miss degrades the read, it does
+  not crash it. The check binds the signed payload to the row, so a genuine envelope
+  copied onto a different row is rejected.
+- **`single_trust_domain` disclosure.** Query results and the exported bundle carry,
+  on each ESTABLISHED row, whether every validator traces to one root of trust. It
+  discloses trust-domain concentration so a consumer can discount intra-operator
+  ESTABLISHED. It is a disclosure, not a Sybil guard.
+- **`asserter_keyid` column.** Denormalized from the signature bundle onto each
+  claim, indexed, with the envelope authoritative. The REPLICATED promotion query
+  and the trust-layer independence count both read it. Added to existing graphs by
+  `ALTER TABLE ADD COLUMN` on first open; legacy rows stay NULL.
+
+### Changed
+
+- **REPLICATED keys on the signing key, not `generated_by`.** Two claims sharing an
+  ESTABLISHED upstream converge only when distinct keys sign them (distinct
+  `asserter_keyid`). `generated_by` becomes a display label and plays no part in
+  promotion. An unsigned claim, or two claims signed by the same key, no longer
+  reach REPLICATED. Existing REPLICATED rows promoted under the old rule are
+  grandfathered on first open with a durable `legacy_promotion` health event.
+  Distinct keys prove the asserters are cryptographically separate, not that their
+  data is independent, so REPLICATED reads as a convergence signal, not proof.
+- **Status independence keys on the signing key.** `independent_support` and
+  `independent_refute` count distinct `asserter_keyid`, the same axis the promotion
+  path uses, with a `data_id` guard. Unsigned evidence lines fall back to the retired
+  distinct-`generated_by` run axis, so their counts are preserved. The policy version
+  moves from `status_policy@v2` to `status_policy@v3`; Status is recomputed on read,
+  no migration.
+- **`artifact_hash` is a collapse check, not a match requirement.** Two converging
+  peers with equal data collapse to one independent line, so an equal-hash pair does
+  not promote on data alone; distinct content-addressed data counts as two lines.
+  Absent data never blocks: distinct signers alone promote. This reverses the prior
+  rule, where matching hashes were required for convergence.
+- **`data_id` is content-addressed.** When a finding supplies the dataset bytes,
+  mareforma hashes them into `data_id` (`sha256:` prefix), so equal data collapses
+  and an agent cannot fabricate distinctness with a made-up string. A reference-only
+  `data_id` stays an agent-attested fallback.
+
 ## [0.3.6] - 2026-06-17
 
 The multi-line evidence tree. A finding can now carry several evidence lines
