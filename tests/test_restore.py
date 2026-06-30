@@ -32,23 +32,48 @@ def _build_full_graph(tmp_path: Path) -> dict:
     one unsigned PRELIMINARY (in a separate unsigned-mode project).
 
     Returns identifiers used by tests for verification.
+
+    REPLICATED now keys on two distinct, non-NULL ``asserter_keyid`` values
+    (the per-claim signer), not distinct ``generated_by``. The two converging
+    "converged" claims are therefore signed by two distinct *enrolled* keys
+    (the root key and ``val_key``) so the pair promotes AND every signed claim's
+    keyid still appears in the validators section (restore's orphan-signer gate
+    requires this). The validator that promotes ``rep_id`` to ESTABLISHED must
+    differ from BOTH asserter signers, so a third enrolled key (``val2_key``)
+    performs the validation.
     """
     root_key = _bootstrap_key(tmp_path, "root.key")
     val_key = _bootstrap_key(tmp_path, "val.key")
+    val2_key = _bootstrap_key(tmp_path, "val2.key")
+    root_signer = _signing.load_private_key(root_key)
+    val_signer = _signing.load_private_key(val_key)
 
     with mareforma.open(tmp_path, key_path=root_key) as g:
         seed_id = g.assert_claim("anchor", generated_by="seed", seed=True)
-        rep_id = g.assert_claim("converged", supports=[seed_id], generated_by="A")
-        g.assert_claim("converged", supports=[seed_id], generated_by="B")
+        # Two converging peers signed by two distinct enrolled keys → the
+        # asserter_keyids differ → REPLICATED fires. Enroll val_key (the
+        # second asserter) and val2_key (the future validator) first so both
+        # signed peers' keyids are present in the validators section.
         g.enroll_validator(_pem_of(val_key), identity="v")
+        g.enroll_validator(_pem_of(val2_key), identity="v2")
+        rep_id = g.assert_claim(
+            "converged", supports=[seed_id], generated_by="A",
+            signer=root_signer,
+        )
+        g.assert_claim(
+            "converged", supports=[seed_id], generated_by="B",
+            signer=val_signer,
+        )
 
-    with mareforma.open(tmp_path, key_path=val_key) as g:
+    # Validate with a third key distinct from both asserters (root, val).
+    with mareforma.open(tmp_path, key_path=val2_key) as g:
         g.validate(rep_id)
         assert g.get_claim(rep_id)["support_level"] == "ESTABLISHED"
 
     return {
         "root_key": root_key,
         "val_key": val_key,
+        "val2_key": val2_key,
         "seed_id": seed_id,
         "rep_id": rep_id,
     }
@@ -156,7 +181,7 @@ class TestRestoreRefusesNonEmptyGraph:
     def test_accepts_when_graph_db_empty(self, tmp_path: Path) -> None:
         """Empty .mareforma/graph.db (claims table exists but has 0
         rows) is accepted — restore() proceeds normally."""
-        ctx = _build_full_graph(tmp_path)
+        _build_full_graph(tmp_path)
         # Wipe ROWS but keep the file. Re-open the live graph and delete
         # rows would trip the retracted-terminal trigger; easier: drop
         # the file entirely.
@@ -180,7 +205,7 @@ class TestRestoreMissingTOML:
         assert exc_info.value.kind == "toml_not_found"
 
     def test_explicit_toml_path_honored(self, tmp_path: Path) -> None:
-        ctx = _build_full_graph(tmp_path)
+        _build_full_graph(tmp_path)
         # Move claims.toml to a non-default location.
         moved = tmp_path / "backup" / "state.toml"
         moved.parent.mkdir()
@@ -219,7 +244,7 @@ class TestRestoreAdversarial:
         """Edit a signed claim's text in claims.toml without re-signing.
         The signature_bundle remains the original bytes; restore must
         detect the field divergence and refuse."""
-        ctx = self._setup_and_wipe(tmp_path)
+        self._setup_and_wipe(tmp_path)
         data = self._read_toml(tmp_path)
         # Pick a signed claim (the seed has a bundle).
         signed_ids = [
@@ -239,7 +264,7 @@ class TestRestoreAdversarial:
         self, tmp_path: Path,
     ) -> None:
         """Mutate the base64 signature bytes; verify must fail."""
-        ctx = self._setup_and_wipe(tmp_path)
+        self._setup_and_wipe(tmp_path)
         data = self._read_toml(tmp_path)
         signed_ids = [
             cid for cid, c in data["claims"].items()
@@ -269,7 +294,7 @@ class TestRestoreAdversarial:
     ) -> None:
         """Strip a signature_bundle from a signed-mode TOML — restore
         must refuse the mode-inconsistent graph."""
-        ctx = self._setup_and_wipe(tmp_path)
+        self._setup_and_wipe(tmp_path)
         data = self._read_toml(tmp_path)
         # Strip the bundle from one signed claim.
         for cid, c in data["claims"].items():
@@ -285,7 +310,7 @@ class TestRestoreAdversarial:
     def test_orphan_signer_refused(self, tmp_path: Path) -> None:
         """A signature_bundle's keyid doesn't appear in the validators
         section — restore refuses the orphan signer."""
-        ctx = self._setup_and_wipe(tmp_path)
+        self._setup_and_wipe(tmp_path)
         data = self._read_toml(tmp_path)
         # Strip the validators section while leaving signed claims.
         # The signed claims now have signers not in the (empty)
@@ -306,7 +331,7 @@ class TestRestoreAdversarial:
     ) -> None:
         """Tamper with a validator's identity field in claims.toml —
         the enrollment envelope's signed payload no longer matches."""
-        ctx = self._setup_and_wipe(tmp_path)
+        self._setup_and_wipe(tmp_path)
         data = self._read_toml(tmp_path)
         non_root_keyids = [
             keyid for keyid, v in data["validators"].items()
@@ -328,7 +353,7 @@ class TestRestoreAdversarial:
         validation envelope shoved into the claim-bundle slot) used to
         leak InvalidEnvelopeError past the restore contract. The
         verify_envelope call must be wrapped so RestoreError fires."""
-        ctx = self._setup_and_wipe(tmp_path)
+        self._setup_and_wipe(tmp_path)
         data = self._read_toml(tmp_path)
         signed_ids = [
             cid for cid, c in data["claims"].items()
@@ -378,14 +403,22 @@ class TestRestoreAdversarial:
         # Now try to plant a REPLICATED-via-retracted-seed convergence.
         # Two new agent claims cite the retracted seed; the convergence
         # check must refuse to promote them.
+        # Sign the two downstream peers with distinct enrolled keys so the
+        # ONLY thing that can block REPLICATED is the retracted-seed anchor
+        # gate, not a same-signer collapse.
+        sa = _signing.load_private_key(ctx["root_key"])
+        sb = _signing.load_private_key(ctx["val_key"])
         with mareforma.open(tmp_path, key_path=ctx["root_key"]) as g:
             a = g.assert_claim(
                 "downstream A", supports=[seed_id], generated_by="A",
+                signer=sa,
             )
             g.assert_claim(
                 "downstream B", supports=[seed_id], generated_by="B",
+                signer=sb,
             )
-            # Without the gate, both would be REPLICATED.
+            # Without the gate, both would be REPLICATED (distinct signers,
+            # shared anchor) — the retracted seed must block it.
             assert g.get_claim(a)["support_level"] == "PRELIMINARY"
 
     def test_missing_required_field_raises_restore_error(
@@ -394,7 +427,7 @@ class TestRestoreAdversarial:
         """A hand-edited claims.toml that drops a required key (e.g.
         c['text']) used to leak KeyError past the documented RestoreError
         contract. The _required_field helper must translate it."""
-        ctx = self._setup_and_wipe(tmp_path)
+        self._setup_and_wipe(tmp_path)
         data = self._read_toml(tmp_path)
         victim = next(iter(data["claims"]))
         del data["claims"][victim]["text"]
@@ -408,7 +441,7 @@ class TestRestoreAdversarial:
         self, tmp_path: Path,
     ) -> None:
         """Same for the validators section."""
-        ctx = self._setup_and_wipe(tmp_path)
+        self._setup_and_wipe(tmp_path)
         data = self._read_toml(tmp_path)
         victim = next(iter(data["validators"]))
         del data["validators"][victim]["identity"]
@@ -424,7 +457,7 @@ class TestRestoreAdversarial:
         ESTABLISHED. The envelope verifies cryptographically (the bytes
         are unchanged), but its embedded claim_id no longer matches the
         new row. Restore must catch the row-vs-envelope divergence."""
-        ctx = self._setup_and_wipe(tmp_path)
+        self._setup_and_wipe(tmp_path)
         data = self._read_toml(tmp_path)
 
         # Find a legitimate ESTABLISHED claim with a validation envelope.
@@ -481,7 +514,7 @@ class TestRestoreAdversarial:
         """Flip a domain in evidence_json without re-signing. The
         envelope binds the original evidence; restore must catch the
         signed-evidence vs row-evidence divergence."""
-        ctx = self._setup_and_wipe(tmp_path)
+        self._setup_and_wipe(tmp_path)
         data = self._read_toml(tmp_path)
         # Pick a signed claim whose evidence is the all-zero default
         # and flip one domain to -1. Signature_bundle stays unchanged.
@@ -522,7 +555,7 @@ class TestRestoreAdversarial:
         """Forge statement_cid on a row. Restore re-derives the cid
         from the row's fields + evidence; the forged value must not
         match, raising RestoreError."""
-        ctx = self._setup_and_wipe(tmp_path)
+        self._setup_and_wipe(tmp_path)
         data = self._read_toml(tmp_path)
         signed_ids = [
             cid for cid, c in data["claims"].items()
@@ -554,7 +587,7 @@ class TestRestoreCLI:
         from mareforma.cli import cli as mareforma_cli
 
         monkeypatch.chdir(tmp_path)
-        ctx = _build_full_graph(tmp_path)
+        _build_full_graph(tmp_path)
         _wipe_graph_db(tmp_path)
 
         runner = CliRunner()

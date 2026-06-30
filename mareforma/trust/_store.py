@@ -7,6 +7,7 @@ keeps the graph object thin and keeps every trust query in one place.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import sqlite3
@@ -40,6 +41,33 @@ _VALID_FLOORS = frozenset(
 
 def _uuid() -> str:
     return str(uuid.uuid4())
+
+
+# data_id content-addressing -------------------------------------------------
+#
+# A finding's independence guard counts distinct datasets by data_id. When the
+# agent supplies the dataset bytes, mareforma hashes them itself so two
+# findings over byte-identical data collapse to one line (a re-run is not a
+# second dataset) and an agent cannot fabricate distinctness with a made-up
+# string. The ``sha256:`` prefix makes the content-addressed value
+# self-describing: a data_id without it is an agent-attested string fallback,
+# which a consumer can discount.
+
+_CONTENT_ADDRESS_PREFIX = "sha256:"
+
+
+def content_address_data_id(data_bytes: bytes) -> str:
+    """Return the content-addressed data_id for *data_bytes* (``sha256:<hex>``)."""
+    if not isinstance(data_bytes, (bytes, bytearray)):
+        raise TypeError(
+            f"data_bytes must be bytes, got {type(data_bytes).__name__}"
+        )
+    return _CONTENT_ADDRESS_PREFIX + hashlib.sha256(bytes(data_bytes)).hexdigest()
+
+
+def is_content_addressed(data_id: str) -> bool:
+    """True iff *data_id* was content-addressed from dataset bytes."""
+    return isinstance(data_id, str) and data_id.startswith(_CONTENT_ADDRESS_PREFIX)
 
 
 # -- writes ------------------------------------------------------------------
@@ -292,8 +320,50 @@ def _count_run_distinct(pairs: list[tuple[str, str]]) -> int:
     return len(set(run_of_dataset.values()))
 
 
+def _authentic_signer_keyid(
+    conn: sqlite3.Connection,
+    claim_id: str,
+    asserter_keyid: "str | None",
+    bundle_json: "str | None",
+) -> "str | None":
+    """Return ``asserter_keyid`` only when the signed bundle authenticates it.
+
+    The denormalized ``asserter_keyid`` column is not itself part of the signed
+    envelope, so a direct/foreign writer can set it to any string to inflate the
+    independence count. We trust it as the WHO axis only when the claim's
+    ``signature_bundle`` (a) embeds that same keyid, (b) binds to this
+    ``claim_id``, and (c) verifies against the pubkey when the signer is an
+    enrolled validator. This mirrors the read-path verify gate. When it does not
+    authenticate, the caller falls back to the soft ``generated_by`` axis, which
+    is no weaker than the pre-keyid behaviour. Any structural failure returns
+    None (fall back), never raises: one un-authenticatable line must not deny the
+    whole proposition's count.
+    """
+    if asserter_keyid is None or not bundle_json:
+        return None
+    try:
+        from .. import signing as _signing
+        from .. import validators as _validators
+
+        env = json.loads(bundle_json)
+        if env["signatures"][0]["keyid"] != asserter_keyid:
+            return None
+        pred = _signing.claim_predicate_from_envelope(env)
+        if pred.get("claim_id") != claim_id:
+            return None
+        signer_row = _validators.get_validator(conn, asserter_keyid)
+        if signer_row is not None:
+            pem = base64.standard_b64decode(signer_row["pubkey_pem"])
+            pub = _signing.public_key_from_pem(pem)
+            if not _signing.verify_envelope(env, pub):
+                return None
+        return asserter_keyid
+    except Exception:
+        return None
+
+
 def independence_counts(conn: sqlite3.Connection, content_id: str) -> tuple[int, int]:
-    """(independent_support, independent_refute) by distinct run, with a data_id guard.
+    """(independent_support, independent_refute) by distinct signer, data_id guard.
 
     Per-line bearing is recomputed on read: each evidence line's stored estimate
     is gated against its finding's stored prediction (the gate inputs are
@@ -301,15 +371,22 @@ def independence_counts(conn: sqlite3.Connection, content_id: str) -> tuple[int,
     multi-line finding whose lines disagree is counted line by line, never off
     the finding's denormalised ``bearing_direction`` cache.
 
-    Independence is then counted by distinct ``generated_by`` (run) with a
-    ``data_id`` guard (see :func:`_count_run_distinct`): one run yields at most
-    one independent support and one independent refute. For single-line findings
-    from distinct runs this reduces to the prior distinct-dataset behaviour; what
-    changes is that distinct datasets from the SAME run no longer count as
-    independent (status_policy@v2).
+    Independence is then counted by distinct **signer** (the claim's
+    ``asserter_keyid``) with a ``data_id`` guard (see
+    :func:`_count_run_distinct`): one signer yields at most one independent
+    support and one independent refute. This is the same WHO axis the
+    REPLICATED promotion query keys on, read from the same denormalised claim
+    column, so promotion and trust counting can never disagree. Legacy
+    evidence lines whose claim predates the keyid column (NULL
+    ``asserter_keyid``) fall back to the retired ``generated_by`` run axis so
+    they keep their count instead of silently collapsing two NULL signers to
+    one (status_policy@v3). The two axes are namespaced (``k:`` vs ``g:``) so a
+    keyid can never alias a run label.
     """
     rows = conn.execute(
         "SELECT el.data_id AS data_id, cl.generated_by AS generated_by, "
+        " cl.asserter_keyid AS asserter_keyid, cl.claim_id AS claim_id, "
+        " cl.signature_bundle AS signature_bundle, "
         " est.estimate_value, est.effect_type, est.scale, est.p_value, "
         " est.ci_lower, est.ci_upper, est.ci_level, est.n_total, "
         " pr.test_type, pr.direction_of_interest, pr.equivalence_lower, "
@@ -360,7 +437,19 @@ def independence_counts(conn: sqlite3.Connection, content_id: str) -> tuple[int,
             direction = compute_bearing(estimate, prediction).direction
         except Exception:
             continue
-        pair = (r["generated_by"], r["data_id"])
+        # Independence axis = distinct signer (asserter_keyid), the same WHO
+        # the REPLICATED promotion keys on. The denormalized column is not
+        # itself signed, so trust it only when the claim's bundle authenticates
+        # it (embeds the same keyid, binds to this claim, and verifies when the
+        # signer is enrolled). A forged or unbacked keyid falls back to the
+        # retired generated_by run axis so it cannot inflate the count beyond
+        # the soft string axis. The k:/g: namespace stops a keyid aliasing a run
+        # label.
+        keyid = _authentic_signer_keyid(
+            conn, r["claim_id"], r["asserter_keyid"], r["signature_bundle"],
+        )
+        run_token = f"k:{keyid}" if keyid is not None else f"g:{r['generated_by']}"
+        pair = (run_token, r["data_id"])
         if direction is BearingDirection.SUPPORTS:
             supports.append(pair)
         elif direction is BearingDirection.REFUTES:

@@ -16,7 +16,7 @@ Runs in a temporary directory with no external dependencies.
 2. **Assert**: INFERRED, ANALYTICAL, DERIVED classifications
 3. **Query**: text filter, `min_support`, classification, limit
 4. **Idempotency**: retry-safe writes and convergence convention
-5. **REPLICATED**: automatic when two independent agents share upstream evidence
+5. **REPLICATED**: automatic when two claims under distinct signing keys share upstream evidence
 6. **ESTABLISHED**: human validation only, requires REPLICATED first
 7. **Anti-patterns**: what silently corrupts the epistemic model
 
@@ -36,6 +36,8 @@ import tempfile, mareforma
 
 with tempfile.TemporaryDirectory() as tmp:
     with mareforma.open(tmp) as graph:
+        # The two findings must be signed by distinct keys for REPLICATED
+        # to fire; the runnable example loads a separate key per agent.
         prior_id = graph.assert_claim("upstream reference", generated_by="seed")
         id_a = graph.assert_claim(
             "finding A", supports=[prior_id], generated_by="agent/a"

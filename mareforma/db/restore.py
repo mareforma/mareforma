@@ -27,6 +27,7 @@ from .core import (
     _compute_prev_hash,
     _is_claim_id,
     _extract_validation_signer_keyid,
+    _extract_signature_bundle_keyid,
     _verdict_canonical_payload,
     _REPLICATION_VERDICT_FIELDS,
     _CONTRADICTION_VERDICT_FIELDS,
@@ -396,6 +397,7 @@ def restore(
                              comparison_summary, unresolved,
                              signature_bundle, transparency_logged,
                              validation_signature, validator_keyid,
+                             asserter_keyid,
                              artifact_hash, prev_hash,
                              ev_risk_of_bias, ev_inconsistency,
                              ev_indirectness, ev_imprecision, ev_pub_bias,
@@ -404,7 +406,7 @@ def restore(
                              predicate_payload, original_signature_bundle,
                              created_at, updated_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                 ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
@@ -424,6 +426,12 @@ def restore(
                             resolved_transparency,
                             insert_validation_signature,
                             insert_validator_keyid,
+                            # Re-derive the asserter keyid from the preserved
+                            # bundle so the denormalization stays in sync with
+                            # the authoritative signature_bundle after restore.
+                            _extract_signature_bundle_keyid(
+                                c.get("signature_bundle")
+                            ),
                             c.get("artifact_hash"), prev_hash,
                             int(evidence_dict.get("risk_of_bias", 0) or 0),
                             int(evidence_dict.get("inconsistency", 0) or 0),

@@ -35,12 +35,20 @@ key_path = tmp / "_example_key"
 _signing.bootstrap_key(key_path)
 graph = mareforma.open(tmp, key_path=key_path)
 
-# graph.get_tools(generated_by=...) returns [query_graph, assert_finding] as
-# plain callables, with generated_by baked into the closure. One set per agent.
-query_graph, assert_finding_a = [tool(fn) for fn in graph.get_tools(
+# Two distinct lab keys for the converging claims. REPLICATED keys on the
+# signing key, so the two peers must sign with different keys.
+lab_a_key_path = tmp / "_lab_a_key"
+lab_b_key_path = tmp / "_lab_b_key"
+_signing.bootstrap_key(lab_a_key_path)
+_signing.bootstrap_key(lab_b_key_path)
+lab_a_priv = _signing.load_private_key(lab_a_key_path)
+lab_b_priv = _signing.load_private_key(lab_b_key_path)
+
+# query_graph is the shared read tool. The two converging claims below assert
+# via graph.assert_claim directly so each passes its own signer=; the
+# get_tools() closures bake in generated_by, not a signing key.
+query_graph, _ = [tool(fn) for fn in graph.get_tools(
     generated_by="analyst/model-a/lab_a")]
-_, assert_finding_b = [tool(fn) for fn in graph.get_tools(
-    generated_by="analyst/model-b/lab_b")]
 _, assert_finding_synth = [tool(fn) for fn in graph.get_tools(
     generated_by="synthesizer/model-c/lab_b")]
 ```
@@ -55,16 +63,20 @@ prior_ref = graph.assert_claim(
     classification="DERIVED", generated_by="agent_seed/literature", seed=True,
 )
 
-finding_a = assert_finding_a.invoke({
-    "text": "Cell type A forms the majority of inhibitory connections onto cell type B"
-            " (dataset_alpha, n=842, p<0.001)",
-    "classification": "ANALYTICAL", "supports": [prior_ref], "source": "dataset_alpha",
-})
-finding_b = assert_finding_b.invoke({
-    "text": "Cell type A dominates inhibitory input onto cell type B"
-            " (dataset_beta, n=1104, p<0.001)",
-    "classification": "ANALYTICAL", "supports": [prior_ref], "source": "dataset_beta",
-})  # same upstream, different agent, different source → REPLICATED fires
+finding_a = graph.assert_claim(
+    "Cell type A forms the majority of inhibitory connections onto cell type B"
+    " (dataset_alpha, n=842, p<0.001)",
+    classification="ANALYTICAL", supports=[prior_ref],
+    source_name="dataset_alpha", generated_by="analyst/model-a/lab_a",
+    signer=lab_a_priv,
+)
+finding_b = graph.assert_claim(
+    "Cell type A dominates inhibitory input onto cell type B"
+    " (dataset_beta, n=1104, p<0.001)",
+    classification="ANALYTICAL", supports=[prior_ref],
+    source_name="dataset_beta", generated_by="analyst/model-b/lab_b",
+    signer=lab_b_priv,    # distinct key + same upstream: REPLICATED fires
+)
 ```
 
 ```
@@ -73,7 +85,7 @@ finding_b = assert_finding_b.invoke({
   lab_b claim_id             2d170aaa…
   lab_b support_level        REPLICATED
 
-  Two independent agents, shared upstream → REPLICATED fires automatically.
+  Two distinct signing keys, shared upstream: REPLICATED fires automatically.
 ```
 
 ## Agent B: Synthesizer

@@ -130,6 +130,7 @@ class EpistemicGraph:
                 self._conn,
                 signer,
                 identity=signer_identity or "root",
+                root=self._root,
             )
             keyid = _signing.public_key_id(signer.public_key())
             if not _validators.is_enrolled(self._conn, keyid):
@@ -219,12 +220,15 @@ class EpistemicGraph:
             merging two different claims would discard the second
             author's content and break REPLICATED detection. For
             cross-lab convergence, assert two separate claims that
-            share an entry in ``supports[]`` with different
-            ``generated_by`` values: that's the path that fires
-            REPLICATED honestly.
+            share an ``ESTABLISHED`` entry in ``supports[]`` and are
+            signed by two distinct keys (distinct ``asserter_keyid``):
+            that's the path that fires REPLICATED honestly. Pass a
+            per-call ``signer`` for each distinct asserter.
         generated_by:
             Agent identifier. Use ``"model/version/context"`` format.
-            Defaults to ``'agent'``.
+            Defaults to ``'agent'``. A display label only: it does not
+            decide REPLICATED convergence (the ``asserter_keyid`` from
+            the signature does).
         source_name:
             Data source this claim derives from. Required for ANALYTICAL
             classification to be meaningful.
@@ -237,10 +241,12 @@ class EpistemicGraph:
         artifact_hash:
             SHA256 hex digest of the output artifact (figure, CSV, model)
             backing this claim. When supplied it is bound into the signed
-            payload and used as a parallel REPLICATED signal: two peers
-            citing the same upstream that BOTH supply a hash must agree
-            on the hash before they converge. Compute with
-            ``hashlib.sha256(bytes).hexdigest()``.
+            payload and used as a secondary collapse on REPLICATED: two
+            peers citing the same upstream that BOTH supply an EQUAL hash
+            are the same output, so they collapse to one line and do not
+            converge on their own. Distinct hashes, or an absent hash on
+            either side, do not block the distinct-signer convergence.
+            Compute with ``hashlib.sha256(bytes).hexdigest()``.
         evidence:
             Optional GRADE 5-domain ``EvidenceVector`` declaring the
             asserter's confidence in the evidence backing this claim.
@@ -908,6 +914,7 @@ class EpistemicGraph:
         estimate: "EffectEstimate | None" = None,
         *,
         data_id: str | None = None,
+        data_bytes: bytes | None = None,
         lines: "Sequence[EvidenceLine] | None" = None,
         generated_by: str | None = None,
         control_type: "ControlType | str | None" = None,
@@ -964,6 +971,18 @@ class EpistemicGraph:
                 f"got direction={proposition.direction.value}, "
                 f"scope={dict(proposition.scope)!r}"
             )
+
+        # When the caller supplies dataset bytes, content-address them into the
+        # data_id so the independence guard collapses byte-identical reruns and
+        # cannot be fooled by a fabricated string. Bytes and an explicit
+        # string data_id are mutually exclusive.
+        if data_bytes is not None:
+            if data_id is not None:
+                raise ValueError(
+                    "pass either data_id (a string) or data_bytes (hashed), "
+                    "not both"
+                )
+            data_id = _store.content_address_data_id(data_bytes)
 
         # Validate the gate inputs (estimate/data_id consistency, then the gate)
         # for EVERY line BEFORE writing anything, so a rejected one-shot finding
@@ -1032,6 +1051,7 @@ class EpistemicGraph:
         estimate: "EffectEstimate | None" = None,
         *,
         data_id: str | None = None,
+        data_bytes: bytes | None = None,
         lines: "Sequence[EvidenceLine] | None" = None,
         generated_by: str | None = None,
         control_type: "ControlType | str | None" = None,
@@ -1098,6 +1118,18 @@ class EpistemicGraph:
                 f"scope={dict(proposition.scope)!r}"
             )
 
+        # When the caller supplies dataset bytes, content-address them into the
+        # data_id so the independence guard collapses byte-identical reruns and
+        # cannot be fooled by a fabricated string. Bytes and an explicit
+        # string data_id are mutually exclusive.
+        if data_bytes is not None:
+            if data_id is not None:
+                raise ValueError(
+                    "pass either data_id (a string) or data_bytes (hashed), "
+                    "not both"
+                )
+            data_id = _store.content_address_data_id(data_bytes)
+
         # Resolve single-line vs multi-line input into a list of EvidenceLine.
         # Building each line validates its estimate/data_id before any write.
         if lines is not None:
@@ -1147,6 +1179,17 @@ class EpistemicGraph:
             raise ValueError(
                 "generated_by must be a non-empty run token (or None to default); "
                 "a blank token collapses distinct-run independence"
+            )
+
+        # Flag string-fallback data_ids: a line whose data_id was NOT
+        # content-addressed from bytes is agent-attested, so its distinctness
+        # is soft. Surface it as a durable health event rather than silently
+        # treating it as content-addressed.
+        if any(not _store.is_content_addressed(ln.data_id) for ln in evidence_lines):
+            from mareforma import health as _health
+            _health.append_health_event(
+                self._root, "data_id_string_fallback",
+                content_id=proposition.content_id(),
             )
 
         cid = proposition.content_id()
@@ -2024,6 +2067,12 @@ class EpistemicGraph:
             if depth >= 1 else []
         )
 
+        # query_provenance is an audit surface, so it FLAGS each high-trust
+        # row's verify-on-read result rather than excluding a tampered row:
+        # an auditor must be able to see a forged ESTABLISHED/REPLICATED row
+        # and know it failed verification. One cache for the whole walk.
+        prov_verify_cache: dict = {}
+
         def _hydrate(edges: list[dict]) -> list[dict]:
             if not edges:
                 return []
@@ -2042,7 +2091,11 @@ class EpistemicGraph:
                     chunk,
                 )
                 for row in cursor.fetchall():
-                    rows_by_id[row["claim_id"]] = dict(row)
+                    rd = dict(row)
+                    rd["verified"] = _db._row_verified_on_read(
+                        self._conn, rd, prov_verify_cache,
+                    )
+                    rows_by_id[row["claim_id"]] = rd
             return [
                 {
                     "claim_id": e["claim_id"],

@@ -13,13 +13,14 @@ All persistent state lives in a single SQLite file at `<project_root>/.mareforma
 | `claim_id` | TEXT | UUID at insert | No | Primary key |
 | `text` | TEXT | required | No | The falsifiable assertion. Hard cap 100,000 chars. Sanitized on write (zero-width / bidi / control chars stripped) |
 | `classification` | TEXT | `INFERRED` | No | Epistemic origin: `INFERRED` / `ANALYTICAL` / `DERIVED` |
-| `support_level` | TEXT | `PRELIMINARY` | No | Graph-derived trust: `PRELIMINARY` / `REPLICATED` / `ESTABLISHED`. Transitions enforced by BEFORE triggers |
+| `support_level` | TEXT | `PRELIMINARY` | No | Graph-derived trust: `PRELIMINARY` / `REPLICATED` / `ESTABLISHED`. Transitions enforced by BEFORE triggers. REPLICATED fires when ≥2 claims signed by distinct keys (`asserter_keyid`) cite a shared ESTABLISHED upstream |
 | `idempotency_key` | TEXT | `NULL` | Yes | UNIQUE: same key → same `claim_id`, no INSERT |
 | `validated_by` | TEXT | `NULL` | Yes | Cosmetic display label set by `graph.validate()` (authoritative identity lives in `validation_signature`) |
 | `validated_at` | TEXT | `NULL` | Yes | UTC ISO 8601 timestamp of validation |
 | `status` | TEXT | `open` | No | Editorial: `open` / `contested` / `retracted` |
 | `source_name` | TEXT | `NULL` | Yes | Data source name; required for `ANALYTICAL` to be meaningful |
-| `generated_by` | TEXT | `agent` | No | Agent identifier; independence signal for REPLICATED |
+| `generated_by` | TEXT | `agent` | No | Agent identifier; display label only. The REPLICATED independence axis is the signing key, see `asserter_keyid` |
+| `asserter_keyid` | TEXT | `NULL` | Yes | Denormalized signer keyid from the `signature_bundle`. The REPLICATED independence axis: two claims signed by distinct keyids count as independent; an unsigned claim (NULL) cannot reach REPLICATED |
 | `supports_json` | TEXT | `[]` | No | JSON array of upstream claim_ids or DOIs |
 | `contradicts_json` | TEXT | `[]` | No | JSON array of claim_ids this finding contests |
 | `comparison_summary` | TEXT | `NULL` | Yes | Human-readable diff note for contradictions. Editable on signed claims (not part of signed payload) |
@@ -29,7 +30,7 @@ All persistent state lives in a single SQLite file at `<project_root>/.mareforma
 | `transparency_logged` | INTEGER | `1` | No | `1` when the claim has been (or did not need to be) submitted to Sigstore-Rekor. Blocks REPLICATED until `refresh_unsigned()` flips it. **Restore** downgrades a TOML-asserted `1` to `0` when the bundle has no `rekor` block; hand-edited TOML cannot fake a Rekor inclusion |
 | `validation_signature` | TEXT | `NULL` | Yes | Signed `(claim_id, validator_keyid, validated_at)` envelope. CHECK constraint requires this on every `ESTABLISHED` row |
 | `validator_keyid` | TEXT | `NULL` | Yes | Denormalized signer keyid from `validation_signature` for indexable reputation aggregation |
-| `artifact_hash` | TEXT | `NULL` | Yes | SHA-256 hex digest of the output bytes (figure, CSV, model) backing the claim. Bound into the signed payload; gates REPLICATED when both peers supply a hash |
+| `artifact_hash` | TEXT | `NULL` | Yes | SHA-256 hex digest of the output bytes (figure, CSV, model) backing the claim. Bound into the signed payload. Secondary collapse check: two peers with equal `artifact_hash` collapse to one line (a byte-identical rerun is not corroboration). Never a match requirement; NULL never blocks promotion |
 | `prev_hash` | TEXT | `NULL` | Yes | Append-only chain link `sha256(prev_chain_link \|\| canonical_statement_bytes)`. The chain input is the same bytes the signature covers, so chain integrity and signature integrity move together. UNIQUE partial index catches branched chains |
 | `ev_risk_of_bias` | INTEGER | `0` | No | GRADE downgrade domain in `[-2, 0]`. Methodological flaws (allocation, blinding, attrition). CHECK constraint bounds the value |
 | `ev_inconsistency` | INTEGER | `0` | No | GRADE downgrade domain in `[-2, 0]`. Heterogeneity of effect across studies |
@@ -55,7 +56,8 @@ All persistent state lives in a single SQLite file at `<project_root>/.mareforma
 | `idx_claims_support_level` | `support_level` | Non-unique | Filters by trust tier |
 | `idx_claims_unresolved` | `unresolved` | Non-unique | Accelerates `refresh_unresolved()` |
 | `idx_claims_transparency_logged` | `transparency_logged` | Non-unique | Accelerates `refresh_unsigned()` |
-| `idx_claims_artifact_hash` | `artifact_hash` | Unique (partial) | `WHERE artifact_hash IS NOT NULL`: only rows that opt in to the gate |
+| `idx_claims_artifact_hash` | `artifact_hash` | Unique (partial) | `WHERE artifact_hash IS NOT NULL`: only rows that supply a data hash |
+| `idx_claims_asserter_keyid` | `asserter_keyid` | Non-unique (partial) | `WHERE asserter_keyid IS NOT NULL`: the REPLICATED independence axis |
 | `idx_claims_idempotency_key` | `idempotency_key` | Unique (partial) | `WHERE idempotency_key IS NOT NULL` |
 | `idx_claims_prev_hash` | `prev_hash` | Unique (partial) | `WHERE prev_hash IS NOT NULL`: catches branched chains from concurrent writers or manual SQL tamper |
 | `idx_claims_validator_keyid` | `validator_keyid` | Non-unique (partial) | `WHERE validator_keyid IS NOT NULL`: reputation aggregation |
@@ -252,14 +254,14 @@ One attestation plus its computed bearing on a proposition under a plan.
 ### evidence_lines table
 
 One line of evidence; a finding may carry several. Independence is counted by
-distinct run (`generated_by`), with `data_id` as a guard so the same dataset is
-not counted twice.
+distinct signing key, with `data_id` as a guard so the same dataset is not
+counted twice.
 
 | Field | Type | Notes |
 |---|---|---|
 | `line_id` | TEXT (PK) | UUID |
 | `finding_id` | TEXT | FK to `findings(finding_id)`. Indexed (`idx_line_finding`) |
-| `data_id` | TEXT | Dataset key; guards against counting the same dataset twice across runs. Indexed (`idx_line_data`) |
+| `data_id` | TEXT | Dataset key; guards against counting the same dataset twice across runs. Content-addressed (`sha256:` prefix) when dataset bytes are supplied. Indexed (`idx_line_data`) |
 | `modality` / `provenance_id` / `design_type` | TEXT | Optional descriptors |
 | `created_at` | TEXT | UTC ISO 8601 |
 
@@ -289,7 +291,7 @@ The estimate the gate reads. Minimal metafor-named field set.
 | `n_total` | INTEGER | Optional total N |
 
 The `Status` of a proposition is not stored. It is derived on read from the
-independent supporting / refuting line counts, counted by distinct run
+independent supporting / refuting line counts, counted by distinct signing key
 (`status_policy@v2`), so improving the rule later is a new policy over the same
 data, not a migration.
 

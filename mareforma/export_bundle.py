@@ -93,14 +93,26 @@ def build_statement(root: Path) -> dict[str, Any]:
     """
     from mareforma.db import open_db, list_claims
     from mareforma.exporters.jsonld import JSONLDExporter
+    from mareforma import validators as _validators
 
     conn = open_db(root)
     try:
         claims = list_claims(conn)
+        single_trust_domain = _validators.single_trust_domain(conn)
+        trust_domain_root = _validators.trust_domain_root(conn)
     finally:
         conn.close()
     subjects = [_subject_for_claim(c) for c in claims]
     predicate = JSONLDExporter(root).export()
+    # Disclose the validator topology of the exporting graph: true when every
+    # validator traces to one root of trust. It labels trust-domain
+    # concentration over the ESTABLISHED rows in this bundle; it is a
+    # disclosure, not a Sybil guard over the participant topology.
+    predicate = {
+        **predicate,
+        "mare:singleTrustDomain": single_trust_domain,
+        "mare:trustDomainRoot": trust_domain_root,
+    }
     return {
         "_type": STATEMENT_TYPE,
         "subject": subjects,

@@ -31,7 +31,7 @@ import mareforma
 from mareforma import db as _db
 from mareforma import signing as _signing
 from mareforma import validators as _validators
-from tests._helpers import _bootstrap_key, _pem_of
+from tests._helpers import _bootstrap_key, _pem_of, _two_signers
 
 
 # ---------------------------------------------------------------------------
@@ -39,10 +39,19 @@ from tests._helpers import _bootstrap_key, _pem_of
 # ---------------------------------------------------------------------------
 
 
-def _build_replicated(graph) -> str:
+def _build_replicated(graph, signer_a, signer_b) -> str:
+    """Assert seed + two converging peers signed by distinct keys.
+
+    Under the v0.3.7 model REPLICATED keys on two distinct, non-NULL
+    asserter_keyid values, so each converging peer carries its own signer.
+    """
     seed = graph.assert_claim("seed", generated_by="seed", seed=True)
-    rep = graph.assert_claim("finding", supports=[seed], generated_by="A")
-    graph.assert_claim("finding", supports=[seed], generated_by="B")
+    rep = graph.assert_claim(
+        "finding", supports=[seed], generated_by="A", signer=signer_a,
+    )
+    graph.assert_claim(
+        "finding", supports=[seed], generated_by="B", signer=signer_b,
+    )
     assert graph.get_claim(rep)["support_level"] == "REPLICATED"
     return rep
 
@@ -163,8 +172,9 @@ class TestLLMValidatorPromotionRefused:
         validate_claim refuses to flip the row to ESTABLISHED."""
         root_key = _bootstrap_key(tmp_path, "root.key")
         bot_key = _bootstrap_key(tmp_path, "bot.key")
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=root_key) as g:
-            rep_id = _build_replicated(g)
+            rep_id = _build_replicated(g, sa, sb)
             g.enroll_validator(
                 _pem_of(bot_key), identity="reviewer-bot",
                 validator_type="llm",
@@ -182,8 +192,9 @@ class TestLLMValidatorPromotionRefused:
         """A human-typed validator (the default) promotes as before."""
         root_key = _bootstrap_key(tmp_path, "root.key")
         human_key = _bootstrap_key(tmp_path, "human.key")
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=root_key) as g:
-            rep_id = _build_replicated(g)
+            rep_id = _build_replicated(g, sa, sb)
             g.enroll_validator(
                 _pem_of(human_key), identity="alice@lab",
                 validator_type="human",
@@ -202,11 +213,17 @@ class TestSelfValidationRefused:
     def test_same_key_signs_and_validates_refused(
         self, tmp_path: Path,
     ) -> None:
-        """The root key signs the claim (via _build_replicated) AND tries
-        to validate it. The graph refuses self-promotion."""
+        """The root key SIGNS one converging claim AND tries to validate
+        it. Under the v0.3.7 model the refusal triggers when the
+        validating key equals an asserter (signer) in the converging set,
+        so root signs one peer and a distinct key signs the other to reach
+        REPLICATED. The graph then refuses root's self-promotion."""
         root_key = _bootstrap_key(tmp_path, "root.key")
+        root_signer = _signing.load_private_key(root_key)
+        _, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=root_key) as g:
-            rep_id = _build_replicated(g)
+            # root signs one converging peer; sb signs the other.
+            rep_id = _build_replicated(g, root_signer, sb)
             with pytest.raises(_db.SelfValidationError):
                 g.validate(rep_id)
 
@@ -219,8 +236,9 @@ class TestSelfValidationRefused:
         refuse — only the equal-keyid case is blocked."""
         root_key = _bootstrap_key(tmp_path, "root.key")
         val_key = _bootstrap_key(tmp_path, "val.key")
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=root_key) as g:
-            rep_id = _build_replicated(g)
+            rep_id = _build_replicated(g, sa, sb)
             g.enroll_validator(_pem_of(val_key), identity="v")
         with mareforma.open(tmp_path, key_path=val_key) as g:
             g.validate(rep_id)
@@ -234,18 +252,18 @@ class TestSelfValidationRefused:
         consult validator_type first, then bundle-signer equality. The
         canonical behaviour is to refuse for SOME reason; this test
         documents that we don't silently promote."""
-        # Build a graph where the LLM validator is also the claim signer.
+        # Build a graph where the would-be validator (bot, the loaded
+        # graph key) is ALSO an asserter signer of a converging claim.
+        # The self-validation guard fires before the llm-type check.
         bot_key = _bootstrap_key(tmp_path, "bot.key")
+        bot_signer = _signing.load_private_key(bot_key)
+        _, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=bot_key) as g:
-            # bot is root → auto-enrolled as 'human' by default.
-            # Direct sqlite tamper: flip to 'llm' AND break the chain
-            # check by also rewriting the envelope. Easier: enroll a
-            # second key first, then re-bootstrap with that second key
-            # as 'llm', sign the REPLICATED chain with it.
-            # The simplest construction: use bot as a generator that is
-            # also the would-be validator; the graph gate raises
+            # bot is root → auto-enrolled as 'human' by default. It signs
+            # one converging peer (sb signs the other to reach REPLICATED),
+            # then tries to validate — the graph gate raises
             # SelfValidationError before reaching the LLM check.
-            rep_id = _build_replicated(g)
+            rep_id = _build_replicated(g, bot_signer, sb)
             with pytest.raises((_db.SelfValidationError,
                                 _db.LLMValidatorPromotionError)):
                 g.validate(rep_id)

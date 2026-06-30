@@ -13,7 +13,7 @@ Two agents work sequentially on the same research question.
 
   Agent A (Analyst) runs on two independent datasets.
   Both analyses cite the same upstream evidence.
-  Different agents, shared upstream → REPLICATED fires automatically.
+  Distinct signing keys, shared upstream -> REPLICATED fires automatically.
 
   Agent B (Synthesizer) queries the graph before asserting anything.
   Finds the REPLICATED findings, builds a DERIVED synthesis on top.
@@ -89,19 +89,27 @@ key_path = tmp / "_example_key"
 _signing.bootstrap_key(key_path)
 graph = mareforma.open(tmp, key_path=key_path)
 
+# Two distinct lab keys for the converging claims below. REPLICATED keys on
+# the signing key: the signing key is the independence unit, so the two peers
+# must sign with different keys to promote. generated_by stays a display label.
+lab_a_key_path = tmp / "_lab_a_key"
+lab_b_key_path = tmp / "_lab_b_key"
+_signing.bootstrap_key(lab_a_key_path)
+_signing.bootstrap_key(lab_b_key_path)
+lab_a_priv = _signing.load_private_key(lab_a_key_path)
+lab_b_priv = _signing.load_private_key(lab_b_key_path)
+
 
 # ---------------------------------------------------------------------------
 # Mareforma tools via get_tools() — one set per agent, generated_by baked in
 # ---------------------------------------------------------------------------
 
-# Agent A: Lab A analyst
-query_graph, assert_finding_a = [tool(fn) for fn in graph.get_tools(
+# query_graph is the shared read tool. The two converging analyst claims below
+# assert via graph.assert_claim directly so each can pass its own signer=: the
+# get_tools() closures bake in generated_by, not a signing key, and the signing
+# key is what drives REPLICATED.
+query_graph, _ = [tool(fn) for fn in graph.get_tools(
     generated_by="analyst/model-a/lab_a"
-)]
-
-# Agent B Lab B analyst uses the same query tool, different assert identity
-_, assert_finding_b = [tool(fn) for fn in graph.get_tools(
-    generated_by="analyst/model-b/lab_b"
 )]
 
 # Synthesizer
@@ -129,33 +137,37 @@ prior_ref = graph.assert_claim(
     seed=True,
 )
 
-# Run 1: Lab A, dataset alpha
-finding_a = assert_finding_a.invoke({
-    "text": "Cell type A forms the majority of inhibitory connections onto cell type B"
-            " (dataset_alpha, n=842, p<0.001)",
-    "classification": "ANALYTICAL",
-    "supports": [prior_ref],
-    "source": "dataset_alpha",
-})
+# Run 1: Lab A, dataset alpha. Signed by lab A's key.
+finding_a = graph.assert_claim(
+    "Cell type A forms the majority of inhibitory connections onto cell type B"
+    " (dataset_alpha, n=842, p<0.001)",
+    classification="ANALYTICAL",
+    supports=[prior_ref],
+    source_name="dataset_alpha",
+    generated_by="analyst/model-a/lab_a",
+    signer=lab_a_priv,
+)
 c_a = graph.get_claim(finding_a)
 show("lab_a claim_id", finding_a[:8] + "…")
 show("lab_a support_level", c_a["support_level"] if c_a else "—")
 
-# Run 2: Lab B, independent dataset beta
-# Same upstream reference, different agent, different source → REPLICATED fires
-finding_b = assert_finding_b.invoke({
-    "text": "Cell type A dominates inhibitory input onto cell type B"
-            " (dataset_beta, n=1104, p<0.001)",
-    "classification": "ANALYTICAL",
-    "supports": [prior_ref],
-    "source": "dataset_beta",
-})
+# Run 2: Lab B, independent dataset beta. Same upstream reference, distinct
+# signing key, different source: REPLICATED fires.
+finding_b = graph.assert_claim(
+    "Cell type A dominates inhibitory input onto cell type B"
+    " (dataset_beta, n=1104, p<0.001)",
+    classification="ANALYTICAL",
+    supports=[prior_ref],
+    source_name="dataset_beta",
+    generated_by="analyst/model-b/lab_b",
+    signer=lab_b_priv,
+)
 c_b = graph.get_claim(finding_b)
 show("lab_b claim_id", finding_b[:8] + "…")
 show("lab_b support_level", c_b["support_level"] if c_b else "—")
 
 print()
-print("  Two independent agents, shared upstream → REPLICATED fires automatically.")
+print("  Two distinct signing keys, shared upstream -> REPLICATED fires automatically.")
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +216,7 @@ for c in sorted(all_claims, key=lambda x: level_order.get(x["support_level"], 3)
 
 print()
 print("  Agent B's synthesis is traceable:")
-print("  prior reference → ANALYTICAL (×2, independent) → REPLICATED → DERIVED")
+print("  prior reference -> ANALYTICAL (x2, distinct keys) -> REPLICATED -> DERIVED")
 print()
 print("  Without querying the graph, Agent B would have asserted from scratch.")
 print("  The graph is what makes findings compound instead of evaporate.")

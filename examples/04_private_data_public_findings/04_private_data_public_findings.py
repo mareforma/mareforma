@@ -87,16 +87,29 @@ key_path = tmp / "_example_key"
 _signing.bootstrap_key(key_path)
 graph = mareforma.open(tmp, key_path=key_path)
 
+# Each lab signs with its own key. The signing key is the independence unit:
+# REPLICATED fires when two claims share an ESTABLISHED upstream and are signed
+# by DISTINCT keys. generated_by is a display label, not what drives REPLICATED.
+# In real use each lab runs its own `mareforma bootstrap`; here we mint both keys
+# inline and pass them per-call via signer=.
+lab_a_key_path = tmp / "_lab_a_key"
+lab_b_key_path = tmp / "_lab_b_key"
+_signing.bootstrap_key(lab_a_key_path)
+_signing.bootstrap_key(lab_b_key_path)
+lab_a_priv = _signing.load_private_key(lab_a_key_path)
+lab_b_priv = _signing.load_private_key(lab_b_key_path)
+
 
 # ---------------------------------------------------------------------------
-# Mareforma tools — get_tools() per lab, get_provenance_trace defined separately
+# Mareforma tools: get_tools() gives the read tool; get_provenance_trace
+# defined separately. The write tool (assert_finding) binds the graph's
+# default key, so the per-lab claims below call graph.assert_claim(...,
+# signer=...) directly: each lab signs with its own key, which is what
+# drives REPLICATED.
 # ---------------------------------------------------------------------------
 
-query_graph, assert_finding_a = [tool(fn) for fn in graph.get_tools(
+query_graph, _ = [tool(fn) for fn in graph.get_tools(
     generated_by="lab_a/model-a"
-)]
-_, assert_finding_b = [tool(fn) for fn in graph.get_tools(
-    generated_by="lab_b/model-b"
 )]
 
 
@@ -142,24 +155,28 @@ upstream_ref = graph.assert_claim(
 )
 
 # Lab A runs a multi-step analysis on its private dataset.
-# Each intermediate step is published as a claim with provenance.
-# The raw data never leaves Lab A.
+# Each intermediate step is published as a claim with provenance, signed by
+# Lab A's key. The raw data never leaves Lab A.
 
-step_1 = assert_finding_a.invoke({
-    "text": "Candidate target T shows elevated activity in condition C"
-            " (partition_1, n=620, fold-change=2.3)",
-    "classification": "ANALYTICAL",
-    "supports": [upstream_ref],
-    "source": "private_dataset_A",          # name only — data stays at Lab A
-})
+step_1 = graph.assert_claim(
+    "Candidate target T shows elevated activity in condition C"
+    " (partition_1, n=620, fold-change=2.3)",
+    classification="ANALYTICAL",
+    supports=[upstream_ref],
+    generated_by="lab_a/model-a",           # display label
+    source_name="private_dataset_A",        # name only, data stays at Lab A
+    signer=lab_a_priv,                       # Lab A's key
+)
 
-step_2 = assert_finding_a.invoke({
-    "text": "Target T activity in condition C is specific to cell subtype S"
-            " (partition_1, pathway analysis, p=0.004)",
-    "classification": "ANALYTICAL",
-    "supports": [step_1],                   # builds on the previous step
-    "source": "private_dataset_A",
-})
+step_2 = graph.assert_claim(
+    "Target T activity in condition C is specific to cell subtype S"
+    " (partition_1, pathway analysis, p=0.004)",
+    classification="ANALYTICAL",
+    supports=[step_1],                       # builds on the previous step
+    generated_by="lab_a/model-a",
+    source_name="private_dataset_A",
+    signer=lab_a_priv,
+)
 
 print("  Lab A published 2 claims to the shared graph.")
 print(f"  step_1 id: {step_1[:8]}…")
@@ -192,21 +209,25 @@ for f in lab_a_findings:
 # It runs the same hypothesis on its own private dataset.
 print("  Lab B reconstructs experimental logic and replicates on private_dataset_B…\n")
 
-rep_1 = assert_finding_b.invoke({
-    "text": "Candidate target T shows elevated activity in condition C"
-            " (partition_2, n=580, fold-change=2.1)",
-    "classification": "ANALYTICAL",
-    "supports": [upstream_ref],             # same upstream anchor, independent data
-    "source": "private_dataset_B",          # different private dataset
-})
+rep_1 = graph.assert_claim(
+    "Candidate target T shows elevated activity in condition C"
+    " (partition_2, n=580, fold-change=2.1)",
+    classification="ANALYTICAL",
+    supports=[upstream_ref],                 # same upstream anchor, independent data
+    generated_by="lab_b/model-b",            # display label
+    source_name="private_dataset_B",         # different private dataset
+    signer=lab_b_priv,                        # Lab B's key, distinct from Lab A
+)
 
-rep_2 = assert_finding_b.invoke({
-    "text": "Target T activity in condition C is specific to cell subtype S"
-            " (partition_2, pathway analysis, p=0.009)",
-    "classification": "ANALYTICAL",
-    "supports": [step_2],                   # cites Lab A's published claim as upstream
-    "source": "private_dataset_B",
-})
+rep_2 = graph.assert_claim(
+    "Target T activity in condition C is specific to cell subtype S"
+    " (partition_2, pathway analysis, p=0.009)",
+    classification="ANALYTICAL",
+    supports=[step_2],                       # cites Lab A's published claim as upstream
+    generated_by="lab_b/model-b",
+    source_name="private_dataset_B",
+    signer=lab_b_priv,
+)
 
 print(f"  Lab B published 2 claims.")
 print(f"  rep_1 id: {rep_1[:8]}…")
@@ -228,10 +249,10 @@ show("distinct generated_by", sorted(agents))
 print()
 
 if len(sources) > 1 and len(agents) > 1:
-    print("  ✓ Two independent data sources, two independent agents.")
+    print("  ✓ Two independent data sources, two distinct signing keys.")
     print("    If they converged, the finding is not a dataset artifact.")
 else:
-    print("  ✗ Same source or same agent — not genuinely independent.")
+    print("  ✗ Same source or same key: not genuinely independent.")
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +271,7 @@ support_1 = c_rep1["support_level"] if c_rep1 else "—"
 support_2 = c_rep2["support_level"] if c_rep2 else "—"
 
 if support_1 == "REPLICATED" or support_2 == "REPLICATED":
-    print("  ✓ REPLICATED — independent agents, shared upstream, independent data paths.")
+    print("  ✓ REPLICATED: distinct signing keys, shared upstream, independent data paths.")
     print("    The finding holds across datasets. Genuine replication.")
 else:
     print("  Claims are PRELIMINARY — replication pending.")
@@ -285,20 +306,24 @@ print("""
 sep("Contrast — spurious replication (what to watch for)")
 
 # Both labs assert INFERRED with no source_name and no real data.
-# REPLICATED fires because they share the same upstream,
-# but the finding is backed entirely by LLM prior knowledge.
+# REPLICATED still fires: distinct signing keys, shared ESTABLISHED upstream.
+# But the finding is backed entirely by LLM prior knowledge.
 
-spurious_a = assert_finding_a.invoke({
-    "text": "Target T is likely relevant in condition C based on literature",
-    "classification": "INFERRED",           # no data pipeline ran
-    "supports": [upstream_ref],
-})
+spurious_a = graph.assert_claim(
+    "Target T is likely relevant in condition C based on literature",
+    classification="INFERRED",               # no data pipeline ran
+    supports=[upstream_ref],
+    generated_by="lab_a/model-a",
+    signer=lab_a_priv,
+)
 
-spurious_b = assert_finding_b.invoke({
-    "text": "Target T is likely relevant in condition C based on literature",
-    "classification": "INFERRED",
-    "supports": [upstream_ref],             # same upstream → REPLICATED fires
-})
+spurious_b = graph.assert_claim(
+    "Target T is likely relevant in condition C based on literature",
+    classification="INFERRED",
+    supports=[upstream_ref],                 # distinct key + same upstream → REPLICATED
+    generated_by="lab_b/model-b",
+    signer=lab_b_priv,
+)
 
 c_sp_a = graph.get_claim(spurious_a)
 c_sp_b = graph.get_claim(spurious_b)
@@ -308,7 +333,7 @@ show("spurious_a classification", c_sp_a["classification"] if c_sp_a else "—")
 
 print()
 print("  REPLICATED fired — but classification=INFERRED and source_name=''.")
-print("  Two agents repeated the same LLM prior. No data behind either finding.")
+print("  Two distinct keys repeated the same LLM prior. No data behind either finding.")
 print()
 print("  The graph makes this detectable:")
 print("    graph.query('Target T', min_support='REPLICATED')")

@@ -27,7 +27,7 @@ import pytest
 
 import mareforma
 from mareforma.db import ClaimNotFoundError
-from tests._helpers import _bootstrap_key, _pem_of
+from tests._helpers import _bootstrap_key, _pem_of, _two_signers
 
 
 # ---------------------------------------------------------------------------
@@ -146,14 +146,15 @@ def test_assert_claim_different_keys_creates_two(tmp_path):
 
 def test_assert_claim_replicated_triggers_on_independent_agents(tmp_path):
     key_path = _bootstrap_key(tmp_path)
+    sa, sb = _two_signers(tmp_path)
     with mareforma.open(tmp_path, key_path=key_path) as graph:
         prior = graph.assert_claim("prior finding", generated_by="agent_seed", seed=True)
         # Two independent agents both support the same prior
         id1 = graph.assert_claim(
-            "agent A finding", supports=[prior], generated_by="agent_A"
+            "agent A finding", supports=[prior], generated_by="agent_A", signer=sa
         )
         id2 = graph.assert_claim(
-            "agent B finding", supports=[prior], generated_by="agent_B"
+            "agent B finding", supports=[prior], generated_by="agent_B", signer=sb
         )
         c1 = graph.get_claim(id1)
         c2 = graph.get_claim(id2)
@@ -223,11 +224,12 @@ def test_query_text_no_match_returns_empty(tmp_path):
 
 def test_query_min_support_filters_correctly(tmp_path):
     key_path = _bootstrap_key(tmp_path)
+    sa, sb = _two_signers(tmp_path)
     with mareforma.open(tmp_path, key_path=key_path) as graph:
         prior = graph.assert_claim("prior", generated_by="seed", seed=True)
         # Create a REPLICATED pair
-        rep1 = graph.assert_claim("rep claim", supports=[prior], generated_by="A")
-        rep2 = graph.assert_claim("rep claim", supports=[prior], generated_by="B")
+        rep1 = graph.assert_claim("rep claim", supports=[prior], generated_by="A", signer=sa)
+        rep2 = graph.assert_claim("rep claim", supports=[prior], generated_by="B", signer=sb)
         # One PRELIMINARY
         pre = graph.assert_claim("preliminary only", generated_by="C")
 
@@ -291,10 +293,11 @@ def test_get_claim_nonexistent_returns_none(tmp_path):
 def test_validate_replicated_to_established(tmp_path):
     root_key = _bootstrap_key(tmp_path, "root.key")
     validator_key = _bootstrap_key(tmp_path, "validator.key")
+    sa, sb = _two_signers(tmp_path)
     with mareforma.open(tmp_path, key_path=root_key) as graph:
         prior = graph.assert_claim("prior", generated_by="seed", seed=True)
-        id1 = graph.assert_claim("finding", supports=[prior], generated_by="A")
-        id2 = graph.assert_claim("finding", supports=[prior], generated_by="B")
+        id1 = graph.assert_claim("finding", supports=[prior], generated_by="A", signer=sa)
+        graph.assert_claim("finding", supports=[prior], generated_by="B", signer=sb)
         graph.enroll_validator(_pem_of(validator_key), identity="v")
     with mareforma.open(tmp_path, key_path=validator_key) as graph:
         graph.validate(id1)
@@ -305,10 +308,11 @@ def test_validate_replicated_to_established(tmp_path):
 def test_validate_stores_validated_by(tmp_path):
     root_key = _bootstrap_key(tmp_path, "root.key")
     validator_key = _bootstrap_key(tmp_path, "validator.key")
+    sa, sb = _two_signers(tmp_path)
     with mareforma.open(tmp_path, key_path=root_key) as graph:
         prior = graph.assert_claim("prior", generated_by="seed", seed=True)
-        id1 = graph.assert_claim("finding", supports=[prior], generated_by="A")
-        graph.assert_claim("finding", supports=[prior], generated_by="B")
+        id1 = graph.assert_claim("finding", supports=[prior], generated_by="A", signer=sa)
+        graph.assert_claim("finding", supports=[prior], generated_by="B", signer=sb)
         graph.enroll_validator(_pem_of(validator_key), identity="v")
     with mareforma.open(tmp_path, key_path=validator_key) as graph:
         graph.validate(id1, validated_by="jane@lab.org")
@@ -480,15 +484,23 @@ def test_get_tools_assert_creates_claim(tmp_path):
 
 
 def test_get_tools_generated_by_baked_into_closure_triggers_replicated(tmp_path):
-    key_path = _bootstrap_key(tmp_path)
-    with mareforma.open(tmp_path, key_path=key_path) as graph:
+    # The get_tools closures sign with the graph handle's loaded key, so
+    # giving each converging peer a distinct asserter_keyid means opening
+    # two graph handles on the same root with distinct keys.
+    root_key = _bootstrap_key(tmp_path, "root.key")
+    key_a = _bootstrap_key(tmp_path, "agent_a.key")
+    key_b = _bootstrap_key(tmp_path, "agent_b.key")
+    with mareforma.open(tmp_path, key_path=root_key) as graph:
         prior = graph.assert_claim(
             "upstream evidence", generated_by="seed", seed=True,
         )
-        _, assert_finding_a = graph.get_tools(generated_by="agent/a")
-        _, assert_finding_b = graph.get_tools(generated_by="agent/b")
+    with mareforma.open(tmp_path, key_path=key_a) as graph_a:
+        _, assert_finding_a = graph_a.get_tools(generated_by="agent/a")
         id_a = assert_finding_a("finding A", supports=[prior])
+    with mareforma.open(tmp_path, key_path=key_b) as graph_b:
+        _, assert_finding_b = graph_b.get_tools(generated_by="agent/b")
         id_b = assert_finding_b("finding B", supports=[prior])
+    with mareforma.open(tmp_path, key_path=root_key) as graph:
         claim_a = graph.get_claim(id_a)
         claim_b = graph.get_claim(id_b)
     assert claim_a["support_level"] == "REPLICATED"
@@ -675,18 +687,28 @@ class TestDoiResolution:
     def test_update_claim_curing_unresolved_triggers_replicated(
         self, tmp_path, httpx_mock,
     ):
-        """Curing a stale-unresolved claim via update_claim must trigger REPLICATED.
+        """Curing a stale-unresolved claim must trigger REPLICATED.
 
         Two agents both cite the same upstream claim_id, but one starts with a
-        bad DOI (unresolved=1). When that agent's DOI is replaced via
-        update_claim, the resulting unresolved 1→0 transition must re-run the
-        REPLICATED convergence check — otherwise both claims stay PRELIMINARY
-        forever, defeating the convergence guarantee.
+        DOI that does not yet resolve (unresolved=1). When that claim's
+        unresolved flag clears (the DOI now resolves), the resulting
+        unresolved 1→0 transition must re-run the REPLICATED convergence
+        check — otherwise both claims stay PRELIMINARY forever, defeating the
+        convergence guarantee.
+
+        Under the v0.3.7 signed-asserter model the two converging peers must
+        carry distinct, non-NULL asserter_keyid (so each is signed). Signed
+        claims are append-only across their signed surface, so the cure runs
+        through ``mark_claim_resolved`` (the production same-DOI-now-resolves
+        path that clears the flag without mutating signed supports), not a
+        supports-swap via ``update_claim`` which is refused on signed rows.
         """
-        from mareforma.db import open_db, add_claim, update_claim, get_claim
+        from mareforma.db import (
+            open_db, add_claim, mark_claim_resolved, get_claim,
+        )
         from mareforma import doi_resolver as _doi
 
-        # Agent B's initial fake DOI fails on both registries.
+        # Agent B's DOI initially fails to resolve on both registries.
         httpx_mock.add_response(
             method="HEAD",
             url=_CROSSREF.format(doi="10.9999/bad"),
@@ -697,17 +719,12 @@ class TestDoiResolution:
             url=_DATACITE.format(doi="10.9999/bad"),
             status_code=404,
         )
-        # The replacement DOI resolves cleanly on Crossref.
-        httpx_mock.add_response(
-            method="HEAD",
-            url=_CROSSREF.format(doi="10.1038/cure"),
-            status_code=200,
-        )
 
         # REPLICATED requires an ESTABLISHED upstream. Bootstrap a key
         # and seed the upstream via the graph API, then drop down to the
         # db API for the DOI-curing flow this test actually exercises.
         key_path = _bootstrap_key(tmp_path)
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as g:
             upstream = g.assert_claim(
                 "upstream observation", generated_by="seed", seed=True,
@@ -720,27 +737,27 @@ class TestDoiResolution:
                 conn, tmp_path, "agent A finding",
                 supports=[upstream],
                 generated_by="agent/a",
+                signer=sa,
             )
             assert get_claim(conn, id_a)["support_level"] == "PRELIMINARY"
 
-            # Agent B cites upstream plus a fake DOI; unresolved=1 blocks REPLICATED.
+            # Agent B cites upstream plus an unresolved DOI; unresolved=1
+            # blocks REPLICATED.
             _doi.resolve_dois_with_cache(conn, ["10.9999/bad"])
             id_b = add_claim(
                 conn, tmp_path, "agent B finding",
                 supports=[upstream, "10.9999/bad"],
                 generated_by="agent/b",
                 unresolved=True,
+                signer=sb,
             )
             assert get_claim(conn, id_b)["unresolved"] == 1
             assert get_claim(conn, id_b)["support_level"] == "PRELIMINARY"
             assert get_claim(conn, id_a)["support_level"] == "PRELIMINARY"
 
-            # Agent B replaces the bad DOI. unresolved should flip to 0 AND
-            # REPLICATED should fire on both claims.
-            update_claim(
-                conn, tmp_path, id_b,
-                supports=[upstream, "10.1038/cure"],
-            )
+            # Agent B's DOI now resolves; clearing the unresolved flag must
+            # flip unresolved 1→0 AND re-fire REPLICATED on both claims.
+            mark_claim_resolved(conn, tmp_path, id_b)
             assert get_claim(conn, id_b)["unresolved"] == 0
             assert get_claim(conn, id_b)["support_level"] == "REPLICATED"
             assert get_claim(conn, id_a)["support_level"] == "REPLICATED"
@@ -771,7 +788,7 @@ class TestDoiResolution:
                 (bad_id, "corrupt claim", now, now),
             )
             # Insert a healthy unresolved claim with no DOIs (should clear).
-            good_id = add_claim(
+            add_claim(
                 conn, tmp_path, "healthy claim", generated_by="seed", unresolved=True,
             )
             conn.commit()
@@ -1481,7 +1498,7 @@ class TestRekorSagaAtomicity:
 
             # Read claim B's signature_bundle (valid envelope but for
             # different payload) and the original A bundle.
-            row_a = graph.get_claim(cid_a)
+            graph.get_claim(cid_a)
             row_b = graph.get_claim(cid_b)
             bundle_b = json.loads(row_b["signature_bundle"])
             bundle_b.pop("rekor", None)
@@ -1613,15 +1630,16 @@ class TestEvidenceSeenBinding:
     'reviewed nothing' admission, not an absent field."""
 
     def _setup_replicated(self, graph, root_key):
-        """Build a REPLICATED claim under a different signer than `root_key`."""
+        """Build a REPLICATED claim under signers distinct from `root_key`."""
+        sa, sb = _two_signers(graph._root)
         seed = graph.assert_claim(
             "anchor", generated_by="seed", seed=True,
         )
         graph.assert_claim(
-            "child-a", generated_by="lab_a", supports=[seed],
+            "child-a", generated_by="lab_a", supports=[seed], signer=sa,
         )
         cid_b = graph.assert_claim(
-            "child-b", generated_by="lab_b", supports=[seed],
+            "child-b", generated_by="lab_b", supports=[seed], signer=sb,
         )
         assert graph.get_claim(cid_b)["support_level"] == "REPLICATED"
         return seed, cid_b
@@ -1759,6 +1777,15 @@ class TestEvidenceSeenBinding:
                 _pem_of(other_key),
                 identity="reviewer",
             )
+            # The converging peers are signed by the two distinct asserter
+            # keys; enroll both so restore does not refuse them as orphan
+            # signers when it re-verifies claim signatures.
+            g.enroll_validator(
+                _pem_of(tmp_path / "_signer_a.key"), identity="lab_a",
+            )
+            g.enroll_validator(
+                _pem_of(tmp_path / "_signer_b.key"), identity="lab_b",
+            )
 
         with mareforma.open(tmp_path, key_path=other_key) as g:
             g.validate(cid_b, evidence_seen=[seed])
@@ -1784,9 +1811,10 @@ class TestValidationEnvelopeKwargAgreement:
     an empty kwarg to bypass the graph's evidence verification."""
 
     def _setup_replicated(self, graph):
+        sa, sb = _two_signers(graph._root)
         seed = graph.assert_claim("anchor", generated_by="seed", seed=True)
-        graph.assert_claim("a", generated_by="lab_a", supports=[seed])
-        cid_b = graph.assert_claim("b", generated_by="lab_b", supports=[seed])
+        graph.assert_claim("a", generated_by="lab_a", supports=[seed], signer=sa)
+        cid_b = graph.assert_claim("b", generated_by="lab_b", supports=[seed], signer=sb)
         return seed, cid_b
 
     def test_envelope_kwarg_mismatch_refused(self, tmp_path):
@@ -1869,9 +1897,10 @@ class TestValidationEnvelopeCryptographicVerification:
     """
 
     def _setup_replicated(self, graph):
+        sa, sb = _two_signers(graph._root)
         seed = graph.assert_claim("anchor", generated_by="seed", seed=True)
-        graph.assert_claim("a", generated_by="lab_a", supports=[seed])
-        cid_b = graph.assert_claim("b", generated_by="lab_b", supports=[seed])
+        graph.assert_claim("a", generated_by="lab_a", supports=[seed], signer=sa)
+        cid_b = graph.assert_claim("b", generated_by="lab_b", supports=[seed], signer=sb)
         return seed, cid_b
 
     def test_unverifiable_signature_is_refused(self, tmp_path):

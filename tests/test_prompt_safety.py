@@ -278,13 +278,15 @@ class TestQueryForLLM:
         assert raw[0]["text"] == "plain finding"
         assert "<untrusted_data>" not in raw[0]["text"]
 
-    def test_filters_apply_same_as_query(self, open_graph) -> None:
+    def test_filters_apply_same_as_query(self, open_graph, tmp_path) -> None:
+        from tests._helpers import _two_signers
+        sa, sb = _two_signers(tmp_path)
         upstream = open_graph.assert_claim("upstream", generated_by="seed", seed=True)
         open_graph.assert_claim(
-            "peer A", supports=[upstream], generated_by="A",
+            "peer A", supports=[upstream], generated_by="A", signer=sa,
         )
         open_graph.assert_claim(
-            "peer B", supports=[upstream], generated_by="B",
+            "peer B", supports=[upstream], generated_by="B", signer=sb,
         )
         # Both peers converge → REPLICATED. min_support='REPLICATED' is
         # inclusive of ESTABLISHED, so the seeded upstream is also

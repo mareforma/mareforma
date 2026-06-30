@@ -633,17 +633,19 @@ class TestReplicatedGating:
     def test_logged_claims_replicate_normally(
         self, tmp_path: Path, httpx_mock,
     ) -> None:
+        from tests._helpers import _two_signers
         _mirror_rekor(httpx_mock)
         key_path = _bootstrap_key(tmp_path)
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(
             tmp_path, key_path=key_path, rekor_url=_TEST_REKOR_URL,
         ) as graph:
             upstream = graph.assert_claim("upstream", generated_by="seed", seed=True)
             id_a = graph.assert_claim(
-                "agent A", supports=[upstream], generated_by="agent/a",
+                "agent A", supports=[upstream], generated_by="agent/a", signer=sa,
             )
             id_b = graph.assert_claim(
-                "agent B", supports=[upstream], generated_by="agent/b",
+                "agent B", supports=[upstream], generated_by="agent/b", signer=sb,
             )
 
             assert graph.get_claim(id_a)["support_level"] == "REPLICATED"
@@ -661,7 +663,13 @@ class TestOnePeerLoggedOneNot:
         claim's transparency_logged=1 as well — agent B's continued
         unlogged state keeps both at PRELIMINARY."""
         import base64
+        from tests._helpers import _bootstrap_key as _bk
         key_path = _bootstrap_key(tmp_path)
+        # Peer A is signed by a distinct key (sa); peer B is signed by the
+        # graph's own loaded key so refresh_unsigned (which re-logs only
+        # claims signed by the current key) can recover it. The asserters
+        # still differ (sa vs the graph key), so REPLICATED is reachable.
+        sa = _signing.load_private_key(_bk(tmp_path, "sa.key"))
 
         def one_shot_mirror(httpx_mock):
             def cb(request: "httpx.Request") -> "httpx.Response":
@@ -701,7 +709,7 @@ class TestOnePeerLoggedOneNot:
         ) as graph:
             upstream = graph.assert_claim("upstream", generated_by="seed", seed=True)
             id_a = graph.assert_claim(
-                "agent A", supports=[upstream], generated_by="agent/a",
+                "agent A", supports=[upstream], generated_by="agent/a", signer=sa,
             )
             id_b = graph.assert_claim(
                 "agent B", supports=[upstream], generated_by="agent/b",
@@ -762,13 +770,24 @@ class TestRefreshUnsigned:
         self, tmp_path: Path, httpx_mock,
     ) -> None:
         """After refresh_unsigned succeeds for both peer claims, their shared
-        upstream's REPLICATED check fires."""
+        upstream's REPLICATED check fires.
+
+        Under the distinct-signer model a peer's asserter key is per-call, and
+        ``refresh_unsigned`` can only re-log claims signed by the graph's
+        currently loaded key (the key-rotation guard). The upstream + peer A are
+        signed by the graph's own key (``key_path``); peer B is signed by a
+        distinct key (``sb``) so the asserters differ and REPLICATED is
+        reachable. Re-logging therefore happens in two passes, one per loaded
+        key — exactly how an operator with two asserter keys would recover."""
         # First three asserts: Rekor down.
+        from tests._helpers import _bootstrap_key as _bk
         for _ in range(3):
             httpx_mock.add_response(
                 method="POST", url=_TEST_REKOR_URL, status_code=503,
             )
         key_path = _bootstrap_key(tmp_path)
+        sb_path = _bk(tmp_path, "sb.key")
+        sb = _signing.load_private_key(sb_path)
         with mareforma.open(
             tmp_path, key_path=key_path, rekor_url=_TEST_REKOR_URL,
         ) as graph:
@@ -777,15 +796,26 @@ class TestRefreshUnsigned:
                 "agent A", supports=[upstream], generated_by="agent/a",
             )
             id_b = graph.assert_claim(
-                "agent B", supports=[upstream], generated_by="agent/b",
+                "agent B", supports=[upstream], generated_by="agent/b", signer=sb,
             )
             assert graph.get_claim(id_a)["support_level"] == "PRELIMINARY"
 
-            # Rekor recovers — register a reusable mirror callback.
+            # Rekor recovers. Pass 1 (graph key loaded) re-logs the upstream +
+            # peer A; peer B is skipped (signed by sb).
             _mirror_rekor(httpx_mock, uuid_prefix="late")
             result = graph.refresh_unsigned()
-            assert result == {"checked": 3, "logged": 3, "still_unlogged": 0}
+            assert result == {"checked": 3, "logged": 2, "still_unlogged": 1}
+            # Peer A is logged; peer B not yet -> still not REPLICATED.
+            assert graph.get_claim(id_b)["transparency_logged"] == 0
+            assert graph.get_claim(id_a)["support_level"] == "PRELIMINARY"
 
+        # Pass 2: reopen with sb loaded so peer B can be re-logged.
+        with mareforma.open(
+            tmp_path, key_path=sb_path, rekor_url=_TEST_REKOR_URL,
+        ) as graph:
+            result2 = graph.refresh_unsigned()
+            assert result2 == {"checked": 1, "logged": 1, "still_unlogged": 0}
+            assert graph.get_claim(id_b)["transparency_logged"] == 1
             assert graph.get_claim(id_a)["support_level"] == "REPLICATED"
             assert graph.get_claim(id_b)["support_level"] == "REPLICATED"
 

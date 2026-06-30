@@ -52,19 +52,19 @@ graph LR
     style E fill:#713f12,stroke:#f59e0b,color:#fde68a
 ```
 
-`REPLICATED` fires when two enrolled keys sign claims with different `generated_by` strings, all citing the same `ESTABLISHED` upstream in `supports[]`. Three conditions, all required. On a fresh graph, bootstrap an `ESTABLISHED` anchor with `seed=True` (enrolled validator only). See [Example 03](examples/03_documented_contestation) for the seed-then-converge pattern.
+`REPLICATED` fires when two claims signed by distinct keys cite the same `ESTABLISHED` upstream in `supports[]`. The signing key is the independence unit, so one operator cannot manufacture it by relabelling a string. On a fresh graph, bootstrap an `ESTABLISHED` anchor with `seed=True` (enrolled validator only). See [Example 03](examples/03_documented_contestation) for the seed-then-converge pattern.
 
-**Trust ladder.** Derived from graph topology, never self-reported.
+**Trust ladder.** Derived from graph topology, never self-reported. A `REPLICATED` or `ESTABLISHED` row is re-verified against its signatures on every read, so a tampered high-trust row in a shared graph is caught at query time, not served.
 
 | Level | Meaning |
 |---|---|
 | `PRELIMINARY` | One agent asserted it. Cryptographic provenance, no convergence signal yet. |
-| `REPLICATED` | ≥2 enrolled keys signed claims sharing an `ESTABLISHED` upstream with different `generated_by` strings. |
-| `ESTABLISHED` | An enrolled human-typed key signed a validation envelope binding `evidence_seen=[...]` review citations. |
+| `REPLICATED` | Two claims signed by distinct keys, sharing an `ESTABLISHED` upstream. A convergence signal, not proof: distinct keys do not prove the data is independent. |
+| `ESTABLISHED` | An enrolled human validator signed a validation envelope binding `evidence_seen=[...]` review citations. |
 
 **Classification.** Declared by the agent, records what kind of work produced it: `INFERRED` (LLM reasoning), `ANALYTICAL` (deterministic analysis against source data), `DERIVED` (built on `ESTABLISHED` or `REPLICATED` claims). Trust level and classification are independent axes. Query both: `graph.query(text, min_support="REPLICATED", classification="ANALYTICAL")`.
 
-**Findings: earned, not declared.** The trust ladder above is read from provenance. The trust layer (`mareforma.trust`) goes one step further. It turns a claim into a content-addressed `Proposition` bound to a pre-registered `Prediction`, computes the direction of evidence with `compute_bearing` instead of letting the agent declare it, and derives a count-based `Status` (`PRELIMINARY` to `CORROBORATED`) from independent runs. A finding rides a signed claim, so it is additive. See [Findings](https://docs.mareforma.com/concepts/findings) and [Example 02](examples/02_compounding_agents).
+**Findings: earned, not declared.** The trust ladder above is read from provenance. The trust layer (`mareforma.trust`) turns a claim into a content-addressed `Proposition` bound to a pre-registered `Prediction`, computes the direction of evidence with `compute_bearing` instead of letting the agent declare it, and derives a count-based `Status` (`PRELIMINARY` to `CORROBORATED`) from independent signers. A finding rides a signed claim, so it is additive. See [Findings](https://docs.mareforma.com/concepts/findings) and [Example 02](examples/02_compounding_agents).
 
 ### Core surface
 

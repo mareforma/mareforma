@@ -27,7 +27,12 @@ than silence.
 LangChain integration
 ---------------------
 graph.get_tools(generated_by="...") returns [query_graph, assert_finding] as plain
-callables. Wrap with @tool for LangChain. generated_by is baked into the closure.
+callables. Wrap with @tool for LangChain. generated_by is baked into the closure
+as a display label. It does not drive REPLICATED: the signing key
+(asserter_keyid) is the independence unit. The two converging consensus claims
+below are therefore asserted with graph.assert_claim(signer=...) under two
+distinct lab keys, not through the langchain tools, which sign with the one
+loaded key.
 
     from langchain_openai import ChatOpenAI
     from langgraph.prebuilt import create_react_agent
@@ -66,8 +71,15 @@ tmp = Path(tempfile.mkdtemp())
 # claim it signed itself), so the reviewer is a separate enrolled key.
 agent_key_path = tmp / "_agent_key"
 reviewer_key_path = tmp / "_reviewer_key"
+# Two distinct lab keys for the converging consensus claims. REPLICATED keys
+# on the signing key (asserter_keyid), so the two peers must sign with
+# different keys. The reviewer/validator key stays distinct from both.
+lab_a_key_path = tmp / "_lab_a_key"
+lab_b_key_path = tmp / "_lab_b_key"
 _signing.bootstrap_key(agent_key_path)
 _signing.bootstrap_key(reviewer_key_path)
+_signing.bootstrap_key(lab_a_key_path)
+_signing.bootstrap_key(lab_b_key_path)
 graph = mareforma.open(tmp, key_path=agent_key_path)
 
 # Enroll the reviewer as a second validator. The current signer (auto-enrolled
@@ -79,13 +91,17 @@ graph.enroll_validator(reviewer_pem, identity="reviewer@lab.org")
 
 # ---------------------------------------------------------------------------
 # Mareforma tools via get_tools() — one set per agent, generated_by baked in
+# as a display label. query_graph and the challenge agent's assert_finding_c
+# go through langchain tools. The two converging consensus claims do NOT:
+# they must sign with distinct keys to reach REPLICATED, and the tools sign
+# with the single loaded key, so they use graph.assert_claim(signer=...) below.
 # ---------------------------------------------------------------------------
 
-query_graph, assert_finding_a = [tool(fn) for fn in graph.get_tools(
+lab_a_priv = _signing.load_private_key(lab_a_key_path)
+lab_b_priv = _signing.load_private_key(lab_b_key_path)
+
+query_graph, _ = [tool(fn) for fn in graph.get_tools(
     generated_by="agent_lab_a/model-a"
-)]
-_, assert_finding_b = [tool(fn) for fn in graph.get_tools(
-    generated_by="agent_lab_b/model-b"
 )]
 _, assert_finding_c = [tool(fn) for fn in graph.get_tools(
     generated_by="agent_lab_c/model-c"
@@ -112,19 +128,28 @@ upstream_ref = graph.assert_claim(
     seed=True,
 )
 
-consensus_a = assert_finding_a.invoke({
-    "text": "Treatment X reduces outcome Y in population P (cohort_1, n=500, p=0.003)",
-    "classification": "ANALYTICAL",
-    "supports": [upstream_ref],
-    "source": "dataset_alpha",
-})
+# Two converging claims on the same ESTABLISHED upstream, signed by DISTINCT
+# keys. The signing key (asserter_keyid) is the independence unit, so REPLICATED
+# fires here; generated_by is a display label only. Asserted via
+# graph.assert_claim(signer=...) because the langchain tools sign with the one
+# loaded key and could not converge.
+consensus_a = graph.assert_claim(
+    "Treatment X reduces outcome Y in population P (cohort_1, n=500, p=0.003)",
+    classification="ANALYTICAL",
+    generated_by="agent_lab_a/model-a",
+    supports=[upstream_ref],
+    source_name="dataset_alpha",
+    signer=lab_a_priv,
+)
 
-consensus_b = assert_finding_b.invoke({
-    "text": "Treatment X reduces outcome Y in population P (cohort_2, n=480, p=0.011)",
-    "classification": "ANALYTICAL",
-    "supports": [upstream_ref],
-    "source": "dataset_beta",
-})
+consensus_b = graph.assert_claim(
+    "Treatment X reduces outcome Y in population P (cohort_2, n=480, p=0.011)",
+    classification="ANALYTICAL",
+    generated_by="agent_lab_b/model-b",
+    supports=[upstream_ref],          # same upstream, distinct key: REPLICATED fires
+    source_name="dataset_beta",
+    signer=lab_b_priv,
+)
 
 c_a = graph.get_claim(consensus_a)
 show("consensus_a support_level", c_a["support_level"] if c_a else "—")
@@ -144,12 +169,10 @@ with mareforma.open(tmp, key_path=reviewer_key_path) as reviewer_graph:
         evidence_seen=[upstream_ref],
     )
 graph = mareforma.open(tmp, key_path=agent_key_path)
-# Re-bind agent tools to the reopened graph.
-query_graph, assert_finding_a = [tool(fn) for fn in graph.get_tools(
+# Re-bind the langchain tools to the reopened graph. The challenge agent
+# (lab_c) asserts through its tool below; query_graph reads the prior consensus.
+query_graph, _ = [tool(fn) for fn in graph.get_tools(
     generated_by="agent_lab_a/model-a"
-)]
-_, assert_finding_b = [tool(fn) for fn in graph.get_tools(
-    generated_by="agent_lab_b/model-b"
 )]
 _, assert_finding_c = [tool(fn) for fn in graph.get_tools(
     generated_by="agent_lab_c/model-c"

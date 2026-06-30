@@ -241,6 +241,39 @@ def _count_self_signed_rows(conn: sqlite3.Connection) -> int:
     return int(row["n"] if row else 0)
 
 
+def enrollment_roots(conn: sqlite3.Connection) -> list[str]:
+    """Return the keyids of the self-signed root rows (``keyid == enrolled_by_keyid``)."""
+    rows = conn.execute(
+        "SELECT keyid FROM validators WHERE keyid = enrolled_by_keyid "
+        "ORDER BY enrolled_at"
+    ).fetchall()
+    return [r["keyid"] for r in rows]
+
+
+def trust_domain_root(conn: sqlite3.Connection) -> Optional[str]:
+    """The single root-of-trust keyid, or None when there is not exactly one.
+
+    Returns the keyid every enrolled validator chains back to. None when the
+    table is empty (no root) or carries more than one self-signed root (more
+    than one trust domain), in which case there is no single root to name.
+    """
+    roots = enrollment_roots(conn)
+    return roots[0] if len(roots) == 1 else None
+
+
+def single_trust_domain(conn: sqlite3.Connection) -> bool:
+    """True iff every enrolled validator traces to one root of trust.
+
+    The solo-operator default: one self-signed root, every other validator
+    chained beneath it. This is NOT ``count_validators == 1`` — a root with
+    several delegated validators is still a single trust domain. It labels the
+    *validator* topology only (one root key), so it discloses trust-domain
+    concentration; it is not a Sybil guard over the participant topology where
+    convergence happens.
+    """
+    return len(enrollment_roots(conn)) == 1
+
+
 def _verify_chain(conn: sqlite3.Connection, keyid: str) -> bool:
     """Walk ``enrolled_by_keyid`` back to a self-signed root, verifying
     each signature against the parent's persisted pubkey.
@@ -374,6 +407,7 @@ def auto_enroll_root(
     identity: str,
     *,
     validator_type: str = _DEFAULT_VALIDATOR_TYPE,
+    root=None,
 ) -> Optional[dict]:
     """Enroll *signer* as the root validator if no validators exist yet.
 
@@ -465,6 +499,21 @@ def auto_enroll_root(
         except sqlite3.OperationalError:
             pass
         return get_validator(conn, keyid)
+
+    # Durable record of the root bootstrap. The UserWarning below is transient
+    # (a single stderr line at open time); the health event persists in
+    # .mareforma/health.jsonl so the root-of-trust decision stays auditable
+    # long after the warning has scrolled away. Best-effort: a missing root
+    # path or unwritable log never blocks enrollment.
+    if root is not None:
+        try:
+            from mareforma.health import append_health_event
+            append_health_event(
+                root, "root_auto_enroll", outcome="ok",
+                keyid=keyid, identity=identity, validator_type=validator_type,
+            )
+        except Exception:
+            pass
 
     import warnings
     # stacklevel=4 points at the user's mareforma.open(...) call site.

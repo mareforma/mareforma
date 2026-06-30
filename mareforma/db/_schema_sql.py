@@ -33,6 +33,15 @@ CREATE TABLE IF NOT EXISTS claims (
     -- remains authoritative; if this column ever drifts from the
     -- envelope it is the envelope that wins.
     validator_keyid TEXT,
+    -- Denormalized asserter keyid from the claim's signature_bundle (the
+    -- primary/asserter-role signature). NULL on unsigned rows and on legacy
+    -- rows written before this column existed. Mirrors validator_keyid: the
+    -- signature_bundle stays authoritative, this is the indexable projection
+    -- the REPLICATED promotion query and the trust-layer independence count
+    -- both read, so neither walks the bundle JSON. A REPLICATED row with a
+    -- NULL asserter_keyid is necessarily a legacy (pre-build) promotion: the
+    -- current rule refuses to promote a NULL-asserter row.
+    asserter_keyid  TEXT,
     artifact_hash   TEXT,
     prev_hash       TEXT,
     -- GRADE 5-domain EvidenceVector. Stored inside the signed Statement
@@ -142,6 +151,10 @@ CREATE INDEX IF NOT EXISTS idx_claims_convergence_retry
 -- on NOT NULL keeps index storage proportional to ESTABLISHED-only rows.
 CREATE INDEX IF NOT EXISTS idx_claims_validator_keyid
     ON claims(validator_keyid) WHERE validator_keyid IS NOT NULL;
+-- Independence counting and REPLICATED distinctness filter on a non-NULL
+-- asserter_keyid. Partial on NOT NULL keeps storage proportional to signed rows.
+CREATE INDEX IF NOT EXISTS idx_claims_asserter_keyid
+    ON claims(asserter_keyid) WHERE asserter_keyid IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_claims_idempotency_key
     ON claims(idempotency_key) WHERE idempotency_key IS NOT NULL;
 -- UNIQUE on prev_hash catches branched chains (two writers racing past
@@ -724,6 +737,9 @@ _CLAIM_COLUMNS = (
     "signature_bundle", "transparency_logged",
     "validation_signature",
     "validator_keyid",
+    # Denormalized asserter keyid from the signature_bundle (REPLICATED
+    # distinctness axis + trust-layer independence count read this column).
+    "asserter_keyid",
     "artifact_hash",
     "prev_hash",
     # GRADE EvidenceVector denormalised columns + full JSON.

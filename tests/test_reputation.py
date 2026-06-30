@@ -12,7 +12,7 @@ from pathlib import Path
 
 import mareforma
 from mareforma import signing as _signing
-from tests._helpers import _bootstrap_key, _pem_of
+from tests._helpers import _bootstrap_key, _pem_of, _two_signers
 
 
 # ---------------------------------------------------------------------------
@@ -107,14 +107,17 @@ class TestValidatorReputationProjection:
         """Build a graph with *n_promotions* claims promoted to
         ESTABLISHED under *validator_key*. Returns the promoted ids."""
         rep_ids: list[str] = []
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=root_key) as g:
             seed = g.assert_claim("seed", generated_by="seed", seed=True)
             for i in range(n_promotions):
                 rep_id = g.assert_claim(
                     f"finding {i}", supports=[seed], generated_by=f"A{i}",
+                    signer=sa,
                 )
                 g.assert_claim(
                     f"finding {i}", supports=[seed], generated_by=f"B{i}",
+                    signer=sb,
                 )
                 rep_ids.append(rep_id)
             g.enroll_validator(_pem_of(validator_key), identity="v")
@@ -198,14 +201,15 @@ class TestGetValidatorReputation:
         )
         # Promote 5 ESTABLISHED claims under v_key.
         rep_ids: list[str] = []
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=root_key) as g:
             seed = g.assert_claim("seed", generated_by="seed", seed=True)
             for i in range(5):
                 rep_id = g.assert_claim(
-                    f"f{i}", supports=[seed], generated_by=f"A{i}",
+                    f"f{i}", supports=[seed], generated_by=f"A{i}", signer=sa,
                 )
                 g.assert_claim(
-                    f"f{i}", supports=[seed], generated_by=f"B{i}",
+                    f"f{i}", supports=[seed], generated_by=f"B{i}", signer=sb,
                 )
                 rep_ids.append(rep_id)
             g.enroll_validator(_pem_of(v_key), identity="v")
@@ -242,12 +246,17 @@ class TestGetValidatorReputation:
         v_keyid = _signing.public_key_id(
             _signing.load_private_key(v_key).public_key(),
         )
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=root_key) as g:
             seed = g.assert_claim("seed", generated_by="seed", seed=True)
-            id1 = g.assert_claim("f1", supports=[seed], generated_by="A1")
-            g.assert_claim("f1", supports=[seed], generated_by="B1")
-            id2 = g.assert_claim("f2", supports=[seed], generated_by="A2")
-            g.assert_claim("f2", supports=[seed], generated_by="B2")
+            id1 = g.assert_claim(
+                "f1", supports=[seed], generated_by="A1", signer=sa,
+            )
+            g.assert_claim("f1", supports=[seed], generated_by="B1", signer=sb)
+            id2 = g.assert_claim(
+                "f2", supports=[seed], generated_by="A2", signer=sa,
+            )
+            g.assert_claim("f2", supports=[seed], generated_by="B2", signer=sb)
             g.enroll_validator(_pem_of(v_key), identity="v")
 
         with mareforma.open(tmp_path, key_path=v_key) as g:
@@ -271,10 +280,13 @@ class TestValidatorKeyidColumn:
         v_keyid = _signing.public_key_id(
             _signing.load_private_key(v_key).public_key(),
         )
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=root_key) as g:
             seed = g.assert_claim("seed", generated_by="seed", seed=True)
-            rep_id = g.assert_claim("f", supports=[seed], generated_by="A")
-            g.assert_claim("f", supports=[seed], generated_by="B")
+            rep_id = g.assert_claim(
+                "f", supports=[seed], generated_by="A", signer=sa,
+            )
+            g.assert_claim("f", supports=[seed], generated_by="B", signer=sb)
             g.enroll_validator(_pem_of(v_key), identity="v")
         with mareforma.open(tmp_path, key_path=v_key) as g:
             g.validate(rep_id)

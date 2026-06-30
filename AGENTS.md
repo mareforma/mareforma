@@ -2,9 +2,11 @@
 
 Mareforma is a local verification layer for AI-assisted research. It gives
 agents a graph for asserting claims with provenance, detecting convergence
-when independent agents reach the same conclusion through different data
-paths, and querying what has already been established before making new
-assertions.
+when cryptographically distinct signers reach the same conclusion on a shared
+anchor, and querying what has already been established before making new
+assertions. Convergence is a verifiable signal, not a proof of truth: it shows
+that distinct keys agreed, re-checked end to end on every read; the real trust
+anchor is the human-validated ESTABLISHED tier.
 
 Trust in a claim is derived from the graph, not from the agent that made it.
 No confidence score. No self-reporting. The structure of the provenance graph
@@ -112,8 +114,11 @@ Assert a claim into the graph. Returns `claim_id` (UUID string).
 
 **Raises:** `ValueError` if `classification` is invalid or `text` is empty.
 
-**Side effect:** if ≥2 claims now share the same upstream in `supports[]`
-with different `generated_by`, both are promoted to `REPLICATED` automatically.
+**Side effect:** if ≥2 claims now share the same `ESTABLISHED` upstream in
+`supports[]` and are signed by distinct keys (distinct `asserter_keyid`), both
+are promoted to `REPLICATED` automatically. Claims signed by the same key, and
+unsigned claims, do not converge. Pass a per-claim `signer=` for each distinct
+asserter.
 
 ---
 
@@ -394,13 +399,19 @@ claim without `supports=` is unverifiable. The chain is broken.
 | Level | Meaning | How reached |
 |---|---|---|
 | `PRELIMINARY` | One agent claimed it | Automatic on first assertion |
-| `REPLICATED` | ≥2 independent agents converged on the same upstream | Automatic at INSERT |
+| `REPLICATED` | ≥2 distinct signers converged on the same upstream | Automatic at INSERT |
 | `ESTABLISHED` | Human-validated | `graph.validate()` only, requires REPLICATED first |
 
 `REPLICATED` fires automatically when ≥2 claims share the same upstream
-claim_id in `supports[]` and have different `generated_by` values **AND**
-at least one of those upstreams is itself `ESTABLISHED`. No agent can
-self-promote to `ESTABLISHED`.
+claim_id in `supports[]`, carry **distinct, non-NULL `asserter_keyid`** values
+(the signer keyid from each claim's signature), **AND** at least one of those
+upstreams is itself `ESTABLISHED`. Claims signed by the same key, and unsigned
+claims, do not converge; equal `artifact_hash` collapses two peers to one line.
+Distinct keys are a cryptographic distinctness signal, not a proof of apparatus
+independence. REPLICATED is a convergence signal, not a truth claim, and the
+real anchor is human-validated `ESTABLISHED`. No agent can self-promote to
+`ESTABLISHED`, and a validator that signed any claim in the converging set is
+refused.
 
 **ESTABLISHED-upstream rule.** REPLICATED requires an ESTABLISHED claim
 in the converging supports[]. Matches Cochrane / GRADE evidence chains.
@@ -427,14 +438,15 @@ graph.assert_claim("finding B", supports=[root], generated_by="agent-B")
 `CycleDetectedError`. Walk is depth-capped at 1024 hops. DOI strings
 in supports[] are not graph nodes and skipped.
 
-**Artifact-hash gate.** When two converging peers BOTH supply
-`artifact_hash` (a SHA256 hex digest of the output bytes: figure, CSV,
-model), the hashes must match for `REPLICATED` to fire. Identity
-convergence alone is no longer enough in that case. When either peer
-omits the hash, the gate is bypassed and identity-only `REPLICATED`
-applies as before; the signal is opt-in, not retroactive. The hash is
-part of the signed payload, so an attacker who edits the column without
-the private key breaks verification.
+**Artifact-hash collapse.** `artifact_hash` (a SHA256 hex digest of the
+output bytes: figure, CSV, model) is a secondary collapse check, not a
+match requirement. When two converging peers BOTH supply a hash and the
+hashes are EQUAL, the two lines collapse to one: a byte-identical rerun is
+the same output, not corroboration, so an equal-hash pair does not promote
+on data alone. Distinct hashes count as two independent lines. When either
+peer omits the hash, data never blocks: distinct signing keys alone promote.
+The hash is part of the signed payload, so an attacker who edits the column
+without the private key breaks verification.
 
 ```python
 import hashlib
@@ -735,7 +747,7 @@ alice$ mareforma validator add \
            --identity bob@lab.example
 alice$ mareforma validator list                # confirms both enrolled
 # Alice asserts a claim and gets it to REPLICATED through the usual
-# convergence path (different generated_by, shared ESTABLISHED upstream).
+# convergence path (distinct signing keys, shared ESTABLISHED upstream).
 
 # --- Back on Bob's machine -------------------------------------------------
 bob$ cd ~/shared/my-project                    # same project root
@@ -1080,7 +1092,7 @@ reconcile the conflict.
 **Not a convergence mechanism.** Two agents reaching the same conclusion
 must converge through mareforma's epistemic ladder, not by sharing a
 key. The supported pattern: both cite the same `ESTABLISHED` upstream in
-`supports[]` with different `generated_by` values → `REPLICATED` fires
+`supports[]` and sign with distinct keys, so `REPLICATED` fires
 automatically. `idempotency_key` collapsing two distinct findings into
 one row would erase the second agent's independent contribution;
 mareforma refuses that path on purpose.
@@ -1089,9 +1101,11 @@ mareforma refuses that path on purpose.
 
 ## generated_by convention
 
-`generated_by` is the independence signal. `REPLICATED` fires only when two
-claims have **different** `generated_by` values. If both claims share the same
-identifier, convergence is not detected regardless of how different the text is.
+`generated_by` is a display and provenance label, not the independence signal.
+`REPLICATED` keys on the signing key (`asserter_keyid`): two claims signed by
+**distinct keys**, citing the same `ESTABLISHED` upstream, converge. Two claims
+signed by the same key do not, regardless of their `generated_by` strings. Still
+set `generated_by` to a meaningful identifier so provenance stays auditable.
 
 Use a structured string encoding model + version + context:
 

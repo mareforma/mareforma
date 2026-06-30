@@ -203,12 +203,13 @@ class Contrast:
 class EvidenceLine:
     """One independent line of evidence for a finding.
 
-    ``data_id`` is the distinct-artifact key the independence heuristic counts
-    over: two lines are independent iff their ``data_id`` differs. When the
+    Independence is counted by distinct **signer** (the claim's
+    ``asserter_keyid``) with ``data_id`` as a secondary guard: two lines count
+    as independent only when both the signer AND the ``data_id`` differ, so the
+    same dataset re-run under a second signer does not add a line. When the
     agent persists the dataset bytes, mareforma content-addresses them itself
-    so ``data_id`` is core-computed and the heuristic is honest; when only a
-    reference is supplied, ``data_id`` is agent-attested and the independence
-    is soft.
+    so ``data_id`` is core-computed and the guard is honest; when only a
+    reference is supplied, ``data_id`` is agent-attested and the guard is soft.
     """
 
     estimate: EffectEstimate

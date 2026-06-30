@@ -109,13 +109,15 @@ class TestReplicatedFiltersStatus:
         self, tmp_path: Path,
     ) -> None:
         """The retracted row is skipped but honest peers still find each other."""
+        from tests._helpers import _two_signers
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
             seed = _seeded_upstream(g)
             g.assert_claim(
                 "Y", supports=[seed], generated_by="agent/x", status="retracted",
             )
-            a = g.assert_claim("Y", supports=[seed], generated_by="agent/a")
-            b = g.assert_claim("Y", supports=[seed], generated_by="agent/b")
+            a = g.assert_claim("Y", supports=[seed], generated_by="agent/a", signer=sa)
+            b = g.assert_claim("Y", supports=[seed], generated_by="agent/b", signer=sb)
             assert g.get_claim(a)["support_level"] == "REPLICATED"
             assert g.get_claim(b)["support_level"] == "REPLICATED"
 
@@ -152,10 +154,12 @@ class TestValidateRefusesNonOpen:
     def test_validate_refused_on_contested(self, tmp_path: Path) -> None:
         """Build a REPLICATED row by normal means, then flip status, then
         confirm validate() refuses the promotion."""
+        from tests._helpers import _two_signers
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
             seed = _seeded_upstream(g)
-            a = g.assert_claim("Z", supports=[seed], generated_by="agent/a")
-            b = g.assert_claim("Z", supports=[seed], generated_by="agent/b")
+            a = g.assert_claim("Z", supports=[seed], generated_by="agent/a", signer=sa)
+            b = g.assert_claim("Z", supports=[seed], generated_by="agent/b", signer=sb)
             assert g.get_claim(a)["support_level"] == "REPLICATED"
             # Flip a to contested via the editorial update path.
             from mareforma.db import update_claim
@@ -258,6 +262,8 @@ class TestRetractedIsTerminal:
         ride an honest peer's INSERT into REPLICATED. The trigger refuses
         the flip, so the chain stops at step 2."""
         from mareforma.db import update_claim, IllegalStateTransitionError
+        from tests._helpers import _two_signers
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
             seed = _seeded_upstream(g)
             adv = g.assert_claim(
@@ -268,8 +274,8 @@ class TestRetractedIsTerminal:
                 update_claim(g._conn, g._root, adv, status="open")
             # Honest peer can still REPLICATE with another honest peer —
             # the adversary's retracted claim is invisible to convergence.
-            honest_a = g.assert_claim("Z", supports=[seed], generated_by="agent/h1")
-            honest_b = g.assert_claim("Z", supports=[seed], generated_by="agent/h2")
+            honest_a = g.assert_claim("Z", supports=[seed], generated_by="agent/h1", signer=sa)
+            honest_b = g.assert_claim("Z", supports=[seed], generated_by="agent/h2", signer=sb)
             assert g.get_claim(adv)["support_level"] == "PRELIMINARY"
             assert g.get_claim(adv)["status"] == "retracted"
             assert g.get_claim(honest_a)["support_level"] == "REPLICATED"
@@ -285,10 +291,12 @@ class TestLLMToolSurfacesStatus:
     def test_query_graph_returns_status_field(self, tmp_path: Path) -> None:
         """An LLM consumer of the agent tool must be able to see editorial
         taint, even on a REPLICATED row whose peers happen to be open."""
+        from tests._helpers import _two_signers
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
             seed = _seeded_upstream(g)
-            a = g.assert_claim("W", supports=[seed], generated_by="agent/a")
-            b = g.assert_claim("W", supports=[seed], generated_by="agent/b")
+            a = g.assert_claim("W", supports=[seed], generated_by="agent/a", signer=sa)
+            b = g.assert_claim("W", supports=[seed], generated_by="agent/b", signer=sb)
             assert g.get_claim(a)["support_level"] == "REPLICATED"
             # Flip a to contested editorially — it remains REPLICATED but
             # the LLM must see the taint.

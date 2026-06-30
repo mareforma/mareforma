@@ -16,13 +16,20 @@ python 04_private_data_public_findings.py
 
 No API key required.
 
-## Setup: a shared graph, plus a provenance-trace tool
+## Setup: distinct keys per lab, plus a provenance-trace tool
+
+The signing key is the independence unit. REPLICATED fires when two claims share
+an ESTABLISHED upstream and are signed by **distinct keys**. `generated_by` is a
+display label, not what drives REPLICATED. Each lab signs with its own key,
+passed per-call via `signer=`.
 
 ```python
-query_graph, assert_finding_a = [tool(fn) for fn in graph.get_tools(
-    generated_by="lab_a/model-a")]
-_, assert_finding_b = [tool(fn) for fn in graph.get_tools(
-    generated_by="lab_b/model-b")]
+# get_tools() gives the read tool; the write tool binds the graph's default key,
+# so per-lab claims call graph.assert_claim(..., signer=...) directly.
+query_graph, _ = [tool(fn) for fn in graph.get_tools(generated_by="lab_a/model-a")]
+
+lab_a_priv = _signing.load_private_key(lab_a_key_path)  # Lab A's key
+lab_b_priv = _signing.load_private_key(lab_b_key_path)  # Lab B's key
 
 @tool
 def get_provenance_trace(claim_id: str) -> dict:
@@ -43,21 +50,23 @@ def get_provenance_trace(claim_id: str) -> dict:
 ```python
 # An ESTABLISHED upstream both labs cite (seed=True). Lab A then runs a
 # multi-step analysis on its private dataset; each step is a claim with
-# provenance. The raw data never leaves Lab A — only source NAMES travel.
+# provenance, signed by Lab A's key. The raw data never leaves Lab A, only
+# source NAMES travel.
 upstream_ref = graph.assert_claim(
     "Prior literature on Target T in condition C",
     classification="DERIVED", generated_by="agent_seed/literature", seed=True)
 
-step_1 = assert_finding_a.invoke({
-    "text": "Candidate target T shows elevated activity in condition C"
-            " (partition_1, n=620, fold-change=2.3)",
-    "classification": "ANALYTICAL", "supports": [upstream_ref],
-    "source": "private_dataset_A"})           # name only — data stays at Lab A
-step_2 = assert_finding_a.invoke({
-    "text": "Target T activity in condition C is specific to cell subtype S"
-            " (partition_1, pathway analysis, p=0.004)",
-    "classification": "ANALYTICAL", "supports": [step_1],  # builds on the previous step
-    "source": "private_dataset_A"})
+step_1 = graph.assert_claim(
+    "Candidate target T shows elevated activity in condition C"
+    " (partition_1, n=620, fold-change=2.3)",
+    classification="ANALYTICAL", supports=[upstream_ref],
+    generated_by="lab_a/model-a", source_name="private_dataset_A",  # name only
+    signer=lab_a_priv)                                              # Lab A's key
+step_2 = graph.assert_claim(
+    "Target T activity in condition C is specific to cell subtype S"
+    " (partition_1, pathway analysis, p=0.004)",
+    classification="ANALYTICAL", supports=[step_1],  # builds on the previous step
+    generated_by="lab_a/model-a", source_name="private_dataset_A", signer=lab_a_priv)
 ```
 
 ```
@@ -80,16 +89,17 @@ for f in lab_a_findings:
     trace = get_provenance_trace.invoke({"claim_id": f["claim_id"]})
     # trace['source_name'] names Lab A's data — which Lab B cannot access.
 
-rep_1 = assert_finding_b.invoke({
-    "text": "Candidate target T shows elevated activity in condition C"
-            " (partition_2, n=580, fold-change=2.1)",
-    "classification": "ANALYTICAL", "supports": [upstream_ref],  # same anchor, independent data
-    "source": "private_dataset_B"})
-rep_2 = assert_finding_b.invoke({
-    "text": "Target T activity in condition C is specific to cell subtype S"
-            " (partition_2, pathway analysis, p=0.009)",
-    "classification": "ANALYTICAL", "supports": [step_2],  # cites Lab A's published claim
-    "source": "private_dataset_B"})
+rep_1 = graph.assert_claim(
+    "Candidate target T shows elevated activity in condition C"
+    " (partition_2, n=580, fold-change=2.1)",
+    classification="ANALYTICAL", supports=[upstream_ref],  # same anchor, independent data
+    generated_by="lab_b/model-b", source_name="private_dataset_B",
+    signer=lab_b_priv)                                     # Lab B's key, distinct from Lab A
+rep_2 = graph.assert_claim(
+    "Target T activity in condition C is specific to cell subtype S"
+    " (partition_2, pathway analysis, p=0.009)",
+    classification="ANALYTICAL", supports=[step_2],  # cites Lab A's published claim
+    generated_by="lab_b/model-b", source_name="private_dataset_B", signer=lab_b_priv)
 ```
 
 ```
@@ -112,14 +122,14 @@ rep_2 = assert_finding_b.invoke({
 all_claims = graph.query("Target T")
 sources = {c.get("source_name") for c in all_claims if c.get("source_name")}
 agents  = {c.get("generated_by") for c in all_claims if c.get("generated_by")}
-# Independent iff >1 distinct source AND >1 distinct agent.
+# Independent iff >1 distinct source AND >1 distinct label.
 ```
 
 ```
   distinct source_names          ['private_dataset_A', 'private_dataset_B']
   distinct generated_by          ['agent_seed/literature', 'lab_a/model-a', 'lab_b/model-b']
 
-  ✓ Two independent data sources, two independent agents.
+  ✓ Two independent data sources, two distinct signing keys.
     If they converged, the finding is not a dataset artifact.
 ```
 
@@ -128,14 +138,14 @@ agents  = {c.get("generated_by") for c in all_claims if c.get("generated_by")}
 ```python
 for c in graph.query("Target T"):
     print(c["text"][:45], c["support_level"])
-# Independent agents + shared ESTABLISHED upstream + independent data → REPLICATED.
+# Distinct signing keys + shared ESTABLISHED upstream + independent data → REPLICATED.
 ```
 
 ```
   Candidate target T shows elevated activity in… REPLICATED
   Target T activity in condition C is specific … PRELIMINARY
   …
-  ✓ REPLICATED — independent agents, shared upstream, independent data paths.
+  ✓ REPLICATED: distinct signing keys, shared upstream, independent data paths.
     The finding holds across datasets. Genuine replication.
 ```
 
@@ -145,16 +155,18 @@ Provenance distance measures how far a conclusion is from raw data: short chains
 of ANALYTICAL steps are strong; long chains of INFERRED steps are fragile. Both
 labs' chains are anchored in ANALYTICAL findings from independent sources.
 
-The contrast that makes the example worth reading: two agents repeating the
-same LLM prior with **no data behind either**:
+The contrast that makes the example worth reading: two distinct keys repeating
+the same LLM prior with **no data behind either**:
 
 ```python
-spurious_a = assert_finding_a.invoke({
-    "text": "Target T is likely relevant in condition C based on literature",
-    "classification": "INFERRED", "supports": [upstream_ref]})   # no data pipeline ran
-spurious_b = assert_finding_b.invoke({
-    "text": "Target T is likely relevant in condition C based on literature",
-    "classification": "INFERRED", "supports": [upstream_ref]})   # same upstream → REPLICATED
+spurious_a = graph.assert_claim(
+    "Target T is likely relevant in condition C based on literature",
+    classification="INFERRED", supports=[upstream_ref],
+    generated_by="lab_a/model-a", signer=lab_a_priv)   # no data pipeline ran
+spurious_b = graph.assert_claim(
+    "Target T is likely relevant in condition C based on literature",
+    classification="INFERRED", supports=[upstream_ref],
+    generated_by="lab_b/model-b", signer=lab_b_priv)   # distinct key + same upstream → REPLICATED
 ```
 
 ```
@@ -163,7 +175,7 @@ spurious_b = assert_finding_b.invoke({
   spurious_a classification      INFERRED
 
   REPLICATED fired — but classification=INFERRED and source_name=''.
-  Two agents repeated the same LLM prior. No data behind either finding.
+  Two distinct keys repeated the same LLM prior. No data behind either finding.
 ```
 
 `REPLICATED` alone is not trust. The graph lets you filter it out:

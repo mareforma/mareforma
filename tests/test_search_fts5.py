@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 import mareforma
-from tests._helpers import _bootstrap_key
+from tests._helpers import _bootstrap_key, _two_signers
 
 
 class TestSearchBasicMatch:
@@ -110,6 +110,7 @@ class TestSearchWildcardRejection:
 class TestSearchFilters:
     def test_min_support_filter(self, tmp_path: Path) -> None:
         key = _bootstrap_key(tmp_path)
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=key) as g:
             seed = g.assert_claim(
                 "dopamine reference work",
@@ -117,11 +118,11 @@ class TestSearchFilters:
             )
             g.assert_claim(
                 "dopamine modulates striatum",
-                supports=[seed], generated_by="A",
+                supports=[seed], generated_by="A", signer=sa,
             )
             g.assert_claim(
                 "dopamine modulates striatum",
-                supports=[seed], generated_by="B",
+                supports=[seed], generated_by="B", signer=sb,
             )
             # Now we have 1 ESTABLISHED + 2 REPLICATED with 'dopamine'.
             replicated = g.search("dopamine", min_support="REPLICATED")

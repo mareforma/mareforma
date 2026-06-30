@@ -6,14 +6,18 @@ durable stored inputs (stamped :data:`STATUS_POLICY`), never baked into the
 schema. Improving the rule later is a new policy over the same data, not a
 migration.
 
-Independence is a distinct-run heuristic, not proof: two supporting lines count
-as independent support iff they come from different runs (``generated_by``) AND
-different datasets (``data_id``). One run contributes at most one independent
-support (so a single run cannot self-certify) and at most one independent refute;
-re-running the identical dataset under a new run token adds nothing. A **refute
-line** is an evidence line whose recomputed ``Bearing.direction == refutes``. The
-counts the state machine reads are ``independent_support`` and
-``independent_refute``, both computed run-distinct (see
+Independence is a distinct-signer heuristic, not proof: two supporting lines
+count as independent support iff they come from different signers (the claim's
+``asserter_keyid``) AND different datasets (``data_id``). This is the same WHO
+axis the REPLICATED promotion query keys on, so promotion and trust counting
+agree by construction. One signer contributes at most one independent support
+(so a single signer cannot self-certify) and at most one independent refute;
+re-running the identical dataset under a new signer adds nothing. Legacy lines
+whose claim predates the keyid column fall back to the retired ``generated_by``
+run axis, so their counts are preserved rather than collapsed. A **refute line**
+is an evidence line whose recomputed ``Bearing.direction == refutes``. The counts
+the state machine reads are ``independent_support`` and ``independent_refute``,
+both computed signer-distinct (see
 :func:`mareforma.trust._store.independence_counts`).
 
 REFUTED / CONTESTED are derived labels, not auto-refutation: a REFUTED status
@@ -27,7 +31,7 @@ from enum import Enum
 # when the status computation itself changes, not on every release. A finding's
 # Status carries the policy that computed it, so a later policy change stays
 # identifiable on old rows.
-STATUS_POLICY = "status_policy@v2"
+STATUS_POLICY = "status_policy@v3"
 
 
 class Status(str, Enum):

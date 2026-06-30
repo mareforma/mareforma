@@ -19,13 +19,22 @@ can demonstrate.
     Set automatically at INSERT. Every new claim starts here.
   </Accordion>
   <Accordion title="REPLICATED">
-    ≥2 agents with different `generated_by` values share the same upstream
-    in `supports[]`, AND at least one of those upstreams is itself
+    ≥2 claims signed by **distinct keys** cite the same upstream in
+    `supports[]`, AND at least one of those upstreams is itself
     `ESTABLISHED`. Set automatically at INSERT. No extra step required.
 
-    The ESTABLISHED-upstream rule (added currently) matches Cochrane / GRADE
-    evidence-chain methodology: replication-of-noise is not replication. A
-    fresh project bootstraps the chain via a *seed claim* (see below).
+    The independence unit is the signing key (the `asserter_keyid` denormalized
+    from each signature bundle), not `generated_by`. An unsigned claim (no
+    `asserter_keyid`) or two claims signed by the same key cannot reach
+    REPLICATED.
+
+    REPLICATED is a convergence signal, not proof. Distinct keys prove the
+    asserters are cryptographically separate, not that their data or reasoning
+    is independent.
+
+    The ESTABLISHED-upstream rule matches Cochrane / GRADE evidence-chain
+    methodology: replication-of-noise is not replication. A fresh project
+    bootstraps the chain via a *seed claim* (see below).
   </Accordion>
   <Accordion title="ESTABLISHED">
     A human (an enrolled validator) reviewed the provenance chain and
@@ -39,18 +48,19 @@ can demonstrate.
 ## How REPLICATED fires
 
 ```
-ESTABLISHED upstream ──► ANALYTICAL claim (lab_a, generated_by="agent/a")  ──┐
-                                                                              ├──► REPLICATED
-ESTABLISHED upstream ──► ANALYTICAL claim (lab_b, generated_by="agent/b")  ──┘
+ESTABLISHED upstream ──► ANALYTICAL claim (lab_a, signed by key A)  ──┐
+                                                                      ├──► REPLICATED
+ESTABLISHED upstream ──► ANALYTICAL claim (lab_b, signed by key B)  ──┘
 ```
 
 Three conditions must all be true:
 1. Both claims reference the **same upstream** in `supports[]`
-2. Both claims have **different `generated_by`** values
+2. Each claim is **signed by a distinct key** (`asserter_keyid`)
 3. At least one shared upstream is itself **ESTABLISHED**
 
-A single agent asserting the same claim a thousand times is still PRELIMINARY.
-Independence of provenance paths is what matters, not count.
+One key asserting the same claim a thousand times is still PRELIMINARY.
+Cryptographic separation of asserters is what matters, not count. An unsigned
+claim carries no `asserter_keyid` and cannot reach REPLICATED.
 
 ### Bootstrapping a fresh project (seed claim)
 
@@ -88,16 +98,27 @@ with mareforma.open() as graph:
     graph.get_claim(id_b)["support_level"]  # → "REPLICATED"
 ```
 
-### Artifact-hash gate
+### Data equality: a collapse check, not a match requirement
 
-When two converging peers BOTH supply `artifact_hash` (a SHA-256 hex digest
-of the output bytes, figure, CSV, model), the hashes must match for
-`REPLICATED` to fire. Identity convergence alone is no longer enough in
-that case. When either peer omits the hash, the gate is bypassed and
-identity-only `REPLICATED` applies: the signal is opt-in, not retroactive.
+`artifact_hash` (a SHA-256 hex digest of the output bytes: figure, CSV, model)
+is a secondary collapse check, never a match requirement. Two peers with equal
+data (equal `artifact_hash`, or equal content-addressed `data_id`) collapse to
+one line: a byte-identical rerun is not corroboration. Distinct data counts as
+independent. Absent data (NULL) never blocks promotion; distinct signers alone
+promote.
 
 The hash is part of the signed payload, so an attacker who edits the
 column without the private key breaks verification.
+
+## Verify on read
+
+High-trust rows (REPLICATED and ESTABLISHED) are re-verified on read. A
+`query_*` call excludes a row whose signature does not verify; `get_claim`
+returns it flagged `verified=False`. Read never raises.
+
+ESTABLISHED rows in query results and bundle export also disclose
+`single_trust_domain`: whether every validator traces to one root of trust.
+This is a disclosure of trust-domain concentration, not a Sybil guard.
 
 ## How ESTABLISHED is reached
 
