@@ -361,24 +361,23 @@ def _ensure_claims_columns_for_upgrade(
                 f"Could not add claims.{col} column: {exc}"
             ) from exc
 
-    # The partial index on asserter_keyid lives in _SCHEMA_SQL, which only
-    # runs on a fresh db. An upgraded db gets the column via the ALTER above
-    # but never re-runs _SCHEMA_SQL, so create the index here too. IF NOT
-    # EXISTS keeps it a no-op once present.
-    if "asserter_keyid" in existing_cols or any(
-        col == "asserter_keyid" for col, _ in upgrades
-    ):
-        try:
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_claims_asserter_keyid "
-                "ON claims(asserter_keyid) WHERE asserter_keyid IS NOT NULL"
-            )
-            conn.commit()
-        except sqlite3.OperationalError:
-            # A concurrent opener may be mid-ALTER; the index is a perf
-            # optimisation, not a correctness gate, so a transient failure
-            # here must not block the open. The next open retries.
-            pass
+    # The partial index on asserter_keyid lives in _SCHEMA_SQL, which only runs
+    # on a fresh db. An upgraded db gets the column via the ALTER above but
+    # never re-runs _SCHEMA_SQL, so create the index here too. asserter_keyid is
+    # always present by this point (in existing_cols, or added by the loop
+    # above), so this runs unconditionally; IF NOT EXISTS keeps it a no-op once
+    # present.
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_claims_asserter_keyid "
+            "ON claims(asserter_keyid) WHERE asserter_keyid IS NOT NULL"
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        # A concurrent opener may be mid-ALTER; the index is a perf
+        # optimisation, not a correctness gate, so a transient failure
+        # here must not block the open. The next open retries.
+        pass
 
     return added
 
@@ -1938,8 +1937,16 @@ def _refuse_self_validation_across_set(
         return
     try:
         supports = json.loads(sup_row["supports_json"] or "[]")
-    except (json.JSONDecodeError, TypeError):
-        return
+    except (json.JSONDecodeError, TypeError) as exc:
+        # Fail closed: a malformed supports_json on the row being promoted is a
+        # tamper signal, not a normal state (the system always writes valid
+        # JSON). We cannot enumerate the converging peers to clear the across-set
+        # refusal, so refuse rather than fall through to validation. Mirrors
+        # _refuse_self_validation failing closed on an unparseable bundle.
+        raise SelfValidationError(
+            f"Cannot verify the converging set behind '{claim_id}': its "
+            f"supports_json does not parse ({exc}). Refusing validation."
+        ) from exc
     if not supports:
         return
     sup_placeholders = ",".join("?" * len(supports))
@@ -3191,33 +3198,55 @@ def _verify_validation_on_read(
 def _verify_participant_bundle_on_read(
     conn: sqlite3.Connection, row: dict, cache: dict,
 ) -> bool:
-    """Re-verify a REPLICATED row's asserter bundle signature (participant side).
+    """Re-verify a REPLICATED row's asserter bundle (participant side).
 
-    Legacy (NULL asserter_keyid / no bundle) rows are verify-exempt. A row
-    whose asserter keyid is an enrolled validator is verified against that
-    pubkey; a forged or tampered bundle excludes the row. A row whose asserter
-    is not enrolled is exempt (no pubkey to check against in the lean model).
+    Legacy (NULL asserter_keyid / no bundle) rows are verify-exempt. Otherwise
+    the bundle's signed predicate MUST name THIS claim (claim_id binding) and be
+    subject/predicate-consistent. That binding holds even when the asserter is
+    not an enrolled validator, so a genuine bundle copied off another claim
+    cannot be stapled onto this row and a junk bundle is rejected, with no
+    pubkey needed. When the asserter IS enrolled the bundle signature is
+    additionally verified against that pubkey; a forged or tampered signature
+    excludes the row. When it is not enrolled there is no pubkey in the lean
+    model, so a claim-bound bundle is served (exempt on authenticity, never on
+    the claim binding).
     """
     ak = row.get("asserter_keyid")
     bundle_json = row.get("signature_bundle")
     if ak is None or not bundle_json:
         return True
-    ck = ("P", ak, hashlib.sha256(bundle_json.encode("utf-8")).hexdigest())
+    # claim_id is part of the key: the binding check below depends on the row,
+    # so two rows sharing one bundle (a copy attack) must not share a cache
+    # entry or the first-evaluated row poisons the second (same reasoning as
+    # the validator path).
+    ck = (
+        "P", ak, row.get("claim_id"),
+        hashlib.sha256(bundle_json.encode("utf-8")).hexdigest(),
+    )
     if ck in cache:
         return cache[ck]
     from mareforma import signing as _signing
     from mareforma import validators as _validators
-    ok = True  # exempt by default: no enrolled pubkey -> cannot prove forgery
-    signer_row = _validators.get_validator(conn, ak)
-    if signer_row is not None:
+    ok = False
+    try:
+        env = json.loads(bundle_json)
+        # Structural binding (no pubkey needed): the signed predicate must name
+        # THIS claim. claim_predicate_from_envelope also enforces
+        # subject-vs-predicate consistency, so a junk or internally-inconsistent
+        # bundle raises and is excluded.
+        pred = _signing.claim_predicate_from_envelope(env)
+        if pred.get("claim_id") == row.get("claim_id"):
+            signer_row = _validators.get_validator(conn, ak)
+            if signer_row is None:
+                # Non-enrolled asserter: no pubkey in the lean model. The
+                # binding above is the integrity we can offer; serve it.
+                ok = True
+            else:
+                pem = base64.standard_b64decode(signer_row["pubkey_pem"])
+                pub = _signing.public_key_from_pem(pem)
+                ok = bool(_signing.verify_envelope(env, pub))
+    except Exception:
         ok = False
-        try:
-            env = json.loads(bundle_json)
-            pem = base64.standard_b64decode(signer_row["pubkey_pem"])
-            pub = _signing.public_key_from_pem(pem)
-            ok = bool(_signing.verify_envelope(env, pub))
-        except Exception:
-            ok = False
     cache[ck] = ok
     return ok
 
@@ -3952,6 +3981,14 @@ def query_claims(
     # heavy unverified PRELIMINARY traffic the loop keeps pulling
     # until it has `limit` survivors or hits the end.
     batch_size = max(limit, 1)
+    # Bound the scan. Under a flood of rows that fail verify-on-read (a mass
+    # direct-SQL tamper, or heavy unenrolled-PRELIMINARY traffic) survivors can
+    # stay below `limit` indefinitely, which would walk the whole table on every
+    # query: a cheap-to-insert forged row becomes a read-amplifier. Cap total
+    # rows scanned and return what survived rather than scanning to exhaustion.
+    # The ceiling is generous so legitimate verified-heavy / PRELIMINARY-heavy
+    # projects are unaffected; it only bounds the adversarial worst case.
+    max_scan = max(limit * 50, 5000)
     try:
         while len(results) < limit:
             rows = conn.execute(
@@ -3995,6 +4032,10 @@ def query_claims(
             # filter can still drop rows, so keep batching until we have
             # `limit` survivors or the table is exhausted (the while + the
             # empty-rows break above bound the loop).
+            if offset >= max_scan:
+                # Scan ceiling hit: return the survivors found so far rather
+                # than walking the rest of the table behind a tamper flood.
+                break
     except sqlite3.OperationalError as exc:
         raise DatabaseError(f"Failed to query claims: {exc}") from exc
     return results

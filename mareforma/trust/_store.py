@@ -7,6 +7,7 @@ keeps the graph object thin and keeps every trust query in one place.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import sqlite3
@@ -319,6 +320,48 @@ def _count_run_distinct(pairs: list[tuple[str, str]]) -> int:
     return len(set(run_of_dataset.values()))
 
 
+def _authentic_signer_keyid(
+    conn: sqlite3.Connection,
+    claim_id: str,
+    asserter_keyid: "str | None",
+    bundle_json: "str | None",
+) -> "str | None":
+    """Return ``asserter_keyid`` only when the signed bundle authenticates it.
+
+    The denormalized ``asserter_keyid`` column is not itself part of the signed
+    envelope, so a direct/foreign writer can set it to any string to inflate the
+    independence count. We trust it as the WHO axis only when the claim's
+    ``signature_bundle`` (a) embeds that same keyid, (b) binds to this
+    ``claim_id``, and (c) verifies against the pubkey when the signer is an
+    enrolled validator. This mirrors the read-path verify gate. When it does not
+    authenticate, the caller falls back to the soft ``generated_by`` axis, which
+    is no weaker than the pre-keyid behaviour. Any structural failure returns
+    None (fall back), never raises: one un-authenticatable line must not deny the
+    whole proposition's count.
+    """
+    if asserter_keyid is None or not bundle_json:
+        return None
+    try:
+        from .. import signing as _signing
+        from .. import validators as _validators
+
+        env = json.loads(bundle_json)
+        if env["signatures"][0]["keyid"] != asserter_keyid:
+            return None
+        pred = _signing.claim_predicate_from_envelope(env)
+        if pred.get("claim_id") != claim_id:
+            return None
+        signer_row = _validators.get_validator(conn, asserter_keyid)
+        if signer_row is not None:
+            pem = base64.standard_b64decode(signer_row["pubkey_pem"])
+            pub = _signing.public_key_from_pem(pem)
+            if not _signing.verify_envelope(env, pub):
+                return None
+        return asserter_keyid
+    except Exception:
+        return None
+
+
 def independence_counts(conn: sqlite3.Connection, content_id: str) -> tuple[int, int]:
     """(independent_support, independent_refute) by distinct signer, data_id guard.
 
@@ -342,7 +385,8 @@ def independence_counts(conn: sqlite3.Connection, content_id: str) -> tuple[int,
     """
     rows = conn.execute(
         "SELECT el.data_id AS data_id, cl.generated_by AS generated_by, "
-        " cl.asserter_keyid AS asserter_keyid, "
+        " cl.asserter_keyid AS asserter_keyid, cl.claim_id AS claim_id, "
+        " cl.signature_bundle AS signature_bundle, "
         " est.estimate_value, est.effect_type, est.scale, est.p_value, "
         " est.ci_lower, est.ci_upper, est.ci_level, est.n_total, "
         " pr.test_type, pr.direction_of_interest, pr.equivalence_lower, "
@@ -394,10 +438,16 @@ def independence_counts(conn: sqlite3.Connection, content_id: str) -> tuple[int,
         except Exception:
             continue
         # Independence axis = distinct signer (asserter_keyid), the same WHO
-        # the REPLICATED promotion keys on. Legacy lines whose claim has no
-        # keyid fall back to the retired generated_by run axis so they keep
-        # their count; the k:/g: namespace stops a keyid aliasing a run label.
-        keyid = r["asserter_keyid"]
+        # the REPLICATED promotion keys on. The denormalized column is not
+        # itself signed, so trust it only when the claim's bundle authenticates
+        # it (embeds the same keyid, binds to this claim, and verifies when the
+        # signer is enrolled). A forged or unbacked keyid falls back to the
+        # retired generated_by run axis so it cannot inflate the count beyond
+        # the soft string axis. The k:/g: namespace stops a keyid aliasing a run
+        # label.
+        keyid = _authentic_signer_keyid(
+            conn, r["claim_id"], r["asserter_keyid"], r["signature_bundle"],
+        )
         run_token = f"k:{keyid}" if keyid is not None else f"g:{r['generated_by']}"
         pair = (run_token, r["data_id"])
         if direction is BearingDirection.SUPPORTS:

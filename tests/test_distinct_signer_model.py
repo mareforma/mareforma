@@ -515,3 +515,142 @@ class TestVerifyOnReadCacheBinding:
             # forged row sharing its envelope bytes.
             assert "legit A" in texts
             assert g.get_claim(a)["verified"] is True
+
+
+class TestParticipantBundleBinding:
+    """Verify-on-read for REPLICATED rows binds the bundle to the claim, so a
+    genuine bundle cannot be stapled onto a forged row (the P1 review gap)."""
+
+    def test_copied_bundle_onto_other_claim_excluded(self, tmp_path: Path) -> None:
+        """A genuine enrolled-key bundle copied onto a different REPLICATED row
+        fails the claim_id binding: get_claim flags verified=False and query
+        excludes it, while the genuine row is still served."""
+        sa, sb = _two_signers(tmp_path)
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        pem_a = _signing.public_key_to_pem(sa.public_key())
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            g.enroll_validator(pem_a, identity="a")
+            up = g.assert_claim("anchor", generated_by="seed", seed=True)
+            rep = g.assert_claim("A", supports=[up], generated_by="lab_a", signer=sa)
+            g.assert_claim("B", supports=[up], generated_by="lab_b", signer=sb)
+            victim = g.assert_claim("totally fabricated", generated_by="x")
+            assert g.get_claim(rep)["support_level"] == "REPLICATED"
+
+        conn = sqlite3.connect(str(_db_path(tmp_path)))
+        conn.row_factory = sqlite3.Row
+        try:
+            r = conn.execute(
+                "SELECT signature_bundle, asserter_keyid FROM claims "
+                "WHERE claim_id = ?", (rep,),
+            ).fetchone()
+            # Staple rep's genuine (enrolled-key) bundle + keyid onto the
+            # fabricated row and flip it to REPLICATED via raw SQL.
+            conn.execute(
+                "UPDATE claims SET signature_bundle = ?, asserter_keyid = ?, "
+                "support_level = 'REPLICATED' WHERE claim_id = ?",
+                (r["signature_bundle"], r["asserter_keyid"], victim),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            c = g.get_claim(victim)
+            assert c["support_level"] == "REPLICATED"  # forged level persists
+            assert c["verified"] is False               # but flagged unverified
+            ids = {row["claim_id"]
+                   for row in g.query(min_support="REPLICATED", limit=99)}
+            assert victim not in ids                     # excluded from query
+            assert rep in ids                            # genuine row still served
+
+    def test_junk_bundle_unenrolled_keyid_excluded(self, tmp_path: Path) -> None:
+        """A non-enrolled keyid with a non-claim bundle no longer slips through
+        the exempt path: the structural binding rejects it."""
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            victim = g.assert_claim("fabricated", generated_by="x")
+        conn = sqlite3.connect(str(_db_path(tmp_path)))
+        try:
+            conn.execute(
+                "UPDATE claims SET signature_bundle = ?, asserter_keyid = ?, "
+                "support_level = 'REPLICATED' WHERE claim_id = ?",
+                ('{"not":"a claim envelope"}', "deadbeefdeadbeef", victim),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            assert g.get_claim(victim)["verified"] is False
+            ids = {row["claim_id"]
+                   for row in g.query(min_support="REPLICATED", limit=99)}
+            assert victim not in ids
+
+
+class TestPromotionDataAxis:
+    """The data axis is a secondary collapse, never a gate: absent data never
+    blocks promotion on the distinct-signer axis."""
+
+    def test_distinct_signers_one_null_hash_promote(self, tmp_path: Path) -> None:
+        sa, sb = _two_signers(tmp_path)
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            up = g.assert_claim("anchor", generated_by="seed", seed=True)
+            a = g.assert_claim(
+                "A", supports=[up], generated_by="lab_a", signer=sa,
+                artifact_hash="a" * 64,
+            )
+            b = g.assert_claim(  # no artifact_hash -> absent data
+                "B", supports=[up], generated_by="lab_b", signer=sb,
+            )
+            assert g.get_claim(a)["support_level"] == "REPLICATED"
+            assert g.get_claim(b)["support_level"] == "REPLICATED"
+
+
+class TestGrandfatherMigration:
+    """A pre-asserter_keyid graph.db (v0.3.6) keeps its REPLICATED rows on
+    upgrade: they are grandfathered, not mass-downgraded, with a durable
+    legacy_promotion health event recorded exactly once."""
+
+    def _health_events(self, tmp_path: Path) -> list[dict]:
+        path = _db_path(tmp_path).parent / "health.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text().splitlines()
+                if line.strip()]
+
+    def test_legacy_replicated_survives_upgrade_with_health_event(
+        self, tmp_path: Path,
+    ) -> None:
+        sa, sb = _two_signers(tmp_path)
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            up = g.assert_claim("anchor", generated_by="seed", seed=True)
+            rep = g.assert_claim("A", supports=[up], generated_by="lab_a", signer=sa)
+            g.assert_claim("B", supports=[up], generated_by="lab_b", signer=sb)
+            assert g.get_claim(rep)["support_level"] == "REPLICATED"
+
+        # Simulate a pre-asserter_keyid (v0.3.6) graph.db: drop the index + column
+        # so the genuine REPLICATED rows look legacy (NULL keyid) on reopen.
+        conn = sqlite3.connect(str(_db_path(tmp_path)))
+        try:
+            conn.execute("DROP INDEX IF EXISTS idx_claims_asserter_keyid")
+            conn.execute("ALTER TABLE claims DROP COLUMN asserter_keyid")
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Reopen under v0.3.7: column re-added (NULL everywhere), so the genuine
+        # REPLICATED rows must be grandfathered, not downgraded.
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            assert g.get_claim(rep)["support_level"] == "REPLICATED"
+        gf = [e for e in self._health_events(tmp_path)
+              if e.get("op") == "legacy_promotion"]
+        assert len(gf) == 1
+        assert gf[0]["replicated_grandfathered"] >= 1
+
+        # Idempotent: a second open does not re-fire the grandfather.
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            pass
+        gf2 = [e for e in self._health_events(tmp_path)
+               if e.get("op") == "legacy_promotion"]
+        assert len(gf2) == 1
