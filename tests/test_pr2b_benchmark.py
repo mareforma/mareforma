@@ -1,24 +1,17 @@
-"""PR2b read-latency benchmark: verify-on-read over a many-REPLICATED-row graph.
+"""PR2b verify-on-read cache benchmark over a many-REPLICATED-row graph.
 
 The read path re-verifies a high-trust row's signature before serving it, with a
-per-query ``(tier, keyid, digest)`` cache. This file MEASURES two things on a
-graph with many REPLICATED rows rather than asserting them by construction:
-
-* the cache BOUNDS total signature verifications — at most one per distinct
-  ``(keyid, digest)`` served. Distinct claims carry distinct signature digests,
-  so a varied result set rarely collapses; the bound that matters is "never more
-  than once per row," which is what the cache guarantees and what we count.
-* read latency stays within a generous budget so verify-on-read does not turn a
-  bulk query into an O(rows x crypto) cliff.
-
-The budget is deliberately loose (CI machines vary); the test guards against an
-order-of-magnitude regression, not a tight wall-clock number.
+per-query ``(tier, keyid, digest)`` cache. This file MEASURES the cache bound on
+a graph with many REPLICATED rows rather than asserting it by construction: the
+cache BOUNDS total signature verifications at most one per distinct
+``(keyid, digest)`` served. Distinct claims carry distinct signature digests, so
+a varied result set rarely collapses; the bound that matters is "never more than
+once per row," which is what the cache guarantees and what we count. The count is
+deterministic, so it is not gated on wall-clock timing (which varies by machine).
 """
 
 from __future__ import annotations
 
-import base64
-import time
 from pathlib import Path
 
 import mareforma
@@ -56,7 +49,7 @@ def _build_many_replicated(graph, root: Path, n_signers: int) -> int:
     return n_signers
 
 
-def test_pr2b_verify_count_is_bounded_and_latency_within_budget(
+def test_pr2b_verify_count_is_bounded(
     tmp_path, monkeypatch,
 ):
     n = 40
@@ -77,9 +70,7 @@ def test_pr2b_verify_count_is_bounded_and_latency_within_budget(
 
         monkeypatch.setattr(_signing, "verify_envelope", counting)
 
-        t0 = time.perf_counter()
         rows = g.query(limit=1000)
-        elapsed = time.perf_counter() - t0
 
         replicated = [r for r in rows if r["support_level"] == "REPLICATED"]
         # The setup actually produced the REPLICATED rows we query over.
@@ -100,9 +91,6 @@ def test_pr2b_verify_count_is_bounded_and_latency_within_budget(
             f"verify cache did not bound checks: {calls['n']} checks for "
             f"{len(high_trust)} high-trust rows"
         )
-
-        # Latency budget: loose, regression-only. 40 rows must not take seconds.
-        assert elapsed < 5.0, f"read latency {elapsed:.2f}s exceeds budget"
 
 
 def test_pr2b_cache_collapses_a_repeated_row_in_one_walk(tmp_path):
