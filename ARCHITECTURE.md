@@ -224,7 +224,7 @@ body)`) with these payload types:
 
 | Payload type | What it signs |
 |---|---|
-| `application/vnd.in-toto+json` (Statement v1) | Per-claim assertion (text + classification + supports + contradicts + source + artifact_hash + evidence + created_at) |
+| `application/vnd.in-toto+json` (Statement v1) | Per-claim assertion (text + classification + supports + contradicts + source + artifact_hash + evidence + created_at, plus an optional versioned `observed_grounding` verdict when the observer recorded one) |
 | `application/vnd.mareforma.validator-enrollment+json` | Per-validator enrollment (keyid + pubkey + identity + validator_type + parent) |
 | `application/vnd.mareforma.validation+json` | Per-validation event (claim_id + validator_keyid + validated_at + evidence_seen) |
 | `application/vnd.mareforma.seed-claim+json` | Per-seed bootstrap (claim_id + validator_keyid + seeded_at) |
@@ -573,6 +573,55 @@ altitude up: they need richer platform integration than the core
 provides. The core ships the framework + three adapters; the rest
 follows adoption signal.
 
+## Execution-observed grounding
+
+Whether a finding is grounded in real data (`did the cited data flow into
+it`) is computed from execution, not declared by the producer. The observer
+lives in [`mareforma/observe/`](mareforma/observe/).
+
+Wrap the span that authors a finding in `observe(cites=...)`. Inside it,
+wrapped loaders (`builtins.open` and `sqlite3.connect` always; `pandas`,
+`httpx`, `requests` only if the host already imported them, so no new core
+dep) record the reads that happen, and a PEP-578 audit hook plus direct
+thread-start wrapping record the spawn seams the loaders cannot see across.
+On exit the scope classifies into one of three states:
+
+- `GROUNDED`: a read matching the finding's cited source returned non-empty
+  data. An incidental read (config, tokenizer, cache) does not qualify;
+  read-to-citation binding is what separates it from the cited source.
+- `UNGROUNDED`: the scope was fully observed and the cited data never
+  arrived. This is the silent-fallback tell, and it is the ONLY path to
+  UNGROUNDED, which is what makes UNGROUNDED trustworthy.
+- `OPAQUE`: a thread, subprocess, socket, or uninstrumented reader could
+  have hidden a read, so absence cannot be trusted. A first-class state, not
+  an error: a confident GROUNDED/UNGROUNDED across a boundary the observer
+  cannot cross is worse than admitting the blind spot.
+
+The observed axis is **separate and additive**. It never touches the
+declared `classification` enum (`INFERRED` / `ANALYTICAL` / `DERIVED`) and
+never shares its value space. A verdict rides into the signed in-toto
+statement as an optional, versioned `observed_grounding` record (verdict,
+reason, receipt digest, axis version): present only when a verdict was
+recorded, so a claim asserted without the observer produces byte-identical
+signed bytes, and an envelope that omits the field reads as "no verdict,"
+never as tampering. The chain hash and `statement_cid` bind it too, and
+restore rejects a `claims.toml` whose stored verdict no longer matches the
+signature. A verdict that is not `GROUNDED` never counts toward support-level
+promotion; grounding is a necessary floor, never sufficient.
+
+The verdict is computed from execution of a **cooperating producer**: the
+binding is tamper-evidence over what a cooperating run did, not a proof
+against an adversarial operator. A finding is authored inside the scope and
+signed after it closes; asserting a claim while its grounding scope is still
+open is refused.
+
+An independent **causal oracle** ([`observe/oracle.py`](mareforma/observe/oracle.py))
+validates the observer without reading its log: it perturbs the input,
+re-runs the pipeline, and checks whether the finding moves. Flow (did the
+bytes arrive) and influence (does the finding depend on them) are different
+constructs, so the two can honestly disagree; `reconcile` labels
+"read the data then ignored it" a construct difference, not a detector error.
+
 ## Honest scope
 
 What mareforma is NOT: trust is
@@ -582,7 +631,12 @@ agent discipline); Rekor inclusion is logged-not-proof-verified; DOIs
 are HEAD-checked-not-content-verified; contradiction is per-claim;
 `EvidenceVector` is GRADE-shaped storage, not GRADE evaluation; no
 automated fraud detection beyond the structural invariants
-mareforma enforces.
+mareforma enforces. Observed grounding computes FLOW of a cooperating
+producer, not correctness or influence: it has documented bounds (a
+load-once/reuse read looks UNGROUNDED, a stale-but-non-empty read looks
+GROUNDED, and anything across a spawn seam or uninstrumented reader is
+OPAQUE rather than a confident verdict), and it does not defend against an
+adversarial operator.
 
 ## Engineering discipline: code as audit trail
 

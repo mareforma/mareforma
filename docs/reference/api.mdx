@@ -1023,3 +1023,67 @@ view. Accepts a `frame_id` or a `Proposition`. `min_status` filters to a floor o
 the `UNTESTED < PRELIMINARY < CORROBORATED` ladder (the only valid floors;
 `REFUTED` / `CONTESTED` are off the ladder and excluded by any floor). Raises
 `ValueError` on an invalid floor.
+
+## v0.3.8 surface
+
+The `mareforma.observe` package computes whether cited data actually flowed into a
+finding. See [Grounding](/concepts/grounding) for the model.
+
+### `mareforma.observe.observe(cites=None, *, content_address=False)`
+
+Context manager over the code that authors a finding. `cites` is the source(s)
+the finding cites: a path, a URL, a `sha256:` data id, or an iterable of these.
+Set `content_address=True` to match a cited `sha256:` id against the hash of a
+read's returned bytes instead of by identifier. Yields an `ObserveHandle` whose
+`.verdict` holds the computed `GroundingVerdict` after the block closes. Reading
+`.verdict` inside the open block raises `ScopeNotClosedError`.
+
+```python
+from mareforma.observe import observe
+
+with observe(cites="/data/trial.csv") as obs:
+    frame = pandas.read_csv("/data/trial.csv")
+    estimate = analyze(frame)
+
+obs.verdict.grounding    # ObservedGrounding.GROUNDED
+```
+
+### `GroundingVerdict`
+
+The computed verdict plus its receipt. Fields: `grounding` (an `ObservedGrounding`
+member), `reason` (str), `cited_sources`, `reads`, `seams`, `matched_identifier`,
+`version`, `reads_seen`, `opens_detected`.
+
+- `grounding` is `ObservedGrounding.GROUNDED` / `UNGROUNDED` / `OPAQUE`.
+- `receipt()` returns the full canonicalizable evidence; `receipt_digest()` is its
+  `sha256:` digest.
+- `to_signed_dict()` is the compact `{version, grounding, reason, receipt_digest}`
+  record bound into the signed statement. mareforma binds the digest, not the
+  receipt, so a caller that keeps the receipt out of band can detect mutation.
+- `read_coverage_fraction()` is `reads_seen / opens_detected`, or `None` when
+  nothing was opened.
+
+### `perturbation_oracle(run_fn, base_input, perturb, *, repeats=1, metric=None, effect_threshold=0.0, noise_multiplier=3.0)`
+
+The independent causal check. Runs `run_fn` on the base input and on perturbed
+inputs and returns an `OracleResult` whose `influence` is `INFLUENCED`,
+`NOT_INFLUENCED`, or `UNDECIDABLE`. With `repeats > 1` the spread of the base runs
+sets the noise floor a real effect must clear, so a stochastic pipeline does not
+read as influenced by its own jitter. `reconcile(grounding, influence)` relates
+the observer's flow verdict to the oracle's influence verdict.
+
+### `summarize(verdicts) -> GroundingReport`
+
+Aggregates an iterable of `GroundingVerdict` into the split a report states:
+`fractions()`, `incidental_read_rate`, `mean_read_coverage`, and
+`opaque_dominates(threshold=0.5)`.
+
+### `grounding=` on `assert_finding` and `submit_finding`
+
+Both gain an optional `grounding` parameter that takes a `GroundingVerdict`. The
+verdict is bound into the signed statement, the chain hash, and a queryable
+column, and re-checked on restore. The return dict gains a `grounding` key (the
+stored record, or `None`). A finding whose verdict is not `GROUNDED` never counts
+toward a support-level promotion; a claim asserted without a verdict is
+unaffected and its signed bytes are identical to a pre-observer claim. Asserting a
+claim while an `observe()` scope is still open raises.

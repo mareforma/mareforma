@@ -1,0 +1,168 @@
+---
+title: "Grounding"
+description: "The observed-grounding axis: whether cited data actually flowed into a finding, computed from what ran rather than declared by the producer."
+---
+
+A finding cites a source. Nothing checks that the source was read. An agent can
+name `/data/trial.csv`, fall back to what it remembers from training, and write a
+number that never touched the file. The claim records the citation faithfully and
+the reader has no way to tell the difference. This is the silent fallback, and it
+is the failure the grounding observer exists to catch.
+
+`mareforma.observe` computes a second, separate signal: **did the cited data
+actually flow into the code that authored this finding?** The answer is derived
+from execution, never from what the producer declares. It is one of three states.
+
+| State | Meaning |
+|---|---|
+| `GROUNDED` | A read matching the cited source returned data inside the observed scope. |
+| `UNGROUNDED` | The scope was fully observed and the cited data did not arrive. This is the silent-fallback tell. |
+| `OPAQUE` | The observer could not see. A read may have happened across a boundary it cannot cross, so absence cannot be trusted. |
+
+`OPAQUE` is first-class on purpose. A confident `GROUNDED` or `UNGROUNDED` across a
+boundary the observer cannot see would be confidently wrong, which is worse than
+admitting the blind spot.
+
+## Observing a scope
+
+Wrap the span that authors a finding in `observe(...)`. Inside it, wrapped loaders
+(`builtins.open`, `sqlite3`, and `pandas` / `httpx` / `requests` when you already
+import them) record what data flowed, and a PEP-578 audit hook records the reads
+and boundaries the loaders cannot see. On exit the observer computes the verdict
+from what it captured.
+
+```python
+import mareforma
+from mareforma.observe import observe
+
+with observe(cites="/data/trial.csv") as obs:
+    frame = pandas.read_csv("/data/trial.csv")
+    estimate = analyze(frame)
+
+# Author the finding after the scope closes, then bind the verdict:
+graph.assert_finding(
+    prop, prediction, estimate,
+    data_id="dataset_alpha",
+    generated_by="analyst/model-a/lab_a",
+    grounding=obs.verdict,
+)
+```
+
+The verdict is available only after the `with` block closes, since it is a
+function of the whole span. Read `obs.verdict` after the block, not inside it.
+
+A claim must be **authored inside the scope and signed after it closes**. Asserting
+a claim while its grounding scope is still open would bind a verdict computed from
+a partial observation, so it is refused.
+
+## A read only grounds when it matches the citation
+
+`GROUNDED` is not "some loader returned data." It is "a read that matches the
+cited source returned data." Reading a config file, a tokenizer, or a `.env`
+through the same wrapped `open()` is an incidental read: it does not ground the
+finding. The match is what makes `UNGROUNDED` mean the *cited* data did not
+arrive, not merely that nothing was read.
+
+Matching is by identifier (same absolute file path, same database target, same
+`scheme://host/path` for a URL) or, when you opt in with `content_address=True`,
+by the `sha256:` hash of the returned bytes against a cited data id.
+
+## When the observer cannot see: seams
+
+The observed scope propagates into `asyncio` tasks but not into library-spawned
+threads or a child process. A read on the far side of one of those boundaries is
+invisible. Rather than call that invisible read a genuine absence, the observer
+records a **seam** and returns `OPAQUE`:
+
+- a thread start (`threading.Thread.start`, `_thread.start_new_thread`),
+- a subprocess or new process (`subprocess`, `os.exec`, `os.fork`, ...),
+- a raw socket connection,
+- a cited path opened through an uninstrumented reader (`os.open`, C-extension
+  I/O) that the loader wrappers do not cover.
+
+## Honest bounds
+
+The observer names what it cannot do:
+
+- For a plain `open()` file, `GROUNDED` means the cited file was opened for reading
+  and is non-empty. The `sqlite` and `http` wrappers observe the actual returned
+  rows and bytes; the file path proxies flow by file size, so it does not prove
+  the bytes were consumed.
+- A resource opened **before** the scope (a module-level or pooled connection
+  reused inside it) is not wrapped, so its reads are invisible and the finding can
+  read `UNGROUNDED`. Open the cited source inside the scope for the tell to hold.
+- The verdict is tamper-evidence over what a **cooperating** producer's run did.
+  It is not a proof against an adversarial operator, who signs under their own key.
+
+## The causal oracle: an independent check
+
+The observer measures **flow**: did the cited bytes arrive. The oracle measures
+**influence**: does the finding actually depend on the data. It perturbs the
+input, re-runs the pipeline, and sees whether the finding moves. It never reads
+the observer's log, so a detector that agreed with itself cannot look correct here.
+
+```python
+from mareforma.observe import perturbation_oracle, reconcile
+
+result = perturbation_oracle(run_pipeline, base_input, perturb=drop_half_the_rows,
+                             repeats=5, metric=lambda finding: finding.estimate)
+result.influence   # INFLUENCED, NOT_INFLUENCED, or UNDECIDABLE
+```
+
+The oracle handles the honest hard case: a stochastic pipeline (an LLM at nonzero
+temperature) moves run to run even with fixed input. It measures that run-to-run
+noise first and calls `INFLUENCED` only when the perturbation moves the finding
+past the noise floor. When the effect sits inside the noise band the answer is
+`UNDECIDABLE`, never a silent `INFLUENCED`.
+
+Flow and influence are different constructs, so `reconcile` reads a mismatch as a
+construct difference, not a detector error. A finding can read the cited data
+(flow) and then ignore it (no influence). The one combination worth investigating
+is `UNGROUNDED` yet `INFLUENCED`: the data demonstrably shapes the finding but no
+cited read was seen, which points at a coverage gap the observer missed.
+
+## The split over a pipeline
+
+A single verdict answers one finding. `summarize` aggregates many into the numbers
+a report states: the `GROUNDED` / `UNGROUNDED` / `OPAQUE` fractions, how often an
+incidental read occurred that citation binding correctly refused to count, and
+what fraction of the cited reads the observer actually saw.
+
+```python
+from mareforma.observe import summarize
+
+report = summarize(verdict for verdict in run_all_findings())
+report.fractions()          # {"GROUNDED": 0.71, "UNGROUNDED": 0.06, "OPAQUE": 0.23}
+report.opaque_dominates()   # True → attach deeper before trusting the split
+```
+
+When `OPAQUE` dominates, the observer cannot see enough of the pipeline for the
+other numbers to mean anything, so the honest response is to instrument deeper
+before publishing a measurement.
+
+## Bound into the claim
+
+Pass the verdict to `assert_finding` or `submit_finding` and it is bound into the
+signed in-toto statement, the append-only chain hash, and the queryable column,
+so it is tamper-evident and re-checked on restore. The field is optional and
+versioned: a claim asserted without the observer produces byte-identical signed
+bytes to a pre-observer claim, and its absence is read as "no verdict recorded,"
+never as tampering.
+
+Grounding is a **necessary floor for promotion, never sufficient**. A finding that
+execution shows is not grounded (`UNGROUNDED` or `OPAQUE`) never counts toward a
+support-level promotion. A `GROUNDED` verdict still has to clear the
+independent-signer counts described in [Trust](/concepts/trust). A claim without a
+verdict is unaffected, so the axis is purely additive.
+
+## Not the same as the declared classification
+
+The observed axis is separate from the claim's declared `classification`
+(`INFERRED` / `ANALYTICAL` / `DERIVED`), which is what the producing agent asserts.
+It is also separate from the soft `grounding_score`, a text-level hint that scores
+a claim against its cited supports. Observed grounding is what execution shows.
+The two never share a value space, so a reader can never confuse a
+self-declaration with a computed result.
+
+See the [API reference](/reference/api) for full signatures and
+[Findings](/concepts/findings) for how a grounded finding earns its status.
