@@ -1,0 +1,242 @@
+"""Input-perturbation causal oracle: an independent ground truth for grounding.
+
+The observer computes FLOW: did the cited bytes arrive in the scope. The oracle
+measures INFLUENCE: does the finding actually depend on the data. Perturb the
+input, re-run the pipeline, and see if the finding moves. If it moves, the data
+causally shaped the finding; if it does not, the finding would have come out the
+same with different data, which is the signature of a silent fallback.
+
+The oracle is the observer's validation because it is independent: it never
+reads the observer's log, so a detector that agreed with itself cannot look
+correct here. It also handles the honest hard case — a stochastic pipeline
+(an LLM at nonzero temperature) moves run to run even with fixed input, so a
+naive "did it change" test would call everything influenced. The oracle measures
+that run-to-run noise first and only calls INFLUENCED when the perturbation moves
+the finding by more than the noise floor. When the effect is comparable to the
+noise, the answer is UNDECIDABLE, never a silent INFLUENCED.
+
+Flow and influence are different constructs, so the observer and the oracle can
+honestly disagree: a finding can read the cited data (flow) and then ignore it
+(no influence). :func:`reconcile` labels that a construct difference, not a
+detector error.
+"""
+from __future__ import annotations
+
+import statistics
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Callable, Sequence
+
+from ._verdict import ObservedGrounding
+
+
+class OracleInfluence(str, Enum):
+    """The oracle's verdict on whether the data influenced the finding."""
+
+    INFLUENCED = "INFLUENCED"
+    NOT_INFLUENCED = "NOT_INFLUENCED"
+    UNDECIDABLE = "UNDECIDABLE"
+
+
+@dataclass
+class OracleResult:
+    """The oracle's measurement, with the numbers behind the verdict."""
+
+    influence: OracleInfluence
+    effect_size: float
+    noise_floor: float
+    decision_threshold: float
+    reason: str
+    base_values: tuple[float, ...] = ()
+    perturbed_values: tuple[float, ...] = ()
+
+
+def _default_metric(finding: Any) -> float:
+    try:
+        return float(finding)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            "the causal oracle needs a scalar per finding: pass metric=... to "
+            "reduce a structured finding to a float (e.g. the effect estimate)"
+        ) from exc
+
+
+def perturbation_oracle(
+    run_fn: Callable[[Any], Any],
+    base_input: Any,
+    perturb: "Callable[[Any], Any] | Sequence[Any]",
+    *,
+    repeats: int = 1,
+    metric: "Callable[[Any], float] | None" = None,
+    effect_threshold: float = 0.0,
+    noise_multiplier: float = 3.0,
+) -> OracleResult:
+    """Measure whether the cited data causally influences the finding.
+
+    Parameters
+    ----------
+    run_fn:
+        Runs the pipeline on an input and returns the finding. Called with the
+        base input and each perturbed input.
+    base_input:
+        The unperturbed input.
+    perturb:
+        Either a callable that maps the base input to a perturbed input, or a
+        sequence of already-perturbed inputs. Each perturbation is a different
+        way of changing the cited data; the finding should move if it depends
+        on that data.
+    repeats:
+        Runs per configuration. Above 1, the spread of the base runs measures
+        the pipeline's run-to-run noise (LLM nondeterminism), which sets the
+        floor a real effect must clear. Use temperature 0 / a pinned seed plus
+        repeats to bound the noise honestly.
+    metric:
+        Reduces a finding to a scalar for comparison. Defaults to ``float()``.
+    effect_threshold:
+        A floor on the effect size below which a change is not meaningful,
+        independent of noise (e.g. a domain-minimal effect).
+    noise_multiplier:
+        How many noise standard deviations the effect must exceed to count as
+        influence. The decision threshold is ``max(effect_threshold,
+        noise_multiplier * noise_std)``.
+
+    Returns
+    -------
+    OracleResult
+        INFLUENCED when the perturbation moves the finding past the threshold;
+        NOT_INFLUENCED when the finding holds still; UNDECIDABLE when the effect
+        is real-signed but within the noise band (never silently INFLUENCED).
+    """
+    if repeats < 1:
+        raise ValueError("repeats must be >= 1")
+    m = metric or _default_metric
+
+    base_values = tuple(m(run_fn(base_input)) for _ in range(repeats))
+    perturbed_inputs = _resolve_perturbations(base_input, perturb)
+    perturbed_values: list[float] = []
+    for pin in perturbed_inputs:
+        perturbed_values.extend(m(run_fn(pin)) for _ in range(repeats))
+    perturbed_values = tuple(perturbed_values)
+
+    base_mean = statistics.fmean(base_values)
+    pert_mean = statistics.fmean(perturbed_values)
+    effect_size = abs(pert_mean - base_mean)
+
+    # Noise floor from run-to-run spread of the base configuration. With a
+    # single deterministic run there is no measurable noise, so the floor is 0
+    # and effect_threshold alone decides.
+    noise_std = statistics.pstdev(base_values) if len(base_values) > 1 else 0.0
+    noise_margin = noise_multiplier * noise_std
+    decision_threshold = max(effect_threshold, noise_margin)
+
+    # UNDECIDABLE is a NOISE verdict: it applies only when noise, not the domain
+    # floor, sets the threshold. When effect_threshold is the binding constraint,
+    # an effect below it is domain-insignificant (NOT_INFLUENCED), not ambiguous.
+    noise_driven = noise_std > 0 and noise_margin >= effect_threshold
+
+    if effect_size > decision_threshold:
+        influence = OracleInfluence.INFLUENCED
+        reason = (
+            f"perturbing the input moved the finding by {effect_size:.4g}, past "
+            f"the {decision_threshold:.4g} threshold: the data influences it"
+        )
+    elif noise_driven and effect_size > noise_std:
+        # A signed move that clears one noise sd but not the full noise margin:
+        # real enough not to call NOT_INFLUENCED, not clear enough for INFLUENCED.
+        influence = OracleInfluence.UNDECIDABLE
+        reason = (
+            f"effect {effect_size:.4g} is within the noise band "
+            f"(<= {decision_threshold:.4g}); undecidable, not called grounded"
+        )
+    else:
+        influence = OracleInfluence.NOT_INFLUENCED
+        reason = (
+            f"perturbing the input barely moved the finding ({effect_size:.4g} "
+            f"<= {decision_threshold:.4g}): the finding does not depend on the data"
+        )
+
+    return OracleResult(
+        influence=influence,
+        effect_size=effect_size,
+        noise_floor=noise_std,
+        decision_threshold=decision_threshold,
+        reason=reason,
+        base_values=base_values,
+        perturbed_values=perturbed_values,
+    )
+
+
+def _resolve_perturbations(base_input, perturb) -> list:
+    if callable(perturb):
+        return [perturb(base_input)]
+    perturbed = list(perturb)
+    if not perturbed:
+        raise ValueError("perturb must yield at least one perturbed input")
+    return perturbed
+
+
+class Reconciliation(str, Enum):
+    """How the observer's flow verdict relates to the oracle's influence verdict."""
+
+    AGREE = "AGREE"
+    CONSTRUCT_DIFFERENCE = "CONSTRUCT_DIFFERENCE"
+    OBSERVER_BLIND = "OBSERVER_BLIND"
+    TENSION = "TENSION"
+    INCONCLUSIVE = "INCONCLUSIVE"
+
+
+@dataclass
+class ReconcileResult:
+    relation: Reconciliation
+    reason: str
+
+
+def reconcile(
+    grounding: ObservedGrounding, oracle: OracleInfluence
+) -> ReconcileResult:
+    """Relate the observer's flow verdict to the oracle's influence verdict.
+
+    Flow and influence are different constructs, so a mismatch is not
+    automatically a detector error:
+
+    - GROUNDED + INFLUENCED, UNGROUNDED + NOT_INFLUENCED → AGREE.
+    - GROUNDED + NOT_INFLUENCED → CONSTRUCT_DIFFERENCE: the pipeline read the
+      cited data and then did not use it. Flow without influence, not a bug.
+    - OPAQUE + anything → OBSERVER_BLIND: the observer could not see, so there is
+      nothing to reconcile against the oracle.
+    - UNGROUNDED + INFLUENCED → TENSION: the data demonstrably influences the
+      finding, yet the observer saw no cited read. This is the one combination
+      worth investigating — the observer likely missed a read (a coverage gap).
+    - anything + UNDECIDABLE → INCONCLUSIVE: the oracle could not decide.
+    """
+    if oracle is OracleInfluence.UNDECIDABLE:
+        return ReconcileResult(
+            Reconciliation.INCONCLUSIVE,
+            "the oracle could not decide influence above the noise floor",
+        )
+    if grounding is ObservedGrounding.OPAQUE:
+        return ReconcileResult(
+            Reconciliation.OBSERVER_BLIND,
+            "the observer could not see the scope; no flow verdict to reconcile",
+        )
+    if grounding is ObservedGrounding.GROUNDED:
+        if oracle is OracleInfluence.INFLUENCED:
+            return ReconcileResult(
+                Reconciliation.AGREE, "cited data flowed in and influences the finding"
+            )
+        return ReconcileResult(
+            Reconciliation.CONSTRUCT_DIFFERENCE,
+            "cited data flowed in but does not influence the finding "
+            "(flow without influence, not a detector error)",
+        )
+    # grounding is UNGROUNDED
+    if oracle is OracleInfluence.NOT_INFLUENCED:
+        return ReconcileResult(
+            Reconciliation.AGREE,
+            "no cited data flowed in and the finding does not depend on it",
+        )
+    return ReconcileResult(
+        Reconciliation.TENSION,
+        "the finding depends on the data, yet no cited read was observed: "
+        "likely a coverage gap the observer missed",
+    )
