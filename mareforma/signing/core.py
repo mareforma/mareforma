@@ -410,6 +410,9 @@ def canonical_statement(
         artifact_hash=claim_fields.get("artifact_hash"),
         created_at=claim_fields["created_at"],
         evidence=evidence,
+        # Optional/versioned: present in the signed bytes only when the caller
+        # recorded an observed verdict. Absent keys leave the bytes unchanged.
+        observed_grounding=claim_fields.get("observed_grounding"),
     )
     from .._canonical import canonicalize
     return canonicalize(stmt)

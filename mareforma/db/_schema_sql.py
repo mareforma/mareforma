@@ -119,6 +119,16 @@ CREATE TABLE IF NOT EXISTS claims (
     -- here. Callers writing this field directly are responsible for
     -- supplying a valid DSSE envelope JSON string.
     original_signature_bundle TEXT,
+    -- Observed grounding verdict (the computed axis), as a JSON record:
+    -- {version, grounding, reason, receipt_digest}. Distinct from the declared
+    -- ``classification`` column above and never overlapping its value space.
+    -- Written from the same record bound into the signed predicate, so this is
+    -- a queryable denormalisation the split measurement and the promotion gate
+    -- read; the signed envelope stays authoritative. NULL on every claim
+    -- asserted without the observer (including every row that predates this
+    -- column), and a NULL here means the signed predicate omits the field too,
+    -- so the signed bytes are byte-identical to a pre-observer claim.
+    observed_grounding TEXT,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
     -- ESTABLISHED rows must carry a signed validation envelope. The
@@ -755,6 +765,9 @@ _CLAIM_COLUMNS = (
     "predicate_payload",
     # Federation-import preservation of source-side signature.
     "original_signature_bundle",
+    # Observed grounding verdict (computed axis), queryable denormalisation of
+    # the signed predicate's observed_grounding record.
+    "observed_grounding",
     "created_at", "updated_at",
 )
 _CLAIM_SELECT = ", ".join(_CLAIM_COLUMNS)

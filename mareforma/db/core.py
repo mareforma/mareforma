@@ -106,6 +106,46 @@ def _serialize_predicate_payload(payload: dict | None) -> str:
     return canonicalize(payload).decode("utf-8")
 
 
+def _serialize_observed_grounding(record: dict | None) -> str | None:
+    """Serialize the observed-grounding record for its queryable column.
+
+    Canonical JSON so the column round-trips byte-stably and matches the same
+    record bound into the signed predicate. ``None`` stays NULL — the column
+    default — so a claim asserted without the observer writes exactly the bytes
+    it did before this field existed. The signed envelope is authoritative; this
+    column is the denormalisation the split measurement and the promotion gate
+    read.
+    """
+    if record is None:
+        return None
+    if not isinstance(record, dict):
+        raise TypeError(
+            f"observed_grounding must be a dict (the computed verdict record), "
+            f"got {type(record).__name__}."
+        )
+    from .._canonical import canonicalize
+    return canonicalize(record).decode("utf-8")
+
+
+def _observed_grounding_promotes(stored: str | None) -> bool:
+    """Whether a stored observed-grounding column permits support-level promotion.
+
+    A NULL column (every claim asserted without the observer) is unaffected and
+    promotes as before. A recorded verdict promotes only when it is GROUNDED;
+    UNGROUNDED and OPAQUE never count toward promotion. Any non-NULL value that
+    is not GROUNDED JSON (including an empty string) is non-promoting
+    (fail-closed): a verdict we cannot read is not a GROUNDED one. This matches
+    the peer-promotion SQL guard, which excludes a non-``json_valid`` column.
+    """
+    if stored is None:
+        return True
+    try:
+        record = json.loads(stored)
+        return record.get("grounding") == "GROUNDED"
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
@@ -338,6 +378,12 @@ def _ensure_claims_columns_for_upgrade(
         # promotion query's NULL guard treats them as "not a distinct signer."
         ("asserter_keyid",
          "ALTER TABLE claims ADD COLUMN asserter_keyid TEXT"),
+        # Observed grounding verdict (computed axis). Added NULL on every
+        # existing row; a NULL verdict is omitted from the signed predicate, so
+        # this ALTER leaves every existing row's signed bytes byte-identical,
+        # exactly like the query-side columns above.
+        ("observed_grounding",
+         "ALTER TABLE claims ADD COLUMN observed_grounding TEXT"),
     ]
     for col, alter_sql in upgrades:
         if col in existing_cols:
@@ -848,6 +894,7 @@ def add_claim(
     rekor_log_pubkey_pem: bytes | None = None,
     predicate_payload: dict | None = None,
     original_signature_bundle: str | None = None,
+    observed_grounding: dict | None = None,
 ) -> str:
     """Insert a new claim and return its claim_id.
 
@@ -1098,6 +1145,11 @@ def add_claim(
             "artifact_hash": artifact_hash,
             "created_at": now,
         }
+        # Bind the observed verdict into the signed bytes only when one was
+        # recorded. Absent → the key never enters claim_fields, so the signed
+        # statement and its cid are byte-identical to a pre-observer claim.
+        if observed_grounding is not None:
+            claim_fields["observed_grounding"] = observed_grounding
         envelope = _signing.sign_claim(
             claim_fields, signer, evidence=evidence_dict,
         )
@@ -1114,6 +1166,7 @@ def add_claim(
                 artifact_hash=claim_fields["artifact_hash"],
                 created_at=claim_fields["created_at"],
                 evidence=evidence_dict,
+                observed_grounding=observed_grounding,
             )
         )
 
@@ -1140,6 +1193,12 @@ def add_claim(
         "artifact_hash": artifact_hash,
         "created_at": now,
     }
+    # The chain hash binds the same optional field the signature does, so the
+    # verdict is tamper-evident on the append-only chain as well. Absent when no
+    # verdict was recorded, keeping the chain link identical for pre-observer
+    # claims (the chain input is the canonical statement, which omits the key).
+    if observed_grounding is not None:
+        chain_fields["observed_grounding"] = observed_grounding
     # BEGIN IMMEDIATE is only valid when no transaction is currently
     # open. Python's default sqlite3 isolation_level='' auto-starts a
     # transaction before DML, so callers that already wrote within the
@@ -1182,9 +1241,10 @@ def add_claim(
                  ev_imprecision, ev_pub_bias,
                  evidence_json, statement_cid,
                  predicate_payload, original_signature_bundle,
+                 observed_grounding,
                  created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 claim_id, text, classification, initial_level, idempotency_key,
@@ -1201,6 +1261,7 @@ def add_claim(
                 evidence_json, statement_cid,
                 _serialize_predicate_payload(predicate_payload),
                 _canonical_envelope(original_signature_bundle),
+                _serialize_observed_grounding(observed_grounding),
                 now, now,
             ),
         )
@@ -1337,7 +1398,8 @@ def _maybe_update_replicated_unlocked(
     # below). Short-circuit before the SELECT so neither the new row
     # nor any open peer is promoted.
     new_status_row = conn.execute(
-        "SELECT status, asserter_keyid FROM claims WHERE claim_id = ?",
+        "SELECT status, asserter_keyid, observed_grounding "
+        "FROM claims WHERE claim_id = ?",
         (new_claim_id,),
     ).fetchone()
     if new_status_row is None or new_status_row["status"] != "open":
@@ -1349,6 +1411,13 @@ def _maybe_update_replicated_unlocked(
     # they are never re-promoted here.)
     new_asserter_keyid = new_status_row["asserter_keyid"]
     if new_asserter_keyid is None:
+        return
+    # Observed-grounding gate: a finding that execution shows is NOT grounded
+    # (UNGROUNDED or OPAQUE) never counts toward support-level promotion. A
+    # claim without a computed verdict (NULL — every pre-observer claim) is
+    # unaffected, so this is purely additive. Grounding is necessary, not
+    # sufficient: a GROUNDED verdict still has to clear the signer axis below.
+    if not _observed_grounding_promotes(new_status_row["observed_grounding"]):
         return
 
     # Shared-anchor rule: the converged-on-same-upstream contract requires
@@ -1399,6 +1468,16 @@ def _maybe_update_replicated_unlocked(
           AND c.status = 'open'
           AND c.unresolved = 0
           AND c.transparency_logged = 1
+          AND (
+              c.observed_grounding IS NULL
+              OR (
+                  CASE
+                      WHEN json_valid(c.observed_grounding)
+                      THEN json_extract(c.observed_grounding, '$.grounding')
+                      ELSE NULL
+                  END
+              ) = 'GROUNDED'
+          )
           AND NOT (
               c.artifact_hash IS NOT NULL
               AND ? IS NOT NULL
@@ -4340,6 +4419,12 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
                 entry["predicate_payload"] = c["predicate_payload"]
             if c.get("original_signature_bundle"):
                 entry["original_signature_bundle"] = c["original_signature_bundle"]
+            # Observed grounding verdict: round-trip only when populated, so a
+            # backup of a graph that never used the observer grows no new field.
+            # It is bound into the signed statement, so restore rebuilds the
+            # canonical bytes from it and statement_cid catches any TOML tamper.
+            if c.get("observed_grounding"):
+                entry["observed_grounding"] = c["observed_grounding"]
             data["claims"][c["claim_id"]] = entry
 
         # Verdict tables. Each verdict carries its own signature

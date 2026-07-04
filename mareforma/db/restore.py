@@ -28,10 +28,46 @@ from .core import (
     _is_claim_id,
     _extract_validation_signer_keyid,
     _extract_signature_bundle_keyid,
+    _serialize_observed_grounding,
     _verdict_canonical_payload,
     _REPLICATION_VERDICT_FIELDS,
     _CONTRADICTION_VERDICT_FIELDS,
 )
+
+
+def _parse_observed_grounding(value) -> dict | None:
+    """Parse the restored ``observed_grounding`` record into a dict, or None.
+
+    The column is stored as canonical JSON (or omitted). Restore rebuilds the
+    signed statement from it, so a malformed value must abort loudly rather than
+    silently drop the field and let statement_cid mismatch masquerade as tamper.
+    Absent / empty → None (a claim asserted without the observer).
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError) as exc:
+            raise RestoreError(
+                "A claim's observed_grounding is not valid JSON; "
+                "claims.toml is malformed.",
+                kind="claim_unverified",
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise RestoreError(
+                "A claim's observed_grounding must be a JSON object; "
+                "claims.toml is malformed.",
+                kind="claim_unverified",
+            )
+        return parsed
+    raise RestoreError(
+        f"A claim's observed_grounding has unexpected type "
+        f"{type(value).__name__}; claims.toml is malformed.",
+        kind="claim_unverified",
+    )
 
 
 def _restore_predicate_payload(c: dict, claim_id: str) -> str:
@@ -295,6 +331,13 @@ def restore(
                     evidence_dict = json.loads(evidence_json_str)
                 except (ValueError, TypeError):
                     evidence_dict = {}
+                # Observed grounding verdict (optional/versioned). Parse the
+                # stored JSON record so the chain hash and statement_cid rebuild
+                # from the same bytes the original signing path bound. Absent for
+                # every pre-observer claim, keeping those chain links identical.
+                observed_grounding = _parse_observed_grounding(
+                    c.get("observed_grounding")
+                )
                 chain_fields = {
                     "claim_id": claim_id,
                     "text": c_text,
@@ -306,6 +349,8 @@ def restore(
                     "artifact_hash": c.get("artifact_hash"),
                     "created_at": c_created_at,
                 }
+                if observed_grounding is not None:
+                    chain_fields["observed_grounding"] = observed_grounding
                 prev_hash = _compute_prev_hash(
                     conn, chain_fields, evidence_dict,
                 )
@@ -365,6 +410,7 @@ def restore(
                         artifact_hash=c.get("artifact_hash"),
                         created_at=c_created_at,
                         evidence=evidence_dict,
+                        observed_grounding=observed_grounding,
                     )
                 ) if c.get("signature_bundle") else None
                 # transparency_logged: trust the TOML flag ONLY when the
@@ -404,10 +450,11 @@ def restore(
                              evidence_json, statement_cid,
                              convergence_retry_needed,
                              predicate_payload, original_signature_bundle,
+                             observed_grounding,
                              created_at, updated_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                ?, ?, ?, ?, ?, ?, ?)
+                                ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             claim_id, c_text, c_classification,
@@ -443,6 +490,7 @@ def restore(
                             1 if c.get("convergence_retry_needed") else 0,
                             _restore_predicate_payload(c, claim_id),
                             _restore_original_signature_bundle(c, claim_id),
+                            _serialize_observed_grounding(observed_grounding),
                             c_created_at, c_updated_at,
                         ),
                     )
@@ -1029,6 +1077,20 @@ def _verify_claim_signatures_on_restore(
                 kind="claim_unverified",
             )
 
+        # Observed grounding binding. The optional/versioned field lives inside
+        # the signed predicate; the row's observed_grounding column must match
+        # it. Absence on both sides is the pre-observer case and passes. A
+        # verdict present in the envelope but flipped (or dropped) on the row is
+        # caught here — the same posture as the evidence check above. Parse both
+        # sides so key ordering does not create a false mismatch.
+        row_grounding = _parse_observed_grounding(c.get("observed_grounding"))
+        if predicate.get("observed_grounding") != row_grounding:
+            raise RestoreError(
+                f"Claim {claim_id} signed observed-grounding verdict does not "
+                "match the observed_grounding column on the row — TOML tampered.",
+                kind="claim_unverified",
+            )
+
         # statement_cid cross-check. The row carries the cid the
         # original signing path computed. Restore re-derives the cid
         # from the row's fields + evidence and compares. A bare TOML
@@ -1048,6 +1110,7 @@ def _verify_claim_signatures_on_restore(
                     artifact_hash=expected["artifact_hash"],
                     created_at=expected["created_at"],
                     evidence=row_evidence,
+                    observed_grounding=row_grounding,
                 )
             )
             if recomputed_cid != c["statement_cid"]:

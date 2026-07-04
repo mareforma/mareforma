@@ -166,6 +166,7 @@ class EpistemicGraph:
         predicate_payload: dict | None = None,
         original_signature_bundle: str | None = None,
         grounding_sensor: "object | None" = None,
+        observed_grounding: dict | None = None,
     ) -> str:
         # signer:
         #     Per-call override for the graph's loaded signer. When
@@ -288,6 +289,18 @@ class EpistemicGraph:
         REPLICATED promotion. Call :meth:`refresh_unresolved` later to retry.
         """
         self._check_open()
+        # Sign-after-author invariant: a claim must be authored inside a
+        # grounding scope and signed AFTER it closes. Asserting while the scope
+        # that grounds it is still open would sign a verdict computed from an
+        # incomplete observation, so it is refused rather than silently signed.
+        from mareforma import observe as _observe
+        if _observe.scope_is_open():
+            raise RuntimeError(
+                "cannot assert a claim while a grounding observe() scope is "
+                "open: close the scope first, then assert with the computed "
+                "grounding verdict. Signing inside an open scope would bind a "
+                "verdict from a partial observation."
+            )
         # Resolve any DOIs in supports/contradicts. Strings that don't match
         # DOI format are treated as claim_id references and pass through.
         dois = _doi.extract_dois((supports or []) + (contradicts or []))
@@ -398,6 +411,7 @@ class EpistemicGraph:
             rekor_log_pubkey_pem=self._rekor_log_pubkey_pem,
             predicate_payload=predicate_payload,
             original_signature_bundle=original_signature_bundle,
+            observed_grounding=observed_grounding,
         )
 
     def query(
@@ -923,6 +937,7 @@ class EpistemicGraph:
         design_type: str | None = None,
         code_ref: str | None = None,
         idempotency_key: str | None = None,
+        grounding: "GroundingVerdict | None" = None,
     ) -> dict:
         """Record a finding: a computed bearing of an outcome on a proposition.
 
@@ -1042,6 +1057,7 @@ class EpistemicGraph:
             design_type=design_type,
             code_ref=code_ref,
             idempotency_key=idempotency_key,
+            grounding=grounding,
         )
 
     def submit_finding(
@@ -1060,6 +1076,7 @@ class EpistemicGraph:
         design_type: str | None = None,
         code_ref: str | None = None,
         idempotency_key: str | None = None,
+        grounding: "GroundingVerdict | None" = None,
     ) -> dict:
         """Submit a finding against a plan that was already pre-registered.
 
@@ -1192,6 +1209,14 @@ class EpistemicGraph:
                 content_id=proposition.content_id(),
             )
 
+        # Normalize the observed grounding verdict into the compact record bound
+        # into the signed envelope. The cited source(s) the verdict was computed
+        # against travel inside its receipt (digested into the signed record), so
+        # the finding carries a matchable source identifier, not just the opaque
+        # data_id. The assert path enforces that no observe() scope is still open
+        # when this signs.
+        grounding_signed = self._normalize_grounding(grounding)
+
         cid = proposition.content_id()
         plan_id = _store.compute_plan_id(cid, prediction)
         data_id_set = {ln.data_id for ln in evidence_lines}
@@ -1254,6 +1279,10 @@ class EpistemicGraph:
                 "status": view["status"] if view else None,
                 "idempotent": True,
                 "proposition_status": view,
+                # Report the verdict actually stored on the existing claim, not a
+                # freshly-passed one: an idempotent replay reuses the first
+                # write's signed claim and does not re-record grounding.
+                "grounding": self._stored_grounding(existing["claim_id"]),
             }
         if not _store.plan_exists(self._conn, plan_id):
             raise NoRegisteredPlanError(
@@ -1322,6 +1351,7 @@ class EpistemicGraph:
                     generated_by=generated_by,
                     supports=supports,
                     idempotency_key=finding_key,
+                    observed_grounding=grounding_signed,
                     predicate_payload={
                         "trust": "finding/v1",
                         "content_id": cid,
@@ -1369,7 +1399,56 @@ class EpistemicGraph:
             "status": view["status"] if view else None,
             "idempotent": idempotent,
             "proposition_status": view,
+            # The observed grounding record bound into the signed envelope, or
+            # None when no verdict was supplied. Additive: it never changes the
+            # bearing or the derived status. On an idempotent reuse, report the
+            # verdict actually stored on the reused claim, not the passed one.
+            "grounding": (
+                self._stored_grounding(result_claim_id)
+                if idempotent
+                else grounding_signed
+            ),
         }
+
+    def _stored_grounding(self, claim_id: str) -> dict | None:
+        """The observed-grounding record stored on a claim, or None.
+
+        Reads the queryable column so an idempotent replay reports what was
+        actually persisted and signed, rather than a verdict a later call passed
+        but never recorded.
+        """
+        row = self._conn.execute(
+            "SELECT observed_grounding FROM claims WHERE claim_id = ?", (claim_id,)
+        ).fetchone()
+        if row is None or row["observed_grounding"] is None:
+            return None
+        import json as _json
+
+        try:
+            return _json.loads(row["observed_grounding"])
+        except (ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _normalize_grounding(grounding) -> dict | None:
+        """Coerce a grounding argument into the signed observed-grounding record.
+
+        Accepts a :class:`mareforma.observe.GroundingVerdict` (the normal path),
+        a pre-built signed-record dict, or None. Returns the compact record
+        (version, grounding, reason, receipt_digest) bound into the signed
+        envelope, or None when no verdict was supplied.
+        """
+        if grounding is None:
+            return None
+        to_signed = getattr(grounding, "to_signed_dict", None)
+        if callable(to_signed):
+            return to_signed()
+        if isinstance(grounding, dict):
+            return grounding
+        raise TypeError(
+            "grounding must be a GroundingVerdict (from mareforma.observe) or "
+            f"None; got {type(grounding).__name__}"
+        )
 
     def proposition_status(self, proposition_or_content_id) -> dict | None:
         """The retrieval view for one proposition: derived Status, independence

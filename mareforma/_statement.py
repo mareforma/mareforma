@@ -74,6 +74,7 @@ def build_statement(
     artifact_hash: Optional[str],
     created_at: str,
     evidence: dict[str, Any],
+    observed_grounding: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Assemble an unsigned in-toto Statement v1 for a claim.
 
@@ -103,6 +104,16 @@ def build_statement(
         ISO 8601 UTC, microsecond precision (existing mareforma convention).
     evidence
         GRADE EvidenceVector serialized via :meth:`EvidenceVector.to_dict`.
+    observed_grounding
+        Optional computed-grounding record (the observed axis: a verdict of
+        GROUNDED / UNGROUNDED / OPAQUE plus its reason, receipt digest, and
+        axis version). This is an OPTIONAL, VERSIONED field: it is bound into
+        the signed predicate ONLY when present, so a claim asserted without the
+        observer produces byte-identical bytes to a pre-observer claim. Its
+        absence in an envelope is read as "no observed verdict was recorded,"
+        never as tampering — a claim signed before this field existed still
+        verifies. The declared ``classification`` above is untouched: the
+        observed axis is additive and lives in a separate value space.
     """
     predicate = {
         "claim_id": claim_id,
@@ -116,6 +127,11 @@ def build_statement(
         "created_at": created_at,
         "evidence": evidence,
     }
+    # Conditional inclusion is what makes the field backward-compatible: adding
+    # the key only when a verdict exists keeps the canonical bytes (and thus the
+    # signature and chain hash) identical for every claim that carries none.
+    if observed_grounding is not None:
+        predicate["observed_grounding"] = observed_grounding
     return {
         "_type": STATEMENT_TYPE,
         "subject": [

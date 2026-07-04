@@ -69,6 +69,8 @@ from .core import (
     _attach_supports_cache,
     # Serialization.
     _serialize_predicate_payload,
+    _serialize_observed_grounding,
+    _observed_grounding_promotes,
     # Chain hash.
     _chain_input_for_claim,
     _compute_prev_hash,
@@ -147,6 +149,7 @@ from .restore import (
     restore,
     _restore_predicate_payload,
     _restore_original_signature_bundle,
+    _parse_observed_grounding,
     _verify_and_insert_replication_verdict,
     _verify_and_insert_contradiction_verdict,
     _required_field,
