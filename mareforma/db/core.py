@@ -1398,11 +1398,19 @@ def _maybe_update_replicated_unlocked(
     # below). Short-circuit before the SELECT so neither the new row
     # nor any open peer is promoted.
     new_status_row = conn.execute(
-        "SELECT status, asserter_keyid, observed_grounding "
+        "SELECT status, asserter_keyid, observed_grounding, t_invalid "
         "FROM claims WHERE claim_id = ?",
         (new_claim_id,),
     ).fetchone()
     if new_status_row is None or new_status_row["status"] != "open":
+        return
+    # A claim a signed contradiction verdict marked invalid (t_invalid set) must
+    # not climb the trust ladder through convergence, nor ride an honest peer's
+    # promotion. record_replication_verdict already refuses to promote such a
+    # claim; the convergence path agrees. Gated here for the new claim, in the
+    # candidate-peer SELECT below, and again in the promotion UPDATE (the UPDATE
+    # guard closes the TOCTOU window if a peer is invalidated after the SELECT).
+    if new_status_row["t_invalid"] is not None:
         return
     # The new claim must carry a non-NULL asserter_keyid to enter the new
     # promotion rule. An unsigned / legacy row is not a valid distinct signer,
@@ -1466,6 +1474,7 @@ def _maybe_update_replicated_unlocked(
           AND c.asserter_keyid != ?
           AND c.support_level != 'ESTABLISHED'
           AND c.status = 'open'
+          AND c.t_invalid IS NULL
           AND c.unresolved = 0
           AND c.transparency_logged = 1
           AND (
@@ -1500,7 +1509,8 @@ def _maybe_update_replicated_unlocked(
     # UPDATE is the actual gate; the pre-SELECT is a cheap fast-path.
     conn.execute(
         f"UPDATE claims SET support_level = 'REPLICATED', updated_at = ? "
-        f"WHERE claim_id IN ({peer_placeholders}) AND status = 'open'",
+        f"WHERE claim_id IN ({peer_placeholders}) AND status = 'open' "
+        f"AND t_invalid IS NULL",
         (_now(), *peer_ids),
     )
 
@@ -1585,6 +1595,36 @@ def _maybe_update_replicated(
             type(exc).__name__, new_claim_id, exc,
         )
         return False
+
+
+def _maybe_update_replicated_best_effort(
+    conn: sqlite3.Connection,
+    root: Path,
+    claim_id: str,
+    supports: list[str],
+    generated_by: str,
+    artifact_hash: str | None,
+) -> None:
+    """Re-check REPLICATED after a caller-owned flag flip without losing work.
+
+    The flag-flip sites (mark_claim_logged, mark_claim_resolved, update_claim)
+    re-run convergence inside their own transaction. A bare
+    ``except OperationalError: pass`` here left the claim PRELIMINARY with no
+    retry flag on a transient lock, invisible to refresh_convergence and health.
+    Route them through the same wrapper add_claim uses (``own_transaction=False``,
+    so it sets ``convergence_retry_needed`` on transient failure without
+    committing the caller's transaction), and record a health event when the
+    re-check is stranded so the strand is not silent.
+    """
+    ok = _maybe_update_replicated(
+        conn, claim_id, supports, generated_by, artifact_hash,
+        own_transaction=False,
+    )
+    if not ok:
+        from mareforma.health import append_health_event
+        append_health_event(
+            root, "convergence_retry", outcome="degraded", claim_id=claim_id,
+        )
 
 
 def list_convergence_retry_claims(
@@ -2912,15 +2952,13 @@ def mark_claim_logged(
                 (new_signature_bundle, now, claim_id),
             )
             # Convergence detection is best-effort by design: a transient
-            # lock error during the REPLICATED check must not roll back
-            # the flag flip the operator just committed.
+            # lock error during the REPLICATED check must not roll back the
+            # flag flip the operator just committed, but it must not vanish
+            # either (retry flag + health event).
             if not unresolved:
-                try:
-                    _maybe_update_replicated_unlocked(
-                        conn, claim_id, supports, generated_by, artifact_hash,
-                    )
-                except sqlite3.OperationalError:
-                    pass
+                _maybe_update_replicated_best_effort(
+                    conn, root, claim_id, supports, generated_by, artifact_hash,
+                )
     except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
         raise DatabaseError(f"Failed to mark claim logged: {exc}") from exc
 
@@ -2967,13 +3005,11 @@ def mark_claim_resolved(
             )
             # Convergence detection is best-effort by design: a transient
             # lock or convergence-query failure must not roll back the
-            # flag-clear (which is the actual user intent).
-            try:
-                _maybe_update_replicated_unlocked(
-                    conn, claim_id, supports, generated_by, artifact_hash,
-                )
-            except sqlite3.OperationalError:
-                pass
+            # flag-clear (the actual user intent), but it must stay retryable
+            # (retry flag + health event) rather than strand the claim.
+            _maybe_update_replicated_best_effort(
+                conn, root, claim_id, supports, generated_by, artifact_hash,
+            )
     except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
         raise DatabaseError(f"Failed to mark claim resolved: {exc}") from exc
 
@@ -3120,15 +3156,13 @@ def update_claim(
                 ),
             )
             if needs_replicated_check:
-                try:
-                    new_supports = json.loads(new_supports_json)
-                    _maybe_update_replicated_unlocked(
-                        conn, claim_id, new_supports, existing["generated_by"],
-                        existing.get("artifact_hash"),
-                    )
-                except sqlite3.OperationalError:
-                    # Convergence detection is best-effort — never crash an update.
-                    pass
+                # Best-effort convergence: never crash an update, but keep a
+                # stranded re-check retryable (retry flag + health event).
+                new_supports = json.loads(new_supports_json)
+                _maybe_update_replicated_best_effort(
+                    conn, root, claim_id, new_supports,
+                    existing["generated_by"], existing.get("artifact_hash"),
+                )
     except sqlite3.IntegrityError as exc:
         translated = _state_error_from_integrity(exc)
         if translated is not None:

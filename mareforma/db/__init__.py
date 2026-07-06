@@ -94,6 +94,7 @@ from .core import (
     # Convergence detection.
     _maybe_update_replicated_unlocked,
     _maybe_update_replicated,
+    _maybe_update_replicated_best_effort,
     list_convergence_retry_claims,
     clear_convergence_retry_flag,
     find_dangling_supports,
