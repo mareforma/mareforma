@@ -367,3 +367,98 @@ class TestPerClaimSignature:
         bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
         with pytest.raises(BundleVerificationError):
             verify_bundle(bundle_path, pk.public_key())
+
+
+# ---------------------------------------------------------------------------
+# Support-level attestation (no exporter-only inflation)
+# ---------------------------------------------------------------------------
+
+
+class TestSupportLevelAttestation:
+    def test_established_without_a_validation_signature_fails(
+        self, tmp_path: Path,
+    ) -> None:
+        """A PRELIMINARY claim relabelled ESTABLISHED by the exporter, with no
+        validator-signed promotion, must fail — the level cannot be inflated."""
+        key_path, pk = _bootstrap(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as g:
+            g.assert_claim("really preliminary", generated_by="a")
+        statement = build_statement(tmp_path)
+        for node in statement["predicate"]["@graph"]:
+            if node.get("@type") == "mare:Claim":
+                node["supportLevel"] = "ESTABLISHED"
+                node.pop("validationSignature", None)
+                break
+        bundle = sign_bundle(statement, pk)
+        bundle_path = tmp_path / "bundle.json"
+        bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+        with pytest.raises(
+            BundleVerificationError, match="carries no validation signature",
+        ):
+            verify_bundle(bundle_path, pk.public_key())
+
+    def test_replicated_without_corroboration_fails(
+        self, tmp_path: Path,
+    ) -> None:
+        """A lone claim relabelled REPLICATED, with no second distinct-signer
+        claim on a shared upstream, must fail."""
+        key_path, pk = _bootstrap(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as g:
+            seed = g.assert_claim("anchor", generated_by="seed", seed=True)
+            g.assert_claim("lone claim", supports=[seed], generated_by="a")
+        statement = build_statement(tmp_path)
+        for node in statement["predicate"]["@graph"]:
+            if node.get("claimText") == "lone claim":
+                node["supportLevel"] = "REPLICATED"
+                break
+        bundle = sign_bundle(statement, pk)
+        bundle_path = tmp_path / "bundle.json"
+        bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+        with pytest.raises(
+            BundleVerificationError, match="no shared upstream carries a second",
+        ):
+            verify_bundle(bundle_path, pk.public_key())
+
+    def test_genuine_established_and_replicated_verify(
+        self, tmp_path: Path,
+    ) -> None:
+        """A real REPLICATED pair (distinct signers) promoted to ESTABLISHED by
+        a third validator round-trips: the validation envelope and distinct
+        signers are present and check out."""
+        root_key = tmp_path / "root.key"
+        _signing.bootstrap_key(root_key)
+        root_pk = _signing.load_private_key(root_key)
+        val_key = tmp_path / "val.key"
+        _signing.bootstrap_key(val_key)
+        val2_key = tmp_path / "val2.key"
+        _signing.bootstrap_key(val2_key)
+        val_pem = _signing.public_key_to_pem(
+            _signing.load_private_key(val_key).public_key()
+        )
+        val2_pem = _signing.public_key_to_pem(
+            _signing.load_private_key(val2_key).public_key()
+        )
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            seed = g.assert_claim("anchor", generated_by="seed", seed=True)
+            g.enroll_validator(val_pem, identity="v")
+            g.enroll_validator(val2_pem, identity="v2")
+            rep = g.assert_claim(
+                "converged", supports=[seed], generated_by="A", signer=root_pk,
+            )
+            g.assert_claim(
+                "converged", supports=[seed], generated_by="B",
+                signer=_signing.load_private_key(val_key),
+            )
+            assert g.get_claim(rep)["support_level"] == "REPLICATED"
+        with mareforma.open(tmp_path, key_path=val2_key) as g:
+            g.validate(rep)
+            assert g.get_claim(rep)["support_level"] == "ESTABLISHED"
+        bundle_path = tmp_path / "bundle.json"
+        write_bundle(tmp_path, bundle_path, root_pk)
+        statement = verify_bundle(bundle_path, root_pk.public_key())
+        levels = {
+            n["claimText"]: n["supportLevel"]
+            for n in statement["predicate"]["@graph"]
+            if n.get("@type") == "mare:Claim"
+        }
+        assert levels["converged"] in ("ESTABLISHED", "REPLICATED")
