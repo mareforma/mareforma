@@ -46,6 +46,9 @@ migration). See [Grounding](/concepts/grounding) and [Trust](/concepts/trust).
 - Export to a path outside the project reports success, not a false failure.
 - Root auto-enrollment is announced on stderr, not only a filterable warning.
 - A naive DOI cache timestamp is treated as UTC rather than crashing the write path.
+- `mareforma ingest --help` now documents the required `TITLE` / `DOI` / `CLAIMS`
+  layout, and a structured-mode file that yields no claims exits non-zero and
+  names the expected layout, instead of a silent success on an unparseable file.
 
 ## v0.3.7 - 2026-06-30
 
