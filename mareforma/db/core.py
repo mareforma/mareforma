@@ -4360,6 +4360,51 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# Backup deferral state, keyed by id(conn). A connection with an open deferral
+# window records that a rewrite is due rather than writing claims.toml; the
+# window writes once when the outermost window closes. The connection stays
+# alive for the whole window, so its id is stable and unique for it. The value
+# is ``[depth, dirty]``: nesting depth so an inner window does not end the outer
+# one, and the pending-dirty flag a mutation sets.
+_backup_suspended: dict[int, list] = {}
+
+
+def suspend_backup(conn: sqlite3.Connection) -> None:
+    """Open a backup-deferral window on *conn*. While open, _backup_claims_toml
+    marks the backup dirty rather than writing claims.toml. Windows nest: a
+    mutation writes once when the outermost window closes."""
+    state = _backup_suspended.get(id(conn))
+    if state is None:
+        _backup_suspended[id(conn)] = [1, False]
+    else:
+        state[0] += 1
+
+
+def resume_backup(conn: sqlite3.Connection, root: Path) -> None:
+    """Close one deferral window on *conn*. The outermost close writes
+    claims.toml once if a mutation marked it dirty; an inner close keeps the
+    window open. A no-op when no window is open."""
+    state = _backup_suspended.get(id(conn))
+    if state is None:
+        return
+    state[0] -= 1
+    if state[0] > 0:
+        return
+    dirty = state[1]
+    del _backup_suspended[id(conn)]
+    if dirty:
+        _backup_claims_toml(conn, root)
+
+
+def _drain_backup_window(conn: sqlite3.Connection, root: Path) -> None:
+    """Close every open deferral level on *conn* at once and flush a pending
+    write. For teardown: a graph closed mid-batch still leaves claims.toml
+    current, and no window keyed on a soon-reused id() is left behind."""
+    state = _backup_suspended.pop(id(conn), None)
+    if state is not None and state[1]:
+        _backup_claims_toml(conn, root)
+
+
 def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
     """Write all claims AND validators to claims.toml in the project root.
 
@@ -4371,6 +4416,11 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
     the file. Stderr-ERROR (not ``warnings.warn``, which production
     callers often suppress) so divergence is visible by default.
     """
+    state = _backup_suspended.get(id(conn))
+    if state is not None:
+        # A deferral window is open: mark a rewrite due; resume_backup writes it.
+        state[1] = True
+        return
     try:
         import tomli_w
 

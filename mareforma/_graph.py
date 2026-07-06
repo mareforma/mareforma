@@ -32,6 +32,7 @@ from __future__ import annotations
 import base64
 import json
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -1792,26 +1793,27 @@ class EpistemicGraph:
         # Step 2: decide per-claim using the shared results.
         resolved_count = 0
         still_unresolved = len(quarantined)
-        for claim in unresolved_claims:
-            cid = claim["claim_id"]
-            if cid in quarantined:
-                continue
-            dois = claim_dois[cid]
-            if not dois:
-                warnings.warn(
-                    f"Claim {cid} was flagged unresolved but contains no DOIs "
-                    "in supports/contradicts. Clearing flag.",
-                    stacklevel=2,
-                )
-                _db.mark_claim_resolved(self._conn, self._root, cid)
-                resolved_count += 1
-                continue
+        with self.defer_backup():
+            for claim in unresolved_claims:
+                cid = claim["claim_id"]
+                if cid in quarantined:
+                    continue
+                dois = claim_dois[cid]
+                if not dois:
+                    warnings.warn(
+                        f"Claim {cid} was flagged unresolved but contains no "
+                        "DOIs in supports/contradicts. Clearing flag.",
+                        stacklevel=2,
+                    )
+                    _db.mark_claim_resolved(self._conn, self._root, cid)
+                    resolved_count += 1
+                    continue
 
-            if all(results.get(d, False) for d in dois):
-                _db.mark_claim_resolved(self._conn, self._root, cid)
-                resolved_count += 1
-            else:
-                still_unresolved += 1
+                if all(results.get(d, False) for d in dois):
+                    _db.mark_claim_resolved(self._conn, self._root, cid)
+                    resolved_count += 1
+                else:
+                    still_unresolved += 1
 
         return {
             "checked": len(unresolved_claims),
@@ -1995,33 +1997,34 @@ class EpistemicGraph:
         promoted = 0
         still_pending = 0
 
-        for row in flagged:
-            try:
-                supports = json.loads(row.get("supports_json") or "[]")
-            except (json.JSONDecodeError, TypeError):
-                supports = []
-            generated_by = row.get("generated_by") or "agent"
-            artifact_hash = row.get("artifact_hash")
-            claim_id = row["claim_id"]
+        with self.defer_backup():
+            for row in flagged:
+                try:
+                    supports = json.loads(row.get("supports_json") or "[]")
+                except (json.JSONDecodeError, TypeError):
+                    supports = []
+                generated_by = row.get("generated_by") or "agent"
+                artifact_hash = row.get("artifact_hash")
+                claim_id = row["claim_id"]
 
-            def _bump(_exc: Exception) -> None:
-                self._convergence_errors += 1
+                def _bump(_exc: Exception) -> None:
+                    self._convergence_errors += 1
 
-            ok = _db._maybe_update_replicated(
-                self._conn,
-                claim_id,
-                supports,
-                generated_by,
-                artifact_hash,
-                on_error=_bump,
-            )
-            if ok:
-                _db.clear_convergence_retry_flag(
-                    self._conn, self._root, claim_id,
+                ok = _db._maybe_update_replicated(
+                    self._conn,
+                    claim_id,
+                    supports,
+                    generated_by,
+                    artifact_hash,
+                    on_error=_bump,
                 )
-                promoted += 1
-            else:
-                still_pending += 1
+                if ok:
+                    _db.clear_convergence_retry_flag(
+                        self._conn, self._root, claim_id,
+                    )
+                    promoted += 1
+                else:
+                    still_pending += 1
 
         return {
             "checked": checked,
@@ -2728,6 +2731,32 @@ class EpistemicGraph:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    def backup(self) -> None:
+        """Write ``claims.toml`` now, the recovery source for ``restore``.
+
+        Each mutation refreshes the backup on its own; call this to force a
+        write, for example at the end of a :meth:`defer_backup` batch.
+        """
+        self._check_open()
+        _db._backup_claims_toml(self._conn, self._root)
+
+    @contextmanager
+    def defer_backup(self):
+        """Group many mutations under a single ``claims.toml`` rewrite.
+
+        Inside the block a mutation marks the backup due rather than rewriting
+        the whole file; the write happens once when the block exits, and
+        ``claims.toml`` reflects the committed state again after it. Use it for a
+        bulk import or a loop of writes. Outside the block each mutation refreshes
+        the backup as usual.
+        """
+        self._check_open()
+        _db.suspend_backup(self._conn)
+        try:
+            yield
+        finally:
+            _db.resume_backup(self._conn, self._root)
+
     def close(self) -> None:
         """Close the underlying database connection.
 
@@ -2736,6 +2765,10 @@ class EpistemicGraph:
         ``sqlite3.ProgrammingError``.
         """
         if not self._closed:
+            # Flush any backup a still-open deferral window left pending, so a
+            # graph closed mid-batch still leaves claims.toml current. Drain
+            # every nesting level at once, before the connection closes.
+            _db._drain_backup_window(self._conn, self._root)
             self._conn.close()
             self._closed = True
 

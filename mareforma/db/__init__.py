@@ -148,6 +148,10 @@ from .core import (
     # Internal helpers.
     _now,
     _backup_claims_toml,
+    _backup_suspended,
+    suspend_backup,
+    resume_backup,
+    _drain_backup_window,
 )
 from .restore import (
     restore,
