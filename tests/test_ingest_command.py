@@ -9,8 +9,9 @@ Conceptual clusters:
 - :class:`TestProvenance` — extracted_by, ingested_at, source_doc_id
   shape, confidence numeric parsing.
 - :class:`TestTomlExport` — claims_to_toml round-trip + required fields.
-- :class:`TestCli` — Click runner integration: --llm gating, missing
-  file exit code, --db custom-path honour (regression).
+- :class:`TestCli` — Click runner integration: --help documents the
+  structured format, --llm gating, missing file exit code, a non-empty
+  file with no CLAIMS: exits non-zero, --db custom-path honour (regression).
 """
 
 from __future__ import annotations
@@ -97,6 +98,78 @@ class TestTomlExport:
 
 
 class TestCli:
+    def test_help_shows_structured_file_format(self):
+        from mareforma.ingest_command import ingest_cli
+
+        runner = CliRunner()
+        result = runner.invoke(ingest_cli, ["--help"])
+
+        assert result.exit_code == 0
+        # Each field must render on its own line: without Click's \b no-rewrap
+        # marker the template collapses into one run-on line, so a bare
+        # substring check would pass on mangled output. Assert whole lines.
+        lines = [ln.strip() for ln in result.output.splitlines()]
+        assert "TITLE: Paper title" in lines
+        assert "DOI: 10.xxxx/example" in lines
+        assert "CLAIMS:" in lines
+
+    def test_llm_empty_extraction_exits_zero(self, tmp_path, sample_abstract_a):
+        """An --llm run that extracts no claims is a valid answer, not a format
+        error: it exits 0 so a batch loop does not abort on a claim-less paper.
+        The loud non-zero exit is reserved for the structured path."""
+        import sys
+        import types
+
+        from mareforma import ingest_command
+        from mareforma.db import open_db_from_db_path
+
+        # Stub anthropic so the --llm import gate passes, and make extraction
+        # return no claims.
+        orig = sys.modules.get("anthropic")
+        sys.modules["anthropic"] = types.ModuleType("anthropic")
+        orig_ingest = ingest_command.ingest_file
+        ingest_command.ingest_file = lambda *a, **k: []
+        try:
+            db_path = tmp_path / "g.db"
+            open_db_from_db_path(db_path).close()
+            runner = CliRunner()
+            result = runner.invoke(
+                ingest_command.ingest_cli,
+                [str(sample_abstract_a), "--db", str(db_path), "--llm"],
+            )
+        finally:
+            ingest_command.ingest_file = orig_ingest
+            if orig is None:
+                del sys.modules["anthropic"]
+            else:
+                sys.modules["anthropic"] = orig
+
+        assert result.exit_code == 0, result.output
+
+    def test_structured_no_claims_exits_nonzero_with_format_hint(self, tmp_path):
+        """A non-empty file with no ``CLAIMS:`` section is a silent no-op:
+        it prints a generic warning and exits 0, so a script cannot tell a
+        wrong file format from a paper that genuinely holds no claims. The
+        command should exit non-zero and name the expected format + --llm.
+        """
+        from mareforma.ingest_command import ingest_cli
+        from mareforma.db import open_db_from_db_path
+
+        db_path = tmp_path / "g.db"
+        open_db_from_db_path(db_path).close()
+        paper = tmp_path / "paper.md"
+        paper.write_text(
+            "# An ordinary paper\n\n"
+            "Real prose, but none of the structured headers.\n"
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(ingest_cli, [str(paper), "--db", str(db_path)])
+
+        assert result.exit_code != 0
+        assert "CLAIMS:" in result.output
+        assert "--llm" in result.output
+
     def test_llm_flag_fails_gracefully_when_anthropic_missing(
         self, tmp_path, sample_abstract_a,
     ):

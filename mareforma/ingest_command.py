@@ -140,7 +140,7 @@ def ingest_file(
     *,
     extracted_by: str = "ingest:mock",
     use_llm: bool = False,
-    model: str = "claude-opus-4-6",
+    model: str = "claude-opus-4-8",
 ) -> list[dict]:
     """
     Parse file_path, extract claims, write to DB.
@@ -218,12 +218,23 @@ def claims_to_toml(claims: list[dict]) -> str:
 @click.option("--llm", "use_llm", is_flag=True, default=False, help="Use LLM extraction")
 @click.option(
     "--model",
-    default="claude-opus-4-6",
+    default="claude-opus-4-8",
     show_default=True,
     help="Claude model (only used with --llm)",
 )
 def ingest_cli(file, db_path, use_llm, model):
-    """Ingest a literature file into the provenance graph."""
+    """Ingest a literature file into the provenance graph.
+
+    In default structured mode, FILE should contain:
+
+    \b
+        TITLE: Paper title
+        DOI: 10.xxxx/example
+        CLAIMS:
+        - First claim (confidence: 0.90)
+
+    Use --llm to extract claims from unstructured text.
+    """
     from mareforma.db import open_db_from_db_path
 
     file_path = Path(file)
@@ -255,7 +266,17 @@ def ingest_cli(file, db_path, use_llm, model):
 
     if not claims:
         console.print("[yellow]Warning:[/yellow] No claims found in file.")
-        return
+        if use_llm:
+            # An LLM extraction that returns no claims is a valid answer, not a
+            # format error: exit 0 so a batch loop does not abort on a genuinely
+            # claim-less paper. The loud non-zero exit is reserved for the
+            # structured path, where zero claims means the file format was wrong.
+            return
+        console.print(
+            "Structured mode expects TITLE: / DOI: / CLAIMS: with `-` bullets. "
+            "Use --llm to extract claims from free-form text."
+        )
+        sys.exit(3)
 
     table = Table(title=f"Ingested {len(claims)} claim(s)")
     table.add_column("ID", style="dim")
