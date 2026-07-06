@@ -1377,6 +1377,12 @@ class EpistemicGraph:
             view = _store.proposition_status(conn, cid)
             if _own_txn:
                 conn.commit()
+                # add_claim ran inside this transaction (own_transaction=False),
+                # so it deferred the claims.toml backup to the transaction owner.
+                # Snapshot the now-committed state here, never the uncommitted
+                # rows a rollback would have erased.
+                from mareforma.db.core import _backup_claims_toml
+                _backup_claims_toml(conn, self._root)
         except BaseException:
             if _own_txn:
                 conn.rollback()

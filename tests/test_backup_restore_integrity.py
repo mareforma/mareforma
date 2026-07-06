@@ -37,3 +37,29 @@ def test_backup_survives_a_crash_at_the_atomic_rename(tmp_path, monkeypatch):
     assert b"second claim beta" not in after
     # No half-written temp file lingers in the project root.
     assert not list(tmp_path.glob(".claims.toml.*.tmp"))
+
+
+def test_backup_does_not_capture_a_rolled_back_claim(tmp_path):
+    """A claim written inside a caller's open transaction that then rolls back
+    must not persist in claims.toml. The backup snapshots committed state only,
+    so it runs only when add_claim owns the transaction, not when it joined a
+    caller's open one."""
+    import mareforma.db.core as _core
+
+    root_key = _bootstrap_key(tmp_path, "root.key")
+    out = tmp_path / "claims.toml"
+
+    with mareforma.open(tmp_path, key_path=root_key) as g:
+        g.assert_claim("committed alpha claim", generated_by="x")
+        conn = g._conn
+        # A caller owns the transaction; add_claim joins it (own_transaction is
+        # False), writes the claim, then the caller rolls the whole thing back.
+        conn.execute("BEGIN IMMEDIATE")
+        _core.add_claim(
+            conn, tmp_path, "phantom rolled-back claim", generated_by="x",
+        )
+        conn.rollback()
+
+    toml = out.read_text()
+    assert "committed alpha claim" in toml
+    assert "phantom rolled-back claim" not in toml

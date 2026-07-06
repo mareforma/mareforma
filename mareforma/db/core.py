@@ -1336,6 +1336,7 @@ def add_claim(
             rekor_url=rekor_url,
             require_rekor=require_rekor,
             rekor_log_pubkey_pem=rekor_log_pubkey_pem,
+            own_transaction=_own_transaction,
         )
 
     # Check whether this claim triggers REPLICATED status on shared upstreams.
@@ -1347,7 +1348,12 @@ def add_claim(
             own_transaction=_own_transaction,
         )
 
-    _backup_claims_toml(conn, root)
+    # Snapshot committed state only. When this call joined a caller's open
+    # transaction the rows are not committed yet, so backing up here would put a
+    # claim in the DR artifact that a caller rollback then erases from the DB.
+    # The owning caller runs the backup after it commits (submit_finding does).
+    if _own_transaction:
+        _backup_claims_toml(conn, root)
     return claim_id
 
 
@@ -2528,6 +2534,7 @@ def _attempt_rekor_saga(
     rekor_url: str,
     require_rekor: bool,
     rekor_log_pubkey_pem: bytes | None = None,
+    own_transaction: bool = True,
 ) -> int:
     """Run the Rekor 4-step saga on a freshly-INSERTed signed claim.
 
@@ -2649,7 +2656,14 @@ def _attempt_rekor_saga(
             "WHERE claim_id = ?",
             (new_bundle, _now(), claim_id),
         )
-        conn.commit()
+        # Commit only when this call owns the transaction. When add_claim joined
+        # a caller's open transaction (submit_finding's BEGIN IMMEDIATE),
+        # committing here would flush the caller's in-flight writes early and
+        # void its atomicity: a later fork or raise could no longer roll the
+        # signed claim back, stranding an orphan. The caller's commit flushes
+        # this UPDATE with the rest of its transaction.
+        if own_transaction:
+            conn.commit()
         return 1
     except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
         warnings.warn(
