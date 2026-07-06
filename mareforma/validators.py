@@ -516,16 +516,25 @@ def auto_enroll_root(
             pass
 
     import warnings
-    # stacklevel=4 points at the user's mareforma.open(...) call site.
-    # Chain: warn → auto_enroll_root → EpistemicGraph.__init__ →
-    # mareforma.open → user (1 → 2 → 3 → 4).
-    warnings.warn(
+    _notice = (
         f"Enrolled key {keyid[:12]}… ({identity!r}) as root validator on "
         f"this project. This is silent and irrevocable currently — if you "
         "opened the graph with the wrong key, fix it before any further "
-        "validate() calls.",
-        stacklevel=4,
+        "validate() calls."
     )
+    # stacklevel=4 points at the user's mareforma.open(...) call site.
+    # Chain: warn → auto_enroll_root → EpistemicGraph.__init__ →
+    # mareforma.open → user (1 → 2 → 3 → 4).
+    warnings.warn(_notice, stacklevel=4)
+    # Also emit on a real channel. warnings.warn is silenceable by
+    # PYTHONWARNINGS=ignore, and an irrevocable trust-root decision must not be
+    # suppressible by an env var. stderr carries the notice, not a command's
+    # data output (stdout), so scripts that parse stdout are unaffected.
+    import sys
+    try:
+        sys.stderr.write("mareforma: " + _notice + "\n")
+    except Exception:
+        pass
 
     return get_validator(conn, keyid)
 

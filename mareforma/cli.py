@@ -40,6 +40,36 @@ def _root() -> Path:
     return Path.cwd()
 
 
+def _discover_root(start: "Path | None" = None) -> "Path | None":
+    """Nearest ancestor of *start* (cwd) that holds a mareforma project.
+
+    Returns the directory containing ``.mareforma/graph.db``, or None when no
+    project exists at or above cwd. Read-only commands use this so they report
+    on an existing project (from a subdirectory too) rather than silently
+    creating an empty ``graph.db`` in the current directory.
+    """
+    cur = (start or Path.cwd()).resolve()
+    for d in (cur, *cur.parents):
+        if (d / ".mareforma" / "graph.db").exists():
+            return d
+    return None
+
+
+def _read_only_root() -> Path:
+    """Resolve the project root for a read-only command, or exit 1 if none.
+
+    Never creates a project — that is a write-path side effect.
+    """
+    root = _discover_root()
+    if root is None:
+        _err(
+            "No mareforma project here or in any parent directory. Write a "
+            "claim first (e.g. `mareforma claim assert ...`) to create one."
+        )
+        sys.exit(1)
+    return root
+
+
 def _err(msg: str) -> None:
     click.echo(click.style("Error: ", fg="red", bold=True) + msg, err=True)
 
@@ -312,7 +342,7 @@ def validator_list(as_json: bool) -> None:
     import mareforma
     from mareforma import validators as _validators
 
-    with mareforma.open(_root()) as graph:
+    with mareforma.open(_read_only_root()) as graph:
         rows = _validators.list_validators(graph._conn)
 
     if as_json:
@@ -358,7 +388,7 @@ def status_cmd(as_json: bool) -> None:
     from mareforma.db import open_db, DatabaseError
     from mareforma.health import compute_health
 
-    root = _root()
+    root = _read_only_root()
 
     try:
         conn = open_db(root)
@@ -622,7 +652,7 @@ def export(
                 else root / "mareforma-bundle.json"
             )
             written = write_bundle(root, out_path, private_key)
-            _ok(f"Exported signed bundle → {written.relative_to(root)}")
+            _ok(f"Exported signed bundle → {_display_path(written)}")
         except Exception as exc:
             _err(f"Bundle export failed: {exc}")
             sys.exit(1)
@@ -638,7 +668,7 @@ def export(
             return
         out_path = Path(output) if output else None
         written = exporter.write(out_path)
-        _ok(f"Exported claims → {written.relative_to(root)}")
+        _ok(f"Exported claims → {_display_path(written)}")
     except Exception as exc:
         _err(f"Export failed: {exc}")
         sys.exit(1)
@@ -763,7 +793,7 @@ def claim_list(status, source_name, as_json):
     """List scientific claims, optionally filtered."""
     from mareforma.db import open_db, list_claims, DatabaseError
 
-    root = _root()
+    root = _read_only_root()
     try:
         conn = open_db(root)
         try:
@@ -802,7 +832,7 @@ def claim_show(claim_id, as_json):
     """Show full details for a claim by ID."""
     from mareforma.db import open_db, get_claim, DatabaseError
 
-    root = _root()
+    root = _read_only_root()
     try:
         conn = open_db(root)
         try:
