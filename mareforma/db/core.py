@@ -13,8 +13,10 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import re
 import sqlite3
+import tempfile
 import uuid
 import warnings
 from datetime import datetime, timezone
@@ -4508,7 +4510,41 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
                 }
 
         out = root / "claims.toml"
-        out.write_bytes(tomli_w.dumps(data).encode("utf-8"))
+        payload = tomli_w.dumps(data).encode("utf-8")
+        # Atomic write: a crash during the rewrite must not destroy the sole DR
+        # artifact on the exact crash class it exists for. Write a temp file in
+        # the same directory, fsync it, then os.replace onto the target (an
+        # atomic rename on POSIX). A failure anywhere before the replace leaves
+        # the previous good claims.toml untouched, never truncated or empty.
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=".claims.toml.", suffix=".tmp", dir=str(root),
+        )
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_name, out)
+            # fsync the directory so the rename itself survives a power loss,
+            # not just the temp file's contents. Best-effort: os.replace has
+            # already committed the write, so a directory-fsync failure must
+            # not surface as a backup failure. Skip where the platform has no
+            # directory fd (Windows).
+            if hasattr(os, "O_DIRECTORY"):
+                try:
+                    dir_fd = os.open(str(root), os.O_DIRECTORY)
+                    try:
+                        os.fsync(dir_fd)
+                    finally:
+                        os.close(dir_fd)
+                except OSError:
+                    pass
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
 
     except Exception as exc:  # noqa: BLE001
         import sys
