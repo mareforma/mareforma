@@ -1723,6 +1723,58 @@ class EpistemicGraph:
             identity=identity, validator_type=validator_type,
         )
 
+    def require_rekor_witnessing(self) -> dict:
+        """Declare that this project's findings must be witnessed by the
+        transparency log before they can converge.
+
+        The root validator signs a project-policy envelope; the declaration is
+        persisted and emitted to ``claims.toml``. On recovery,
+        ``restore(..., enforce_rekor_policy=True)`` verifies this envelope
+        against the enrolled root and refuses to mark any signed claim
+        convergence-eligible without a verified, claim-bound inclusion proof.
+
+        One-way, and root-only: a project cannot un-require witnessing (mirrors
+        validator enrollment), and only the single root of trust may set the
+        policy. Idempotent once set. Returns the effective policy dict.
+
+        Raises
+        ------
+        ValueError
+            If no signer is loaded, or the loaded signer is not the project's
+            single root validator.
+        """
+        self._check_open()
+        if self._signer is None:
+            raise ValueError(
+                "graph.require_rekor_witnessing requires a loaded signing key. "
+                "Reopen the graph with the root key_path."
+            )
+        from mareforma import signing as _signing
+        from mareforma import validators as _validators
+        from mareforma.db.core import _now
+        signer_keyid = _signing.public_key_id(self._signer.public_key())
+        root_keyid = _validators.trust_domain_root(self._conn)
+        if root_keyid is None or signer_keyid != root_keyid:
+            raise ValueError(
+                "Only the project's root validator may declare the Rekor "
+                "witnessing policy. Reopen with the root key."
+            )
+        existing = _db.get_project_policy(self._conn)
+        if existing is not None:
+            return existing
+        created_at = _now()
+        envelope = _signing.sign_project_policy(
+            {"rekor_required": True, "created_at": created_at},
+            self._signer,
+        )
+        return _db.set_project_policy(
+            self._conn, self._root,
+            envelope=json.dumps(envelope, sort_keys=True, separators=(",", ":")),
+            signer_keyid=signer_keyid,
+            rekor_required=True,
+            created_at=created_at,
+        )
+
     def list_validators(self) -> list[dict]:
         """Return all enrolled validators ordered by enrollment time."""
         self._check_open()

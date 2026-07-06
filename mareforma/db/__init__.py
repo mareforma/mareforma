@@ -152,14 +152,19 @@ from .core import (
     suspend_backup,
     resume_backup,
     _drain_backup_window,
+    get_project_policy,
+    set_project_policy,
 )
 from .restore import (
     restore,
+    _rekor_body_binds_to_claim,
     _restore_predicate_payload,
     _restore_original_signature_bundle,
     _parse_observed_grounding,
+    _verify_replicated_corroboration,
     _verify_and_insert_replication_verdict,
     _verify_and_insert_contradiction_verdict,
+    _verify_and_insert_project_policy,
     _required_field,
     _verify_claim_signatures_on_restore,
 )

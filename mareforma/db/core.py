@@ -4405,6 +4405,61 @@ def _drain_backup_window(conn: sqlite3.Connection, root: Path) -> None:
         _backup_claims_toml(conn, root)
 
 
+def get_project_policy(conn: sqlite3.Connection) -> dict | None:
+    """Return the singleton project-policy row as a dict, or None if unset.
+
+    The signed ``envelope`` is the authority; the flat columns are a read
+    cache. restore verifies the envelope against the enrolled root before
+    trusting either.
+    """
+    row = conn.execute(
+        "SELECT rekor_required, signer_keyid, envelope, created_at "
+        "FROM project_policy WHERE id = 1"
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def set_project_policy(
+    conn: sqlite3.Connection,
+    root: Path,
+    *,
+    envelope: str,
+    signer_keyid: str,
+    rekor_required: bool,
+    created_at: str,
+) -> dict:
+    """Persist the singleton project policy and refresh the backup.
+
+    One-way: a policy already present is returned unchanged (a project cannot
+    revoke witnessing once required). Locks with BEGIN IMMEDIATE so a racing
+    writer serializes on the singleton insert. Returns the effective policy.
+    """
+    existing = get_project_policy(conn)
+    if existing is not None:
+        return existing
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        existing = get_project_policy(conn)
+        if existing is not None:
+            conn.execute("COMMIT")
+            return existing
+        conn.execute(
+            "INSERT INTO project_policy "
+            "(id, rekor_required, signer_keyid, envelope, created_at) "
+            "VALUES (1, ?, ?, ?, ?)",
+            (1 if rekor_required else 0, signer_keyid, envelope, created_at),
+        )
+        conn.execute("COMMIT")
+    except BaseException:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.OperationalError:
+            pass
+        raise
+    _backup_claims_toml(conn, root)
+    return get_project_policy(conn)
+
+
 def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
     """Write all claims AND validators to claims.toml in the project root.
 
@@ -4572,6 +4627,18 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
                     "raw_response_b64": r["raw_response_b64"],
                     "recorded_at": r["recorded_at"],
                 }
+
+        # Project policy: a root-signed, project-wide trust declaration. The
+        # signed envelope is the authority restore verifies; the flat fields
+        # are the read cache. Emitted only when set.
+        policy_row = get_project_policy(conn)
+        if policy_row is not None:
+            data["project_policy"] = {
+                "rekor_required": bool(policy_row["rekor_required"]),
+                "signer_keyid": policy_row["signer_keyid"],
+                "envelope": policy_row["envelope"],
+                "created_at": policy_row["created_at"],
+            }
 
         out = root / "claims.toml"
         payload = tomli_w.dumps(data).encode("utf-8")

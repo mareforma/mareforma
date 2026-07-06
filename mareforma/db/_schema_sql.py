@@ -547,6 +547,20 @@ CREATE TABLE IF NOT EXISTS validators (
 # user_version=1 and skip _SCHEMA_SQL entirely, so literature_claims
 # and agent_activities would otherwise be missing on every upgrade.
 _ADDITIVE_TABLES_SQL = """
+-- project_policy: a root-signed, single-row declaration of project-wide
+-- trust policy. Today it carries rekor_required: once set, the project's
+-- findings must be witnessed by the transparency log before they can
+-- converge. The row is a singleton (id = 1). The signed envelope is the
+-- authority; the flat columns are a denormalized read cache. restore
+-- verifies the envelope against the enrolled root before enforcing.
+CREATE TABLE IF NOT EXISTS project_policy (
+    id             INTEGER PRIMARY KEY CHECK (id = 1),
+    rekor_required INTEGER NOT NULL,
+    signer_keyid   TEXT NOT NULL,
+    envelope       TEXT NOT NULL,
+    created_at     TEXT NOT NULL
+);
+
 -- literature_claims: paper-ingested claim drafts.
 -- Populated by `mareforma ingest`. Separate from the signed `claims`
 -- table because ingest-extracted assertions are drafts pending review,
