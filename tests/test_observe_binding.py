@@ -166,7 +166,7 @@ def test_ungrounded_finding_does_not_promote(tmp_path):
     # REPLICATED, even when a distinct-signer peer would otherwise converge.
     key_b = _bootstrap_validator_key(tmp_path)
     with open_graph(tmp_path) as g:
-        seed = g.assert_claim("established anchor", seed=True)
+        g.assert_claim("established anchor", seed=True)
         prop, pred = _prop(), _superiority()
         g.register_plan(prop, pred)
         g.submit_finding(

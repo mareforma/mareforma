@@ -8,8 +8,6 @@ one fails here loudly instead of silently.
 """
 from __future__ import annotations
 
-import os
-
 import pytest
 
 import mareforma.observe as obs

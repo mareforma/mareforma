@@ -391,6 +391,25 @@ def test_schema_is_stable_across_calls():
     assert mareforma.schema() == mareforma.schema()
 
 
+def test_schema_replicated_rule_is_the_distinct_signer_model():
+    """schema() is a machine contract agents follow. It must describe the
+    distinct-signer convergence rule, not the retired single-key generated_by
+    rule — an agent following the old text signs both claims with one key and
+    never promotes."""
+    s = mareforma.schema()
+    rep = next(
+        t for t in s["transitions"]
+        if t["from"] == "PRELIMINARY" and t["to"] == "REPLICATED"
+    )
+    cond = rep["condition"].lower()
+    assert "generated_by" not in cond
+    assert any(
+        term in cond for term in ("signer", "signing key", "asserter", "validator key")
+    )
+    est = next(t for t in s["transitions"] if t["to"] == "ESTABLISHED")
+    assert "validate" in est["condition"].lower()
+
+
 # ---------------------------------------------------------------------------
 # get_tools()
 # ---------------------------------------------------------------------------

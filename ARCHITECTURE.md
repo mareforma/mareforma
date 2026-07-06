@@ -231,12 +231,16 @@ body)`) with these payload types:
 | `application/vnd.mareforma.replication-verdict+json` | Per-replication verdict from an issuer |
 | `application/vnd.mareforma.contradiction-verdict+json` | Per-contradiction verdict from an issuer |
 
-The bundle export (`export_bundle.py`) signs the entire JSON-LD graph
-under a separate `application/vnd.mareforma.graph-bundle+json` payload
-type. The bundle signature attests "this set of claims was bundled by
-this key". It does **not** re-attest the per-claim signatures. To
-verify per-claim signatures end-to-end, use the `claims.toml` backup,
-which preserves each row's `signature_bundle` field.
+The bundle export (`export_bundle.py`) wraps the JSON-LD graph in an
+in-toto Statement v1 and signs it over the DSSE PAE encoding
+(`application/vnd.in-toto+json`), so it verifies with standard DSSE
+tooling. `verify_bundle` checks the bundle signature AND, for each
+claim, its own asserter signature bound to the presented content, the
+enrolled validator chain to a single root (which must be the bundle
+signer), and the displayed support level (ESTABLISHED against a
+validator-signed validation envelope, REPLICATED against distinct-signer
+corroboration). Editorial status (`retracted` / `contested`) carries no
+signature and stays exporter-attested.
 
 ### Canonicalization: RFC 8785 strict
 
@@ -566,12 +570,6 @@ not break the contracts. URI constants live in
 the core reserves, re-exported at the top level for
 ergonomics. The five core primitives (events, canonicalize, tools,
 derivation, hooks) each follow the same core-first rule.
-
-The intentionally-deferred adapters (the full per-surface Gemini
-producers, a federation bundle exporter, an MCP server) sit one
-altitude up: they need richer platform integration than the core
-provides. The core ships the framework + three adapters; the rest
-follows adoption signal.
 
 ## Execution-observed grounding
 

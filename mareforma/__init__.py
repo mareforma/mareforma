@@ -281,15 +281,21 @@ def schema() -> dict:
                 "to": "REPLICATED",
                 "trigger": "automatic",
                 "condition": (
-                    "≥2 claims with different generated_by share the same "
-                    "upstream claim_id in supports[]"
+                    "≥2 claims signed by different validator keys (distinct "
+                    "asserter keyids — the per-claim signing key, not the agent "
+                    "label) support the same ESTABLISHED upstream claim_id in "
+                    "supports[]; each claim must be transparency-logged, "
+                    "grounded, and free of a signed contradiction verdict"
                 ),
             },
             {
                 "from": "REPLICATED",
                 "to": "ESTABLISHED",
-                "trigger": "human",
-                "condition": "graph.validate(claim_id, validated_by=...) — no automated path",
+                "trigger": "validator",
+                "condition": (
+                    "graph.validate(claim_id) by an enrolled validator whose "
+                    "key signed neither converging claim — no automated path"
+                ),
             },
         ],
     }

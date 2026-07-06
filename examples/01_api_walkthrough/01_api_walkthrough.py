@@ -293,10 +293,12 @@ print()
 
 # ✗  Correlated agents do not produce genuine REPLICATED
 #    Two runs of the same model on the same data are not independent.
-#    REPLICATED requires different generated_by AND divergent provenance paths.
-#    Encoding model + version + lab context in generated_by makes this auditable:
-#      "gpt-4o-2024-11/lab_a"   ← meaningful
-#      "agent"                  ← meaningless
+#    REPLICATED requires two claims signed by DIFFERENT keys (distinct
+#    asserter_keyid) on the same ESTABLISHED upstream — a single key cannot
+#    self-replicate. generated_by is a display label, not the independence
+#    axis; encode model + version + lab context in it for auditability:
+#      "gpt-4o-2024-11/lab_a"   ← meaningful label
+#      "agent"                  ← meaningless label
 
 # ✗  DERIVED with no supports= is unverifiable
 #    The provenance chain is broken. Always pass supports= with DERIVED.

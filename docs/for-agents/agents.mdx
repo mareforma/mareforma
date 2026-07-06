@@ -132,6 +132,8 @@ as independent; absent data never blocks.
 | `graph.refresh_unsigned()` | Retry Rekor submission for signed-but-unlogged claims. |
 | `graph.enroll_validator(pubkey_pem, *, identity)` | Add a validator (parent must already be enrolled). |
 | `graph.list_validators()` | List the project's validators. |
+| `graph.require_rekor_witnessing()` | Root-only, one-way: declare that findings must be transparency-log witnessed before they converge. Enforced by `restore(enforce_rekor_policy=True)`. |
+| `graph.defer_backup()` / `graph.backup()` | Group many mutations under one `claims.toml` rewrite / force a rewrite. |
 | `graph.get_tools(*, generated_by="agent/...")` | `[query_graph, assert_finding]` for framework integration. `query_graph` routes through `query_for_llm`. |
 
 Full per-method documentation lives in the
@@ -429,8 +431,10 @@ mareforma verify mareforma-bundle.json # → "verified: N claim subjects match"
 `predicateType` is `urn:mareforma:predicate:epistemic-graph:v1`. URN
 namespacing means schema evolution to v2 carries a new predicate type
 without breaking v1 verifiers. Tampered claim text, or even a re-signed
-bundle whose predicate was edited, fails the per-claim subject digest
-check.
+bundle whose predicate was edited, fails verification: each claim's
+subject digest and its own asserter signature are checked against the
+presented content, and the displayed support level against signed
+material. Editorial status is exporter-attested, not verified.
 
 ---
 
