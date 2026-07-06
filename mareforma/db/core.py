@@ -3893,6 +3893,89 @@ def refutation_status(row: dict) -> dict:
     }
 
 
+def _read_scan_ceiling(limit: int) -> int:
+    """Max rows a read surface materialises before returning the survivors it
+    has. Bounds the adversarial worst case: a flood of rows that fail
+    verify-on-read (mass tamper or unenrolled-PRELIMINARY traffic) must not turn
+    a cheap insert into a whole-table read amplifier. Generous enough that
+    legitimate verified-heavy / PRELIMINARY-heavy projects are unaffected."""
+    return max(limit * 50, 5000)
+
+
+def _read_path_row(
+    conn: sqlite3.Connection,
+    row,
+    *,
+    reputation: dict,
+    enrolled_keyids: set,
+    include_unverified: bool,
+    trust_domain: tuple,
+    verify_cache: dict,
+) -> dict | None:
+    """Project one claims row for a read surface, or None to exclude it.
+
+    Shared by :func:`query_claims` and :func:`search_claims` so the read-path
+    verification cannot drift between the two surfaces. Attaches
+    ``generator_enrolled`` and ``validator_reputation``; drops an
+    unenrolled-generator PRELIMINARY row unless ``include_unverified``; drops a
+    REPLICATED / ESTABLISHED row whose signature does not re-verify (independent
+    of ``include_unverified``, which only relaxes the PRELIMINARY generator
+    filter, never the high-trust signature check); and attaches the trust-domain
+    disclosure to an ESTABLISHED row.
+    """
+    d = dict(row)
+    gen_keyid = _extract_signature_bundle_keyid(d.get("signature_bundle"))
+    d["generator_enrolled"] = (
+        gen_keyid is not None and gen_keyid in enrolled_keyids
+    )
+    validator_kid = d.get("validator_keyid")
+    d["validator_reputation"] = (
+        reputation.get(validator_kid, 0) if validator_kid else 0
+    )
+    if not include_unverified and (
+        d["support_level"] == "PRELIMINARY" and not d["generator_enrolled"]
+    ):
+        return None
+    if not _row_verified_on_read(conn, d, verify_cache):
+        return None
+    if d["support_level"] == "ESTABLISHED":
+        d["single_trust_domain"], d["trust_domain_root"] = trust_domain
+    return d
+
+
+def _project_verified_rows(
+    conn: sqlite3.Connection,
+    rows: list,
+    *,
+    limit: int,
+    include_unverified: bool,
+) -> list[dict]:
+    """Filter and project already-fetched rows for a read surface.
+
+    Computes the per-call reputation, enrolled set, and trust-domain disclosure
+    once, then applies :func:`_read_path_row` in sorted order until ``limit``
+    survivors are collected. The single ordered fetch happens in the caller, so
+    the table is sorted once, not re-sorted per batch.
+    """
+    reputation = _compute_validator_reputation(conn)
+    enrolled_keyids = _enrolled_validator_keyids(conn)
+    trust_domain = _trust_domain_disclosure(conn)
+    verify_cache: dict = {}
+    results: list[dict] = []
+    for row in rows:
+        d = _read_path_row(
+            conn, row,
+            reputation=reputation, enrolled_keyids=enrolled_keyids,
+            include_unverified=include_unverified, trust_domain=trust_domain,
+            verify_cache=verify_cache,
+        )
+        if d is not None:
+            results.append(d)
+            if len(results) >= limit:
+                break
+    return results
+
+
 def query_claims(
     conn: sqlite3.Connection,
     *,
@@ -4031,93 +4114,26 @@ def query_claims(
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
-    # When include_unverified is False, the verified-claim filter runs in
-    # Python after the SQL fetch. A flat `LIMIT N` could return zero
-    # results when the top-N rows are all unverified PRELIMINARY,
-    # silently under-returning. Pull rows in batches and keep going
-    # until either we have `limit` survivors or the table is exhausted.
-    # When include_unverified is True there is no filter, so one fetch
-    # at the exact limit is enough.
-    reputation = _compute_validator_reputation(conn)
-    enrolled_keyids = _enrolled_validator_keyids(conn)
-    # Graph-global trust-domain disclosure, attached to each ESTABLISHED row.
-    _std, _trust_root = _trust_domain_disclosure(conn)
-
+    # The verified-claim filter runs in Python after the fetch, so a flat
+    # `LIMIT limit` could under-return when the top rows are all drained. Order
+    # the table once and materialise up to the scan ceiling of sorted rows in a
+    # single statement (no growing OFFSET, so no per-batch re-scan and re-sort),
+    # then filter for survivors.
     base_sql = (
         f"SELECT {_CLAIM_SELECT} FROM claims {where} "
         f"ORDER BY CASE support_level "
         f"WHEN 'ESTABLISHED' THEN 3 WHEN 'REPLICATED' THEN 2 ELSE 1 END DESC, "
-        f"created_at DESC LIMIT ? OFFSET ?"
+        f"created_at DESC LIMIT ?"
     )
-
-    results: list[dict] = []
-    offset = 0
-    # One verify cache for the whole query: at most one signature check per
-    # distinct (tier, keyid, digest) across every batch this call fetches.
-    verify_cache: dict = {}
-    # Fetch in batches sized to the caller's limit. For verified-heavy
-    # projects the first batch is usually enough; for projects with
-    # heavy unverified PRELIMINARY traffic the loop keeps pulling
-    # until it has `limit` survivors or hits the end.
-    batch_size = max(limit, 1)
-    # Bound the scan. Under a flood of rows that fail verify-on-read (a mass
-    # direct-SQL tamper, or heavy unenrolled-PRELIMINARY traffic) survivors can
-    # stay below `limit` indefinitely, which would walk the whole table on every
-    # query: a cheap-to-insert forged row becomes a read-amplifier. Cap total
-    # rows scanned and return what survived rather than scanning to exhaustion.
-    # The ceiling is generous so legitimate verified-heavy / PRELIMINARY-heavy
-    # projects are unaffected; it only bounds the adversarial worst case.
-    max_scan = max(limit * 50, 5000)
     try:
-        while len(results) < limit:
-            rows = conn.execute(
-                base_sql, params + [batch_size, offset],
-            ).fetchall()
-            if not rows:
-                break
-            offset += len(rows)
-            for row in rows:
-                d = dict(row)
-                gen_keyid = _extract_signature_bundle_keyid(
-                    d.get("signature_bundle"),
-                )
-                d["generator_enrolled"] = (
-                    gen_keyid is not None and gen_keyid in enrolled_keyids
-                )
-                validator_kid = d.get("validator_keyid")
-                d["validator_reputation"] = (
-                    reputation.get(validator_kid, 0)
-                    if validator_kid else 0
-                )
-                if not include_unverified:
-                    if (d["support_level"] == "PRELIMINARY"
-                            and not d["generator_enrolled"]):
-                        continue
-                # Re-verify high-trust rows on read: a REPLICATED/ESTABLISHED
-                # row whose signature does not verify is a tamper and is
-                # excluded from query results entirely (get_claim is the
-                # surface that still returns it, flagged). include_unverified
-                # is about unenrolled PRELIMINARY generators, NOT about
-                # serving a forged high-trust row, so it does not relax this.
-                if not _row_verified_on_read(conn, d, verify_cache):
-                    continue
-                if d["support_level"] == "ESTABLISHED":
-                    d["single_trust_domain"] = _std
-                    d["trust_domain_root"] = _trust_root
-                results.append(d)
-                if len(results) >= limit:
-                    break
-            # No early break on include_unverified: the high-trust verify
-            # filter can still drop rows, so keep batching until we have
-            # `limit` survivors or the table is exhausted (the while + the
-            # empty-rows break above bound the loop).
-            if offset >= max_scan:
-                # Scan ceiling hit: return the survivors found so far rather
-                # than walking the rest of the table behind a tamper flood.
-                break
+        rows = conn.execute(
+            base_sql, params + [_read_scan_ceiling(limit)],
+        ).fetchall()
     except sqlite3.OperationalError as exc:
         raise DatabaseError(f"Failed to query claims: {exc}") from exc
-    return results
+    return _project_verified_rows(
+        conn, rows, limit=limit, include_unverified=include_unverified,
+    )
 
 
 def _extract_signature_bundle_keyid(bundle_json: str | None) -> str | None:
@@ -4244,53 +4260,21 @@ def search_claims(
 
     where = " AND ".join(conditions)
     select_cols = ", ".join(f"c.{col}" for col in _CLAIM_COLUMNS)
+    # Rank once and materialise up to the scan ceiling in a single statement,
+    # then project through the SAME read-path filter as query_claims. Routing
+    # both surfaces through _project_verified_rows re-verifies high-trust rows
+    # here too, so search cannot serve a REPLICATED / ESTABLISHED row that query
+    # correctly excludes, and the two projections cannot drift apart.
     base_sql = (
         f"SELECT {select_cols} FROM claims_fts f "
         f"JOIN claims c ON c.claim_id = f.claim_id "
         f"WHERE {where} "
-        f"ORDER BY rank LIMIT ? OFFSET ?"
+        f"ORDER BY rank LIMIT ?"
     )
-
-    reputation = _compute_validator_reputation(conn)
-    enrolled_keyids = _enrolled_validator_keyids(conn)
-
-    # Same batched-pull pattern as query_claims — keep pulling until
-    # we have `limit` survivors of the include_unverified filter, or
-    # the FTS5 match-set is exhausted. include_unverified=True needs
-    # no filter, so one batch covers it.
-    results: list[dict] = []
-    offset = 0
-    batch_size = max(limit, 1)
     try:
-        while len(results) < limit:
-            rows = conn.execute(
-                base_sql, params + [batch_size, offset],
-            ).fetchall()
-            if not rows:
-                break
-            offset += len(rows)
-            for row in rows:
-                d = dict(row)
-                gen_keyid = _extract_signature_bundle_keyid(
-                    d.get("signature_bundle"),
-                )
-                d["generator_enrolled"] = (
-                    gen_keyid is not None and gen_keyid in enrolled_keyids
-                )
-                validator_kid = d.get("validator_keyid")
-                d["validator_reputation"] = (
-                    reputation.get(validator_kid, 0)
-                    if validator_kid else 0
-                )
-                if not include_unverified:
-                    if (d["support_level"] == "PRELIMINARY"
-                            and not d["generator_enrolled"]):
-                        continue
-                results.append(d)
-                if len(results) >= limit:
-                    break
-            if include_unverified:
-                break
+        rows = conn.execute(
+            base_sql, params + [_read_scan_ceiling(limit)],
+        ).fetchall()
     except sqlite3.OperationalError as exc:
         # FTS5 raises OperationalError on malformed MATCH syntax.
         # Wrap so callers don't have to import sqlite3 to pattern-match.
@@ -4300,7 +4284,9 @@ def search_claims(
                 f"Search query {query!r} is not valid FTS5 syntax: {msg}"
             ) from exc
         raise DatabaseError(f"Failed to search claims: {exc}") from exc
-    return results
+    return _project_verified_rows(
+        conn, rows, limit=limit, include_unverified=include_unverified,
+    )
 
 
 def get_validator_reputation(conn: sqlite3.Connection) -> dict[str, int]:
