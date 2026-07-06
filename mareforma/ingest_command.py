@@ -223,7 +223,17 @@ def claims_to_toml(claims: list[dict]) -> str:
     help="Claude model (only used with --llm)",
 )
 def ingest_cli(file, db_path, use_llm, model):
-    """Ingest a literature file into the provenance graph."""
+    """Ingest a literature file into the provenance graph.
+
+    In default structured mode, FILE should contain:
+
+        TITLE: Paper title
+        DOI: 10.xxxx/example
+        CLAIMS:
+        - First claim (confidence: 0.90)
+
+    Use --llm to extract claims from unstructured text.
+    """
     from mareforma.db import open_db_from_db_path
 
     file_path = Path(file)

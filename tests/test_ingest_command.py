@@ -97,6 +97,17 @@ class TestTomlExport:
 
 
 class TestCli:
+    def test_help_shows_structured_file_format(self):
+        from mareforma.ingest_command import ingest_cli
+
+        runner = CliRunner()
+        result = runner.invoke(ingest_cli, ["--help"])
+
+        assert result.exit_code == 0
+        assert "TITLE:" in result.output
+        assert "DOI:" in result.output
+        assert "CLAIMS:" in result.output
+
     def test_llm_flag_fails_gracefully_when_anthropic_missing(
         self, tmp_path, sample_abstract_a,
     ):
