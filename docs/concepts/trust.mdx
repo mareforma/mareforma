@@ -28,13 +28,22 @@ can demonstrate.
     `asserter_keyid`) or two claims signed by the same key cannot reach
     REPLICATED.
 
-    REPLICATED is a convergence signal, not proof. Distinct keys prove the
-    asserters are cryptographically separate, not that their data or reasoning
-    is independent.
+    REPLICATED is a convergence marker, not proof of independence. Distinct
+    keys prove the asserters are cryptographically separate, not that their data
+    or reasoning is independent, and signing keys are operator-mintable, so one
+    operator can produce any number of "distinct" signers. Treat REPLICATED as a
+    weak prior; read independence from its own axis (see
+    [The independence axis](#the-independence-axis) below), which is honest about
+    what it cannot verify.
 
     The ESTABLISHED-upstream rule matches Cochrane / GRADE evidence-chain
     methodology: replication-of-noise is not replication. A fresh project
     bootstraps the chain via a *seed claim* (see below).
+
+    Promotion is also gated on the claim being witnessed (marked in the
+    transparency log). A project that requires witnessing
+    (`graph.require_rekor_witnessing()`) will not converge a claim until a
+    verified inclusion proof lands.
   </Accordion>
   <Accordion title="ESTABLISHED">
     A human (an enrolled validator) reviewed the provenance chain and
@@ -109,6 +118,63 @@ promote.
 
 The hash is part of the signed payload, so an attacker who edits the
 column without the private key breaks verification.
+
+For operators who want data-distinctness as a hard gate rather than a collapse
+check, open with `strict_promotion=True`: a pair then promotes only when BOTH
+sides carry non-NULL data. It is off by default and only ever adds the
+requirement. It never loosens the default signer-axis rule.
+
+## The independence axis
+
+Independence is reported as its own axis, separate from the support ladder,
+because the ladder's distinct-key rule proves cryptographic separation, not
+independent lines of evidence. When every enrolled validator traces to a single
+trust root (the solo-operator default), the same operator could have minted
+every key, so independence is `UNVERIFIABLE`. Mareforma states that plainly
+rather than letting "two distinct signatures" read as "two independent labs."
+
+`mareforma map <claim>` renders the axis, and it never translates a convergence
+marker into the word "independent."
+
+## The trust map
+
+A claim carries many trust properties, and they are not equal. Some Mareforma
+computes from evidence; some through a proxy whose bound it names; some it does
+not evaluate at all and says so. `mareforma map <claim>` places each property
+(attributability, provenance, grounding, methodological validity, leakage,
+independence, contestation, standing, trust-root, witnessing) at its tier with
+the residual named, so trust reads as a structured ledger instead of one word.
+
+```bash
+mareforma map <claim-id>              # human-readable ledger
+mareforma map <claim-id> --json       # canonicalizable record
+mareforma map <claim-id> --html       # one self-contained page
+```
+
+A property Mareforma cannot observe is stated (`DEFERRED`, `not present`, or
+`UNVERIFIABLE`), never inferred to a confident answer. The map is a read-side
+artifact: it adds no signed field and changes no verdict.
+
+## Verify
+
+`mareforma verify <target>` is the audit receipt at the moment of the check. It
+re-verifies signatures, the grounding-to-citation binding, and the support
+level, then prints the trust map. `target` is detected by shape: an existing
+file is a signed bundle, a directory an export dir, anything else a claim id
+resolved against the local project. Verifying a claim needs only public
+material; an auditor does not need the producer's private key.
+
+Exit codes are stable, for CI gates:
+
+| Code | Meaning |
+|---|---|
+| `0` | verified |
+| `1` | tamper or binding violation |
+| `2` | unverifiable (missing material to reach a verdict) |
+
+A missing local key makes a bundle *unverifiable* (2), never a *failure* (1):
+the auditor lacks the key, the bundle is not proven tampered. `--json` emits the
+verdict and trust map for a gate to parse.
 
 ## Verify on read
 

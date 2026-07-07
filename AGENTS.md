@@ -66,6 +66,7 @@ manager to ensure the connection is closed.
 | `trust_insecure_rekor` | `bool` | `False` | Skip SSRF validation on `rekor_url` (only for private Rekor instances on internal networks). |
 | `rekor_log_pubkey_pem` | `bytes \| None` | `None` | PEM-encoded Rekor log operator public key. When supplied, every signed-claim submit and every `refresh_unsigned()` re-fetches the entry and cryptographically verifies the RFC 6962 Merkle inclusion proof against the log's signed checkpoint. Verification failure refuses to mark the row `transparency_logged=1`. Supports Ed25519 (private Rekor) and ECDSA secp256r1 (Sigstore public-good); other curves and key types raise `RekorInclusionError(reason="unsupported_key")`. Mutually exclusive with `rekor_log_pubkey_path`. |
 | `rekor_log_pubkey_path` | `str \| Path \| None` | `None` | Filesystem path to a PEM file holding the Rekor log operator public key. Read once at open() time; equivalent to passing the file contents via `rekor_log_pubkey_pem`. Mutually exclusive with `rekor_log_pubkey_pem`. |
+| `strict_promotion` | `bool` | `False` | Gate REPLICATED on non-NULL data (`artifact_hash`) present on BOTH sides of a converging pair. Off by default (the signer axis alone promotes; absent data never blocks). Opt-in and additive: it only ever adds the requirement. |
 
 When `rekor_log_pubkey_pem` or `rekor_log_pubkey_path` is supplied, the
 key is persisted to `<project>/.mareforma/rekor_log_pubkey.pem` as a
@@ -189,6 +190,19 @@ state: recomputed on every call; never cached.
 ### `graph.get_claim(claim_id) → dict | None`
 
 Return a single claim dict by ID, or `None` if not found.
+
+---
+
+### `graph.trust_map(claim_id) → TrustMap | None`
+
+Return the per-finding `TrustMap` for a claim, or `None` if it does not
+exist. A read-side artifact: it places every trust property (attributability,
+provenance, grounding, methodological validity, leakage, independence,
+contestation, standing, trust-root, witnessing) at a tier
+(`COMPUTED` / `PROXIED` / `DEFERRED`) with the residual named, and infers
+nothing it cannot compute. Adds no signed field. `TrustMap.to_dict()` is
+canonicalizable and `TrustMap.canonical_digest()` commits to it. The
+`mareforma map` CLI renders it as text, JSON, or one self-contained HTML file.
 
 ---
 
