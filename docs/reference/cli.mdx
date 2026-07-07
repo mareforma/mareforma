@@ -281,15 +281,22 @@ Export all claims as a JSON-LD document, optionally as a SCITT-style signed bund
 mareforma export [OPTIONS]
 ```
 
-**Plain JSON-LD** (default). Writes `ontology.jsonld` in the mareforma-native vocabulary (`@type=mare:Graph`, media type `application/x-mareforma-graph+json`). The export is NOT PROV-O-conformant. Earlier versions name-dropped PROV-O without populating the full graph; the current export uses an honest mareforma-native vocabulary instead. Each claim node carries every `SIGNED_FIELDS` member so a bundle verifier can re-derive `canonical_payload` from a node alone.
+**Plain JSON-LD** (`--format=jsonld`, default). Writes `ontology.jsonld` in the mareforma-native vocabulary (`@type=mare:Graph`, media type `application/x-mareforma-graph+json`). This default format is NOT PROV-O-conformant: it uses an honest mareforma-native vocabulary rather than name-dropping PROV-O without populating the full graph. For a real W3C PROV-O graph, use `--format=prov-o` (below). Each claim node carries every `SIGNED_FIELDS` member so a bundle verifier can re-derive `canonical_payload` from a node alone.
 
-**Signed bundle** (`--bundle`). Wraps the JSON-LD export in an in-toto Statement v1 envelope and signs it with the local Ed25519 key. The bundle includes one subject entry per claim (`urn:mareforma:claim:<uuid>`) with a SHA-256 of the claim's `canonical_payload`, plus a bundle-level DSSE signature. Requires a bootstrapped XDG key.
+**Interop formats** (`--format`). Beyond the native JSON-LD, `export` emits three interchange formats for external tooling:
+
+- `--format=in-toto-v1` — an unsigned in-toto Statement v1 (sigstore / SLSA / GUAC ecosystem). Distinct from `--bundle`, which produces a *signed* in-toto v1 envelope.
+- `--format=ro-crate-1.2` — an RO-Crate 1.2 Process Run Crate (`ro-crate-metadata.json`).
+- `--format=prov-o` — a W3C PROV-O JSON-LD graph for provenance-aware tooling.
+
+**Signed bundle** (`--bundle`). Wraps the JSON-LD export in an in-toto Statement v1 envelope and signs it with the local Ed25519 key. The bundle includes one subject entry per claim (`urn:mareforma:claim:<uuid>`) with a SHA-256 of the claim's `canonical_payload`, plus a bundle-level DSSE signature. Requires a bootstrapped XDG key. `--bundle` and `--format` are mutually exclusive — `--bundle` always signs the native JSON-LD.
 
 **Options**
 
 | Option | Default | Description |
 |---|---|---|
-| `--output PATH` | `./ontology.jsonld` (or `./mareforma-bundle.json` with `--bundle`) | Output file path |
+| `--format [jsonld\|in-toto-v1\|ro-crate-1.2\|prov-o]` | `jsonld` | Export format. Mutually exclusive with `--bundle` |
+| `--output PATH` | `./ontology.jsonld` (varies by `--format`; `./mareforma-bundle.json` with `--bundle`) | Output file path |
 | `--json` | `False` | Print JSON-LD to stdout instead of writing a file (no effect with `--bundle`) |
 | `--bundle` | `False` | Produce a SCITT-style signed bundle (in-toto Statement v1 + DSSE) |
 
@@ -300,6 +307,11 @@ mareforma export [OPTIONS]
 mareforma export
 mareforma export --output /tmp/my_claims.jsonld
 mareforma export --json | jq '.["@graph"][] | select(.["@type"] == "mare:Claim")'
+
+# Interop formats
+mareforma export --format=in-toto-v1
+mareforma export --format=ro-crate-1.2 --output crate-metadata.json
+mareforma export --format=prov-o --output mareforma-prov-o.jsonld
 
 # Signed bundle
 mareforma export --bundle
