@@ -121,7 +121,12 @@ Three rules:
    resolution gates apply too; see `_maybe_update_replicated_unlocked` in
    db/core.py. Distinct keys are a cryptographic distinctness signal, NOT a
    proof of apparatus independence. REPLICATED is a convergence signal, not
-   a truth claim.
+   a truth claim. Opening with `strict_promotion=True` (opt-in, off by
+   default) turns the equal-data collapse into a hard gate: a pair then
+   promotes only when BOTH sides carry non-NULL data. Independence itself is
+   reported on its own axis by the read-side trust map (`graph.trust_map`),
+   which marks it `UNVERIFIABLE` when every validator traces to a single
+   trust root.
 2. **REPLICATED → ESTABLISHED is human-only.** `graph.validate()`
    requires an enrolled validator key whose `validator_type` is
    `'human'`. LLM-typed validators may sign validations but cannot
