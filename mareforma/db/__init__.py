@@ -79,7 +79,9 @@ from .core import (
     classify_support,
     classify_supports,
     _check_no_cycle,
+    _GraphConnection,
     # State-machine helpers.
+    _signed_delete_error,
     _state_error_from_integrity,
     validate_status,
     normalize_artifact_hash,

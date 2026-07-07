@@ -156,6 +156,21 @@ def _observed_grounding_promotes(stored: str | None) -> bool:
 # Connection management
 # ---------------------------------------------------------------------------
 
+class _GraphConnection(sqlite3.Connection):
+    """A ``sqlite3.Connection`` that permits attribute storage.
+
+    Stdlib ``sqlite3.Connection`` rejects arbitrary attribute assignment,
+    which silently disabled the per-connection chain-verification cache in
+    :func:`mareforma.validators._conn_cache`: ``setattr`` raised, the cache
+    fell through to a fresh empty set on every call, and every
+    ``is_enrolled`` re-walked the validator chain. A trivial subclass gains
+    ``__dict__`` so the cache actually persists for the life of the
+    connection and dies with it — no module-level ``id()``-keyed dict (which
+    aliases recycled object ids) and no weakref (sqlite3 connections are not
+    weak-referenceable).
+    """
+
+
 def _db_path(root: Path) -> Path:
     return root / ".mareforma" / DB_FILENAME
 
@@ -205,7 +220,9 @@ def open_db(root: Path) -> sqlite3.Connection:
         )
 
     try:
-        conn = sqlite3.connect(str(path), check_same_thread=False)
+        conn = sqlite3.connect(
+            str(path), check_same_thread=False, factory=_GraphConnection
+        )
         conn.row_factory = sqlite3.Row
         # SQLite default is foreign_keys = OFF. Every REFERENCES clause
         # in the schema is advisory without this PRAGMA. Verdict-issuer
@@ -329,7 +346,9 @@ def open_db_from_db_path(db_path: "str | Path") -> sqlite3.Connection:
     # schema script (idempotent). This preserves the user-supplied
     # filename instead of silently rewriting it under .mareforma/.
     db_file.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_file), check_same_thread=False)
+    conn = sqlite3.connect(
+        str(db_file), check_same_thread=False, factory=_GraphConnection
+    )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     version = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -656,74 +675,98 @@ def _check_no_cycle(
     """Raise :class:`CycleDetectedError` if extending the graph with
     ``new_claim_id → supports`` would create a cycle.
 
-    Algorithm: simple DFS reachability with a visited set. From each
-    supports[] entry that looks like a claim_id, walk forward (i.e.
-    follow that claim's own supports[]) and check whether we ever
-    encounter ``new_claim_id``. If yes, the new edge closes a cycle.
+    Algorithm: one recursive-CTE reachability walk. Seed the walk with
+    the new claim's ``supports[]`` and follow each reached claim's own
+    ``supports[]`` forward; if the walk ever reaches ``new_claim_id`` the
+    new edge closes a cycle. A single query replaces the former
+    per-node DFS (one ``SELECT`` per visited claim), so the cost no longer
+    scales with the depth of the ancestral chain.
 
-    Why DFS (not Tarjan's SCC): the existing graph is acyclic by
+    The walk reads ``claims.supports_json`` directly (the authoritative
+    edge source), not the ``supports_cache`` sidecar: cycle detection must
+    stay correct on connections where that cache is not attached
+    (``open_db_from_db_path`` on a non-conventional path).
+
+    Why reachability (not Tarjan's SCC): the existing graph is acyclic by
     induction (we reject cycles on every write). A new claim has no
-    incoming edges at INSERT time, so the only cycle it can create is
-    one that goes ``new → supports → ... → new``. A forward walk from
-    each support entry is sufficient. For ``update_claim``, the new
-    edge is the changed ``supports[]``; same algorithm applies.
+    incoming edges at INSERT time, so the only cycle it can create is one
+    that goes ``new → supports → ... → new``. A forward walk from each
+    support entry is sufficient. For ``update_claim``, the new edge is the
+    changed ``supports[]``; same algorithm applies.
 
-    DOI strings in ``supports[]`` are external references, skipped
-    in the walk.
+    DOI strings in ``supports[]`` are external references — they are kept
+    as seeds but never match a ``claim_id``, so they drop out of the walk.
+    ``UNION`` (not ``UNION ALL``) dedupes reached nodes, so even a
+    pre-existing cycle in the stored graph terminates the recursion.
     """
-    if not supports:
+    seeds = [s for s in supports if _is_claim_id(s)]
+    if not seeds:
         return
+    if new_claim_id in seeds:
+        raise CycleDetectedError(
+            f"Claim {new_claim_id!r} cannot support itself "
+            f"(self-loop in supports[])."
+        )
 
-    visited: set[str] = set()
-    # Seed the DFS with the new-claim's supports themselves. If any
-    # entry IS new_claim_id, that's a direct self-loop.
-    stack: list[tuple[str, int]] = []
-    for s in supports:
-        if not _is_claim_id(s):
-            continue
-        if s == new_claim_id:
-            raise CycleDetectedError(
-                f"Claim {new_claim_id!r} cannot support itself "
-                f"(self-loop in supports[])."
-            )
-        stack.append((s, 1))
+    row = conn.execute(
+        """
+        WITH RECURSIVE reach(node, depth) AS (
+            SELECT value, 1 FROM json_each(?)
+            UNION
+            SELECT je.value, r.depth + 1
+              FROM reach r
+              JOIN claims c ON c.claim_id = r.node
+              JOIN json_each(c.supports_json) je
+             WHERE r.depth < ?
+               AND c.supports_json IS NOT NULL
+               AND json_valid(c.supports_json)
+        )
+        SELECT
+            MAX(CASE WHEN node = ? THEN 1 ELSE 0 END) AS hit,
+            MAX(depth) AS max_depth
+        FROM reach
+        """,
+        (json.dumps(seeds), _CYCLE_MAX_DEPTH, new_claim_id),
+    ).fetchone()
 
-    while stack:
-        current, depth = stack.pop()
-        if current in visited:
-            continue
-        visited.add(current)
-        if depth > _CYCLE_MAX_DEPTH:
-            raise CycleDetectedError(
-                f"supports[] walk exceeded depth cap of {_CYCLE_MAX_DEPTH} "
-                "hops. The graph contains a pathologically long chain — "
-                "investigate before relaxing the cap."
-            )
-        row = conn.execute(
-            "SELECT supports_json FROM claims WHERE claim_id = ?",
-            (current,),
-        ).fetchone()
-        if row is None:
-            # supports[] referenced a non-existent claim_id. Not a
-            # cycle issue — typically a typo or out-of-order insert.
-            # Leave the broader validation to the caller.
-            continue
-        try:
-            child_supports = json.loads(row["supports_json"] or "[]")
-        except json.JSONDecodeError:
-            # Corrupt row — skip rather than crash. Quarantining is
-            # the resolver path's responsibility, not the cycle check.
-            continue
-        for child in child_supports:
-            if not _is_claim_id(child):
-                continue
-            if child == new_claim_id:
-                raise CycleDetectedError(
-                    f"Inserting/updating {new_claim_id!r} with the given "
-                    f"supports[] would create a cycle through {current!r}."
-                )
-            if child not in visited:
-                stack.append((child, depth + 1))
+    if row is not None and row["hit"]:
+        raise CycleDetectedError(
+            f"Inserting/updating {new_claim_id!r} with the given "
+            "supports[] would create a cycle."
+        )
+    if row is not None and (row["max_depth"] or 0) >= _CYCLE_MAX_DEPTH:
+        raise CycleDetectedError(
+            f"supports[] walk exceeded depth cap of {_CYCLE_MAX_DEPTH} "
+            "hops. The graph contains a pathologically long chain — "
+            "investigate before relaxing the cap."
+        )
+
+
+def _signed_delete_error(
+    exc: sqlite3.IntegrityError, claim_id: str | None = None,
+) -> "MareformaError":
+    """Translate a delete-blocked IntegrityError into a typed error.
+
+    The ``claims_signed_no_delete`` trigger raises
+    ``mareforma:append_only:signed_claim_no_delete`` when a caller tries to
+    delete a signed claim (its signature + Rekor entry + chain hash attest
+    the assertion; a delete would let a DB-write process forget it). Map
+    that marker to the documented :class:`SignedClaimImmutableError` so the
+    delete path surfaces the same typed failure as the update path instead
+    of a raw sqlite3.IntegrityError. Any other IntegrityError is a genuine
+    DB fault and becomes :class:`DatabaseError`.
+    """
+    msg = str(exc)
+    if "mareforma:append_only:signed_claim_no_delete" in msg:
+        target = f" '{claim_id}'" if claim_id else ""
+        return SignedClaimImmutableError(
+            f"Signed claim{target} cannot be deleted: its signature commits "
+            "the assertion to the append-only chain. To withdraw it, assert "
+            "a retraction (status='retracted') that cites the claim via "
+            "contradicts=[...]."
+        )
+    detail = f" claim '{claim_id}'" if claim_id else "s"
+    return DatabaseError(f"Failed to delete claim{detail}: {exc}")
 
 
 def _state_error_from_integrity(
@@ -3203,6 +3246,8 @@ def delete_claim(conn: sqlite3.Connection, root: Path, claim_id: str) -> None:
     try:
         conn.execute("DELETE FROM claims WHERE claim_id = ?", (claim_id,))
         conn.commit()
+    except sqlite3.IntegrityError as exc:
+        raise _signed_delete_error(exc, claim_id) from exc
     except sqlite3.OperationalError as exc:
         raise DatabaseError(f"Failed to delete claim '{claim_id}': {exc}") from exc
 
@@ -3234,9 +3279,8 @@ def delete_claim(conn: sqlite3.Connection, root: Path, claim_id: str) -> None:
 #
 # The cache is a caller-owned dict keyed on (tier, keyid, digest): one
 # verification per distinct signature within a bulk query. It is passed in
-# rather than stored on the connection because stdlib sqlite3.Connection
-# rejects arbitrary attributes (see validators._conn_cache), so a per-query
-# local dict is the only cache that actually persists across rows on stdlib.
+# and scoped to a single query on purpose — a bulk read must not persist
+# signature-verification results past the rows it was called for.
 
 def _row_verified_on_read(
     conn: sqlite3.Connection, row: dict, cache: dict,
@@ -3462,6 +3506,8 @@ def delete_claims_by_generated_by(
             f"DELETE FROM claims WHERE claim_id IN ({placeholders})", claim_ids
         )
         conn.commit()
+    except sqlite3.IntegrityError as exc:
+        raise _signed_delete_error(exc) from exc
     except sqlite3.OperationalError as exc:
         raise DatabaseError(f"Failed to delete claims: {exc}") from exc
 

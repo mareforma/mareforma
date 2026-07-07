@@ -150,12 +150,14 @@ def ingest_file(
     meta = _parse_structured(text)
     doi = meta["doi"]
     title = meta["title"]
+    # The document's own id, computed independently of the extraction result, so
+    # the re-ingest purge below can run even when extraction yields zero claims.
+    doc_id = _doc_id(doi, title)
 
     if use_llm:
         claims = _extract_llm(text, model, doi, title)
     else:
         now = datetime.now(timezone.utc).isoformat()
-        doc_id = _doc_id(doi, title)
         claims = []
         for i, raw in enumerate(meta["claims_raw"]):
             claim_text, confidence = _parse_claim_line(raw)
@@ -171,10 +173,27 @@ def ingest_file(
                 "contradicts": None,
             })
 
+    # Re-ingesting a paper must not orphan FTS rows. INSERT OR REPLACE
+    # would DELETE the superseded row to make way, but SQLite fires the
+    # AFTER DELETE trigger for a REPLACE only when recursive_triggers is on
+    # (it is not), so the external-content literature_claims_fts index kept
+    # the old rowid and search returned stale, orphaned hits (#31). Delete
+    # this document's prior claims first — that fires literature_claims_ad,
+    # which purges the FTS entry — then insert the fresh set. A re-ingest
+    # with fewer claims also drops the now-absent tail this way.
+    #
+    # Delete by the DOCUMENT's own id, not the ids of the freshly produced
+    # claims: an empty re-extraction (zero claims) must STILL purge the prior
+    # version's rows, or its FTS entries survive as stale hits (the #31 bug this
+    # closes). Deriving the purge set from `claims` would skip the delete when
+    # `claims` is empty.
+    db.execute(
+        "DELETE FROM literature_claims WHERE source_doc_id = ?", (doc_id,)
+    )
     for row in claims:
         db.execute(
             """
-            INSERT OR REPLACE INTO literature_claims
+            INSERT INTO literature_claims
             (claim_id, source_doc_id, doi, title, claim_text, confidence,
              extracted_by, ingested_at, contradicts)
             VALUES (:claim_id, :source_doc_id, :doi, :title, :claim_text,
