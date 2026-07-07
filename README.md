@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="https://docs.mareforma.com/quickstart">Quickstart</a> &nbsp;·&nbsp;
+  <a href="https://docs.mareforma.com/introduction/quickstart">Quickstart</a> &nbsp;·&nbsp;
   <a href="https://docs.mareforma.com">Docs</a> &nbsp;·&nbsp;
   <a href="examples/">Examples</a>
 </p>
@@ -58,7 +58,9 @@ mareforma bootstrap   # optional: sign your claims and enable the public log
 |---|---|
 | **Signed claims** | Each claim shows who stands behind it and cannot be altered unnoticed. |
 | **Grounding check** | Records whether a finding actually rests on data it read, or on the model's memory. |
-| **Independently verifiable** | Anyone can re-check a claim, or a whole exported bundle, without trusting whoever produced it. |
+| **Trust map** | `mareforma map <claim>` places every trust property (grounding, independence, contestation, witnessing) at its tier, and states plainly what it does not evaluate. |
+| **Audit-grade verify** | `mareforma verify <claim>` re-checks signatures, the grounding-to-citation binding, and support level, with stable exit codes for CI (0 verified, 1 tampered, 2 unverifiable). |
+| **Diagnose a run** | `mareforma diagnose -- python run.py` runs a target under the observer and reports what data actually flowed, and where a silent fallback hid. |
 | **Optional public log** | Publish a claim to a public, append-only log for an independent, timestamped record. |
 | **Local-first** | Runs on local SQLite. Network only for the optional log. |
 
@@ -69,8 +71,10 @@ A claim's support level is read from the graph, never self-reported. High-trust 
 | Level | Meaning |
 |---|---|
 | `PRELIMINARY` | One agent asserted it. No independent agreement yet. |
-| `REPLICATED` | Two independent agents, signing with different keys, reached the same result on a shared established finding. Independence is the key, so relabeling cannot fake it. |
-| `ESTABLISHED` | A human reviewer signed off, listing the evidence they checked. |
+| `REPLICATED` | Two agents signing with different keys converged on the same established finding. A convergence marker, not proof of independence: signing keys are operator-mintable, so distinct signatures are a weak prior. |
+| `ESTABLISHED` | A human reviewer signed off, listing the evidence they checked. Reachable only for a claim marked in the transparency log; the top of the ladder depends on witnessing. |
+
+Independence is reported as its own axis, not folded into the ladder. `mareforma map` marks it `UNVERIFIABLE` whenever every validator traces to a single trust root. That is the honest reading when the same operator could mint every key. Operators who want data-distinctness as a hard promotion gate can open with `strict_promotion=True`, which requires distinct data on both sides before a pair converges.
 
 Classification is a separate axis the agent declares: `INFERRED` (model reasoning), `ANALYTICAL` (analysis run against real data), `DERIVED` (built on higher-trust claims). Ask for both at once: `graph.query(text, min_support="REPLICATED", classification="ANALYTICAL")`.
 
@@ -83,6 +87,7 @@ Classification is a separate axis the agent declares: `INFERRED` (model reasonin
 | 03 | [Documented Contestation](examples/03_documented_contestation/) | An agent challenges established consensus |
 | 04 | [Private Data, Public Findings](examples/04_private_data_public_findings/) | Two labs share provenance without sharing data |
 | 05 | [Drug Target Provenance](examples/05_drug_target_provenance/) | A real research agent with honest evidence labels |
+| 06 | [Verify in CI](examples/06_ci_verify/) | `mareforma verify` as a GitHub Actions gate, keyed on exit codes |
 
 <hr>
 
