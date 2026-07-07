@@ -87,6 +87,44 @@ def cited_set(cites) -> tuple[str, ...]:
     return tuple(out)
 
 
+# File extensions whose bytes are read through a C runtime (HDF5, netCDF, Arrow),
+# which opens via the C library's own open(2)/fopen and emits NO Python PEP-578
+# audit event. A cited read of one is invisible to the open-coverage hook, so its
+# absence cannot be trusted: the classifier floors it to OPAQUE unless a wrapped
+# reader recorded the read directly. The formats of natural-science pipelines.
+_C_EXTENSION_SUFFIXES: frozenset[str] = frozenset(
+    {".h5", ".hdf5", ".he5", ".nc", ".nc4", ".cdf", ".parquet", ".pq",
+     ".feather", ".arrow"}
+)
+
+
+def citation_kind(identifier: str) -> str:
+    """Classify a normalized cited identifier into a coverage kind.
+
+    - ``"content-address"`` — a ``sha256:`` data_id. Its bytes can arrive over any
+      channel (disk or network), so a socket seam is relevant to it.
+    - ``"url"`` — an ``http``/``https``/``ftp`` location. Delivered over a socket.
+    - ``"c-extension-file"`` — a local path whose suffix is read through a C
+      runtime, invisible to the PEP-578 open hook.
+    - ``"file"`` — any other local path. An in-process read of it hits the open
+      audit event, so a socket seam cannot have hidden it.
+    - ``"unknown"`` — anything else (an opaque DB target); treated fail-closed.
+    """
+    if not isinstance(identifier, str) or not identifier:
+        return "unknown"
+    if is_content_addressed(identifier):
+        return "content-address"
+    parts = urlsplit(identifier)
+    if parts.scheme in ("http", "https", "ftp") and parts.netloc:
+        return "url"
+    if identifier.startswith("/") or (parts.scheme in ("", "file")):
+        lower = identifier.lower()
+        if any(lower.endswith(suf) for suf in _C_EXTENSION_SUFFIXES):
+            return "c-extension-file"
+        return "file"
+    return "unknown"
+
+
 def read_matches_citation(read_identifier: str, read_content_address, cited) -> bool:
     """True iff this read binds to one of the cited sources.
 

@@ -132,8 +132,12 @@ def test_subprocess_is_a_seam(cited):
     assert any(s.kind == "subprocess" for s in h.verdict.seams)
 
 
-def test_socket_connect_is_a_seam(cited):
-    with obs.observe(cites=cited) as h:
+def test_socket_connect_is_a_seam():
+    # A socket seam blocks UNGROUNDED for a URL citation: the bytes could have
+    # arrived over that connection. (For a local-FILE citation the same seam is
+    # irrelevant and the verdict stays UNGROUNDED — see the seam-relevance tests
+    # in test_observe_scope.py.)
+    with obs.observe(cites="https://example.org/data.csv") as h:
         try:
             socket.create_connection(("127.0.0.1", 1), timeout=0.05)
         except OSError:

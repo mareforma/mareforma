@@ -72,13 +72,29 @@ by the `sha256:` hash of the returned bytes against a cited data id.
 The observed scope propagates into `asyncio` tasks but not into library-spawned
 threads or a child process. A read on the far side of one of those boundaries is
 invisible. Rather than call that invisible read a genuine absence, the observer
-records a **seam** and returns `OPAQUE`:
+records a **seam** and, when the seam is relevant to the citation, returns
+`OPAQUE`:
 
 - a thread start (`threading.Thread.start`, `_thread.start_new_thread`),
 - a subprocess or new process (`subprocess`, `os.exec`, `os.fork`, ...),
 - a raw socket connection,
-- a cited path opened through an uninstrumented reader (`os.open`, C-extension
-  I/O) that the loader wrappers do not cover.
+- a cited path opened through an uninstrumented reader (`os.open`), or a cited
+  C-runtime file (HDF5, netCDF, Arrow) whose bytes emit no PEP-578 event and were
+  not read through a wrapped reader.
+
+Seam relevance keeps a seam from hiding a tell it could not have caused. A socket
+connection cannot deliver a **local file** read, so a socket seam does not force
+`OPAQUE` on a file-cited finding — the silent-fallback `UNGROUNDED` tell survives
+an unrelated network call. A socket seam does block a **URL** or **content-address**
+citation, whose bytes can arrive over the network. Thread, subprocess, and
+coverage-gap seams can hide anything, so they always block; an unknown seam or
+citation kind blocks too (fail-closed). A cited URL with no observed HTTP read is
+unknown coverage, so it is `OPAQUE`, never `UNGROUNDED`.
+
+Keep-alive HTTP is covered: pooled `requests.Session`, `httpx.Client` /
+`AsyncClient`, and `aiohttp` sessions reused inside the scope are wrapped, so a
+retrieval through one is a recorded read (or `OPAQUE` when the body streams),
+never a false `UNGROUNDED`.
 
 ## Honest bounds
 
