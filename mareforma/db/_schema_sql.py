@@ -728,6 +728,11 @@ CREATE TABLE IF NOT EXISTS contrasts (
     control_type   TEXT NOT NULL DEFAULT 'negative' CHECK (control_type IN
                        ('positive','negative','vehicle','sham','comparative'))
 );
+-- independence_counts joins evidence_lines → contrasts on line_id, then
+-- contrasts → effect_estimates on contrast_id. Without this index the
+-- planner has no way into contrasts by line_id and falls back to scanning
+-- effect_estimates for the whole join; index it so the walk stays keyed.
+CREATE INDEX IF NOT EXISTS idx_contrast_line ON contrasts(line_id);
 
 -- The effect estimate the gate reads. Minimal field set (metafor field
 -- names); variance, IRIs, test statistics, per-group n, and 2x2 cells are

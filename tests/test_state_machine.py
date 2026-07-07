@@ -25,6 +25,7 @@ import mareforma
 from mareforma import db as _db
 from mareforma.db import (
     IllegalStateTransitionError,
+    SignedClaimImmutableError,
     add_claim,
     open_db,
     update_claim,
@@ -457,14 +458,16 @@ class TestSignedDeleteAppendOnly:
         self, tmp_path: Path,
     ) -> None:
         """The user-facing ``db.delete_claim`` helper must surface the
-        trigger's refusal, not swallow it. Without this, a caller who
-        only uses the public API would still be able to wipe signed
-        claims via a typed exception that callers can catch."""
+        trigger's refusal as the documented typed error, not a raw
+        sqlite3.IntegrityError a public-API caller cannot reasonably
+        catch (#42)."""
         from mareforma.db import delete_claim as _delete
         cid, g = self._signed_claim(tmp_path)
         try:
-            with pytest.raises(sqlite3.IntegrityError, match="signed_claim_no_delete"):
+            with pytest.raises(SignedClaimImmutableError, match="cannot be deleted"):
                 _delete(g._conn, tmp_path, cid)
+            # The row survives the refused delete.
+            assert g.get_claim(cid) is not None
         finally:
             g.close()
 
@@ -489,7 +492,7 @@ class TestSignedDeleteAppendOnly:
         cid, g = self._signed_claim(tmp_path)
         try:
             with pytest.raises(
-                sqlite3.IntegrityError, match="signed_claim_no_delete",
+                SignedClaimImmutableError, match="cannot be deleted",
             ):
                 _bulk(g._conn, tmp_path, generated_by=g.get_claim(cid)["generated_by"])
             # Row still present after the failed bulk delete.

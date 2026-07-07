@@ -174,8 +174,11 @@ def _conn_cache(conn: sqlite3.Connection) -> set[str]:
         try:
             setattr(conn, _CACHE_ATTR, cache)
         except (AttributeError, TypeError):
-            # Some sqlite3.Connection wrappers refuse arbitrary attributes
-            # (rare). Fall back to a fresh set every call — slow but safe.
+            # A raw stdlib sqlite3.Connection rejects attribute writes.
+            # Graph connections come from db.open_db as the attribute-
+            # accepting _GraphConnection subclass, so the cache persists
+            # there; this fallback keeps a bare Connection correct (fresh
+            # set every call — slow but safe) instead of crashing.
             return set()
     return cache
 
@@ -197,14 +200,18 @@ def invalidate_conn_cache(conn: sqlite3.Connection) -> None:
 
     Where this matters
     ------------------
-    Stdlib ``sqlite3.Connection`` does NOT allow arbitrary attributes,
-    so :func:`_conn_cache` falls through to its "fresh set every call"
-    safe-but-slow branch. On stdlib this function is therefore a no-op:
-    there is nothing to drop, and nothing was cached in the first
-    place. The invalidation is **load-bearing** for any Connection
-    wrapper (apsw, certain SQLAlchemy adapters, future subclasses) that
-    DOES accept attribute writes: there, the cache persists across
-    calls and stale entries are a real consistency hazard.
+    Graph connections from :func:`mareforma.db.open_db` are the
+    ``_GraphConnection`` subclass, which accepts attribute writes, so the
+    cache persists across calls. This invalidation is defense-in-depth, not
+    the primary guard: the ``validators`` table is INSERT-only (no code path
+    UPDATEs or DELETEs a chain), and the one INSERT that could invalidate a
+    cached True — planting a second self-signed root — is caught on every
+    call by the singleton-root re-check that runs BEFORE the cache lookup,
+    regardless of the cache. So a stale True cannot actually survive; the
+    invalidation just keeps the cache tidy. A raw stdlib
+    ``sqlite3.Connection`` (rare — only a caller who bypassed ``open_db``)
+    rejects the attribute, so :func:`_conn_cache` falls through to its
+    "fresh set every call" branch and this function is a harmless no-op there.
 
     Raw-SQL mutations from outside our Python paths (e.g. a sqlite
     shell ``UPDATE``) bypass this: there is no SQLite-side trigger we
@@ -220,9 +227,9 @@ def invalidate_conn_cache(conn: sqlite3.Connection) -> None:
         # and equivalent for correctness.
         delattr(conn, _CACHE_ATTR)
     except AttributeError:
-        # Either the cache attribute was never set (stdlib sqlite3,
-        # which rejects setattr in _conn_cache; or no is_enrolled call
-        # had populated it yet) — nothing to drop, no-op.
+        # Either the cache attribute was never set (a raw stdlib
+        # connection, which rejects setattr in _conn_cache; or no
+        # is_enrolled call had populated it yet) — nothing to drop, no-op.
         pass
 
 

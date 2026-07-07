@@ -1107,19 +1107,15 @@ class TestConnCacheInvalidation:
 
         Asserted through observable cache state, not by counting calls to
         the invalidation helper: a sentinel planted in the cache before
-        enrollment must be gone afterwards. The graph's connection is
-        wrapped in ``_AttrConn`` because the cache only persists — and is
-        thus only observably invalidated — on a Connection that accepts
-        attribute writes. Stdlib sqlite3 refuses them, so invalidation is
-        a silent no-op there; the wrapper is the surface the cache code
-        actually targets (apsw, some SQLAlchemy adapters, future
-        subclasses).
+        enrollment must be gone afterwards. Graph connections are the
+        attribute-accepting ``_GraphConnection`` subclass, so the cache
+        genuinely persists on ``g._conn`` and its invalidation is
+        observable directly — no shim needed.
         """
         from mareforma import validators as _v
         key_path = _bootstrap_key(tmp_path, "root.key")
         child_key = _bootstrap_key(tmp_path, "child.key")
         with mareforma.open(tmp_path, key_path=key_path) as g:
-            g._conn = self._AttrConn(g._conn)
             # Plant a sentinel so the cache is non-empty going in.
             _v._conn_cache(g._conn).add("sentinel-keyid-deadbeef")
             assert "sentinel-keyid-deadbeef" in _v._conn_cache(g._conn)

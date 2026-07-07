@@ -362,6 +362,28 @@ def _authentic_signer_keyid(
         return None
 
 
+# The read query behind independence_counts. Kept as a module constant so a
+# regression test can pin its EXPLAIN QUERY PLAN (no full scan of
+# effect_estimates — the join stays keyed through idx_contrast_line and
+# idx_estimate_contrast).
+INDEPENDENCE_COUNTS_SQL = (
+    "SELECT el.data_id AS data_id, cl.generated_by AS generated_by, "
+    " cl.asserter_keyid AS asserter_keyid, cl.claim_id AS claim_id, "
+    " cl.signature_bundle AS signature_bundle, "
+    " est.estimate_value, est.effect_type, est.scale, est.p_value, "
+    " est.ci_lower, est.ci_upper, est.ci_level, est.n_total, "
+    " pr.test_type, pr.direction_of_interest, pr.equivalence_lower, "
+    " pr.equivalence_upper, pr.alpha, pr.inference_regime "
+    "FROM findings f "
+    "JOIN evidence_lines el ON el.finding_id = f.finding_id "
+    "JOIN contrasts c ON c.line_id = el.line_id "
+    "JOIN effect_estimates est ON est.contrast_id = c.contrast_id "
+    "JOIN predictions pr ON pr.plan_id = f.plan_id "
+    "JOIN claims cl ON cl.claim_id = f.claim_id "
+    "WHERE f.content_id = ?"
+)
+
+
 def independence_counts(conn: sqlite3.Connection, content_id: str) -> tuple[int, int]:
     """(independent_support, independent_refute) by distinct signer, data_id guard.
 
@@ -383,23 +405,7 @@ def independence_counts(conn: sqlite3.Connection, content_id: str) -> tuple[int,
     one (status_policy@v3). The two axes are namespaced (``k:`` vs ``g:``) so a
     keyid can never alias a run label.
     """
-    rows = conn.execute(
-        "SELECT el.data_id AS data_id, cl.generated_by AS generated_by, "
-        " cl.asserter_keyid AS asserter_keyid, cl.claim_id AS claim_id, "
-        " cl.signature_bundle AS signature_bundle, "
-        " est.estimate_value, est.effect_type, est.scale, est.p_value, "
-        " est.ci_lower, est.ci_upper, est.ci_level, est.n_total, "
-        " pr.test_type, pr.direction_of_interest, pr.equivalence_lower, "
-        " pr.equivalence_upper, pr.alpha, pr.inference_regime "
-        "FROM findings f "
-        "JOIN evidence_lines el ON el.finding_id = f.finding_id "
-        "JOIN contrasts c ON c.line_id = el.line_id "
-        "JOIN effect_estimates est ON est.contrast_id = c.contrast_id "
-        "JOIN predictions pr ON pr.plan_id = f.plan_id "
-        "JOIN claims cl ON cl.claim_id = f.claim_id "
-        "WHERE f.content_id = ?",
-        (content_id,),
-    ).fetchall()
+    rows = conn.execute(INDEPENDENCE_COUNTS_SQL, (content_id,)).fetchall()
 
     supports: list[tuple[str, str]] = []
     refutes: list[tuple[str, str]] = []
