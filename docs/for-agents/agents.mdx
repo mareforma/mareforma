@@ -743,24 +743,6 @@ Plus the public canonicalize registry and predicate-URI constants:
 - **`mareforma.canonicalize`**: `canonicalize(value, form=...)` with registered forms `json-c14n-v1` (default), `dsse-jcs-nfc-v1` (same bytes the envelope layer signs), plus specialty SMILES / FASTA / PDB canonicalizers registered on import.
 - **Capability URI constants** at `mareforma.predicate_types` (also re-exported at the top level): `TOOL_CALL_V1`, `CONTAINER_EXEC_V1`, `WORKSHOP_EVENT_V1`, `CODE_VARIATION_V1`, `HYPOTHESIS_V1`, `LITERATURE_INSIGHT_V1`, `SCIENCE_SKILL_V1`, `META_CLAIM_V1`, plus the core + wet-lab assay families. Use the constants instead of string literals so a typo fails at import.
 
-## Core-derived classification (`mareforma.derivation`)
-
-Deterministically derives `ANALYTICAL` vs `INFERRED` from a static profile of the agent's source code plus dynamic templates extracted from runtime logs (Drain parser). ANALYTICAL requires positive evidence from BOTH; INFERRED is the conservative default.
-
-```python
-from mareforma.derivation import derive_classification
-
-result = derive_classification(source_code=src, runtime_logs=logs)
-graph.assert_claim(
-    finding,
-    classification=result.classification,
-    generated_by="agent/...",
-    predicate_payload=result.to_predicate_payload(),
-)
-```
-
-Source-profile extraction requires the `[derivation]` extra (`pip install mareforma[derivation]`); it gates `tree_sitter` + `tree_sitter_python`. Log-template extraction is pure stdlib and available unconditionally.
-
 ## Claude Code hook (`mareforma.hooks`)
 
 `python -m mareforma.hooks` is a Claude Code `PreToolUse` handler that records every tool invocation as a `prov:Activity` row in the project's `.mareforma/graph.db`. The `agent_activities` table is part of the canonical schema; the hook routes through `mareforma.db.open_db` so it inherits foreign-keys PRAGMA + schema validation. Opt in via `.claude/settings.json`:

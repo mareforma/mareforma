@@ -837,23 +837,6 @@ canonicalize({"x": 1}, form=DSSE_JCS_NFC_V1)    # NFC-normalising, same bytes as
 
 Importing `mareforma.canonicalize` also registers the specialty forms `rdkit-canonical-smiles-v1`, `fasta-nfc-v1`, `pdb-atom-sorted-v1` via the auto-imported `specialty` submodule. RDKit canonicaliser gracefully falls back to NFC-stripped UTF-8 when `rdkit` isn't installed.
 
-### `mareforma.derivation`
-
-Core-derived classification. Deterministically derives `ANALYTICAL` vs `INFERRED` from a static source-code profile plus dynamic runtime-log templates.
-
-```python
-from mareforma.derivation import (
-    derive_classification, verify_classification,
-    extract_source_profile, extract_templates,
-    DERIVATION_VERSION,
-)
-
-result = derive_classification(source_code, runtime_logs)
-# ClassificationResult with .classification + .evidence
-```
-
-Source-profile extraction requires `pip install mareforma[derivation]` (`tree_sitter` + `tree_sitter_python`); log-template extraction (Drain parser) is pure stdlib.
-
 ### `mareforma.hooks`
 
 Claude Code `PreToolUse` handler. Records every tool invocation as a `prov:Activity` row in the project's `.mareforma/graph.db`.
