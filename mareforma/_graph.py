@@ -2715,7 +2715,10 @@ class EpistemicGraph:
             "still_unlogged": still_unlogged,
         }
 
-    def get_tools(self, *, generated_by: str = "agent") -> list:
+    def get_tools(
+        self, *, generated_by: str = "agent",
+        include_deprecated_aliases: bool = False,
+    ) -> list:
         """Return agent tool callables pre-bound to this graph.
 
         Returns two plain Python functions that any agent framework can wrap.
@@ -2727,11 +2730,20 @@ class EpistemicGraph:
         generated_by:
             Agent identifier, e.g. ``"agent/model-a/lab_a"``.
             Defaults to ``'agent'``.
+        include_deprecated_aliases:
+            When True, appends a deprecated ``assert_finding`` tool that
+            forwards to ``record_claim`` and warns on use. The LLM-facing
+            claim-recording tool was renamed from ``assert_finding`` to
+            ``record_claim`` because the old name collided with
+            :meth:`EpistemicGraph.assert_finding` (a different, one-shot
+            finding path). The alias is kept for one release; leave this
+            False for the clean two-tool surface.
 
         Returns
         -------
         list
-            ``[query_graph, assert_finding]``
+            ``[query_graph, record_claim]`` (plus a deprecated
+            ``assert_finding`` alias when ``include_deprecated_aliases``).
 
         Note
         ----
@@ -2786,7 +2798,7 @@ class EpistemicGraph:
                 for r in results
             ])
 
-        def assert_finding(
+        def record_claim(
             text: str,
             classification: str = "INFERRED",
             supports: list[str] | None = None,
@@ -2828,7 +2840,44 @@ class EpistemicGraph:
                 source_name=source or None,
             )
 
-        return [query_graph, assert_finding]
+        tools = [query_graph, record_claim]
+
+        if include_deprecated_aliases:
+            def assert_finding(
+                text: str,
+                classification: str = "INFERRED",
+                supports: list[str] | None = None,
+                contradicts: list[str] | None = None,
+                source: str = "",
+            ) -> str:
+                """Deprecated alias for ``record_claim``.
+
+                The claim-recording agent tool was renamed to
+                ``record_claim``; ``assert_finding`` collided with
+                :meth:`EpistemicGraph.assert_finding`. This alias forwards
+                to ``record_claim`` and is kept for one release.
+                """
+                import warnings
+                warnings.warn(
+                    "The 'assert_finding' agent tool was renamed to "
+                    "'record_claim' (the old name shadowed "
+                    "EpistemicGraph.assert_finding). Update your tool "
+                    "wiring; this deprecated alias will be removed in a "
+                    "future release.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                return record_claim(
+                    text,
+                    classification=classification,
+                    supports=supports,
+                    contradicts=contradicts,
+                    source=source,
+                )
+
+            tools.append(assert_finding)
+
+        return tools
 
     # ------------------------------------------------------------------
     # Observability
