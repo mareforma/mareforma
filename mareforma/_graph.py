@@ -89,12 +89,16 @@ class EpistemicGraph:
         rekor_url: str | None = None,
         require_rekor: bool = False,
         rekor_log_pubkey_pem: bytes | None = None,
+        strict_promotion: bool = False,
     ) -> None:
         self._conn = conn
         self._root = root
         self._signer = signer
         self._rekor_url = rekor_url
         self._require_rekor = require_rekor
+        # Opt-in gate: require data on both sides of a REPLICATED pair. Off by
+        # default; threaded into every write path that can trigger promotion.
+        self._strict_promotion = strict_promotion
         # Rekor log operator's public key, used to verify the signed
         # checkpoint that anchors each inclusion proof. When None,
         # mareforma trusts only the submit-time response binding (OUR
@@ -413,6 +417,7 @@ class EpistemicGraph:
             predicate_payload=predicate_payload,
             original_signature_bundle=original_signature_bundle,
             observed_grounding=observed_grounding,
+            strict_promotion=self._strict_promotion,
         )
 
     def query(
@@ -586,6 +591,7 @@ class EpistemicGraph:
             supports=supports,
             contradicts=contradicts,
             comparison_summary=comparison_summary,
+            strict_promotion=self._strict_promotion,
         )
 
     def refutation_status(self, claim_id: str) -> dict:
@@ -821,6 +827,20 @@ class EpistemicGraph:
         """Return a single claim dict by ID, or None if not found."""
         self._check_open()
         return _db.get_claim(self._conn, claim_id)
+
+    def trust_map(self, claim_id: str):
+        """Return the per-finding :class:`mareforma.trust_map.TrustMap` for a claim.
+
+        A read-side artifact that places every trust property — attributability,
+        provenance, grounding, methodological validity, leakage, independence,
+        contestation, standing, trust-root, witnessing — at its tier with the
+        residual named. Adds no signed field; derived from what is already
+        stored. Returns ``None`` if the claim does not exist.
+        """
+        self._check_open()
+        from mareforma.trust_map import build_trust_map
+
+        return build_trust_map(self._conn, claim_id)
 
     # ------------------------------------------------------------------
     # Trust layer: propositions, findings, derived Status
@@ -2002,12 +2022,12 @@ class EpistemicGraph:
                         "DOIs in supports/contradicts. Clearing flag.",
                         stacklevel=2,
                     )
-                    _db.mark_claim_resolved(self._conn, self._root, cid)
+                    _db.mark_claim_resolved(self._conn, self._root, cid, strict_promotion=self._strict_promotion)
                     resolved_count += 1
                     continue
 
                 if all(results.get(d, False) for d in dois):
-                    _db.mark_claim_resolved(self._conn, self._root, cid)
+                    _db.mark_claim_resolved(self._conn, self._root, cid, strict_promotion=self._strict_promotion)
                     resolved_count += 1
                 else:
                     still_unresolved += 1
@@ -2214,6 +2234,7 @@ class EpistemicGraph:
                     generated_by,
                     artifact_hash,
                     on_error=_bump,
+                    strict_promotion=self._strict_promotion,
                 )
                 if ok:
                     _db.clear_convergence_retry_flag(
@@ -2636,6 +2657,7 @@ class EpistemicGraph:
                 )
                 _db.mark_claim_logged(
                     self._conn, self._root, cid, new_bundle,
+                    strict_promotion=self._strict_promotion,
                 )
                 logged_count += 1
                 continue
@@ -2698,7 +2720,8 @@ class EpistemicGraph:
                 new_bundle = json.dumps(
                     augmented, sort_keys=True, separators=(",", ":"),
                 )
-                _db.mark_claim_logged(self._conn, self._root, cid, new_bundle)
+                _db.mark_claim_logged(self._conn, self._root, cid, new_bundle,
+                                      strict_promotion=self._strict_promotion)
                 logged_count += 1
             else:
                 still_unlogged += 1

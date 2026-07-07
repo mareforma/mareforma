@@ -1,0 +1,504 @@
+"""The per-finding trust map: place every trust property honestly.
+
+A claim carries many trust properties, and they are not equal. Some mareforma
+computes from evidence (who signed it, whether cited data was observed to flow,
+whether a signed contradiction stands). Some it computes through a proxy whose
+bound it names (a file read is stat-based, not byte-proven). Some it does not
+evaluate at all this release and says so rather than inferring (leakage across a
+held-out partition; a private trust root). The trust map is the one artifact that
+places EACH property at its tier with the residual named, so an auditor reads a
+claim's trust as a structured, honest ledger instead of a single word.
+
+Design invariants:
+
+- **Read-side only.** The map is derived from what is already stored and signed.
+  It adds no new signed field; nothing here changes a verdict or a support level.
+- **Honest, never inferred.** An unobservable property is stated as such
+  (``DEFERRED`` / ``not present`` / ``UNVERIFIABLE``), never guessed. A property
+  the observer could not see is not a confident answer.
+- **Versioned and canonicalizable.** :meth:`TrustMap.to_dict` is stable and
+  :meth:`TrustMap.canonical_digest` commits to it, so two hosts render the same
+  map for the same stored claim.
+
+The map is the read model behind ``mareforma map`` and the trust section of
+``mareforma verify``.
+"""
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass
+from enum import Enum
+
+from ._canonical import canonicalize
+
+# Version of the trust-map shape. Bound into the rendered record so a consumer
+# knows which property set + tier semantics produced it, and a future revision
+# is distinguishable rather than silently reinterpreted.
+TRUST_MAP_VERSION = "v0.3.9"
+
+# Observed-grounding axis versions KNOWN to carry the verdict↔citation binding.
+# An ALLOWLIST, not a denylist: only a GROUNDED verdict stamped with one of these
+# is presented as a bound GROUNDED. Anything else — a missing/absent version, a
+# hand-edited record, an older axis, or a future axis that drops binding — reads
+# as pre-binding ("citation binding not checkable"), which is the honest, fail-
+# safe default. A denylist would let an unknown/absent version overclaim as bound.
+_BINDING_AXIS_VERSIONS = frozenset({"v0.3.9"})
+
+# The rendered string for a GROUNDED verdict computed on a pre-binding axis. A
+# golden-file test pins this exact text; do not reword without updating it.
+PRE_BINDING_GROUNDED_LABEL = "GROUNDED (pre-binding axis; citation binding not checkable)"
+
+# Rendered when a claim carries no stored value for a property that would
+# otherwise be computed (a pre-observer claim has no grounding verdict). Never
+# inferred to a confident answer.
+NOT_PRESENT = "not present"
+
+
+class Tier(str, Enum):
+    """Where a property's answer comes from — the honesty of the signal.
+
+    - ``COMPUTED``  — derived directly from stored evidence this release.
+    - ``PROXIED``   — computed through a proxy signal whose bound is named
+                      (e.g. a file read observed by stat, not by byte).
+    - ``DEFERRED``  — not evaluated this release; the residual is named so the
+                      gap is explicit rather than silent.
+    """
+
+    COMPUTED = "COMPUTED"
+    PROXIED = "PROXIED"
+    DEFERRED = "DEFERRED"
+
+
+@dataclass(frozen=True)
+class TrustProperty:
+    """One property of a claim's trust, placed at its tier with the residual.
+
+    ``name`` is the property (``grounding``, ``independence``, …). ``tier`` is
+    where the answer comes from. ``value`` is the property's state — a verdict, a
+    count, a level, or ``None`` / :data:`NOT_PRESENT` when there is nothing to
+    show. ``residual`` names what the answer does NOT cover: the honest bound on
+    a computed value, or the reason a deferred property is deferred.
+    """
+
+    name: str
+    tier: Tier
+    value: str | None
+    residual: str
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "tier": self.tier.value,
+            "value": self.value,
+            "residual": self.residual,
+        }
+
+
+@dataclass(frozen=True)
+class TrustMap:
+    """A claim's trust as a placed, honest ledger of properties."""
+
+    version: str
+    subject_kind: str
+    subject_id: str
+    properties: tuple[TrustProperty, ...]
+
+    def to_dict(self) -> dict:
+        return {
+            "version": self.version,
+            "subject_kind": self.subject_kind,
+            "subject_id": self.subject_id,
+            "properties": [p.to_dict() for p in self.properties],
+        }
+
+    def canonical_digest(self) -> str:
+        """``sha256:<hex>`` over the canonical map bytes (RFC 8785)."""
+        return "sha256:" + hashlib.sha256(canonicalize(self.to_dict())).hexdigest()
+
+    def get(self, name: str) -> "TrustProperty | None":
+        for p in self.properties:
+            if p.name == name:
+                return p
+        return None
+
+
+def parse_grounding_record(value) -> "dict | None":
+    """Coerce a stored ``observed_grounding`` value into a record dict, or None.
+
+    ``get_claim`` returns the raw column (a JSON string), while some callers
+    already hold a decoded dict. One parser keeps the map, ``verify``, and the
+    graph read path from drifting on how a malformed record is treated (→ None,
+    never a partial dict).
+    """
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        import json as _json
+
+        try:
+            parsed = _json.loads(value)
+        except (ValueError, TypeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def _short(keyid: str | None) -> str:
+    """First 12 hex chars of a keyid for display, or a placeholder."""
+    if not keyid:
+        return "—"
+    return f"{keyid[:12]}…"
+
+
+def _grounding_property(claim: dict) -> TrustProperty:
+    """Place the observed-grounding axis, carrying the verdict reason + cited set.
+
+    A pre-observer claim (no stored verdict) renders ``not present`` — never
+    inferred. A GROUNDED verdict on a pre-binding axis renders with the
+    pre-binding label so an auditor sees the citation binding was not checkable
+    when it was computed.
+    """
+    record = parse_grounding_record(claim.get("observed_grounding"))
+    if not isinstance(record, dict) or not record.get("grounding"):
+        return TrustProperty(
+            name="grounding",
+            tier=Tier.COMPUTED,
+            value=NOT_PRESENT,
+            residual=(
+                "no observed-grounding verdict on this claim; it predates the "
+                "execution-observed axis (grounding was never computed for it)"
+            ),
+        )
+    state = record.get("grounding")
+    reason = record.get("reason") or ""
+    cited = record.get("cited_sources") or []
+    grounded = record.get("grounded_sources")
+    version = record.get("version")
+    pre_binding = version not in _BINDING_AXIS_VERSIONS
+    # A plain file read is a stat-based proxy (opened + non-empty), not a
+    # byte-level proof, so a GROUNDED file verdict is PROXIED; the observer's
+    # own reason carries the specifics.
+    tier = Tier.COMPUTED
+    if state == "GROUNDED":
+        value = PRE_BINDING_GROUNDED_LABEL if pre_binding else "GROUNDED"
+        tier = Tier.PROXIED
+    else:
+        value = state
+    # Surface the GROUNDED set (the sources a read was actually observed for and
+    # the binding is checked against), not just the declared cite set: showing
+    # only the declared set would imply every cited source was grounded when only
+    # the read-observed subset was. Name the declared set separately when it is
+    # wider, so the gap is visible, not hidden.
+    if grounded is not None:
+        note = (
+            f"; grounded on: {', '.join(map(str, grounded))}" if grounded
+            else "; grounded on: (no cited read observed)"
+        )
+        if cited and set(cited) - set(grounded):
+            note += f"; declared cited (not all read-verified): {', '.join(map(str, cited))}"
+    else:
+        note = (
+            f"; declared cited set, binding not checkable: {', '.join(map(str, cited))}"
+            if cited else "; cited set: (none recorded)"
+        )
+    residual = f"{reason}{note}" if reason else f"observed axis{note}"
+    return TrustProperty(name="grounding", tier=tier, value=value, residual=residual)
+
+
+def _independence_property(claim: dict, n_roots: int) -> TrustProperty:
+    """Place the INDEPENDENCE axis, distinct from the support ladder.
+
+    Distinctness that rests on operator-mintable keys alone is UNVERIFIABLE: one
+    operator can mint any number of keys, so "two distinct signers" proves
+    nothing about independent lines of evidence when they all trace to one trust
+    root. Fewer than two enrolled roots (zero or one) is that unverifiable case:
+    zero roots is the most conservative reading, not a multi-root convergence.
+    Only two or more roots is the weak-convergence-prior case, and even then the
+    map does not translate a convergence marker into the word "independent".
+
+    This axis is a GRAPH-LEVEL disclosure of validator-root topology, not a
+    per-claim measurement: the residual says so, so a lone-signer claim is not
+    read as carrying a convergence prior it does not have.
+    """
+    if n_roots < 2:
+        detail = (
+            "no trust root is enrolled" if n_roots == 0
+            else "all validators trace to a single trust root"
+        )
+        return TrustProperty(
+            name="independence",
+            tier=Tier.COMPUTED,
+            value="UNVERIFIABLE",
+            residual=(
+                f"{detail}; distinctness rests on operator-mintable keys alone, so "
+                "independent lines of evidence cannot be verified (graph-level "
+                "validator topology, not a per-claim measure)"
+            ),
+        )
+    return TrustProperty(
+        name="independence",
+        tier=Tier.COMPUTED,
+        value="MULTI_ROOT",
+        residual=(
+            "more than one root of trust is enrolled; distinct signers under "
+            "distinct roots is a weak convergence prior, not proof of independence "
+            "(graph-level validator topology, not a per-claim measure)"
+        ),
+    )
+
+
+def _standing_property(claim: dict) -> TrustProperty:
+    """Place standing / ratification: the computed gate, human-in-the-loop by design."""
+    level = claim.get("support_level") or "PRELIMINARY"
+    verified = claim.get("verified")
+    if level == "ESTABLISHED":
+        detail = (
+            "ratified to ESTABLISHED by a signed human-validator envelope"
+            if verified
+            else "marked ESTABLISHED but the validation envelope did not verify on read"
+        )
+    elif level == "REPLICATED":
+        detail = "REPLICATED by distinct-signer convergence; ratification to ESTABLISHED is human-in-the-loop by design"
+    else:
+        detail = "PRELIMINARY; no ratification gate cleared"
+    return TrustProperty(
+        name="standing",
+        tier=Tier.COMPUTED,
+        value=level,
+        residual=detail,
+    )
+
+
+def _witnessing_property(claim: dict, has_inclusion: bool) -> TrustProperty:
+    """Place witnessing honestly against the actual transparency-log inclusion.
+
+    ``transparency_logged`` defaults to 1 even when no transparency log is in
+    use (a signed claim REPLICATES on the local signature alone), so the flag
+    alone cannot be read as "witnessed." The map keys off whether an actual
+    inclusion record exists: present → witnessed; a set flag with no inclusion →
+    not gated on witnessing (the log was disabled); a cleared flag → inclusion
+    pending.
+    """
+    logged = claim.get("transparency_logged")
+    signed = claim.get("signature_bundle")
+    if not signed:
+        return TrustProperty(
+            name="witnessing",
+            tier=Tier.COMPUTED,
+            value=NOT_PRESENT,
+            residual="unsigned claim; nothing to witness in a transparency log",
+        )
+    if has_inclusion:
+        return TrustProperty(
+            name="witnessing",
+            tier=Tier.COMPUTED,
+            value="logged",
+            residual="signed and recorded in a transparency log with an inclusion proof",
+        )
+    if logged == 1:
+        return TrustProperty(
+            name="witnessing",
+            tier=Tier.COMPUTED,
+            value="not witnessed",
+            residual=(
+                "signed but no transparency-log inclusion; the log was not enabled, "
+                "so the top of the support ladder is unreachable (it requires witnessing)"
+            ),
+        )
+    return TrustProperty(
+        name="witnessing",
+        tier=Tier.COMPUTED,
+        value="pending",
+        residual="signed; transparency-log inclusion is pending retry",
+    )
+
+
+def build_trust_map(conn, claim_id: str, *, single_domain: "bool | None" = None) -> "TrustMap | None":
+    """Build the trust map for a stored claim, or ``None`` if it does not exist.
+
+    ``conn`` is an open graph connection. ``single_domain`` may be passed to
+    avoid a redundant validator-topology read when the caller already has it;
+    when ``None`` it is read from the graph.
+    """
+    from mareforma.db import get_claim
+
+    claim = get_claim(conn, claim_id)
+    if claim is None:
+        return None
+    if single_domain is None:
+        from mareforma import validators as _validators
+
+        n_roots = len(_validators.enrollment_roots(conn))
+    else:
+        # Explicit override (a caller that already knows the topology): the bool
+        # maps to a representative count — a single domain is one root, "not
+        # single" is two. A zero-root graph is only reached via the graph read
+        # above, where its distinct three-way handling matters.
+        n_roots = 1 if single_domain else 2
+    has_inclusion = _has_rekor_inclusion(conn, claim_id)
+    # Attributability must reflect an ACTUAL signature check, not the promotion
+    # gate: get_claim's ``verified`` passes PRELIMINARY rows through True without
+    # re-verifying, so trusting it would make the map assert "signature
+    # re-verified on read" for a signed PRELIMINARY claim it never checked (and
+    # miss a tamper). Run the audit-grade, tier-independent re-verification here,
+    # the same one ``mareforma verify`` uses, so the standalone map is honest.
+    sig_verified = None
+    asserter_enrolled = None
+    if claim.get("asserter_keyid") and claim.get("signature_bundle"):
+        from mareforma.db import verify_claim_signatures
+        from mareforma.validators import is_enrolled
+
+        sig_verified, _ = verify_claim_signatures(conn, claim)
+        # verify_claim_signatures returns (True, "") for a non-enrolled asserter:
+        # it can only check the claim-binding, never the signature against a
+        # pubkey (the lean model has no key to check it against). Tell the two
+        # apart so the map does not claim "re-verified" for a binding-only pass.
+        asserter_enrolled = is_enrolled(conn, claim["asserter_keyid"])
+    return _assemble(
+        claim, n_roots, has_inclusion,
+        sig_verified=sig_verified, asserter_enrolled=asserter_enrolled,
+    )
+
+
+def _has_rekor_inclusion(conn, claim_id: str) -> bool:
+    """True iff a transparency-log inclusion record exists for this claim."""
+    import sqlite3
+
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM rekor_inclusions WHERE claim_id = ? LIMIT 1",
+            (claim_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        # No inclusions table (older schema): treat as no inclusion.
+        return False
+    return row is not None
+
+
+def _assemble(
+    claim: dict, n_roots: int, has_inclusion: bool, *, sig_verified: "bool | None" = None,
+    asserter_enrolled: "bool | None" = None,
+) -> TrustMap:
+    """Assemble a TrustMap from an already-fetched claim dict (pure).
+
+    ``n_roots`` is the number of enrolled trust roots. Fewer than two (zero or
+    one) means independence cannot be verified; only two or more is the
+    weak-convergence-prior case. ``sig_verified`` is the result of an ACTUAL
+    audit-grade signature re-verification (``verify_claim_signatures``); when
+    ``None`` (a direct caller that did not run one) it falls back to the stored
+    ``verified`` column, which is the support-level read gate, NOT a signature
+    check on PRELIMINARY rows. ``asserter_enrolled`` is ``False`` when the signed
+    asserter is not an enrolled validator: ``verify_claim_signatures`` passes
+    (binding only, no pubkey to check against), so the map must not claim the
+    signature was cryptographically re-verified.
+    """
+    from mareforma.db import refutation_status
+
+    supports = claim.get("supports_json")
+    contradicts = claim.get("contradicts_json")
+    try:
+        import json as _json
+
+        n_supports = len(_json.loads(supports or "[]"))
+        n_contradicts = len(_json.loads(contradicts or "[]"))
+    except (ValueError, TypeError):
+        n_supports = n_contradicts = 0
+
+    asserter = claim.get("asserter_keyid")
+    # An actual signature re-verification if one was run, else the stored gate.
+    att_verified = sig_verified if sig_verified is not None else claim.get("verified")
+    attributability = TrustProperty(
+        name="attributability",
+        tier=Tier.COMPUTED,
+        value=(_short(asserter) if asserter else "unsigned"),
+        residual=(
+            "no signature; the asserter is not cryptographically bound" if not asserter
+            else "asserter signature present, but the asserter is not an enrolled "
+                 "validator, so the signature was not cryptographically re-verified"
+                 if asserter_enrolled is False
+            else "signature re-verified on read" if att_verified
+            else "signature failed re-verification on read"
+        ),
+    )
+
+    provenance = TrustProperty(
+        name="provenance",
+        tier=Tier.COMPUTED,
+        value=f"{n_supports} supports / {n_contradicts} contradicts",
+        residual=(
+            "the declared provenance graph the asserter recorded; a declaration, "
+            "not proof that the cited upstreams were used"
+        ),
+    )
+
+    grounding = _grounding_property(claim)
+
+    methodological = TrustProperty(
+        name="methodological_validity",
+        tier=Tier.COMPUTED,
+        value=claim.get("classification") or "INFERRED",
+        residual=(
+            "declared classification; bearing (supports/refutes/neutral vs a "
+            "registered prediction) is computed for findings that carry an "
+            "effect estimate and prediction"
+        ),
+    )
+
+    leakage = TrustProperty(
+        name="leakage",
+        tier=Tier.DEFERRED,
+        value=None,
+        residual=(
+            "partition/held-out independence is not evaluated; a finding may "
+            "reuse data it should have held out and this map would not show it"
+        ),
+    )
+
+    independence = _independence_property(claim, n_roots)
+
+    ref = refutation_status(claim)
+    contestation = TrustProperty(
+        name="contestation",
+        tier=Tier.COMPUTED,
+        value=ref["state"],
+        residual=f"{ref['reason']} (signal: {ref['signal']})",
+    )
+
+    standing = _standing_property(claim)
+
+    trust_root = TrustProperty(
+        name="trust_root",
+        tier=Tier.DEFERRED,
+        value=(
+            "no trust root enrolled" if n_roots == 0
+            else "single trust domain" if n_roots == 1
+            else "multiple roots"
+        ),
+        residual=(
+            "trust-root concentration is disclosed, not established: a private or "
+            "externally-anchored root of trust is not evaluated this release"
+        ),
+    )
+
+    witnessing = _witnessing_property(claim, has_inclusion)
+
+    properties = (
+        attributability,
+        provenance,
+        grounding,
+        methodological,
+        leakage,
+        independence,
+        contestation,
+        standing,
+        trust_root,
+        witnessing,
+    )
+    return TrustMap(
+        version=TRUST_MAP_VERSION,
+        subject_kind="claim",
+        subject_id=claim.get("claim_id") or "",
+        properties=properties,
+    )

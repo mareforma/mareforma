@@ -951,6 +951,7 @@ def add_claim(
     predicate_payload: dict | None = None,
     original_signature_bundle: str | None = None,
     observed_grounding: dict | None = None,
+    strict_promotion: bool = False,
 ) -> str:
     """Insert a new claim and return its claim_id.
 
@@ -1400,6 +1401,7 @@ def add_claim(
             conn, claim_id, supports or [], generated_by, artifact_hash,
             on_error=on_convergence_error,
             own_transaction=_own_transaction,
+            strict_promotion=strict_promotion,
         )
 
     # Snapshot committed state only. When this call joined a caller's open
@@ -1417,11 +1419,20 @@ def _maybe_update_replicated_unlocked(
     supports: list[str],
     generated_by: str,
     artifact_hash: str | None = None,
+    *,
+    strict_promotion: bool = False,
 ) -> None:
     """REPLICATED-detection SQL without a commit: caller controls the txn.
 
     Used by ``mark_claim_resolved`` so the unresolved-flag clear and the
     REPLICATED promotion land in the same SQLite transaction.
+
+    ``strict_promotion`` (opt-in, off by default) requires **non-NULL data on
+    both sides** of the converging pair: the new claim and every candidate peer
+    must carry an ``artifact_hash``. The default rule promotes on the
+    distinct-signer axis alone (absent data never blocks); an operator who wants
+    data-distinctness as a hard gate turns this on. It never loosens the default
+    — it only adds the data-presence requirement.
 
     Independence axis: distinct asserter_keyid
     ------------------------------------------
@@ -1490,6 +1501,13 @@ def _maybe_update_replicated_unlocked(
     if not _observed_grounding_promotes(new_status_row["observed_grounding"]):
         return
 
+    # Strict-promotion gate (opt-in): the new claim must carry data. Without an
+    # artifact_hash there is no data to distinguish from a peer, so under strict
+    # mode it cannot start or join a convergence. The default rule promotes on
+    # the signer axis alone; this adds the data-presence requirement.
+    if strict_promotion and artifact_hash is None:
+        return
+
     # Shared-anchor rule: the converged-on-same-upstream contract requires
     # that there exists a SINGLE upstream X such that
     #   X ∈ new_claim.supports  ∧  X ∈ peer.supports  ∧  X is ESTABLISHED+open.
@@ -1526,6 +1544,12 @@ def _maybe_update_replicated_unlocked(
     # claim and ride an honest peer's INSERT into REPLICATED (and from
     # there, via validate(), into ESTABLISHED — usable as a fake upstream
     # for further chains).
+    # Under strict promotion, a candidate peer must ALSO carry data — an
+    # artifact_hash on both sides is the data-distinctness the operator opted
+    # into. Off by default, this clause is empty and behaviour is unchanged.
+    strict_peer_clause = (
+        "\n          AND c.artifact_hash IS NOT NULL" if strict_promotion else ""
+    )
     rows = conn.execute(
         f"""
         SELECT DISTINCT c.claim_id, c.asserter_keyid
@@ -1553,7 +1577,7 @@ def _maybe_update_replicated_unlocked(
               c.artifact_hash IS NOT NULL
               AND ? IS NOT NULL
               AND c.artifact_hash = ?
-          )
+          ){strict_peer_clause}
         """,
         (*established_anchors, new_claim_id, new_asserter_keyid,
          artifact_hash, artifact_hash),
@@ -1586,6 +1610,7 @@ def _maybe_update_replicated(
     on_error: "Callable[[Exception], None] | None" = None,
     *,
     own_transaction: bool = True,
+    strict_promotion: bool = False,
 ) -> bool:
     """Promote claims to REPLICATED when convergence is detected.
 
@@ -1612,6 +1637,7 @@ def _maybe_update_replicated(
     try:
         _maybe_update_replicated_unlocked(
             conn, new_claim_id, supports, generated_by, artifact_hash,
+            strict_promotion=strict_promotion,
         )
         if own_transaction:
             conn.commit()
@@ -1666,6 +1692,8 @@ def _maybe_update_replicated_best_effort(
     supports: list[str],
     generated_by: str,
     artifact_hash: str | None,
+    *,
+    strict_promotion: bool = False,
 ) -> None:
     """Re-check REPLICATED after a caller-owned flag flip without losing work.
 
@@ -1680,7 +1708,7 @@ def _maybe_update_replicated_best_effort(
     """
     ok = _maybe_update_replicated(
         conn, claim_id, supports, generated_by, artifact_hash,
-        own_transaction=False,
+        own_transaction=False, strict_promotion=strict_promotion,
     )
     if not ok:
         from mareforma.health import append_health_event
@@ -2877,6 +2905,8 @@ def mark_claim_logged(
     root: Path,
     claim_id: str,
     new_signature_bundle: str,
+    *,
+    strict_promotion: bool = False,
 ) -> None:
     """Mark a claim as transparency-log included and update its bundle.
 
@@ -3028,6 +3058,7 @@ def mark_claim_logged(
             if not unresolved:
                 _maybe_update_replicated_best_effort(
                     conn, root, claim_id, supports, generated_by, artifact_hash,
+                    strict_promotion=strict_promotion,
                 )
     except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
         raise DatabaseError(f"Failed to mark claim logged: {exc}") from exc
@@ -3039,6 +3070,8 @@ def mark_claim_resolved(
     conn: sqlite3.Connection,
     root: Path,
     claim_id: str,
+    *,
+    strict_promotion: bool = False,
 ) -> None:
     """Clear the unresolved flag on a claim and re-check REPLICATED eligibility.
 
@@ -3079,6 +3112,7 @@ def mark_claim_resolved(
             # (retry flag + health event) rather than strand the claim.
             _maybe_update_replicated_best_effort(
                 conn, root, claim_id, supports, generated_by, artifact_hash,
+                strict_promotion=strict_promotion,
             )
     except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
         raise DatabaseError(f"Failed to mark claim resolved: {exc}") from exc
@@ -3096,6 +3130,7 @@ def update_claim(
     supports: list[str] | None = None,
     contradicts: list[str] | None = None,
     comparison_summary: str | None = None,
+    strict_promotion: bool = False,
 ) -> None:
     """Update fields on an existing claim.
 
@@ -3232,6 +3267,7 @@ def update_claim(
                 _maybe_update_replicated_best_effort(
                     conn, root, claim_id, new_supports,
                     existing["generated_by"], existing.get("artifact_hash"),
+                    strict_promotion=strict_promotion,
                 )
     except sqlite3.IntegrityError as exc:
         translated = _state_error_from_integrity(exc)
@@ -3429,10 +3465,144 @@ def _verify_participant_bundle_on_read(
                 pem = base64.standard_b64decode(signer_row["pubkey_pem"])
                 pub = _signing.public_key_from_pem(pem)
                 ok = bool(_signing.verify_envelope(env, pub))
+                # Multi-role parity: a claim-with-roles:v1 bundle carries role
+                # attestations in signatures[1:]. verify_envelope only checked
+                # signatures[0] (the asserter); walk the rest so a forged role
+                # signature is caught on the LIVE read path, not only at restore.
+                if ok:
+                    ok = _verify_role_signatures(conn, env)
     except Exception:
         ok = False
     cache[ck] = ok
     return ok
+
+
+def _verify_role_signatures(conn: sqlite3.Connection, env: dict) -> bool:
+    """Verify the role attestations in signatures[1:] of a claim-with-roles bundle.
+
+    The shared read-path routine for multi-signature envelopes. Applies the same
+    contract restore enforces (:func:`db.restore._verify_claim_signatures_on_restore`):
+    every signature beyond the asserter must carry a role in
+    :data:`signing.VALID_CLAIM_ROLES`, roles are unique, each signer's keyid must
+    be enrolled, and each signature must verify against that keyid's pubkey over
+    the DSSE PAE. Any deviation → ``False``. A single-signature (asserter-only)
+    bundle has nothing extra to check and passes.
+    """
+    from mareforma import signing as _signing
+    from mareforma import validators as _validators
+
+    sigs = env.get("signatures") or []
+    if len(sigs) <= 1:
+        return True
+    try:
+        payload_bytes = base64.standard_b64decode(env["payload"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    pae = _signing.dsse_pae(_signing.PAYLOAD_TYPE_CLAIM, payload_bytes)
+    seen_roles: set[str] = set()
+    for entry in sigs[1:]:
+        if not isinstance(entry, dict):
+            return False
+        role = entry.get("role")
+        keyid = entry.get("keyid")
+        if not isinstance(role, str) or role not in _signing.VALID_CLAIM_ROLES:
+            return False
+        if role in seen_roles:
+            return False
+        seen_roles.add(role)
+        if not isinstance(keyid, str):
+            return False
+        signer_row = _validators.get_validator(conn, keyid)
+        if signer_row is None:
+            return False  # orphan signer — not enrolled
+        try:
+            pem = base64.standard_b64decode(signer_row["pubkey_pem"])
+            pub = _signing.public_key_from_pem(pem)
+            sig_bytes = base64.standard_b64decode(entry["sig"])
+            pub.verify(sig_bytes, pae)
+        except Exception:
+            return False
+    return True
+
+
+def verify_claim_signatures(
+    conn: sqlite3.Connection, row: dict,
+) -> tuple[bool, str]:
+    """Audit-grade, tier-independent re-verification of a claim's signatures.
+
+    Unlike :func:`_row_verified_on_read` — which is gated by support level and
+    passes PRELIMINARY rows through untouched — this re-checks a signed claim's
+    bundle at ANY tier, for the explicit ``mareforma verify`` audit. It confirms
+    the signed predicate binds THIS row (claim_id + every signed field matches,
+    catching a hand-edited row), verifies the asserter signature when the
+    asserter is enrolled, and verifies all role attestations. Returns
+    ``(ok, reason)``; ``reason`` is empty on success.
+
+    An unsigned claim returns ``(True, "")`` — there is no signature to break;
+    its lack of attribution is reported by the trust map, not failed here. A
+    non-enrolled asserter cannot have its signature checked against a pubkey in
+    the lean model, so the claim-binding (predicate names this row, signed fields
+    match) is the integrity floor offered.
+    """
+    from mareforma import signing as _signing
+    from mareforma import validators as _validators
+
+    bundle_json = row.get("signature_bundle")
+    if not bundle_json:
+        return (True, "")
+    try:
+        env = json.loads(bundle_json)
+    except (ValueError, TypeError):
+        return (False, "signature bundle is not valid JSON")
+    try:
+        pred = _signing.claim_predicate_from_envelope(env)
+    except Exception:
+        return (False, "signature bundle envelope is structurally invalid")
+
+    if pred.get("claim_id") != row.get("claim_id"):
+        return (False, "signed predicate does not bind this claim id")
+
+    expected = {
+        "claim_id": row.get("claim_id"),
+        "text": row.get("text"),
+        "classification": row.get("classification"),
+        "generated_by": row.get("generated_by"),
+        "supports": _json_list(row.get("supports_json")),
+        "contradicts": _json_list(row.get("contradicts_json")),
+        "source_name": row.get("source_name"),
+        "artifact_hash": row.get("artifact_hash"),
+        "created_at": row.get("created_at"),
+    }
+    for field in _signing.SIGNED_FIELDS:
+        if pred.get(field) != expected[field]:
+            return (False, f"signed field {field!r} does not match the row (tampered)")
+
+    keyid = _extract_signature_bundle_keyid(bundle_json) or row.get("asserter_keyid")
+    if keyid is not None:
+        signer_row = _validators.get_validator(conn, keyid)
+        if signer_row is not None:
+            try:
+                pem = base64.standard_b64decode(signer_row["pubkey_pem"])
+                pub = _signing.public_key_from_pem(pem)
+                if not _signing.verify_envelope(env, pub):
+                    return (False, "asserter signature failed verification")
+            except Exception:
+                return (False, "asserter signature could not be verified")
+
+    if not _verify_role_signatures(conn, env):
+        return (False, "a role signature failed verification")
+    return (True, "")
+
+
+def _json_list(value) -> list:
+    """Parse a JSON-array column into a list; ``None``/malformed → ``[]``."""
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except (ValueError, TypeError):
+        return []
+    return parsed if isinstance(parsed, list) else []
 
 
 def get_claim(conn: sqlite3.Connection, claim_id: str) -> dict | None:

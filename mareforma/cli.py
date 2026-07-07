@@ -82,6 +82,46 @@ def _info(msg: str) -> None:
     click.echo(click.style("  ", fg="cyan") + msg)
 
 
+_TIER_FG = {"COMPUTED": "green", "PROXIED": "yellow", "DEFERRED": "white"}
+
+
+def _trust_map_plaintext(tmap) -> str:
+    """Unstyled text rendering of a TrustMap — for writing to a file (no ANSI)."""
+    lines = [
+        "TRUST MAP",
+        f"  {tmap.subject_kind} {tmap.subject_id}",
+        f"  map version: {tmap.version}",
+        "",
+    ]
+    for p in tmap.properties:
+        val = "—" if p.value is None else str(p.value)
+        lines.append(f"  {p.name:24} [{p.tier.value:8}] {val}")
+        lines.append(f"      {p.residual}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _echo_trust_map(tmap, *, redact_home: bool = False) -> None:
+    """Print a TrustMap as a human-readable ledger."""
+    def out(line: str) -> None:
+        click.echo(_redact_home(line) if redact_home else line)
+
+    click.echo(click.style("TRUST MAP", bold=True, fg="cyan"))
+    out(f"  {tmap.subject_kind} {tmap.subject_id}")
+    click.echo(f"  map version: {tmap.version}")
+    click.echo("")
+    for p in tmap.properties:
+        color = _TIER_FG.get(p.tier.value, "white")
+        val = "—" if p.value is None else str(p.value)
+        click.echo(
+            "  " + click.style(f"{p.name:24}", bold=True) + " "
+            + click.style(f"[{p.tier.value:8}]", fg=color) + " "
+        )
+        out(f"      {val}")
+        out(f"      {p.residual}")
+        click.echo("")
+
+
 # ---------------------------------------------------------------------------
 # Root group
 # ---------------------------------------------------------------------------
@@ -674,36 +714,428 @@ def export(
         sys.exit(1)
 
 
-@cli.command()
-@click.argument("bundle_path")
-def verify(bundle_path: str) -> None:
-    """Verify a SCITT-style signed bundle against the local signing key.
+# verify exit-code contract (E3 — stable across releases, keyed by CI gates):
+#   0  verified
+#   1  tamper or binding violation (a definite NO)
+#   2  unverifiable (missing material to reach a verdict — not a NO)
+#   3  usage error (a bad flag / missing argument — NOT one of the above)
+# The split between 1 and 2 is the whole point: a CI gate must be able to tell
+# "this claim is tampered" from "I could not check this claim." Click defaults a
+# usage error to exit 2, which would collide with "unverifiable"; the command
+# class below remaps it to 3 so a typo'd flag can never read as a verdict.
+_VERIFY_OK = 0
+_VERIFY_FAIL = 1
+_VERIFY_UNVERIFIABLE = 2
+_VERIFY_USAGE = 3
 
-    \b
-    Examples:
-        mareforma verify mareforma-bundle.json
+
+class _VerifyCommand(click.Command):
+    """A command whose click usage errors exit 3, distinct from the 0/1/2 verdicts.
+
+    A bad flag or missing argument is neither "verified", "tampered", nor
+    "unverifiable" — surfacing it as exit 2 would let a CI gate misread a typo as
+    "could not verify." Bumping the usage-error exit code keeps the verdict codes
+    unambiguous.
+    """
+
+    def parse_args(self, ctx, args):
+        try:
+            return super().parse_args(ctx, args)
+        except click.UsageError as exc:
+            exc.exit_code = _VERIFY_USAGE
+            raise
+
+
+def _verify_bundle_file(path: Path, as_json: bool) -> int:
+    """Verify a signed bundle with public material only. Returns an exit code.
+
+    Auditor posture: verification needs only the public key. The local signing
+    key (its public half) is the material a solo operator has; when it is absent
+    the bundle is UNVERIFIABLE (exit 2), never a failure (exit 1) — the auditor
+    lacks the key, the bundle is not proven tampered.
     """
     from mareforma import signing as _signing
     from mareforma.export_bundle import BundleVerificationError, verify_bundle
 
+    key_path = _signing.default_key_path()
+    if not key_path.exists():
+        reason = (
+            "no public key available to verify this bundle (no local key found). "
+            "This is unverifiable, not a failure; supply the signer's key."
+        )
+        if as_json:
+            click.echo(json.dumps(
+                {"target": str(path), "target_kind": "bundle",
+                 "verdict": "unverifiable", "exit_code": _VERIFY_UNVERIFIABLE,
+                 "reason": reason}, indent=2))
+        else:
+            _err(reason)
+        return _VERIFY_UNVERIFIABLE
     try:
-        key_path = _signing.default_key_path()
-        if not key_path.exists():
-            _err(
-                "mareforma verify requires the signing key that produced "
-                "the bundle. Run `mareforma bootstrap` or restore the key."
-            )
-            sys.exit(1)
         private_key = _signing.load_private_key(key_path)
-        statement = verify_bundle(Path(bundle_path), private_key.public_key())
-        n_subjects = len(statement.get("subject") or [])
-        _ok(f"Bundle verified: {n_subjects} claim subject(s) match.")
+        statement = verify_bundle(path, private_key.public_key())
     except BundleVerificationError as exc:
-        _err(f"Bundle verification failed: {exc}")
+        reason = f"bundle verification failed: {exc}"
+        if as_json:
+            click.echo(json.dumps(
+                {"target": str(path), "target_kind": "bundle",
+                 "verdict": "tampered", "exit_code": _VERIFY_FAIL,
+                 "reason": reason}, indent=2))
+        else:
+            _err(reason)
+        return _VERIFY_FAIL
+    except _signing.SigningError as exc:
+        reason = f"could not load the local key to verify: {exc}"
+        if as_json:
+            click.echo(json.dumps(
+                {"target": str(path), "target_kind": "bundle",
+                 "verdict": "unverifiable", "exit_code": _VERIFY_UNVERIFIABLE,
+                 "reason": reason}, indent=2))
+        else:
+            _err(reason)
+        return _VERIFY_UNVERIFIABLE
+    n_subjects = len(statement.get("subject") or [])
+    if as_json:
+        click.echo(json.dumps(
+            {"target": str(path), "target_kind": "bundle",
+             "verdict": "verified", "exit_code": _VERIFY_OK,
+             "subjects": n_subjects}, indent=2))
+    else:
+        _ok(f"Bundle verified: {n_subjects} claim subject(s) match.")
+    return _VERIFY_OK
+
+
+def _verify_claim(target: str, as_json: bool, redact_home: bool) -> int:
+    """Verify a stored claim end to end and print its trust map.
+
+    Auditor mode: uses only public material (the graph's enrolled validator
+    pubkeys). Re-verifies signatures on read, re-checks the grounding→citation
+    binding against the FROZEN routine, and prints the trust map. A claim that
+    cannot be located is UNVERIFIABLE (2); a signature or binding that fails is a
+    definite tamper/violation (1).
+    """
+    import mareforma
+    from mareforma.db import DatabaseError, verify_claim_signatures
+    from mareforma.observe._binding import check_grounding_binding
+    from mareforma.trust_map import build_trust_map, parse_grounding_record
+
+    def emit_json(payload: dict) -> None:
+        # Every JSON path — success AND failure — honors --redact-home. The
+        # tampered/unverifiable payloads embed the trust map whose residuals
+        # carry cited-source paths, so a dropped redaction here would leak
+        # $HOME on exactly the receipt an auditor forwards.
+        text = json.dumps(payload, indent=2)
+        click.echo(_redact_home(text) if redact_home else text)
+
+    def unverifiable(reason: str) -> int:
+        if as_json:
+            emit_json({"target": target, "target_kind": "claim",
+                       "verdict": "unverifiable",
+                       "exit_code": _VERIFY_UNVERIFIABLE, "reason": reason})
+        else:
+            _err(reason)
+        return _VERIFY_UNVERIFIABLE
+
+    root = _discover_root()
+    if root is None:
+        return unverifiable(
+            f"no mareforma project here or above to resolve claim {target!r}; "
+            "cannot verify"
+        )
+
+    try:
+        with mareforma.open(root) as graph:
+            claim = graph.get_claim(target)
+            if claim is None:
+                return unverifiable(
+                    f"claim {target!r} not found in this project; cannot verify"
+                )
+
+            problems: list[str] = []
+            # Signature re-verification. Two complementary checks:
+            #  (a) the tier-gated read flag (ESTABLISHED validation envelope /
+            #      REPLICATED participant bundle), and
+            #  (b) an audit-grade, tier-INDEPENDENT re-check (signed-field
+            #      binding + asserter + role signatures) that catches a tampered
+            #      PRELIMINARY signed claim the flag would pass through.
+            if claim.get("signature_bundle") and not claim.get("verified"):
+                problems.append("signature failed re-verification on read")
+            sig_ok, sig_reason = verify_claim_signatures(graph._conn, claim)
+            if not sig_ok:
+                problems.append(sig_reason)
+
+            # Grounding→citation binding re-check. Bind on ``grounded_sources``
+            # (the cited sources a read was actually observed for), not the
+            # declared ``cited_sources`` — matching the write side and the
+            # verify-on-read path (mareforma.db.restore). A producer who declares
+            # a dataset in cites but reads only a decoy grounds on the decoy, so
+            # the declared set would falsely MATCH. The check runs even when the
+            # set is EMPTY, because "finding cites data + verdict grounded on none
+            # of it" is itself a binding violation. A pre-binding verdict has no
+            # such field and is annotated by the trust map, not failed here.
+            grounding = parse_grounding_record(claim.get("observed_grounding"))
+            if (
+                isinstance(grounding, dict)
+                and grounding.get("grounding") == "GROUNDED"
+                and grounding.get("grounded_sources") is not None
+            ):
+                verdict_grounded = tuple(grounding.get("grounded_sources") or ())
+                finding_sources = tuple(_claim_bound_sources(claim))
+                result = check_grounding_binding(verdict_grounded, finding_sources)
+                if result.disjoint:
+                    problems.append(f"grounding binding violation: {result.reason}")
+
+            # build_trust_map re-fetches the row and runs its own audit-grade
+            # signature re-verification, so the standalone map is honest.
+            tmap = build_trust_map(graph._conn, target)
+            tmap_dict = tmap.to_dict() if tmap else None
+
+            if problems:
+                if as_json:
+                    emit_json({"target": target, "target_kind": "claim",
+                               "verdict": "tampered", "exit_code": _VERIFY_FAIL,
+                               "reason": "; ".join(problems),
+                               "trust_map": tmap_dict})
+                else:
+                    _err("; ".join(problems))
+                    _info("")
+                    _echo_trust_map(tmap, redact_home=redact_home)
+                return _VERIFY_FAIL
+
+            if as_json:
+                emit_json({"target": target, "target_kind": "claim",
+                           "verdict": "verified", "exit_code": _VERIFY_OK,
+                           "trust_map": tmap_dict})
+            else:
+                _ok(f"Claim {target} verified.")
+                _info("")
+                _echo_trust_map(tmap, redact_home=redact_home)
+            return _VERIFY_OK
+    except DatabaseError as exc:
+        return unverifiable(f"could not read the project graph: {exc}")
+
+
+def _claim_bound_sources(claim: dict) -> list[str]:
+    """The finding's bound data-source identifiers for the binding re-check.
+
+    Read from the SIGNED predicate payload — the normalized ``data_sources`` the
+    finding declares its grounding is over, plus any content-addressed
+    ``data_ids`` — exactly the set the write side bound against and the
+    verify-on-read path re-checks (see
+    :func:`mareforma.db.restore._verify_grounding_binding_on_read`). NOT the
+    claim's ``supports`` (claim-id / DOI upstreams that would never intersect a
+    data-path set), and NOT ``source_name`` (a free-text label that never binds).
+    A string-only ``data_id`` with no ``data_source`` yields an empty set, so the
+    binding reads as ``not_applicable``.
+
+    ``data_source`` is not a claim column, so the finding citation lives only in
+    ``predicate_payload``; reading it from anywhere else silently no-ops the
+    binding re-check.
+    """
+    raw = claim.get("predicate_payload")
+    if not isinstance(raw, str):
+        return []
+    try:
+        predicate = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(predicate, dict):
+        return []
+    from mareforma.trust._store import is_content_addressed
+
+    data_sources = predicate.get("data_sources") or []
+    data_ids = predicate.get("data_ids") or []
+    out = [s for s in data_sources if isinstance(s, str)]
+    out += [d for d in data_ids if isinstance(d, str) and is_content_addressed(d)]
+    return out
+
+
+def _verify_export_dir(path: Path, as_json: bool) -> int:
+    """Verify an export directory by finding and verifying its signed bundle."""
+    bundle = path / "mareforma-bundle.json"
+    if bundle.is_file():
+        return _verify_bundle_file(bundle, as_json)
+    reason = (
+        f"no signed bundle (mareforma-bundle.json) found in {path}; nothing to "
+        "verify with public material"
+    )
+    if as_json:
+        click.echo(json.dumps(
+            {"target": str(path), "target_kind": "export-dir",
+             "verdict": "unverifiable", "exit_code": _VERIFY_UNVERIFIABLE,
+             "reason": reason}, indent=2))
+    else:
+        _err(reason)
+    return _VERIFY_UNVERIFIABLE
+
+
+@cli.command(cls=_VerifyCommand)
+@click.argument("target")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Emit a machine-readable verdict + trust map to stdout.")
+@click.option("--redact-home", "redact_home", is_flag=True, default=False,
+              help="Rewrite $HOME to ~ in the printed trust map (never applied "
+                   "to signed receipts).")
+def verify(target: str, as_json: bool, redact_home: bool) -> None:
+    """Verify a claim, a signed bundle, or an export directory (the audit receipt).
+
+    TARGET is detected by shape: an existing file is verified as a signed
+    bundle; an existing directory as an export dir; anything else as a claim id
+    resolved against the local project. Verifying a claim uses only public
+    material (auditor mode) and prints its trust map.
+
+    \b
+    Exit codes (stable, for CI gates):
+        0  verified
+        1  tamper or binding violation
+        2  unverifiable (missing material to reach a verdict)
+        3  usage error (bad flag / argument)
+
+    \b
+    Examples:
+        mareforma verify <claim-id>
+        mareforma verify <claim-id> --json
+        mareforma verify mareforma-bundle.json
+        mareforma verify ./export-dir
+    """
+    p = Path(target)
+    try:
+        if p.exists():
+            if p.is_dir():
+                code = _verify_export_dir(p, as_json)
+            else:
+                code = _verify_bundle_file(p, as_json)
+        else:
+            code = _verify_claim(target, as_json, redact_home)
+    except Exception as exc:  # noqa: BLE001
+        # An unexpected failure means we could not reach a verdict, which is
+        # UNVERIFIABLE (exit 2), NOT a tamper (exit 1). Letting it escape would
+        # surface as Python's exit 1 — the exact 1-vs-2 confusion the stable
+        # exit-code contract exists to prevent for CI gates.
+        reason = f"verification could not complete: {type(exc).__name__}"
+        if as_json:
+            click.echo(json.dumps(
+                {"target": target, "verdict": "unverifiable",
+                 "exit_code": _VERIFY_UNVERIFIABLE, "reason": reason},
+                indent=2))
+        else:
+            _err(reason)
+        code = _VERIFY_UNVERIFIABLE
+    sys.exit(code)
+
+
+@cli.command("map")
+@click.argument("claim_id")
+@click.option("--html", "as_html", is_flag=True, default=False,
+              help="Render the trust map as one self-contained HTML file.")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Emit the trust map as JSON to stdout.")
+@click.option("--output", default=None,
+              help="Write the artifact to this path instead of stdout "
+                   "(HTML defaults to stdout when omitted).")
+@click.option("--redact-home", "redact_home", is_flag=True, default=False,
+              help="Rewrite $HOME to ~ in the emitted artifact.")
+def map_cmd(claim_id: str, as_html: bool, as_json: bool,
+            output: str | None, redact_home: bool) -> None:
+    """Show the per-finding trust map for a claim.
+
+    Places every trust property (attributability, provenance, grounding,
+    methodological validity, leakage, independence, contestation, standing,
+    trust-root, witnessing) at its tier with the residual named. A read-side
+    artifact: it adds no signed field and infers nothing it cannot compute.
+
+    \b
+    Examples:
+        mareforma map <claim-id>
+        mareforma map <claim-id> --json
+        mareforma map <claim-id> --html --output trust-map.html
+    """
+    if as_html and as_json:
+        _err("--html and --json are mutually exclusive.")
         sys.exit(1)
-    except Exception as exc:
-        _err(f"Verify failed: {exc}")
+
+    import mareforma
+
+    root = _read_only_root()
+    with mareforma.open(root) as graph:
+        tmap = graph.trust_map(claim_id)
+
+    if tmap is None:
+        _err(f"Claim '{claim_id}' not found.")
         sys.exit(1)
+
+    if as_html:
+        from mareforma.trust_map_html import render_html
+
+        html = render_html(tmap)
+        if redact_home:
+            html = _redact_home(html)
+        if output:
+            Path(output).write_text(html, encoding="utf-8")
+            _ok(f"Wrote trust map → {output}")
+        else:
+            click.echo(html, nl=False)
+        return
+
+    if as_json:
+        text = json.dumps(tmap.to_dict(), indent=2)
+        if redact_home:
+            text = _redact_home(text)
+        if output:
+            Path(output).write_text(text + "\n", encoding="utf-8")
+            _ok(f"Wrote trust map → {output}")
+        else:
+            click.echo(text)
+        return
+
+    if output:
+        text = _trust_map_plaintext(tmap)
+        if redact_home:
+            text = _redact_home(text)
+        Path(output).write_text(text, encoding="utf-8")
+        _ok(f"Wrote trust map → {output}")
+        return
+
+    _echo_trust_map(tmap, redact_home=redact_home)
+
+
+@cli.command("diagnose", context_settings={"ignore_unknown_options": True})
+@click.option("--cites", "cites", multiple=True, metavar="SRC",
+              help="A source the run should ground on (path/URL/sha256:). "
+                   "Repeatable. Without it, diagnose reports observation only "
+                   "and computes no grounding verdict; it never guesses a "
+                   "citation.")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Emit the observation report as JSON.")
+@click.option("--redact-home", "redact_home", is_flag=True, default=False,
+              help="Rewrite $HOME to ~ in the emitted report.")
+@click.argument("command", nargs=-1, type=click.UNPROCESSED, required=True)
+def diagnose_cmd(cites: tuple[str, ...], as_json: bool, redact_home: bool,
+                 command: tuple[str, ...]) -> None:
+    """Run a Python target under the observer and report what data flowed.
+
+    Runs COMMAND in-process (via runpy, the coverage.py pattern; a subprocess
+    would hide the target behind the observer's own seam) with the grounding
+    observer active, then prints the observed reads, seams, and coverage. With
+    ``--cites`` it also computes and prints the grounding verdict for those
+    sources; without it, the report is observation-only (no verdict is invented
+    for a citation you did not state).
+
+    A target that crashes still prints its partial observation and exits with
+    the target's own exit code.
+
+    \b
+    Examples:
+        mareforma diagnose -- python analysis.py
+        mareforma diagnose --cites /data/trial.csv -- analysis.py
+        mareforma diagnose -- -m mypkg.pipeline
+    """
+    from mareforma.diagnose import run_diagnose
+
+    sys.exit(run_diagnose(
+        list(command), cites=list(cites), as_json=as_json,
+        redact_home=(_redact_home if redact_home else None),
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -830,10 +1262,14 @@ def _redact_home(obj):
     must match the bytes that were signed). Recurses through dicts and lists.
     """
     home = str(Path.home())
+    # A one-character home (``/`` — a root container with HOME=/) would turn this
+    # into a global slash→tilde corruptor, mangling every path in the artifact.
+    # Only redact a real, multi-character home prefix.
+    redact = len(home) > 1 and home != "~"
 
     def walk(x):
         if isinstance(x, str):
-            return x.replace(home, "~") if home and home != "~" else x
+            return x.replace(home, "~") if redact else x
         if isinstance(x, dict):
             return {k: walk(v) for k, v in x.items()}
         if isinstance(x, list):

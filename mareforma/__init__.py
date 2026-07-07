@@ -44,6 +44,7 @@ def open(  # noqa: A001
     trust_insecure_rekor: bool = False,
     rekor_log_pubkey_pem: "bytes | None" = None,
     rekor_log_pubkey_path: "str | Path | None" = None,
+    strict_promotion: bool = False,
 ) -> "EpistemicGraph":
     """Open the epistemic graph at *path* and return an EpistemicGraph.
 
@@ -98,6 +99,14 @@ def open(  # noqa: A001
         PEM file. The two are mutually exclusive. If neither is
         supplied AND ``<root>/.mareforma/rekor_log_pubkey.pem`` exists
         from a prior open(), it is loaded automatically.
+    strict_promotion:
+        When True, REPLICATED promotion additionally requires non-NULL
+        ``artifact_hash`` on BOTH sides of a converging pair — an operator
+        who wants data-distinctness as a hard gate, not just distinct
+        signers. Off by default (the default rule promotes on the
+        distinct-signer axis alone; absent data never blocks). Opt-in and
+        additive: it never loosens the default, only adds the data-presence
+        requirement.
 
     Returns
     -------
@@ -229,6 +238,7 @@ def open(  # noqa: A001
         rekor_url=rekor_url,
         require_rekor=require_rekor,
         rekor_log_pubkey_pem=rekor_log_pubkey_pem,
+        strict_promotion=strict_promotion,
     )
 
 
