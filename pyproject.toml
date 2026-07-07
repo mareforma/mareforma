@@ -38,9 +38,6 @@ Repository = "https://github.com/mareforma/mareforma"
 Issues = "https://github.com/mareforma/mareforma/issues"
 
 [project.optional-dependencies]
-git = [
-    "gitpython>=3.1",
-]
 # Adapter extras. Each names the platform-specific runtime deps the
 # adapter needs. mareforma core stays slim; users opt into the
 # platforms they actually integrate with.
@@ -51,7 +48,6 @@ dev = [
     "pytest>=9.0.3",
     "pytest-cov",
     "pytest-httpx>=0.36.2",
-    "gitpython>=3.1",
 ]
 # Heavy scientific + networking loaders exercised by the grounding tests. Gated
 # behind an extra so the default dev install stays fast and the main matrix does
