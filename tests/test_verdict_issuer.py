@@ -878,34 +878,32 @@ class TestVerdictFieldTamperOnRestore:
 # Restore downgrades transparency without Rekor entry
 # ---------------------------------------------------------------------------
 
-class TestRestoreDowngradesTransparencyWithoutRekor:
-    """Hand-edited claims.toml that flips transparency_logged=true on a
-    claim whose signature_bundle has no rekor block must be silently
-    downgraded to transparency_logged=0 — otherwise the row would
-    satisfy REPLICATED's transparency_logged=1 gate without ever
-    having been witnessed by the log."""
+class TestRestorePreservesNonRekorTransparency:
+    """A non-Rekor project's claims are transparency-ready by default
+    (transparency_logged=1); restore must preserve that so REPLICATED's
+    transparency_logged=1 gate still passes after recovery. Witnessed state
+    for a Rekor-enabled claim is derived from the [rekor_inclusions] sidecar,
+    not the unsigned rekor block inside signature_bundle — the forge-refusal
+    path lives in test_restore_trust_layer."""
 
-    def test_transparency_flag_requires_rekor_block(
+    def test_non_rekor_claim_keeps_transparency_on_restore(
         self, tmp_path: Path,
     ) -> None:
         try:
             import tomllib as tomli  # type: ignore[import-not-found]
         except ImportError:
             import tomli  # type: ignore[no-redef]
-        import tomli_w
         root_key = _bootstrap(tmp_path, "root.key")
         with mareforma.open(tmp_path, key_path=root_key) as g:
             cid = g.assert_claim("anchor")
         toml_path = tmp_path / "claims.toml"
         data = tomli.loads(toml_path.read_text(encoding="utf-8"))
-        # Force-set transparency_logged=true even though no rekor block
-        # was ever attached (no rekor_url was configured).
-        data["claims"][cid]["transparency_logged"] = True
-        toml_path.write_bytes(tomli_w.dumps(data).encode("utf-8"))
-        # Wipe + restore.
+        # No rekor_url was ever configured: the claim is ready by default and
+        # its bundle carries no rekor block. The backup omits the field (it
+        # equals the default), so restore must rebuild it as 1, not demote it.
+        assert "transparency_logged" not in data["claims"][cid]
         _wipe_db(tmp_path)
         mareforma.restore(tmp_path)
         with mareforma.open(tmp_path, key_path=root_key) as g:
             row = g.get_claim(cid)
-        # The flag must be downgraded to 0 — bundle has no rekor uuid.
-        assert row["transparency_logged"] == 0
+        assert row["transparency_logged"] == 1

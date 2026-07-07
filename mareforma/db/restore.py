@@ -15,6 +15,7 @@ the live path proves "what is being written is being signed."
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import sqlite3
 import warnings
@@ -28,10 +29,78 @@ from .core import (
     _is_claim_id,
     _extract_validation_signer_keyid,
     _extract_signature_bundle_keyid,
+    _serialize_observed_grounding,
     _verdict_canonical_payload,
     _REPLICATION_VERDICT_FIELDS,
     _CONTRADICTION_VERDICT_FIELDS,
 )
+
+
+def _parse_observed_grounding(value) -> dict | None:
+    """Parse the restored ``observed_grounding`` record into a dict, or None.
+
+    The column is stored as canonical JSON (or omitted). Restore rebuilds the
+    signed statement from it, so a malformed value must abort loudly rather than
+    silently drop the field and let statement_cid mismatch masquerade as tamper.
+    Absent / empty → None (a claim asserted without the observer).
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError) as exc:
+            raise RestoreError(
+                "A claim's observed_grounding is not valid JSON; "
+                "claims.toml is malformed.",
+                kind="claim_unverified",
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise RestoreError(
+                "A claim's observed_grounding must be a JSON object; "
+                "claims.toml is malformed.",
+                kind="claim_unverified",
+            )
+        return parsed
+    raise RestoreError(
+        f"A claim's observed_grounding has unexpected type "
+        f"{type(value).__name__}; claims.toml is malformed.",
+        kind="claim_unverified",
+    )
+
+
+def _rekor_body_binds_to_claim(entry_val: dict, claim: dict) -> bool:
+    """Whether a Rekor entry's hashedrekord records THIS claim's signed
+    material.
+
+    The logged ``hashedrekord`` carries ``sha256(payload)`` and the signature
+    that were submitted (see :func:`mareforma.signing.submit_to_rekor`). Both
+    must equal the claim's own bundle payload hash and signature. An inclusion
+    proof only shows its body is in the log; this binds that body to the claim,
+    so a valid proof copied from another claim cannot confer witnessed state
+    here. Returns False on any missing/malformed field (fail closed).
+    """
+    bundle_json = claim.get("signature_bundle")
+    if not bundle_json:
+        return False
+    try:
+        bundle = json.loads(bundle_json)
+        claim_hash = hashlib.sha256(
+            base64.standard_b64decode(bundle["payload"])
+        ).hexdigest()
+        claim_sig = bundle["signatures"][0]["sig"]
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError):
+        return False
+    try:
+        record = json.loads(base64.standard_b64decode(entry_val["body"]))
+        spec = record["spec"]
+        body_hash = spec["data"]["hash"]["value"]
+        body_sig = spec["signature"]["content"]
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return False
+    return body_hash == claim_hash and body_sig == claim_sig
 
 
 def _restore_predicate_payload(c: dict, claim_id: str) -> str:
@@ -79,6 +148,7 @@ def restore(
     *,
     claims_toml: Path | str | None = None,
     rekor_log_pubkey_pem: bytes | None = None,
+    enforce_rekor_policy: bool = False,
 ) -> dict:
     """Rebuild a fresh graph.db from claims.toml.
 
@@ -88,6 +158,17 @@ def restore(
 
     Parameters
     ----------
+    enforce_rekor_policy:
+        When True, the operator asserts this project requires Rekor
+        witnessing. restore then requires a valid root-signed
+        ``[project_policy]`` (``rekor_required``) and a pinned
+        ``rekor_log_pubkey_pem``, and marks a signed claim
+        convergence-eligible only when it carries a verified, claim-bound
+        inclusion proof. This closes the strip-route: an edited
+        claims.toml cannot make an unwitnessed claim convergence-eligible,
+        because the signed policy cannot be forged and its absence is
+        refused. Off by default (best-effort, matching the pinned-key
+        opt-in posture).
     rekor_log_pubkey_pem:
         PEM-encoded Rekor log operator public key. When supplied, every
         ``[rekor_inclusions]`` entry is cryptographically verified via
@@ -260,6 +341,32 @@ def restore(
                         kind="enrollment_unverified",
                     ) from exc
 
+            # Project policy: verify the root-signed [project_policy] envelope
+            # (if present) and round-trip it into the restored graph. A present
+            # but unverifiable policy is tampered signed material and aborts.
+            policy_rekor_required = _verify_and_insert_project_policy(
+                conn, data.get("project_policy"), validators_section, _signing,
+            )
+            # Enforcement is the operator's out-of-band assertion, like the
+            # pinned log pubkey: only when they pass enforce_rekor_policy does
+            # restore refuse to reconstruct convergence-eligible state for a
+            # signed claim that lacks a verified, claim-bound inclusion proof.
+            policy_enforced = False
+            if enforce_rekor_policy:
+                if not policy_rekor_required:
+                    raise RestoreError(
+                        "enforce_rekor_policy=True but claims.toml carries no "
+                        "root-signed policy requiring Rekor witnessing.",
+                        kind="policy_absent",
+                    )
+                if rekor_log_pubkey_pem is None:
+                    raise RestoreError(
+                        "enforce_rekor_policy=True requires rekor_log_pubkey_pem "
+                        "so inclusion proofs can be verified.",
+                        kind="policy_unverifiable",
+                    )
+                policy_enforced = True
+
             # Order claims by created_at so prev_hash reconstruction
             # matches the original chain. SHA256 is deterministic — same
             # inputs in the same order produce the same chain.
@@ -267,6 +374,12 @@ def restore(
                 claims_section.items(),
                 key=lambda kv: kv[1].get("created_at", ""),
             )
+
+            # The [rekor_inclusions] sidecar is the authoritative record of
+            # which claims the transparency log witnessed: each entry carries
+            # the log's own inclusion proof (verified below when a log pubkey
+            # is pinned). transparency_logged is derived from it per claim.
+            rekor_sidecar = data.get("rekor_inclusions") or {}
 
             for claim_id, c in ordered_claims:
                 ctx_c = f"Claim {claim_id}"
@@ -295,6 +408,13 @@ def restore(
                     evidence_dict = json.loads(evidence_json_str)
                 except (ValueError, TypeError):
                     evidence_dict = {}
+                # Observed grounding verdict (optional/versioned). Parse the
+                # stored JSON record so the chain hash and statement_cid rebuild
+                # from the same bytes the original signing path bound. Absent for
+                # every pre-observer claim, keeping those chain links identical.
+                observed_grounding = _parse_observed_grounding(
+                    c.get("observed_grounding")
+                )
                 chain_fields = {
                     "claim_id": claim_id,
                     "text": c_text,
@@ -306,6 +426,8 @@ def restore(
                     "artifact_hash": c.get("artifact_hash"),
                     "created_at": c_created_at,
                 }
+                if observed_grounding is not None:
+                    chain_fields["observed_grounding"] = observed_grounding
                 prev_hash = _compute_prev_hash(
                     conn, chain_fields, evidence_dict,
                 )
@@ -365,27 +487,58 @@ def restore(
                         artifact_hash=c.get("artifact_hash"),
                         created_at=c_created_at,
                         evidence=evidence_dict,
+                        observed_grounding=observed_grounding,
                     )
                 ) if c.get("signature_bundle") else None
-                # transparency_logged: trust the TOML flag ONLY when the
-                # bundle actually carries a rekor block with a uuid.
-                # Otherwise a hand-edited claims.toml could flip the
-                # flag to true and the row would then satisfy the
-                # REPLICATED-detection gate (transparency_logged=1)
-                # without ever having been witnessed by the log.
-                toml_logged = c.get("transparency_logged")
-                bundle_has_rekor = False
+                # transparency_logged gates convergence eligibility. Anchor it
+                # to the [rekor_inclusions] sidecar, not the `rekor` block inside
+                # signature_bundle: that block is attached after signing and the
+                # claim signature does not cover it, so a lone bundle edit must
+                # not confer witnessed state. A claim whose bundle asserts a
+                # rekor uuid counts as witnessed only when a matching sidecar
+                # entry is present (and, when a log pubkey is pinned, that entry
+                # is cryptographically verified below). A claim with no rekor
+                # coords keeps the honest default: ready unless the TOML recorded
+                # it pending. This preserves the non-Rekor case (the flag
+                # defaults to 1 and the backup omits it, so absence restores as
+                # 1) and fails closed when the sidecar cannot corroborate a
+                # witnessed claim (the operator re-establishes it via
+                # refresh_unsigned). Full anti-forgery of witnessed state relies
+                # on a pinned log pubkey; without one the sidecar is replayed
+                # unverified, matching the submit-path opt-in posture.
+                bundle_rekor_uuid = None
                 if c.get("signature_bundle"):
                     try:
                         _env = json.loads(c["signature_bundle"])
                         _rekor = _env.get("rekor") or {}
-                        bundle_has_rekor = bool(_rekor.get("uuid"))
+                        bundle_rekor_uuid = _rekor.get("uuid") or None
                     except (json.JSONDecodeError, AttributeError, TypeError):
-                        bundle_has_rekor = False
-                resolved_transparency = (
-                    1 if (toml_logged is not False and bundle_has_rekor)
-                    else 0
-                )
+                        bundle_rekor_uuid = None
+                if policy_enforced and c.get("signature_bundle"):
+                    # Under an enforced witnessing policy a signed claim is
+                    # convergence-eligible only with a sidecar entry, which the
+                    # replay loop below verifies (Merkle) and binds to the claim
+                    # or aborts the whole restore. No entry, no eligibility —
+                    # stripping the bundle rekor block cannot buy readiness.
+                    resolved_transparency = 1 if claim_id in rekor_sidecar else 0
+                elif bundle_rekor_uuid is not None:
+                    _sidecar = rekor_sidecar.get(claim_id) or {}
+                    resolved_transparency = (
+                        1 if _sidecar.get("uuid") == bundle_rekor_uuid else 0
+                    )
+                elif policy_rekor_required:
+                    # The project's signed policy requires witnessing. A claim
+                    # with no rekor coords and no verified sidecar entry is not
+                    # witnessed, so it restores pending regardless of the TOML
+                    # flag: stripping a `transparency_logged = false` line
+                    # cannot buy convergence-eligibility even when the operator
+                    # did not pass enforce_rekor_policy. (A genuinely witnessed
+                    # claim carries rekor coords and is resolved above.)
+                    resolved_transparency = 0
+                else:
+                    resolved_transparency = (
+                        0 if c.get("transparency_logged") is False else 1
+                    )
                 try:
                     conn.execute(
                         """
@@ -404,10 +557,11 @@ def restore(
                              evidence_json, statement_cid,
                              convergence_retry_needed,
                              predicate_payload, original_signature_bundle,
+                             observed_grounding,
                              created_at, updated_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                ?, ?, ?, ?, ?, ?, ?)
+                                ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             claim_id, c_text, c_classification,
@@ -443,6 +597,7 @@ def restore(
                             1 if c.get("convergence_retry_needed") else 0,
                             _restore_predicate_payload(c, claim_id),
                             _restore_original_signature_bundle(c, claim_id),
+                            _serialize_observed_grounding(observed_grounding),
                             c_created_at, c_updated_at,
                         ),
                     )
@@ -530,7 +685,9 @@ def restore(
                     f"claims.toml has no [rekor_inclusions] section but "
                     f"{len(rekor_logged_claim_ids)} claim(s) have Rekor "
                     "coords in their signature_bundle. This is expected "
-                    "when restoring from a pre-v0.3.2 TOML. Run "
+                    "when restoring from a pre-v0.3.2 TOML. Those claims "
+                    "restore as not-yet-witnessed (transparency_logged=0) "
+                    "and stay out of convergence until re-established. Run "
                     "refresh_unsigned() to re-fetch inclusion proofs.",
                     RekorSidecarSectionAbsentWarning,
                     stacklevel=2,
@@ -548,7 +705,11 @@ def restore(
                 r_raw = entry.get("raw_response_b64")
                 r_itime = entry.get("integrated_time")
                 r_recorded = entry.get("recorded_at")
-                if not r_uuid or r_raw is None:
+                # Reject an empty raw_response too, not just a missing one: an
+                # empty body would slip past verification below (the pinned-key
+                # block is guarded on a truthy raw) while the claim still counts
+                # as witnessed by presence, forging convergence-eligible state.
+                if not r_uuid or not r_raw:
                     raise RestoreError(
                         f"rekor_inclusions entry for {cid!r} is missing "
                         "required fields (uuid, raw_response_b64)",
@@ -559,6 +720,27 @@ def restore(
                         raw_json = base64.standard_b64decode(r_raw).decode("utf-8")
                         rekor_body = json.loads(raw_json)
                         entry_val = next(iter(rekor_body.values())) if isinstance(rekor_body, dict) and rekor_body else rekor_body
+                    except Exception as exc:
+                        raise RestoreError(
+                            f"Rekor inclusion entry for claim {cid!r} is "
+                            f"unparseable: {exc}",
+                            kind="rekor_inclusion_invalid",
+                        ) from exc
+                    # Bind the entry to THIS claim before trusting its proof: a
+                    # valid inclusion proof only shows its body is in the log,
+                    # not that the body is about this claim. Without this a real
+                    # proof copied from another claim would confer witnessed
+                    # state on a row it never covered.
+                    if not _rekor_body_binds_to_claim(
+                        entry_val, claims_section[cid],
+                    ):
+                        raise RestoreError(
+                            f"Rekor inclusion proof for claim {cid!r} does not "
+                            "bind to this claim's signed payload; the entry "
+                            "belongs to a different claim.",
+                            kind="rekor_inclusion_invalid",
+                        )
+                    try:
                         from mareforma.signing import verify_rekor_inclusion
                         verify_rekor_inclusion(entry_val, rekor_log_pubkey_pem)
                     except Exception as exc:
@@ -588,6 +770,12 @@ def restore(
                             RekorSidecarEntryMissingWarning,
                             stacklevel=2,
                         )
+
+            # Refuse a REPLICATED level no distinct-signer corroboration backs.
+            # support_level is not signed, so this runs after the full graph +
+            # verdicts are in place and re-derives the promotion invariant from
+            # signed material (supports edges + verified asserter identities).
+            _verify_replicated_corroboration(conn)
 
             conn.execute("COMMIT")
         except Exception:
@@ -629,6 +817,91 @@ def restore(
         }
     finally:
         conn.close()
+
+
+def _verify_replicated_corroboration(conn: sqlite3.Connection) -> None:
+    """Refuse a restored REPLICATED level no distinct-signer corroboration backs.
+
+    ``support_level`` is not a signed field, so a tampered claims.toml can flip a
+    lone PRELIMINARY claim to REPLICATED while its signature still verifies. The
+    signed material is enough to re-establish the promotion invariant: a claim's
+    ``supports`` edges are signed, and each signer's ``asserter_keyid`` is
+    re-derived from the verified signature bundle. A genuine REPLICATED must
+    share an ESTABLISHED, open anchor with at least one peer carrying a distinct,
+    non-NULL asserter_keyid. A row that cannot show this is a forged level and
+    fails the whole restore (kind='claim_unverified').
+
+    A REPLICATED level is legitimate on either of the two paths that produce it:
+
+    (a) An enrolled validator's signed replication verdict names the claim.
+        Restore verifies each verdict's signature before insert, so a verdict
+        present in the table is itself the verifiable material backing the level.
+    (b) Automatic convergence: the claim shares an ESTABLISHED anchor in its
+        signed ``supports`` with a peer carrying a distinct, non-NULL
+        asserter_keyid.
+
+    Path (b) checks durable, signed facts only. It deliberately does NOT re-apply
+    the live promotion's point-in-time filters (peer/anchor still ``open``, peer
+    ``t_invalid`` NULL, transparency / grounding gates): those conditions can
+    change AFTER a genuine promotion — the peer can be contradicted or the anchor
+    retracted later — and re-applying them would false-reject an honest
+    REPLICATED that was invalidated or whose anchor was withdrawn after it earned
+    the level. Forgery is still blocked: a lone flipped claim cannot conjure a
+    second real signature on a shared ESTABLISHED anchor, and ESTABLISHED itself
+    is gated by a signed validation envelope restore verifies. Legacy REPLICATED
+    rows predate the asserter_keyid rule and carry a NULL asserter_keyid; they
+    are grandfathered elsewhere and skipped here.
+    """
+    rows = conn.execute(
+        "SELECT claim_id, asserter_keyid, supports_json FROM claims "
+        "WHERE support_level = 'REPLICATED' AND asserter_keyid IS NOT NULL"
+    ).fetchall()
+    for r in rows:
+        claim_id = r["claim_id"]
+        asserter_keyid = r["asserter_keyid"]
+        # (a) Named in a signature-verified replication verdict.
+        if conn.execute(
+            "SELECT 1 FROM replication_verdicts "
+            "WHERE member_claim_id = ? OR other_claim_id = ? LIMIT 1",
+            (claim_id, claim_id),
+        ).fetchone() is not None:
+            continue
+        try:
+            supports = json.loads(r["supports_json"]) or []
+        except (ValueError, TypeError):
+            supports = []
+        # (b) Automatic convergence on a shared ESTABLISHED anchor.
+        corroborated = False
+        if supports:
+            sup_ph = ",".join("?" * len(supports))
+            anchors = [
+                a["claim_id"] for a in conn.execute(
+                    f"SELECT claim_id FROM claims "
+                    f"WHERE claim_id IN ({sup_ph}) "
+                    f"AND support_level = 'ESTABLISHED'",
+                    supports,
+                ).fetchall()
+            ]
+            if anchors:
+                anc_ph = ",".join("?" * len(anchors))
+                peer = conn.execute(
+                    f"SELECT 1 FROM claims c, json_each(c.supports_json) j "
+                    f"WHERE j.value IN ({anc_ph}) "
+                    f"AND c.claim_id != ? "
+                    f"AND c.asserter_keyid IS NOT NULL "
+                    f"AND c.asserter_keyid != ? "
+                    f"LIMIT 1",
+                    (*anchors, claim_id, asserter_keyid),
+                ).fetchone()
+                corroborated = peer is not None
+        if not corroborated:
+            raise RestoreError(
+                f"Claim {claim_id} is stored as REPLICATED but no distinct-signer "
+                "corroboration on a shared ESTABLISHED anchor backs it. The "
+                "support level is not a signed field; this one is unverifiable "
+                "and the backup may be tampered.",
+                kind="claim_unverified",
+            )
 
 
 def _verify_and_insert_replication_verdict(
@@ -825,6 +1098,96 @@ def _verify_and_insert_contradiction_verdict(
             f"{ctx} INSERT refused: {exc}",
             kind="claim_unverified",
         ) from exc
+
+
+def _verify_and_insert_project_policy(
+    conn: sqlite3.Connection,
+    policy_section: dict | None,
+    validators_section: dict,
+    _signing,
+) -> bool:
+    """Verify a ``[project_policy]`` envelope and round-trip it into the graph.
+
+    The policy must be signed by the project's root validator (self-enrolled).
+    A present-but-unverifiable policy is tampered signed material and aborts the
+    restore. The flat row fields must match the signed payload. Returns True iff
+    a valid policy requiring Rekor witnessing is present; False when absent.
+    """
+    if not policy_section:
+        return False
+    ctx = "Project policy"
+    signer_keyid = _required_field(policy_section, "signer_keyid", ctx)
+    envelope_json = _required_field(policy_section, "envelope", ctx)
+    created_at = _required_field(policy_section, "created_at", ctx)
+    rekor_required = bool(policy_section.get("rekor_required"))
+
+    enrollment = validators_section.get(signer_keyid)
+    if enrollment is None:
+        raise RestoreError(
+            f"{ctx} is signed by keyid {signer_keyid[:12]}… which is not "
+            "in the validators section.",
+            kind="policy_unverified",
+        )
+    # The signer must be the project's SINGLE root of trust, matching the
+    # write-side check in require_rekor_witnessing. A self-enrolled-but-not-sole
+    # root (two trust domains in one TOML) has no single authority to speak for
+    # the project, so a policy signed by one of several roots is refused.
+    roots = [
+        k for k, v in validators_section.items()
+        if v.get("enrolled_by_keyid") == k
+    ]
+    if len(roots) != 1 or signer_keyid != roots[0]:
+        raise RestoreError(
+            f"{ctx} must be signed by the project's single root validator; "
+            f"{signer_keyid[:12]}… is not that root.",
+            kind="policy_unverified",
+        )
+    try:
+        env = json.loads(envelope_json)
+    except (ValueError, TypeError) as exc:
+        raise RestoreError(
+            f"{ctx} envelope is not valid JSON.", kind="policy_unverified",
+        ) from exc
+    try:
+        pem = base64.standard_b64decode(enrollment["pubkey_pem"])
+        pub = _signing.public_key_from_pem(pem)
+    except (KeyError, ValueError, TypeError, _signing.SigningError) as exc:
+        raise RestoreError(
+            f"{ctx} root pubkey unparseable: {exc}", kind="policy_unverified",
+        ) from exc
+    try:
+        ok = _signing.verify_envelope(
+            env, pub,
+            expected_payload_type=_signing.PAYLOAD_TYPE_PROJECT_POLICY,
+        )
+    except _signing.InvalidEnvelopeError as exc:
+        raise RestoreError(
+            f"{ctx} envelope is structurally invalid: {exc}",
+            kind="policy_unverified",
+        ) from exc
+    if not ok:
+        raise RestoreError(
+            f"{ctx} signature failed verification — TOML tampered.",
+            kind="policy_unverified",
+        )
+    # Bind the flat row to the signed payload so a tampered cache is caught.
+    payload = _signing.envelope_payload(env)
+    if (
+        bool(payload.get("rekor_required")) != rekor_required
+        or payload.get("created_at") != created_at
+    ):
+        raise RestoreError(
+            f"{ctx} row fields do not match the signed envelope — "
+            "TOML tampered.",
+            kind="policy_unverified",
+        )
+    conn.execute(
+        "INSERT INTO project_policy "
+        "(id, rekor_required, signer_keyid, envelope, created_at) "
+        "VALUES (1, ?, ?, ?, ?)",
+        (1 if rekor_required else 0, signer_keyid, envelope_json, created_at),
+    )
+    return rekor_required
 
 
 def _required_field(d: dict, key: str, context: str) -> Any:
@@ -1029,6 +1392,20 @@ def _verify_claim_signatures_on_restore(
                 kind="claim_unverified",
             )
 
+        # Observed grounding binding. The optional/versioned field lives inside
+        # the signed predicate; the row's observed_grounding column must match
+        # it. Absence on both sides is the pre-observer case and passes. A
+        # verdict present in the envelope but flipped (or dropped) on the row is
+        # caught here — the same posture as the evidence check above. Parse both
+        # sides so key ordering does not create a false mismatch.
+        row_grounding = _parse_observed_grounding(c.get("observed_grounding"))
+        if predicate.get("observed_grounding") != row_grounding:
+            raise RestoreError(
+                f"Claim {claim_id} signed observed-grounding verdict does not "
+                "match the observed_grounding column on the row — TOML tampered.",
+                kind="claim_unverified",
+            )
+
         # statement_cid cross-check. The row carries the cid the
         # original signing path computed. Restore re-derives the cid
         # from the row's fields + evidence and compares. A bare TOML
@@ -1048,6 +1425,7 @@ def _verify_claim_signatures_on_restore(
                     artifact_hash=expected["artifact_hash"],
                     created_at=expected["created_at"],
                     evidence=row_evidence,
+                    observed_grounding=row_grounding,
                 )
             )
             if recomputed_cid != c["statement_cid"]:

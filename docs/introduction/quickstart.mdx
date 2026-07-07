@@ -91,8 +91,22 @@ seed_id = graph.assert_claim(
 
 ## Let two agents converge
 
+Independence is the *signing key*, not the `generated_by` label. Enroll a
+second validator and sign the second claim with its key, so the two lines
+carry distinct `asserter_keyid`s.
+
 ```python
-# Agent A — supports the seed
+from mareforma import signing
+
+# A second independent signer (your bootstrap key is the first).
+signing.bootstrap_key("lab_b.key")
+signer_b = signing.load_private_key("lab_b.key")
+graph.enroll_validator(
+    signing.public_key_to_pem(signer_b.public_key()),
+    identity="lab_b",
+)
+
+# Agent A — signed by your loaded (root) key
 id_a = graph.assert_claim(
     "Target T elevated in condition C (n=620)",
     classification="ANALYTICAL",
@@ -101,13 +115,14 @@ id_a = graph.assert_claim(
     source_name="dataset_alpha",
 )
 
-# Agent B — independent data, same upstream
+# Agent B — independent data, signed by a DISTINCT key
 id_b = graph.assert_claim(
     "Target T elevated in condition C (n=580)",
     classification="ANALYTICAL",
     generated_by="agent/model-b/lab_b",
     supports=[seed_id],
     source_name="dataset_beta",
+    signer=signer_b,
 )
 
 # REPLICATED fires automatically
@@ -115,9 +130,9 @@ graph.get_claim(id_a)["support_level"]  # → "REPLICATED"
 graph.get_claim(id_b)["support_level"]  # → "REPLICATED"
 ```
 
-Two agents under distinct signing keys, shared ESTABLISHED upstream →
+Two claims under distinct signing keys, sharing an ESTABLISHED upstream →
 `REPLICATED` is set automatically at INSERT time. Independence is the
-signing key (`asserter_keyid`); `generated_by` is a display label. No
+signing key (`asserter_keyid`); `generated_by` is a display label only. No
 extra step required.
 
 ## Promote to ESTABLISHED

@@ -17,8 +17,14 @@ Wraps the JSON-LD graph export in an in-toto Statement v1 envelope:
     }
 
 The bundle is then signed by the local Ed25519 key using a DSSE-style
-envelope. Verification checks the bundle signature AND every per-claim
-signature inside ``predicate``.
+envelope. Verification checks the bundle signature, every per-claim
+asserter signature (bound to the claim's presented content), and the
+displayed support level: ESTABLISHED against a validator-signed
+validation envelope, REPLICATED against distinct-signer corroboration.
+Editorial status (``retracted`` / ``contested``) and comparison
+summaries are exporter-attested only: the data model records no
+signature for a status change, so a verified bundle does not attest
+them (use the retract-then-supersede pattern for a signed retraction).
 
 Design choices (one-way doors, locked currently):
 
@@ -100,18 +106,52 @@ def build_statement(root: Path) -> dict[str, Any]:
         claims = list_claims(conn)
         single_trust_domain = _validators.single_trust_domain(conn)
         trust_domain_root = _validators.trust_domain_root(conn)
+        validator_rows = _validators.list_validators(conn)
     finally:
         conn.close()
     subjects = [_subject_for_claim(c) for c in claims]
     predicate = JSONLDExporter(root).export()
-    # Disclose the validator topology of the exporting graph: true when every
-    # validator traces to one root of trust. It labels trust-domain
-    # concentration over the ESTABLISHED rows in this bundle; it is a
-    # disclosure, not a Sybil guard over the participant topology.
+    # Carry each claim's own asserter signature into its node so verify_bundle
+    # can check it offline, and the enrolled validator set (with enrollment
+    # envelopes) so those signatures verify against a chain-checked key rather
+    # than collapsing to the exporter's. The digest is derived from named
+    # fields, so this added field does not perturb it.
+    sig_by_claim = {c["claim_id"]: c.get("signature_bundle") for c in claims}
+    val_by_claim = {c["claim_id"]: c.get("validation_signature") for c in claims}
+    for node in predicate.get("@graph", []):
+        node_id = node.get("@id", "")
+        if node_id.startswith("mare:claim/"):
+            cid = node_id[len("mare:claim/"):]
+            bundle_json = sig_by_claim.get(cid)
+            if bundle_json:
+                node["signatureBundle"] = json.loads(bundle_json)
+            # An ESTABLISHED claim's promotion is attested by a validator's
+            # signed validation (or seed) envelope; carry it so verify_bundle
+            # can confirm the displayed support level, not just trust the
+            # exporter for it.
+            val_json = val_by_claim.get(cid)
+            if val_json:
+                node["validationSignature"] = json.loads(val_json)
+    # Disclose the validator topology of the exporting graph: singleTrustDomain
+    # is true when every validator traces to one root of trust. It labels
+    # trust-domain concentration over the ESTABLISHED rows in this bundle; it is
+    # a disclosure, not a Sybil guard over the participant topology.
     predicate = {
         **predicate,
         "mare:singleTrustDomain": single_trust_domain,
         "mare:trustDomainRoot": trust_domain_root,
+        "mare:validators": [
+            {
+                "keyid": v["keyid"],
+                "pubkey_pem": v["pubkey_pem"],
+                "identity": v["identity"],
+                "validator_type": v["validator_type"],
+                "enrolled_at": v["enrolled_at"],
+                "enrolled_by_keyid": v["enrolled_by_keyid"],
+                "enrollment_envelope": v["enrollment_envelope"],
+            }
+            for v in validator_rows
+        ],
     }
     return {
         "_type": STATEMENT_TYPE,
@@ -135,7 +175,11 @@ def sign_bundle(
     payload_bytes = json.dumps(
         statement, sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")
-    sig = private_key.sign(payload_bytes)
+    # Sign over the DSSE PAE encoding, not the raw payload, so the envelope
+    # verifies with mareforma's own verify_envelope and any standard DSSE
+    # verifier — the type is bound into the signature, not just carried beside
+    # it.
+    sig = private_key.sign(_signing.dsse_pae(BUNDLE_PAYLOAD_TYPE, payload_bytes))
     keyid = _signing.public_key_id(private_key.public_key())
     return {
         "payloadType": BUNDLE_PAYLOAD_TYPE,
@@ -174,6 +218,148 @@ class BundleVerificationError(Exception):
     caller can route between "this is corrupt" and "this is a
     cross-version skew" without parsing English.
     """
+
+
+def _verify_exported_validators(
+    validators: list[dict],
+) -> tuple[dict[str, Any], str]:
+    """Verify the exported validator set; return (keyid -> public-key, root).
+
+    Each enrollment envelope is verified against its parent's pubkey (the root
+    is self-verified), mirroring the restore path, and every validator must
+    chain to a single root of trust with no islands or cycles. Per-claim
+    asserter signatures are then checked against these chain-verified keys, so a
+    malicious exporter cannot substitute fabricated asserters. Any failure
+    raises :class:`BundleVerificationError`.
+    """
+    from mareforma import signing as _signing
+    from mareforma import validators as _validators
+
+    by_keyid = {v.get("keyid"): v for v in validators}
+    roots = [
+        k for k, v in by_keyid.items() if v.get("enrolled_by_keyid") == k
+    ]
+    if len(roots) != 1:
+        raise BundleVerificationError(
+            f"validators:expected exactly one root of trust, found {len(roots)}"
+        )
+    root = roots[0]
+
+    verified: dict[str, Any] = {}
+    for keyid, v in by_keyid.items():
+        parent = by_keyid.get(v.get("enrolled_by_keyid"))
+        if parent is None:
+            raise BundleVerificationError(
+                f"validators:{str(keyid)[:12]}… enrolled by a key absent "
+                "from the bundle"
+            )
+        try:
+            parent_pem = base64.standard_b64decode(parent["pubkey_pem"])
+        except (ValueError, TypeError, KeyError) as exc:
+            raise BundleVerificationError(
+                f"validators:{str(keyid)[:12]}… parent pubkey not base64"
+            ) from exc
+        if not _validators.verify_enrollment(v, parent_pem):
+            raise BundleVerificationError(
+                f"validators:{str(keyid)[:12]}… enrollment failed verification"
+            )
+        try:
+            verified[keyid] = _signing.public_key_from_pem(
+                base64.standard_b64decode(v["pubkey_pem"])
+            )
+        except (ValueError, TypeError, KeyError, _signing.SigningError) as exc:
+            raise BundleVerificationError(
+                f"validators:{str(keyid)[:12]}… pubkey unparseable"
+            ) from exc
+
+    # Every validator must reach the single root by walking parents — no
+    # island component and no cycle can smuggle in an off-root asserter key.
+    for keyid in by_keyid:
+        seen: set = set()
+        cur = keyid
+        while cur != root:
+            if cur in seen or cur not in by_keyid:
+                raise BundleVerificationError(
+                    f"validators:{str(keyid)[:12]}… does not chain to the root"
+                )
+            seen.add(cur)
+            cur = by_keyid[cur].get("enrolled_by_keyid")
+    return verified, root
+
+
+def _string_supports(supports: Any) -> list[str]:
+    """The string entries of a node's ``supports``, ignoring anything else.
+
+    A hand-crafted bundle could carry a non-list or nested/unhashable supports
+    value; this keeps the distinct-signer pre-pass and REPLICATED check within
+    the module's ``BundleVerificationError`` contract instead of leaking a
+    TypeError. A malformed supports value simply contributes no upstream.
+    """
+    if not isinstance(supports, list):
+        return []
+    return [s for s in supports if isinstance(s, str)]
+
+
+def _verify_established_level(
+    node: dict, claim_id: str, verified_validators: dict, _signing,
+) -> None:
+    """Confirm a node displayed as ESTABLISHED carries a validator-signed
+    promotion for THIS claim, so the exporter cannot inflate a claim's support
+    level. Mirrors the validation-envelope checks the restore path applies."""
+    vs = node.get("validationSignature")
+    if not vs:
+        raise BundleVerificationError(
+            f"claim:{claim_id} is shown ESTABLISHED but carries no validation "
+            "signature"
+        )
+    try:
+        val_keyid = vs["signatures"][0]["keyid"]
+        declared = vs["payloadType"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise BundleVerificationError(
+            f"claim:{claim_id} validation signature is malformed"
+        ) from exc
+    if declared not in (
+        _signing.PAYLOAD_TYPE_VALIDATION, _signing.PAYLOAD_TYPE_SEED,
+    ):
+        raise BundleVerificationError(
+            f"claim:{claim_id} validation signature has unexpected payloadType "
+            f"{declared!r}"
+        )
+    val_pub = verified_validators.get(val_keyid)
+    if val_pub is None:
+        raise BundleVerificationError(
+            f"claim:{claim_id} validation signed by {str(val_keyid)[:12]}… "
+            "which is not a chain-verified validator"
+        )
+    try:
+        ok = _signing.verify_envelope(vs, val_pub, expected_payload_type=declared)
+    except _signing.InvalidEnvelopeError as exc:
+        raise BundleVerificationError(
+            f"claim:{claim_id} validation signature is structurally invalid: "
+            f"{exc}"
+        ) from exc
+    if not ok:
+        raise BundleVerificationError(
+            f"claim:{claim_id} validation signature failed verification"
+        )
+    try:
+        payload = _signing.envelope_payload(vs)
+    except _signing.InvalidEnvelopeError as exc:
+        raise BundleVerificationError(
+            f"claim:{claim_id} validation payload is unparseable: {exc}"
+        ) from exc
+    if payload.get("claim_id") != claim_id:
+        raise BundleVerificationError(
+            f"claim:{claim_id} validation envelope binds a different claim_id "
+            f"({payload.get('claim_id')!r})"
+        )
+    displayed_by = node.get("validatedBy")
+    if displayed_by is not None and displayed_by != val_keyid:
+        raise BundleVerificationError(
+            f"claim:{claim_id} validatedBy {str(displayed_by)[:12]}… does not "
+            "match the validation signer"
+        )
 
 
 def verify_bundle(
@@ -223,7 +409,9 @@ def verify_bundle(
 
     from cryptography.exceptions import InvalidSignature
     try:
-        public_key.verify(sig_bytes, payload_bytes)
+        public_key.verify(
+            sig_bytes, _signing.dsse_pae(BUNDLE_PAYLOAD_TYPE, payload_bytes),
+        )
     except InvalidSignature as exc:
         raise BundleVerificationError(
             "bundle:signature verification failed — bundle has been tampered"
@@ -251,6 +439,41 @@ def verify_bundle(
     subjects = {s["name"]: s["digest"]["sha256"] for s in statement.get("subject", [])}
     predicate = statement.get("predicate") or {}
     nodes = predicate.get("@graph") or []
+    # Chain-verify the exported validator set: every validator descends from a
+    # single root of trust. The bundle must then be signed BY that root, so the
+    # public key the caller pins is the same key every per-claim asserter chains
+    # to — the whole bundle anchors to one key the caller chose to trust, not to
+    # the exporter as a separate party. A validator-less bundle is refused
+    # (_verify_exported_validators requires one root), so a signed graph cannot
+    # be stripped to a digest-only bundle that skips per-claim verification.
+    verified_validators, trust_root = _verify_exported_validators(
+        predicate.get("mare:validators") or []
+    )
+    if keyid != trust_root:
+        raise BundleVerificationError(
+            f"bundle:signed by {keyid[:12]}… but the validators chain to root "
+            f"{str(trust_root)[:12]}…; a bundle must be signed by its root"
+        )
+    # Map each support value to the distinct chain-verified asserters that carry
+    # a claim supporting it. A REPLICATED display is checked against this for
+    # the distinct-signer corroboration that support level requires. Necessary
+    # condition, so a genuine REPLICATED never false-rejects; it forbids a lone
+    # claim from displaying REPLICATED with no independent corroborator.
+    support_asserters: dict[str, set] = {}
+    for n in nodes:
+        if not n.get("@id", "").startswith("mare:claim/"):
+            continue
+        n_sig = n.get("signatureBundle")
+        if not n_sig:
+            continue
+        try:
+            n_asserter = n_sig["signatures"][0]["keyid"]
+        except (KeyError, IndexError, TypeError):
+            continue
+        if n_asserter not in verified_validators:
+            continue
+        for sup in _string_supports(n.get("supports")):
+            support_asserters.setdefault(sup, set()).add(n_asserter)
     for node in nodes:
         node_id = node.get("@id", "")
         if not node_id.startswith("mare:claim/"):
@@ -261,6 +484,101 @@ def verify_bundle(
             raise BundleVerificationError(
                 f"statement:subject missing for claim {claim_id!r}"
             )
+        # Per-claim asserter signature. The digest check above is
+        # self-referential to the exporter key; this proves each claim was
+        # signed by its stated asserter. In a signed graph every claim must
+        # carry its bundle, so a stripped signature cannot hide an unsigned row.
+        sig_bundle = node.get("signatureBundle")
+        if sig_bundle is None:
+            if verified_validators:
+                raise BundleVerificationError(
+                    f"claim:{claim_id} carries no signature bundle but the "
+                    "graph is signed"
+                )
+        else:
+            try:
+                asserter_keyid = sig_bundle["signatures"][0]["keyid"]
+            except (KeyError, IndexError, TypeError) as exc:
+                raise BundleVerificationError(
+                    f"claim:{claim_id} signature bundle is malformed"
+                ) from exc
+            asserter_pub = verified_validators.get(asserter_keyid)
+            if asserter_pub is None:
+                raise BundleVerificationError(
+                    f"claim:{claim_id} asserter {str(asserter_keyid)[:12]}… is "
+                    "not a chain-verified validator in the bundle"
+                )
+            try:
+                sig_ok = _signing.verify_envelope(sig_bundle, asserter_pub)
+            except _signing.InvalidEnvelopeError as exc:
+                raise BundleVerificationError(
+                    f"claim:{claim_id} signature bundle is structurally "
+                    f"invalid: {exc}"
+                ) from exc
+            if not sig_ok:
+                raise BundleVerificationError(
+                    f"claim:{claim_id} asserter signature failed verification"
+                )
+            try:
+                bound = _signing.claim_predicate_from_envelope(sig_bundle)
+            except _signing.InvalidEnvelopeError as exc:
+                raise BundleVerificationError(
+                    f"claim:{claim_id} signature payload is unparseable: {exc}"
+                ) from exc
+            if bound.get("claim_id") != claim_id:
+                raise BundleVerificationError(
+                    f"claim:{claim_id} signature binds a different claim_id "
+                    f"({bound.get('claim_id')!r})"
+                )
+            # Bind the asserter signature to the CONTENT, not just the claim_id:
+            # re-derive the subject digest from the validator-signed fields and
+            # require it equals the bundle's subject digest. Without this the
+            # asserter signs only an id while the exporter alone vouches for the
+            # displayed text/evidence — the signature would be decorative.
+            asserter_digest = hashlib.sha256(
+                _signing.canonical_statement({
+                    "claim_id": claim_id,
+                    "text": bound.get("text"),
+                    "classification": bound.get("classification"),
+                    "generated_by": bound.get("generated_by"),
+                    "supports": bound.get("supports") or [],
+                    "contradicts": bound.get("contradicts") or [],
+                    "source_name": bound.get("source_name"),
+                    "artifact_hash": bound.get("artifact_hash"),
+                    "created_at": bound.get("created_at"),
+                }, bound.get("evidence") or {})
+            ).hexdigest()
+            if asserter_digest != subjects.get(subject_name):
+                raise BundleVerificationError(
+                    f"claim:{claim_id} asserter signature does not cover the "
+                    "presented content — text or evidence differs from what "
+                    "was signed"
+                )
+        # Support level: verify the DISPLAYED level is backed by signed
+        # material, so the exporter cannot inflate it. ESTABLISHED needs a
+        # validator-signed validation envelope for this claim; REPLICATED needs
+        # distinct-signer corroboration on a shared upstream. Editorial status
+        # (retracted/contested) and comparison summaries are NOT attested here —
+        # they carry no signature in the data model (see the module docstring).
+        # Only meaningful in signed mode: an unsigned bundle has no trust chain
+        # to attest a level against, and legacy grandfathered REPLICATED rows
+        # carry no bundle — attesting a level there would false-reject.
+        level = node.get("supportLevel", "PRELIMINARY")
+        if verified_validators and level == "ESTABLISHED":
+            _verify_established_level(
+                node, claim_id, verified_validators, _signing,
+            )
+        elif verified_validators and level == "REPLICATED":
+            corroborated = any(
+                len(support_asserters.get(sup, set())) >= 2
+                for sup in _string_supports(node.get("supports"))
+            )
+            if not corroborated:
+                raise BundleVerificationError(
+                    f"claim:{claim_id} is shown REPLICATED but no shared "
+                    "upstream carries a second distinct-signer claim in the "
+                    "bundle"
+                )
         # Re-derive the canonical Statement v1 hash from the @graph
         # node. evidence is part of the signed predicate, so the
         # JSON-LD node carries it and verify uses the same shape that

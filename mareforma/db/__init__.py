@@ -69,6 +69,8 @@ from .core import (
     _attach_supports_cache,
     # Serialization.
     _serialize_predicate_payload,
+    _serialize_observed_grounding,
+    _observed_grounding_promotes,
     # Chain hash.
     _chain_input_for_claim,
     _compute_prev_hash,
@@ -92,6 +94,7 @@ from .core import (
     # Convergence detection.
     _maybe_update_replicated_unlocked,
     _maybe_update_replicated,
+    _maybe_update_replicated_best_effort,
     list_convergence_retry_claims,
     clear_convergence_retry_flag,
     find_dangling_supports,
@@ -128,6 +131,9 @@ from .core import (
     refutation_status,
     query_claims,
     search_claims,
+    _read_scan_ceiling,
+    _read_path_row,
+    _project_verified_rows,
     _row_verified_on_read,
     _verify_validation_on_read,
     _verify_participant_bundle_on_read,
@@ -142,13 +148,23 @@ from .core import (
     # Internal helpers.
     _now,
     _backup_claims_toml,
+    _backup_suspended,
+    suspend_backup,
+    resume_backup,
+    _drain_backup_window,
+    get_project_policy,
+    set_project_policy,
 )
 from .restore import (
     restore,
+    _rekor_body_binds_to_claim,
     _restore_predicate_payload,
     _restore_original_signature_bundle,
+    _parse_observed_grounding,
+    _verify_replicated_corroboration,
     _verify_and_insert_replication_verdict,
     _verify_and_insert_contradiction_verdict,
+    _verify_and_insert_project_policy,
     _required_field,
     _verify_claim_signatures_on_restore,
 )

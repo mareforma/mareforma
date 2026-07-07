@@ -340,15 +340,19 @@ class TestContentAddressing:
 # verify-on-read
 # ===========================================================================
 
-def _build_established(tmp_path: Path):
-    """Build an ESTABLISHED claim; return (root_key, val_key, rep_id, peer_id)."""
+def _build_established(tmp_path: Path, *, rep_text: str = "A"):
+    """Build an ESTABLISHED claim; return (root_key, val_key, rep_id, peer_id).
+
+    ``rep_text`` sets the promoted claim's text so a search-side test can find
+    it by a distinctive term.
+    """
     sa, sb = _two_signers(tmp_path)
     root_key = _bootstrap_key(tmp_path, "root.key")
     val_key = _bootstrap_key(tmp_path, "val.key")
     with mareforma.open(tmp_path, key_path=root_key) as g:
         g.enroll_validator(_pem_of(val_key), identity="v")
         up = g.assert_claim("anchor", generated_by="seed", seed=True)
-        rep = g.assert_claim("A", supports=[up], generated_by="lab_a", signer=sa)
+        rep = g.assert_claim(rep_text, supports=[up], generated_by="lab_a", signer=sa)
         peer = g.assert_claim("B", supports=[up], generated_by="lab_b", signer=sb)
     with mareforma.open(tmp_path, key_path=val_key) as g:
         g.validate(rep)
@@ -432,6 +436,44 @@ class TestVerifyOnRead:
             assert c["verified"] is False
             ids = {r["claim_id"] for r in g.query(min_support="REPLICATED", limit=99)}
             assert rep not in ids
+
+    def test_search_excludes_a_high_trust_row_that_query_excludes(
+        self, tmp_path: Path,
+    ) -> None:
+        """Every read surface gates a high-trust row on re-verification, not just
+        query(). Build an ESTABLISHED row, break its validation envelope in the
+        DB, and assert search() excludes it exactly as query() does."""
+        root_key, _, rep, _ = _build_established(
+            tmp_path, rep_text="quasarflux marker term",
+        )
+        conn = sqlite3.connect(_db_path(tmp_path))
+        try:
+            conn.execute(
+                "UPDATE claims SET validation_signature = ? WHERE claim_id = ?",
+                ('{"payloadType":"x","payload":"x","signatures":[]}', rep),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            q_ids = {r["claim_id"] for r in g.query(min_support="ESTABLISHED", limit=99)}
+            s_ids = {r["claim_id"] for r in g.search("quasarflux", limit=99)}
+        assert rep not in q_ids
+        assert rep not in s_ids
+
+    def test_search_returns_a_genuine_established_row_with_disclosure(
+        self, tmp_path: Path,
+    ) -> None:
+        """The read-path gate must not over-exclude: a genuine ESTABLISHED row is
+        still served by search, and carries the same trust-domain disclosure
+        query attaches (search promises the same projection as query_claims)."""
+        root_key, _, rep, _ = _build_established(
+            tmp_path, rep_text="pulsarwidth marker term",
+        )
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            hits = {r["claim_id"]: r for r in g.search("pulsarwidth", limit=99)}
+        assert rep in hits
+        assert hits[rep]["single_trust_domain"] is True
 
 
 # ===========================================================================

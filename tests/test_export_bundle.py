@@ -175,13 +175,7 @@ class TestTamperDetection:
                 node["claimText"] = "TAMPERED VALUE"
                 break
         # Re-sign so the DSSE check passes but the subject digest doesn't.
-        new_payload = json.dumps(
-            statement, sort_keys=True, separators=(",", ":"),
-        ).encode("utf-8")
-        bundle["payload"] = base64.standard_b64encode(new_payload).decode("ascii")
-        bundle["signatures"][0]["sig"] = base64.standard_b64encode(
-            pk.sign(new_payload)
-        ).decode("ascii")
+        bundle = sign_bundle(statement, pk)
         bundle_path.write_text(json.dumps(bundle))
 
         with pytest.raises(BundleVerificationError, match="digest mismatch"):
@@ -198,13 +192,7 @@ class TestTamperDetection:
         bundle = json.loads(bundle_path.read_text())
         statement = json.loads(base64.standard_b64decode(bundle["payload"]))
         statement["predicateType"] = "urn:mareforma:predicate:epistemic-graph:v2"
-        new_payload = json.dumps(
-            statement, sort_keys=True, separators=(",", ":"),
-        ).encode("utf-8")
-        bundle["payload"] = base64.standard_b64encode(new_payload).decode("ascii")
-        bundle["signatures"][0]["sig"] = base64.standard_b64encode(
-            pk.sign(new_payload)
-        ).decode("ascii")
+        bundle = sign_bundle(statement, pk)
         bundle_path.write_text(json.dumps(bundle))
 
         with pytest.raises(BundleVerificationError, match="predicateType"):
@@ -268,3 +256,209 @@ class TestCLI:
             result = runner.invoke(cli, ["verify", "mareforma-bundle.json"])
             assert result.exit_code == 1
             assert "verification failed" in result.output.lower()
+
+
+# ---------------------------------------------------------------------------
+# DSSE PAE + per-claim asserter signature verification
+# ---------------------------------------------------------------------------
+
+
+class TestBundleInterop:
+    def test_bundle_envelope_verifies_with_the_standard_verifier(
+        self, tmp_path: Path,
+    ) -> None:
+        """The bundle signs over the DSSE PAE encoding, so mareforma's own
+        verify_envelope (and any standard DSSE verifier) accepts it."""
+        key_path, pk = _bootstrap(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as g:
+            g.assert_claim("interop claim", generated_by="a")
+        bundle = sign_bundle(build_statement(tmp_path), pk)
+        assert _signing.verify_envelope(bundle, pk.public_key()) is True
+
+
+class TestPerClaimSignature:
+    def test_valid_bundle_carries_and_verifies_per_claim_signatures(
+        self, tmp_path: Path,
+    ) -> None:
+        """A signed graph's bundle carries each claim's signature bundle and its
+        asserter set, and verify_bundle checks every per-claim signature."""
+        key_path, pk = _bootstrap(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as g:
+            g.assert_claim("first signed", generated_by="a")
+            g.assert_claim("second signed", generated_by="b")
+        bundle_path = tmp_path / "bundle.json"
+        write_bundle(tmp_path, bundle_path, pk)
+        statement = verify_bundle(bundle_path, pk.public_key())
+        nodes = statement["predicate"]["@graph"]
+        signed = [n for n in nodes if n.get("signatureBundle")]
+        assert len(signed) == 2  # both claims carry asserter signatures
+
+    def test_asserter_signature_must_cover_the_displayed_content(
+        self, tmp_path: Path,
+    ) -> None:
+        """A malicious exporter cannot show content the asserter never signed:
+        even with the subject digest rewritten to match the tampered node (so
+        the self-referential digest check passes), the asserter signature over
+        the original content must fail the bundle."""
+        import hashlib
+        key_path, pk = _bootstrap(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as g:
+            g.assert_claim("Compound X is SAFE at 10mg", generated_by="a")
+        statement = build_statement(tmp_path)
+        for node in statement["predicate"]["@graph"]:
+            if node.get("signatureBundle"):
+                cid = node["@id"][len("mare:claim/"):]
+                node["claimText"] = "Compound X is LETHAL at 10mg"
+                # Rewrite the subject digest to match the tampered node so the
+                # node-vs-subject digest check still passes.
+                new_digest = hashlib.sha256(
+                    _signing.canonical_statement({
+                        "claim_id": cid,
+                        "text": node["claimText"],
+                        "classification": node.get("classification", "INFERRED"),
+                        "generated_by": node.get("generatedBy", "agent"),
+                        "supports": node.get("supports", []),
+                        "contradicts": node.get("contradicts", []),
+                        "source_name": node.get("sourceName"),
+                        "artifact_hash": node.get("artifactHash"),
+                        "created_at": node.get("dateCreated", ""),
+                    }, node.get("evidence") or {})
+                ).hexdigest()
+                for s in statement["subject"]:
+                    if s["name"] == f"{SUBJECT_PREFIX}{cid}":
+                        s["digest"]["sha256"] = new_digest
+                break
+        bundle = sign_bundle(statement, pk)  # valid exporter signature
+        bundle_path = tmp_path / "bundle.json"
+        bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+        with pytest.raises(
+            BundleVerificationError, match="does not cover the presented content",
+        ):
+            verify_bundle(bundle_path, pk.public_key())
+
+    def test_tampered_per_claim_signature_fails_verification(
+        self, tmp_path: Path,
+    ) -> None:
+        """A bundle whose exporter signature is valid but that contains a claim
+        with an invalid asserter signature must fail. The digest check alone
+        (self-referential to the exporter key) would pass it."""
+        key_path, pk = _bootstrap(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as g:
+            g.assert_claim("tamper target", generated_by="a")
+        statement = build_statement(tmp_path)
+        # Corrupt one claim's asserter signature, then sign the bundle validly
+        # with the exporter key (the malicious-exporter scenario).
+        tampered = False
+        for node in statement["predicate"]["@graph"]:
+            sb = node.get("signatureBundle")
+            if sb:
+                raw = bytearray(
+                    base64.standard_b64decode(sb["signatures"][0]["sig"])
+                )
+                raw[0] ^= 0xFF
+                sb["signatures"][0]["sig"] = base64.standard_b64encode(
+                    bytes(raw)
+                ).decode("ascii")
+                tampered = True
+                break
+        assert tampered, "no per-claim signature was carried into the bundle"
+        bundle = sign_bundle(statement, pk)
+        bundle_path = tmp_path / "bundle.json"
+        bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+        with pytest.raises(BundleVerificationError):
+            verify_bundle(bundle_path, pk.public_key())
+
+
+# ---------------------------------------------------------------------------
+# Support-level attestation (no exporter-only inflation)
+# ---------------------------------------------------------------------------
+
+
+class TestSupportLevelAttestation:
+    def test_established_without_a_validation_signature_fails(
+        self, tmp_path: Path,
+    ) -> None:
+        """A PRELIMINARY claim relabelled ESTABLISHED by the exporter, with no
+        validator-signed promotion, must fail — the level cannot be inflated."""
+        key_path, pk = _bootstrap(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as g:
+            g.assert_claim("really preliminary", generated_by="a")
+        statement = build_statement(tmp_path)
+        for node in statement["predicate"]["@graph"]:
+            if node.get("@type") == "mare:Claim":
+                node["supportLevel"] = "ESTABLISHED"
+                node.pop("validationSignature", None)
+                break
+        bundle = sign_bundle(statement, pk)
+        bundle_path = tmp_path / "bundle.json"
+        bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+        with pytest.raises(
+            BundleVerificationError, match="carries no validation signature",
+        ):
+            verify_bundle(bundle_path, pk.public_key())
+
+    def test_replicated_without_corroboration_fails(
+        self, tmp_path: Path,
+    ) -> None:
+        """A lone claim relabelled REPLICATED, with no second distinct-signer
+        claim on a shared upstream, must fail."""
+        key_path, pk = _bootstrap(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as g:
+            seed = g.assert_claim("anchor", generated_by="seed", seed=True)
+            g.assert_claim("lone claim", supports=[seed], generated_by="a")
+        statement = build_statement(tmp_path)
+        for node in statement["predicate"]["@graph"]:
+            if node.get("claimText") == "lone claim":
+                node["supportLevel"] = "REPLICATED"
+                break
+        bundle = sign_bundle(statement, pk)
+        bundle_path = tmp_path / "bundle.json"
+        bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+        with pytest.raises(
+            BundleVerificationError, match="no shared upstream carries a second",
+        ):
+            verify_bundle(bundle_path, pk.public_key())
+
+    def test_genuine_established_and_replicated_verify(
+        self, tmp_path: Path,
+    ) -> None:
+        """A real REPLICATED pair (distinct signers) promoted to ESTABLISHED by
+        a third validator round-trips: the validation envelope and distinct
+        signers are present and check out."""
+        root_key = tmp_path / "root.key"
+        _signing.bootstrap_key(root_key)
+        root_pk = _signing.load_private_key(root_key)
+        val_key = tmp_path / "val.key"
+        _signing.bootstrap_key(val_key)
+        val2_key = tmp_path / "val2.key"
+        _signing.bootstrap_key(val2_key)
+        val_pem = _signing.public_key_to_pem(
+            _signing.load_private_key(val_key).public_key()
+        )
+        val2_pem = _signing.public_key_to_pem(
+            _signing.load_private_key(val2_key).public_key()
+        )
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            seed = g.assert_claim("anchor", generated_by="seed", seed=True)
+            g.enroll_validator(val_pem, identity="v")
+            g.enroll_validator(val2_pem, identity="v2")
+            rep = g.assert_claim(
+                "converged", supports=[seed], generated_by="A", signer=root_pk,
+            )
+            g.assert_claim(
+                "converged", supports=[seed], generated_by="B",
+                signer=_signing.load_private_key(val_key),
+            )
+            assert g.get_claim(rep)["support_level"] == "REPLICATED"
+        with mareforma.open(tmp_path, key_path=val2_key) as g:
+            g.validate(rep)
+            assert g.get_claim(rep)["support_level"] == "ESTABLISHED"
+        bundle_path = tmp_path / "bundle.json"
+        write_bundle(tmp_path, bundle_path, root_pk)
+        statement = verify_bundle(bundle_path, root_pk.public_key())
+        levels = {
+            n["claimText"]: n["supportLevel"]
+            for n in statement["predicate"]["@graph"]
+            if n.get("@type") == "mare:Claim"
+        }
+        assert levels["converged"] in ("ESTABLISHED", "REPLICATED")

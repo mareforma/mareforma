@@ -13,8 +13,10 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import re
 import sqlite3
+import tempfile
 import uuid
 import warnings
 from datetime import datetime, timezone
@@ -104,6 +106,46 @@ def _serialize_predicate_payload(payload: dict | None) -> str:
         )
     from .._canonical import canonicalize
     return canonicalize(payload).decode("utf-8")
+
+
+def _serialize_observed_grounding(record: dict | None) -> str | None:
+    """Serialize the observed-grounding record for its queryable column.
+
+    Canonical JSON so the column round-trips byte-stably and matches the same
+    record bound into the signed predicate. ``None`` stays NULL — the column
+    default — so a claim asserted without the observer writes exactly the bytes
+    it did before this field existed. The signed envelope is authoritative; this
+    column is the denormalisation the split measurement and the promotion gate
+    read.
+    """
+    if record is None:
+        return None
+    if not isinstance(record, dict):
+        raise TypeError(
+            f"observed_grounding must be a dict (the computed verdict record), "
+            f"got {type(record).__name__}."
+        )
+    from .._canonical import canonicalize
+    return canonicalize(record).decode("utf-8")
+
+
+def _observed_grounding_promotes(stored: str | None) -> bool:
+    """Whether a stored observed-grounding column permits support-level promotion.
+
+    A NULL column (every claim asserted without the observer) is unaffected and
+    promotes as before. A recorded verdict promotes only when it is GROUNDED;
+    UNGROUNDED and OPAQUE never count toward promotion. Any non-NULL value that
+    is not GROUNDED JSON (including an empty string) is non-promoting
+    (fail-closed): a verdict we cannot read is not a GROUNDED one. This matches
+    the peer-promotion SQL guard, which excludes a non-``json_valid`` column.
+    """
+    if stored is None:
+        return True
+    try:
+        record = json.loads(stored)
+        return record.get("grounding") == "GROUNDED"
+    except (ValueError, TypeError, AttributeError):
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +380,12 @@ def _ensure_claims_columns_for_upgrade(
         # promotion query's NULL guard treats them as "not a distinct signer."
         ("asserter_keyid",
          "ALTER TABLE claims ADD COLUMN asserter_keyid TEXT"),
+        # Observed grounding verdict (computed axis). Added NULL on every
+        # existing row; a NULL verdict is omitted from the signed predicate, so
+        # this ALTER leaves every existing row's signed bytes byte-identical,
+        # exactly like the query-side columns above.
+        ("observed_grounding",
+         "ALTER TABLE claims ADD COLUMN observed_grounding TEXT"),
     ]
     for col, alter_sql in upgrades:
         if col in existing_cols:
@@ -848,6 +896,7 @@ def add_claim(
     rekor_log_pubkey_pem: bytes | None = None,
     predicate_payload: dict | None = None,
     original_signature_bundle: str | None = None,
+    observed_grounding: dict | None = None,
 ) -> str:
     """Insert a new claim and return its claim_id.
 
@@ -1098,6 +1147,11 @@ def add_claim(
             "artifact_hash": artifact_hash,
             "created_at": now,
         }
+        # Bind the observed verdict into the signed bytes only when one was
+        # recorded. Absent → the key never enters claim_fields, so the signed
+        # statement and its cid are byte-identical to a pre-observer claim.
+        if observed_grounding is not None:
+            claim_fields["observed_grounding"] = observed_grounding
         envelope = _signing.sign_claim(
             claim_fields, signer, evidence=evidence_dict,
         )
@@ -1114,6 +1168,7 @@ def add_claim(
                 artifact_hash=claim_fields["artifact_hash"],
                 created_at=claim_fields["created_at"],
                 evidence=evidence_dict,
+                observed_grounding=observed_grounding,
             )
         )
 
@@ -1140,6 +1195,12 @@ def add_claim(
         "artifact_hash": artifact_hash,
         "created_at": now,
     }
+    # The chain hash binds the same optional field the signature does, so the
+    # verdict is tamper-evident on the append-only chain as well. Absent when no
+    # verdict was recorded, keeping the chain link identical for pre-observer
+    # claims (the chain input is the canonical statement, which omits the key).
+    if observed_grounding is not None:
+        chain_fields["observed_grounding"] = observed_grounding
     # BEGIN IMMEDIATE is only valid when no transaction is currently
     # open. Python's default sqlite3 isolation_level='' auto-starts a
     # transaction before DML, so callers that already wrote within the
@@ -1182,9 +1243,10 @@ def add_claim(
                  ev_imprecision, ev_pub_bias,
                  evidence_json, statement_cid,
                  predicate_payload, original_signature_bundle,
+                 observed_grounding,
                  created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 claim_id, text, classification, initial_level, idempotency_key,
@@ -1201,6 +1263,7 @@ def add_claim(
                 evidence_json, statement_cid,
                 _serialize_predicate_payload(predicate_payload),
                 _canonical_envelope(original_signature_bundle),
+                _serialize_observed_grounding(observed_grounding),
                 now, now,
             ),
         )
@@ -1273,6 +1336,7 @@ def add_claim(
             rekor_url=rekor_url,
             require_rekor=require_rekor,
             rekor_log_pubkey_pem=rekor_log_pubkey_pem,
+            own_transaction=_own_transaction,
         )
 
     # Check whether this claim triggers REPLICATED status on shared upstreams.
@@ -1284,7 +1348,12 @@ def add_claim(
             own_transaction=_own_transaction,
         )
 
-    _backup_claims_toml(conn, root)
+    # Snapshot committed state only. When this call joined a caller's open
+    # transaction the rows are not committed yet, so backing up here would put a
+    # claim in the DR artifact that a caller rollback then erases from the DB.
+    # The owning caller runs the backup after it commits (submit_finding does).
+    if _own_transaction:
+        _backup_claims_toml(conn, root)
     return claim_id
 
 
@@ -1337,10 +1406,19 @@ def _maybe_update_replicated_unlocked(
     # below). Short-circuit before the SELECT so neither the new row
     # nor any open peer is promoted.
     new_status_row = conn.execute(
-        "SELECT status, asserter_keyid FROM claims WHERE claim_id = ?",
+        "SELECT status, asserter_keyid, observed_grounding, t_invalid "
+        "FROM claims WHERE claim_id = ?",
         (new_claim_id,),
     ).fetchone()
     if new_status_row is None or new_status_row["status"] != "open":
+        return
+    # A claim a signed contradiction verdict marked invalid (t_invalid set) must
+    # not climb the trust ladder through convergence, nor ride an honest peer's
+    # promotion. record_replication_verdict already refuses to promote such a
+    # claim; the convergence path agrees. Gated here for the new claim, in the
+    # candidate-peer SELECT below, and again in the promotion UPDATE (the UPDATE
+    # guard closes the TOCTOU window if a peer is invalidated after the SELECT).
+    if new_status_row["t_invalid"] is not None:
         return
     # The new claim must carry a non-NULL asserter_keyid to enter the new
     # promotion rule. An unsigned / legacy row is not a valid distinct signer,
@@ -1349,6 +1427,13 @@ def _maybe_update_replicated_unlocked(
     # they are never re-promoted here.)
     new_asserter_keyid = new_status_row["asserter_keyid"]
     if new_asserter_keyid is None:
+        return
+    # Observed-grounding gate: a finding that execution shows is NOT grounded
+    # (UNGROUNDED or OPAQUE) never counts toward support-level promotion. A
+    # claim without a computed verdict (NULL — every pre-observer claim) is
+    # unaffected, so this is purely additive. Grounding is necessary, not
+    # sufficient: a GROUNDED verdict still has to clear the signer axis below.
+    if not _observed_grounding_promotes(new_status_row["observed_grounding"]):
         return
 
     # Shared-anchor rule: the converged-on-same-upstream contract requires
@@ -1397,8 +1482,19 @@ def _maybe_update_replicated_unlocked(
           AND c.asserter_keyid != ?
           AND c.support_level != 'ESTABLISHED'
           AND c.status = 'open'
+          AND c.t_invalid IS NULL
           AND c.unresolved = 0
           AND c.transparency_logged = 1
+          AND (
+              c.observed_grounding IS NULL
+              OR (
+                  CASE
+                      WHEN json_valid(c.observed_grounding)
+                      THEN json_extract(c.observed_grounding, '$.grounding')
+                      ELSE NULL
+                  END
+              ) = 'GROUNDED'
+          )
           AND NOT (
               c.artifact_hash IS NOT NULL
               AND ? IS NOT NULL
@@ -1421,7 +1517,8 @@ def _maybe_update_replicated_unlocked(
     # UPDATE is the actual gate; the pre-SELECT is a cheap fast-path.
     conn.execute(
         f"UPDATE claims SET support_level = 'REPLICATED', updated_at = ? "
-        f"WHERE claim_id IN ({peer_placeholders}) AND status = 'open'",
+        f"WHERE claim_id IN ({peer_placeholders}) AND status = 'open' "
+        f"AND t_invalid IS NULL",
         (_now(), *peer_ids),
     )
 
@@ -1506,6 +1603,36 @@ def _maybe_update_replicated(
             type(exc).__name__, new_claim_id, exc,
         )
         return False
+
+
+def _maybe_update_replicated_best_effort(
+    conn: sqlite3.Connection,
+    root: Path,
+    claim_id: str,
+    supports: list[str],
+    generated_by: str,
+    artifact_hash: str | None,
+) -> None:
+    """Re-check REPLICATED after a caller-owned flag flip without losing work.
+
+    The flag-flip sites (mark_claim_logged, mark_claim_resolved, update_claim)
+    re-run convergence inside their own transaction. A bare
+    ``except OperationalError: pass`` here left the claim PRELIMINARY with no
+    retry flag on a transient lock, invisible to refresh_convergence and health.
+    Route them through the same wrapper add_claim uses (``own_transaction=False``,
+    so it sets ``convergence_retry_needed`` on transient failure without
+    committing the caller's transaction), and record a health event when the
+    re-check is stranded so the strand is not silent.
+    """
+    ok = _maybe_update_replicated(
+        conn, claim_id, supports, generated_by, artifact_hash,
+        own_transaction=False,
+    )
+    if not ok:
+        from mareforma.health import append_health_event
+        append_health_event(
+            root, "convergence_retry", outcome="degraded", claim_id=claim_id,
+        )
 
 
 def list_convergence_retry_claims(
@@ -2407,6 +2534,7 @@ def _attempt_rekor_saga(
     rekor_url: str,
     require_rekor: bool,
     rekor_log_pubkey_pem: bytes | None = None,
+    own_transaction: bool = True,
 ) -> int:
     """Run the Rekor 4-step saga on a freshly-INSERTed signed claim.
 
@@ -2528,7 +2656,14 @@ def _attempt_rekor_saga(
             "WHERE claim_id = ?",
             (new_bundle, _now(), claim_id),
         )
-        conn.commit()
+        # Commit only when this call owns the transaction. When add_claim joined
+        # a caller's open transaction (submit_finding's BEGIN IMMEDIATE),
+        # committing here would flush the caller's in-flight writes early and
+        # void its atomicity: a later fork or raise could no longer roll the
+        # signed claim back, stranding an orphan. The caller's commit flushes
+        # this UPDATE with the rest of its transaction.
+        if own_transaction:
+            conn.commit()
         return 1
     except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
         warnings.warn(
@@ -2833,15 +2968,13 @@ def mark_claim_logged(
                 (new_signature_bundle, now, claim_id),
             )
             # Convergence detection is best-effort by design: a transient
-            # lock error during the REPLICATED check must not roll back
-            # the flag flip the operator just committed.
+            # lock error during the REPLICATED check must not roll back the
+            # flag flip the operator just committed, but it must not vanish
+            # either (retry flag + health event).
             if not unresolved:
-                try:
-                    _maybe_update_replicated_unlocked(
-                        conn, claim_id, supports, generated_by, artifact_hash,
-                    )
-                except sqlite3.OperationalError:
-                    pass
+                _maybe_update_replicated_best_effort(
+                    conn, root, claim_id, supports, generated_by, artifact_hash,
+                )
     except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
         raise DatabaseError(f"Failed to mark claim logged: {exc}") from exc
 
@@ -2888,13 +3021,11 @@ def mark_claim_resolved(
             )
             # Convergence detection is best-effort by design: a transient
             # lock or convergence-query failure must not roll back the
-            # flag-clear (which is the actual user intent).
-            try:
-                _maybe_update_replicated_unlocked(
-                    conn, claim_id, supports, generated_by, artifact_hash,
-                )
-            except sqlite3.OperationalError:
-                pass
+            # flag-clear (the actual user intent), but it must stay retryable
+            # (retry flag + health event) rather than strand the claim.
+            _maybe_update_replicated_best_effort(
+                conn, root, claim_id, supports, generated_by, artifact_hash,
+            )
     except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
         raise DatabaseError(f"Failed to mark claim resolved: {exc}") from exc
 
@@ -3041,15 +3172,13 @@ def update_claim(
                 ),
             )
             if needs_replicated_check:
-                try:
-                    new_supports = json.loads(new_supports_json)
-                    _maybe_update_replicated_unlocked(
-                        conn, claim_id, new_supports, existing["generated_by"],
-                        existing.get("artifact_hash"),
-                    )
-                except sqlite3.OperationalError:
-                    # Convergence detection is best-effort — never crash an update.
-                    pass
+                # Best-effort convergence: never crash an update, but keep a
+                # stranded re-check retryable (retry flag + health event).
+                new_supports = json.loads(new_supports_json)
+                _maybe_update_replicated_best_effort(
+                    conn, root, claim_id, new_supports,
+                    existing["generated_by"], existing.get("artifact_hash"),
+                )
     except sqlite3.IntegrityError as exc:
         translated = _state_error_from_integrity(exc)
         if translated is not None:
@@ -3814,6 +3943,89 @@ def refutation_status(row: dict) -> dict:
     }
 
 
+def _read_scan_ceiling(limit: int) -> int:
+    """Max rows a read surface materialises before returning the survivors it
+    has. Bounds the adversarial worst case: a flood of rows that fail
+    verify-on-read (mass tamper or unenrolled-PRELIMINARY traffic) must not turn
+    a cheap insert into a whole-table read amplifier. Generous enough that
+    legitimate verified-heavy / PRELIMINARY-heavy projects are unaffected."""
+    return max(limit * 50, 5000)
+
+
+def _read_path_row(
+    conn: sqlite3.Connection,
+    row,
+    *,
+    reputation: dict,
+    enrolled_keyids: set,
+    include_unverified: bool,
+    trust_domain: tuple,
+    verify_cache: dict,
+) -> dict | None:
+    """Project one claims row for a read surface, or None to exclude it.
+
+    Shared by :func:`query_claims` and :func:`search_claims` so the read-path
+    verification cannot drift between the two surfaces. Attaches
+    ``generator_enrolled`` and ``validator_reputation``; drops an
+    unenrolled-generator PRELIMINARY row unless ``include_unverified``; drops a
+    REPLICATED / ESTABLISHED row whose signature does not re-verify (independent
+    of ``include_unverified``, which only relaxes the PRELIMINARY generator
+    filter, never the high-trust signature check); and attaches the trust-domain
+    disclosure to an ESTABLISHED row.
+    """
+    d = dict(row)
+    gen_keyid = _extract_signature_bundle_keyid(d.get("signature_bundle"))
+    d["generator_enrolled"] = (
+        gen_keyid is not None and gen_keyid in enrolled_keyids
+    )
+    validator_kid = d.get("validator_keyid")
+    d["validator_reputation"] = (
+        reputation.get(validator_kid, 0) if validator_kid else 0
+    )
+    if not include_unverified and (
+        d["support_level"] == "PRELIMINARY" and not d["generator_enrolled"]
+    ):
+        return None
+    if not _row_verified_on_read(conn, d, verify_cache):
+        return None
+    if d["support_level"] == "ESTABLISHED":
+        d["single_trust_domain"], d["trust_domain_root"] = trust_domain
+    return d
+
+
+def _project_verified_rows(
+    conn: sqlite3.Connection,
+    rows: list,
+    *,
+    limit: int,
+    include_unverified: bool,
+) -> list[dict]:
+    """Filter and project already-fetched rows for a read surface.
+
+    Computes the per-call reputation, enrolled set, and trust-domain disclosure
+    once, then applies :func:`_read_path_row` in sorted order until ``limit``
+    survivors are collected. The single ordered fetch happens in the caller, so
+    the table is sorted once, not re-sorted per batch.
+    """
+    reputation = _compute_validator_reputation(conn)
+    enrolled_keyids = _enrolled_validator_keyids(conn)
+    trust_domain = _trust_domain_disclosure(conn)
+    verify_cache: dict = {}
+    results: list[dict] = []
+    for row in rows:
+        d = _read_path_row(
+            conn, row,
+            reputation=reputation, enrolled_keyids=enrolled_keyids,
+            include_unverified=include_unverified, trust_domain=trust_domain,
+            verify_cache=verify_cache,
+        )
+        if d is not None:
+            results.append(d)
+            if len(results) >= limit:
+                break
+    return results
+
+
 def query_claims(
     conn: sqlite3.Connection,
     *,
@@ -3952,93 +4164,26 @@ def query_claims(
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
-    # When include_unverified is False, the verified-claim filter runs in
-    # Python after the SQL fetch. A flat `LIMIT N` could return zero
-    # results when the top-N rows are all unverified PRELIMINARY,
-    # silently under-returning. Pull rows in batches and keep going
-    # until either we have `limit` survivors or the table is exhausted.
-    # When include_unverified is True there is no filter, so one fetch
-    # at the exact limit is enough.
-    reputation = _compute_validator_reputation(conn)
-    enrolled_keyids = _enrolled_validator_keyids(conn)
-    # Graph-global trust-domain disclosure, attached to each ESTABLISHED row.
-    _std, _trust_root = _trust_domain_disclosure(conn)
-
+    # The verified-claim filter runs in Python after the fetch, so a flat
+    # `LIMIT limit` could under-return when the top rows are all drained. Order
+    # the table once and materialise up to the scan ceiling of sorted rows in a
+    # single statement (no growing OFFSET, so no per-batch re-scan and re-sort),
+    # then filter for survivors.
     base_sql = (
         f"SELECT {_CLAIM_SELECT} FROM claims {where} "
         f"ORDER BY CASE support_level "
         f"WHEN 'ESTABLISHED' THEN 3 WHEN 'REPLICATED' THEN 2 ELSE 1 END DESC, "
-        f"created_at DESC LIMIT ? OFFSET ?"
+        f"created_at DESC LIMIT ?"
     )
-
-    results: list[dict] = []
-    offset = 0
-    # One verify cache for the whole query: at most one signature check per
-    # distinct (tier, keyid, digest) across every batch this call fetches.
-    verify_cache: dict = {}
-    # Fetch in batches sized to the caller's limit. For verified-heavy
-    # projects the first batch is usually enough; for projects with
-    # heavy unverified PRELIMINARY traffic the loop keeps pulling
-    # until it has `limit` survivors or hits the end.
-    batch_size = max(limit, 1)
-    # Bound the scan. Under a flood of rows that fail verify-on-read (a mass
-    # direct-SQL tamper, or heavy unenrolled-PRELIMINARY traffic) survivors can
-    # stay below `limit` indefinitely, which would walk the whole table on every
-    # query: a cheap-to-insert forged row becomes a read-amplifier. Cap total
-    # rows scanned and return what survived rather than scanning to exhaustion.
-    # The ceiling is generous so legitimate verified-heavy / PRELIMINARY-heavy
-    # projects are unaffected; it only bounds the adversarial worst case.
-    max_scan = max(limit * 50, 5000)
     try:
-        while len(results) < limit:
-            rows = conn.execute(
-                base_sql, params + [batch_size, offset],
-            ).fetchall()
-            if not rows:
-                break
-            offset += len(rows)
-            for row in rows:
-                d = dict(row)
-                gen_keyid = _extract_signature_bundle_keyid(
-                    d.get("signature_bundle"),
-                )
-                d["generator_enrolled"] = (
-                    gen_keyid is not None and gen_keyid in enrolled_keyids
-                )
-                validator_kid = d.get("validator_keyid")
-                d["validator_reputation"] = (
-                    reputation.get(validator_kid, 0)
-                    if validator_kid else 0
-                )
-                if not include_unverified:
-                    if (d["support_level"] == "PRELIMINARY"
-                            and not d["generator_enrolled"]):
-                        continue
-                # Re-verify high-trust rows on read: a REPLICATED/ESTABLISHED
-                # row whose signature does not verify is a tamper and is
-                # excluded from query results entirely (get_claim is the
-                # surface that still returns it, flagged). include_unverified
-                # is about unenrolled PRELIMINARY generators, NOT about
-                # serving a forged high-trust row, so it does not relax this.
-                if not _row_verified_on_read(conn, d, verify_cache):
-                    continue
-                if d["support_level"] == "ESTABLISHED":
-                    d["single_trust_domain"] = _std
-                    d["trust_domain_root"] = _trust_root
-                results.append(d)
-                if len(results) >= limit:
-                    break
-            # No early break on include_unverified: the high-trust verify
-            # filter can still drop rows, so keep batching until we have
-            # `limit` survivors or the table is exhausted (the while + the
-            # empty-rows break above bound the loop).
-            if offset >= max_scan:
-                # Scan ceiling hit: return the survivors found so far rather
-                # than walking the rest of the table behind a tamper flood.
-                break
+        rows = conn.execute(
+            base_sql, params + [_read_scan_ceiling(limit)],
+        ).fetchall()
     except sqlite3.OperationalError as exc:
         raise DatabaseError(f"Failed to query claims: {exc}") from exc
-    return results
+    return _project_verified_rows(
+        conn, rows, limit=limit, include_unverified=include_unverified,
+    )
 
 
 def _extract_signature_bundle_keyid(bundle_json: str | None) -> str | None:
@@ -4165,53 +4310,21 @@ def search_claims(
 
     where = " AND ".join(conditions)
     select_cols = ", ".join(f"c.{col}" for col in _CLAIM_COLUMNS)
+    # Rank once and materialise up to the scan ceiling in a single statement,
+    # then project through the SAME read-path filter as query_claims. Routing
+    # both surfaces through _project_verified_rows re-verifies high-trust rows
+    # here too, so search cannot serve a REPLICATED / ESTABLISHED row that query
+    # correctly excludes, and the two projections cannot drift apart.
     base_sql = (
         f"SELECT {select_cols} FROM claims_fts f "
         f"JOIN claims c ON c.claim_id = f.claim_id "
         f"WHERE {where} "
-        f"ORDER BY rank LIMIT ? OFFSET ?"
+        f"ORDER BY rank LIMIT ?"
     )
-
-    reputation = _compute_validator_reputation(conn)
-    enrolled_keyids = _enrolled_validator_keyids(conn)
-
-    # Same batched-pull pattern as query_claims — keep pulling until
-    # we have `limit` survivors of the include_unverified filter, or
-    # the FTS5 match-set is exhausted. include_unverified=True needs
-    # no filter, so one batch covers it.
-    results: list[dict] = []
-    offset = 0
-    batch_size = max(limit, 1)
     try:
-        while len(results) < limit:
-            rows = conn.execute(
-                base_sql, params + [batch_size, offset],
-            ).fetchall()
-            if not rows:
-                break
-            offset += len(rows)
-            for row in rows:
-                d = dict(row)
-                gen_keyid = _extract_signature_bundle_keyid(
-                    d.get("signature_bundle"),
-                )
-                d["generator_enrolled"] = (
-                    gen_keyid is not None and gen_keyid in enrolled_keyids
-                )
-                validator_kid = d.get("validator_keyid")
-                d["validator_reputation"] = (
-                    reputation.get(validator_kid, 0)
-                    if validator_kid else 0
-                )
-                if not include_unverified:
-                    if (d["support_level"] == "PRELIMINARY"
-                            and not d["generator_enrolled"]):
-                        continue
-                results.append(d)
-                if len(results) >= limit:
-                    break
-            if include_unverified:
-                break
+        rows = conn.execute(
+            base_sql, params + [_read_scan_ceiling(limit)],
+        ).fetchall()
     except sqlite3.OperationalError as exc:
         # FTS5 raises OperationalError on malformed MATCH syntax.
         # Wrap so callers don't have to import sqlite3 to pattern-match.
@@ -4221,7 +4334,9 @@ def search_claims(
                 f"Search query {query!r} is not valid FTS5 syntax: {msg}"
             ) from exc
         raise DatabaseError(f"Failed to search claims: {exc}") from exc
-    return results
+    return _project_verified_rows(
+        conn, rows, limit=limit, include_unverified=include_unverified,
+    )
 
 
 def get_validator_reputation(conn: sqlite3.Connection) -> dict[str, int]:
@@ -4245,6 +4360,106 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# Backup deferral state, keyed by id(conn). A connection with an open deferral
+# window records that a rewrite is due rather than writing claims.toml; the
+# window writes once when the outermost window closes. The connection stays
+# alive for the whole window, so its id is stable and unique for it. The value
+# is ``[depth, dirty]``: nesting depth so an inner window does not end the outer
+# one, and the pending-dirty flag a mutation sets.
+_backup_suspended: dict[int, list] = {}
+
+
+def suspend_backup(conn: sqlite3.Connection) -> None:
+    """Open a backup-deferral window on *conn*. While open, _backup_claims_toml
+    marks the backup dirty rather than writing claims.toml. Windows nest: a
+    mutation writes once when the outermost window closes."""
+    state = _backup_suspended.get(id(conn))
+    if state is None:
+        _backup_suspended[id(conn)] = [1, False]
+    else:
+        state[0] += 1
+
+
+def resume_backup(conn: sqlite3.Connection, root: Path) -> None:
+    """Close one deferral window on *conn*. The outermost close writes
+    claims.toml once if a mutation marked it dirty; an inner close keeps the
+    window open. A no-op when no window is open."""
+    state = _backup_suspended.get(id(conn))
+    if state is None:
+        return
+    state[0] -= 1
+    if state[0] > 0:
+        return
+    dirty = state[1]
+    del _backup_suspended[id(conn)]
+    if dirty:
+        _backup_claims_toml(conn, root)
+
+
+def _drain_backup_window(conn: sqlite3.Connection, root: Path) -> None:
+    """Close every open deferral level on *conn* at once and flush a pending
+    write. For teardown: a graph closed mid-batch still leaves claims.toml
+    current, and no window keyed on a soon-reused id() is left behind."""
+    state = _backup_suspended.pop(id(conn), None)
+    if state is not None and state[1]:
+        _backup_claims_toml(conn, root)
+
+
+def get_project_policy(conn: sqlite3.Connection) -> dict | None:
+    """Return the singleton project-policy row as a dict, or None if unset.
+
+    The signed ``envelope`` is the authority; the flat columns are a read
+    cache. restore verifies the envelope against the enrolled root before
+    trusting either.
+    """
+    row = conn.execute(
+        "SELECT rekor_required, signer_keyid, envelope, created_at "
+        "FROM project_policy WHERE id = 1"
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def set_project_policy(
+    conn: sqlite3.Connection,
+    root: Path,
+    *,
+    envelope: str,
+    signer_keyid: str,
+    rekor_required: bool,
+    created_at: str,
+) -> dict:
+    """Persist the singleton project policy and refresh the backup.
+
+    One-way: a policy already present is returned unchanged (a project cannot
+    revoke witnessing once required). Locks with BEGIN IMMEDIATE so a racing
+    writer serializes on the singleton insert. Returns the effective policy.
+    """
+    existing = get_project_policy(conn)
+    if existing is not None:
+        return existing
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        existing = get_project_policy(conn)
+        if existing is not None:
+            conn.execute("COMMIT")
+            return existing
+        conn.execute(
+            "INSERT INTO project_policy "
+            "(id, rekor_required, signer_keyid, envelope, created_at) "
+            "VALUES (1, ?, ?, ?, ?)",
+            (1 if rekor_required else 0, signer_keyid, envelope, created_at),
+        )
+        conn.execute("COMMIT")
+    except BaseException:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.OperationalError:
+            pass
+        raise
+    _backup_claims_toml(conn, root)
+    return get_project_policy(conn)
+
+
 def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
     """Write all claims AND validators to claims.toml in the project root.
 
@@ -4256,6 +4471,11 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
     the file. Stderr-ERROR (not ``warnings.warn``, which production
     callers often suppress) so divergence is visible by default.
     """
+    state = _backup_suspended.get(id(conn))
+    if state is not None:
+        # A deferral window is open: mark a rewrite due; resume_backup writes it.
+        state[1] = True
+        return
     try:
         import tomli_w
 
@@ -4340,6 +4560,12 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
                 entry["predicate_payload"] = c["predicate_payload"]
             if c.get("original_signature_bundle"):
                 entry["original_signature_bundle"] = c["original_signature_bundle"]
+            # Observed grounding verdict: round-trip only when populated, so a
+            # backup of a graph that never used the observer grows no new field.
+            # It is bound into the signed statement, so restore rebuilds the
+            # canonical bytes from it and statement_cid catches any TOML tamper.
+            if c.get("observed_grounding"):
+                entry["observed_grounding"] = c["observed_grounding"]
             data["claims"][c["claim_id"]] = entry
 
         # Verdict tables. Each verdict carries its own signature
@@ -4402,8 +4628,54 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
                     "recorded_at": r["recorded_at"],
                 }
 
+        # Project policy: a root-signed, project-wide trust declaration. The
+        # signed envelope is the authority restore verifies; the flat fields
+        # are the read cache. Emitted only when set.
+        policy_row = get_project_policy(conn)
+        if policy_row is not None:
+            data["project_policy"] = {
+                "rekor_required": bool(policy_row["rekor_required"]),
+                "signer_keyid": policy_row["signer_keyid"],
+                "envelope": policy_row["envelope"],
+                "created_at": policy_row["created_at"],
+            }
+
         out = root / "claims.toml"
-        out.write_bytes(tomli_w.dumps(data).encode("utf-8"))
+        payload = tomli_w.dumps(data).encode("utf-8")
+        # Atomic write: a crash during the rewrite must not destroy the sole DR
+        # artifact on the exact crash class it exists for. Write a temp file in
+        # the same directory, fsync it, then os.replace onto the target (an
+        # atomic rename on POSIX). A failure anywhere before the replace leaves
+        # the previous good claims.toml untouched, never truncated or empty.
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=".claims.toml.", suffix=".tmp", dir=str(root),
+        )
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_name, out)
+            # fsync the directory so the rename itself survives a power loss,
+            # not just the temp file's contents. Best-effort: os.replace has
+            # already committed the write, so a directory-fsync failure must
+            # not surface as a backup failure. Skip where the platform has no
+            # directory fd (Windows).
+            if hasattr(os, "O_DIRECTORY"):
+                try:
+                    dir_fd = os.open(str(root), os.O_DIRECTORY)
+                    try:
+                        os.fsync(dir_fd)
+                    finally:
+                        os.close(dir_fd)
+                except OSError:
+                    pass
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
 
     except Exception as exc:  # noqa: BLE001
         import sys

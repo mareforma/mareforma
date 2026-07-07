@@ -32,6 +32,7 @@ from __future__ import annotations
 import base64
 import json
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -166,6 +167,7 @@ class EpistemicGraph:
         predicate_payload: dict | None = None,
         original_signature_bundle: str | None = None,
         grounding_sensor: "object | None" = None,
+        observed_grounding: dict | None = None,
     ) -> str:
         # signer:
         #     Per-call override for the graph's loaded signer. When
@@ -288,6 +290,18 @@ class EpistemicGraph:
         REPLICATED promotion. Call :meth:`refresh_unresolved` later to retry.
         """
         self._check_open()
+        # Sign-after-author invariant: a claim must be authored inside a
+        # grounding scope and signed AFTER it closes. Asserting while the scope
+        # that grounds it is still open would sign a verdict computed from an
+        # incomplete observation, so it is refused rather than silently signed.
+        from mareforma import observe as _observe
+        if _observe.scope_is_open():
+            raise RuntimeError(
+                "cannot assert a claim while a grounding observe() scope is "
+                "open: close the scope first, then assert with the computed "
+                "grounding verdict. Signing inside an open scope would bind a "
+                "verdict from a partial observation."
+            )
         # Resolve any DOIs in supports/contradicts. Strings that don't match
         # DOI format are treated as claim_id references and pass through.
         dois = _doi.extract_dois((supports or []) + (contradicts or []))
@@ -398,6 +412,7 @@ class EpistemicGraph:
             rekor_log_pubkey_pem=self._rekor_log_pubkey_pem,
             predicate_payload=predicate_payload,
             original_signature_bundle=original_signature_bundle,
+            observed_grounding=observed_grounding,
         )
 
     def query(
@@ -923,6 +938,7 @@ class EpistemicGraph:
         design_type: str | None = None,
         code_ref: str | None = None,
         idempotency_key: str | None = None,
+        grounding: "GroundingVerdict | None" = None,
     ) -> dict:
         """Record a finding: a computed bearing of an outcome on a proposition.
 
@@ -1042,6 +1058,7 @@ class EpistemicGraph:
             design_type=design_type,
             code_ref=code_ref,
             idempotency_key=idempotency_key,
+            grounding=grounding,
         )
 
     def submit_finding(
@@ -1060,6 +1077,7 @@ class EpistemicGraph:
         design_type: str | None = None,
         code_ref: str | None = None,
         idempotency_key: str | None = None,
+        grounding: "GroundingVerdict | None" = None,
     ) -> dict:
         """Submit a finding against a plan that was already pre-registered.
 
@@ -1192,6 +1210,14 @@ class EpistemicGraph:
                 content_id=proposition.content_id(),
             )
 
+        # Normalize the observed grounding verdict into the compact record bound
+        # into the signed envelope. The cited source(s) the verdict was computed
+        # against travel inside its receipt (digested into the signed record), so
+        # the finding carries a matchable source identifier, not just the opaque
+        # data_id. The assert path enforces that no observe() scope is still open
+        # when this signs.
+        grounding_signed = self._normalize_grounding(grounding)
+
         cid = proposition.content_id()
         plan_id = _store.compute_plan_id(cid, prediction)
         data_id_set = {ln.data_id for ln in evidence_lines}
@@ -1254,6 +1280,10 @@ class EpistemicGraph:
                 "status": view["status"] if view else None,
                 "idempotent": True,
                 "proposition_status": view,
+                # Report the verdict actually stored on the existing claim, not a
+                # freshly-passed one: an idempotent replay reuses the first
+                # write's signed claim and does not re-record grounding.
+                "grounding": self._stored_grounding(existing["claim_id"]),
             }
         if not _store.plan_exists(self._conn, plan_id):
             raise NoRegisteredPlanError(
@@ -1322,6 +1352,7 @@ class EpistemicGraph:
                     generated_by=generated_by,
                     supports=supports,
                     idempotency_key=finding_key,
+                    observed_grounding=grounding_signed,
                     predicate_payload={
                         "trust": "finding/v1",
                         "content_id": cid,
@@ -1347,6 +1378,12 @@ class EpistemicGraph:
             view = _store.proposition_status(conn, cid)
             if _own_txn:
                 conn.commit()
+                # add_claim ran inside this transaction (own_transaction=False),
+                # so it deferred the claims.toml backup to the transaction owner.
+                # Snapshot the now-committed state here, never the uncommitted
+                # rows a rollback would have erased.
+                from mareforma.db.core import _backup_claims_toml
+                _backup_claims_toml(conn, self._root)
         except BaseException:
             if _own_txn:
                 conn.rollback()
@@ -1369,7 +1406,56 @@ class EpistemicGraph:
             "status": view["status"] if view else None,
             "idempotent": idempotent,
             "proposition_status": view,
+            # The observed grounding record bound into the signed envelope, or
+            # None when no verdict was supplied. Additive: it never changes the
+            # bearing or the derived status. On an idempotent reuse, report the
+            # verdict actually stored on the reused claim, not the passed one.
+            "grounding": (
+                self._stored_grounding(result_claim_id)
+                if idempotent
+                else grounding_signed
+            ),
         }
+
+    def _stored_grounding(self, claim_id: str) -> dict | None:
+        """The observed-grounding record stored on a claim, or None.
+
+        Reads the queryable column so an idempotent replay reports what was
+        actually persisted and signed, rather than a verdict a later call passed
+        but never recorded.
+        """
+        row = self._conn.execute(
+            "SELECT observed_grounding FROM claims WHERE claim_id = ?", (claim_id,)
+        ).fetchone()
+        if row is None or row["observed_grounding"] is None:
+            return None
+        import json as _json
+
+        try:
+            return _json.loads(row["observed_grounding"])
+        except (ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _normalize_grounding(grounding) -> dict | None:
+        """Coerce a grounding argument into the signed observed-grounding record.
+
+        Accepts a :class:`mareforma.observe.GroundingVerdict` (the normal path),
+        a pre-built signed-record dict, or None. Returns the compact record
+        (version, grounding, reason, receipt_digest) bound into the signed
+        envelope, or None when no verdict was supplied.
+        """
+        if grounding is None:
+            return None
+        to_signed = getattr(grounding, "to_signed_dict", None)
+        if callable(to_signed):
+            return to_signed()
+        if isinstance(grounding, dict):
+            return grounding
+        raise TypeError(
+            "grounding must be a GroundingVerdict (from mareforma.observe) or "
+            f"None; got {type(grounding).__name__}"
+        )
 
     def proposition_status(self, proposition_or_content_id) -> dict | None:
         """The retrieval view for one proposition: derived Status, independence
@@ -1637,6 +1723,58 @@ class EpistemicGraph:
             identity=identity, validator_type=validator_type,
         )
 
+    def require_rekor_witnessing(self) -> dict:
+        """Declare that this project's findings must be witnessed by the
+        transparency log before they can converge.
+
+        The root validator signs a project-policy envelope; the declaration is
+        persisted and emitted to ``claims.toml``. On recovery,
+        ``restore(..., enforce_rekor_policy=True)`` verifies this envelope
+        against the enrolled root and refuses to mark any signed claim
+        convergence-eligible without a verified, claim-bound inclusion proof.
+
+        One-way, and root-only: a project cannot un-require witnessing (mirrors
+        validator enrollment), and only the single root of trust may set the
+        policy. Idempotent once set. Returns the effective policy dict.
+
+        Raises
+        ------
+        ValueError
+            If no signer is loaded, or the loaded signer is not the project's
+            single root validator.
+        """
+        self._check_open()
+        if self._signer is None:
+            raise ValueError(
+                "graph.require_rekor_witnessing requires a loaded signing key. "
+                "Reopen the graph with the root key_path."
+            )
+        from mareforma import signing as _signing
+        from mareforma import validators as _validators
+        from mareforma.db.core import _now
+        signer_keyid = _signing.public_key_id(self._signer.public_key())
+        root_keyid = _validators.trust_domain_root(self._conn)
+        if root_keyid is None or signer_keyid != root_keyid:
+            raise ValueError(
+                "Only the project's root validator may declare the Rekor "
+                "witnessing policy. Reopen with the root key."
+            )
+        existing = _db.get_project_policy(self._conn)
+        if existing is not None:
+            return existing
+        created_at = _now()
+        envelope = _signing.sign_project_policy(
+            {"rekor_required": True, "created_at": created_at},
+            self._signer,
+        )
+        return _db.set_project_policy(
+            self._conn, self._root,
+            envelope=json.dumps(envelope, sort_keys=True, separators=(",", ":")),
+            signer_keyid=signer_keyid,
+            rekor_required=True,
+            created_at=created_at,
+        )
+
     def list_validators(self) -> list[dict]:
         """Return all enrolled validators ordered by enrollment time."""
         self._check_open()
@@ -1707,26 +1845,27 @@ class EpistemicGraph:
         # Step 2: decide per-claim using the shared results.
         resolved_count = 0
         still_unresolved = len(quarantined)
-        for claim in unresolved_claims:
-            cid = claim["claim_id"]
-            if cid in quarantined:
-                continue
-            dois = claim_dois[cid]
-            if not dois:
-                warnings.warn(
-                    f"Claim {cid} was flagged unresolved but contains no DOIs "
-                    "in supports/contradicts. Clearing flag.",
-                    stacklevel=2,
-                )
-                _db.mark_claim_resolved(self._conn, self._root, cid)
-                resolved_count += 1
-                continue
+        with self.defer_backup():
+            for claim in unresolved_claims:
+                cid = claim["claim_id"]
+                if cid in quarantined:
+                    continue
+                dois = claim_dois[cid]
+                if not dois:
+                    warnings.warn(
+                        f"Claim {cid} was flagged unresolved but contains no "
+                        "DOIs in supports/contradicts. Clearing flag.",
+                        stacklevel=2,
+                    )
+                    _db.mark_claim_resolved(self._conn, self._root, cid)
+                    resolved_count += 1
+                    continue
 
-            if all(results.get(d, False) for d in dois):
-                _db.mark_claim_resolved(self._conn, self._root, cid)
-                resolved_count += 1
-            else:
-                still_unresolved += 1
+                if all(results.get(d, False) for d in dois):
+                    _db.mark_claim_resolved(self._conn, self._root, cid)
+                    resolved_count += 1
+                else:
+                    still_unresolved += 1
 
         return {
             "checked": len(unresolved_claims),
@@ -1910,33 +2049,34 @@ class EpistemicGraph:
         promoted = 0
         still_pending = 0
 
-        for row in flagged:
-            try:
-                supports = json.loads(row.get("supports_json") or "[]")
-            except (json.JSONDecodeError, TypeError):
-                supports = []
-            generated_by = row.get("generated_by") or "agent"
-            artifact_hash = row.get("artifact_hash")
-            claim_id = row["claim_id"]
+        with self.defer_backup():
+            for row in flagged:
+                try:
+                    supports = json.loads(row.get("supports_json") or "[]")
+                except (json.JSONDecodeError, TypeError):
+                    supports = []
+                generated_by = row.get("generated_by") or "agent"
+                artifact_hash = row.get("artifact_hash")
+                claim_id = row["claim_id"]
 
-            def _bump(_exc: Exception) -> None:
-                self._convergence_errors += 1
+                def _bump(_exc: Exception) -> None:
+                    self._convergence_errors += 1
 
-            ok = _db._maybe_update_replicated(
-                self._conn,
-                claim_id,
-                supports,
-                generated_by,
-                artifact_hash,
-                on_error=_bump,
-            )
-            if ok:
-                _db.clear_convergence_retry_flag(
-                    self._conn, self._root, claim_id,
+                ok = _db._maybe_update_replicated(
+                    self._conn,
+                    claim_id,
+                    supports,
+                    generated_by,
+                    artifact_hash,
+                    on_error=_bump,
                 )
-                promoted += 1
-            else:
-                still_pending += 1
+                if ok:
+                    _db.clear_convergence_retry_flag(
+                        self._conn, self._root, claim_id,
+                    )
+                    promoted += 1
+                else:
+                    still_pending += 1
 
         return {
             "checked": checked,
@@ -2643,6 +2783,32 @@ class EpistemicGraph:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    def backup(self) -> None:
+        """Write ``claims.toml`` now, the recovery source for ``restore``.
+
+        Each mutation refreshes the backup on its own; call this to force a
+        write, for example at the end of a :meth:`defer_backup` batch.
+        """
+        self._check_open()
+        _db._backup_claims_toml(self._conn, self._root)
+
+    @contextmanager
+    def defer_backup(self):
+        """Group many mutations under a single ``claims.toml`` rewrite.
+
+        Inside the block a mutation marks the backup due rather than rewriting
+        the whole file; the write happens once when the block exits, and
+        ``claims.toml`` reflects the committed state again after it. Use it for a
+        bulk import or a loop of writes. Outside the block each mutation refreshes
+        the backup as usual.
+        """
+        self._check_open()
+        _db.suspend_backup(self._conn)
+        try:
+            yield
+        finally:
+            _db.resume_backup(self._conn, self._root)
+
     def close(self) -> None:
         """Close the underlying database connection.
 
@@ -2651,6 +2817,10 @@ class EpistemicGraph:
         ``sqlite3.ProgrammingError``.
         """
         if not self._closed:
+            # Flush any backup a still-open deferral window left pending, so a
+            # graph closed mid-batch still leaves claims.toml current. Drain
+            # every nesting level at once, before the connection closes.
+            _db._drain_backup_window(self._conn, self._root)
             self._conn.close()
             self._closed = True
 

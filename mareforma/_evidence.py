@@ -147,6 +147,15 @@ class EvidenceVector:
     # run independently and produce a different number; that
     # recomputed verdict is NOT stored on the claim. None = no
     # grounding sensor was wired into this assertion.
+    #
+    # This is a SOFT, text-level hint (a sensor scores the claim text
+    # against its cited supports), not a computed grounding verdict. The
+    # authoritative grounding signal is the execution-observed axis
+    # (``observed_grounding`` on the signed statement, computed by
+    # ``mareforma.observe``): that is what a reader should trust for
+    # "did real data flow into this finding." This score stays only as a
+    # legacy asserter-provided confidence hint and does not carry the
+    # observed axis's trust properties.
     grounding_score: float | None = None
     grounding_rationale: str | None = None
 

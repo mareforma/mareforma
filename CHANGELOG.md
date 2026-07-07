@@ -2,6 +2,67 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.8] - 2026-07-06
+
+Execution-observed grounding, and a trust-layer hardening pass across every path a
+finding travels: read, convergence, backup, restore, and the export bundle. The
+substrate now proves more of what it shows. A bundle's claims are checked against
+their own asserters and earned support level, restore rebuilds trust state from
+verifiable material rather than agent-set flags, and a project can require
+transparency-log witnessing before its findings converge. Additive on the schema
+(one new nullable column and one additive table, no migration).
+
+### Added
+
+- **Execution-observed grounding.** An optional observer watches a finding's
+  computation and records whether real data actually flowed into it (GROUNDED /
+  UNGROUNDED / OPAQUE). The verdict is bound into the signed claim and re-derived on
+  restore, so "this finding read the data it claims to" becomes part of what the
+  signature attests.
+- **Required Rekor witnessing.** `graph.require_rekor_witnessing()` writes a
+  root-signed, one-way project policy; `restore(enforce_rekor_policy=True)` then
+  reconstructs convergence-eligibility only for claims carrying a verified,
+  claim-bound transparency-log inclusion proof.
+- **Per-claim verification in the export bundle.** `verify_bundle` checks each
+  claim's own asserter signature bound to its presented content, the enrolled
+  validator chain to a single root (which must be the bundle signer), and the
+  displayed support level (ESTABLISHED against a validator-signed validation
+  envelope, REPLICATED against distinct-signer corroboration). The bundle signs over
+  the DSSE PAE encoding, so it verifies with standard DSSE tooling. Editorial status
+  (retracted / contested) carries no signature and stays exporter-attested.
+
+### Changed
+
+- **Search re-verifies high-trust rows.** `search()` applies the same
+  verify-on-read and trust-domain disclosure as `query()`, and both read paths sort
+  the table once instead of per batch.
+- **Convergence respects contradiction verdicts.** A claim invalidated by a signed
+  contradiction no longer rides an honest peer into REPLICATED, and a transiently
+  failed convergence re-check is retained and retried rather than lost.
+- **Durable, coherent backup.** `claims.toml` is written atomically, so a crash
+  cannot truncate the sole recovery artifact; the backup and the Rekor commit run
+  only when the call owns the transaction; and many mutations can share one rewrite
+  via `graph.defer_backup()` / `graph.backup()`.
+- **Restore reconstructs the trust layer.** Support level, invalidation, signer
+  identity, and witnessed state round-trip so promotion outcomes match the original.
+  Witnessed state is derived from the transparency-log inclusion sidecar, not an
+  unsigned field.
+- **Honest machine schema.** `schema()` describes the distinct-signer convergence
+  rule an agent must follow; a test pins the transition text so it cannot drift.
+
+### Fixed
+
+- The publish workflow fails when the release tag and built version disagree, so a
+  forgotten version bump cannot ship a tagged release with no package.
+- Read-only CLI commands discover an existing project by walking up from the working
+  directory and refuse when none exists, instead of creating a stray `graph.db`.
+- Exporting to a path outside the project reports success, not a false failure.
+- Root auto-enrollment is announced on stderr, not only a filterable warning.
+- A naive DOI cache timestamp is treated as UTC rather than crashing the write path.
+- `mareforma ingest --help` now documents the required `TITLE` / `DOI` / `CLAIMS`
+  layout, and a structured-mode file that yields no claims exits non-zero and
+  names the expected layout, instead of a silent success on an unparseable file.
+
 ## [0.3.7] - 2026-06-30
 
 Verified independence. REPLICATED now keys on the signing key, not a free-text

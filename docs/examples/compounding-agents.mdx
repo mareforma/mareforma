@@ -81,7 +81,10 @@ graph.assert_finding(prop, plan,
 graph.query_frame(prop, min_status="PRELIMINARY")[0]["status"]   # "CORROBORATED"
 ```
 
-Neither agent declared support. The bearing is computed from the pre-registered
-rule, and `CORROBORATED` is derived from two independent signers (unsigned
-lines fall back to distinct `generated_by` runs). See
-[Findings](/concepts/findings).
+Neither agent declared support: the bearing is computed from the pre-registered
+rule. The two lines are distinct runs (`generated_by`) on distinct datasets
+(`data_id`). On an unsigned graph, independence is counted on that run axis, so
+the proposition reaches `CORROBORATED`. When findings are signed, independence
+counts distinct *authenticated signers* instead — two analysts each write
+through a graph opened with their own key, so a single signer cannot
+self-corroborate. See [Findings](/concepts/findings).

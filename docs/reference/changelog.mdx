@@ -6,6 +6,50 @@ description: "Notable changes across Mareforma releases."
 The authoritative changelog lives in [CHANGELOG.md](https://github.com/mareforma/mareforma/blob/main/CHANGELOG.md).
 This page mirrors it.
 
+## v0.3.8 - 2026-07-06
+
+Execution-observed grounding, and a trust-layer hardening pass across every path a
+finding travels: read, convergence, backup, restore, and the export bundle. A
+bundle's claims are checked against their own asserters and earned support level,
+restore rebuilds trust state from verifiable material rather than agent-set flags,
+and a project can require transparency-log witnessing before its findings converge.
+Additive on the schema (one new nullable column and one additive table, no
+migration). See [Grounding](/concepts/grounding) and [Trust](/concepts/trust).
+
+### Added
+
+- **Execution-observed grounding.** An optional observer records whether real data
+  actually flowed into a finding (GROUNDED / UNGROUNDED / OPAQUE); the verdict is
+  bound into the signed claim and re-derived on restore.
+- **Required Rekor witnessing.** `graph.require_rekor_witnessing()` writes a
+  root-signed, one-way project policy; `restore(enforce_rekor_policy=True)`
+  reconstructs convergence-eligibility only for claims carrying a verified,
+  claim-bound inclusion proof.
+- **Per-claim verification in the export bundle.** `verify_bundle` checks each
+  claim's asserter signature bound to its content, the validator chain to a single
+  root, and the displayed support level. The bundle signs over DSSE PAE, so it
+  verifies with standard tooling.
+
+### Changed
+
+- `search()` re-verifies high-trust rows on read, matching `query()`.
+- Convergence respects signed contradiction verdicts; a stranded re-check is retried.
+- `claims.toml` is written atomically and can be batched with `graph.defer_backup()`.
+- Restore reconstructs the trust layer; witnessed state comes from the inclusion
+  sidecar, not an unsigned field.
+- `schema()` describes the distinct-signer convergence rule (pinned by a test).
+
+### Fixed
+
+- The publish workflow fails when the release tag and built version disagree.
+- Read-only CLI commands discover an existing project instead of creating a stray one.
+- Export to a path outside the project reports success, not a false failure.
+- Root auto-enrollment is announced on stderr, not only a filterable warning.
+- A naive DOI cache timestamp is treated as UTC rather than crashing the write path.
+- `mareforma ingest --help` now documents the required `TITLE` / `DOI` / `CLAIMS`
+  layout, and a structured-mode file that yields no claims exits non-zero and
+  names the expected layout, instead of a silent success on an unparseable file.
+
 ## v0.3.7 - 2026-06-30
 
 Verified independence. `REPLICATED` now keys on the signing key, not a free-text

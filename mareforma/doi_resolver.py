@@ -207,8 +207,17 @@ def _is_fresh(last_checked_at: str, resolved: bool) -> bool:
         ts = datetime.fromisoformat(last_checked_at)
     except (ValueError, TypeError):
         return False
+    # A naive timestamp (no tzinfo — e.g. an admin-loaded cache row) would
+    # crash the subtraction against the aware _utcnow(); treat it as UTC. Guard
+    # the comparison too so one malformed cache row can never break the DOI
+    # write path (assert_claim / REPLICATED refresh).
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
     ttl = _TTL_RESOLVED if resolved else _TTL_UNRESOLVED
-    return (_utcnow() - ts) < ttl
+    try:
+        return (_utcnow() - ts) < ttl
+    except (TypeError, OverflowError):
+        return False
 
 
 def resolve_dois_with_cache(

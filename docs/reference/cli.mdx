@@ -312,7 +312,9 @@ The JSON-LD output uses `mare:` and `schema:` vocabularies. Each claim is a `mar
 
 ## verify
 
-Verify a SCITT-style signed bundle against the local signing key. Checks the bundle's DSSE signature AND every per-claim subject digest.
+Verify a SCITT-style signed bundle against the local signing key. Checks the bundle's DSSE signature (over the DSSE PAE encoding, so it interoperates with standard verifiers), every per-claim subject digest, every per-claim **asserter signature** bound to the claim's presented content, the enrolled validator chain to a single root (which must be the bundle signer), and the displayed **support level** (ESTABLISHED against a validator-signed validation envelope, REPLICATED against distinct-signer corroboration).
+
+Editorial status (`retracted` / `contested`) and comparison summaries carry no signature in the data model, so a verified bundle does not attest them — it attests each claim's asserter content and earned support level, not a mutable status flag.
 
 ```bash
 mareforma verify BUNDLE_PATH
@@ -362,13 +364,13 @@ mareforma restore backups/state.toml
 
 The output reports `validators_restored` and `claims_restored` counts. Failure exits `1` with a `RestoreError` message naming the failure mode: `graph_not_empty`, `toml_not_found`, `toml_malformed`, `enrollment_unverified`, `claim_unverified`, `mode_inconsistent`, `orphan_signer`, or `rekor_inclusion_invalid`.
 
-Since v0.3.2, `claims.toml` includes a `[rekor_inclusions]` section. Pre-v0.3.2 files restore successfully with a `RekorSidecarSectionAbsentWarning`. Run `refresh_unsigned()` afterward to re-fetch inclusion proofs.
+`claims.toml` includes a `[rekor_inclusions]` section. Older files written without it restore successfully with a `RekorSidecarSectionAbsentWarning`. Run `refresh_unsigned()` afterward to re-fetch inclusion proofs.
 
 ---
 
 ## ingest
 
-Added in v0.3.3. Read a paper abstract from disk, extract claim drafts, and write them to the project's `literature_claims` table (separate from the signed `claims` table, since most drafts stay drafts pending review).
+Read a paper abstract from disk, extract claim drafts, and write them to the project's `literature_claims` table (separate from the signed `claims` table, since most drafts stay drafts pending review).
 
 ```bash
 mareforma ingest <FILE> [--db PATH] [--llm] [--model MODEL]
@@ -386,7 +388,7 @@ mareforma ingest <FILE> [--db PATH] [--llm] [--model MODEL]
 |---|---|---|
 | `--db PATH` | `.mareforma/graph.db` | Path to the graph DB. Honours the literal filename; non-conventional paths are NOT silently rewritten under `.mareforma/`. |
 | `--llm` | off | Use the Anthropic Claude API to extract claims from arbitrary text. Requires `pip install anthropic`. |
-| `--model MODEL` | `claude-opus-4-7` | Anthropic model name when `--llm` is set. |
+| `--model MODEL` | `claude-opus-4-8` | Anthropic model name when `--llm` is set. |
 
 **Default (structured) mode** parses files with explicit `TITLE:` / `DOI:` / `CLAIMS:` sections; each `CLAIMS:` line becomes one draft with an optional `(confidence: 0.NN)` marker. Zero external dependencies.
 
@@ -396,7 +398,7 @@ mareforma ingest <FILE> [--db PATH] [--llm] [--model MODEL]
 mareforma ingest paper.md
 # Ingested 3 claim(s) → written to .mareforma/graph.db
 
-mareforma ingest preprint.txt --llm --model claude-opus-4-7
+mareforma ingest preprint.txt --llm --model claude-opus-4-8
 # Extracts claims from arbitrary text via Claude.
 ```
 
@@ -404,7 +406,7 @@ mareforma ingest preprint.txt --llm --model claude-opus-4-7
 
 ## ask
 
-Added in v0.3.3. FTS5 BM25 search over ingested literature claims. Input is sanitised so hyphens, parens, and asterisks are treated as literals; embedded double quotes are escaped per the FTS5 spec.
+FTS5 BM25 search over ingested literature claims. Input is sanitized so hyphens, parens, and asterisks are treated as literals; embedded double quotes are escaped per the FTS5 spec.
 
 ```bash
 mareforma ask "<QUESTION>" [--db PATH] [--limit N] [--json]
@@ -438,7 +440,7 @@ mareforma ask 'mutations of "BRCA1"' --json
 
 ## narrative
 
-Added in v0.3.3. Export all ingested literature claims as a Markdown narrative grouped by source document, with structural and polarity-heuristic contradictions flagged inline.
+Export all ingested literature claims as a Markdown narrative grouped by source document, with structural and polarity-heuristic contradictions flagged inline.
 
 ```bash
 mareforma narrative [--db PATH] [--output FILE]

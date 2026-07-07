@@ -1,7 +1,7 @@
 """Mareforma: local verification layer for AI-assisted research."""
 
 __description__ = "Mareforma: local verification layer for AI-assisted research."
-__version__ = "0.3.7"
+__version__ = "0.3.8"
 
 from pathlib import Path
 
@@ -281,15 +281,21 @@ def schema() -> dict:
                 "to": "REPLICATED",
                 "trigger": "automatic",
                 "condition": (
-                    "≥2 claims with different generated_by share the same "
-                    "upstream claim_id in supports[]"
+                    "≥2 claims signed by different validator keys (distinct "
+                    "asserter keyids — the per-claim signing key, not the agent "
+                    "label) support the same ESTABLISHED upstream claim_id in "
+                    "supports[]; each claim must be transparency-logged, "
+                    "grounded, and free of a signed contradiction verdict"
                 ),
             },
             {
                 "from": "REPLICATED",
                 "to": "ESTABLISHED",
-                "trigger": "human",
-                "condition": "graph.validate(claim_id, validated_by=...) — no automated path",
+                "trigger": "validator",
+                "condition": (
+                    "graph.validate(claim_id) by an enrolled validator whose "
+                    "key signed neither converging claim — no automated path"
+                ),
             },
         ],
     }
@@ -303,6 +309,7 @@ def restore(
     *,
     claims_toml: "str | Path | None" = None,
     rekor_log_pubkey_pem: "bytes | None" = None,
+    enforce_rekor_policy: bool = False,
 ) -> dict:
     """Rebuild a fresh graph.db from claims.toml.
 
@@ -332,6 +339,14 @@ def restore(
         is cryptographically verified before replay. Verification
         failure raises ``RestoreError(kind='rekor_inclusion_invalid')``.
         When ``None``, sidecar entries are replayed unverified.
+    enforce_rekor_policy:
+        When True, the operator asserts this project requires Rekor
+        witnessing. restore then requires a valid root-signed
+        ``[project_policy]`` and a pinned ``rekor_log_pubkey_pem``, and
+        marks a signed claim convergence-eligible only when it carries a
+        verified, claim-bound inclusion proof. Closes the strip-route where
+        an edited claims.toml makes an unwitnessed claim look ready. Off by
+        default (best-effort, matching the pinned-key opt-in posture).
 
     Returns
     -------
@@ -343,14 +358,16 @@ def restore(
     mareforma.db.RestoreError
         With a ``.kind`` field naming the failure mode: graph_not_empty,
         toml_not_found, toml_malformed, enrollment_unverified,
-        claim_unverified, mode_inconsistent, orphan_signer, or
-        rekor_inclusion_invalid.
+        claim_unverified, mode_inconsistent, orphan_signer,
+        rekor_inclusion_invalid, policy_unverified, policy_absent, or
+        policy_unverifiable.
     """
     from mareforma.db import restore as _restore
     return _restore(
         project_root,
         claims_toml=claims_toml,
         rekor_log_pubkey_pem=rekor_log_pubkey_pem,
+        enforce_rekor_policy=enforce_rekor_policy,
     )
 
 

@@ -21,11 +21,13 @@ from .core import (
     PAYLOAD_TYPE_VALIDATOR_ENROLLMENT,
     PAYLOAD_TYPE_VALIDATION,
     PAYLOAD_TYPE_SEED,
+    PAYLOAD_TYPE_PROJECT_POLICY,
     # Signed-field contracts.
     SIGNED_FIELDS,
     _ENROLLMENT_FIELDS,
     _VALIDATION_FIELDS,
     _SEED_FIELDS,
+    _PROJECT_POLICY_FIELDS,
     VALID_CLAIM_ROLES,
     # Exceptions.
     SigningError,
@@ -48,6 +50,7 @@ from .core import (
     sign_validator_enrollment,
     sign_validation,
     sign_seed_claim,
+    sign_project_policy,
     verify_envelope,
     verify_envelope_multi,
     envelope_payload,
@@ -96,6 +99,7 @@ __all__ = [
     "PAYLOAD_TYPE_VALIDATOR_ENROLLMENT",
     "PAYLOAD_TYPE_VALIDATION",
     "PAYLOAD_TYPE_SEED",
+    "PAYLOAD_TYPE_PROJECT_POLICY",
     # Signed-field contracts.
     "SIGNED_FIELDS",
     "VALID_CLAIM_ROLES",
@@ -121,6 +125,7 @@ __all__ = [
     "sign_validator_enrollment",
     "sign_validation",
     "sign_seed_claim",
+    "sign_project_policy",
     "verify_envelope",
     "verify_envelope_multi",
     "envelope_payload",

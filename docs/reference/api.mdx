@@ -66,7 +66,7 @@ s["transitions"]       # list of state transition dicts
 
 ---
 
-## `mareforma.restore(project_root, *, claims_toml=None, rekor_log_pubkey_pem=None)`
+## `mareforma.restore(project_root, *, claims_toml=None, rekor_log_pubkey_pem=None, enforce_rekor_policy=False)`
 
 Rebuild a fresh `graph.db` from `claims.toml` for catastrophic-loss
 recovery. Fresh-only: refuses to run if `graph.db` already has any
@@ -84,7 +84,8 @@ result = mareforma.restore("/path/to/project")
 |---|---|---|---|
 | `project_root` | `str \| Path` | required | Project directory. `graph.db` is reconstructed under `<root>/.mareforma/`. |
 | `claims_toml` | `str \| Path \| None` | `None` | Path to source TOML. Defaults to `<project_root>/claims.toml`. |
-| `rekor_log_pubkey_pem` | `bytes \| None` | `None` | PEM-encoded Rekor log operator public key. When supplied, every `[rekor_inclusions]` entry's Merkle inclusion proof is cryptographically verified before replay. Verification failure raises `RestoreError(kind='rekor_inclusion_invalid')`. When `None`, sidecar entries are replayed unverified. |
+| `rekor_log_pubkey_pem` | `bytes \| None` | `None` | PEM-encoded Rekor log operator public key. When supplied, every `[rekor_inclusions]` entry's Merkle inclusion proof is cryptographically verified before replay, and each proof is bound to the claim it covers. Verification failure raises `RestoreError(kind='rekor_inclusion_invalid')`. When `None`, sidecar entries are replayed unverified. |
+| `enforce_rekor_policy` | `bool` | `False` | Assert this project requires transparency-log witnessing. Requires a valid root-signed `[project_policy]` and a pinned `rekor_log_pubkey_pem`; a signed claim is then marked convergence-eligible only when it carries a verified, claim-bound inclusion proof. Closes the strip-route where an edited claims.toml makes an unwitnessed claim look ready. Off by default (best-effort, matching the pinned-key opt-in posture). |
 
 **Returns** `dict` with `validators_restored` and `claims_restored` counts.
 
@@ -99,7 +100,10 @@ result = mareforma.restore("/path/to/project")
 | `claim_unverified` | A claim's `signature_bundle` or `validation_signature` failed verification. |
 | `mode_inconsistent` | Signed-mode graph (validators enrolled) contains a claim with no signature. |
 | `orphan_signer` | A claim is signed by a keyid not present in the validators section. |
-| `rekor_inclusion_invalid` | A `[rekor_inclusions]` entry failed verification, references a missing claim, or is missing required fields. |
+| `rekor_inclusion_invalid` | A `[rekor_inclusions]` entry failed verification, references a missing claim, is missing required fields, or does not bind to the claim it is attached to. |
+| `policy_unverified` | A `[project_policy]` is present but its root signature or field binding failed. |
+| `policy_absent` | `enforce_rekor_policy=True` but no root-signed policy requiring witnessing is present. |
+| `policy_unverifiable` | `enforce_rekor_policy=True` without a pinned `rekor_log_pubkey_pem` to verify inclusion proofs. |
 
 ---
 
@@ -605,6 +609,21 @@ graph.enroll_validator(bot_pem, identity="reviewer-bot", validator_type="llm")
 
 ---
 
+### `require_rekor_witnessing()`
+
+Declare that this project's findings must be witnessed by the transparency log before they can converge. The root validator signs a project-policy envelope; the declaration is persisted and emitted to `claims.toml`. On recovery, `restore(..., enforce_rekor_policy=True)` verifies this envelope against the enrolled root and refuses to mark any signed claim convergence-eligible without a verified, claim-bound inclusion proof — closing the strip-route where an edited `claims.toml` makes an unwitnessed claim look ready.
+
+```python
+graph.require_rekor_witnessing()
+```
+
+Root-only and one-way (mirrors validator enrollment): only the project's single root of trust may set the policy, and a project cannot un-require witnessing. Idempotent once set. Returns the effective policy dict.
+
+**Raises**
+- `ValueError`: no signer loaded, or the loaded signer is not the project's single root validator
+
+---
+
 ### `list_validators()`
 
 Return all enrolled validators for this project, ordered by `enrolled_at`.
@@ -634,7 +653,7 @@ lc_tools = [tool(fn) for fn in tools]
 
 | Name | Type | Default | Description |
 |---|---|---|---|
-| `generated_by` | `str` | `"agent"` | Agent identifier baked into the closure. Set this to the calling agent's identity so REPLICATED detection works across independent runs. |
+| `generated_by` | `str` | `"agent"` | Agent identifier baked into the closure, carried as a display label on each claim. Independence for REPLICATED is the signing key (`asserter_keyid`), not this field; give each independent agent its own key. |
 
 **Returns** `list`: `[query_graph, assert_finding]`
 
@@ -642,6 +661,23 @@ lc_tools = [tool(fn) for fn in tools]
 - `assert_finding(text, classification="INFERRED", supports=None, contradicts=None, source="") -> str`: returns `claim_id`.
 
 See [Framework integrations](/for-agents/agents#framework-integrations) for per-framework wrapping.
+
+---
+
+### `backup()` / `defer_backup()`
+
+`claims.toml` is refreshed after every mutation. For a bulk import or a loop of writes, group the mutations under one rewrite:
+
+```python
+with graph.defer_backup():
+    for row in many_rows:
+        graph.assert_claim(row.text, generated_by=row.agent)
+# one claims.toml rewrite here, reflecting the committed batch
+
+graph.backup()  # force a rewrite on demand
+```
+
+Inside a `defer_backup()` block each mutation marks the backup due rather than rewriting the whole file; the write happens once when the outermost block exits (windows nest), and `claims.toml` reflects committed state again after it. `graph.backup()` forces a write, for example at the end of a batch. The write is atomic, so a crash cannot truncate the recovery artifact.
 
 ---
 
@@ -653,7 +689,7 @@ Close the graph database connection.
 graph.close()
 ```
 
-Not required when using the context manager; `__exit__` calls `close()` automatically.
+Not required when using the context manager; `__exit__` calls `close()` automatically. A still-open `defer_backup()` window is flushed first, so a graph closed mid-batch still leaves `claims.toml` current.
 
 ---
 
@@ -698,7 +734,7 @@ catching looks like `from mareforma import RekorInclusionError`.
 | `RekorInclusionError` | `mareforma.signing` | `verify_rekor_inclusion`, `verify_rekor_checkpoint`, `fetch_inclusion_proof`, `fetch_log_pubkey`, and the submit + refresh paths when `rekor_log_pubkey_pem` is set | RFC 6962 inclusion proof failed cryptographic verification. Stable `.reason` token: `missing_proof`, `malformed_proof`, `bad_root_hex`, `bad_proof_hex`, `merkle_root_mismatch`, `checkpoint_missing`, `checkpoint_malformed`, `checkpoint_root_mismatch`, `checkpoint_unsigned`, `checkpoint_bad_sig`, `unsupported_key`. Callers pattern-match on the reason without parsing English. |
 | `InvalidIdentityError` | `mareforma.validators` | `enroll_validator()` | Identity contains rejected characters |
 | `ValidatorAlreadyEnrolledError` | `mareforma.validators` | `enroll_validator()` | Validator row already exists |
-| `BundleVerificationError` | `mareforma.export_bundle` | `mareforma verify` | Signed export bundle failed DSSE or per-claim subject digest |
+| `BundleVerificationError` | `mareforma.export_bundle` | `mareforma verify` | Signed export bundle failed a check: DSSE signature, per-claim subject digest, per-claim asserter signature, validator chain, or displayed support level |
 
 Every exception is re-exported at the top level so a caller can write
 `from mareforma import RekorInclusionError` without remembering the
@@ -1023,3 +1059,67 @@ view. Accepts a `frame_id` or a `Proposition`. `min_status` filters to a floor o
 the `UNTESTED < PRELIMINARY < CORROBORATED` ladder (the only valid floors;
 `REFUTED` / `CONTESTED` are off the ladder and excluded by any floor). Raises
 `ValueError` on an invalid floor.
+
+## v0.3.8 surface
+
+The `mareforma.observe` package computes whether cited data actually flowed into a
+finding. See [Grounding](/concepts/grounding) for the model.
+
+### `mareforma.observe.observe(cites=None, *, content_address=False)`
+
+Context manager over the code that authors a finding. `cites` is the source(s)
+the finding cites: a path, a URL, a `sha256:` data id, or an iterable of these.
+Set `content_address=True` to match a cited `sha256:` id against the hash of a
+read's returned bytes instead of by identifier. Yields an `ObserveHandle` whose
+`.verdict` holds the computed `GroundingVerdict` after the block closes. Reading
+`.verdict` inside the open block raises `ScopeNotClosedError`.
+
+```python
+from mareforma.observe import observe
+
+with observe(cites="/data/trial.csv") as obs:
+    frame = pandas.read_csv("/data/trial.csv")
+    estimate = analyze(frame)
+
+obs.verdict.grounding    # ObservedGrounding.GROUNDED
+```
+
+### `GroundingVerdict`
+
+The computed verdict plus its receipt. Fields: `grounding` (an `ObservedGrounding`
+member), `reason` (str), `cited_sources`, `reads`, `seams`, `matched_identifier`,
+`version`, `reads_seen`, `opens_detected`.
+
+- `grounding` is `ObservedGrounding.GROUNDED` / `UNGROUNDED` / `OPAQUE`.
+- `receipt()` returns the full canonicalizable evidence; `receipt_digest()` is its
+  `sha256:` digest.
+- `to_signed_dict()` is the compact `{version, grounding, reason, receipt_digest}`
+  record bound into the signed statement. mareforma binds the digest, not the
+  receipt, so a caller that keeps the receipt out of band can detect mutation.
+- `read_coverage_fraction()` is `reads_seen / opens_detected`, or `None` when
+  nothing was opened.
+
+### `perturbation_oracle(run_fn, base_input, perturb, *, repeats=1, metric=None, effect_threshold=0.0, noise_multiplier=3.0)`
+
+The independent causal check. Runs `run_fn` on the base input and on perturbed
+inputs and returns an `OracleResult` whose `influence` is `INFLUENCED`,
+`NOT_INFLUENCED`, or `UNDECIDABLE`. With `repeats > 1` the spread of the base runs
+sets the noise floor a real effect must clear, so a stochastic pipeline does not
+read as influenced by its own jitter. `reconcile(grounding, influence)` relates
+the observer's flow verdict to the oracle's influence verdict.
+
+### `summarize(verdicts) -> GroundingReport`
+
+Aggregates an iterable of `GroundingVerdict` into the split a report states:
+`fractions()`, `incidental_read_rate`, `mean_read_coverage`, and
+`opaque_dominates(threshold=0.5)`.
+
+### `grounding=` on `assert_finding` and `submit_finding`
+
+Both gain an optional `grounding` parameter that takes a `GroundingVerdict`. The
+verdict is bound into the signed statement, the chain hash, and a queryable
+column, and re-checked on restore. The return dict gains a `grounding` key (the
+stored record, or `None`). A finding whose verdict is not `GROUNDED` never counts
+toward a support-level promotion; a claim asserted without a verdict is
+unaffected and its signed bytes are identical to a pre-observer claim. Asserting a
+claim while an `observe()` scope is still open raises.

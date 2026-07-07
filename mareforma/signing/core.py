@@ -101,6 +101,7 @@ PAYLOAD_TYPE_CLAIM = "application/vnd.in-toto+json"
 PAYLOAD_TYPE_VALIDATOR_ENROLLMENT = "application/vnd.mareforma.validator-enrollment+json"
 PAYLOAD_TYPE_VALIDATION = "application/vnd.mareforma.validation+json"
 PAYLOAD_TYPE_SEED = "application/vnd.mareforma.seed+json"
+PAYLOAD_TYPE_PROJECT_POLICY = "application/vnd.mareforma.project-policy+json"
 
 # Predicate fields bound by a claim signature. After Statement v1 these
 # live inside ``statement.predicate``; the tuple is the contract restore
@@ -158,6 +159,16 @@ _SEED_FIELDS = (
     "claim_id",
     "validator_keyid",
     "seeded_at",
+)
+
+# Fields included in the signed payload of a project-policy declaration.
+# The root validator signs (rekor_required, created_at) to declare, once
+# and tamper-evidently, that this project's findings must be witnessed by
+# the transparency log before they can converge. restore verifies this
+# envelope against the enrolled root before enforcing the policy.
+_PROJECT_POLICY_FIELDS = (
+    "rekor_required",
+    "created_at",
 )
 
 
@@ -410,6 +421,9 @@ def canonical_statement(
         artifact_hash=claim_fields.get("artifact_hash"),
         created_at=claim_fields["created_at"],
         evidence=evidence,
+        # Optional/versioned: present in the signed bytes only when the caller
+        # recorded an observed verdict. Absent keys leave the bytes unchanged.
+        observed_grounding=claim_fields.get("observed_grounding"),
     )
     from .._canonical import canonicalize
     return canonicalize(stmt)
@@ -724,6 +738,25 @@ def sign_seed_claim(
     return _build_envelope(
         payload, private_key,
         payload_type=PAYLOAD_TYPE_SEED,
+    )
+
+
+def sign_project_policy(
+    policy: dict[str, Any],
+    private_key: Ed25519PrivateKey,
+) -> dict[str, Any]:
+    """Sign a project-policy declaration.
+
+    The record must contain ``rekor_required`` (bool) and ``created_at``
+    (ISO 8601 UTC). The root validator signs it so restore can prove, from
+    the signed material alone, that the project requires transparency-log
+    witnessing. The payload type is distinct so a policy envelope cannot be
+    substituted for a validation or seed envelope, or vice versa.
+    """
+    payload = _canonical_record(_PROJECT_POLICY_FIELDS, policy)
+    return _build_envelope(
+        payload, private_key,
+        payload_type=PAYLOAD_TYPE_PROJECT_POLICY,
     )
 
 

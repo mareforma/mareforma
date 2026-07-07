@@ -447,3 +447,24 @@ class TestResolveDoiNetworkContract:
         results = resolve_dois_with_cache(conn, ["10.1038/z-suffix"])
         assert results == {"10.1038/z-suffix": True}
         conn.close()
+
+    def test_naive_timestamp_does_not_crash_the_write_path(
+        self, tmp_path: Path,
+    ) -> None:
+        """A cache row with a naive (tz-less) timestamp must be treated as UTC,
+        not crash the aware-vs-naive subtraction. One such row would otherwise
+        break every assert_claim / REPLICATED refresh that touches this DOI."""
+        conn = open_db(tmp_path)
+        fresh_naive = (datetime.now(timezone.utc) - timedelta(days=1)).strftime(
+            "%Y-%m-%dT%H:%M:%S"  # no offset, no Z
+        )
+        conn.execute(
+            "INSERT INTO doi_cache (doi, resolved, registry, last_checked_at) "
+            "VALUES (?, 1, 'crossref', ?)",
+            ("10.1038/naive-ts", fresh_naive),
+        )
+        conn.commit()
+        # No httpx mocks — a cache hit must be used, no network, no crash.
+        results = resolve_dois_with_cache(conn, ["10.1038/naive-ts"])
+        assert results == {"10.1038/naive-ts": True}
+        conn.close()

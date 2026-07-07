@@ -394,6 +394,39 @@ claim without `supports=` is unverifiable. The chain is broken.
 
 ---
 
+## Observed grounding (computed, not declared)
+
+`classification` is what the agent declares. **Observed grounding** is what
+execution shows: did the cited data actually flow into the finding. The two are
+separate axes and never share a value space.
+
+Wrap the span that authors a finding in `observe(cites=...)`, then pass the
+verdict to `assert_finding(..., grounding=verdict)`:
+
+```python
+import mareforma
+from mareforma.observe import observe
+
+with observe(cites="/data/trial.csv") as obs:
+    frame = load(from_="/data/trial.csv")   # wrapped loaders record the read
+    estimate = analyze(frame)
+# author outside the scope, then sign:
+graph.assert_finding(prop, pred, estimate, data_id=..., grounding=obs.verdict)
+```
+
+The verdict is one of `GROUNDED` (a read matching the cited source returned
+data), `UNGROUNDED` (the scope was fully observed and the cited data never
+arrived, the silent-fallback tell), or `OPAQUE` (a thread / subprocess /
+socket / uninstrumented reader could have hidden a read, so absence cannot be
+trusted). It is bound into the signed envelope, so verify-on-read re-checks it,
+and a non-`GROUNDED` verdict never counts toward `REPLICATED` promotion. A claim
+asserted without the observer carries no verdict and behaves exactly as before.
+
+Author inside the scope and sign after it closes: asserting a claim while its
+grounding scope is still open is refused.
+
+---
+
 ## Support levels
 
 | Level | Meaning | How reached |

@@ -65,9 +65,23 @@ class TestClaimList:
     def test_list_empty_exits_0(self, tmp_path: Path) -> None:
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
+            import mareforma
+            mareforma.open(".").close()  # empty project, no claims
             result = runner.invoke(cli, ["claim", "list"], catch_exceptions=False)
         assert result.exit_code == 0
         assert "No claims" in result.output
+
+    def test_read_only_command_errors_without_a_project(
+        self, tmp_path: Path,
+    ) -> None:
+        """A read-only command in a bare directory must NOT create a stray
+        graph.db; it reports that no project exists."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            result = runner.invoke(cli, ["claim", "list"], catch_exceptions=False)
+            assert result.exit_code == 1
+            assert "No mareforma project" in result.output
+            assert not (Path(fs) / ".mareforma" / "graph.db").exists()
 
     def test_list_shows_added_claim(self, tmp_path: Path) -> None:
         runner = CliRunner()
@@ -170,6 +184,8 @@ class TestStatus:
     def test_status_red_on_empty_graph(self, tmp_path: Path) -> None:
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
+            import mareforma
+            mareforma.open(".").close()  # empty project
             result = runner.invoke(cli, ["status"], catch_exceptions=False)
         assert result.exit_code == 0
         assert "RED" in result.output
@@ -177,6 +193,8 @@ class TestStatus:
     def test_status_json_flag_emits_valid_json(self, tmp_path: Path) -> None:
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
+            import mareforma
+            mareforma.open(".").close()  # empty project
             result = runner.invoke(cli, ["status", "--json"], catch_exceptions=False)
         data = json.loads(result.output)
         assert "traffic_light" in data
