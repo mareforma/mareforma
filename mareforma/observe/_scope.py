@@ -141,9 +141,26 @@ class Scope:
                         "a read matching the cited source returned non-empty "
                         f"data ({r.kind})"
                     )
+                # The cited sources an actual non-empty read was observed for —
+                # every cited entry that a read bound to, not just the first. The
+                # binding gate checks THESE against the finding's citation, never
+                # the declared `cited`: a decoy read of one cited source cannot
+                # ground a finding whose own cited data was never read.
+                grounded = tuple(
+                    c
+                    for c in cited
+                    if any(
+                        rr.nonempty
+                        and read_matches_citation(
+                            rr.identifier, rr.content_address, (c,)
+                        )
+                        for rr in reads
+                    )
+                )
                 return GroundingVerdict(
                     grounding=ObservedGrounding.GROUNDED,
                     reason=reason,
+                    grounded_sources=grounded,
                     matched_identifier=normalize_identifier(r.identifier),
                     seams=tuple(seams),
                     **base,

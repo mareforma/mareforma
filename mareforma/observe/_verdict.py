@@ -45,7 +45,14 @@ from .._canonical import canonicalize
 # verifier reading an envelope knows which axis semantics produced the verdict,
 # and so a future axis revision (new states, new match rules) is distinguishable
 # from this one rather than silently reinterpreted.
-GROUNDING_AXIS_VERSION = "v0.3.8"
+#
+# v0.3.9 bumps the shape: the cited set the verdict was computed against now
+# rides INSIDE the signed record (``cited_sources``), so verify-on-read can
+# re-check the verdict against the finding's citation instead of trusting the
+# write-time result. A v0.3.8 envelope omits ``cited_sources``; its absence is
+# "the citation binding was not checkable," never tampering — the pre-binding
+# label the auditor surface renders.
+GROUNDING_AXIS_VERSION = "v0.3.9"
 
 
 class ObservedGrounding(str, Enum):
@@ -117,6 +124,13 @@ class GroundingVerdict:
     grounding: ObservedGrounding
     reason: str
     cited_sources: tuple[str, ...] = ()
+    # The cited sources a matching non-empty read was actually observed for — the
+    # subset of ``cited_sources`` that GROUNDED the verdict. The binding gate
+    # checks THIS against the finding's citation, never the full declared
+    # ``cited_sources``: a producer who lists a dataset in ``cites`` but reads
+    # only an incidental decoy would otherwise earn a MATCHED binding on a source
+    # it never read. Empty for UNGROUNDED / OPAQUE (nothing grounded the verdict).
+    grounded_sources: tuple[str, ...] = ()
     reads: tuple[ReadRecord, ...] = ()
     seams: tuple[SeamEvent, ...] = ()
     matched_identifier: str | None = None
@@ -133,6 +147,7 @@ class GroundingVerdict:
             "grounding": self.grounding.value,
             "reason": self.reason,
             "cited_sources": list(self.cited_sources),
+            "grounded_sources": list(self.grounded_sources),
             "matched_identifier": self.matched_identifier,
             "reads": [
                 {
@@ -162,18 +177,25 @@ class GroundingVerdict:
     def to_signed_dict(self) -> dict:
         """The compact record bound INTO the signed in-toto statement.
 
-        Carries the verdict, the reason, the receipt digest, and the axis
-        version — enough to re-check the verdict, and to confirm an
+        Carries the verdict, the reason, the cited set it was computed against,
+        the receipt digest, and the axis version — enough to re-check the verdict
+        AND its binding to the finding's citation on read, and to confirm an
         out-of-band receipt is unmutated for a caller that keeps one, without
         inflating the envelope with the full read list. mareforma binds the
         digest, not the receipt itself. This is an OPTIONAL, versioned field:
         pre-v0.3.8 envelopes omit it entirely, and its absence is read as "not
-        present," never as tampering.
+        present," never as tampering. The ``cited_sources`` member arrived in
+        v0.3.9; a v0.3.8 record omits it, and the auditor surface renders that as
+        "pre-binding axis; citation binding not checkable." ``grounded_sources``
+        rides alongside it: the binding is re-checked on read against the sources
+        actually read, not the declared cite set.
         """
         return {
             "version": self.version,
             "grounding": self.grounding.value,
             "reason": self.reason,
+            "cited_sources": list(self.cited_sources),
+            "grounded_sources": list(self.grounded_sources),
             "receipt_digest": self.receipt_digest(),
         }
 

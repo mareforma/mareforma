@@ -930,6 +930,7 @@ class EpistemicGraph:
         *,
         data_id: str | None = None,
         data_bytes: bytes | None = None,
+        data_source: str | None = None,
         lines: "Sequence[EvidenceLine] | None" = None,
         generated_by: str | None = None,
         control_type: "ControlType | str | None" = None,
@@ -939,6 +940,7 @@ class EpistemicGraph:
         code_ref: str | None = None,
         idempotency_key: str | None = None,
         grounding: "GroundingVerdict | None" = None,
+        grounding_strict: bool = False,
     ) -> dict:
         """Record a finding: a computed bearing of an outcome on a proposition.
 
@@ -1050,6 +1052,7 @@ class EpistemicGraph:
             prediction,
             estimate,
             data_id=data_id,
+            data_source=data_source,
             lines=lines,
             generated_by=generated_by,
             control_type=control_type,
@@ -1059,6 +1062,7 @@ class EpistemicGraph:
             code_ref=code_ref,
             idempotency_key=idempotency_key,
             grounding=grounding,
+            grounding_strict=grounding_strict,
         )
 
     def submit_finding(
@@ -1069,6 +1073,7 @@ class EpistemicGraph:
         *,
         data_id: str | None = None,
         data_bytes: bytes | None = None,
+        data_source: str | None = None,
         lines: "Sequence[EvidenceLine] | None" = None,
         generated_by: str | None = None,
         control_type: "ControlType | str | None" = None,
@@ -1078,6 +1083,7 @@ class EpistemicGraph:
         code_ref: str | None = None,
         idempotency_key: str | None = None,
         grounding: "GroundingVerdict | None" = None,
+        grounding_strict: bool = False,
     ) -> dict:
         """Submit a finding against a plan that was already pre-registered.
 
@@ -1157,12 +1163,13 @@ class EpistemicGraph:
                 )
             if any(
                 v is not None
-                for v in (control_type, modality, provenance_id, design_type)
+                for v in (control_type, modality, provenance_id, design_type,
+                          data_source)
             ):
                 raise ValueError(
                     "in multi-line mode the per-line attributes (control_type, "
-                    "modality, provenance_id, design_type) belong on each "
-                    "EvidenceLine, not as scalar arguments"
+                    "modality, provenance_id, design_type, data_source) belong on "
+                    "each EvidenceLine, not as scalar arguments"
                 )
             evidence_lines = list(lines)
             if not evidence_lines:
@@ -1183,6 +1190,7 @@ class EpistemicGraph:
                     modality=modality,
                     provenance_id=provenance_id,
                     design_type=design_type,
+                    data_source=data_source,
                 )
             ]
 
@@ -1210,13 +1218,27 @@ class EpistemicGraph:
                 content_id=proposition.content_id(),
             )
 
+        # The finding's own citation identifiers: the content-addressed data_id
+        # set plus any data_source location(s), each normalized ONCE here at write
+        # time. The verdict's cited set is cross-checked against this so a GROUNDED
+        # earned on one dataset cannot be bound onto a finding that cites another.
+        # Normalized strings are persisted (data_sources below, cited_sources in
+        # the signed record) so the read side re-checks by pure string comparison,
+        # never by touching a verifier's filesystem.
+        finding_sources = self._finding_citation_sources(evidence_lines)
+
         # Normalize the observed grounding verdict into the compact record bound
-        # into the signed envelope. The cited source(s) the verdict was computed
-        # against travel inside its receipt (digested into the signed record), so
-        # the finding carries a matchable source identifier, not just the opaque
-        # data_id. The assert path enforces that no observe() scope is still open
-        # when this signs.
-        grounding_signed = self._normalize_grounding(grounding)
+        # into the signed envelope, cross-checking its cited set against the
+        # finding's citation. A GROUNDED whose cited set is disjoint from the
+        # finding downgrades to OPAQUE (or raises in strict mode) with a health
+        # event, so a signed GROUNDED always attests the finding's own data. The
+        # assert path enforces that no observe() scope is still open when this
+        # signs.
+        grounding_signed = self._bind_grounding(
+            grounding, finding_sources, strict=grounding_strict,
+            content_id=proposition.content_id(),
+        )
+        data_sources = self._normalized_data_sources(evidence_lines)
 
         cid = proposition.content_id()
         plan_id = _store.compute_plan_id(cid, prediction)
@@ -1362,6 +1384,12 @@ class EpistemicGraph:
                         # is always in data_ids.
                         "data_id": next(iter(data_id_set)) if single_line else None,
                         "data_ids": sorted(data_id_set),
+                        # Normalized read location(s) the finding declares, next
+                        # to data_ids so the read side re-checks the grounding
+                        # binding against signed material. Omitted (not an empty
+                        # list) when no line names a data_source, so a finding
+                        # without one is byte-identical to a pre-v0.3.9 finding.
+                        **({"data_sources": data_sources} if data_sources else {}),
                         "code_ref": code_ref,
                         "bearing": primary_bearing.direction.value,
                         "bearings": [b.direction.value for b in bearings],
@@ -1442,8 +1470,10 @@ class EpistemicGraph:
 
         Accepts a :class:`mareforma.observe.GroundingVerdict` (the normal path),
         a pre-built signed-record dict, or None. Returns the compact record
-        (version, grounding, reason, receipt_digest) bound into the signed
-        envelope, or None when no verdict was supplied.
+        (version, grounding, reason, cited_sources, receipt_digest) bound into
+        the signed envelope, or None when no verdict was supplied. This does NOT
+        cross-check the finding's citation — that is :meth:`_bind_grounding`,
+        which the write path calls instead.
         """
         if grounding is None:
             return None
@@ -1456,6 +1486,117 @@ class EpistemicGraph:
             "grounding must be a GroundingVerdict (from mareforma.observe) or "
             f"None; got {type(grounding).__name__}"
         )
+
+    @staticmethod
+    def _finding_citation_sources(evidence_lines) -> tuple[str, ...]:
+        """The finding's citation identifiers, each normalized once at write time.
+
+        The union of every line's ``data_id`` (a content address or an
+        agent-attested string) and its ``data_source`` (a read location), run
+        through the same ``_citation`` normalization the verdict's cited set went
+        through when the scope was entered. A verdict binds to the finding when
+        its cited set shares ANY of these.
+        """
+        from mareforma.observe._citation import normalize_identifier
+
+        out: list[str] = []
+        for ln in evidence_lines:
+            norm_id = normalize_identifier(ln.data_id)
+            if norm_id:
+                out.append(norm_id)
+            if ln.data_source:
+                norm_src = normalize_identifier(ln.data_source)
+                if norm_src:
+                    out.append(norm_src)
+        return tuple(dict.fromkeys(out))
+
+    @staticmethod
+    def _normalized_data_sources(evidence_lines) -> list[str]:
+        """The normalized, deduped, sorted ``data_source`` values for the payload."""
+        from mareforma.observe._citation import normalize_identifier
+
+        return sorted(
+            {
+                norm
+                for ln in evidence_lines
+                if ln.data_source
+                for norm in (normalize_identifier(ln.data_source),)
+                if norm
+            }
+        )
+
+    def _bind_grounding(
+        self, grounding, finding_sources, *, strict, content_id
+    ) -> dict | None:
+        """Cross-check a verdict's cited set against the finding's citation.
+
+        Returns the signed observed-grounding record to persist. A GROUNDED
+        verdict whose cited set is disjoint from ``finding_sources`` is not stored
+        as GROUNDED: in strict mode this raises
+        :class:`GroundingCitationMismatchError`; by default it is downgraded to
+        OPAQUE with the disjoint reason and a ``grounding_citation_mismatch``
+        health event, so a misconfigured producer is visible when drift starts,
+        not at audit. A verdict that already matches, or a finding with no
+        citation to bind, is returned unchanged (the latter annotated). The check
+        is pure string comparison over the normalized identifiers.
+        """
+        record = self._normalize_grounding(grounding)
+        if record is None:
+            return None
+
+        from mareforma.observe._binding import (
+            DISJOINT_REASON,
+            BindingState,
+            GroundingCitationMismatchError,
+            check_grounding_binding,
+        )
+        from mareforma.observe._verdict import ObservedGrounding
+
+        # Bind against the sources a read was ACTUALLY observed for, not the
+        # declared cite set: a producer who lists the dataset in observe(cites=)
+        # but reads only an incidental decoy grounds on the decoy, so the declared
+        # set would MATCH a finding whose own data never flowed. ``grounded_sources``
+        # is that read-observed subset (empty for a hand-built verdict that names
+        # none, which correctly cannot demonstrate binding).
+        verdict_grounded = tuple(record.get("grounded_sources") or ())
+        result = check_grounding_binding(verdict_grounded, finding_sources)
+
+        if result.state is BindingState.MATCHED:
+            return record
+        if result.state is BindingState.NOT_APPLICABLE:
+            # Nothing to bind against; keep the verdict and annotate so a reader
+            # sees the binding was not exercised rather than silently assumed.
+            record = dict(record)
+            record["reason"] = f"{record.get('reason', '')} [no finding citation to bind]"
+            return record
+
+        # DISJOINT. Only a GROUNDED verdict is unsafe to store as-is — an OPAQUE
+        # or UNGROUNDED verdict does not promote and does not claim the data
+        # arrived, so a mismatched cited set on it is not a false trust signal.
+        if record.get("grounding") != ObservedGrounding.GROUNDED.value:
+            return record
+
+        if strict:
+            raise GroundingCitationMismatchError(
+                DISJOINT_REASON + f"; content_id={content_id[:12]}…"
+            )
+
+        from mareforma import health as _health
+        _health.append_health_event(
+            self._root, "grounding_citation_mismatch",
+            content_id=content_id[:12],
+        )
+        # Downgrade to OPAQUE and strip the GROUNDED-specific evidence so the
+        # stored record is self-consistent: leaving the original cited/grounded
+        # sets and receipt digest would have the OPAQUE record still committing to
+        # a GROUNDED receipt an auditor could flag as mutated.
+        record = dict(record)
+        record["grounding"] = ObservedGrounding.OPAQUE.value
+        record["reason"] = DISJOINT_REASON
+        record["grounded_sources"] = []
+        record["cited_sources"] = []
+        record.pop("receipt_digest", None)
+        return record
 
     def proposition_status(self, proposition_or_content_id) -> dict | None:
         """The retrieval view for one proposition: derived Status, independence
