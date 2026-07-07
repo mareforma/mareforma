@@ -38,6 +38,72 @@ class OracleInfluence(str, Enum):
     UNDECIDABLE = "UNDECIDABLE"
 
 
+@dataclass(frozen=True)
+class MetricReducer:
+    """A DECLARED reduction of a finding to a scalar the oracle can compare.
+
+    The oracle needs one number per finding. For a numeric finding that is
+    ``float(finding)``. For a PROSE finding (the text output of a RAG or
+    agent pipeline) the caller must supply a reduction — a named extraction to a
+    scalar — and DECLARE what it is, because the choice of reducer is a
+    measurement decision a reviewer must be able to audit. In particular an
+    embedding-distance or LLM-judge reducer re-inserts a model into the ground
+    truth the oracle is supposed to provide independently; that is sometimes the
+    only option, but it must be stated, never hidden. ``reinserts_model=True``
+    records it so the measurement artifact declares it.
+
+    ``name`` identifies the reducer in the artifact; ``reduce`` is the callable;
+    ``description`` is free-text for the run log.
+    """
+
+    name: str
+    reduce: "Callable[[Any], float]"
+    reinserts_model: bool = False
+    description: str = ""
+
+    def __call__(self, finding: Any) -> float:
+        return self.reduce(finding)
+
+    def declaration(self) -> dict:
+        """The record a measurement artifact carries so the reducer is auditable."""
+        return {
+            "name": self.name,
+            "reinserts_model": self.reinserts_model,
+            "description": self.description,
+        }
+
+
+# The default reducer: a numeric finding reduced by float(). Named and declared
+# like any other, so every OracleResult can say which reducer produced it.
+scalar_reducer = MetricReducer(
+    name="scalar",
+    reduce=lambda finding: _coerce_scalar(finding),
+    reinserts_model=False,
+    description="float(finding); for a numeric finding or effect estimate",
+)
+
+
+def declared_reducer(
+    name: str,
+    reduce: "Callable[[Any], float]",
+    *,
+    reinserts_model: bool = False,
+    description: str = "",
+) -> MetricReducer:
+    """Build a declared reducer for prose or structured findings.
+
+    Use this to name the reduction a text-output pipeline needs (for example, an
+    extraction of the reported effect from an answer string). Set
+    ``reinserts_model=True`` when the reduction runs a model (an embedding
+    distance, an LLM judge), so the measurement declares that it is no longer a
+    model-independent ground truth.
+    """
+    return MetricReducer(
+        name=name, reduce=reduce, reinserts_model=reinserts_model,
+        description=description,
+    )
+
+
 @dataclass
 class OracleResult:
     """The oracle's measurement, with the numbers behind the verdict."""
@@ -49,16 +115,24 @@ class OracleResult:
     reason: str
     base_values: tuple[float, ...] = ()
     perturbed_values: tuple[float, ...] = ()
+    # The declared reducer used to reduce each finding to a scalar, so the
+    # measurement artifact is auditable about how prose became a number.
+    reducer: "MetricReducer | None" = None
 
 
-def _default_metric(finding: Any) -> float:
+def _coerce_scalar(finding: Any) -> float:
     try:
         return float(finding)
     except (TypeError, ValueError) as exc:
         raise TypeError(
             "the causal oracle needs a scalar per finding: pass metric=... to "
-            "reduce a structured finding to a float (e.g. the effect estimate)"
+            "reduce a structured finding to a float (e.g. the effect estimate). "
+            "For a prose finding, declare a reducer with declared_reducer(...)"
         ) from exc
+
+
+def _default_metric(finding: Any) -> float:
+    return _coerce_scalar(finding)
 
 
 def perturbation_oracle(
@@ -109,7 +183,15 @@ def perturbation_oracle(
     """
     if repeats < 1:
         raise ValueError("repeats must be >= 1")
-    m = metric or _default_metric
+    # Resolve the metric to a declared reducer so the result records which one ran.
+    # A bare callable is wrapped as an unnamed reducer; None uses scalar_reducer.
+    if metric is None:
+        reducer = scalar_reducer
+    elif isinstance(metric, MetricReducer):
+        reducer = metric
+    else:
+        reducer = MetricReducer(name="custom", reduce=metric)
+    m = reducer
 
     base_values = tuple(m(run_fn(base_input)) for _ in range(repeats))
     perturbed_inputs = _resolve_perturbations(base_input, perturb)
@@ -163,6 +245,7 @@ def perturbation_oracle(
         reason=reason,
         base_values=base_values,
         perturbed_values=perturbed_values,
+        reducer=reducer,
     )
 
 

@@ -33,6 +33,27 @@ jobs:
       - name: Run tests
         run: pytest
 
+  test-heavy:
+    # One pinned leg that installs the heavy scientific + networking loaders
+    # (h5py, netCDF4, pyarrow, pandas, aiohttp, requests) so the grounding tests that
+    # skip elsewhere actually run. Pinned to 3.13 because cp314 wheels for the
+    # native scientific deps may not exist yet. HTTP tests mock the network.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev,test-heavy]"
+
+      - name: Run tests
+        run: pytest
+
   examples:
     # Smoke-test the LangChain quickstart examples end-to-end. These are
     # what every first-time reader of the repo will run; if any break,

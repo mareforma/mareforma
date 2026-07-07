@@ -199,6 +199,43 @@ class GroundingVerdict:
             "receipt_digest": self.receipt_digest(),
         }
 
+    @classmethod
+    def from_receipt(cls, receipt: dict) -> "GroundingVerdict":
+        """Reconstruct a verdict from a full receipt dict (the inverse of
+        :meth:`receipt`).
+
+        A measurement run persists receipts (which carry the reads and seams a
+        signed envelope does not) so the aggregate report can bucket OPAQUE by
+        seam kind. This rebuilds a verdict from one so the same summarize path
+        serves both live verdicts and persisted receipts. Unknown / missing
+        fields degrade to their defaults rather than raise, so a hand-authored or
+        older receipt still summarizes.
+        """
+        cov = receipt.get("coverage") or {}
+        return cls(
+            grounding=ObservedGrounding(receipt.get("grounding", "OPAQUE")),
+            reason=receipt.get("reason", ""),
+            cited_sources=tuple(receipt.get("cited_sources") or ()),
+            grounded_sources=tuple(receipt.get("grounded_sources") or ()),
+            reads=tuple(
+                ReadRecord(
+                    kind=r.get("kind", ""),
+                    identifier=r.get("identifier", ""),
+                    nonempty=bool(r.get("nonempty")),
+                    content_address=r.get("content_address"),
+                )
+                for r in receipt.get("reads") or ()
+            ),
+            seams=tuple(
+                SeamEvent(kind=s.get("kind", ""), detail=s.get("detail", ""))
+                for s in receipt.get("seams") or ()
+            ),
+            matched_identifier=receipt.get("matched_identifier"),
+            version=receipt.get("version", GROUNDING_AXIS_VERSION),
+            reads_seen=int(cov.get("reads_seen", 0)),
+            opens_detected=int(cov.get("opens_detected", 0)),
+        )
+
     def read_coverage_fraction(self) -> float | None:
         """Fraction of detected opens the observer actually read through.
 

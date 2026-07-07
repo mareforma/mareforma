@@ -707,6 +707,143 @@ def verify(bundle_path: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# observe — coverage self-report (the doctor)
+# ---------------------------------------------------------------------------
+
+@cli.command("observe")
+@click.option("--doctor", is_flag=True, help="Report observer coverage for this environment.")
+@click.option("--json", "as_json", is_flag=True, help="Emit the report as JSON.")
+def observe_cmd(doctor: bool, as_json: bool) -> None:
+    """Inspect the execution-observed grounding machinery.
+
+    \b
+    Examples:
+        mareforma observe --doctor
+        mareforma observe --doctor --json
+    """
+    if not doctor:
+        _err("mareforma observe currently supports --doctor. Run with --doctor.")
+        sys.exit(2)
+    from mareforma.observe import coverage_report
+
+    report = coverage_report()
+    if as_json:
+        click.echo(json.dumps(report, indent=2, sort_keys=True))
+        return
+    _ok("Observer coverage for this environment")
+    click.echo(click.style("  stdlib loaders:", bold=True))
+    for row in report["stdlib_wrapped"]:
+        mark = "✓" if row["wrapped"] else "·"
+        _info(f"{mark} {row['loader']}")
+    click.echo(click.style("  third-party loaders (wrapped if you use them):", bold=True))
+    for row in report["third_party"]:
+        if row["wrapped"]:
+            mark, note = "✓", "wrapped"
+        elif row["importable"]:
+            mark, note = "·", "importable, not yet active"
+        else:
+            mark, note = " ", "not installed"
+        _info(f"{mark} {row['loader']} — {note}")
+    click.echo(click.style("  seams that force OPAQUE:", bold=True))
+    for row in report["seam_kinds"]:
+        _info(f"{row['kind']}: {row['effect']}")
+    click.echo(click.style("  known bounds:", bold=True))
+    for bound in report["known_bounds"]:
+        _info(f"- {bound}")
+
+
+# ---------------------------------------------------------------------------
+# measure — aggregate grounding verdicts into the paper's number
+# ---------------------------------------------------------------------------
+
+@cli.command("measure")
+@click.argument("receipts_path")
+@click.option("--json", "as_json", is_flag=True, help="Emit the report as JSON.")
+@click.option(
+    "--redact-home", is_flag=True,
+    help="Rewrite $HOME to ~ in emitted paths (never applied to signed receipts).",
+)
+def measure_cmd(receipts_path: str, as_json: bool, redact_home: bool) -> None:
+    """Aggregate a pipeline's grounding verdicts into the reported split.
+
+    RECEIPTS_PATH is a JSON array of verdict receipts, or a JSONL file with one
+    receipt per line (as written by a measurement run). The report gives the
+    GROUNDED / UNGROUNDED / OPAQUE split, the incidental-read rate, mean read
+    coverage, and OPAQUE bucketed by seam kind.
+
+    \b
+    Examples:
+        mareforma measure run-receipts.jsonl
+        mareforma measure run-receipts.json --json --redact-home
+    """
+    from mareforma.observe import summarize_receipts
+
+    try:
+        receipts = _load_receipts(Path(receipts_path))
+    except (OSError, ValueError) as exc:
+        _err(f"Could not read receipts: {exc}")
+        sys.exit(1)
+
+    report = summarize_receipts(receipts).to_dict()
+    closing = summarize_receipts(receipts).closing_sentence()
+    if redact_home:
+        report = _redact_home(report)
+        closing = _redact_home(closing)
+    if as_json:
+        click.echo(json.dumps({**report, "summary": closing}, indent=2, sort_keys=True))
+        return
+    _ok(f"Grounding report over {report['total']} findings")
+    counts = report["counts"]
+    for state in ("GROUNDED", "UNGROUNDED", "OPAQUE"):
+        _info(f"{state}: {counts[state]} ({report['fractions'][state]:.0%})")
+    if report["opaque_by_seam"]:
+        _info("OPAQUE by seam: " + ", ".join(
+            f"{k}={v}" for k, v in sorted(report["opaque_by_seam"].items())
+        ))
+    _info(f"incidental-read rate: {report['incidental_read_rate']:.0%}")
+    if report["mean_read_coverage"] is not None:
+        _info(f"mean read coverage: {report['mean_read_coverage']:.0%}")
+    click.echo(closing)
+
+
+def _load_receipts(path: Path) -> list:
+    """Load verdict receipts from a JSON array file or a JSONL file."""
+    text = path.read_text(encoding="utf-8")
+    stripped = text.lstrip()
+    if stripped.startswith("["):
+        data = json.loads(text)
+        if not isinstance(data, list):
+            raise ValueError("expected a JSON array of receipts")
+        return data
+    receipts = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line:
+            receipts.append(json.loads(line))
+    return receipts
+
+
+def _redact_home(obj):
+    """Rewrite the absolute home directory to ~ in every string in *obj*.
+
+    Applied to EMITTED artifacts only (never to a signed receipt, whose digest
+    must match the bytes that were signed). Recurses through dicts and lists.
+    """
+    home = str(Path.home())
+
+    def walk(x):
+        if isinstance(x, str):
+            return x.replace(home, "~") if home and home != "~" else x
+        if isinstance(x, dict):
+            return {k: walk(v) for k, v in x.items()}
+        if isinstance(x, list):
+            return [walk(v) for v in x]
+        return x
+
+    return walk(obj)
+
+
+# ---------------------------------------------------------------------------
 # claim
 # ---------------------------------------------------------------------------
 
