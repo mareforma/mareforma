@@ -14,14 +14,10 @@ signed claims.
 from __future__ import annotations
 
 from mareforma.hooks.agent_hook import find_graph_db, main, parse_event
-from mareforma.hooks.db_activities import (
-    create_activities_table,
-    record_activity,
-)
+from mareforma.hooks.db_activities import record_activity
 
 
 __all__ = [
-    "create_activities_table",
     "find_graph_db",
     "main",
     "parse_event",

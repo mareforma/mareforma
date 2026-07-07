@@ -862,6 +862,48 @@ class TestRefreshUnsignedDrift:
         # Only the original failed POST during assert_claim.
         assert len(rekor_posts) == 1
 
+    def test_refresh_unsigned_skips_a_drifted_row(self, tmp_path, httpx_mock):
+        """Exercise the Python-side drift guard directly by calling
+        refresh_unsigned on a row whose text was tampered *after* the
+        laundering trigger was dropped — the case the DB gate can't catch.
+
+        The guard must warn and refuse to submit the stale row. If it were
+        deleted, refresh_unsigned would make a *second* Rekor POST for the
+        drifted claim and emit no drift warning, so both assertions below
+        fail — deleting the guard is the acceptance bar #52 asks for."""
+        import sqlite3
+
+        httpx_mock.add_response(method="POST", url=_TEST_REKOR_URL, status_code=503)
+        key_path = _bootstrap_key(tmp_path)
+        # rekor_url + a 503 leaves the claim unlogged (transparency_logged=0).
+        with mareforma.open(
+            tmp_path, key_path=key_path, rekor_url=_TEST_REKOR_URL,
+        ) as graph:
+            claim_id = graph.assert_claim("original signed text")
+            assert graph.get_claim(claim_id)["transparency_logged"] == 0
+
+        # Drop the DB gate, then drift the row's text out from under its
+        # signature — simulating an attacker who bypassed the trigger.
+        conn = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
+        conn.execute("DROP TRIGGER IF EXISTS claims_signed_fields_no_laundering")
+        conn.execute(
+            "UPDATE claims SET text = ? WHERE claim_id = ?",
+            ("tampered text", claim_id),
+        )
+        conn.commit()
+        conn.close()
+
+        with pytest.warns(UserWarning, match="drifted from its signed payload"):
+            with mareforma.open(
+                tmp_path, key_path=key_path, rekor_url=_TEST_REKOR_URL,
+            ) as graph:
+                result = graph.refresh_unsigned()
+
+        assert result == {"checked": 1, "logged": 0, "still_unlogged": 1}
+        # The drift guard short-circuited before any Rekor submission — the
+        # only POST is the failed one from assert_claim, not a resubmission.
+        assert len([r for r in httpx_mock.get_requests() if r.method == "POST"]) == 1
+
 
 # ---------------------------------------------------------------------------
 # Key rotation: refresh_unsigned skips claims signed by the prior key

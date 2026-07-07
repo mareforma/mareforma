@@ -5,6 +5,11 @@ activities are high-volume, low-semantic-density data: every Claude
 Code (or other agent) tool invocation produces a row, but most rows
 never escalate into signed claims. Keeping them out of the signed
 graph lets mareforma stay lean.
+
+The table's DDL lives once, in the canonical schema
+(``mareforma.db._schema_sql``), and is created by ``open_db``. This
+module only inserts rows; it does not carry a second copy of the CREATE
+statement to drift out of sync with the canonical schema.
 """
 
 from __future__ import annotations
@@ -12,22 +17,6 @@ from __future__ import annotations
 import json
 import sqlite3
 from typing import Any
-
-
-def create_activities_table(conn: sqlite3.Connection) -> None:
-    """Create the ``agent_activities`` table if missing."""
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS agent_activities (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id  TEXT,
-            tool_name   TEXT NOT NULL,
-            tool_input  TEXT NOT NULL,
-            started_at  TEXT NOT NULL,
-            prov_type   TEXT NOT NULL DEFAULT 'prov:Activity'
-        )
-        """
-    )
 
 
 def record_activity(
