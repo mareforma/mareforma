@@ -4,19 +4,21 @@ Conceptual clusters:
 
 - :class:`TestParseEvent` — JSON parsing of stdin payloads.
 - :class:`TestFindGraphDb` — walk-up resolution of .mareforma/graph.db.
-- :class:`TestAgentActivitiesTable` — DDL + INSERT contract for the
-  ``agent_activities`` table.
+- :class:`TestAgentActivitiesTable` — the record path against the real
+  ``open_db`` schema, exercised end-to-end through ``python -m
+  mareforma.hooks``.
 """
 
 from __future__ import annotations
 
 import io
 import json
-import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
+from mareforma.db import open_db
 from mareforma.hooks import (
-    create_activities_table,
     find_graph_db,
     parse_event,
     record_activity,
@@ -61,11 +63,11 @@ class TestFindGraphDb:
 
 
 class TestAgentActivitiesTable:
-    def test_create_and_record(self, tmp_path: Path):
-        db_path = tmp_path / "graph.db"
-        conn = sqlite3.connect(str(db_path))
+    def test_record_activity_uses_canonical_schema(self, tmp_path: Path):
+        """record_activity inserts into the agent_activities table that
+        open_db creates from the canonical schema — no hand-rolled DDL."""
+        conn = open_db(tmp_path)
         try:
-            create_activities_table(conn)
             record_activity(
                 conn,
                 tool_name="Bash",
@@ -74,7 +76,6 @@ class TestAgentActivitiesTable:
                 started_at="2026-05-30T00:00:00Z",
             )
             conn.commit()
-
             rows = list(conn.execute(
                 "SELECT tool_name, tool_input, session_id, started_at, prov_type "
                 "FROM agent_activities"
@@ -89,12 +90,46 @@ class TestAgentActivitiesTable:
         finally:
             conn.close()
 
-    def test_create_is_idempotent(self, tmp_path: Path):
-        db_path = tmp_path / "graph.db"
-        conn = sqlite3.connect(str(db_path))
+
+class TestHookMainEndToEnd:
+    def test_python_m_mareforma_hooks_records_a_row(self, tmp_path: Path):
+        """Run the hook exactly as Claude Code does — `python -m
+        mareforma.hooks`, event on stdin — and read the row back through a
+        real open_db connection. This exercises main()'s open_db path and
+        proves the canonical schema stands on its own without any
+        hand-duplicated CREATE TABLE."""
+        open_db(tmp_path).close()  # bootstrap .mareforma/graph.db
+
+        event = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls -la"},
+            "session_id": "sess-e2e",
+        })
+        proc = subprocess.run(
+            [sys.executable, "-m", "mareforma.hooks"],
+            input=event, text=True, capture_output=True, cwd=str(tmp_path),
+        )
+        assert proc.returncode == 0, proc.stderr
+
+        conn = open_db(tmp_path)
         try:
-            create_activities_table(conn)
-            create_activities_table(conn)  # second call must not raise
-            conn.commit()
+            rows = list(conn.execute(
+                "SELECT tool_name, tool_input, session_id FROM agent_activities"
+            ))
         finally:
             conn.close()
+        assert len(rows) == 1
+        assert rows[0][0] == "Bash"
+        assert json.loads(rows[0][1]) == {"command": "ls -la"}
+        assert rows[0][2] == "sess-e2e"
+
+    def test_hook_is_a_noop_without_a_graph_db(self, tmp_path: Path):
+        """No .mareforma/graph.db in the tree → the hook exits 0 and writes
+        nothing, never interrupting the host tool call."""
+        event = json.dumps({"tool_name": "Bash", "tool_input": {}})
+        proc = subprocess.run(
+            [sys.executable, "-m", "mareforma.hooks"],
+            input=event, text=True, capture_output=True, cwd=str(tmp_path),
+        )
+        assert proc.returncode == 0
+        assert not (tmp_path / ".mareforma").exists()
