@@ -549,7 +549,7 @@ platform-specific translation lives. Three load-bearing properties:
   `_graph`, or `_canonical`; it imports them.
 - **Opt-in by install extra.** `pip install mareforma` brings the
   core alone. `pip install mareforma[clawinstitute]` /
-  `[tooluniverse]` / `[gemini]` / `[derivation]` adds the platform's
+  `[tooluniverse]` / `[gemini]` adds the platform's
   runtime deps. Users pay for what they integrate.
 - **Convention surface, not framework.** Each adapter exposes the
   same minimum: a constructor taking `graph=`, `predicate_uris()`
