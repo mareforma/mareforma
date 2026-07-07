@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
-from . import _audit, _loaders, _scope, measure, oracle
+from . import _audit, _doctor, _loaders, _scope, measure, oracle
 from ._binding import (
     BindingResult,
     BindingState,
@@ -31,6 +31,7 @@ from ._binding import (
     check_grounding_binding,
 )
 from ._citation import cited_set
+from ._doctor import coverage_report
 from ._scope import current_scope, scope_is_open
 from ._verdict import (
     GROUNDING_AXIS_VERSION,
@@ -39,13 +40,16 @@ from ._verdict import (
     ReadRecord,
     SeamEvent,
 )
-from .measure import GroundingReport, summarize
+from .measure import GroundingReport, summarize, summarize_receipts
 from .oracle import (
+    MetricReducer,
     OracleInfluence,
     OracleResult,
     Reconciliation,
+    declared_reducer,
     perturbation_oracle,
     reconcile,
+    scalar_reducer,
 )
 
 
@@ -132,6 +136,8 @@ __all__ = [
     "GROUNDING_AXIS_VERSION",
     "current_scope",
     "scope_is_open",
+    # Coverage self-report (the doctor).
+    "coverage_report",
     # Verdict↔citation binding.
     "check_grounding_binding",
     "BindingResult",
@@ -143,7 +149,12 @@ __all__ = [
     "OracleResult",
     "reconcile",
     "Reconciliation",
+    # Declared metric reducer (prose findings need a stated reduction).
+    "MetricReducer",
+    "scalar_reducer",
+    "declared_reducer",
     # Aggregate measurement over many verdicts.
     "summarize",
     "GroundingReport",
+    "summarize_receipts",
 ]

@@ -191,3 +191,73 @@ def test_bound_seam_is_opaque(tmp_path):
     with obs.observe(cites=str(data)) as h:
         subprocess.run(["true"], capture_output=True)
     assert h.verdict.grounding is OG.OPAQUE
+
+
+# -- declared metric reducer -------------------------------------------------
+
+def test_oracle_records_the_default_scalar_reducer():
+    from mareforma.observe.oracle import scalar_reducer
+
+    result = perturbation_oracle(lambda x: x, 1.0, perturb=[5.0])
+    assert result.reducer is scalar_reducer
+    assert result.reducer.reinserts_model is False
+
+
+def test_oracle_records_a_declared_prose_reducer():
+    from mareforma.observe.oracle import declared_reducer
+
+    # A prose finding reduced by a declared model-based extraction: the result
+    # must record the reducer AND that it reinserts a model into the ground truth.
+    reducer = declared_reducer(
+        "answer_length", lambda text: float(len(text)),
+        reinserts_model=True, description="LLM-judge stand-in",
+    )
+    result = perturbation_oracle(lambda text: text, "short",
+                                 perturb=["a much longer answer"], metric=reducer)
+    assert result.reducer is reducer
+    assert result.reducer.declaration()["reinserts_model"] is True
+
+
+def test_bare_callable_metric_is_wrapped_as_a_reducer():
+    result = perturbation_oracle(lambda x: x, 1.0, perturb=[9.0],
+                                 metric=lambda f: float(f))
+    assert result.reducer is not None
+    assert result.reducer.name == "custom"
+
+
+# -- measure: per-seam buckets, receipts, closing sentence -------------------
+
+def test_summarize_buckets_opaque_by_seam():
+    from mareforma.observe import GroundingVerdict, SeamEvent
+
+    verdicts = [
+        GroundingVerdict(OG.OPAQUE, "r", seams=(SeamEvent("subprocess", "x"),)),
+        GroundingVerdict(OG.OPAQUE, "r", seams=(SeamEvent("socket", "y"),)),
+        GroundingVerdict(OG.OPAQUE, "r", seams=(SeamEvent("subprocess", "z"),)),
+    ]
+    report = summarize(verdicts)
+    assert report.opaque_by_seam == {"socket": 1, "subprocess": 2}
+
+
+def test_summarize_receipts_matches_live_verdicts():
+    from mareforma.observe import GroundingVerdict, ReadRecord, SeamEvent
+    from mareforma.observe.measure import summarize_receipts
+
+    verdicts = [
+        GroundingVerdict(OG.GROUNDED, "g", cited_sources=("/x",),
+                         reads=(ReadRecord("file", "/x", True),)),
+        GroundingVerdict(OG.OPAQUE, "o", seams=(SeamEvent("thread", "t"),)),
+    ]
+    live = summarize(verdicts).to_dict()
+    from_receipts = summarize_receipts([v.receipt() for v in verdicts]).to_dict()
+    assert live == from_receipts
+
+
+def test_closing_sentence_names_the_dominant_seam():
+    from mareforma.observe import GroundingVerdict, SeamEvent
+
+    verdicts = [GroundingVerdict(OG.OPAQUE, "r", seams=(SeamEvent("subprocess", "x"),))
+                for _ in range(3)]
+    sentence = summarize(verdicts).closing_sentence()
+    assert "subprocess" in sentence
+    assert "OPAQUE dominates" in sentence
