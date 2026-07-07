@@ -1,6 +1,6 @@
 """Packaging invariants: sdist completeness, extras hygiene, Dependabot.
 
-Regression guards for the v0.3.9 packaging issues:
+Regression guards for the packaging issues:
 
 - #45  the sdist must ship a *runnable* test suite (conftest, shared
        helpers, and every subpackage) or none at all. Completeness is the

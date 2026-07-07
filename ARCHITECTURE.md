@@ -568,8 +568,8 @@ have no dependency on any adapter; an adapter that disappears does
 not break the contracts. URI constants live in
 `mareforma.predicate_types`: a single source of truth for the URIs
 the core reserves, re-exported at the top level for
-ergonomics. The five core primitives (events, canonicalize, tools,
-derivation, hooks) each follow the same core-first rule.
+ergonomics. The core primitives (events, canonicalize, tools,
+hooks) each follow the same core-first rule.
 
 ## Execution-observed grounding
 
