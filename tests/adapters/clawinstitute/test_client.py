@@ -339,6 +339,38 @@ class TestApiVersion:
         finally:
             c.close()
 
+    def _client_reporting(self, monkeypatch, version):
+        c = HttpxClient(base_url="https://x", token="t")
+        monkeypatch.setattr(
+            c._http, "request",
+            lambda *a, **k: _json_response(200, {"version": version}),
+        )
+        return c
+
+    def test_neighbouring_major_rejected(self, monkeypatch):
+        """#49: 'v10'/'v1beta2' share a prefix with 'v1' but are a
+        different major and must be rejected, not accepted by startswith."""
+        for bogus in (f"{SUPPORTED_API_VERSION}0", f"{SUPPORTED_API_VERSION}beta2"):
+            c = self._client_reporting(monkeypatch, bogus)
+            try:
+                with pytest.raises(ApiVersionError, match="requires"):
+                    c.api_version()
+            finally:
+                c.close()
+
+    def test_exact_major_and_minor_accepted(self, monkeypatch):
+        """The exact major and any minor/patch under it are compatible."""
+        for good in (
+            SUPPORTED_API_VERSION,
+            f"{SUPPORTED_API_VERSION}.0",
+            f"{SUPPORTED_API_VERSION}.4.2",
+        ):
+            c = self._client_reporting(monkeypatch, good)
+            try:
+                assert c.api_version() == good
+            finally:
+                c.close()
+
 
 class TestExceptionTaxonomy:
     def test_typed_exceptions_share_parent(self):

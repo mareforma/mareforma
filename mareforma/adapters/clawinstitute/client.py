@@ -279,7 +279,14 @@ class HttpxClient:
             raise UnexpectedShapeError(
                 "'version' field missing or not a string in /api/version"
             )
-        if not version.startswith(SUPPORTED_API_VERSION):
+        # Exact-major match. A bare ``startswith`` accepts "v10" and
+        # "v1beta2" as compatible with "v1" — different majors that silently
+        # slip past. Accept only the exact major or a minor/patch under it
+        # ("v1", "v1.4", "v1.4.2"); reject "v10", "v1beta2", "v2".
+        if not (
+            version == SUPPORTED_API_VERSION
+            or version.startswith(SUPPORTED_API_VERSION + ".")
+        ):
             raise ApiVersionError(
                 f"server reports API version {version!r}; this client "
                 f"requires {SUPPORTED_API_VERSION!r}. Upgrade the "
