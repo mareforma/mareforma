@@ -25,6 +25,7 @@ import pytest
 import mareforma
 from mareforma.db import (
     CycleDetectedError,
+    GraphTooLargeError,
     SignedClaimImmutableError,
     _check_no_cycle,
     open_db,
@@ -129,27 +130,31 @@ class TestEdgeCases:
             cid = g.assert_claim("references unknown", supports=[fake])
         assert cid
 
-    def test_depth_cap_rejects_long_chain(
+    def test_reachable_cap_rejects_oversized_graph_not_as_cycle(
         self, tmp_path: Path, monkeypatch,
     ) -> None:
-        """Monkey-patch the cap to a small value, build a chain longer
-        than that, verify the walker raises. The production cap
-        (1024 hops) is too long to test directly because the chain
-        construction itself would trip it — but the cap-rejection
-        path is the same."""
+        """Monkey-patch the reachable-claim cap to a small value, build a chain
+        that reaches past it, and verify the walker raises GraphTooLargeError —
+        NOT CycleDetectedError. The cap is a runaway guard, not a cycle, and a
+        legitimate (acyclic) oversized reach must never be mislabeled a cycle.
+        The production cap (100k) is too large to test directly."""
         from mareforma.db import core as _db_core
-        monkeypatch.setattr(_db_core, "_CYCLE_MAX_DEPTH", 5)
+        monkeypatch.setattr(_db_core, "_REACHABLE_CLAIM_CAP", 5)
         with mareforma.open(tmp_path) as g:
             ids = [g.assert_claim("genesis")]
-            # Build 7 hops — past the patched cap of 5. The first 5
-            # hops walk inside the cap and succeed; the 6th hit the cap.
+            # Build 7 hops — past the patched cap of 5. The 6th reaches 6
+            # distinct acyclic claims and trips the cap.
             for i in range(7):
                 try:
                     ids.append(g.assert_claim(f"link {i}", supports=[ids[-1]]))
-                except CycleDetectedError as exc:
-                    assert "depth cap" in str(exc)
+                except GraphTooLargeError as exc:
+                    assert "not a cycle" in str(exc)
                     return
-        pytest.fail("Expected CycleDetectedError on depth-cap overflow")
+                except CycleDetectedError:
+                    pytest.fail(
+                        "Oversized acyclic reach was wrongly reported as a cycle"
+                    )
+        pytest.fail("Expected GraphTooLargeError on reachable-cap overflow")
 
 
 # ---------------------------------------------------------------------------
