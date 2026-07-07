@@ -43,6 +43,7 @@ from .errors import (  # noqa: F401
     InvalidValidationEnvelopeError,
     RestoreError,
     CycleDetectedError,
+    GraphTooLargeError,
     VerdictIssuerError,
 )
 
@@ -593,9 +594,13 @@ _CLAIM_ID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
 
-# Walk depth cap for cycle detection. Same value as the validator-chain
-# cap; defends against pathologically long planted chains.
-_CYCLE_MAX_DEPTH = 1024
+# Cap on the number of DISTINCT claims the acyclicity walk may reach before it
+# gives up. With node-dedup the walk always terminates, so this is not a
+# correctness bound — it is a runaway guard against an absurdly large reachable
+# set. Generous: a legitimate fan-out in a mature graph can reach many thousands
+# of claims at shallow depth, and exceeding the cap is reported as
+# GraphTooLargeError, never as a cycle.
+_REACHABLE_CLAIM_CAP = 100_000
 
 
 def _is_claim_id(value: str) -> bool:
@@ -696,8 +701,14 @@ def _check_no_cycle(
 
     DOI strings in ``supports[]`` are external references — they are kept
     as seeds but never match a ``claim_id``, so they drop out of the walk.
-    ``UNION`` (not ``UNION ALL``) dedupes reached nodes, so even a
-    pre-existing cycle in the stored graph terminates the recursion.
+    ``UNION`` dedupes the reachable set by ``node``, so each claim is
+    visited once: the walk is O(reachable claims), it terminates even if a
+    stored cycle exists among other claims (a DB-write adversary could
+    plant one), and such a stored cycle never turns into a spurious verdict
+    here — only ``new_claim_id`` being reachable from the seeds is a cycle.
+    The reachable-set size is bounded by ``_REACHABLE_CLAIM_CAP`` as a
+    runaway guard: exceeding it raises :class:`GraphTooLargeError` (a distinct
+    condition, never a cycle), so a legitimate wide fan-out is not mislabeled.
     """
     seeds = [s for s in supports if _is_claim_id(s)]
     if not seeds:
@@ -710,23 +721,22 @@ def _check_no_cycle(
 
     row = conn.execute(
         """
-        WITH RECURSIVE reach(node, depth) AS (
-            SELECT value, 1 FROM json_each(?)
+        WITH RECURSIVE reach(node) AS (
+            SELECT value FROM json_each(?)
             UNION
-            SELECT je.value, r.depth + 1
+            SELECT je.value
               FROM reach r
               JOIN claims c ON c.claim_id = r.node
               JOIN json_each(c.supports_json) je
-             WHERE r.depth < ?
-               AND c.supports_json IS NOT NULL
+             WHERE c.supports_json IS NOT NULL
                AND json_valid(c.supports_json)
         )
         SELECT
             MAX(CASE WHEN node = ? THEN 1 ELSE 0 END) AS hit,
-            MAX(depth) AS max_depth
+            COUNT(*) AS visited
         FROM reach
         """,
-        (json.dumps(seeds), _CYCLE_MAX_DEPTH, new_claim_id),
+        (json.dumps(seeds), new_claim_id),
     ).fetchone()
 
     if row is not None and row["hit"]:
@@ -734,11 +744,12 @@ def _check_no_cycle(
             f"Inserting/updating {new_claim_id!r} with the given "
             "supports[] would create a cycle."
         )
-    if row is not None and (row["max_depth"] or 0) >= _CYCLE_MAX_DEPTH:
-        raise CycleDetectedError(
-            f"supports[] walk exceeded depth cap of {_CYCLE_MAX_DEPTH} "
-            "hops. The graph contains a pathologically long chain — "
-            "investigate before relaxing the cap."
+    if row is not None and (row["visited"] or 0) > _REACHABLE_CLAIM_CAP:
+        raise GraphTooLargeError(
+            f"supports[] reaches more than {_REACHABLE_CLAIM_CAP} distinct "
+            "upstream claims; the acyclicity walk gave up. This is not a cycle "
+            "(the walk terminates on cycles) — the reachable graph is "
+            "extraordinarily large. Investigate before relaxing the cap."
         )
 
 
