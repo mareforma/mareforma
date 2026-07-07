@@ -7,12 +7,14 @@ and ``prov:wasAssociatedWith`` from activity → agent. ``supports[]``
 links materialise as ``prov:wasDerivedFrom`` edges (entity → entity).
 Validation events become a second activity that
 ``prov:wasAssociatedWith`` the validator agent. The whole document is
-PROV-O JSON-LD with the standard ``prov:`` namespace prefix.
+PROV-O JSON-LD with the standard ``prov:`` namespace prefix and
+``rdfs:label`` (RDFS) for human-readable labels, which a strict PROV
+consumer accepts (``prov:label`` is not a term in the PROV ontology).
 
 PRIVACY NOTE
 ------------
 The exported document carries the first 120 characters of every
-claim's text verbatim as ``prov:label`` on the entity node, and the
+claim's text verbatim as ``rdfs:label`` on the entity node, and the
 asserter's ``generated_by`` + validator's ``validated_by`` as agent
 labels. Mareforma's posture is "your scientific findings stay
 on your machine," but PROV-O export is the intended cross-boundary
@@ -51,6 +53,7 @@ __all__ = [
 
 PROV_CONTEXT = {
     "prov": "http://www.w3.org/ns/prov#",
+    "rdfs": "http://www.w3.org/2000/01/rdf-schema#",
     "xsd": "http://www.w3.org/2001/XMLSchema#",
     "mareforma": "urn:mareforma:",
 }
@@ -195,7 +198,7 @@ def build_prov_o(root: Path, claim_id: str | None = None) -> dict[str, Any]:
             graph.append({
                 "@id": _agent_id(agent),
                 "@type": "prov:Agent",
-                "prov:label": agent,
+                "rdfs:label": agent,
             })
             seen_agents.add(agent_safe)
 
@@ -203,7 +206,7 @@ def build_prov_o(root: Path, claim_id: str | None = None) -> dict[str, Any]:
         entity: dict[str, Any] = {
             "@id": _entity_id(cid),
             "@type": "prov:Entity",
-            "prov:label": (claim.get("text") or "")[:120],
+            "rdfs:label": (claim.get("text") or "")[:120],
             "prov:wasGeneratedBy": {
                 "@id": _activity_id(cid, "assertion"),
             },
@@ -240,7 +243,7 @@ def build_prov_o(root: Path, claim_id: str | None = None) -> dict[str, Any]:
                 graph.append({
                     "@id": _validator_id(vkeyid),
                     "@type": "prov:Agent",
-                    "prov:label": claim.get("validated_by") or vkeyid,
+                    "rdfs:label": claim.get("validated_by") or vkeyid,
                 })
                 seen_validators.add(vkeyid)
             graph.append({

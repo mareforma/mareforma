@@ -435,11 +435,18 @@ class TestExportFormats:
             conforms_ids = {conforms["@id"]}
         assert RO_CRATE_PROFILE in conforms_ids
         assert PROCESS_RUN_CRATE_PROFILE in conforms_ids
-        # Root Dataset has the seeded claim in hasPart.
+        # Root Dataset mentions the claim's provenance action and lists
+        # the claim-text data entity under hasPart (Process Run Crate).
         root = next(e for e in graph if e["@id"] == "./")
         assert root["@type"] == "Dataset"
+        mention_ids = {m["@id"] for m in root["mentions"]}
         has_part_ids = {p["@id"] for p in root["hasPart"]}
-        assert f"urn:mareforma:claim:{claim_id}" in has_part_ids
+        assert f"urn:mareforma:claim:{claim_id}" in mention_ids
+        assert f"#claim-text/{claim_id}" in has_part_ids
+        assert f"urn:mareforma:claim:{claim_id}" not in has_part_ids
+        # Root declares a license resolving to a contextual entity.
+        lic_id = root["license"]["@id"]
+        assert any(e["@id"] == lic_id for e in graph)
         # CreateAction entity for the claim exists.
         action = next(
             e for e in graph
