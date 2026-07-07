@@ -20,8 +20,43 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 
-from ._citation import normalize_identifier, read_matches_citation
+from ._citation import citation_kind, normalize_identifier, read_matches_citation
 from ._verdict import GroundingVerdict, ObservedGrounding, ReadRecord, SeamEvent
+
+# Which citation kinds a socket seam can hide a read of. A socket delivers bytes
+# over the network, so it is relevant to a URL or a content-address (whose bytes
+# can arrive from anywhere) but NOT to a local file (an in-process file read hits
+# the open audit event; a C-extension file is floored to OPAQUE by its own
+# coverage-gap seam). Every other seam kind hides anything.
+_SOCKET_BLOCKS: frozenset[str] = frozenset({"url", "content-address", "unknown"})
+_BLOCKS_EVERYTHING: frozenset[str] = frozenset(
+    {"subprocess", "thread", "coverage-gap"}
+)
+
+
+def _seam_blocks_ungrounded(seam_kind: str, cited_kinds: set[str]) -> bool:
+    """Whether a seam of this kind blocks an UNGROUNDED verdict for this cited set.
+
+    Conservative-ANY: the seam blocks if it could have hidden a read of ANY
+    citation kind present. Fail-closed on both axes — an unknown seam kind blocks
+    everything, and an unknown citation kind is blocked by every seam — so a gap
+    the matrix does not model lands OPAQUE, never a confident UNGROUNDED. An empty
+    citation set has no tell to recover, so any seam blocks.
+    """
+    if not cited_kinds:
+        return True
+    for k in cited_kinds:
+        if k == "unknown":
+            return True
+        if seam_kind == "socket":
+            if k in _SOCKET_BLOCKS:
+                return True
+        elif seam_kind in _BLOCKS_EVERYTHING:
+            return True
+        else:
+            # Unknown seam kind: fail-closed, blocks any citation.
+            return True
+    return False
 
 # The active scope for the current context. ``None`` means nothing is observing;
 # every wrapper and the audit hook short-circuit on that in a single read.
@@ -166,7 +201,12 @@ class Scope:
                     **base,
                 )
 
-        # No qualifying cited read. Did anything hide one?
+        # No qualifying cited read. Did anything hide one? Fold in the coverage
+        # gaps that a fully-observed scope cannot rule out: a cited source opened
+        # through an uninstrumented reader, a cited C-extension file whose bytes
+        # never emit a PEP-578 event, and a cited URL with no observed HTTP read.
+        # Each becomes a coverage-gap seam, which the relevance matrix below
+        # treats as blocking every citation kind (fail-closed).
         read_idents = {normalize_identifier(r.identifier) for r in reads}
         for op in self.opens:
             n = normalize_identifier(op)
@@ -178,14 +218,43 @@ class Scope:
                     )
                 )
                 break
+        for c in cited:
+            if c in read_idents:
+                continue
+            kind = citation_kind(c)
+            if kind == "c-extension-file":
+                seams.append(
+                    SeamEvent(
+                        "coverage-gap",
+                        "C-extension reader, bytes not observable via PEP-578",
+                    )
+                )
+            elif kind == "url":
+                seams.append(
+                    SeamEvent(
+                        "coverage-gap",
+                        "cited URL with no observed HTTP read; coverage unknown",
+                    )
+                )
 
-        if seams:
-            kinds = ", ".join(sorted({s.kind for s in seams}))
+        # Seam-relevance matrix. A seam blocks UNGROUNDED only if it could have
+        # hidden a read of a citation kind actually in the set (conservative-ANY:
+        # one relevant citation is enough). A socket seam cannot deliver a local
+        # file read, so it does NOT block a file-cited finding — that is the tell
+        # a silent fallback on an LLM-shaped pipeline leaves behind. It DOES block
+        # URL- and content-address-cited findings (bytes can arrive over the
+        # network). Subprocess / thread / coverage-gap seams, and any unknown
+        # seam or citation kind, block everything (fail-closed).
+        cited_kinds = {citation_kind(c) for c in cited}
+        relevant = [s for s in seams if _seam_blocks_ungrounded(s.kind, cited_kinds)]
+        if relevant:
+            kinds = ", ".join(sorted({s.kind for s in relevant}))
             return GroundingVerdict(
                 grounding=ObservedGrounding.OPAQUE,
                 reason=(
-                    "no cited read observed, but a seam could have hidden one "
-                    f"({kinds}); absence cannot be trusted"
+                    "no cited read observed, but a seam relevant to the cited "
+                    f"source(s) could have hidden one ({kinds}); absence cannot "
+                    "be trusted"
                 ),
                 seams=tuple(seams),
                 **base,
