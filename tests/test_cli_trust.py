@@ -1,0 +1,359 @@
+"""CLI tests for the trust-experience layer: map, verify, diagnose.
+
+Pins the verify exit-code contract (0/1/2/3), bundle-mode subsumption and
+auditor mode, the pre-binding label, map's three output shapes, and diagnose's
+runpy-in-process behaviour with its no-guessed-citation rule.
+"""
+from __future__ import annotations
+
+import base64
+import json
+from pathlib import Path
+
+from click.testing import CliRunner
+
+import mareforma
+from mareforma import signing
+from mareforma.cli import cli, _claim_bound_sources
+from mareforma.db import open_db
+
+
+def _bootstrap_default_key() -> None:
+    """Create the XDG-default signing key (XDG is isolated per test)."""
+    kp = signing.default_key_path()
+    kp.parent.mkdir(parents=True, exist_ok=True)
+    if not kp.exists():
+        signing.bootstrap_key(kp)
+
+
+def _v038_grounded_record() -> str:
+    return json.dumps({
+        "version": "v0.3.8", "grounding": "GROUNDED",
+        "reason": "cited file opened and non-empty",
+        "receipt_digest": "sha256:deadbeef",
+    })
+
+
+# ---------------------------------------------------------------------------
+# map
+# ---------------------------------------------------------------------------
+
+class TestMapCommand:
+    def test_map_text(self, tmp_path: Path) -> None:
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            with mareforma.open(".") as g:
+                cid = g.assert_claim("m", classification="ANALYTICAL")
+            res = r.invoke(cli, ["map", cid])
+            assert res.exit_code == 0, res.output
+            assert "TRUST MAP" in res.output
+            assert "independence" in res.output
+            assert "UNVERIFIABLE" in res.output
+
+    def test_map_json(self, tmp_path: Path) -> None:
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            with mareforma.open(".") as g:
+                cid = g.assert_claim("m", classification="ANALYTICAL")
+            res = r.invoke(cli, ["map", cid, "--json"])
+            assert res.exit_code == 0
+            doc = json.loads(res.output)
+            assert doc["subject_id"] == cid
+            assert len(doc["properties"]) == 10
+
+    def test_map_html_written_to_file(self, tmp_path: Path) -> None:
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            with mareforma.open(".") as g:
+                cid = g.assert_claim("m", classification="ANALYTICAL")
+            res = r.invoke(cli, ["map", cid, "--html", "--output", "tm.html"])
+            assert res.exit_code == 0, res.output
+            html = Path("tm.html").read_text()
+            assert html.startswith("<!DOCTYPE html>")
+            assert "https://" not in html and "<script" not in html.lower()
+
+    def test_map_missing_claim_exits_1(self, tmp_path: Path) -> None:
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            with mareforma.open(".") as g:
+                g.assert_claim("m", classification="ANALYTICAL")
+            res = r.invoke(cli, ["map", "nope"])
+            assert res.exit_code == 1
+
+    def test_map_html_and_json_mutually_exclusive(self, tmp_path: Path) -> None:
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            with mareforma.open(".") as g:
+                cid = g.assert_claim("m", classification="ANALYTICAL")
+            res = r.invoke(cli, ["map", cid, "--html", "--json"])
+            assert res.exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# verify — exit-code contract
+# ---------------------------------------------------------------------------
+
+class TestVerifyExitCodes:
+    def test_claim_verified_exit_0(self, tmp_path: Path) -> None:
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            with mareforma.open(".") as g:
+                cid = g.assert_claim("v", classification="ANALYTICAL")
+            res = r.invoke(cli, ["verify", cid])
+            assert res.exit_code == 0, res.output
+            assert "TRUST MAP" in res.output
+
+    def test_unknown_claim_is_unverifiable_exit_2(self, tmp_path: Path) -> None:
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            with mareforma.open(".") as g:
+                g.assert_claim("v", classification="ANALYTICAL")
+            res = r.invoke(cli, ["verify", "not-a-real-claim"])
+            assert res.exit_code == 2
+
+    def test_bad_flag_exit_code_distinct_from_unverifiable(
+        self, tmp_path: Path,
+    ) -> None:
+        # A typo'd flag must NOT read as "unverifiable" (2) to a CI gate.
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            res = r.invoke(cli, ["verify", "x", "--no-such-flag"])
+            assert res.exit_code == 3
+            assert res.exit_code != 2
+
+    def test_claim_json_schema(self, tmp_path: Path) -> None:
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            with mareforma.open(".") as g:
+                cid = g.assert_claim("v", classification="ANALYTICAL")
+            res = r.invoke(cli, ["verify", cid, "--json"])
+            assert res.exit_code == 0
+            doc = json.loads(res.output)
+            assert doc["verdict"] == "verified"
+            assert doc["exit_code"] == 0
+            assert doc["trust_map"]["subject_id"] == cid
+
+
+class TestVerifyBundleMode:
+    """The new command subsumes the old bundle-path invocation."""
+
+    def _make_bundle(self) -> Path:
+        with mareforma.open(".") as g:
+            g.assert_claim("seeded", generated_by="seed", seed=True)
+        from mareforma.export_bundle import write_bundle
+        out = Path("mareforma-bundle.json")
+        write_bundle(Path("."), out, signing.load_private_key(
+            signing.default_key_path()))
+        return out
+
+    def test_existing_bundle_invocation_still_verifies(
+        self, tmp_path: Path,
+    ) -> None:
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            self._make_bundle()
+            res = r.invoke(cli, ["verify", "mareforma-bundle.json"])
+            assert res.exit_code == 0
+            assert "verified" in res.output.lower()
+
+    def test_tampered_bundle_is_failure_exit_1(self, tmp_path: Path) -> None:
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            self._make_bundle()
+            bundle = json.loads(Path("mareforma-bundle.json").read_text())
+            bundle["signatures"][0]["sig"] = base64.standard_b64encode(
+                b"x" * 64).decode("ascii")
+            Path("mareforma-bundle.json").write_text(json.dumps(bundle))
+            res = r.invoke(cli, ["verify", "mareforma-bundle.json"])
+            assert res.exit_code == 1
+
+    def test_missing_local_key_is_unverifiable_not_failure(
+        self, tmp_path: Path,
+    ) -> None:
+        # A missing local key → exit 2 (unverifiable), never 1.
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            self._make_bundle()
+            signing.default_key_path().unlink()
+            res = r.invoke(cli, ["verify", "mareforma-bundle.json", "--json"])
+            assert res.exit_code == 2
+            assert json.loads(res.output)["verdict"] == "unverifiable"
+
+    def test_export_dir_detection(self, tmp_path: Path) -> None:
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            self._make_bundle()  # writes mareforma-bundle.json in cwd
+            res = r.invoke(cli, ["verify", "."])
+            assert res.exit_code == 0, res.output
+
+
+class TestVerifyAuditorMode:
+    def test_claim_verifies_with_only_public_material(
+        self, tmp_path: Path,
+    ) -> None:
+        # Auditor mode: no local signing key, verification uses the graph's
+        # enrolled validator pubkeys (public material).
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            with mareforma.open(".") as g:
+                cid = g.assert_claim("v", classification="ANALYTICAL")
+            signing.default_key_path().unlink()  # drop private material
+            res = r.invoke(cli, ["verify", cid])
+            assert res.exit_code == 0, res.output
+
+
+class TestVerifyPreBindingLabel:
+    """An axis-v0.3.8 GROUNDED renders as pre-binding, not bound GROUNDED."""
+
+    def test_pre_binding_label_in_verify_output(self, tmp_path: Path) -> None:
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            with mareforma.open(".") as g:
+                cid = g.assert_claim(
+                    "v", classification="ANALYTICAL",
+                    observed_grounding=json.loads(_v038_grounded_record()),
+                )
+            res = r.invoke(cli, ["verify", cid])
+            assert res.exit_code == 0, res.output
+            assert "pre-binding axis; citation binding not checkable" in res.output
+
+
+# ---------------------------------------------------------------------------
+# diagnose (E1)
+# ---------------------------------------------------------------------------
+
+class TestDiagnose:
+    def _script(self, tmp_path: Path, body: str, name: str = "t.py") -> Path:
+        p = tmp_path / name
+        p.write_text(body)
+        return p
+
+    def test_no_cites_reports_observation_without_verdict(
+        self, tmp_path: Path,
+    ) -> None:
+        data = tmp_path / "data.csv"
+        data.write_text("a,b\n1,2\n")
+        script = self._script(
+            tmp_path, f"open({str(data)!r}).read()\n")
+        r = CliRunner()
+        res = r.invoke(cli, ["diagnose", "--json", "--", str(script)])
+        assert res.exit_code == 0, res.output
+        doc = json.loads(res.output)
+        # Never guesses a citation: obvious data read, no --cites → NO verdict.
+        assert doc["grounding"] is None
+        assert any(str(data) in rr["identifier"] for rr in doc["reads"])
+
+    def test_cites_produces_grounding_verdict(self, tmp_path: Path) -> None:
+        data = tmp_path / "data.csv"
+        data.write_text("a,b\n1,2\n")
+        script = self._script(tmp_path, f"open({str(data)!r}).read()\n")
+        r = CliRunner()
+        res = r.invoke(
+            cli, ["diagnose", "--json", "--cites", str(data), "--", str(script)])
+        assert res.exit_code == 0, res.output
+        doc = json.loads(res.output)
+        assert doc["grounding"] is not None
+        assert doc["grounding"]["grounding"] == "GROUNDED"
+
+    def test_target_crash_partial_report_and_exit_code(
+        self, tmp_path: Path,
+    ) -> None:
+        script = self._script(tmp_path, "raise SystemExit(5)\n")
+        r = CliRunner()
+        res = r.invoke(cli, ["diagnose", "--json", "--", str(script)])
+        assert res.exit_code == 5
+
+    def test_uncaught_exception_exits_1_and_marks_partial(
+        self, tmp_path: Path,
+    ) -> None:
+        script = self._script(tmp_path, "raise ValueError('boom')\n")
+        r = CliRunner()
+        res = r.invoke(cli, ["diagnose", "--json", "--", str(script)])
+        assert res.exit_code == 1
+        doc = json.loads(res.output)
+        assert doc["partial"] is True
+
+
+# ---------------------------------------------------------------------------
+# verify — grounding→citation binding re-check (the read-side gate)
+# ---------------------------------------------------------------------------
+
+_REAL = "/data/real.csv"
+_DECOY = "/data/decoy.csv"
+
+
+def _grounded_record(grounded: list[str]) -> dict:
+    return {
+        "version": "v0.3.9", "grounding": "GROUNDED",
+        "reason": "cited read observed", "cited_sources": [_REAL],
+        "grounded_sources": grounded,
+    }
+
+
+class TestVerifyGroundingBinding:
+    def test_claim_bound_sources_reads_predicate_payload(self) -> None:
+        # The finding citation lives in the SIGNED predicate payload, not a
+        # (nonexistent) data_source column. Reading the wrong place silently
+        # no-ops the whole binding re-check.
+        ca = "sha256:" + "a" * 64
+        claim = {"predicate_payload": json.dumps(
+            {"data_sources": [_REAL], "data_ids": [ca, "string-token"]})}
+        assert _claim_bound_sources(claim) == [_REAL, ca]
+        assert _claim_bound_sources({"data_source": "/x"}) == []  # dead field ignored
+        assert _claim_bound_sources({}) == []
+        assert _claim_bound_sources({"predicate_payload": "not json"}) == []
+
+    def test_matched_binding_verifies_exit_0(self, tmp_path: Path) -> None:
+        # A GROUNDED verdict whose grounded set matches the finding's citation
+        # verifies clean — proves the binding check is WIRED, not skipped.
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            with mareforma.open(".") as g:
+                cid = g.assert_claim(
+                    "grounded finding", classification="ANALYTICAL",
+                    predicate_payload={"data_sources": [_REAL], "data_ids": []},
+                    observed_grounding=_grounded_record([_REAL]),
+                )
+            res = r.invoke(cli, ["verify", cid])
+            assert res.exit_code == 0, res.output
+
+    def test_disjoint_binding_is_tamper_exit_1(self, tmp_path: Path) -> None:
+        # Tamper the UNSIGNED observed_grounding column to a GROUNDED verdict whose
+        # grounded set is disjoint from the finding's signed data_sources. The
+        # signature still verifies (observed_grounding is not signed), so the
+        # binding re-check is the only thing that can catch it — and it must.
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            with mareforma.open(".") as g:
+                cid = g.assert_claim(
+                    "grounded finding", classification="ANALYTICAL",
+                    predicate_payload={"data_sources": [_REAL], "data_ids": []},
+                    observed_grounding=_grounded_record([_REAL]),
+                )
+            conn = open_db(Path("."))
+            conn.execute(
+                "UPDATE claims SET observed_grounding=? WHERE claim_id=?",
+                (json.dumps(_grounded_record([_DECOY])), cid),
+            )
+            conn.commit()
+            conn.close()
+            res = r.invoke(cli, ["verify", cid, "--json"])
+            assert res.exit_code == 1, res.output
+            assert "grounding binding violation" in res.output
