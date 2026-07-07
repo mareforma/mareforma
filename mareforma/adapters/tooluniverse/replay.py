@@ -1,9 +1,17 @@
-"""Replay-from-claim: verify a tool call byte-for-byte from its signed claim alone.
+"""Replay-from-claim: re-run a tool call from its stored claim and check the
+result reproduces the pinned digest.
 
 Phase 1 ships the single-claim case: given a claim_id and a runtime
 tool registry, look up the tool, re-execute the call with the
 predicate's canonical arguments, canonicalise the new result, and
 assert it matches the predicate's pinned `result_digest`.
+
+Scope: this attests REPRODUCIBILITY of arguments→result, not the INTEGRITY of
+the stored envelope. ``get_claim`` is a plain DB read with no signature check,
+so a caller who needs to trust the rest of the recorded predicate (timestamps,
+cache flags, ``tool_config_fingerprint``) must first run
+:func:`verify_tool_call_envelope` against the signing key. Replay alone proves
+only that re-executing the recorded arguments yields the recorded result digest.
 
 The full chain replay across `supports[]` for a multi-tool reasoning
 trajectory is Phase 6's federation capstone.
