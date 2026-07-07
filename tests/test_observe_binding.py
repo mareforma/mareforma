@@ -235,6 +235,33 @@ def test_idempotent_replay_reports_the_stored_verdict(tmp_path):
     assert replay["grounding"]["grounding"] == "GROUNDED"  # stored, not the new one
 
 
+def test_idempotent_replay_of_disjoint_verdict_fires_no_event_and_no_raise(tmp_path):
+    # An idempotent replay reuses the stored verdict and discards the passed one,
+    # so a disjoint GROUNDED on the replay must NOT fire a downgrade health event
+    # (nothing is downgraded) nor raise in strict mode (nothing is written).
+    with open_graph(tmp_path) as g:
+        prop, pred = _prop(), _superiority()
+        g.register_plan(prop, pred)
+        g.submit_finding(
+            prop, pred, _smd(-0.8, p=0.001), data_id="sha256:" + "a" * 64,
+            data_source="/data/trial.csv", generated_by="a", grounding=_grounded(),
+        )
+        # Replay with a disjoint GROUNDED and strict mode on: must not raise.
+        replay = g.submit_finding(
+            prop, pred, _smd(-0.8, p=0.001), data_id="sha256:" + "a" * 64,
+            data_source="/data/trial.csv", generated_by="a",
+            grounding=_grounded(cited=("/some/other/path.csv",)),
+            grounding_strict=True,
+        )
+    assert replay["idempotent"] is True
+    # The stored verdict is the first write's GROUNDED, untouched — the disjoint
+    # replay was discarded, not applied. Without this the test would pass even if
+    # the replay overwrote the stored verdict.
+    assert replay["grounding"]["grounding"] == "GROUNDED"
+    ops = [e.get("op") for e in _health_ops(tmp_path)]
+    assert "grounding_citation_mismatch" not in ops
+
+
 def test_grounding_promotes_helper():
     from mareforma.db import _observed_grounding_promotes
 
@@ -331,10 +358,12 @@ def test_content_address_citation_binds(tmp_path):
     assert res["grounding"]["grounding"] == "GROUNDED"
 
 
-def test_finding_without_citation_is_not_applicable(tmp_path):
+def test_finding_without_matchable_citation_is_not_applicable(tmp_path):
     # A finding whose only citation is a string-fallback data_id (no data_source,
-    # not content-addressed) gives the verdict nothing filesystem-free to bind
-    # against on read; the verdict is kept and annotated, never silently trusted.
+    # not content-addressed) has no matchable identifier to bind against — a bare
+    # token is not a path or content address, and normalizing it would need a
+    # realpath the read side cannot reproduce. So the binding is not-applicable:
+    # the verdict is kept and annotated, never silently downgraded or trusted.
     with open_graph(tmp_path) as g:
         prop, pred = _prop(), _superiority()
         g.register_plan(prop, pred)
@@ -342,11 +371,8 @@ def test_finding_without_citation_is_not_applicable(tmp_path):
             prop, pred, _smd(-0.8, p=0.001), data_id="dsA", generated_by="a",
             grounding=_grounded(cited=(CITED_PATH,)),
         )
-    # The cited path is disjoint from a bare "dsA" data_id -> downgraded, since
-    # the finding does carry a (soft) citation. The annotation path is exercised
-    # only when the finding truly cites nothing, which the API does not allow
-    # (data_id is required), so a disjoint downgrade is the honest outcome here.
-    assert res["grounding"]["grounding"] == "OPAQUE"
+    assert res["grounding"]["grounding"] == "GROUNDED"
+    assert "no finding citation to bind" in res["grounding"]["reason"]
 
 
 def test_empty_verdict_cited_set_downgrades(tmp_path):
@@ -450,6 +476,33 @@ def test_matched_bind_fires_no_mismatch_event(tmp_path):
         _finding(g, _grounded(), data_source="/data/trial.csv")
     ops = [e.get("op") for e in _health_ops(tmp_path)]
     assert "grounding_citation_mismatch" not in ops
+
+
+def test_string_data_id_with_data_source_survives_restore(tmp_path):
+    # A finding matched via data_source, carrying a string-fallback data_id whose
+    # normalized form the read side cannot reproduce, must NOT false-flag on
+    # restore: the write and read sides bind against the same identifiers
+    # (content-addressed data_ids + data_sources), so a legitimately signed
+    # GROUNDED round-trips.
+    src = "/data/trial.csv"
+    with open_graph(tmp_path) as g:
+        prop, pred = _prop(), _superiority()
+        g.register_plan(prop, pred)
+        res = g.submit_finding(
+            prop, pred, _smd(-0.8, p=0.001), data_id="dsA", data_source=src,
+            generated_by="a",
+            grounding=_grounded(cited=(normalize_identifier(src),)),
+        )
+        cid = res["claim_id"]
+    assert res["grounding"]["grounding"] == "GROUNDED"
+    shutil.rmtree(tmp_path / ".mareforma", ignore_errors=True)
+    report = mareforma.restore(tmp_path)  # must not raise a binding violation
+    assert report["claims_restored"] >= 1
+    with open_graph(tmp_path) as g:
+        row = g._conn.execute(
+            "SELECT observed_grounding FROM claims WHERE claim_id = ?", (cid,)
+        ).fetchone()
+    assert json.loads(row["observed_grounding"])["grounding"] == "GROUNDED"
 
 
 def test_read_side_binding_is_pure_string_no_filesystem(tmp_path):

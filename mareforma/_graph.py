@@ -1218,28 +1218,6 @@ class EpistemicGraph:
                 content_id=proposition.content_id(),
             )
 
-        # The finding's own citation identifiers: the content-addressed data_id
-        # set plus any data_source location(s), each normalized ONCE here at write
-        # time. The verdict's cited set is cross-checked against this so a GROUNDED
-        # earned on one dataset cannot be bound onto a finding that cites another.
-        # Normalized strings are persisted (data_sources below, cited_sources in
-        # the signed record) so the read side re-checks by pure string comparison,
-        # never by touching a verifier's filesystem.
-        finding_sources = self._finding_citation_sources(evidence_lines)
-
-        # Normalize the observed grounding verdict into the compact record bound
-        # into the signed envelope, cross-checking its cited set against the
-        # finding's citation. A GROUNDED whose cited set is disjoint from the
-        # finding downgrades to OPAQUE (or raises in strict mode) with a health
-        # event, so a signed GROUNDED always attests the finding's own data. The
-        # assert path enforces that no observe() scope is still open when this
-        # signs.
-        grounding_signed = self._bind_grounding(
-            grounding, finding_sources, strict=grounding_strict,
-            content_id=proposition.content_id(),
-        )
-        data_sources = self._normalized_data_sources(evidence_lines)
-
         cid = proposition.content_id()
         plan_id = _store.compute_plan_id(cid, prediction)
         data_id_set = {ln.data_id for ln in evidence_lines}
@@ -1314,6 +1292,25 @@ class EpistemicGraph:
                 "prediction) before submit_finding, or use assert_finding for "
                 "the one-shot path that registers the plan for you."
             )
+
+        # Bind the grounding verdict to the finding's citation — AFTER the
+        # idempotency check, so an idempotent replay (which reuses the first
+        # write's stored verdict and discards this one) never fires a spurious
+        # downgrade health event or raises in strict mode for a result that is
+        # thrown away. The finding's own citation identifiers are the
+        # content-addressed data_id set plus any data_source location(s),
+        # normalized ONCE here at write time; a GROUNDED whose cited set is
+        # disjoint downgrades to OPAQUE (or raises in strict mode). Normalized
+        # strings are persisted (data_sources below, cited_sources in the signed
+        # record) so the read side re-checks by pure string comparison, never by
+        # touching a verifier's filesystem. The assert path enforces that no
+        # observe() scope is still open when this signs.
+        finding_sources = self._finding_citation_sources(evidence_lines)
+        grounding_signed = self._bind_grounding(
+            grounding, finding_sources, strict=grounding_strict,
+            content_id=cid,
+        )
+        data_sources = self._normalized_data_sources(evidence_lines)
 
         # The claim idempotency_key: keep the exact single-line form for parity;
         # multi-line keys on a stable hash of the sorted dataset set.
@@ -1489,21 +1486,28 @@ class EpistemicGraph:
 
     @staticmethod
     def _finding_citation_sources(evidence_lines) -> tuple[str, ...]:
-        """The finding's citation identifiers, each normalized once at write time.
+        """The finding's matchable citation identifiers, for the binding check.
 
-        The union of every line's ``data_id`` (a content address or an
-        agent-attested string) and its ``data_source`` (a read location), run
-        through the same ``_citation`` normalization the verdict's cited set went
-        through when the scope was entered. A verdict binds to the finding when
-        its cited set shares ANY of these.
+        The union of every line's content-addressed ``data_id`` (a ``sha256:``,
+        already canonical) and its normalized ``data_source`` (a read location).
+        An agent-attested STRING data_id is excluded: it is an opaque
+        token, not a matchable path or content address, and normalizing it would
+        require a realpath the read side cannot reproduce (verify-on-read is
+        filesystem-free), so binding against it would let an honest claim
+        false-flag on a different host. A finding whose only citation is a string
+        data_id is the already-flagged soft regime (data_id_string_fallback); its
+        verdict is kept as not-applicable rather than bound. Both the persisted
+        identifiers (data_sources, and content-addressed data_ids) are exactly
+        what the read side re-checks against, so write and read agree by
+        construction.
         """
         from mareforma.observe._citation import normalize_identifier
+        from mareforma.trust import _store
 
         out: list[str] = []
         for ln in evidence_lines:
-            norm_id = normalize_identifier(ln.data_id)
-            if norm_id:
-                out.append(norm_id)
+            if _store.is_content_addressed(ln.data_id):
+                out.append(ln.data_id)
             if ln.data_source:
                 norm_src = normalize_identifier(ln.data_source)
                 if norm_src:
