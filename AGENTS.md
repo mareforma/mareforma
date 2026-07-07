@@ -410,8 +410,10 @@ from mareforma.observe import observe
 with observe(cites="/data/trial.csv") as obs:
     frame = load(from_="/data/trial.csv")   # wrapped loaders record the read
     estimate = analyze(frame)
-# author outside the scope, then sign:
-graph.assert_finding(prop, pred, estimate, data_id=..., grounding=obs.verdict)
+# author outside the scope, then sign. data_source names the read location so the
+# verdict binds to a content-addressed data_id:
+graph.assert_finding(prop, pred, estimate, data_id=..., data_source="/data/trial.csv",
+                     grounding=obs.verdict)
 ```
 
 The verdict is one of `GROUNDED` (a read matching the cited source returned
@@ -421,6 +423,15 @@ socket / uninstrumented reader could have hidden a read, so absence cannot be
 trusted). It is bound into the signed envelope, so verify-on-read re-checks it,
 and a non-`GROUNDED` verdict never counts toward `REPLICATED` promotion. A claim
 asserted without the observer carries no verdict and behaves exactly as before.
+
+The verdict must attest the finding's OWN data: its cited set is cross-checked
+against the finding's citation (the `data_id` set plus any `data_source=`), and a
+GROUNDED whose cited set is disjoint downgrades to OPAQUE (or raises with
+`grounding_strict=True`). The modal workflow cites a path in `observe(cites=...)`
+and passes that same path as `data_source=`, with a content-addressed `data_id`.
+The free-text `source_name` never participates in binding. A socket seam does not
+hide the UNGROUNDED tell on a file-cited finding; run `mareforma observe --doctor`
+to see what the observer covers in your environment.
 
 Author inside the scope and sign after it closes: asserting a claim while its
 grounding scope is still open is refused.

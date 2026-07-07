@@ -578,11 +578,14 @@ it`) is computed from execution, not declared by the producer. The observer
 lives in [`mareforma/observe/`](mareforma/observe/).
 
 Wrap the span that authors a finding in `observe(cites=...)`. Inside it,
-wrapped loaders (`builtins.open` and `sqlite3.connect` always; `pandas`,
-`httpx`, `requests` only if the host already imported them, so no new core
-dep) record the reads that happen, and a PEP-578 audit hook plus direct
-thread-start wrapping record the spawn seams the loaders cannot see across.
-On exit the scope classifies into one of three states:
+wrapped loaders (`builtins.open` and `sqlite3.connect` always; `pandas`, the
+keep-alive HTTP clients `requests`/`httpx`/`aiohttp`, and the C-runtime
+scientific readers `h5py`/`pyarrow`/`netCDF4` only if the host already
+imported them, so no new core dep) record the reads that happen, and a
+PEP-578 audit hook plus direct thread-start wrapping record the spawn seams
+the loaders cannot see across. A loader imported INSIDE an open scope is
+wrapped too, by a late-import hook. On exit the scope classifies into one of
+three states:
 
 - `GROUNDED`: a read matching the finding's cited source returned non-empty
   data. An incidental read (config, tokenizer, cache) does not qualify;
@@ -595,17 +598,40 @@ On exit the scope classifies into one of three states:
   an error: a confident GROUNDED/UNGROUNDED across a boundary the observer
   cannot cross is worse than admitting the blind spot.
 
+A seam forces OPAQUE only when it is **relevant** to the citation: a socket
+seam cannot deliver a local-file read, so it does not hide a file-cited
+finding's UNGROUNDED tell, but it does block a URL or content-address
+citation whose bytes can arrive over the network. Thread, subprocess, and
+coverage-gap seams hide anything; an unknown seam or citation kind blocks
+(fail-closed). A cited C-runtime file with no observed read floors to OPAQUE
+("bytes not observable via PEP-578"), never a false UNGROUNDED.
+
 The observed axis is **separate and additive**. It never touches the
 declared `classification` enum (`INFERRED` / `ANALYTICAL` / `DERIVED`) and
 never shares its value space. A verdict rides into the signed in-toto
 statement as an optional, versioned `observed_grounding` record (verdict,
-reason, receipt digest, axis version): present only when a verdict was
-recorded, so a claim asserted without the observer produces byte-identical
-signed bytes, and an envelope that omits the field reads as "no verdict,"
-never as tampering. The chain hash and `statement_cid` bind it too, and
-restore rejects a `claims.toml` whose stored verdict no longer matches the
-signature. A verdict that is not `GROUNDED` never counts toward support-level
-promotion; grounding is a necessary floor, never sufficient.
+reason, the cited set it was computed against, receipt digest, axis version):
+present only when a verdict was recorded, so a claim asserted without the
+observer produces byte-identical signed bytes, and an envelope that omits the
+field reads as "no verdict," never as tampering. The chain hash and
+`statement_cid` bind it too, and restore rejects a `claims.toml` whose stored
+verdict no longer matches the signature.
+
+**Verdict-to-citation binding** closes the gap between "a read happened" and
+"the finding's own data was read." The verdict's cited set is cross-checked
+against the finding's citation (its `data_id` set plus any `data_source=`) at
+bind time; a GROUNDED whose cited set is disjoint downgrades to OPAQUE with a
+signed reason and a `grounding_citation_mismatch` health event, or raises in
+strict mode. The check re-runs on read as pure string comparison over stored
+normalized identifiers, so a cross-host claim whose paths do not exist on the
+verifier is never false-flagged. A verdict that is not `GROUNDED` never counts
+toward support-level promotion; grounding is a necessary floor, never
+sufficient.
+
+`mareforma observe --doctor` reports which loaders are wrapped and which seams
+force OPAQUE in the current environment; `mareforma measure` aggregates a run's
+verdict receipts into the GROUNDED / UNGROUNDED / OPAQUE split, bucketed by
+seam kind.
 
 The verdict is computed from execution of a **cooperating producer**: the
 binding is tamper-evidence over what a cooperating run did, not a proof
