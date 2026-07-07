@@ -323,6 +323,23 @@ def test_wrapped_h5py_read_is_grounded(tmp_path):
     assert h.verdict.grounding is OG.GROUNDED
 
 
+def test_wrapped_h5py_grounded_reason_does_not_overclaim_byte_flow(tmp_path):
+    # The C-extension readers use a stat-based non-emptiness proxy exactly like
+    # builtins.open — they never see the bytes. The signed reason must say so, not
+    # claim the read "returned non-empty data" as the sqlite/http wrappers (which
+    # do observe returns) may.
+    h5py = pytest.importorskip("h5py")
+    path = str(tmp_path / "d.h5")
+    with h5py.File(path, "w") as f:
+        f["x"] = [1, 2, 3]
+    with obs.observe(cites=path) as h:
+        with h5py.File(path, "r") as f:
+            _ = f["x"][:]
+    assert h.verdict.grounding is OG.GROUNDED
+    assert "does not observe the bytes read" in h.verdict.reason
+    assert "returned non-empty data" not in h.verdict.reason
+
+
 def test_wrapped_pyarrow_read_is_grounded(tmp_path):
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")

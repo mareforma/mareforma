@@ -162,13 +162,15 @@ class Scope:
             ):
                 # Be honest about what "non-empty" means per loader: sqlite and
                 # http wrappers see the actual returned rows/bytes, but the
-                # builtins.open path proxies data flow by file size at open time
-                # and does not observe the bytes consumed. Do not let the signed
-                # reason claim byte-level flow the observer did not see.
-                if r.kind == "file":
+                # builtins.open path AND the C-extension readers (h5py / pyarrow /
+                # netCDF4) proxy data flow by file size at open time and do not
+                # observe the bytes consumed. Do not let the signed reason claim
+                # byte-level flow the observer did not see.
+                if r.kind in ("file", "c-extension"):
+                    reader = "file" if r.kind == "file" else "C-extension reader"
                     reason = (
                         "the cited source was opened for reading and is "
-                        "non-empty (file; the open path proxies data flow by "
+                        f"non-empty ({reader}; the open path proxies data flow by "
                         "file size, it does not observe the bytes read)"
                     )
                 else:
