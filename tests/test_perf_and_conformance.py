@@ -224,13 +224,13 @@ class TestCrossExporterConformance:
         )
         assert text_obj_a["text"] == "upstream finding"
 
-        # PROV-O carries (truncated) claim text as prov:label on the
+        # PROV-O carries (truncated) claim text as rdfs:label on the
         # Entity. Compare prefix to handle the 120-char truncation.
         entity_a = next(
             n for n in prov["@graph"]
             if n.get("@id") == f"mareforma:claim:{a}"
         )
-        assert "upstream finding" in entity_a["prov:label"]
+        assert "upstream finding" in entity_a["rdfs:label"]
 
     def test_signed_bundle_anchors_same_claim_id(
         self, tmp_path: Path,

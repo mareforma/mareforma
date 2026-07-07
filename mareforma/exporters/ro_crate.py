@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -35,12 +36,21 @@ __all__ = [
     "RO_CRATE_PROFILE",
     "RO_CRATE_CONTEXT",
     "PROCESS_RUN_CRATE_PROFILE",
+    "DEFAULT_LICENSE_ID",
+    "DEFAULT_LICENSE_NAME",
 ]
 
 
 RO_CRATE_PROFILE = "https://w3id.org/ro/crate/1.2"
 RO_CRATE_CONTEXT = "https://w3id.org/ro/crate/1.2/context"
 PROCESS_RUN_CRATE_PROFILE = "https://w3id.org/ro/wfrun/process/0.5"
+
+# RO-Crate requires the root data entity to declare a license. The graph
+# describes signed provenance, not the underlying research data, so the
+# default is a permissive open-data license for the metadata; callers who
+# know their data's license pass their own via ``build_crate(..., license_id=)``.
+DEFAULT_LICENSE_ID = "https://creativecommons.org/licenses/by/4.0/"
+DEFAULT_LICENSE_NAME = "Creative Commons Attribution 4.0 International"
 
 
 # UUID-shape claim_ids only. Federation imports preserve foreign IDs in
@@ -201,13 +211,24 @@ def _agent_entities(claims: list[dict]) -> list[dict[str, Any]]:
     return entities
 
 
-def build_crate(root: Path) -> dict[str, Any]:
+def build_crate(
+    root: Path,
+    *,
+    license_id: str = DEFAULT_LICENSE_ID,
+    license_name: str = DEFAULT_LICENSE_NAME,
+) -> dict[str, Any]:
     """Build an ``ro-crate-metadata.json`` dict from the local graph.
 
     Parameters
     ----------
     root
         Project root (the directory holding ``.mareforma/graph.db``).
+    license_id
+        URI of the license the root data entity declares. Defaults to
+        CC-BY-4.0 for the exported provenance metadata; override with the
+        data's own license when known.
+    license_name
+        Human-readable name for the license contextual entity.
 
     Returns
     -------
@@ -217,6 +238,14 @@ def build_crate(root: Path) -> dict[str, Any]:
         directory.
     """
     from mareforma.db import open_db, list_claims
+
+    # A license entity with an empty @id is a dangling reference that breaks
+    # any RO-Crate consumer resolving the license; refuse it rather than emit
+    # a malformed crate. Only an explicit override can reach this.
+    if not (license_id and license_id.strip()):
+        raise ValueError("license_id must be a non-empty URI")
+    if not (license_name and license_name.strip()):
+        raise ValueError("license_name must be a non-empty string")
 
     db_path = root / ".mareforma" / "graph.db"
     if not db_path.exists():
@@ -230,6 +259,18 @@ def build_crate(root: Path) -> dict[str, Any]:
         claims = list_claims(conn)
     finally:
         conn.close()
+
+    # datePublished must be non-null for a spec-conformant crate. Prefer
+    # the latest claim's timestamp; fall back to the export instant for an
+    # empty graph (the crate is still published now). list_claims is ordered
+    # by created_at DESC, but updated_at can reorder under it, so take the max
+    # rather than trusting a positional index.
+    date_published = (
+        max((c.get("updated_at") for c in claims if c.get("updated_at")), default=None)
+        if claims else None
+    )
+    if not date_published:
+        date_published = datetime.now(timezone.utc).isoformat()
 
     graph: list[dict[str, Any]] = [
         {
@@ -250,8 +291,17 @@ def build_crate(root: Path) -> dict[str, Any]:
                 "project. Each claim is a CreateAction; the signed "
                 "envelope is attached as the action's signature."
             ),
-            "datePublished": claims[-1]["updated_at"] if claims else None,
+            "license": {"@id": license_id},
+            "datePublished": date_published,
+            # hasPart holds data entities (claim-text MediaObjects);
+            # provenance actions ride under mentions (Process Run Crate).
             "hasPart": [],
+            "mentions": [],
+        },
+        {
+            "@id": license_id,
+            "@type": "CreativeWork",
+            "name": license_name,
         },
     ]
 
@@ -259,14 +309,18 @@ def build_crate(root: Path) -> dict[str, Any]:
     graph.extend(_agent_entities(claims))
 
     has_part: list[dict[str, str]] = []
+    mentions: list[dict[str, str]] = []
     for c in claims:
         graph.append(_claim_to_media_object(c))
         graph.append(_claim_to_create_action(c))
-        has_part.append({"@id": f"urn:mareforma:claim:{c['claim_id']}"})
+        # The claim text is a data entity that is part of the crate; the
+        # CreateAction is a provenance action the crate mentions.
+        has_part.append({"@id": f"#claim-text/{c['claim_id']}"})
+        mentions.append({"@id": f"urn:mareforma:claim:{c['claim_id']}"})
 
-    # Root dataset hasPart references each CreateAction.
     root_entity = next(e for e in graph if e["@id"] == "./")
     root_entity["hasPart"] = has_part
+    root_entity["mentions"] = mentions
 
     return {
         "@context": RO_CRATE_CONTEXT,
