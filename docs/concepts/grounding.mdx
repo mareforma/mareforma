@@ -156,6 +156,42 @@ When `OPAQUE` dominates, the observer cannot see enough of the pipeline for the
 other numbers to mean anything, so the honest response is to instrument deeper
 before publishing a measurement.
 
+Two commands make this inspectable from the shell. `mareforma observe --doctor`
+reports what the observer covers in the current environment: which loaders are
+wrapped, which seams force `OPAQUE`, and the standing bounds. `mareforma measure`
+reads a run's saved verdict receipts and prints the same split with `OPAQUE`
+bucketed by seam kind, so a reviewer can rerun the number on their own pipeline.
+
+```bash
+mareforma observe --doctor
+mareforma measure run-receipts.jsonl --json
+```
+
+## Binding the verdict to the finding's citation
+
+A `GROUNDED` verdict is only as honest as the claim it is attached to. The verdict
+is computed against the source you named in `observe(cites=...)`, which need not be
+the data the finding cites. So at bind time the verdict's cited set is cross-checked
+against the finding's own citation — its `data_id` set plus any `data_source=`. A
+`GROUNDED` whose cited set shares nothing with the finding downgrades to `OPAQUE`
+with a signed reason, or raises `GroundingCitationMismatchError` when you pass
+`grounding_strict=True`.
+
+The modal honest workflow cites a path in the verdict, passes that same path as
+`data_source=`, and content-addresses the `data_id`:
+
+```python
+with observe(cites="/data/trial.csv") as obs:
+    frame = read_csv("/data/trial.csv")
+    estimate = analyze(frame)
+graph.assert_finding(prop, pred, estimate, data_bytes=raw_bytes,
+                     data_source="/data/trial.csv", grounding=obs.verdict)
+```
+
+The free-text `source_name` never participates in binding. The check re-runs on
+read as pure string comparison over stored identifiers, so a claim verified on a
+different host, where the cited paths do not exist, is never false-flagged.
+
 ## Bound into the claim
 
 Pass the verdict to `assert_finding` or `submit_finding` and it is bound into the
