@@ -24,6 +24,12 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 from . import _audit, _loaders, _scope, measure, oracle
+from ._binding import (
+    BindingResult,
+    BindingState,
+    GroundingCitationMismatchError,
+    check_grounding_binding,
+)
 from ._citation import cited_set
 from ._scope import current_scope, scope_is_open
 from ._verdict import (
@@ -126,6 +132,11 @@ __all__ = [
     "GROUNDING_AXIS_VERSION",
     "current_scope",
     "scope_is_open",
+    # Verdict↔citation binding.
+    "check_grounding_binding",
+    "BindingResult",
+    "BindingState",
+    "GroundingCitationMismatchError",
     # Causal oracle (independent influence ground truth).
     "perturbation_oracle",
     "OracleInfluence",

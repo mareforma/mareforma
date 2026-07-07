@@ -218,6 +218,13 @@ class EvidenceLine:
     modality: str | None = None
     provenance_id: str | None = None
     design_type: str | None = None
+    # The location the evidence was read from — a path or URL. Distinct from
+    # ``data_id`` (a content address over the bytes) and from the free-text
+    # ``source_name`` (which never binds). It exists so an observed GROUNDED
+    # verdict, whose cited set is typically a PATH, can bind to a finding whose
+    # data_id is a content address: the modal honest workflow cites the path in
+    # ``observe(cites=...)`` and passes the same path as ``data_source=``.
+    data_source: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.estimate, EffectEstimate):
@@ -226,3 +233,9 @@ class EvidenceLine:
             raise ValueError("EvidenceLine.data_id must be a non-empty string")
         if not isinstance(self.contrast, Contrast):
             raise TypeError("EvidenceLine.contrast must be a Contrast")
+        if self.data_source is not None and (
+            not isinstance(self.data_source, str) or not self.data_source.strip()
+        ):
+            raise ValueError(
+                "EvidenceLine.data_source must be a non-empty string or None"
+            )

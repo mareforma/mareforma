@@ -71,6 +71,42 @@ def _parse_observed_grounding(value) -> dict | None:
     )
 
 
+def _verify_grounding_binding_on_read(claim_id, record, predicate) -> None:
+    """Re-check a GROUNDED verdict's grounded set against the finding's citation.
+
+    Only a GROUNDED v0.3.9 record (one carrying ``grounded_sources``) is checked;
+    a v0.3.8 record omits it and is "not checkable," and OPAQUE / UNGROUNDED never
+    assert the data arrived. The binding re-check uses ``grounded_sources`` — the
+    cited sources a read was actually observed for — not the declared
+    ``cited_sources``, so it matches the write-side gate exactly. The finding's
+    citation identifiers are taken from the signed predicate — the normalized
+    ``data_sources`` and any content-addressed ``data_ids`` — so the comparison is
+    pure string equality with no filesystem access. A disjoint match is a binding
+    violation.
+    """
+    if not isinstance(record, dict) or record.get("grounding") != "GROUNDED":
+        return
+    grounded_sources = record.get("grounded_sources")
+    if grounded_sources is None:  # pre-v0.3.9 axis: binding was not checkable
+        return
+
+    from mareforma.observe._binding import BindingState, check_grounding_binding
+    from mareforma.trust._store import is_content_addressed
+
+    data_sources = predicate.get("data_sources") or []
+    data_ids = predicate.get("data_ids") or []
+    finding_sources = tuple(data_sources) + tuple(
+        d for d in data_ids if isinstance(d, str) and is_content_addressed(d)
+    )
+    result = check_grounding_binding(tuple(grounded_sources), finding_sources)
+    if result.state is BindingState.DISJOINT:
+        raise RestoreError(
+            f"Claim {claim_id} stores a GROUNDED observed-grounding verdict whose "
+            "cited set is disjoint from the finding's citation — binding violation.",
+            kind="claim_unverified",
+        )
+
+
 def _rekor_body_binds_to_claim(entry_val: dict, claim: dict) -> bool:
     """Whether a Rekor entry's hashedrekord records THIS claim's signed
     material.
@@ -1405,6 +1441,16 @@ def _verify_claim_signatures_on_restore(
                 "match the observed_grounding column on the row — TOML tampered.",
                 kind="claim_unverified",
             )
+
+        # Re-run the verdict↔citation binding on read. A v0.3.9 record carries the
+        # cited set inside the signed statement, so verify-on-read can re-confirm
+        # that a stored GROUNDED actually binds to the finding's own citation,
+        # rather than trusting the write-time result — a hand-edited-then-re-signed
+        # row whose GROUNDED cites data the finding never names is caught here.
+        # Pure string comparison over stored normalized identifiers: no realpath,
+        # no filesystem, so an honest cross-host claim whose paths do not exist on
+        # the verifier is never false-flagged.
+        _verify_grounding_binding_on_read(claim_id, row_grounding, predicate)
 
         # statement_cid cross-check. The row carries the cid the
         # original signing path computed. Restore re-derives the cid

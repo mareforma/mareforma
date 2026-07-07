@@ -161,6 +161,7 @@ from .restore import (
     _restore_predicate_payload,
     _restore_original_signature_bundle,
     _parse_observed_grounding,
+    _verify_grounding_binding_on_read,
     _verify_replicated_corroboration,
     _verify_and_insert_replication_verdict,
     _verify_and_insert_contradiction_verdict,
