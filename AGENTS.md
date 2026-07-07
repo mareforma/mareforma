@@ -1224,7 +1224,7 @@ consequential actions. It must not be reachable from a single-agent finding.
 
 ## Framework integrations
 
-`graph.get_tools(generated_by="...")` returns `[query_graph, assert_finding]` as
+`graph.get_tools(generated_by="...")` returns `[query_graph, record_claim]` as
 plain Python callables. Wrap them in one line for any agent framework.
 `generated_by` is baked into the closure. Set it to the agent's identity so
 REPLICATED detection works correctly across independent runs.
@@ -1232,7 +1232,7 @@ REPLICATED detection works correctly across independent runs.
 ```python
 tools = graph.get_tools(generated_by="agent/model-a/lab_a")
 # tools[0] = query_graph(topic, min_support) -> str (JSON)
-# tools[1] = assert_finding(text, classification, supports, contradicts, source) -> str
+# tools[1] = record_claim(text, classification, supports, contradicts, source) -> str
 ```
 
 ### Layer 1: LLM providers
@@ -1251,7 +1251,7 @@ import mareforma
 client = anthropic.Anthropic()
 
 with mareforma.open() as graph:
-    query_graph, assert_finding = graph.get_tools(generated_by="agent/claude/lab_a")
+    query_graph, record_claim = graph.get_tools(generated_by="agent/claude/lab_a")
 
     # Build Anthropic tool schemas from function signatures
     tools = [
@@ -1268,8 +1268,8 @@ with mareforma.open() as graph:
             },
         },
         {
-            "name": "assert_finding",
-            "description": assert_finding.__doc__,
+            "name": "record_claim",
+            "description": record_claim.__doc__,
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -1294,7 +1294,7 @@ with mareforma.open() as graph:
     # Dispatch tool calls
     for block in response.content:
         if block.type == "tool_use":
-            fn = query_graph if block.name == "query_graph" else assert_finding
+            fn = query_graph if block.name == "query_graph" else record_claim
             result = fn(**block.input)
 ```
 
