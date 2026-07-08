@@ -109,7 +109,7 @@ above.
 
 ## Cryptographic core
 
-Mareforma 0.3.0 introduces local Ed25519 signing, Sigstore-Rekor
+Mareforma provides local Ed25519 signing, Sigstore-Rekor
 transparency logging, validator enrollment, and SHA-256 artifact
 hashing. The cryptographic core is documented in [AGENTS.md](AGENTS.md). Known
 trust boundaries:
@@ -117,7 +117,7 @@ trust boundaries:
 - The local signing key at `~/.config/mareforma/key` is mode `0600`.
   Anyone with read access to that file can forge claims as you.
 - The first key opened against a fresh project's `graph.db`
-  auto-enrolls as the root validator. This is **irrevocable in 0.3.x**.
+  auto-enrolls as the root validator. This is **irrevocable**.
   Open a fresh project with the intended key.
 - Sigstore-Rekor inclusion is opt-in (`rekor_url=` parameter on
   `mareforma.open`). Without it, claims are signed but not

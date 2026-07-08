@@ -2,6 +2,122 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.9] - 2026-07-08
+
+Three passes that make trust honest and legible. The grounding verdict now binds to
+the data a finding actually read. The trust a claim carries is read as a structured
+map instead of one word, with three commands that make it legible to a stranger in a
+minute. And the open issue burn-down closes, with the core-derived classification
+engine removed. Additive on the schema.
+
+### Added
+
+- **Verdict-to-citation binding.** An observed GROUNDED verdict now proves it
+  attests the finding's own data. The verdict carries the sources a read was
+  actually observed for into the signed record (grounding axis `v0.3.9`), and that
+  set is cross-checked against the finding's citation at write time and re-checked
+  on read. A producer who names a dataset in `observe(cites=...)` but reads only an
+  incidental decoy no longer earns GROUNDED for it: a disjoint GROUNDED downgrades to
+  OPAQUE with a signed reason and a `grounding_citation_mismatch` health event, or
+  raises in strict mode (`grounding_strict=True`). Evidence lines gain `data_source=`
+  so the honest workflow, cite a path and content-address the data_id, binds. This
+  makes the v0.3.8 promise, "this finding read the data it claims to," true.
+- **The per-finding trust map.** `graph.trust_map(claim)` and `mareforma map
+  <claim>` place every trust property (attributability, provenance, grounding,
+  methodological validity, leakage, independence, contestation, standing,
+  trust-root, witnessing) at its tier (`COMPUTED` / `PROXIED` / `DEFERRED`) with the
+  residual named. A property Mareforma cannot observe is stated, never inferred.
+  `--json` emits a canonicalizable record; `--html` writes one self-contained page.
+- **`mareforma verify <target>`.** The audit receipt at the moment of the check. It
+  re-verifies signatures, the grounding-to-citation binding, and support level, then
+  prints the trust map. It detects its target by shape (claim id, signed bundle, or
+  export directory) and verifies a claim from public material alone. Exit codes are
+  stable for CI: `0` verified, `1` tamper or binding violation, `2` unverifiable, `3`
+  usage error, so a bad flag never masquerades as a verdict. `--json` emits the
+  verdict for a gate to parse.
+- **`mareforma diagnose -- <cmd>`.** Runs a Python target in-process under the
+  grounding observer and reports the reads, seams, and coverage it saw. With
+  `--cites` it also computes the grounding verdict; without one it reports
+  observation only and never guesses a citation. A crashing target still prints its
+  partial observation and exits with the target's own code.
+- **`mareforma observe --doctor` and `mareforma measure`.** `--doctor` self-reports
+  which loaders are wrapped and which seams force OPAQUE in the current environment.
+  `measure` aggregates a run's verdicts into the reported split, OPAQUE bucketed by
+  seam kind. `--redact-home` rewrites `$HOME` in emitted artifacts, never in a signed
+  receipt.
+- **Keep-alive HTTP and C-extension coverage.** Pooled `requests.Session`,
+  `httpx.Client` / `AsyncClient`, and `aiohttp` sessions, and the C-runtime readers
+  (`h5py`, `pyarrow`, `netCDF4`), are wrapped only-if-imported, so a retrieval or an
+  HDF5 / netCDF / Arrow read reaches GROUNDED instead of a false UNGROUNDED. A loader
+  imported inside an open scope is wrapped too.
+- **The independence axis.** The trust map reports independence separately from the
+  support ladder, marking it `UNVERIFIABLE` whenever fewer than two trust roots are
+  enrolled, the honest reading when one operator could mint every key.
+- **`strict_promotion` option.** `mareforma.open(strict_promotion=True)` gates
+  REPLICATED on non-NULL data on both sides of a converging pair. Off by default; it
+  only ever adds the requirement.
+- **Declared metric reducer for the causal oracle.** `declared_reducer(...)` names
+  the reduction a prose finding needs and records whether it reinserts a model into
+  the ground truth. (The oracle itself shipped in v0.3.8.)
+
+### Changed
+
+- **UNGROUNDED means genuine absence, not blindness.** A seam blocks the UNGROUNDED
+  verdict only when it could have hidden a read of a citation kind actually present.
+  A socket seam no longer forces OPAQUE on a file-cited finding, while URL and
+  content-address citations stay blocked. Thread, subprocess, and coverage-gap seams
+  block everything; unknown kinds fail closed.
+- **REPLICATED is a convergence marker, not a claim of independence.** The README
+  and trust docs stop leading with it: signing keys are operator-mintable, so
+  distinct signatures are a weak prior. Independence lives on its own axis.
+- **The claim-recording agent tool is renamed `record_claim`.** It was
+  `assert_finding`, which shadowed the `EpistemicGraph.assert_finding` method. A
+  deprecated `assert_finding` alias is available for one release via
+  `get_tools(include_deprecated_aliases=True)` and warns on use. (#51)
+- **The cycle check runs as one recursive query** instead of one per ancestor, and
+  an oversized reachable graph raises a distinct `GraphTooLargeError` rather than a
+  false "cycle." (#33)
+- **RO-Crate and PROV-O exports align with the profile shapes.** The RO-Crate root
+  entity carries a license and a non-null `datePublished` and separates data entities
+  (`hasPart`) from provenance actions (`mentions`); PROV-O labels use `rdfs:label`.
+  The tests check shape and label vocabulary, not full validator conformance. (#29,
+  #48)
+- **`mareforma verify` subsumes the old bundle-path command.** The prior `mareforma
+  verify <bundle>` invocation keeps working as the file-detection case; a missing
+  local key exits `2` (unverifiable) rather than `1`.
+- **The per-connection validator chain-verification cache now persists**, so a
+  repeated enrollment check skips the chain walk. (#50)
+
+### Fixed
+
+- **Re-ingesting a paper no longer leaves orphaned full-text-search rows**, even when
+  the re-extraction is empty. The ingest path deletes a document's prior claims by
+  document id before inserting the fresh set, so the FTS delete trigger fires. (#31)
+- **Multi-role signatures are re-verified on the live read path**, so a forged role
+  attestation is caught on read and by `mareforma verify`, not only at restore.
+- **Deleting a signed claim raises the typed `SignedClaimImmutableError`** for both
+  `delete_claim` and `delete_claims_by_generated_by`. (#42)
+- **The API-version probe rejects a neighbouring major.** The clawinstitute check
+  matched "v10" and "v1beta2" against "v1"; it now matches the exact major or a minor
+  under it. (#49)
+- **`independence_counts` stops full-scanning `effect_estimates`**, via an index on
+  `contrasts(line_id)`. (#32)
+- **The sdist ships a complete, runnable test suite** (conftest, shared helpers, and
+  every test subpackage). (#45)
+- **The Dependabot config no longer advertises a lockfile the repo does not commit.**
+  (#55)
+- **The reference docs match the code.** The status-policy stamp, the `export
+  --format` choices, and the default-format PROV-O scope note are corrected. (#44,
+  #54)
+
+### Removed
+
+- **The core-derived classification engine.** `mareforma.derivation` (the keyword and
+  log-template classifier), its `[derivation]` install extra, and the `tree_sitter`
+  dependencies are gone; execution-observed grounding computes the same signal from
+  observed reads. (#19, #30, #38)
+- **The dead `[git]` install extra** and the unused `gitpython` dev dependency. (#56)
+
 ## [0.3.8] - 2026-07-06
 
 Execution-observed grounding, and a trust-layer hardening pass across every path a
