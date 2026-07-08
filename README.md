@@ -72,7 +72,7 @@ A claim's support level is read from the graph, never self-reported. High-trust 
 |---|---|
 | `PRELIMINARY` | One agent asserted it. No independent agreement yet. |
 | `REPLICATED` | Two agents signing with different keys converged on the same established finding. A convergence marker, not proof of independence: signing keys are operator-mintable, so distinct signatures are a weak prior. |
-| `ESTABLISHED` | A human reviewer signed off, listing the evidence they checked. Reachable only for a claim marked in the transparency log; the top of the ladder depends on witnessing. |
+| `ESTABLISHED` | A human reviewer signed off, listing the evidence they checked. When the optional public log is enabled, promotion also requires the claim to be witnessed there; without it, the transparency flag is set locally and no external witness is involved. |
 
 Independence is reported as its own axis, not folded into the ladder. `mareforma map` marks it `UNVERIFIABLE` whenever every validator traces to a single trust root. That is the honest reading when the same operator could mint every key. Operators who want data-distinctness as a hard promotion gate can open with `strict_promotion=True`, which requires distinct data on both sides before a pair converges.
 

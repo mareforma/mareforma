@@ -3,9 +3,11 @@
 ## In one sentence
 
 Mareforma is an opinionated wrapper around in-toto Statement v1 +
-DSSE PAE + local SQLite, with GRADE-shaped evidence vectors and signed
-convergence verdicts, packaged as a Python library that an AI agent
-writes to as it works.
+DSSE PAE + local SQLite, with GRADE-shaped evidence vectors, signed
+convergence verdicts, execution-computed grounding (`observe()` records
+whether a finding's cited data actually flowed into it), and a read-side
+trust map, packaged as a Python library that an AI agent writes to as it
+works.
 
 ## The lane
 
@@ -13,7 +15,7 @@ Every individual capability mareforma uses exists in mature form
 elsewhere: Ed25519 signing (`cryptography`), DSSE envelopes (`in-toto`),
 Sigstore transparency (`rekor`), JSON canonicalization (RFC 8785-style),
 local-first SQLite (Datasette ecosystem), GRADE evidence grading
-(Cochrane). What is missing in the OSS landscape is the **combination**:
+(Cochrane). What is missing in OSS is the **combination**:
 a runtime, opt-in, local Python library that takes those primitives
 and gives an agent a place to assert a claim, cite its upstream
 evidence, sign the assertion under a key the agent controls, and find
@@ -24,16 +26,15 @@ Mareforma is that combination. It is **not** trying to replace:
 
 - W3C PROV-O (richer provenance vocabulary, mareforma is a runtime
   library, not an RDF graph)
-- FAIRSCAPE's EVI (research-evidence ontology, an EVI export adapter
-  is on the deferred-features backlog and would map mareforma claims onto EVI Claim
-  / EvidenceGraph / supports / challenges classes; the schema stays
-  mareforma-native, the export is the interop surface)
-- IETF SCITT (federated supply-chain transparency, a SCITT submission
-  path alongside Rekor is on the deferred-features backlog)
+- FAIRSCAPE's EVI (research-evidence ontology; the schema stays
+  mareforma-native and there is no EVI export)
+- IETF SCITT (federated supply-chain transparency; mareforma uses Rekor
+  as its claim-transparency path)
 - Sigstore (transparency for software artifacts, mareforma uses Rekor
   for claim transparency; the protocols are the same shape)
-- RO-Crate (FAIR research-object packaging, an RO-Crate 1.2 export
-  from `export_bundle.py` is on the deferred-features backlog)
+- RO-Crate (FAIR research-object packaging; mareforma exports the graph
+  as an RO-Crate 1.2 Process Run Crate via
+  `mareforma/exporters/ro_crate.py`)
 - MLflow / DVC / W&B (run + dataset versioning, orthogonal; those
   track artifacts, mareforma tracks claims)
 
@@ -84,8 +85,8 @@ db.add_claim (mareforma/db/core.py)
   │                       + asserter_keyid denormalized from the envelope)
   │ ─ COMMIT
   │ ─ optionally submit to Rekor (if rekor_url= was passed)
-  │ ─ _maybe_update_replicated() — detect convergence
-  │ ─ _backup_claims_toml() — write the TOML mirror (post-commit;
+  │ ─ _maybe_update_replicated() : detect convergence
+  │ ─ _backup_claims_toml() : write the TOML mirror (post-commit;
   │                            see "What survives restore" for the
   │                            crash-window gap)
   ▼
@@ -142,6 +143,31 @@ The `seed=True` bootstrap is the only way to insert at ESTABLISHED
 directly. It exists to break the chicken-and-egg of "REPLICATED needs
 an ESTABLISHED upstream that doesn't exist on a fresh graph yet", and
 it is gated to enrolled human-typed validators only.
+
+## Trust map
+
+Three read-side CLI commands expose a claim's trust state without
+adding any signed field:
+
+- `mareforma map <claim>` renders the per-claim trust map
+  (`mareforma/trust_map.py`): each property (grounding, independence,
+  standing, witnessing, and the rest) placed at its tier. `COMPUTED`
+  means derived directly from stored evidence, `PROXIED` means computed
+  through a proxy signal whose bound is named, `DEFERRED` means not
+  evaluated this release with the residual named rather than guessed.
+  `--json` and `--html` emit the same map for CI or review.
+- `mareforma verify <claim>` re-checks the signatures, the
+  grounding-to-citation binding, and the displayed support level, and
+  exits on a stable four-code contract: `0` verified, `1` tampered, `2`
+  unverifiable, `3` usage error. Example 06 wires it as a CI gate.
+- `mareforma diagnose -- python run.py` runs a target in-process under
+  the grounding observer and reports what data actually flowed and
+  where a silent fallback hid; with `--cites` it also computes the
+  grounding verdict for those sources.
+
+The `map`, `verify`, and `diagnose` commands live in
+`mareforma/cli.py`; the tier semantics and property placement live in
+`mareforma/trust_map.py`.
 
 ## Trust layer
 
@@ -262,7 +288,7 @@ What strict JCS gets us:
 - Keys sorted lexicographically by UTF-16 code unit at every nesting
   level (JCS §3.2.3).
 - No whitespace, minimal JSON string escape set, UTF-8 output
-  (JCS §3.2.1–§3.2.2).
+  (JCS §3.2.1-§3.2.2).
 - **Numbers per the ECMAScript `Number.prototype.toString` algorithm**
   (JCS §3.2.2.3). `1.0` renders as `1`; `1e10` renders as
   `10000000000`; exponent boundaries follow ES rules. This is the
@@ -363,8 +389,8 @@ The restore path:
    `contradiction_invalidates_older` trigger sets earliest-first.
 
 Failure of ANY check rolls the entire restore back. Restore is
-`fresh-only` and `fail-all-or-nothing` by design; partial-restore mode
-is on the deferred-features backlog.
+`fresh-only` and `fail-all-or-nothing` by design: it rebuilds a fresh
+graph and does not merge into an existing one.
 
 ### Two known gaps in what TOML guarantees
 
@@ -372,8 +398,9 @@ is on the deferred-features backlog.
 reorders claims (swap two `created_at` values) restores to a different
 but internally-consistent chain. The signatures bind canonical statement
 bytes, not chain position. For tamper-evidence across restore boundaries,
-the per-claim Rekor entry is the external anchor, though Merkle
-inclusion proof verification is itself on the deferred-features backlog.
+the per-claim Rekor entry is the external anchor, and Merkle inclusion
+proof verification is available opt-in via the pinned log key
+(`rekor_log_pubkey_pem`).
 
 **The TOML write lags the SQLite commit.** `_backup_claims_toml` runs
 **after** the INSERT/UPDATE transaction commits. A process crash between
@@ -471,7 +498,7 @@ on a signed row is refused at the SQL layer.
 | `statement_cid` cross-check | column never directly written by user code | yes, re-derives from the row's fields + evidence and compares to the stored `statement_cid` |
 | Validation envelope binds this claim | the gates: `_extract_validation_signer_keyid`, `_refuse_llm_validator`, `_refuse_self_validation`, `_verify_evidence_seen`, envelope/kwarg agreement; cryptographic verify on the envelope | yes, verifies the validation envelope's signature, then checks `claim_id` / `validator_keyid` / timestamp / `evidence_seen` fields against the row |
 | Contradiction verdict is signed by an enrolled validator | enforced at `record_contradiction_verdict`; chain walk via `is_enrolled` | yes, replays each verdict envelope in `created_at` order, verifies before INSERT, the contradiction trigger re-sets `t_invalid` |
-| Rekor inclusion proof is cryptographically valid | only when opt-in `rekor_log_pubkey_pem` was supplied at `mareforma.open()`; submit path + `refresh_unsigned()` verify the Merkle path against the signed checkpoint | yes (v0.3.2), `rekor_inclusions` sidecar round-tripped through `claims.toml`; `restore()` replays entries and (when `rekor_log_pubkey_pem` supplied) re-verifies each inclusion proof against the pinned key. Pre-v0.3.2 TOML files restore with `RekorSidecarSectionAbsentWarning` |
+| Rekor inclusion proof is cryptographically valid | only when opt-in `rekor_log_pubkey_pem` was supplied at `mareforma.open()`; submit path + `refresh_unsigned()` verify the Merkle path against the signed checkpoint | yes, `rekor_inclusions` sidecar round-tripped through `claims.toml`; `restore()` replays entries and (when `rekor_log_pubkey_pem` supplied) re-verifies each inclusion proof against the pinned key. A TOML file that predates the sidecar restores with `RekorSidecarSectionAbsentWarning` |
 
 ### One-page threat model
 
@@ -677,7 +704,7 @@ conventions, applied consistently:
   refuses, e.g. `claims_signed_no_delete` documents that without
   the trigger "an adversary could wipe a Rekor-logged ESTABLISHED
   claim and rewrite claims.toml as if it never existed." The
-  contradiction-invalidates trigger carries a `DESIGN RULE — DO NOT
+  contradiction-invalidates trigger carries a `DESIGN RULE: DO NOT
   PROPAGATE DOWNSTREAM` comment with rationale, so a future
   contributor adding transitive falsification has to engage with the
   reasoning rather than discover it from a broken test.
