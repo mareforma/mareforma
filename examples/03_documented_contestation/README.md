@@ -142,5 +142,5 @@ The script closes with the anti-patterns spelled out:
 ```python
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
-agent = create_react_agent(ChatOpenAI(model="gpt-4o"), tools=[query_graph, assert_finding])
+agent = create_react_agent(ChatOpenAI(model="gpt-4o"), tools=[query_graph, record_claim])
 ```

@@ -44,6 +44,11 @@ _signing.bootstrap_key(lab_b_key_path)
 lab_a_priv = _signing.load_private_key(lab_a_key_path)
 lab_b_priv = _signing.load_private_key(lab_b_key_path)
 
+# Enroll lab_b so analyst B can open the shared graph under its own key and sign
+# its own finding in the trust layer (the finding ladder counts distinct signers).
+graph.enroll_validator(
+    _signing.public_key_to_pem(lab_b_priv.public_key()), identity="lab_b")
+
 # query_graph is the shared read tool. The two converging claims below assert
 # via graph.assert_claim directly so each passes its own signer=; the
 # get_tools() closures bake in generated_by, not a signing key.
@@ -167,9 +172,11 @@ result_a = graph.assert_finding(
                    ci_lower=0.18, ci_upper=0.66, ci_level=0.90, n_total=842),
     data_id="dataset_alpha", generated_by="analyst/model-a/lab_a",
 )
-# Analyst B is a distinct run (generated_by) on a distinct dataset: a second
-# independent line.
-result_b = graph.assert_finding(
+# Analyst B signs with its own key on a distinct dataset: the finding ladder
+# counts distinct signers, so B opens the shared graph under lab_b's key. Two
+# signers, two datasets: a second independent line.
+graph_b = mareforma.open(tmp, key_path=lab_b_key_path)
+result_b = graph_b.assert_finding(
     prop, plan,
     EffectEstimate(estimate_value=0.51, effect_type=EffectType.SMD,
                    ci_lower=0.20, ci_upper=0.82, ci_level=0.90, n_total=1104),
@@ -187,7 +194,8 @@ result_b = graph.assert_finding(
 ```
 
 Neither agent declared `supports`. mareforma computed each bearing from the
-pre-registered rule and derived `CORROBORATED` from two independent runs.
+pre-registered rule and derived `CORROBORATED` from two independent signers on
+two datasets.
 
 ## Synthesizer: query the frame
 
@@ -216,5 +224,5 @@ same tools drive a real agent unchanged:
 ```python
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
-agent = create_react_agent(ChatOpenAI(model="gpt-4o"), tools=[query_graph, assert_finding])
+agent = create_react_agent(ChatOpenAI(model="gpt-4o"), tools=[query_graph, record_claim])
 ```

@@ -31,6 +31,11 @@ query_graph, _ = [tool(fn) for fn in graph.get_tools(generated_by="lab_a/model-a
 lab_a_priv = _signing.load_private_key(lab_a_key_path)  # Lab A's key
 lab_b_priv = _signing.load_private_key(lab_b_key_path)  # Lab B's key
 
+# Enroll Lab A as a validator so its PRELIMINARY step claims are visible on read;
+# query() hides PRELIMINARY claims signed by a non-enrolled key by default.
+graph.enroll_validator(
+    _signing.public_key_to_pem(lab_a_priv.public_key()), identity="lab_a")
+
 @tool
 def get_provenance_trace(claim_id: str) -> dict:
     """Return a claim's full lineage — sources, upstream, classification,
@@ -71,8 +76,8 @@ step_2 = graph.assert_claim(
 
 ```
   Lab A published 2 claims to the shared graph.
-  step_1 id: 52a4d814…
-  step_2 id: 8ad8ff3a…
+  step_1 id: f752301b…
+  step_2 id: 99c0ccd6…
 
   Raw data stays at Lab A.
   The trace — sources, steps, upstream evidence — is in the shared graph.
@@ -105,15 +110,24 @@ rep_2 = graph.assert_claim(
 ```
   query_graph('Target T') → 3 claims from Lab A
 
+  Claim:      Prior literature on Target T in condition C…
+  Source:     None  ← Lab B cannot access this
+  Supports:   []
+  Class:      DERIVED
+
   Claim:      Target T activity in condition C is specific to cell subtype…
   Source:     private_dataset_A  ← Lab B cannot access this
-  Supports:   ['52a4d814-78fc-4940-ab30-eb2e421cae50']
+  Supports:   ['f752301b-5f30-48a4-9d8a-b382bbd3f6ff']
   Class:      ANALYTICAL
-  …
+
+  Claim:      Candidate target T shows elevated activity in condition C (p…
+  Source:     private_dataset_A  ← Lab B cannot access this
+  Supports:   ['e7b323e1-3cf8-4f49-a664-8efaad569557']
+  Class:      ANALYTICAL
 
   Lab B published 2 claims.
-  rep_1 id: 1693f5fd…
-  rep_2 id: d61246e7…
+  rep_1 id: 088283cf…
+  rep_2 id: 6ce98680…
 ```
 
 ## Q1: Independent data paths?
@@ -142,9 +156,11 @@ for c in graph.query("Target T"):
 ```
 
 ```
+  Prior literature on Target T in condition C… ESTABLISHED
+  Candidate target T shows elevated activity in… REPLICATED
   Candidate target T shows elevated activity in… REPLICATED
   Target T activity in condition C is specific … PRELIMINARY
-  …
+
   ✓ REPLICATED: distinct signing keys, shared upstream, independent data paths.
     The finding holds across datasets. Genuine replication.
 ```
@@ -188,5 +204,5 @@ spurious_b = graph.assert_claim(
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 agent = create_react_agent(ChatOpenAI(model="gpt-4o"), tools=[
-    query_graph, get_provenance_trace, assert_finding])
+    query_graph, get_provenance_trace, record_claim])
 ```

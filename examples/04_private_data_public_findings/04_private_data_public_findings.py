@@ -41,7 +41,7 @@ The shared graph then answers three questions automatically:
 
 LangChain integration
 ---------------------
-graph.get_tools(generated_by="...") returns [query_graph, assert_finding].
+graph.get_tools(generated_by="...") returns [query_graph, record_claim].
 get_provenance_trace is defined separately (wraps graph.get_claim).
 
     from langchain_openai import ChatOpenAI
@@ -99,10 +99,19 @@ _signing.bootstrap_key(lab_b_key_path)
 lab_a_priv = _signing.load_private_key(lab_a_key_path)
 lab_b_priv = _signing.load_private_key(lab_b_key_path)
 
+# Enroll Lab A as a validator so its PRELIMINARY step claims are visible to
+# readers by default. query(..., include_unverified=False) hides PRELIMINARY
+# claims whose signer is not enrolled, so without this Lab B's read would see
+# only the ESTABLISHED seed, not Lab A's analytical trace. A lab is a known
+# validator, so enrolling it is the realistic fix.
+graph.enroll_validator(
+    _signing.public_key_to_pem(lab_a_priv.public_key()), identity="lab_a"
+)
+
 
 # ---------------------------------------------------------------------------
 # Mareforma tools: get_tools() gives the read tool; get_provenance_trace
-# defined separately. The write tool (assert_finding) binds the graph's
+# defined separately. The write tool (record_claim) binds the graph's
 # default key, so the per-lab claims below call graph.assert_claim(...,
 # signer=...) directly: each lab signs with its own key, which is what
 # drives REPLICATED.
