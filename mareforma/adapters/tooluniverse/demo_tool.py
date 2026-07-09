@@ -1,6 +1,6 @@
 """Deterministic Open Targets stand-in for the demo CLI.
 
-The CLI's ``demo`` subcommand and the wedge test both need a tool that
+The CLI's ``demo`` subcommand and the adapter test both need a tool that
 behaves like ToolUniverse's `OpenTargets_search_targets` but returns a
 pinned response. This module ships that tool so the CLI is callable
 without the test fixtures at runtime.

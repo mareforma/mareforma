@@ -1,9 +1,9 @@
-"""``mareforma diagnose`` — run a Python target under the observer and report.
+"""``mareforma diagnose``: run a Python target under the observer and report.
 
-The zero-config wedge: point it at a script and it answers the two questions a
+Zero-config: point it at a script and it answers the two questions a
 transcript cannot: did real data flow into this run, and did a step silently
 fail behind a seam the observer could not cross. It runs the target IN-PROCESS
-via :mod:`runpy` (the coverage.py pattern) — launching a subprocess would put
+via :mod:`runpy` (the coverage.py pattern); launching a subprocess would put
 the target behind the observer's own subprocess seam and defeat the point.
 
 Honesty rules, inherited from the observer:

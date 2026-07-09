@@ -2,7 +2,7 @@
 
 Exec-class ToolUniverse tools (Python execution, code execution) need
 hardened sandboxing AND a different attestation shape than retrieval
-tools. The dep maqueta `sandboxed-provenance-aware-execution` shipped
+tools. The sandboxed-execution dependency ships
 `ContainerExecutorTool` for this, a Tool-protocol-conforming class
 that runs user code in a hardened container and asserts a
 ``container-exec/v1`` claim.
@@ -18,12 +18,12 @@ This module:
   envelope shape as the tool-call/v1 path.
 
 The full container-exec executor (real Docker, real isolation) lives
-in the dep maqueta. This module's job is the *routing decision* and
-the *attestation shape*: when the routing target is the dep
-maqueta's ContainerExecutorTool, the import + delegate happens; when
-it's a mock (Phase 3 tests; production callers that don't need real
-isolation for some reason), the same predicate shape lands in the
-graph regardless.
+in the sandboxed-execution dependency. This module's job is the
+*routing decision* and the *attestation shape*: when the routing
+target is that dependency's ContainerExecutorTool, the import +
+delegate happens; when it's a mock (test doubles; production callers
+that don't need real isolation for some reason), the same predicate
+shape lands in the graph regardless.
 """
 
 from __future__ import annotations
@@ -114,10 +114,9 @@ def build_container_exec_predicate(
 ) -> dict[str, Any]:
     """Assemble a container-exec/v1 predicate dict.
 
-    Field set mirrors the dep maqueta's predicate (sandboxed-provenance-
-    aware-execution) so envelopes federate across both maqueta dirs
-    without translation. The dep maqueta's exporter already understands
-    every field here.
+    Field set mirrors the sandboxed-execution dependency's predicate
+    so envelopes federate across both packages without translation.
+    That dependency's exporter already understands every field here.
     """
 
     predicate: dict[str, Any] = {

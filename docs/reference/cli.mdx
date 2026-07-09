@@ -6,6 +6,7 @@ description: "The Mareforma command-line interface: identity setup, claim manage
 | Command | Purpose |
 |---|---|
 | `mareforma bootstrap` | Generate Ed25519 signing key |
+| `mareforma key show` | Print the locally-configured public key |
 | `mareforma validator add` | Enroll a validator (`--type human\|llm`) |
 | `mareforma validator list` | List enrolled validators |
 | `mareforma claim add` | Assert a scientific claim |
@@ -14,9 +15,17 @@ description: "The Mareforma command-line interface: identity setup, claim manage
 | `mareforma claim update` | Update a claim |
 | `mareforma claim validate` | Promote REPLICATED → ESTABLISHED |
 | `mareforma status` | Epistemic health dashboard |
+| `mareforma activity` | Rolling operational rates (`stats` is a deprecated alias) |
 | `mareforma export` | Write `ontology.jsonld` (or signed bundle) |
-| `mareforma verify` | Verify a signed bundle |
+| `mareforma verify` | Verify a claim, signed bundle, or export dir |
+| `mareforma map` | Show a claim's per-finding trust map |
+| `mareforma diagnose` | Run a Python target under the observer, report data flow |
+| `mareforma observe --doctor` | Report observer coverage for this environment |
+| `mareforma measure` | Aggregate grounding verdicts into the reported split |
 | `mareforma restore` | Rebuild graph.db from claims.toml |
+| `mareforma ingest` | Extract claim drafts from a paper abstract |
+| `mareforma ask` | BM25 search over ingested literature claims |
+| `mareforma narrative` | Export literature claims as a Markdown narrative |
 
 ## Overview
 
@@ -24,7 +33,7 @@ description: "The Mareforma command-line interface: identity setup, claim manage
 mareforma [COMMAND] [OPTIONS]
 ```
 
-Available commands: `bootstrap`, `validator`, `claim`, `status`, `export`, `verify`.
+Available commands: `bootstrap`, `key`, `validator`, `claim`, `status`, `activity`, `export`, `verify`, `map`, `diagnose`, `observe`, `measure`, `restore`, `ingest`, `ask`, `narrative`.
 
 ---
 
@@ -285,11 +294,11 @@ mareforma export [OPTIONS]
 
 **Interop formats** (`--format`). Beyond the native JSON-LD, `export` emits three interchange formats for external tooling:
 
-- `--format=in-toto-v1` — an unsigned in-toto Statement v1 (sigstore / SLSA / GUAC ecosystem). Distinct from `--bundle`, which produces a *signed* in-toto v1 envelope.
-- `--format=ro-crate-1.2` — an RO-Crate 1.2 Process Run Crate (`ro-crate-metadata.json`).
-- `--format=prov-o` — a W3C PROV-O JSON-LD graph for provenance-aware tooling.
+- `--format=in-toto-v1`: an unsigned in-toto Statement v1 (sigstore / SLSA / GUAC ecosystem). Distinct from `--bundle`, which produces a *signed* in-toto v1 envelope.
+- `--format=ro-crate-1.2`: an RO-Crate 1.2 Process Run Crate (`ro-crate-metadata.json`).
+- `--format=prov-o`: a W3C PROV-O JSON-LD graph for provenance-aware tooling.
 
-**Signed bundle** (`--bundle`). Wraps the JSON-LD export in an in-toto Statement v1 envelope and signs it with the local Ed25519 key. The bundle includes one subject entry per claim (`urn:mareforma:claim:<uuid>`) with a SHA-256 of the claim's `canonical_payload`, plus a bundle-level DSSE signature. Requires a bootstrapped XDG key. `--bundle` and `--format` are mutually exclusive — `--bundle` always signs the native JSON-LD.
+**Signed bundle** (`--bundle`). Wraps the JSON-LD export in an in-toto Statement v1 envelope and signs it with the local Ed25519 key. The bundle includes one subject entry per claim (`urn:mareforma:claim:<uuid>`) with a SHA-256 of the claim's `canonical_payload`, plus a bundle-level DSSE signature. Requires a bootstrapped XDG key. `--bundle` and `--format` are mutually exclusive: `--bundle` always signs the native JSON-LD.
 
 **Options**
 
@@ -324,28 +333,47 @@ The JSON-LD output uses `mare:` and `schema:` vocabularies. Each claim is a `mar
 
 ## verify
 
-Verify a SCITT-style signed bundle against the local signing key. Checks the bundle's DSSE signature (over the DSSE PAE encoding, so it interoperates with standard verifiers), every per-claim subject digest, every per-claim **asserter signature** bound to the claim's presented content, the enrolled validator chain to a single root (which must be the bundle signer), and the displayed **support level** (ESTABLISHED against a validator-signed validation envelope, REPLICATED against distinct-signer corroboration).
+Verify a claim, a SCITT-style signed bundle, or an export directory (the audit receipt). `TARGET` is detected by shape: an existing file is verified as a signed bundle, an existing directory as an export dir, anything else as a claim id resolved against the local project.
 
-Editorial status (`retracted` / `contested`) and comparison summaries carry no signature in the data model, so a verified bundle does not attest them — it attests each claim's asserter content and earned support level, not a mutable status flag.
+For a bundle, this checks the DSSE signature (over the DSSE PAE encoding, so it interoperates with standard verifiers), every per-claim subject digest, every per-claim **asserter signature** bound to the claim's presented content, the enrolled validator chain to a single root (which must be the bundle signer), and the displayed **support level** (ESTABLISHED against a validator-signed validation envelope, REPLICATED against distinct-signer corroboration). For a claim id, verification uses only public material (auditor mode) and prints the claim's trust map.
+
+Editorial status (`retracted` / `contested`) and comparison summaries carry no signature in the data model, so a verified bundle does not attest them: it attests each claim's asserter content and earned support level, not a mutable status flag.
 
 ```bash
-mareforma verify BUNDLE_PATH
+mareforma verify TARGET [OPTIONS]
 ```
 
 **Arguments**
 
 | Argument | Description |
 |---|---|
-| `BUNDLE_PATH` | Path to a `mareforma-bundle.json` produced by `mareforma export --bundle` |
+| `TARGET` | A claim id, a `mareforma-bundle.json` file, or an export directory. Detected by shape (existing file → bundle, existing dir → export dir, otherwise → claim id) |
 
-Exits `0` on success ("verified: N claim subjects match"), `1` on any verification failure. `BundleVerificationError` names the first failing check so callers can route between "corrupt" and "cross-version skew" (e.g. a bundle whose `predicateType` is `epistemic-graph:v2` will be refused by a `v1` verifier).
+**Options**
+
+| Option | Description |
+|---|---|
+| `--json` | Emit a machine-readable verdict (and, for a claim, its trust map) to stdout |
+| `--redact-home` | Rewrite `$HOME` to `~` in the printed trust map (never applied to signed receipts) |
+
+**Exit codes** (stable, for CI gates). The 1-vs-2 split is the point: a gate must tell "this claim is tampered" from "I could not check this claim."
+
+| Code | Meaning |
+|---|---|
+| `0` | verified |
+| `1` | tamper or binding violation (a definite NO) |
+| `2` | unverifiable (missing material to reach a verdict, not a NO) |
+| `3` | usage error (bad flag or argument) |
 
 **Examples**
 
 ```bash
+mareforma verify <claim-id>
+mareforma verify <claim-id> --json
 mareforma export --bundle
 mareforma verify mareforma-bundle.json
 # → Bundle verified: 12 claim subject(s) match.
+mareforma verify ./export-dir
 ```
 
 ---
@@ -367,14 +395,14 @@ mareforma restore [CLAIMS_TOML_PATH]
 **Examples**
 
 ```bash
-# Standard case — claims.toml in the project root:
+# Standard case, claims.toml in the project root:
 mareforma restore
 
 # Explicit source (e.g. recovered from a backup):
 mareforma restore backups/state.toml
 ```
 
-The output reports `validators_restored` and `claims_restored` counts. Failure exits `1` with a `RestoreError` message naming the failure mode: `graph_not_empty`, `toml_not_found`, `toml_malformed`, `enrollment_unverified`, `claim_unverified`, `mode_inconsistent`, `orphan_signer`, or `rekor_inclusion_invalid`.
+The output reports `validators_restored` and `claims_restored` counts. Failure exits `1` with a `RestoreError` message naming the failure mode: `graph_not_empty`, `toml_not_found`, `toml_malformed`, `enrollment_unverified`, `claim_unverified`, `mode_inconsistent`, `orphan_signer`, or `rekor_inclusion_invalid`. Three further modes (`policy_unverified`, `policy_absent`, `policy_unverifiable`) exist but fire only under `enforce_rekor_policy`, which the CLI `restore` does not expose; see the `mareforma.restore()` API table for those.
 
 `claims.toml` includes a `[rekor_inclusions]` section. Older files written without it restore successfully with a `RekorSidecarSectionAbsentWarning`. Run `refresh_unsigned()` afterward to re-fetch inclusion proofs.
 

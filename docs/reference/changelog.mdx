@@ -6,6 +6,118 @@ description: "Notable changes across Mareforma releases."
 The authoritative changelog lives in [CHANGELOG.md](https://github.com/mareforma/mareforma/blob/main/CHANGELOG.md).
 This page mirrors it.
 
+## v0.3.9 - 2026-07-08
+
+Three passes that make trust honest and legible. The grounding verdict now binds to
+the data a finding actually read. The trust a claim carries is read as a structured
+map instead of one word, with three commands that make it legible to a stranger in a
+minute. And the open-issue burn-down closes, with the core-derived classification
+engine removed. Additive on the schema. See [Grounding](/concepts/grounding) and
+[Trust](/concepts/trust).
+
+### Added
+
+- **Verdict-to-citation binding.** An observed GROUNDED verdict now proves it attests
+  the finding's own data. The sources a read was actually observed for are carried
+  into the signed record (grounding axis `v0.3.9`) and cross-checked against the
+  finding's citation at write time and again on read. A producer who cites a dataset
+  but reads only an incidental decoy no longer earns GROUNDED: a disjoint GROUNDED
+  downgrades to OPAQUE with a signed reason and a `grounding_citation_mismatch` health
+  event, or raises under `grounding_strict=True`. Evidence lines gain `data_source=`
+  so citing a path and content-addressing the `data_id` binds.
+- **The per-finding trust map.** `graph.trust_map(claim)` and `mareforma map <claim>`
+  place every trust property (attributability, provenance, grounding, methodological
+  validity, leakage, independence, contestation, standing, trust-root, witnessing) at
+  its tier (`COMPUTED` / `PROXIED` / `DEFERRED`) with the residual named. A property
+  Mareforma cannot observe is stated, never inferred. `--json` emits a canonicalizable
+  record; `--html` writes one self-contained page.
+- **`mareforma verify <target>`.** An audit receipt at the moment of the check: it
+  re-verifies signatures, the grounding-to-citation binding, and support level, then
+  prints the trust map. It detects its target by shape (claim id, signed bundle, or
+  export directory) and verifies a claim from public material alone. Exit codes are
+  stable for CI (`0` verified, `1` tamper or binding violation, `2` unverifiable, `3`
+  usage error), so a bad flag never masquerades as a verdict. `--json` emits the
+  verdict for a gate to parse.
+- **`mareforma diagnose -- <cmd>`.** Runs a Python target in-process under the
+  grounding observer and reports the reads, seams, and coverage it saw. With `--cites`
+  it also computes the grounding verdict; without one it reports observation only and
+  never guesses a citation. A crashing target still prints its partial observation and
+  exits with the target's own code.
+- **`mareforma observe --doctor` and `mareforma measure`.** `--doctor` self-reports
+  which loaders are wrapped and which seams force OPAQUE in the current environment.
+  `measure` aggregates a run's verdicts into the reported split, OPAQUE bucketed by
+  seam kind. `--redact-home` rewrites `$HOME` in emitted artifacts, never in a signed
+  receipt.
+- **Keep-alive HTTP and C-extension coverage.** Pooled `requests.Session`,
+  `httpx.Client` / `AsyncClient`, and `aiohttp` sessions, and the C-runtime readers
+  (`h5py`, `pyarrow`, `netCDF4`), are wrapped only-if-imported, so a retrieval or an
+  HDF5 / netCDF / Arrow read reaches GROUNDED instead of a false UNGROUNDED. A loader
+  imported inside an open scope is wrapped too.
+- **The independence axis.** The trust map reports independence separately from the
+  support ladder, marking it `UNVERIFIABLE` whenever fewer than two trust roots are
+  enrolled, the honest reading when one operator could mint every key.
+- **`strict_promotion` option.** `mareforma.open(strict_promotion=True)` gates
+  REPLICATED on non-NULL data on both sides of a converging pair. Off by default; it
+  only ever adds the requirement.
+- **Declared metric reducer for the causal oracle.** `declared_reducer(...)` names the
+  reduction a prose finding needs and records whether it reinserts a model into the
+  ground truth. (The oracle itself shipped in v0.3.8.)
+
+### Changed
+
+- **UNGROUNDED means genuine absence, not blindness.** A seam blocks the UNGROUNDED
+  verdict only when it could have hidden a read of a citation kind actually present. A
+  socket seam no longer forces OPAQUE on a file-cited finding, while URL and
+  content-address citations stay blocked. Thread, subprocess, and coverage-gap seams
+  block everything; unknown kinds fail closed.
+- **REPLICATED is a convergence marker, not a claim of independence.** The README and
+  trust docs stop leading with it: signing keys are operator-mintable, so distinct
+  signatures are a weak prior. Independence lives on its own axis.
+- **The claim-recording agent tool is renamed `record_claim`.** It was
+  `assert_finding`, which shadowed the `EpistemicGraph.assert_finding` method. A
+  deprecated `assert_finding` alias is available for one release via
+  `get_tools(include_deprecated_aliases=True)` and warns on use.
+- **The cycle check runs as one recursive query** instead of one per ancestor, and an
+  oversized reachable graph raises a distinct `GraphTooLargeError` rather than a false
+  "cycle."
+- **RO-Crate and PROV-O exports align with the profile shapes.** The RO-Crate root
+  entity carries a license and a non-null `datePublished` and separates data entities
+  (`hasPart`) from provenance actions (`mentions`); PROV-O labels use `rdfs:label`. The
+  tests check shape and label vocabulary, not full validator conformance.
+- **`mareforma verify` subsumes the old bundle-path command.** The prior `mareforma
+  verify <bundle>` invocation keeps working as the file-detection case; a missing local
+  key exits `2` (unverifiable) rather than `1`.
+- **The per-connection validator chain-verification cache now persists**, so a repeated
+  enrollment check skips the chain walk.
+
+### Fixed
+
+- **Re-ingesting a paper no longer leaves orphaned full-text-search rows**, even when
+  the re-extraction is empty. The ingest path deletes a document's prior claims by
+  document id before inserting the fresh set, so the FTS delete trigger fires.
+- **Multi-role signatures are re-verified on the live read path**, so a forged role
+  attestation is caught on read and by `mareforma verify`, not only at restore.
+- **Deleting a signed claim raises the typed `SignedClaimImmutableError`** for both
+  `delete_claim` and `delete_claims_by_generated_by`.
+- **The API-version probe rejects a neighbouring major.** The clawinstitute check
+  matched "v10" and "v1beta2" against "v1"; it now matches the exact major or a minor
+  under it.
+- **`independence_counts` stops full-scanning `effect_estimates`**, via an index on
+  `contrasts(line_id)`.
+- **The sdist ships a complete, runnable test suite** (conftest, shared helpers, and
+  every test subpackage).
+- **The Dependabot config no longer advertises a lockfile the repo does not commit.**
+- **The reference docs match the code.** The status-policy stamp, the `export
+  --format` choices, and the default-format PROV-O scope note are corrected.
+
+### Removed
+
+- **The core-derived classification engine.** `mareforma.derivation` (the keyword and
+  log-template classifier), its `[derivation]` install extra, and the `tree_sitter`
+  dependencies are gone; execution-observed grounding computes the same signal from
+  observed reads.
+- **The dead `[git]` install extra** and the unused `gitpython` dev dependency.
+
 ## v0.3.8 - 2026-07-06
 
 Execution-observed grounding, and a trust-layer hardening pass across every path a
@@ -203,7 +315,7 @@ next `open_db()`.
   two-sided (the metafor/escalc convention), so significance is `p < 2*alpha`,
   matching the `(1 - 2*alpha)` confidence-interval path.
 
-## v0.3.3 — 2026-05-29
+## v0.3.3 - 2026-05-29
 
 Adapter framework and substrate primitives. Five new primitives in
 core (events, tools, canonicalize, derivation, hooks) plus three
@@ -216,27 +328,27 @@ new `literature_claims` and `agent_activities` tables on next
 
 **Substrate primitives**
 
-- `mareforma.events` — `EventSource` / `EventHandler` Protocols,
+- `mareforma.events`: `EventSource` / `EventHandler` Protocols,
   typed `EventPayload` and `ClaimResult`, source-name constants
   (`SOURCE_CLAWINSTITUTE`, `SOURCE_TOOLUNIVERSE`, `SOURCE_GEMINI`,
   `SOURCE_CLAUDE_CODE_PRETOOLUSE`) so adapters dispatch on
   constants, not string literals.
-- `mareforma.tools` — `Tool` Protocol (`name`, `version`,
+- `mareforma.tools`: `Tool` Protocol (`name`, `version`,
   `call(**kwargs) -> ToolResult`), `ToolResult` TypedDict,
   `ReplayResult` dataclass. The structural contract any wrappable
   callable satisfies.
-- `mareforma.canonicalize` — registry-based canonicalizer surface
+- `mareforma.canonicalize`: registry-based canonicalizer surface
   for adapter authors. Default `json-c14n-v1` (RFC 8785 JCS) plus
   `dsse-jcs-nfc-v1` (same bytes the signed-envelope layer produces).
   Importing `mareforma.canonicalize` registers
   `rdkit-canonical-smiles-v1`, `fasta-nfc-v1`, `pdb-atom-sorted-v1`
   via the specialty submodule.
-- `mareforma.derivation` — substrate-derived classification.
+- `mareforma.derivation`: substrate-derived classification.
   Deterministically derives `ANALYTICAL` vs `INFERRED` from a static
   source-code profile plus dynamic log templates (Drain parser).
   Source-profile extraction requires the `[derivation]` extra
   (`tree_sitter`); log-template extraction is pure stdlib.
-- `mareforma.hooks` — Claude Code `PreToolUse` handler
+- `mareforma.hooks`: Claude Code `PreToolUse` handler
   (`python -m mareforma.hooks`) records every tool invocation as a
   `prov:Activity` row. `agent_activities` table is part of the
   canonical schema.
@@ -246,12 +358,12 @@ new `literature_claims` and `agent_activities` tables on next
 `TOOL_CALL_V1`, `CONTAINER_EXEC_V1`, `CODE_VARIATION_V1`,
 `HYPOTHESIS_V1`, `LITERATURE_INSIGHT_V1`, `SCIENCE_SKILL_V1`,
 `META_CLAIM_V1`, `WORKSHOP_EVENT_V1`. Adapters import the
-constants — a typo on a constant name fails at import; a typo on a
+constants: a typo on a constant name fails at import; a typo on a
 URI string would silently mis-classify a claim.
 
 **Three opt-in adapters under `mareforma.adapters.*`**:
 
-- `mareforma.adapters.clawinstitute` — generic ClawInstitute
+- `mareforma.adapters.clawinstitute`: generic ClawInstitute
   workshop-event hook. `EventHook` implements the EventSource
   Protocol; `HttpxClient` uses a pooled `httpx.Client` with
   `follow_redirects=False` and URL-quotes path segments. Eight typed
@@ -261,12 +373,12 @@ URI string would silently mis-classify a claim.
   during `dispatch()` are caught and returned as
   `ClaimResult(error=…)` so a misbehaving subscriber cannot block
   peers.
-- `mareforma.adapters.tooluniverse` — wrap any `mareforma.tools.Tool`
+- `mareforma.adapters.tooluniverse`: wrap any `mareforma.tools.Tool`
   so each `.call(**kwargs)` records a signed `tool-call:v1` claim
   with arguments digest, result digest, tool config fingerprint,
   timing. Container-exec class tools route to `container-exec:v1`.
   Over-cap results raise `ResultTooLargeError`.
-- `mareforma.adapters.gemini` — read-only ingest for Gemini for
+- `mareforma.adapters.gemini`: read-only ingest for Gemini for
   Science outputs (4 capabilities: code-variation, hypothesis,
   literature-insight, science-skill). Per-capability
   `REQUIRED_FIELDS` validation runs before `assert_claim`; string
@@ -280,7 +392,7 @@ signed `claims` table). FTS5 BM25 search escapes embedded quotes;
 the narrative exporter flags structural and polarity-heuristic
 contradictions inline.
 
-**`mareforma.db.open_db_from_db_path()`** — opens a graph DB from a
+**`mareforma.db.open_db_from_db_path()`**: opens a graph DB from a
 direct file path. Honours the supplied filename instead of silently
 re-deriving `<root>/.mareforma/graph.db`.
 
@@ -316,7 +428,7 @@ re-deriving `<root>/.mareforma/graph.db`.
   produces bytes no replayer can re-derive; the adapter now always
   raises `ResultTooLargeError`.
 
-## v0.3.2 — 2026-05-27
+## v0.3.2 - 2026-05-27
 
 Internal restructure + one restore-time verification improvement.
 Schema stays at v1; no migration required. All existing
@@ -350,9 +462,9 @@ import paths continue to work unchanged.
   re-verified post-restore.
 - **Two drift-warning classes** for the sidecar restore path:
   `RekorSidecarSectionAbsentWarning` (TOML has no
-  `[rekor_inclusions]` section — expected for pre-v0.3.2 files)
+  `[rekor_inclusions]` section, expected for pre-v0.3.2 files)
   and `RekorSidecarEntryMissingWarning` (section exists but
-  lacks an entry for a Rekor-logged claim — suspicious).
+  lacks an entry for a Rekor-logged claim, suspicious).
 - **CI guard tests** walk each submodule source file via AST and
   assert every defined name is importable AND accessible via
   `getattr` on the package. Fails CI if a future contributor
@@ -369,7 +481,7 @@ import paths continue to work unchanged.
   `refresh_unsigned()` after restore to re-fetch inclusion
   proofs from the log.
 
-## v0.3.1 — 2026-05-22
+## v0.3.1 - 2026-05-22
 
 Additive release. Schema stays at v1; new columns land via
 in-place `ALTER TABLE ADD COLUMN` on the non-signed-integrity
@@ -382,7 +494,7 @@ code.
 
 ### Added
 
-- **`EpistemicGraph.query_provenance(claim_id, depth=4)`** —
+- **`EpistemicGraph.query_provenance(claim_id, depth=4)`**:
   agent-readable lineage view of a claim: focal row + role-actor
   signatures + recursive upstream / downstream walks + inbound
   contradictions + replication verdicts in one deterministic dict.
@@ -422,36 +534,36 @@ code.
   New `mareforma stats [--last N] [--json]` renders rolling
   rates.
 - **Public `EpistemicGraph.update_claim`** wrapper around
-  `db.update_claim`. Status mutations are EDITORIAL —
+  `db.update_claim`. Status mutations are EDITORIAL:
   cryptographically-traceable changes use the retract-and-
   supersede pattern.
 
-## v0.3.0 — 2026-05-13
+## v0.3.0 - 2026-05-13
 
 Breaking change from v0.2.x. Schema does not migrate from older
 versions; delete `.mareforma/graph.db` to start fresh. `claims.toml`
-at the project root is a human-readable record of the prior state —
+at the project root is a human-readable record of the prior state:
 the prev_hash chain and per-claim signatures cannot be reconstructed
 from it, so it is a reference not a backup.
 
 What ships in v0.3.0:
 
 - **Ed25519 claim signing** with optional Sigstore-Rekor transparency log
-- **Artifact-hash gate** on REPLICATED — converging peers that both supply a SHA-256 must agree
+- **Artifact-hash gate** on REPLICATED: converging peers that both supply a SHA-256 must agree
 - **Identity-gated `graph.validate()`** with a per-project validators table and signed enrollment chain
 - **DOI resolution** against Crossref + DataCite with a persistent cache
-- **DB-layer state-machine triggers** + append-only `prev_hash` chain — the storage layer rejects illegal transitions
+- **DB-layer state-machine triggers** + append-only `prev_hash` chain: the storage layer rejects illegal transitions
 - **Cycle / self-loop detection** on `supports[]` at INSERT and UPDATE
 - **ESTABLISHED-upstream requirement** for REPLICATED + signed seed-claim bootstrap (Cochrane / GRADE evidence chains; no replication-of-noise)
 - **JSON-LD export** in a mareforma-native vocabulary
 - **SCITT-style signed export bundle** + `mareforma verify` CLI
 - **In-toto Statement v1 + DSSE v1 PAE envelope** on every signed claim, GRADE 5-domain `EvidenceVector` inside every signed predicate, signed verdict-issuer protocol that any third party can integrate against (see below)
-- **RFC 8785-strict canonical JSON** for every signed payload — cross-language verifiers in Go, Rust, or JS now read byte-identical bytes from a mareforma envelope. Adds `rfc8785>=0.1` runtime dep.
+- **RFC 8785-strict canonical JSON** for every signed payload: cross-language verifiers in Go, Rust, or JS now read byte-identical bytes from a mareforma envelope. Adds `rfc8785>=0.1` runtime dep.
 - **Operator surfaces:** `graph.health()` single-call audit summary, `graph.refresh_convergence()` to retry promotions whose detection swallowed an error, `graph.refresh_all_dois()` to force-re-check DOIs for retraction drift, `graph.find_dangling_supports()` to audit UUID refs that point nowhere, `graph.classify_supports()` to inspect the substrate's claim/doi/external classification.
-- **Validation envelope binds `evidence_seen`** — pass `graph.validate(claim_id, evidence_seen=[upstream_id, ...])` to record which claims the validator reviewed before signing. Bound into the signed payload alongside `(claim_id, validator_keyid, validated_at)`. Empty list is a positive "I reviewed nothing" admission. Substrate verifies each cited claim exists and predates validation.
+- **Validation envelope binds `evidence_seen`**: pass `graph.validate(claim_id, evidence_seen=[upstream_id, ...])` to record which claims the validator reviewed before signing. Bound into the signed payload alongside `(claim_id, validator_keyid, validated_at)`. Empty list is a positive "I reviewed nothing" admission. Substrate verifies each cited claim exists and predates validation.
 - **Rekor saga atomicity** via a new `rekor_inclusions` sidecar table. When a Rekor submission succeeds but the local row-UPDATE fails, the sidecar preserves the coords so `refresh_unsigned()` replays the UPDATE without re-submitting (no duplicate log entries). Append-only at the trigger level.
 - **Strict UUIDv4 in claim_id pattern.** Non-v4 UUID-shapes in `supports[]` are now classified as external references rather than dangling claim_ids.
-- **RFC 6962 Merkle inclusion-proof verification (opt-in).** Pass `rekor_log_pubkey_pem` (or `rekor_log_pubkey_path`) to `mareforma.open()` and every signed-claim submit + every `refresh_unsigned()` re-fetches the entry from Rekor and cryptographically verifies the Merkle audit path against the log's signed checkpoint. Verification failure refuses to mark `transparency_logged=1`. Supports Ed25519 (private Rekor) + ECDSA secp256r1 (public Sigstore Rekor). The supplied PEM persists to `.mareforma/rekor_log_pubkey.pem` as a TOFU pin — silent rotation is refused on subsequent opens; the first-pin write is atomic (O_CREAT|O_EXCL). New `RekorInclusionError` exception with a stable `.reason` token taxonomy. Since v0.3.2 the `rekor_inclusions` sidecar round-trips through `claims.toml`; `restore(rekor_log_pubkey_pem=...)` re-verifies each entry's inclusion proof against the pinned key.
+- **RFC 6962 Merkle inclusion-proof verification (opt-in).** Pass `rekor_log_pubkey_pem` (or `rekor_log_pubkey_path`) to `mareforma.open()` and every signed-claim submit + every `refresh_unsigned()` re-fetches the entry from Rekor and cryptographically verifies the Merkle audit path against the log's signed checkpoint. Verification failure refuses to mark `transparency_logged=1`. Supports Ed25519 (private Rekor) + ECDSA secp256r1 (public Sigstore Rekor). The supplied PEM persists to `.mareforma/rekor_log_pubkey.pem` as a TOFU pin, silent rotation is refused on subsequent opens; the first-pin write is atomic (O_CREAT|O_EXCL). New `RekorInclusionError` exception with a stable `.reason` token taxonomy. Since v0.3.2 the `rekor_inclusions` sidecar round-trips through `claims.toml`; `restore(rekor_log_pubkey_pem=...)` re-verifies each entry's inclusion proof against the pinned key.
 - **Defense-in-depth on `db.validate_claim`.** Direct callers of the substrate function (not just `EpistemicGraph.validate`) get the full gate sequence: cryptographic envelope verification, LLM-type ceiling refusal, self-validation refusal, payload-field equality vs the row + kwargs. New `InvalidValidationEnvelopeError` for structural / cryptographic envelope failures, distinct from `EvidenceCitationError` for citation-list failures.
 - **All documented exceptions re-exported at the top level.** `from mareforma import RekorInclusionError` works without remembering the submodule path. 19 exception classes total, alphabetical under `MareformaError`.
 
@@ -463,7 +575,7 @@ Envelope upgrade + verdict-issuer protocol (substrate-launch additions):
   (`predicateType=urn:mareforma:predicate:claim:v1`). Standards-aligned;
   introspectable by `cosign`, GUAC, and any in-toto-aware tool without
   a mareforma-specific verifier. The signature covers the DSSE
-  Pre-Authentication Encoding (PAE), not the payload bytes alone —
+  Pre-Authentication Encoding (PAE), not the payload bytes alone:
   a signature on `(typeA, payload)` cannot be replayed as a signature
   on `(typeB, payload)`.
 - **GRADE 5-domain EvidenceVector** carried inside every signed claim's
@@ -474,8 +586,8 @@ Envelope upgrade + verdict-issuer protocol (substrate-launch additions):
   domain), and `reporting_compliance` list. Bound into the signature;
   denormalized into `ev_*` columns for queryable filters; restore
   re-derives the canonical bytes and refuses any TOML-tampered upgrade.
-- **Verdict-issuer protocol.** Two new tables —
-  `replication_verdicts` and `contradiction_verdicts` — accept signed
+- **Verdict-issuer protocol.** Two new tables,
+  `replication_verdicts` and `contradiction_verdicts`, accept signed
   verdicts from any enrolled validator. The OSS substrate ratifies
   what enrolled identities sign; the predicates that PRODUCE verdicts
   (semantic-cluster, cross-method, hash-match, shared-resolved-upstream,
@@ -490,11 +602,11 @@ Envelope upgrade + verdict-issuer protocol (substrate-launch additions):
   `contradiction_verdicts` sets `t_invalid` on the older of the two
   referenced claims (lex-smaller `claim_id` as deterministic tie-break
   when timestamps collide; idempotent via `WHERE t_invalid IS NULL`).
-  `validate_claim` refuses to promote a `t_invalid` claim — a signed
+  `validate_claim` refuses to promote a `t_invalid` claim: a signed
   contradiction is terminal evidence.
 - **`include_invalidated` kwarg** on `graph.query()`, `graph.search()`,
   `graph.replication_verdicts()`, `graph.contradiction_verdicts()`.
-  Defaults to `False` — invalidated claims and the verdicts that
+  Defaults to `False`: invalidated claims and the verdicts that
   reference them are excluded from default reads. Pass `True` for
   audit / history queries.
 - **Append-only over the signed predicate.** New
@@ -509,7 +621,7 @@ Envelope upgrade + verdict-issuer protocol (substrate-launch additions):
   tables. The envelope is the source of truth.
 - **PRAGMA foreign_keys = ON.** Set on every `open_db()`. The verdict
   tables' FK references to `validators(keyid)` and `claims(claim_id)`
-  are now enforced — direct-SQL INSERTs with fabricated keyids fail
+  are now enforced: direct-SQL INSERTs with fabricated keyids fail
   at the SQL layer, not just in Python.
 - **Subject ↔ predicate consistency.** `claim_predicate_from_envelope()`
   refuses envelopes where `subject[0].name` or `subject[0].digest.sha256`
@@ -521,7 +633,7 @@ Envelope upgrade + verdict-issuer protocol (substrate-launch additions):
   before INSERT. Verdicts are replayed in `created_at` order so the
   trigger's `WHERE t_invalid IS NULL` guard preserves the truthful
   first-invalidation moment. `transparency_logged=true` in TOML is
-  downgraded to `0` when the bundle has no `rekor` block — hand-edited
+  downgraded to `0` when the bundle has no `rekor` block: hand-edited
   TOML cannot fake a Rekor inclusion. New adversarial tests for
   tampered `EvidenceVector`, swapped `statement_cid`, tampered verdict
   fields, and forged `issuer_keyid`.
@@ -544,7 +656,7 @@ Envelope upgrade + verdict-issuer protocol (substrate-launch additions):
   Every `assert_claim` then signs before INSERT. The signed payload
   binds `claim_id`, `text`, `classification`, `generated_by`,
   `supports`, `contradicts`, `source_name`, `artifact_hash`, and
-  `created_at` — any tamper breaks verification.
+  `created_at`: any tamper breaks verification.
 - **Append-only invariant.** Signed claims refuse mutation of any
   signed-surface field. `update_claim(text=...)` /
   `update_claim(supports=...)` / `update_claim(contradicts=...)` on a
@@ -565,7 +677,7 @@ Envelope upgrade + verdict-issuer protocol (substrate-launch additions):
 - New `mareforma validator add` / `mareforma validator list`
   subcommands. Each enrollment is signed by the parent validator and
   `is_enrolled` walks the chain back to a self-signed root before
-  accepting a row — direct sqlite INSERTs with a fabricated parent do
+  accepting a row: direct sqlite INSERTs with a fabricated parent do
   not pass. Singleton-root invariant + 64-hop walk cap defend against
   DoS-by-planted-chain.
 
@@ -590,13 +702,13 @@ Envelope upgrade + verdict-issuer protocol (substrate-launch additions):
 - **ESTABLISHED-upstream requirement for REPLICATED.**
   REPLICATED promotion now requires at least one ESTABLISHED claim in
   the peer's `supports[]`. Matches Cochrane / GRADE evidence-chain
-  methodology — stops replication-of-noise. Strict by default.
+  methodology: stops replication-of-noise. Strict by default.
 - **Seed-claim bootstrap.**
   `graph.assert_claim(text=..., seed=True)` inserts a claim directly
   at `ESTABLISHED` with a signed seed envelope (payload type
   `application/vnd.mareforma.seed+json`, binds
   `claim_id + validator_keyid + seeded_at`). Only enrolled validators
-  can produce seeds — bootstraps the trust chain on a fresh graph
+  can produce seeds: bootstraps the trust chain on a fresh graph
   without a back door.
 
 ### Artifact-hash gate
@@ -609,8 +721,7 @@ Envelope upgrade + verdict-issuer protocol (substrate-launch additions):
   signed payload.
 - **REPLICATED gate.** When two converging peers BOTH supply a hash,
   the hashes must match for REPLICATED to fire. When either omits
-  the hash, the gate is bypassed and identity-only REPLICATED applies
-  — the signal is opt-in, not retroactive.
+  the hash, the gate is bypassed and identity-only REPLICATED applies: the signal is opt-in, not retroactive.
 - **Idempotency conflict.** A replay that supplies a different
   `artifact_hash` than the original raises
   `IdempotencyConflictError` rather than silently dropping the new
@@ -634,15 +745,15 @@ Envelope upgrade + verdict-issuer protocol (substrate-launch additions):
   planted by a prior agent is no longer delivered verbatim to the
   consuming LLM.
 - **Sanitize-on-write.** `assert_claim` runs `sanitize_for_llm(text)`
-  before signing and persisting. Defense in depth — any consumer that
+  before signing and persisting. Defense in depth: any consumer that
   reads `claim.text` directly gets a clean string. Hard cap of 100,000
   characters; claims that consist entirely of zero-width / control
   characters are rejected with `ValueError`.
 
 ### Export
 
-- **JSON-LD export — mareforma-native vocabulary.** Removed PROV-O references
-  (`prov:wasGeneratedBy`, `prov:used`) from the JSON-LD `@context` —
+- **JSON-LD export: mareforma-native vocabulary.** Removed PROV-O references
+  (`prov:wasGeneratedBy`, `prov:used`) from the JSON-LD `@context`:
   the previous export name-dropped the vocabulary without populating
   the full PROV-O graph. The export now declares `@type='mare:Graph'`
   and `mare:mediaType='application/x-mareforma-graph+json'`. The
@@ -683,7 +794,7 @@ Envelope upgrade + verdict-issuer protocol (substrate-launch additions):
 - **PyPI Trusted Publishing.** Releases are published via OIDC-based
   GitHub Actions, not long-lived API tokens. `pypa/gh-action-pypi-publish`
   is SHA-pinned. `actions/checkout` and `actions/setup-python` are
-  pinned by commit SHA — closes the tag-squat / maintainer-compromise
+  pinned by commit SHA: closes the tag-squat / maintainer-compromise
   vector against the Trusted Publishing OIDC token.
 - New `SECURITY.md` documents the disclosure channel (GitHub Private
   Vulnerability Reporting), supported-versions policy (latest pre-1.0
@@ -698,7 +809,7 @@ Envelope upgrade + verdict-issuer protocol (substrate-launch additions):
 
 ### Agent surface
 
-- **`mareforma.open()` returns an `EpistemicGraph`** — no `@transform`
+- **`mareforma.open()` returns an `EpistemicGraph`**: no `@transform`
   required. New parameters: `key_path`, `require_signed`, `rekor_url`,
   `require_rekor`, `trust_insecure_rekor`.
 - **EpistemicGraph methods:** `assert_claim`, `query`, `search`,
@@ -709,9 +820,9 @@ Envelope upgrade + verdict-issuer protocol (substrate-launch additions):
   `[query_graph, assert_finding]` as plain Python callables. One-line
   wrap for Anthropic SDK, OpenAI SDK, LangChain, LangGraph, CrewAI,
   AutoGen, LlamaIndex, PydanticAI, Smol Agents.
-- **`mareforma.schema()`** — runtime introspection of valid values,
+- **`mareforma.schema()`**: runtime introspection of valid values,
   defaults, state transitions, and schema version.
-- **`mareforma.restore(project_root)`** — rebuild a fresh `graph.db`
+- **`mareforma.restore(project_root)`**: rebuild a fresh `graph.db`
   from `claims.toml` for catastrophic-loss recovery. Fresh-only,
   fail-all-or-nothing on signature verification.
 - **CLI:** `mareforma bootstrap`, `mareforma validator add` /
@@ -766,27 +877,27 @@ Envelope upgrade + verdict-issuer protocol (substrate-launch additions):
 
 ### Removed
 
-- `@transform` decorator and `BuildContext` — pipeline layer removed.
-- `MareformaObserver`, `LangChainAdapter` — execution tracing removed.
+- `@transform` decorator and `BuildContext`: pipeline layer removed.
+- `MareformaObserver`, `LangChainAdapter`: execution tracing removed.
 - Pipeline CLI commands: `init`, `add-source`, `explain`, `build`,
   `log`, `diff`, `cross-diff`, `trace`.
 
 ---
 
-## v0.2.1 — 2026-05-08
+## v0.2.1 - 2026-05-08
 
-- `ctx.params` — runtime parameter injection from TOML
-- `query_claims()` — read primitive for the epistemic graph
-- `delete_claims_by_generated_by()` — delete claims by source agent
+- `ctx.params`: runtime parameter injection from TOML
+- `query_claims()`: read primitive for the epistemic graph
+- `delete_claims_by_generated_by()`: delete claims by source agent
 - Fixed `LangChainAdapter` import path
 
-## v0.2.0 — 2026-04-08
+## v0.2.0 - 2026-04-08
 
-- `mareforma.agent` — framework-agnostic agent provenance module
-- `MareformaObserver` — context manager recording agent events to `graph.db`
-- `LangChainAdapter` — LangChain callback handler
+- `mareforma.agent`: framework-agnostic agent provenance module
+- `MareformaObserver`: context manager recording agent events to `graph.db`
+- `LangChainAdapter`: LangChain callback handler
 
-## v0.1.0 — 2026-03-25
+## v0.1.0 - 2026-03-25
 
 Initial release. `@transform` decorator, `ctx.claim()`, `mareforma build`,
 SQLite epistemic graph, `claims.toml` backup.

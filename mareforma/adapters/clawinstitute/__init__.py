@@ -1,10 +1,12 @@
 """ClawInstitute adapter: workshop events → signed mareforma claims.
 
 The adapter is generic: ClawInstitute hosts many applications, and
-any of them produces workshop posts. ``EventHook`` polls a workspace
-for new posts, emits an :class:`~mareforma.events.EventPayload` per
-post, and each subscribed handler can turn that into a signed
-``urn:mareforma:predicate:workshop-event:v1`` claim.
+any of them produces workshop posts. ``EventHook.dispatch`` turns
+each workshop post into an :class:`~mareforma.events.EventPayload`
+and fans it out to subscribed handlers, which can sign it as a
+``urn:mareforma:predicate:workshop-event:v1`` claim. Callers fetch
+the posts themselves through the client
+(:meth:`ClawInstituteClient.list_workspace_posts`).
 
 The HTTP transport is a :class:`~typing.Protocol`
 (:class:`ClawInstituteClient`) so tests and downstream code can plug

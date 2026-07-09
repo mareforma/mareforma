@@ -268,11 +268,12 @@ class _ObservedConnection(sqlite3.Connection):
 # -- thread seams: wrap the start entry points (cross-version) ----------------
 #
 # The PEP-578 audit hook cannot carry thread-seam detection on its own: CPython
-# emits NO thread-start audit event before 3.13 (only 3.13+ raises
-# _thread.start_joinable_thread). A thread-hidden read would then give a
+# emits NO thread-start audit event before 3.12 (3.12 raises
+# _thread.start_new_thread and 3.13+ _thread.start_joinable_thread). A
+# thread-hidden read would then give a
 # CONFIDENT FALSE UNGROUNDED — the exact failure OPAQUE exists to prevent. So
 # the robust mechanism wraps the thread entry points directly, which works on
-# every supported version; the audit-hook thread events stay as extra 3.13+
+# every supported version; the audit-hook thread events stay as extra 3.12+
 # coverage for threads spawned via C paths.
 
 def _wrap_thread_seams() -> None:

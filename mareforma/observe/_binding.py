@@ -7,8 +7,9 @@ producer can read ``/etc/hostname`` inside the scope, earn a signed GROUNDED, an
 bind it onto a finding citing a trial dataset it never touched — the verdict is
 honest about the read it saw, dishonest about the claim it is attached to.
 
-This module is that gate. It compares the verdict's cited set against the
-finding's own citation identifiers and reports one of three states:
+This module is that gate. It compares the sources the verdict actually observed a
+matching read for (its ``grounded_sources``, not the full declared cite set)
+against the finding's own citation identifiers and reports one of three states:
 
 - ``MATCHED``        — the verdict cites at least one source the finding cites.
                        The GROUNDED attestation is about the finding's own data.

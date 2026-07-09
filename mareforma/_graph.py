@@ -1487,8 +1487,9 @@ class EpistemicGraph:
 
         Accepts a :class:`mareforma.observe.GroundingVerdict` (the normal path),
         a pre-built signed-record dict, or None. Returns the compact record
-        (version, grounding, reason, cited_sources, receipt_digest) bound into
-        the signed envelope, or None when no verdict was supplied. This does NOT
+        (version, grounding, reason, cited_sources, grounded_sources,
+        receipt_digest) bound into the signed envelope, or None when no verdict
+        was supplied. This does NOT
         cross-check the finding's citation — that is :meth:`_bind_grounding`,
         which the write path calls instead.
         """

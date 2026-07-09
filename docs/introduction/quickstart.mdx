@@ -54,6 +54,33 @@ and building on which upstream claims (`supports`). Claims are append-only:
 once recorded, a claim is built upon, contradicted, or retracted, never
 overwritten.
 
+## Record whether the data was there
+
+The `classification="ANALYTICAL"` above is the agent's own declaration. Mareforma
+can check it against what the run actually did. Wrap the code that reads the data
+in `observe()` and pass the verdict into the claim.
+
+```python
+from mareforma.observe import observe
+
+with observe(cites="dataset_alpha") as obs:
+    result = analyze("dataset_alpha")   # your pipeline reads the data here
+
+claim_id = graph.assert_claim(
+    "Cell type A receives more inhibitory input than cell type B",
+    classification="ANALYTICAL",
+    generated_by="agent/model-a/lab_a",
+    source_name="dataset_alpha",
+    observed_grounding=obs.verdict.to_signed_dict(),
+)
+```
+
+`obs.verdict` is `GROUNDED` if a read of `dataset_alpha` was observed inside the
+block, `UNGROUNDED` if none was, and `OPAQUE` if the read happened somewhere
+Mareforma could not see: a subprocess, a C extension, a warmed connection.
+Mareforma computes this from the run, so an agent that declares `ANALYTICAL` on a
+silent pipeline failure leaves the gap on the record instead of hiding it.
+
 ## Query what is already known
 
 ```python
@@ -73,8 +100,8 @@ stored prompt-injection in earlier claim text cannot escape.
 ## Bootstrap an ESTABLISHED upstream
 
 REPLICATED requires at least one `ESTABLISHED` claim in the converging
-peers' `supports[]` (Cochrane / GRADE evidence-chain methodology, stops
-replication-of-noise). On a fresh project, no claim is yet ESTABLISHED, so
+peers' `supports[]`, which stops replication of noise. On a fresh project,
+no claim is yet ESTABLISHED, so
 the first thing the root validator does is assert a *seed claim*: a claim
 that goes directly to `ESTABLISHED` via a signed seed envelope.
 
@@ -106,7 +133,7 @@ graph.enroll_validator(
     identity="lab_b",
 )
 
-# Agent A — signed by your loaded (root) key
+# Agent A: signed by your loaded (root) key
 id_a = graph.assert_claim(
     "Target T elevated in condition C (n=620)",
     classification="ANALYTICAL",
@@ -115,7 +142,7 @@ id_a = graph.assert_claim(
     source_name="dataset_alpha",
 )
 
-# Agent B — independent data, signed by a DISTINCT key
+# Agent B: independent data, signed by a distinct key
 id_b = graph.assert_claim(
     "Target T elevated in condition C (n=580)",
     classification="ANALYTICAL",

@@ -139,8 +139,9 @@ marker into the word "independent."
 ## The trust map
 
 A claim carries many trust properties, and they are not equal. Some Mareforma
-computes from evidence; some through a proxy whose bound it names; some it does
-not evaluate at all and says so. `mareforma map <claim>` places each property
+computes from evidence (`COMPUTED`); some through a proxy whose bound it names
+(`PROXIED`); some it does not evaluate at all and says so (`DEFERRED`).
+`mareforma map <claim>` places each property
 (attributability, provenance, grounding, methodological validity, leakage,
 independence, contestation, standing, trust-root, witnessing) at its tier with
 the residual named, so trust reads as a structured ledger instead of one word.
@@ -189,7 +190,7 @@ This is a disclosure of trust-domain concentration, not a Sybil guard.
 ## How ESTABLISHED is reached
 
 ```python
-# Only after REPLICATED — will raise ValueError if PRELIMINARY
+# Only after REPLICATED: raises ValueError if still PRELIMINARY
 graph.validate(claim_id, validated_by="reviewer@example.org")
 ```
 

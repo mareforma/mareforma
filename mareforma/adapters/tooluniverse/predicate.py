@@ -6,14 +6,14 @@ that's mareforma's signed predicate, binding `claim_id`, `text`,
 `source_name`, `artifact_hash`, `created_at`, and the GRADE evidence.
 
 The `tool-call/v1` predicate lives *inside* the claim's text as a
-tagged JSON block (same pattern the dependency maqueta's
+tagged JSON block (same pattern the sandboxed-execution dependency's
 container-exec/v1 predicate uses). Decode is via a deterministic
 substring scan; encode refuses ambiguous boundary characters
 (``</predicate>`` smuggled into a tool name, etc.).
 
 Public:
 
-- :data:`PREDICATE_TYPE_V1`: the URI reserved by this maqueta.
+- :data:`PREDICATE_TYPE_V1`: the URI reserved by this adapter.
 - :data:`PREDICATE_TAG_OPEN` / :data:`PREDICATE_TAG_CLOSE`: boundary tags.
 - :func:`build_tool_call_predicate`: assembles the predicate dict.
 - :func:`encode_predicate_into_text`: writes the tagged block.
@@ -64,9 +64,9 @@ _REQUIRED_FIELDS = (
     "completed_at",
     "cache_hit",
     "tool_call_id",
-    # ``cache_origin`` is required as of Phase 2 — null when cache_hit
-    # is false, "local-graph" or "external-cache" when true. Honest
-    # null is the truth-telling signal.
+    # ``cache_origin`` is required: null when cache_hit is false,
+    # "local-graph" or "external-cache" when true. Honest null is the
+    # truth-telling signal.
     "cache_origin",
 )
 
@@ -124,8 +124,8 @@ def build_tool_call_predicate(
 def encode_predicate_into_text(predicate: dict[str, Any], summary: str) -> str:
     """Write the predicate as a tagged JSON block, then the summary line.
 
-    Matches the dependency maqueta's pattern. Refuses to encode a
-    predicate whose JSON form contains the boundary marker: that's a
+    Matches the sandboxed-execution dependency's pattern. Refuses to
+    encode a predicate whose JSON form contains the boundary marker: that's a
     tamper signal, raise rather than silently writing ambiguous text.
     """
 

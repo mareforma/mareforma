@@ -58,25 +58,24 @@ graph.assert_claim(
 Science advances by documented contestation. ESTABLISHED means
 human-validated evidence, not settled truth.
 
-## Epistemic distance
+## Reading a chain of origins
 
-Epistemic distance measures how far a conclusion is from its raw data.
-A short chain of ANALYTICAL steps close to raw data is more trustworthy
-than a long chain of INFERRED steps, even if each step looks locally valid.
-
-The pessimistic rule: one INFERRED step in a chain means the full chain
-carries INFERRED-level epistemic fragility. Origin does not average;
-it takes the weakest link.
+A conclusion is only as grounded as the weakest step behind it. A short chain
+of ANALYTICAL steps close to raw data is more trustworthy than a long chain of
+INFERRED steps, even if each step looks locally valid. One INFERRED step means
+the chain as a whole rests on inference: origin does not average, and a reader
+should take the weakest link.
 
 ```
 raw data → ANALYTICAL → ANALYTICAL → INFERRED → conclusion
                                                   ↑
-                                     full chain is INFERRED
+                                the chain is only as grounded as this step
 ```
 
-This is why the `classification` field is recorded at assertion time and
-cannot be changed retroactively. The epistemic origin of every claim is
-permanently visible in the graph.
+This is a way to read a chain, not a label Mareforma computes for you. The graph
+does not collapse a chain to a single origin. It records each claim's origin at
+assertion time, permanently and unchangeably, so the weakest link is visible
+when you walk the `supports[]` edges.
 
 ## Graph fragmentation
 

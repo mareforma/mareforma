@@ -15,7 +15,7 @@ came from LLM prior knowledge.
 ## Recording origin at assertion time
 
 ```python
-result = run_medea_fork(disease="rheumatoid arthritis", cell_type="CD4")
+result = _run_medea_fork(disease="rheumatoid arthritis", cell_type="CD4")
 classification = "ANALYTICAL" if result["generated_code"] else "INFERRED"
 
 graph.assert_claim(
@@ -36,8 +36,8 @@ anyone acted on the results. Led to a bug report:
 ## Setup
 
 ```bash
-python 05_drug_target_provenance.py --install   # ~21 GB MedeaDB download
-python 05_drug_target_provenance.py --data
+python 05_drug_target_provenance.py --install   # install packages
+python 05_drug_target_provenance.py --data      # ~21 GB MedeaDB download
 cp Medea/env_template.txt .env                  # set OPENAI_API_KEY
 python 05_drug_target_provenance.py --run
 ```

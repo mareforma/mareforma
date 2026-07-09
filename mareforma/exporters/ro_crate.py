@@ -14,9 +14,6 @@ work:
 
 * RO-Crate zip writer (bundle the JSON-LD + claim text payload files +
   signed-envelope sidecars into a single ``.crate.zip``).
-* Software / SoftwareApplication entities for the agents (one per
-  distinct ``generated_by`` value) so downstream tools can audit the
-  toolchain.
 * Embedding the GRADE EvidenceVector as ``additionalProperty``
   PropertyValue rows for quality-of-evidence downstream filters.
 """

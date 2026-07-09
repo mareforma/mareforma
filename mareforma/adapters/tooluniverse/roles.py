@@ -12,8 +12,8 @@ The signed bytes for a role attestation are::
 so the signing covers the role+payload pair, not raw payload bytes,
 preventing role-confusion across attestation types.
 
-Phase 3 ships four roles, mirroring the agent-native maqueta's
-``claim-with-roles/v1`` predicate variant:
+This module defines four roles, mirroring the provenance-aware
+execution package's ``claim-with-roles/v1`` predicate variant:
 
 - ``tool``       : the tool itself attests its own identity (name,
                    version, config_fingerprint) at call time.
@@ -68,7 +68,7 @@ def _canonical_payload_bytes(role: str, payload: dict[str, Any]) -> bytes:
 
     Uses JSON-with-sorted-keys (the same byte-stable shape mareforma's
     own signed predicate uses). NaN/Inf rejected: we want the same
-    finiteness guarantees as the rest of the maqueta.
+    finiteness guarantees as the rest of the package.
     """
 
     body = {"role": role, "payload": payload}

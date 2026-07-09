@@ -84,7 +84,7 @@ records a **seam** and, when the seam is relevant to the citation, returns
 
 Seam relevance keeps a seam from hiding a tell it could not have caused. A socket
 connection cannot deliver a **local file** read, so a socket seam does not force
-`OPAQUE` on a file-cited finding — the silent-fallback `UNGROUNDED` tell survives
+`OPAQUE` on a file-cited finding: the silent-fallback `UNGROUNDED` tell survives
 an unrelated network call. A socket seam does block a **URL** or **content-address**
 citation, whose bytes can arrive over the network. Thread, subprocess, and
 coverage-gap seams can hide anything, so they always block; an unknown seam or
@@ -172,7 +172,7 @@ mareforma measure run-receipts.jsonl --json
 A `GROUNDED` verdict is only as honest as the claim it is attached to. The verdict
 is computed against the source you named in `observe(cites=...)`, which need not be
 the data the finding cites. So at bind time the verdict's cited set is cross-checked
-against the finding's own citation — its `data_id` set plus any `data_source=`. A
+against the finding's own citation: its `data_id` set plus any `data_source=`. A
 `GROUNDED` whose cited set shares nothing with the finding downgrades to `OPAQUE`
 with a signed reason, or raises `GroundingCitationMismatchError` when you pass
 `grounding_strict=True`.
