@@ -34,7 +34,7 @@ independent lines are CORROBORATED.
 
 LangChain integration
 ---------------------
-graph.get_tools(generated_by="...") returns [query_graph, assert_finding] as plain
+graph.get_tools(generated_by="...") returns [query_graph, record_claim] as plain
 callables. Wrap with @tool for LangChain, or pass directly to the Anthropic SDK.
 Each agent gets its own tool set — generated_by is baked into the closure.
 
@@ -98,6 +98,15 @@ _signing.bootstrap_key(lab_a_key_path)
 _signing.bootstrap_key(lab_b_key_path)
 lab_a_priv = _signing.load_private_key(lab_a_key_path)
 lab_b_priv = _signing.load_private_key(lab_b_key_path)
+
+# Enroll lab_b as a validator so analyst B can open the shared graph under its
+# own key and sign its own finding in the trust layer below. The finding-side
+# ladder counts DISTINCT signers, so the two converging findings must be signed
+# by different keys to reach CORROBORATED. The root key (auto-enrolled on first
+# open) signs the enrollment.
+graph.enroll_validator(
+    _signing.public_key_to_pem(lab_b_priv.public_key()), identity="lab_b"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +262,12 @@ plan = Prediction(
 show("frame_id (the question)", prop.frame_id()[:8] + "…")
 show("content_id (the answer)", prop.content_id()[:8] + "…")
 
+# Analyst B signs its finding with its own key. assert_finding signs with the
+# graph's loaded key, and the finding-side ladder counts DISTINCT signers, so
+# analyst B opens the shared graph under lab_b's key. Analyst A keeps the graph's
+# default key: two datasets, two signers -> CORROBORATED.
+graph_b = mareforma.open(tmp, key_path=lab_b_key_path)
+
 # Analyst A on dataset_alpha: a standardised mean difference, positive, with a
 # 90% CI excluding zero (the one-sided test at alpha=0.05).
 result_a = graph.assert_finding(
@@ -272,9 +287,9 @@ result_a = graph.assert_finding(
 show("alpha bearing (computed)", result_a["bearing"]["direction"])
 show("alpha status (derived)", result_a["status"])
 
-# Analyst B's independent run on dataset_beta. A distinct data_id is a second
-# independent line of support for the same proposition.
-result_b = graph.assert_finding(
+# Analyst B's independent run on dataset_beta: a distinct signer (lab_b's key)
+# on a distinct dataset is a second independent line for the same proposition.
+result_b = graph_b.assert_finding(
     prop,
     plan,
     EffectEstimate(
@@ -294,7 +309,7 @@ show("beta status (derived)", result_b["status"])
 print()
 print("  Neither agent declared 'supports'. mareforma computed each bearing")
 print("  from the pre-registered rule and derived CORROBORATED from two")
-print("  independent datasets.")
+print("  independent signers on two datasets.")
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +335,7 @@ print("  a count over independent data, not a self-declared label.")
 # Cleanup
 # ---------------------------------------------------------------------------
 
+graph_b.close()
 graph.close()
 print(f"\n{'─' * 60}")
 print("  Done. Graph written to:", tmp / ".mareforma" / "graph.db")

@@ -26,7 +26,7 @@ than silence.
 
 LangChain integration
 ---------------------
-graph.get_tools(generated_by="...") returns [query_graph, assert_finding] as plain
+graph.get_tools(generated_by="...") returns [query_graph, record_claim] as plain
 callables. Wrap with @tool for LangChain. generated_by is baked into the closure
 as a display label. It does not drive REPLICATED: the signing key
 (asserter_keyid) is the independence unit. The two converging consensus claims
