@@ -1,14 +1,13 @@
-"""ProvenanceToolAdapter: the load-bearing wedge primitive.
+"""ProvenanceToolAdapter: the load-bearing adapter primitive.
 
 Wraps any object satisfying the :class:`Tool` protocol so each
 ``.call(**kwargs)`` produces a signed mareforma claim with a
 ``tool-call/v1`` predicate.
 
-Phase 1 ships the sync path against in-process Python tools.
-Phase 2 layers on cache-hit-as-fresh-claim semantics and the
-``mareforma-tu`` CLI. Phase 3 adds ``.call_async`` for
-TaskManager-shaped async tools. Phase 4 hardens against adversarial
-inputs and formalises selective wrapping.
+The adapter supports a sync path against in-process Python tools,
+cache-hit-as-fresh-claim semantics and the ``mareforma-tu`` CLI,
+``.call_async`` for TaskManager-shaped async tools, and hardening
+against adversarial inputs with selective wrapping.
 """
 
 from __future__ import annotations
@@ -48,8 +47,8 @@ __all__ = [
 
 _TOOL_NAMESPACE_TOOLUNIVERSE = "tooluniverse"
 
-# 10 MB default cap — matches typical LLM-context payload limits with
-# headroom. Phase 4 introduces; user-overridable per adapter.
+# 10 MB default cap: matches typical LLM-context payload limits with
+# headroom. User-overridable per adapter.
 MAX_RESULT_BYTES_DEFAULT = 10 * 1024 * 1024
 
 
@@ -83,8 +82,8 @@ class ProvenanceToolAdapter:
     ----------
     tool : Tool
         Anything conforming to the :class:`Tool` protocol. ToolUniverse
-        callables wrapped via :class:`ToolUniverseToolWrapper` (Phase 2)
-        or local mocks conforming structurally both work.
+        callables wrapped via :class:`ToolUniverseToolWrapper` or local
+        mocks conforming structurally both work.
     graph : EpistemicGraph
         An open mareforma graph with a loaded signer. Unsigned graphs
         raise at first call.
@@ -94,12 +93,11 @@ class ProvenanceToolAdapter:
         this tool). Recorded in the predicate AND in the graph's
         ``supports[]`` chain so lineage walks find both.
     role : str
-        Logical role of this call (Phase 3 adds role attestations as
-        a separate signed structure). Phase 1 records the role as a
-        free-form string in the predicate; the signed attestation
-        round is Phase 3.
+        Logical role of this call. The role is recorded as a free-form
+        string in the predicate; role attestations are a separate
+        signed structure (see :mod:`roles`).
     tool_namespace : str
-        Default ``"tooluniverse"``. Other ateliers passing custom tool
+        Default ``"tooluniverse"``. Other callers passing custom tool
         registries override this.
     canonicalizer : str
         The canonicalizer registered with
@@ -141,11 +139,11 @@ class ProvenanceToolAdapter:
         self._tool_config_fingerprint = fingerprint_tool_config(
             self._tool_config
         )
-        # Phase 3: detect exec-class at wrap time so the call paths can
-        # branch on the predicate URI without re-inspecting category.
+        # Detect exec-class at wrap time so the call paths can branch
+        # on the predicate URI without re-inspecting category.
         self._is_exec_class = is_exec_class(tool)
-        # Phase 4: sanitise + record tool-identity strings ONCE so the
-        # predicate doesn't pay sanitisation cost on every call.
+        # Sanitise + record tool-identity strings ONCE so the predicate
+        # doesn't pay sanitisation cost on every call.
         self._sanitized_tool_name = _sanitize_identity(
             getattr(tool, "name", "<unnamed>"), field="tool.name",
         )
@@ -162,8 +160,7 @@ class ProvenanceToolAdapter:
         Raises :class:`ToolCallError` if the underlying tool's
         ``.call(**kwargs)`` raises. The signed claim is NOT written
         in that case: failed calls produce no provenance row by
-        default; Phase 4 may introduce a failure-class predicate
-        if a use case emerges.
+        default.
         """
 
         started_at = _utc_now()
@@ -444,7 +441,7 @@ class ProvenanceToolAdapter:
 def _utc_now() -> str:
     """Return UTC ISO 8601 with `+00:00` suffix.
 
-    Mareforma's convention (see /tmp/primario/context/architecture.md).
+    Mareforma's timestamp convention.
     """
 
     return datetime.now(timezone.utc).isoformat()

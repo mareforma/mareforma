@@ -25,7 +25,7 @@ No API key required. To use a real LLM:
 ```python
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
-agent = create_react_agent(ChatOpenAI(model="gpt-4o"), tools=[query_graph, assert_finding])
+agent = create_react_agent(ChatOpenAI(model="gpt-4o"), tools=[query_graph, record_claim])
 ```
 
 ## Key pattern
@@ -37,7 +37,7 @@ def query_graph(topic: str, min_support: str = "PRELIMINARY") -> str:
     return json.dumps([r["text"] for r in results])
 
 @tool
-def assert_finding(text: str, classification: str, supports: list[str]) -> str:
+def record_claim(text: str, classification: str, supports: list[str]) -> str:
     return graph.assert_claim(
         text, classification=classification, supports=supports,
         generated_by="agent/synthesiser",
@@ -85,6 +85,6 @@ Neither agent declared support: the bearing is computed from the pre-registered
 rule. The two lines are distinct runs (`generated_by`) on distinct datasets
 (`data_id`). On an unsigned graph, independence is counted on that run axis, so
 the proposition reaches `CORROBORATED`. When findings are signed, independence
-counts distinct *authenticated signers* instead — two analysts each write
+counts distinct *authenticated signers* instead: two analysts each write
 through a graph opened with their own key, so a single signer cannot
 self-corroborate. See [Findings](/concepts/findings).

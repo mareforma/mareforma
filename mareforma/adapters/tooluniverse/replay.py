@@ -1,7 +1,7 @@
 """Replay-from-claim: re-run a tool call from its stored claim and check the
 result reproduces the pinned digest.
 
-Phase 1 ships the single-claim case: given a claim_id and a runtime
+Replay handles the single-claim case: given a claim_id and a runtime
 tool registry, look up the tool, re-execute the call with the
 predicate's canonical arguments, canonicalise the new result, and
 assert it matches the predicate's pinned `result_digest`.
@@ -12,9 +12,6 @@ so a caller who needs to trust the rest of the recorded predicate (timestamps,
 cache flags, ``tool_config_fingerprint``) must first run
 :func:`verify_tool_call_envelope` against the signing key. Replay alone proves
 only that re-executing the recorded arguments yields the recorded result digest.
-
-The full chain replay across `supports[]` for a multi-tool reasoning
-trajectory is Phase 6's federation capstone.
 """
 
 from __future__ import annotations
@@ -60,13 +57,12 @@ def replay_from_claim(
     instance. The version is checked against the predicate's pinned
     ``tool_version`` and surfaces as ``diff_fields`` on mismatch.
 
-    ``expected_tool_config_fingerprint`` (Phase 4): when supplied,
-    the replayer compares it against the predicate's pinned
+    ``expected_tool_config_fingerprint``: when supplied, the replayer
+    compares it against the predicate's pinned
     ``tool_config_fingerprint``. Mismatch adds
     ``"tool_config_fingerprint"`` to ``diff_fields``. This is the
-    audit hook for stale-cache and config-drift detection (Phase 2
-    SEC-T201, Phase 3 SEC-T305 follow-up). Backward-compatible:
-    omitting the kwarg skips the check.
+    audit hook for stale-cache and config-drift detection.
+    Backward-compatible: omitting the kwarg skips the check.
 
     Returns :class:`ReplayResult`. ``ok=True`` requires:
 

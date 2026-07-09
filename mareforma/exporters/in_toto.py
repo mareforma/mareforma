@@ -8,8 +8,8 @@ Statement v1 dict, leaving signing + DSSE wrap to the caller. Use cases:
   their own keys.
 * Embed inside a higher-level provenance package (e.g. an RO-Crate
   Process Run Crate that also carries an in-toto attestation).
-* Test fixtures + cross-conformance checks (item T7 in eng review)
-  that compare in-toto + RO-Crate views of the same graph.
+* Test fixtures + cross-conformance checks that compare in-toto +
+  RO-Crate views of the same graph.
 
 For a signed bundle ready to verify with ``mareforma verify``, use
 :mod:`mareforma.export_bundle` (`mareforma export --bundle`).

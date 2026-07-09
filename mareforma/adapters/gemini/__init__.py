@@ -74,9 +74,9 @@ SUPPORTED_CAPABILITIES: Mapping[str, str] = MappingProxyType({
 # Cached at module load so predicate_uris() is allocation-free.
 _PREDICATE_URIS: tuple[str, ...] = tuple(SUPPORTED_CAPABILITIES.values())
 
-# Per-capability required-field schema. Kept minimal in v0.3.3 — the
-# field sets mirror the atelier predicate builders' load-bearing keys
-# so a v0.3.4 full-adapter promotion will not break existing claims.
+# Per-capability required-field schema. Kept minimal: the field sets
+# mirror the shared predicate builders' load-bearing keys so a later
+# full-adapter promotion will not break existing claims.
 # Each capability's required fields are validated at ingest time;
 # missing fields raise ValueError BEFORE assert_claim runs.
 REQUIRED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
@@ -120,9 +120,9 @@ def _sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
     Sanitisation runs on string values only (digests, version
     strings, and free-text summaries), leaving numbers, bools, and
-    nested digest lists untouched. Mirrors the clawinstitute
-    sanitisation contract so all adapters scrub external content
-    before it reaches the signed envelope.
+    nested digest lists untouched. Mirrors the shared sanitisation
+    contract so all adapters scrub external content before it reaches
+    the signed envelope.
     """
     out: dict[str, Any] = {}
     for k, v in payload.items():

@@ -144,13 +144,17 @@ class RestoreError(MareformaError):
     The ``kind`` attribute lets callers pattern-match on the failure
     mode without parsing the message string:
 
-      - ``'graph_not_empty'``        : existing graph.db has claims
-      - ``'toml_not_found'``         : claims.toml does not exist
-      - ``'toml_malformed'``         : TOML parse error
-      - ``'enrollment_unverified'``  : enrollment envelope fails verify
-      - ``'claim_unverified'``       : claim signature fails verify
-      - ``'mode_inconsistent'``      : signed-mode graph with unsigned claim
-      - ``'orphan_signer'``          : claim signed by an unenrolled keyid
+      - ``'graph_not_empty'``          : existing graph.db has claims
+      - ``'toml_not_found'``           : claims.toml does not exist
+      - ``'toml_malformed'``           : TOML parse error
+      - ``'enrollment_unverified'``    : enrollment envelope fails verify
+      - ``'claim_unverified'``         : claim signature fails verify
+      - ``'mode_inconsistent'``        : signed-mode graph with unsigned claim
+      - ``'orphan_signer'``            : claim signed by an unenrolled keyid
+      - ``'policy_absent'``            : enforce_rekor_policy set but no signed policy
+      - ``'policy_unverifiable'``      : enforced policy has no pinned Rekor log key
+      - ``'policy_unverified'``        : project_policy envelope fails verify
+      - ``'rekor_inclusion_invalid'``  : Rekor inclusion entry or proof invalid
     """
 
     def __init__(self, message: str, *, kind: str) -> None:

@@ -41,7 +41,7 @@ The API field is `classification`. This page explains what its values mean.
 ## Why this matters
 
 The origin captures the difference between two claims that look
-identical as text but represent fundamentally different epistemic situations:
+identical as text but represent different epistemic situations:
 
 ```python
 # Pipeline ran, real omics data queried, output confirmed
@@ -51,15 +51,19 @@ graph.assert_claim(
     source_name="medeadb",
 )
 
-# Pipeline failed silently — LLM answered from training knowledge
+# Pipeline failed silently: LLM answered from training knowledge
 graph.assert_claim(
     "IL-21 is overexpressed in SLE CD4+ T cells",
     classification="INFERRED",  # honest
 )
 ```
 
-Both claims assert the same text. Only the origin reveals that one
-is grounded in data and one is not.
+Both claims assert the same text. The origin is the agent's declaration of
+which is which. On its own that declaration is self-reported, and a silent
+pipeline failure is exactly the case where an agent might declare `ANALYTICAL`
+and be wrong. [Grounding](/concepts/grounding) is Mareforma's independent check
+on the declaration: it watches the run and records whether the cited data was
+actually read.
 
 ## The ANALYTICAL lie
 
@@ -67,6 +71,11 @@ The most dangerous misuse of Mareforma is asserting `ANALYTICAL` when the
 data pipeline returned null and the agent fell back to LLM knowledge. The
 graph records this permanently: future agents may build on it, reviewers
 may validate it, and the epistemic chain will be wrong at the root.
+
+The declaration is on the honor system. The [grounding](/concepts/grounding)
+verdict is the execution-observed catch: an agent that declares `ANALYTICAL`
+on a run where no read was seen gets an `UNGROUNDED` or `OPAQUE` verdict next
+to its claim, and the gap is on the record for a reviewer to challenge.
 
 The rule: if you did not run deterministic code against real data and
 receive real output, the classification is `INFERRED`. Even if the answer

@@ -56,9 +56,10 @@ class EventHook:
         by :meth:`emit_sample` and as the natural target for handlers
         that close over it.
     client : ClawInstituteClient | None
-        HTTP transport. Optional: pass ``None`` for adapters that only
-        consume events handed to them via :meth:`dispatch`. Required
-        for the polling helpers (added in v0.3.4+).
+        HTTP transport for fetching workspace posts. Optional: pass
+        ``None`` when posts are handed to :meth:`dispatch` from
+        elsewhere. The hook does not poll on its own; a caller fetches
+        posts through the client and feeds them to :meth:`dispatch`.
     """
 
     def __init__(

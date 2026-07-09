@@ -1,7 +1,7 @@
 """Selective tool wrapping: which tools get provenance, which pass through.
 
-Phase 2 ships the substantive / skip / unknown three-bucket rule. Tools
-declare a ``category`` attribute (matching ToolUniverse's tool_config
+Selective wrapping uses a substantive / skip / unknown three-bucket rule.
+Tools declare a ``category`` attribute (matching ToolUniverse's tool_config
 ``category`` field); the default selector accepts the wrap or skip
 decision from the bucket the category lands in, and warns when a
 category is unknown (default-wrap with a flag the operator should

@@ -10,7 +10,7 @@ Traffic light (claim-based)
 The ``error`` state is distinct from ``red``: a fresh project legitimately
 has no claims yet (``red``), but a corrupted graph.db that cannot be
 read at all is a different operational signal and gets its own traffic
-light so operators looking at ``mareforma health`` can tell them apart.
+light so operators looking at ``mareforma status`` can tell them apart.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ def compute_health(root: Path, conn: sqlite3.Connection) -> HealthReport:
     """Build a HealthReport from graph.db.
 
     Never raises. On a SQLite read failure the report's traffic light
-    is set to ``"error"`` so an operator looking at ``mareforma health``
+    is set to ``"error"`` so an operator looking at ``mareforma status``
     can distinguish a corrupted / unreadable graph from an empty one
     (which legitimately returns ``"red"`` for ``no claims recorded``).
     """
@@ -104,7 +104,7 @@ def _compute_traffic_light(report: HealthReport) -> tuple[str, str]:
 # append-only JSONL trail of operational signals (provenance queries,
 # grounding verdicts, DOI drift scans, refresh retries). Operators
 # read rolling rates off the trail via :func:`compute_rolling_stats`
-# and the ``mareforma stats`` CLI. Best-effort write — a failure to
+# and the ``mareforma activity`` CLI. Best-effort write — a failure to
 # append is logged via a RuntimeWarning and the underlying operation
 # still completes.
 

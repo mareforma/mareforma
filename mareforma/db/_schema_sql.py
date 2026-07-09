@@ -120,7 +120,8 @@ CREATE TABLE IF NOT EXISTS claims (
     -- supplying a valid DSSE envelope JSON string.
     original_signature_bundle TEXT,
     -- Observed grounding verdict (the computed axis), as a JSON record:
-    -- {version, grounding, reason, receipt_digest}. Distinct from the declared
+    -- {version, grounding, reason, cited_sources, grounded_sources,
+    -- receipt_digest}. Distinct from the declared
     -- ``classification`` column above and never overlapping its value space.
     -- Written from the same record bound into the signed predicate, so this is
     -- a queryable denormalisation the split measurement and the promotion gate

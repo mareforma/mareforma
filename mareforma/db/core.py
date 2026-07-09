@@ -917,12 +917,12 @@ def _reconcile_idempotency_row(
         raise IdempotencyConflictError(
             f"idempotency_key={idempotency_key!r} already exists "
             f"with different {', '.join(mismatches)}. Use a "
-            "different idempotency_key — silently merging two "
+            "different idempotency_key: silently merging two "
             "different claims into one row would discard the "
             "second author's content and break REPLICATED "
-            "detection. For cross-lab convergence assert two "
-            "separate claims that share an entry in supports[] "
-            "with different generated_by values."
+            "detection. For cross-lab convergence, assert two "
+            "separate claims signed by distinct keys that share "
+            "an ESTABLISHED upstream claim in supports[]."
         )
     return row["claim_id"]
 
@@ -957,8 +957,9 @@ def add_claim(
 
     Returns the existing claim_id without inserting if idempotency_key
     already exists. After insert, checks for REPLICATED: if ≥2 claims share
-    the same upstream claim_id in supports[] with different generated_by,
-    all are promoted to support_level='REPLICATED'.
+    the same ESTABLISHED upstream claim_id in supports[] and carry distinct,
+    non-NULL asserter_keyid values, all are promoted to
+    support_level='REPLICATED'.
 
     Parameters
     ----------
@@ -1045,10 +1046,10 @@ def add_claim(
     # generated_by were discarded into the first caller's row, collapsing
     # what should have been two independent claims into one. The
     # "convergence convention" documented around this primitive actively
-    # destroyed what REPLICATED is supposed to detect (different
-    # generated_by values converging on shared upstream). The correct path
+    # destroyed what REPLICATED is supposed to detect (distinct signer
+    # identities converging on a shared upstream). The correct path
     # for cross-lab convergence is two separate claims that share an entry
-    # in supports[] with different generated_by — that fires REPLICATED.
+    # in supports[] with distinct asserter_keyid values, which fires REPLICATED.
     # Idempotency_key is retry-safety only.
     if idempotency_key is not None:
         try:
@@ -3219,7 +3220,7 @@ def update_claim(
     # Cycle / self-loop check on the NEW supports[] if it changed. Signed
     # claims refuse supports mutation upstream (SignedClaimImmutableError
     # raised earlier in this function), so reaching here implies an
-    # unsigned claim — the cycle-introduction window the DFS check covers.
+    # unsigned claim — the cycle-introduction window the acyclicity check covers.
     if supports_changed:
         new_supports_list = json.loads(new_supports_json)
         _check_no_cycle(conn, claim_id, new_supports_list)

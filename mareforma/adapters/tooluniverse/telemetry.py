@@ -1,10 +1,10 @@
 """Telemetry: append-only health.jsonl writer.
 
 Each completed tool call appends one line documenting the call's
-shape. The maqueta's `health.jsonl` aggregates one entry per phase
-capture (Stage 6.k); the adapter's per-call telemetry is a finer-
-grain stream living next to it (Phase 2 introduces this fully; Phase
-1 ships the writer so the wedge test can verify nothing is dropped).
+shape. The sandboxed-execution dependency writes an aggregate
+`health.jsonl`; the adapter's per-call telemetry is a finer-grain
+stream living next to it. The writer records every call so tests
+can verify nothing is dropped.
 """
 
 from __future__ import annotations

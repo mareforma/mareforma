@@ -60,11 +60,17 @@ the payload, not the payload bytes alone. PAE is::
 so a signature on (typeA, payload) cannot be replayed as a signature
 on (typeB, payload) even when the bytes are otherwise identical.
 
-The signed predicate carries exactly: ``claim_id``, ``text``,
-``classification``, ``generated_by``, ``supports``, ``contradicts``,
-``source_name``, ``artifact_hash``, ``created_at`` (the contract in
-:data:`SIGNED_FIELDS`) plus ``evidence`` (a GRADE EvidenceVector
-serialized via :meth:`mareforma._evidence.EvidenceVector.to_dict`).
+The signed predicate carries the :data:`SIGNED_FIELDS` contract
+(``claim_id``, ``text``, ``classification``, ``generated_by``,
+``supports``, ``contradicts``, ``source_name``, ``artifact_hash``,
+``created_at``) plus ``evidence`` (a GRADE EvidenceVector serialized
+via :meth:`mareforma._evidence.EvidenceVector.to_dict`). When the
+observer recorded a verdict it also carries an optional
+``observed_grounding`` record (the GROUNDED / UNGROUNDED / OPAQUE
+verdict with its reason, cited and grounded sources, and axis version).
+``observed_grounding`` is bound into the signed bytes only when present,
+so a claim asserted without it signs byte-identically to one from
+before the field existed.
 
 The ``rekor`` block is added by :func:`mareforma.signing.attach_rekor_entry`
 after a successful transparency-log submission; it does not affect

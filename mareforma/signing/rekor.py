@@ -1070,12 +1070,15 @@ def fetch_log_pubkey(
 ) -> bytes:
     """Fetch the log operator's public key from a Rekor instance.
 
-    Used by :func:`mareforma.open` to implement TOFU pinning of the
-    log key: the first connection to a Rekor URL fetches the key over
-    HTTPS and persists it to ``.mareforma/rekor_log_pubkey.pem``;
-    every subsequent connection loads from disk and mareforma
-    refuses silent rotation (a mismatched key triggers a verification
-    failure on the next inclusion proof).
+    A helper for callers who want Merkle inclusion-proof verification
+    but do not already hold the log's key. :func:`mareforma.open` does
+    NOT call this: auto-fetch is intentionally off, so a Rekor-enabled
+    session makes no surprise GET to ``/api/v1/log/publicKey``. The
+    caller fetches the key here (or obtains it from a trusted source
+    such as Sigstore TUF), then pins it by passing it to
+    ``mareforma.open(rekor_log_pubkey_pem=...)``, which persists it to
+    ``<root>/.mareforma/rekor_log_pubkey.pem`` on first use and refuses
+    silent rotation (a mismatched key on a later open() raises).
 
     URL transformation: ``rekor_url`` is typically the entries
     endpoint (``…/api/v1/log/entries``); the pubkey endpoint sits at

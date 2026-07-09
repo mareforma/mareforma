@@ -41,6 +41,9 @@ All persistent state lives in a single SQLite file at `<project_root>/.mareforma
 | `statement_cid` | TEXT | `NULL` | Yes | Content identifier of the signed in-toto Statement: `sha256(canonicalize(statement))` hex. Restore re-derives this from the row's fields + `evidence_json` and refuses any mismatch with the stored value |
 | `t_invalid` | INTEGER | `NULL` | Yes | Invalidation timestamp set by the `contradiction_invalidates_older` trigger when a signed `contradiction_verdicts` row references this claim. Default `query()` / `search()` excludes invalidated rows; pass `include_invalidated=True` for audit-mode listings |
 | `convergence_retry_needed` | INTEGER | `0` | No | `1` when `_maybe_update_replicated` swallowed a SQLite error during the post-INSERT promotion check. `EpistemicGraph.refresh_convergence()` walks flagged rows to retry detection and clear the flag. Round-trips through `claims.toml` so the operator's audit list survives restore |
+| `predicate_payload` | TEXT | `''` | No | Typed predicate body denormalized for `predicate_type` filtering without parsing the claim text JSON. Query-side only: NOT bound into the signed envelope or chain hash, and NOT compared during idempotency reconciliation |
+| `original_signature_bundle` | TEXT | `NULL` | Yes | On a federation-imported claim, the original signature envelope from the source graph. The active `signature_bundle` carries the receiver's re-signed envelope; verifiers that want the source-side proof read this. NULL on claims that were not federation-imported |
+| `observed_grounding` | TEXT | `NULL` | Yes | The computed grounding axis (distinct from the declared `classification`), stored as a JSON verdict record: `version`, `grounding` (`GROUNDED` / `UNGROUNDED` / `OPAQUE`), `reason`, `cited_sources`, `grounded_sources`, and `receipt_digest`. Written from the same record bound into the signed predicate, so this is a queryable denormalization the split measurement and the promotion gate read while the signed envelope stays authoritative. NULL on every claim asserted without the observer (including rows predating this column); a NULL here means the signed predicate omits the field too, so the signed bytes stay byte-identical to a pre-observer claim |
 | `created_at` | TEXT | UTC now | No | ISO 8601 UTC timestamp |
 | `updated_at` | TEXT | UTC now | No | ISO 8601 UTC; updated on every mutation |
 
@@ -58,12 +61,14 @@ All persistent state lives in a single SQLite file at `<project_root>/.mareforma
 | `idx_claims_transparency_logged` | `transparency_logged` | Non-unique | Accelerates `refresh_unsigned()` |
 | `idx_claims_artifact_hash` | `artifact_hash` | Unique (partial) | `WHERE artifact_hash IS NOT NULL`: only rows that supply a data hash |
 | `idx_claims_asserter_keyid` | `asserter_keyid` | Non-unique (partial) | `WHERE asserter_keyid IS NOT NULL`: the REPLICATED independence axis |
+| `idx_claims_convergence_retry` | `claim_id` | Non-unique (partial) | `WHERE convergence_retry_needed = 1`: keeps `refresh_convergence()` O(retry-pending) rather than O(N) |
 | `idx_claims_idempotency_key` | `idempotency_key` | Unique (partial) | `WHERE idempotency_key IS NOT NULL` |
 | `idx_claims_prev_hash` | `prev_hash` | Unique (partial) | `WHERE prev_hash IS NOT NULL`: catches branched chains from concurrent writers or manual SQL tamper |
 | `idx_claims_validator_keyid` | `validator_keyid` | Non-unique (partial) | `WHERE validator_keyid IS NOT NULL`: reputation aggregation |
 | `idx_replication_cluster` | `cluster_id` | Non-unique | On `replication_verdicts` |
 | `idx_replication_member` | `member_claim_id` | Non-unique | On `replication_verdicts` |
 | `idx_contradiction_member` | `member_claim_id` | Non-unique | On `contradiction_verdicts` |
+| `idx_rekor_inclusions_uuid` | `uuid` | Non-unique | On `rekor_inclusions`: looks up an inclusion by its Rekor UUID |
 
 ## State-machine triggers
 
@@ -85,6 +90,8 @@ Trigger errors carry `mareforma:state:<from>-><to>` codes that Python translates
 **`claims_update_status_terminal`**: `retracted` is terminal. Any UPDATE that transitions a row out of `retracted` raises `mareforma:state:retracted_is_terminal`. To resurrect a withdrawn finding, assert a new claim citing the old via `contradicts=[<old_claim_id>]`.
 
 **`claims_signed_fields_no_laundering`**: append-only over the signed predicate. Refuses any direct-SQL UPDATE that changes a signed-predicate value (`text`, `classification`, `generated_by`, `supports_json`, `contradicts_json`, `source_name`, `artifact_hash`, `ev_*`, `evidence_json`, `statement_cid`, `prev_hash`, `created_at`) on a row whose `signature_bundle IS NOT NULL`. Value-comparison fires only when something actually changed, so multi-column UPDATEs that re-emit unchanged values (e.g. status-only edits via `update_claim`) pass through. Raises `mareforma:append_only:signed_field_locked`.
+
+**`claims_signed_no_delete`**: the delete-side twin of `claims_signed_fields_no_laundering`. BEFORE DELETE on a row whose `signature_bundle IS NOT NULL`, raises `mareforma:append_only:signed_claim_no_delete`. A signed claim cannot be wiped from the local graph while its Rekor entry and chain hash persist. Unsigned claims (legacy / no-key mode) carry no cryptographic commitment and stay deletable.
 
 **`contradiction_invalidates_older`**: AFTER INSERT on `contradiction_verdicts`. Sets `claims.t_invalid = NEW.created_at` on the older of the two referenced claims (lex-smaller `claim_id` as the deterministic tie-break when timestamps collide), idempotent via `WHERE t_invalid IS NULL`.
 
@@ -118,7 +125,7 @@ Signed replication verdicts produced by enrolled validators. The OSS core accept
 | `cluster_id` | TEXT | Caller-supplied cluster identifier shared across all verdicts in one replication cluster |
 | `member_claim_id` | TEXT | FK to `claims(claim_id)`. The claim being asserted as replicated |
 | `other_claim_id` | TEXT | FK to `claims(claim_id)`. Optional second member of the pair (NULL for single-row cross-method verdicts) |
-| `method` | TEXT | CHECK enum: `hash-match` / `semantic-cluster` / `shared-resolved-upstream` / `cross-method` |
+| `method` | TEXT | CHECK enum: `hash-match` / `semantic-cluster` / `shared-resolved-upstream` / `cross-method` / `signed-elo-bracket-replay` |
 | `confidence_json` | TEXT | Canonical JSON of the confidence dict (e.g. `{"cosine":0.91,"nli_forward":0.88}`), never fused into a single score |
 | `issuer_keyid` | TEXT | FK to `validators(keyid)`. The signing validator's keyid |
 | `signature` | BLOB | Ed25519 signature over the DSSE PAE of the canonical payload (`payloadType=application/vnd.mareforma.replication-verdict+json`) |
@@ -165,6 +172,7 @@ Persistent cache of DOI resolution results to avoid repeated network calls.
 | `resolved` | INTEGER | `1` if Crossref or DataCite confirmed it |
 | `registry` | TEXT | `crossref` / `datacite` / `NULL` |
 | `last_checked_at` | TEXT | UTC ISO 8601; TTLs are 30 days for resolved, 24 hours for unresolved |
+| `content_digest` | TEXT | SHA-256 hex of canonicalized registry metadata (title, year, container-title, author family names). NULL when the row carries only a HEAD-check result. `find_drifted_dois` compares a fresh fetch against this to detect post-publication corrections or retractions |
 
 ## validators table
 
@@ -182,6 +190,31 @@ The per-project set of public keys allowed to promote claims to `ESTABLISHED`.
 The first key opened against a fresh `graph.db` auto-enrolls as the root with a self-signed envelope (`BEGIN IMMEDIATE` guards against two simultaneous opens both becoming roots). The chain walk enforces a singleton-root invariant: if two rows have `keyid == enrolled_by_keyid`, neither is trusted. Walk is capped at 64 hops.
 
 Removal is intentionally unsupported currently; validator history is append-only.
+
+## project_policy table
+
+A root-signed, single-row (`id = 1`) declaration of project-wide trust policy. Today it carries `rekor_required`: once set, findings must be witnessed by the transparency log before they can converge (this backs `require_rekor_witnessing`). The signed `envelope` is the authority; the flat columns are a denormalized read cache. Restore verifies the envelope against the enrolled root before enforcing.
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | INTEGER (PK) | CHECK `id = 1`: the row is a singleton |
+| `rekor_required` | INTEGER | `1` when findings must be Rekor-witnessed before they converge |
+| `signer_keyid` | TEXT | Keyid of the root that signed the policy envelope |
+| `envelope` | TEXT | Root-signed DSSE-style envelope; the authoritative copy of the policy |
+| `created_at` | TEXT | UTC ISO 8601 |
+
+## agent_activities table
+
+PROV-O Activity rows for ambient Claude Code tool calls, written by `mareforma.hooks.agent_hook`. High-volume, low-semantic-density data: most rows never escalate into signed claims, so they live outside the signed envelope chain.
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | INTEGER (PK) | AUTOINCREMENT |
+| `session_id` | TEXT | Agent session identifier (nullable) |
+| `tool_name` | TEXT | The tool that was invoked |
+| `tool_input` | TEXT | Serialized tool input |
+| `started_at` | TEXT | UTC ISO 8601 |
+| `prov_type` | TEXT | PROV-O type, default `prov:Activity` |
 
 ## Trust layer tables
 

@@ -1,13 +1,13 @@
 """
-health_extension.py: Contradiction detection extension for health.py (Step 3).
+_literature_health.py: contradiction detection over ingested literature claims.
 
-Adds detect_contradictions() to the end of the health report.
-Two modes:
+detect_contradictions() scans the literature_claims table in two modes:
   1. Structural: explicit contradicts[] JSON links between claims.
   2. Heuristic:  polarity mismatch on shared key terms across documents.
 
-Zero extra dependencies. Integration: import and call at the end of
-the existing health report in health.py.
+Zero extra dependencies. Consumed by the narrative exporter
+(mareforma.exporters.narrative), which flags the detected contradictions
+inline in the rendered Markdown.
 """
 
 from __future__ import annotations
