@@ -201,16 +201,19 @@ Return a single claim dict by ID, or `None` if not found.
 
 ---
 
-### `graph.trust_map(claim_id) → TrustMap | None`
+### `graph.trust_map(claim_id, *, reexec_record=None) → TrustMap | None`
 
 Return the per-finding `TrustMap` for a claim, or `None` if it does not
 exist. A read-side artifact: it places every trust property (attributability,
-provenance, grounding, methodological validity, leakage, independence,
-contestation, standing, trust-root, witnessing) at a tier
+provenance, grounding, faithfulness, methodological validity, leakage,
+independence, contestation, standing, trust-root, witnessing) at a tier
 (`COMPUTED` / `PROXIED` / `DEFERRED`) with the residual named, and infers
 nothing it cannot compute. Adds no signed field. `TrustMap.to_dict()` is
 canonicalizable and `TrustMap.canonical_digest()` commits to it. The
 `mareforma map` CLI renders it as text, JSON, or one self-contained HTML file.
+Pass `reexec_record=` (from `mareforma reexec <run> --map`, i.e.
+`ReexecResult.to_map_record()`) to place a re-execution faithfulness verdict on
+the `PROXIED` faithfulness axis; omitted, that axis reads `not present`.
 
 ---
 

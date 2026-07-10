@@ -142,9 +142,10 @@ A claim carries many trust properties, and they are not equal. Some Mareforma
 computes from evidence (`COMPUTED`); some through a proxy whose bound it names
 (`PROXIED`); some it does not evaluate at all and says so (`DEFERRED`).
 `mareforma map <claim>` places each property
-(attributability, provenance, grounding, methodological validity, leakage,
-independence, contestation, standing, trust-root, witnessing) at its tier with
-the residual named, so trust reads as a structured ledger instead of one word.
+(attributability, provenance, grounding, faithfulness, methodological validity,
+leakage, independence, contestation, standing, trust-root, witnessing) at its
+tier with the residual named, so trust reads as a structured ledger instead of
+one word.
 
 ```bash
 mareforma map <claim-id>              # human-readable ledger
@@ -155,6 +156,25 @@ mareforma map <claim-id> --html       # one self-contained page
 A property Mareforma cannot observe is stated (`DEFERRED`, `not present`, or
 `UNVERIFIABLE`), never inferred to a confident answer. The map is a read-side
 artifact: it adds no signed field and changes no verdict.
+
+## Faithfulness: re-execution as a proxy
+
+Faithfulness answers a narrow question: re-run the recorded pipeline in a clean
+scope, does the reported number come back? `mareforma reexec <run>` takes a
+recorded run, re-executes it, and returns a three-valued verdict: `REPRODUCED`,
+`DIVERGED`, or `COULD_NOT_REEXECUTE`.
+
+The third value is the honest one. A run that rests on world contact, private
+data, or expensive compute, or whose entry point will not resolve, raises, or
+returns a non-number, is `COULD_NOT_REEXECUTE`, never a false `REPRODUCED` and
+never a spurious `DIVERGED`. A re-run that could not run is not evidence that
+the number changed.
+
+Faithfulness is a `PROXIED` axis, and the residual names its bound: reproducible
+is not correct, and re-running the same pipeline on the same inputs is not an
+independent line of evidence. `mareforma reexec <run> --map <claim>` places the
+verdict on that claim's trust map as a read-side overlay, so it reads next to
+every other property without being confused for truth or independence.
 
 ## Verify
 

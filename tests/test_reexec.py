@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+import mareforma
 from mareforma.cli import cli
 from mareforma.reexec import (
     DEFAULT_ABS_TOLERANCE,
@@ -321,8 +322,6 @@ class TestCli:
     def test_map_overlay_places_the_verdict(self, tmp_path: Path) -> None:
         # --map renders the claim's trust map with the faithfulness verdict on
         # its PROXY axis, as a read-side overlay (never stored).
-        import mareforma
-
         r = CliRunner()
         with r.isolated_filesystem(temp_dir=tmp_path):
             with mareforma.open(".") as g:
@@ -340,8 +339,6 @@ class TestCli:
             assert "PROXIED" in res.output
 
     def test_map_overlay_unknown_claim_exits_one(self, tmp_path: Path) -> None:
-        import mareforma
-
         r = CliRunner()
         with r.isolated_filesystem(temp_dir=tmp_path):
             with mareforma.open(".") as g:

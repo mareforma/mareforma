@@ -146,14 +146,14 @@ it is gated to enrolled human-typed validators only.
 
 ## Trust map
 
-Three read-side CLI commands expose a claim's trust state without
+Four read-side CLI commands expose a claim's trust state without
 adding any signed field:
 
 - `mareforma map <claim>` renders the per-claim trust map
-  (`mareforma/trust_map.py`): each property (grounding, independence,
-  standing, witnessing, and the rest) placed at its tier. `COMPUTED`
-  means derived directly from stored evidence, `PROXIED` means computed
-  through a proxy signal whose bound is named, `DEFERRED` means not
+  (`mareforma/trust_map.py`): each property (grounding, faithfulness,
+  independence, standing, witnessing, and the rest) placed at its tier.
+  `COMPUTED` means derived directly from stored evidence, `PROXIED` means
+  computed through a proxy signal whose bound is named, `DEFERRED` means not
   evaluated this release with the residual named rather than guessed.
   `--json` and `--html` emit the same map for CI or review.
 - `mareforma verify <claim>` re-checks the signatures, the
@@ -164,10 +164,20 @@ adding any signed field:
   the grounding observer and reports what data actually flowed and
   where a silent fallback hid; with `--cites` it also computes the
   grounding verdict for those sources.
+- `mareforma reexec <run>` re-runs a recorded pipeline
+  (`mareforma/reexec.py`) and checks the reported number reproduces, as a
+  three-valued faithfulness proxy: `REPRODUCED`, `DIVERGED`, or
+  `COULD_NOT_REEXECUTE`. A run that rests on world contact, private data, or
+  expensive compute, or whose entry point will not resolve, raises, or returns
+  a non-number, is `COULD_NOT_REEXECUTE`, never a false `REPRODUCED`. The
+  verdict is a reproducibility proxy, not correctness and not independence; the
+  exit code carries it (`0`/`1`/`2`), and `--map <claim>` places it on that
+  claim's `PROXIED` faithfulness axis as a read-side overlay.
 
-The `map`, `verify`, and `diagnose` commands live in
+The `map`, `verify`, `diagnose`, and `reexec` commands live in
 `mareforma/cli.py`; the tier semantics and property placement live in
-`mareforma/trust_map.py`.
+`mareforma/trust_map.py`, and the faithfulness proxy in
+`mareforma/reexec.py`.
 
 ## Trust layer
 
