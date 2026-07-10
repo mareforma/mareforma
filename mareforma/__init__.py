@@ -381,20 +381,13 @@ def restore(
     )
 
 
-from mareforma._evidence import (
-    EvidenceVector,
-    EvidenceVectorError,
-    VALID_STUDY_DESIGNS,
-)
-
 # Re-export the user-catchable exception surface. AGENTS.md / docstrings
 # document these as raise paths from the public API (assert_claim,
 # validate, update_claim, restore, refresh_unsigned, etc.), and users
 # previously had to import them from submodules (mareforma.db,
-# mareforma.signing, mareforma.validators, mareforma._evidence) — the
-# last of which is underscore-prefixed and therefore confusing. Make
-# the catch surface match the documented contract by exposing
-# everything at the top level.
+# mareforma.signing, mareforma.validators) — some of which are
+# underscore-prefixed and therefore confusing. Make the catch surface
+# match the documented contract by exposing everything at the top level.
 from mareforma.db import (
     MareformaError,
     DatabaseError,
@@ -477,8 +470,6 @@ __all__ = [
     "EpistemicGraph",
     "schema",
     "restore",
-    "EvidenceVector",
-    "VALID_STUDY_DESIGNS",
     "safe_for_llm",
     "sanitize_for_llm",
     "wrap_untrusted",
@@ -526,7 +517,6 @@ __all__ = [
     "GraphTooLargeError",
     "DatabaseError",
     "EvidenceCitationError",
-    "EvidenceVectorError",
     "IdempotencyConflictError",
     "IllegalStateTransitionError",
     "InvalidEnvelopeError",

@@ -10,7 +10,7 @@ Sigstore and SLSA). The envelope shape is::
       "subject":       [{"name": "mareforma:claim:<id>",
                          "digest": {"sha256": "<text_sha256>"}}],
       "predicateType": "urn:mareforma:predicate:claim:v1",
-      "predicate":     { <claim fields + EvidenceVector> }
+      "predicate":     { <claim fields + evidence vector> }
     }
 
 The Statement dict is canonicalized (sorted keys, NFC text, no whitespace)
@@ -103,7 +103,7 @@ def build_statement(
     created_at
         ISO 8601 UTC, microsecond precision (existing mareforma convention).
     evidence
-        GRADE EvidenceVector serialized via :meth:`EvidenceVector.to_dict`.
+        Evidence-vector dict bound into the signed predicate.
     observed_grounding
         Optional computed-grounding record (the observed axis: a verdict of
         GROUNDED / UNGROUNDED / OPAQUE plus its reason, receipt digest, and

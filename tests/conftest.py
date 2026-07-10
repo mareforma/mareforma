@@ -7,20 +7,6 @@ from pathlib import Path
 import pytest
 
 import mareforma
-from mareforma import doi_resolver
-
-
-@pytest.fixture(autouse=True)
-def _reset_doi_client():
-    """Drop the module-level httpx.Client around every test.
-
-    The DOI resolver pools a Client across calls. Tests using pytest-httpx
-    patch httpx's transport per test; a Client constructed during test N
-    must not leak into test N+1 with stale mock state.
-    """
-    doi_resolver._reset_client_for_testing()
-    yield
-    doi_resolver._reset_client_for_testing()
 
 
 @pytest.fixture(autouse=True)
@@ -51,37 +37,6 @@ def _isolate_predicate_registry():
     yield
     _pt._registry.clear()
     _pt._registry.update(snapshot)
-
-
-_INGEST_FIXTURES = Path(__file__).parent / "ingest_fixtures"
-
-
-@pytest.fixture()
-def db(tmp_path):
-    """Fresh mareforma graph.db with all DDL applied — for ingest/ask tests."""
-    from mareforma.db import open_db
-    conn = open_db(tmp_path)
-    yield conn
-    conn.close()
-
-
-@pytest.fixture()
-def sample_abstract_a():
-    return _INGEST_FIXTURES / "abstract_a.txt"
-
-
-@pytest.fixture()
-def sample_abstract_b():
-    return _INGEST_FIXTURES / "abstract_b.txt"
-
-
-@pytest.fixture()
-def populated_db(db, sample_abstract_a, sample_abstract_b):
-    """DB with two sample abstracts ingested."""
-    from mareforma.ingest_command import ingest_file
-    ingest_file(sample_abstract_a, db, extracted_by="ingest:mock")
-    ingest_file(sample_abstract_b, db, extracted_by="ingest:mock")
-    return db
 
 
 @pytest.fixture()

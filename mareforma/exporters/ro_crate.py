@@ -14,7 +14,7 @@ work:
 
 * RO-Crate zip writer (bundle the JSON-LD + claim text payload files +
   signed-envelope sidecars into a single ``.crate.zip``).
-* Embedding the GRADE EvidenceVector as ``additionalProperty``
+* Embedding the evidence vector as ``additionalProperty``
   PropertyValue rows for quality-of-evidence downstream filters.
 """
 

@@ -207,36 +207,6 @@ class TestStatsCliReadError:
         assert result.exit_code == 1
 
 
-class TestDoiDriftEmitsTotalInspected:
-    def test_emission_carries_total_inspected_counter(
-        self, tmp_path: Path, monkeypatch,
-    ) -> None:
-        from mareforma import doi_resolver as _doi
-        with mareforma.open(tmp_path) as graph:
-            conn = graph._conn
-            for i in range(3):
-                conn.execute(
-                    "INSERT INTO doi_cache (doi, resolved, registry, "
-                    "last_checked_at, content_digest) VALUES "
-                    "(?, 1, 'crossref', ?, ?)",
-                    (f"10.1234/em-{i}", "2026-01-01T00:00:00+00:00", "old"),
-                )
-            conn.commit()
-            monkeypatch.setattr(
-                _doi, "fetch_doi_metadata",
-                lambda doi, timeout=5.0, registry=None: (
-                    {"title": ["X"]}, "crossref", False,
-                ),
-            )
-            graph.find_drifted_dois()
-        stats = _health.compute_rolling_stats(tmp_path)
-        drift = stats["ops"]["doi_drift_scan"]
-        assert drift["count"] == 1
-        # total_inspected is now a real aggregated stat, not just
-        # documented.
-        assert drift["total_inspected"] == 3
-
-
 class TestPredicateRegistryBackwardsCompat:
     def setup_method(self) -> None:
         self._snapshot = dict(_pt._registry)

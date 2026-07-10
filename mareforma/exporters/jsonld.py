@@ -130,8 +130,8 @@ class JSONLDExporter:
     # ------------------------------------------------------------------
 
     def _claim_node(self, claim: dict) -> dict:
-        # Always include every SIGNED_FIELDS member + the GRADE
-        # EvidenceVector so a downstream consumer (e.g. SCITT bundle
+        # Always include every SIGNED_FIELDS member + the evidence
+        # vector so a downstream consumer (e.g. SCITT bundle
         # verification) can re-derive the canonical Statement v1 bytes
         # from the node alone. Optional fields use null/[] defaults to
         # match canonical_statement's expected shape.

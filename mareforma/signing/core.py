@@ -48,7 +48,7 @@ The Statement v1 payload is::
       "subject":       [{"name": "mareforma:claim:<id>",
                          "digest": {"sha256": "<text_sha256>"}}],
       "predicateType": "urn:mareforma:predicate:claim:v1",
-      "predicate":     { <claim fields + GRADE EvidenceVector> }
+      "predicate":     { <claim fields + evidence vector> }
     }
 
 The signature covers the DSSE Pre-Authentication Encoding (PAE) of
@@ -63,8 +63,8 @@ on (typeB, payload) even when the bytes are otherwise identical.
 The signed predicate carries the :data:`SIGNED_FIELDS` contract
 (``claim_id``, ``text``, ``classification``, ``generated_by``,
 ``supports``, ``contradicts``, ``source_name``, ``artifact_hash``,
-``created_at``) plus ``evidence`` (a GRADE EvidenceVector serialized
-via :meth:`mareforma._evidence.EvidenceVector.to_dict`). When the
+``created_at``) plus ``evidence`` (the evidence-vector dict bound into
+the signed predicate). When the
 observer recorded a verdict it also carries an optional
 ``observed_grounding`` record (the GROUNDED / UNGROUNDED / OPAQUE
 verdict with its reason, cited and grounded sources, and axis version).
@@ -485,7 +485,7 @@ def sign_claim_with_roles(
         malformed role attestation (the verifier would not know
         which key to use).
     evidence
-        Optional GRADE EvidenceVector.
+        Optional evidence-vector dict.
 
     Returns
     -------
@@ -632,9 +632,8 @@ def sign_claim(
     private_key
         Ed25519 private key.
     evidence
-        Optional GRADE EvidenceVector serialized via ``EvidenceVector.to_dict()``.
-        Defaults to ``{}`` (an empty vector that decodes back into the
-        all-zeros default).
+        Optional evidence-vector dict. Defaults to ``{}`` (an empty
+        vector that decodes back into the all-zeros default).
     """
     body = canonical_statement(claim_fields, evidence or {})
     return _build_envelope(body, private_key, payload_type=PAYLOAD_TYPE_CLAIM)

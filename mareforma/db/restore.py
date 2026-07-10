@@ -436,7 +436,7 @@ def restore(
                 # Reconstruct supports/contradicts JSON.
                 supports_list = c.get("supports", []) or []
                 contradicts_list = c.get("contradicts", []) or []
-                # EvidenceVector round-trip. The TOML carries the
+                # Evidence-vector round-trip. The TOML carries the
                 # canonical JSON; we re-derive ev_* + chain_input from
                 # it so the chain_hash matches the original.
                 evidence_json_str = c.get("evidence_json") or "{}"
@@ -1408,7 +1408,7 @@ def _verify_claim_signatures_on_restore(
                     kind="claim_unverified",
                 )
 
-        # EvidenceVector binding. The predicate carries the canonical
+        # Evidence-vector binding. The predicate carries the canonical
         # evidence dict that was signed; restore the row's TOML
         # evidence_json must round-trip to the same dict. Without this,
         # a TOML editor could flip ``risk_of_bias`` from -2 to 0 (a

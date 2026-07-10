@@ -37,7 +37,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mareforma import db as _db
-from mareforma import doi_resolver as _doi
 # NOTE: mareforma.signing is imported lazily inside refresh_unsigned so that
 # unsigned-only users can still open the graph even if the cryptography
 # extension fails at import time. Don't promote this to a module-level
@@ -45,7 +44,6 @@ from mareforma import doi_resolver as _doi
 
 if TYPE_CHECKING:
     import sqlite3
-    from mareforma._evidence import EvidenceVector
 
 
 # Fields that get sanitize-and-wrap for LLM consumption. Free-form text
@@ -177,7 +175,7 @@ class EpistemicGraph:
         source_name: str | None = None,
         status: str = "open",
         artifact_hash: str | None = None,
-        evidence: "EvidenceVector | dict | None" = None,
+        evidence: "dict | None" = None,
         seed: bool = False,
         signer: "object | None" = None,
         predicate_payload: dict | None = None,
@@ -266,16 +264,12 @@ class EpistemicGraph:
             either side, do not block the distinct-signer convergence.
             Compute with ``hashlib.sha256(bytes).hexdigest()``.
         evidence:
-            Optional GRADE 5-domain ``EvidenceVector`` declaring the
-            asserter's confidence in the evidence backing this claim.
-            Accepts either a populated
-            :class:`mareforma.EvidenceVector` instance or a dict in the
-            same shape as :meth:`EvidenceVector.to_dict`. Five downgrade
+            Optional evidence-vector dict declaring the asserter's
+            confidence in the evidence backing this claim. Five downgrade
             domains in ``[-2, 0]`` (``risk_of_bias``, ``inconsistency``,
             ``indirectness``, ``imprecision``, ``publication_bias``),
             three upgrade flags (``large_effect``, ``dose_response``,
-            ``opposing_confounding``), a ``rationale`` dict (required for
-            any nonzero domain, the GRADE anti-handwaving rule), and a
+            ``opposing_confounding``), a ``rationale`` dict, and a
             ``reporting_compliance`` list. Bound into the signed
             predicate and denormalized into the ``ev_*`` columns for
             queryable filters. Defaults to all-zeros (the asserter
@@ -291,19 +285,9 @@ class EpistemicGraph:
         ValueError
             If ``classification`` is not a valid value, ``text`` is empty,
             or ``artifact_hash`` is not a 64-character lowercase hex SHA256.
-        mareforma._evidence.EvidenceVectorError
-            If ``evidence`` violates a GRADE invariant (out-of-range domain,
-            nonzero domain without a rationale, malformed structure).
         mareforma.db.IdempotencyConflictError
             If ``idempotency_key`` is set and any semantic field differs
             from the existing row.
-
-        Notes
-        -----
-        Any DOI in ``supports[]`` or ``contradicts[]`` is HEAD-checked against
-        Crossref and DataCite at assertion time. If any DOI fails to resolve,
-        the claim is stored with ``unresolved=True`` and is ineligible for
-        REPLICATED promotion. Call :meth:`refresh_unresolved` later to retry.
         """
         self._check_open()
         # Sign-after-author invariant: a claim must be authored inside a
@@ -318,31 +302,20 @@ class EpistemicGraph:
                 "grounding verdict. Signing inside an open scope would bind a "
                 "verdict from a partial observation."
             )
-        # Resolve any DOIs in supports/contradicts. Strings that don't match
-        # DOI format are treated as claim_id references and pass through.
-        dois = _doi.extract_dois((supports or []) + (contradicts or []))
+        # DOIs in supports/contradicts are accepted as reference identifiers;
+        # they are no longer network-resolved, so a fresh claim is never
+        # quarantined as unresolved at assertion time.
         unresolved = False
-        if dois:
-            results = _doi.resolve_dois_with_cache(self._conn, dois)
-            unresolved = any(not r for r in results.values())
 
-        # Normalize evidence into an EvidenceVector instance. None →
-        # default all-zeros. dict → validated reconstruction. Existing
-        # EvidenceVector → pass through. Anything else raises.
-        from mareforma._evidence import EvidenceVector
-        if evidence is None:
-            ev = EvidenceVector()
-        elif isinstance(evidence, EvidenceVector):
-            ev = evidence
-        elif isinstance(evidence, dict):
-            ev = EvidenceVector.from_dict(evidence)
-        else:
+        # Evidence is an optional plain dict bound into the signed predicate.
+        # ``None`` defers to the default all-zeros vector applied in add_claim.
+        if evidence is not None and not isinstance(evidence, dict):
             raise TypeError(
-                f"evidence must be EvidenceVector | dict | None; "
-                f"got {type(evidence).__name__}"
+                f"evidence must be a dict or None; got {type(evidence).__name__}"
             )
+        ev = dict(evidence) if evidence else None
 
-        # Snapshot the grounding sensor's verdict into the EvidenceVector
+        # Snapshot the grounding sensor's verdict into the evidence vector
         # so the score is signed alongside the rest of the claim. A
         # broken sensor (any Exception subclass: bad shape, model
         # failure, OSError, KeyError, IndexError, network error, etc.)
@@ -374,15 +347,31 @@ class EpistemicGraph:
                         "grounding_sensor rationale must be a str; got "
                         f"{type(rationale).__name__}"
                     )
-                ev = EvidenceVector.from_dict({
-                    **ev.to_dict(),
-                    "grounding_score": float(score),
+                # Validate the score before it is signed: a bad score
+                # (bool, non-numeric, NaN, or out of [0, 1]) raises here and
+                # falls through to the warning path, so a broken sensor never
+                # binds a nonsense grounding verdict into the predicate.
+                if isinstance(score, bool) or not isinstance(score, (int, float)):
+                    raise TypeError(
+                        "grounding_sensor score must be a float; got "
+                        f"{type(score).__name__}"
+                    )
+                score_f = float(score)
+                if score_f != score_f:  # NaN
+                    raise ValueError("grounding_sensor score must not be NaN")
+                if score_f < 0.0 or score_f > 1.0:
+                    raise ValueError(
+                        f"grounding_sensor score {score_f} out of [0.0, 1.0]"
+                    )
+                ev = {
+                    **(ev or {}),
+                    "grounding_score": score_f,
                     "grounding_rationale": rationale,
-                })
+                }
                 from mareforma import health as _health
                 _health.append_health_event(
                     self._root, "grounding_verdict",
-                    score=float(score),
+                    score=score_f,
                 )
             except Exception as exc:
                 _warnings.warn(
@@ -2019,237 +2008,6 @@ class EpistemicGraph:
         from mareforma import validators as _validators
         return _validators.list_validators(self._conn)
 
-    def refresh_unresolved(self) -> dict[str, int]:
-        """Retry DOI resolution for all claims currently marked unresolved.
-
-        For each unresolved claim, re-checks every DOI in its ``supports[]``
-        and ``contradicts[]``. If every DOI now resolves, the claim's
-        unresolved flag is cleared and REPLICATED eligibility is re-evaluated.
-
-        Network behavior
-        ----------------
-        DOIs are deduped across all unresolved claims and resolved exactly
-        once per call, bypassing the cache (``force=True``). The cache is
-        then overwritten with the fresh result. Shared DOIs across many
-        claims therefore generate one HTTP request, not N, and the negative
-        cache is never wiped wholesale.
-
-        No-DOI claims
-        -------------
-        A claim flagged unresolved with no DOIs in supports/contradicts is
-        a stale-flag artefact. The flag is cleared and a warning is emitted
-        so the operator notices the data shape was unexpected.
-
-        Returns
-        -------
-        dict
-            ``{"checked": N, "resolved": M, "still_unresolved": K}``: counts
-            of claims processed and outcomes.
-        """
-        self._check_open()
-        import warnings
-
-        unresolved_claims = _db.list_unresolved_claims(self._conn)
-
-        # Step 1: dedupe DOIs across all unresolved claims and resolve once.
-        # A single corrupt JSON row (manual edit, partial restore from
-        # claims.toml) must not abort the entire refresh — quarantine it
-        # and let the rest of the claims through.
-        claim_dois: dict[str, list[str]] = {}
-        all_dois: set[str] = set()
-        quarantined: list[str] = []
-        for claim in unresolved_claims:
-            try:
-                supports = json.loads(claim.get("supports_json") or "[]")
-                contradicts = json.loads(claim.get("contradicts_json") or "[]")
-            except json.JSONDecodeError:
-                warnings.warn(
-                    f"Claim {claim['claim_id']} has corrupt supports_json or "
-                    "contradicts_json; skipping during refresh.",
-                    stacklevel=2,
-                )
-                quarantined.append(claim["claim_id"])
-                continue
-            dois = _doi.extract_dois(supports + contradicts)
-            claim_dois[claim["claim_id"]] = dois
-            all_dois.update(dois)
-
-        results = (
-            _doi.resolve_dois_with_cache(self._conn, list(all_dois), force=True)
-            if all_dois
-            else {}
-        )
-
-        # Step 2: decide per-claim using the shared results.
-        resolved_count = 0
-        still_unresolved = len(quarantined)
-        with self.defer_backup():
-            for claim in unresolved_claims:
-                cid = claim["claim_id"]
-                if cid in quarantined:
-                    continue
-                dois = claim_dois[cid]
-                if not dois:
-                    warnings.warn(
-                        f"Claim {cid} was flagged unresolved but contains no "
-                        "DOIs in supports/contradicts. Clearing flag.",
-                        stacklevel=2,
-                    )
-                    _db.mark_claim_resolved(self._conn, self._root, cid, strict_promotion=self._strict_promotion)
-                    resolved_count += 1
-                    continue
-
-                if all(results.get(d, False) for d in dois):
-                    _db.mark_claim_resolved(self._conn, self._root, cid, strict_promotion=self._strict_promotion)
-                    resolved_count += 1
-                else:
-                    still_unresolved += 1
-
-        return {
-            "checked": len(unresolved_claims),
-            "resolved": resolved_count,
-            "still_unresolved": still_unresolved,
-        }
-
-    def refresh_all_dois(self) -> dict[str, int]:
-        """Force-re-resolve every DOI in the graph, bypassing the positive cache.
-
-        Walks every claim's ``supports[]`` and ``contradicts[]``, dedupes the
-        DOIs, and re-runs the HEAD check against Crossref + DataCite,
-        bypassing the 30-day positive cache. The ``doi_cache`` table is
-        overwritten with fresh results, so subsequent ``assert_claim``
-        calls see the new state.
-
-        Use when you suspect a referenced DOI has been retracted or its
-        registry state has changed. ``refresh_unresolved`` only retries
-        claims that were flagged at insert time; this method covers the
-        case where a previously-resolved DOI has since failed.
-
-        This method does **not** mutate ``support_level`` or the per-claim
-        ``unresolved`` flag: re-running a HEAD check is not strong enough
-        evidence to demote across the trust ladder, and the no-back-
-        transitions invariant is intentional. To find claims affected by
-        a newly-failing DOI, run::
-
-            failed = [r["doi"] for r in conn.execute(
-                "SELECT doi FROM doi_cache WHERE resolved = 0"
-            )]
-
-        and search ``supports_json``/``contradicts_json`` for those values.
-
-        Returns
-        -------
-        dict
-            ``{"checked", "still_resolved", "now_unresolved",
-            "newly_failed"}``: int counts. ``newly_failed`` is the number
-            of DOIs whose cache state flipped from resolved to unresolved
-            (the drift signal the operator usually wants).
-        """
-        self._check_open()
-
-        all_dois: set[str] = set()
-        for row in self._conn.execute(
-            "SELECT supports_json, contradicts_json FROM claims"
-        ).fetchall():
-            try:
-                supports = json.loads(row["supports_json"] or "[]")
-                contradicts = json.loads(row["contradicts_json"] or "[]")
-            except (json.JSONDecodeError, TypeError):
-                continue
-            all_dois.update(_doi.extract_dois(supports + contradicts))
-
-        if not all_dois:
-            return {
-                "checked": 0,
-                "still_resolved": 0,
-                "now_unresolved": 0,
-                "newly_failed": 0,
-            }
-
-        # Snapshot the prior cache state for every DOI we're about to refresh,
-        # so we can report which entries flipped from resolved → unresolved.
-        placeholders = ",".join("?" * len(all_dois))
-        prior = {
-            r["doi"]: bool(r["resolved"])
-            for r in self._conn.execute(
-                f"SELECT doi, resolved FROM doi_cache "
-                f"WHERE doi IN ({placeholders})",
-                list(all_dois),
-            ).fetchall()
-        }
-
-        results = _doi.resolve_dois_with_cache(
-            self._conn, list(all_dois), force=True,
-        )
-
-        still_resolved = sum(1 for ok in results.values() if ok)
-        now_unresolved = sum(1 for ok in results.values() if not ok)
-        newly_failed = sum(
-            1
-            for d, ok in results.items()
-            if (not ok) and prior.get(d, False) is True
-        )
-
-        from mareforma import health as _health
-        _health.append_health_event(
-            self._root, "refresh_unresolved",
-            succeeded=still_resolved,
-            checked=len(results),
-        )
-        return {
-            "checked": len(results),
-            "still_resolved": still_resolved,
-            "now_unresolved": now_unresolved,
-            "newly_failed": newly_failed,
-        }
-
-    def find_drifted_dois(self, *, limit: int | None = None) -> list[dict]:
-        """Walk the doi_cache and report DOIs whose metadata has drifted.
-
-        Fetches Crossref / DataCite metadata for every cached resolved
-        DOI, recomputes a stable content digest (title + year +
-        container + author family names), and returns the DOIs whose
-        digest differs from the one stored at last resolution.
-
-        First-seen rows (no stored digest) are seeded with the current
-        digest and excluded from the result: they're a baseline, not
-        drift. Returns ``[]`` when httpx is unavailable or no drift is
-        detected.
-
-        Use as a periodic health-check: a drifted DOI may indicate a
-        retraction, correction, or indexing-host swap on a referenced
-        paper. Whether to refresh the cache or flag affected claims is
-        a policy decision left to the caller.
-
-        Parameters
-        ----------
-        limit
-            Optional cap on how many DOIs to inspect per call. ``None``
-            walks every resolved row.
-
-        Returns
-        -------
-        list[dict]
-            ``[{"doi", "stored_digest", "current_digest",
-            "last_checked_at"}, ...]``: one entry per drifted DOI.
-        """
-        self._check_open()
-        from mareforma import health as _health
-        drifted, walked, aborted = _doi.find_drifted_dois(
-            self._conn, limit=limit,
-        )
-        # Emit a coherent (drifted, total_inspected) pair plus an
-        # outcome that distinguishes "clean full scan" from "walk
-        # aborted on 429 after K rows" — otherwise the rolling
-        # rate-limit-recovery signal in stats CLI is invisible.
-        _health.append_health_event(
-            self._root, "doi_drift_scan",
-            outcome="partial" if aborted else "ok",
-            drifted=len(drifted),
-            total_inspected=walked,
-        )
-        return drifted
-
     def refresh_convergence(self) -> dict[str, int]:
         """Retry convergence detection for every flagged claim.
 
@@ -2578,7 +2336,7 @@ class EpistemicGraph:
     def refresh_unsigned(self) -> dict[str, int]:
         """Retry Rekor submission for every signed-but-not-logged claim.
 
-        Mirrors :meth:`refresh_unresolved`. For each claim whose
+        For each claim whose
         ``signature_bundle`` is non-NULL and whose ``transparency_logged``
         is 0, the original envelope is re-submitted to the Rekor URL the
         graph was opened with. Success updates the bundle (attaches the
@@ -2683,7 +2441,7 @@ class EpistemicGraph:
                 still_unlogged += 1
                 continue
             # The signed payload is a canonical in-toto Statement v1
-            # whose predicate carries the EvidenceVector. Re-derive
+            # whose predicate carries the evidence vector. Re-derive
             # with the row's stored evidence_json so a row+envelope
             # drift detector compares like-with-like.
             try:
@@ -3012,8 +2770,7 @@ class EpistemicGraph:
             ``validator_count``: total rows in the validators table
             (every enrolled identity, including LLM-typed).
             ``unresolved_claims``: claims flagged ``unresolved=1``
-            (DOI HEAD-check failed at some point; blocks REPLICATED
-            promotion until ``refresh_unresolved()`` clears them).
+            (a legacy quarantine flag; blocks REPLICATED promotion).
             ``unsigned_claims``: claims with ``signature_bundle IS
             NULL`` (no Ed25519 envelope; blocks REPLICATED promotion
             and any cross-restore verification).

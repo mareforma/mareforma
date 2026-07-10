@@ -310,12 +310,10 @@ def open_db(root: Path) -> sqlite3.Connection:
                 "your claims are backed up in claims.toml."
             )
         _attach_supports_cache(conn, root)
-        _ensure_doi_cache_columns(conn)
-        # Additive tables (literature_claims, agent_activities) must be
+        # Additive tables (project_policy, the trust layer) must be
         # present on every initialised db, not just fresh ones —
-        # otherwise an existing v0.3.2 graph.db opened by v0.3.3 lacks
-        # them and the first `mareforma ingest` or hook event raises
-        # 'no such table'.
+        # otherwise an existing legacy graph.db lacks them and the first
+        # trust-layer write raises 'no such table'.
         conn.executescript(_ADDITIVE_TABLES_SQL)
         _ensure_evidence_lines_columns(conn)
         conn.commit()
@@ -383,7 +381,7 @@ def _ensure_claims_columns_for_upgrade(
 
     Concurrent first-opens race the ALTER: SQLite serialises writes;
     the loser's ALTER fails with ``duplicate column name`` and we
-    re-check + return. Same posture as ``_ensure_doi_cache_columns``.
+    re-check + return. Same posture as ``_ensure_evidence_lines_columns``.
     """
     # If the claims table itself is missing, there's nothing to ALTER —
     # let the column-set validation below surface the schema-mismatch
@@ -517,40 +515,6 @@ def _ensure_evidence_lines_columns(conn: sqlite3.Connection) -> None:
             ) from exc
 
 
-def _ensure_doi_cache_columns(conn: sqlite3.Connection) -> None:
-    """Add the ``content_digest`` column to legacy doi_cache tables.
-
-    The doi_cache table is not part of the signed-schema integrity
-    surface (it caches external resolver results, not claim data), so
-    in-place ALTER is safe. CREATE TABLE IF NOT EXISTS on a fresh DB
-    already creates the column; this fills the gap on DBs created by
-    older mareforma builds.
-    """
-    cols = {
-        row[1]
-        for row in conn.execute("PRAGMA table_info(doi_cache)").fetchall()
-    }
-    if "content_digest" not in cols:
-        try:
-            conn.execute("ALTER TABLE doi_cache ADD COLUMN content_digest TEXT")
-            conn.commit()
-        except sqlite3.OperationalError as exc:
-            # Concurrent open: another process won the ALTER race and
-            # already added the column. Re-check before raising —
-            # "duplicate column name" is benign, anything else is real.
-            cols2 = {
-                row[1]
-                for row in conn.execute(
-                    "PRAGMA table_info(doi_cache)"
-                ).fetchall()
-            }
-            if "content_digest" in cols2:
-                return
-            raise DatabaseError(
-                f"Could not add doi_cache.content_digest column: {exc}"
-            ) from exc
-
-
 def _attach_supports_cache(conn: sqlite3.Connection, root: Path) -> None:
     """Attach the rebuildable claim_supports cache.
 
@@ -584,12 +548,53 @@ def _chain_input_for_claim(
 
     Uses the in-toto Statement v1 canonical bytes: the exact same
     bytes that get signed (after DSSE PAE wrap). Chain integrity and
-    signature integrity bind to one authoritative byte sequence.
-    EvidenceVector is part of the Statement, so it is part of the
+    signature integrity bind to one authoritative byte sequence. The
+    evidence vector is part of the Statement, so it is part of the
     chain input.
     """
     from mareforma import signing as _signing
     return _signing.canonical_statement(claim_fields, evidence or {})
+
+
+# Evidence-vector field defaults. The signed predicate carries a plain
+# dict; a claim asserted without an explicit vector binds this all-zeros
+# shape so the canonical bytes stay stable across releases.
+_EVIDENCE_DOWNGRADE_DOMAINS = (
+    "risk_of_bias",
+    "inconsistency",
+    "indirectness",
+    "imprecision",
+    "publication_bias",
+)
+_EVIDENCE_UPGRADE_FLAGS = (
+    "large_effect",
+    "dose_response",
+    "opposing_confounding",
+)
+
+
+def _normalize_evidence(evidence: dict | None) -> dict:
+    """Project an evidence dict onto the canonical signed-predicate shape.
+
+    Fills every downgrade domain (0), upgrade flag (False), the rationale
+    dict, and the reporting_compliance list. ``study_design`` and the
+    grounding snapshot are carried only when present, so a claim without
+    them produces byte-identical canonical bytes to a legacy claim.
+    """
+    src = evidence or {}
+    out: dict = {}
+    for domain in _EVIDENCE_DOWNGRADE_DOMAINS:
+        out[domain] = src.get(domain, 0)
+    for flag in _EVIDENCE_UPGRADE_FLAGS:
+        out[flag] = src.get(flag, False)
+    out["rationale"] = dict(src.get("rationale") or {})
+    out["reporting_compliance"] = list(src.get("reporting_compliance") or ())
+    if src.get("study_design") is not None:
+        out["study_design"] = src["study_design"]
+    if src.get("grounding_score") is not None:
+        out["grounding_score"] = float(src["grounding_score"])
+        out["grounding_rationale"] = src.get("grounding_rationale")
+    return out
 
 
 def _compute_prev_hash(
@@ -1196,29 +1201,21 @@ def add_claim(
         )
 
     # Sign the claim if a signer was supplied. The signature is bound to the
-    # in-toto Statement v1 wrapping claim fields + GRADE EvidenceVector, so
+    # in-toto Statement v1 wrapping claim fields + the evidence vector, so
     # any later tamper (text edit, support reattribution, evidence override)
     # breaks verification.
     #
-    # Callers can supply a populated GRADE EvidenceVector via the
+    # Callers can supply a populated evidence-vector dict via the
     # ``evidence`` parameter — the asserter's confidence in the evidence
     # backing this claim. Default all-zeros means the asserter flagged
     # no quality concerns; downstream readers should interpret a
     # default-zero vector as "asserter made no claim about quality,"
     # not as "evidence is high-quality."
-    from mareforma._evidence import EvidenceVector
-    if evidence is None:
-        evidence_obj = EvidenceVector()
-    elif isinstance(evidence, EvidenceVector):
-        evidence_obj = evidence
-    elif isinstance(evidence, dict):
-        evidence_obj = EvidenceVector.from_dict(evidence)
-    else:
+    if evidence is not None and not isinstance(evidence, dict):
         raise TypeError(
-            f"evidence must be EvidenceVector | dict | None; "
-            f"got {type(evidence).__name__}"
+            f"evidence must be a dict or None; got {type(evidence).__name__}"
         )
-    evidence_dict = evidence_obj.to_dict()
+    evidence_dict = _normalize_evidence(evidence)
     evidence_json = json.dumps(
         evidence_dict, sort_keys=True, separators=(",", ":"),
     )
@@ -1349,9 +1346,9 @@ def add_claim(
                 asserter_keyid,
                 initial_validated_at,
                 artifact_hash, prev_hash,
-                evidence_obj.risk_of_bias, evidence_obj.inconsistency,
-                evidence_obj.indirectness, evidence_obj.imprecision,
-                evidence_obj.publication_bias,
+                evidence_dict["risk_of_bias"], evidence_dict["inconsistency"],
+                evidence_dict["indirectness"], evidence_dict["imprecision"],
+                evidence_dict["publication_bias"],
                 evidence_json, statement_cid,
                 _serialize_predicate_payload(predicate_payload),
                 _canonical_envelope(original_signature_bundle),
@@ -3290,9 +3287,8 @@ def update_claim(
     if comparison_summary is not None:
         new_comparison_summary = comparison_summary
 
-    # Re-resolve DOIs only when supports/contradicts actually change. Stale
-    # `unresolved` flags would let a claim with a newly-added fake DOI reach
-    # REPLICATED, or pin a claim as unresolved after its bad DOI is removed.
+    # DOIs are no longer network-resolved, so a supports/contradicts edit
+    # clears any legacy `unresolved` quarantine rather than re-checking.
     # Diff-check against the prior JSON skips the hot path when callers pass
     # identical lists (e.g. when only `text` or `status` is being edited).
     old_supports_json = existing.get("supports_json") or "[]"
@@ -3312,14 +3308,7 @@ def update_claim(
         _check_no_cycle(conn, claim_id, new_supports_list)
 
     if supports_changed or contradicts_changed:
-        from mareforma import doi_resolver as _doi
-        all_refs = json.loads(new_supports_json) + json.loads(new_contradicts_json)
-        dois = _doi.extract_dois(all_refs)
-        if dois:
-            results = _doi.resolve_dois_with_cache(conn, dois)
-            new_unresolved = 0 if all(results.values()) else 1
-        else:
-            new_unresolved = 0
+        new_unresolved = 0
 
     # If the claim just became resolved (or supports changed while resolved),
     # we MUST re-evaluate REPLICATED. Otherwise a claim cured via update_claim
@@ -4852,7 +4841,7 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
                 entry["transparency_logged"] = False
             if c.get("artifact_hash"):
                 entry["artifact_hash"] = c["artifact_hash"]
-            # GRADE EvidenceVector: always present currently schema.
+            # Evidence vector: always present in the current schema.
             # Round-trip the full JSON so restore can rebuild the
             # canonical Statement v1 bytes — chain_hash + signature both
             # bind these values. statement_cid is the cross-check anchor

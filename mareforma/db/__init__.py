@@ -66,7 +66,6 @@ from .core import (
     open_db_from_db_path,
     _db_path,
     _ensure_claims_columns_for_upgrade,
-    _ensure_doi_cache_columns,
     _ensure_evidence_lines_columns,
     _attach_supports_cache,
     # Serialization.
@@ -76,6 +75,10 @@ from .core import (
     # Chain hash.
     _chain_input_for_claim,
     _compute_prev_hash,
+    # Evidence-vector normalization.
+    _EVIDENCE_DOWNGRADE_DOMAINS,
+    _EVIDENCE_UPGRADE_FLAGS,
+    _normalize_evidence,
     # Support classification + cycle detection.
     _is_claim_id,
     classify_support,

@@ -9,7 +9,6 @@ import pytest
 import mareforma
 from mareforma import db as _db
 from mareforma import signing as _signing
-from mareforma._evidence import EvidenceVector, EvidenceVectorError
 from mareforma.verifiers import (
     MockNLIVerifier, Verifier, VerifierError, _validate_score,
 )
@@ -211,63 +210,6 @@ class TestMockNLIVerifier:
     def test_validate_score_coerces_int(self) -> None:
         assert _validate_score(1) == 1.0
         assert _validate_score(0) == 0.0
-
-
-# ----------------------------------------------------------------------------
-# EvidenceVector.grounding_score field
-# ----------------------------------------------------------------------------
-
-
-class TestGroundingScoreField:
-    def test_default_omitted_from_to_dict(self) -> None:
-        v = EvidenceVector()
-        d = v.to_dict()
-        assert "grounding_score" not in d
-        assert "grounding_rationale" not in d
-
-    def test_set_score_serialised(self) -> None:
-        v = EvidenceVector(
-            grounding_score=0.85,
-            grounding_rationale="entailment",
-        )
-        d = v.to_dict()
-        assert d["grounding_score"] == 0.85
-        assert d["grounding_rationale"] == "entailment"
-
-    def test_score_without_rationale_raises(self) -> None:
-        with pytest.raises(EvidenceVectorError, match="rationale is required"):
-            EvidenceVector(grounding_score=0.5)
-
-    def test_rationale_without_score_raises(self) -> None:
-        with pytest.raises(EvidenceVectorError, match="without grounding_score"):
-            EvidenceVector(grounding_rationale="orphan")
-
-    def test_out_of_range_score_raises(self) -> None:
-        with pytest.raises(EvidenceVectorError, match="out of"):
-            EvidenceVector(grounding_score=1.5, grounding_rationale="x")
-        with pytest.raises(EvidenceVectorError, match="out of"):
-            EvidenceVector(grounding_score=-0.1, grounding_rationale="x")
-
-    def test_nan_score_raises(self) -> None:
-        with pytest.raises(EvidenceVectorError, match="NaN"):
-            EvidenceVector(
-                grounding_score=float("nan"),
-                grounding_rationale="x",
-            )
-
-    def test_bool_score_rejected(self) -> None:
-        with pytest.raises(EvidenceVectorError, match="not a bool"):
-            EvidenceVector(
-                grounding_score=True,  # type: ignore[arg-type]
-                grounding_rationale="x",
-            )
-
-    def test_round_trip_through_dict(self) -> None:
-        v = EvidenceVector(
-            grounding_score=0.42, grounding_rationale="round-trip",
-        )
-        restored = EvidenceVector.from_dict(v.to_dict())
-        assert restored == v
 
 
 # ----------------------------------------------------------------------------
@@ -518,18 +460,3 @@ class TestVerifierHardening:
                 )
             evidence = json.loads(graph.get_claim(cid)["evidence_json"])
         assert "grounding_score" not in evidence
-
-
-class TestLegacyEvidenceVectorRoundTrip:
-    """Adding grounding_score / grounding_rationale must NOT change the
-    canonical bytes of any legacy EvidenceVector (no field, no
-    rationale). Signed claims from before this change must still
-    verify under the new code path."""
-
-    def test_legacy_to_dict_unchanged(self) -> None:
-        v = EvidenceVector(risk_of_bias=-1, rationale={"risk_of_bias": "x"})
-        d = v.to_dict()
-        assert "grounding_score" not in d
-        assert "grounding_rationale" not in d
-        # No study_design either (also new).
-        assert "study_design" not in d
