@@ -1280,6 +1280,69 @@ def _redact_home(obj):
 
 
 # ---------------------------------------------------------------------------
+# reexec — re-run a recorded pipeline and check the number reproduces
+# ---------------------------------------------------------------------------
+
+@cli.command("reexec")
+@click.argument("run_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--json", "as_json", is_flag=True, help="Emit the verdict as JSON.")
+def reexec_cmd(run_path: Path, as_json: bool) -> None:
+    """Re-run a recorded pipeline and check the reported number reproduces.
+
+    RUN_PATH is a JSON run record: the recorded reported_value, a pipeline
+    naming a 'module:attr' entry point (plus optional args), a declared
+    tolerance and rel_tolerance, and, when the run cannot be re-run faithfully,
+    "reexecutable": false with a not_reexecutable_reason (world_contact,
+    private_data, or expensive_compute).
+
+    The verdict is three-valued and honest: REPRODUCED (re-ran and matched),
+    DIVERGED (re-ran and differed), or COULD_NOT_REEXECUTE (could not run, so
+    faithfulness is unknown, never a false REPRODUCED). It attests
+    reproducibility, not correctness, and a same-arm re-run is not independence.
+
+    Exit code carries the verdict: 0 REPRODUCED, 1 DIVERGED,
+    2 COULD_NOT_REEXECUTE, 3 malformed run record (a usage error, distinct from
+    an honest inconclusive re-run).
+
+    \b
+    Examples:
+        mareforma reexec run.json
+        mareforma reexec run.json --json
+    """
+    from mareforma.reexec import FaithfulnessVerdict, MalformedRunError, reexec
+
+    try:
+        result = reexec(run_path)
+    except MalformedRunError as exc:
+        _err(f"Malformed run record: {exc}")
+        sys.exit(3)
+
+    if as_json:
+        click.echo(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+    else:
+        verdict = result.verdict.value
+        if result.verdict is FaithfulnessVerdict.REPRODUCED:
+            _ok(f"{verdict}: re-execution matched the recorded number")
+        elif result.verdict is FaithfulnessVerdict.DIVERGED:
+            _err(f"{verdict}: re-execution produced a different number")
+        else:
+            _err(f"{verdict}: the pipeline could not be re-executed")
+        if result.reproduced_value is not None:
+            _info(f"recorded: {result.recorded_value}  reproduced: {result.reproduced_value}")
+        else:
+            _info(f"recorded: {result.recorded_value}  reproduced: —")
+        _info(f"tolerance: abs={result.tolerance}  rel={result.rel_tolerance}")
+        _info(f"residual: {result.residual}")
+
+    _exit = {
+        FaithfulnessVerdict.REPRODUCED: 0,
+        FaithfulnessVerdict.DIVERGED: 1,
+        FaithfulnessVerdict.COULD_NOT_REEXECUTE: 2,
+    }[result.verdict]
+    sys.exit(_exit)
+
+
+# ---------------------------------------------------------------------------
 # claim
 # ---------------------------------------------------------------------------
 

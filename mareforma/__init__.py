@@ -428,6 +428,12 @@ from mareforma.signing import (
     RekorInclusionError,
 )
 from mareforma.validators import ValidatorNotEnrolledError
+from mareforma.reexec import (
+    FaithfulnessVerdict,
+    MalformedRunError,
+    ReexecResult,
+    reexec,
+)
 from mareforma.predicate_types import (
     BUILTIN_URIS,
     PredicateTypeError,
@@ -543,6 +549,11 @@ __all__ = [
     # Grounding sensor protocol + reference impl.
     "Verifier",
     "MockNLIVerifier",
+    # Re-execution faithfulness proxy.
+    "reexec",
+    "ReexecResult",
+    "FaithfulnessVerdict",
+    "MalformedRunError",
 ]
 
 
