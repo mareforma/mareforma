@@ -194,23 +194,64 @@ class TestRunDistinct:
         assert (status["independent_support"], status["independent_refute"]) == (1, 1)
 
 
+# The units are (run, data_id, model_key). An ``absent`` model key (no observed
+# model call) carries no model constraint, so the run/dataset axes behave exactly
+# as they did before the model dimension was added.
+_ABSENT = ("absent",)
+
+
 class TestCountRunDistinct:
     """Unit tests for the count, including the dataset-guard path the write-time
     fork-guard prevents the public API from reaching."""
 
     def test_same_dataset_distinct_runs_counts_once(self) -> None:
         # The data_id guard: one dataset re-run under two tokens is one unit.
-        assert _count_run_distinct([("r1", "dA"), ("r2", "dA")]) == 1
+        assert _count_run_distinct(
+            [("r1", "dA", _ABSENT), ("r2", "dA", _ABSENT)]
+        ) == 1
 
     def test_distinct_runs_distinct_data_counts_each(self) -> None:
-        assert _count_run_distinct([("r1", "dA"), ("r2", "dB")]) == 2
+        assert _count_run_distinct(
+            [("r1", "dA", _ABSENT), ("r2", "dB", _ABSENT)]
+        ) == 2
 
     def test_same_run_many_datasets_counts_once(self) -> None:
-        assert _count_run_distinct([("r1", "dA"), ("r1", "dB"), ("r1", "dC")]) == 1
+        assert _count_run_distinct(
+            [("r1", "dA", _ABSENT), ("r1", "dB", _ABSENT), ("r1", "dC", _ABSENT)]
+        ) == 1
 
     def test_order_and_label_independent(self) -> None:
-        pairs = [("zeta", "d1"), ("zeta", "d2"), ("alpha", "d1")]
-        assert _count_run_distinct(pairs) == _count_run_distinct(list(reversed(pairs)))
+        units = [
+            ("zeta", "d1", _ABSENT),
+            ("zeta", "d2", _ABSENT),
+            ("alpha", "d1", _ABSENT),
+        ]
+        assert _count_run_distinct(units) == _count_run_distinct(list(reversed(units)))
+
+    def test_same_model_distinct_runs_collapses(self) -> None:
+        # Distinct signers + distinct data but the SAME COMPUTED model root is one
+        # line of evidence, not two — the model axis collapses it.
+        same = ("model", "claude-3-5-sonnet")
+        assert _count_run_distinct(
+            [("r1", "dA", same), ("r2", "dB", same)]
+        ) == 1
+
+    def test_distinct_model_distinct_runs_counts_each(self) -> None:
+        assert _count_run_distinct(
+            [("r1", "dA", ("model", "claude-3-5-sonnet")),
+             ("r2", "dB", ("model", "gpt-4o"))]
+        ) == 2
+
+    def test_soft_lineage_never_a_silent_pass(self) -> None:
+        # A soft (PROXY/UNVERIFIABLE) line adds no independent unit, so a
+        # computed+soft pair stays at one; two soft lines still stand at one
+        # supporting line (PRELIMINARY), never zero.
+        assert _count_run_distinct(
+            [("r1", "dA", ("model", "gpt-4o")), ("r2", "dB", ("soft",))]
+        ) == 1
+        assert _count_run_distinct(
+            [("r1", "dA", ("soft",)), ("r2", "dB", ("soft",))]
+        ) == 1
 
 
 class TestReadPathSurvivesUngateableRow:

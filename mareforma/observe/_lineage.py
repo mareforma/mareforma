@@ -159,6 +159,56 @@ def resolve_lineage(
     )
 
 
+def independence_model_key(lineage: "dict | None") -> tuple:
+    """The independence-relevant identity of a captured model lineage.
+
+    Returns one of three keys, mirroring the tier's trust:
+
+    - ``("model", root)`` — COMPUTED lineage rooted to a declarable base: a
+      verifiable distinct model. Two lines collapse on this key iff their roots
+      match, so a same-model rerun (even under distinct signers) is not a second
+      independent line.
+    - ``("soft",)`` — PROXY / UNVERIFIABLE lineage (or COMPUTED without a root,
+      defensively): present but not a verifiable model, so it can never certify a
+      distinct model and never earns an independent unit.
+    - ``("absent",)`` — no observed model call. The line made no model claim, so
+      it imposes no model constraint and keeps the legacy signer axis; every
+      pre-observer finding lands here.
+
+    ``lineage`` is the parsed ``model_lineage`` record (a dict) or ``None``.
+    Only ``None`` reads as absent (no model call observed); a present-but-empty
+    or non-conforming record (including a non-dict from a tampered column) reads
+    as soft (fail-closed — a record we cannot make sense of never certifies a
+    distinct model, and never crashes the count).
+    """
+    if lineage is None:
+        return ("absent",)
+    if not isinstance(lineage, dict):
+        return ("soft",)
+    tier = lineage.get("tier")
+    root = lineage.get("family_root")
+    if tier == ModelLineageTier.COMPUTED.value and root:
+        return ("model", root)
+    return ("soft",)
+
+
+def model_distinct_pair(a: "dict | None", b: "dict | None") -> bool:
+    """Whether two lineages count as model-distinct for an independence pair.
+
+    ``False`` when the pair is UNVERIFIABLE — soft lineage on either side, so a
+    distinct model cannot be certified — or when both are the SAME COMPUTED model
+    (equal family roots). ``True`` when both are COMPUTED with distinct roots, or
+    when at least one side made no model claim (legacy absent lineage imposes no
+    constraint). Soft never a silent pass: a soft side always reads ``False``.
+    """
+    ka, kb = independence_model_key(a), independence_model_key(b)
+    if ka[0] == "soft" or kb[0] == "soft":
+        return False
+    if ka[0] == "model" and kb[0] == "model":
+        return ka[1] != kb[1]
+    return True
+
+
 def collapse_lineage(records: list[ModelLineage]) -> ModelLineage | None:
     """The single finding-level lineage for a scope's captured model records.
 

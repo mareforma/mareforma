@@ -96,6 +96,7 @@ from .core import (
     list_claims,
     delete_claims_by_generated_by,
     # Convergence detection.
+    _claim_model_lineage,
     _maybe_update_replicated_unlocked,
     _maybe_update_replicated,
     _maybe_update_replicated_best_effort,

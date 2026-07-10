@@ -1450,6 +1450,35 @@ def add_claim(
     return claim_id
 
 
+def _claim_model_lineage(
+    conn: sqlite3.Connection, claim_id: str,
+) -> "dict | None":
+    """The model/method lineage recorded on a claim's finding, or None.
+
+    A finding-derived claim carries its authoring scope's lineage on its evidence
+    lines (written identically on every line), so the first non-NULL value
+    represents it. A plain claim with no finding — every claims-graph REPLICATED
+    peer — has none, which reads as absent (no model constraint). Any missing
+    table (a schema without the evidence tree) or unparseable value also reads as
+    absent, never as a fabricated distinct model.
+    """
+    try:
+        row = conn.execute(
+            "SELECT el.model_lineage FROM findings f "
+            "JOIN evidence_lines el ON el.finding_id = f.finding_id "
+            "WHERE f.claim_id = ? AND el.model_lineage IS NOT NULL LIMIT 1",
+            (claim_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if row is None or row["model_lineage"] is None:
+        return None
+    try:
+        return json.loads(row["model_lineage"])
+    except (ValueError, TypeError):
+        return None
+
+
 def _maybe_update_replicated_unlocked(
     conn: sqlite3.Connection,
     new_claim_id: str,
@@ -1620,6 +1649,27 @@ def _maybe_update_replicated_unlocked(
          artifact_hash, artifact_hash),
     ).fetchall()
 
+    if not rows:
+        return
+
+    # Model/method independence gate. A converging peer counts only when its
+    # model lineage is distinct from the new claim's: two same-model checks
+    # (COMPUTED, same family root) are one line of evidence, not two, even under
+    # distinct signers, and a pair with soft (PROXY/UNVERIFIABLE) lineage on
+    # either side is UNVERIFIABLE for independence — never a silent pass. Absent
+    # lineage (no observed model call — every plain claims-graph peer) imposes no
+    # model constraint, so the default claims path is unchanged. This reads the
+    # SAME axis the trust-layer independence count keys on, so promotion and
+    # trust counting cannot disagree.
+    from mareforma.observe._lineage import model_distinct_pair
+
+    new_lineage = _claim_model_lineage(conn, new_claim_id)
+    rows = [
+        r for r in rows
+        if model_distinct_pair(
+            new_lineage, _claim_model_lineage(conn, r["claim_id"])
+        )
+    ]
     if not rows:
         return
 

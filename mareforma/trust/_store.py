@@ -328,29 +328,75 @@ def finding_model_lineage(
         return None
 
 
-def _count_run_distinct(pairs: list[tuple[str, str]]) -> int:
-    """Independent count over (run, dataset) pairs, run-distinct policy.
+def _collapse_run_model(keys: list[tuple]) -> tuple:
+    """The single model state a run authored across its surviving datasets.
 
-    A unit of independent evidence requires BOTH a fresh run (``generated_by``)
-    AND a fresh dataset (``data_id``): one run contributes at most one unit (so a
-    single run cannot self-certify), and the same dataset counts once even if it
-    re-appears (the ``data_id`` guard).
-
-    The count is order-free. Each dataset is attributed to exactly one run (the
-    smallest token, a deterministic tie-break), then the answer is the number of
-    distinct runs that own at least one dataset. Under the write-time invariant
-    (``submit_finding``'s fork-guard makes every ``data_id`` belong to exactly one
-    finding, hence one run) this is exactly "distinct runs among the lines"; the
-    per-dataset attribution only matters as defence-in-depth if a future path
-    (e.g. federation import) ever lets one dataset appear under two runs, in which
-    case it stays deterministic and conservative rather than order-dependent.
+    Conservative: any soft line makes the whole run soft (its independence cannot
+    be certified); two distinct COMPUTED roots under one run also collapse to
+    soft (a run that authored under more than one model cannot be pinned to a
+    single distinct one); a single COMPUTED root is that ``("model", root)``;
+    otherwise the run made no model claim (``("absent",)``).
     """
-    run_of_dataset: dict[str, str] = {}
-    for run, data_id in pairs:
-        prior = run_of_dataset.get(data_id)
-        if prior is None or run < prior:
-            run_of_dataset[data_id] = run
-    return len(set(run_of_dataset.values()))
+    if any(k[0] == "soft" for k in keys):
+        return ("soft",)
+    roots = {k[1] for k in keys if k[0] == "model"}
+    if len(roots) > 1:
+        return ("soft",)
+    if roots:
+        return ("model", next(iter(roots)))
+    return ("absent",)
+
+
+def _count_run_distinct(units: list[tuple[str, str, tuple]]) -> int:
+    """Independent count over (run, dataset, model) units, model-distinct policy.
+
+    A unit of independent evidence requires a fresh run (``generated_by`` /
+    signer), a fresh dataset (``data_id``), AND a distinct model/method. Two
+    same-model checks — distinct signer and distinct dataset but the same
+    COMPUTED model — are one line of evidence, not two, so they no longer promote
+    on the signer + data axes alone.
+
+    The count is order-free. Each dataset is first attributed to exactly one run
+    (the smallest token, a deterministic tie-break), carrying that line's model
+    key, so a re-appearing dataset counts once. The surviving datasets are then
+    grouped by run — this preserves the "one signer contributes at most one
+    unit" cap — and each run's model state is resolved
+    (see :func:`_collapse_run_model`). The answer folds the two axes:
+
+    - COMPUTED runs collapse by family root, so two distinct signers on the same
+      model count once;
+    - absent runs (no observed model call) keep the legacy signer axis, so every
+      pre-observer finding is unchanged;
+    - soft runs (PROXY / UNVERIFIABLE) are UNVERIFIABLE for independence and add
+      no unit, so a soft pair cannot silently corroborate — never a silent pass.
+
+    A body of only-soft or single lines still stands at one supporting line
+    (PRELIMINARY), never zero: soft lineage weakens independence, it does not
+    erase the evidence.
+    """
+    best: dict[str, tuple[str, tuple]] = {}
+    for run, data_id, model_key in units:
+        cur = best.get(data_id)
+        if cur is None or run < cur[0]:
+            best[data_id] = (run, model_key)
+
+    run_models: dict[str, list[tuple]] = {}
+    for run, model_key in best.values():
+        run_models.setdefault(run, []).append(model_key)
+
+    computed_roots: set[str] = set()
+    absent_runs: set[str] = set()
+    for run, keys in run_models.items():
+        state = _collapse_run_model(keys)
+        if state[0] == "model":
+            computed_roots.add(state[1])
+        elif state[0] == "absent":
+            absent_runs.add(run)
+        # soft: contributes no independent unit
+    hard = len(computed_roots) + len(absent_runs)
+    if hard:
+        return hard
+    return 1 if run_models else 0
 
 
 def _authentic_signer_keyid(
@@ -400,7 +446,8 @@ def _authentic_signer_keyid(
 # effect_estimates — the join stays keyed through idx_contrast_line and
 # idx_estimate_contrast).
 INDEPENDENCE_COUNTS_SQL = (
-    "SELECT el.data_id AS data_id, cl.generated_by AS generated_by, "
+    "SELECT el.data_id AS data_id, el.model_lineage AS model_lineage, "
+    " cl.generated_by AS generated_by, "
     " cl.asserter_keyid AS asserter_keyid, cl.claim_id AS claim_id, "
     " cl.signature_bundle AS signature_bundle, "
     " est.estimate_value, est.effect_type, est.scale, est.p_value, "
@@ -417,31 +464,51 @@ INDEPENDENCE_COUNTS_SQL = (
 )
 
 
-def independence_counts(conn: sqlite3.Connection, content_id: str) -> tuple[int, int]:
-    """(independent_support, independent_refute) by distinct signer, data_id guard.
+def _line_model_key(raw: "str | None") -> tuple:
+    """The independence model key for a stored ``model_lineage`` column value.
 
-    Per-line bearing is recomputed on read: each evidence line's stored estimate
-    is gated against its finding's stored prediction (the gate inputs are
-    persisted precisely so a reader can recompute and catch drift), so a
-    multi-line finding whose lines disagree is counted line by line, never off
-    the finding's denormalised ``bearing_direction`` cache.
+    ``raw`` is the JSON string persisted on the evidence line, or ``None`` when
+    the finding was authored without an observed model call. A column that no
+    longer parses is treated as soft (never a fabricated distinct model).
+    """
+    # Lazy import: ``mareforma.observe`` imports ``trust._store`` (for
+    # ``is_content_addressed``), so importing the lineage helper at module top
+    # would close a cycle. By call time both modules are fully loaded.
+    from mareforma.observe._lineage import independence_model_key
 
-    Independence is then counted by distinct **signer** (the claim's
-    ``asserter_keyid``) with a ``data_id`` guard (see
-    :func:`_count_run_distinct`): one signer yields at most one independent
-    support and one independent refute. This is the same WHO axis the
-    REPLICATED promotion query keys on, read from the same denormalised claim
-    column, so promotion and trust counting can never disagree. Legacy
-    evidence lines whose claim predates the keyid column (NULL
-    ``asserter_keyid``) fall back to the retired ``generated_by`` run axis so
-    they keep their count instead of silently collapsing two NULL signers to
-    one (status_policy@v3). The two axes are namespaced (``k:`` vs ``g:``) so a
-    keyid can never alias a run label.
+    if raw is None:
+        return ("absent",)
+    try:
+        lineage = json.loads(raw)
+    except (ValueError, TypeError):
+        lineage = None
+    if not isinstance(lineage, dict):
+        return ("soft",)
+    return independence_model_key(lineage)
+
+
+def _independence_units(conn: sqlite3.Connection, content_id: str):
+    """Yield ``(direction, run_token, data_id, model_key)`` per gateable line.
+
+    The shared read path behind :func:`independence_counts` and
+    :func:`effective_independence`. Per-line bearing is recomputed on read: each
+    evidence line's stored estimate is gated against its finding's stored
+    prediction (the gate inputs are persisted precisely so a reader can recompute
+    and catch drift), so a multi-line finding whose lines disagree is counted
+    line by line, never off the finding's denormalised ``bearing_direction``
+    cache.
+
+    The run token is the distinct **signer** (the claim's ``asserter_keyid``),
+    the same WHO the REPLICATED promotion keys on. The denormalized column is not
+    itself signed, so it is trusted only when the claim's bundle authenticates it
+    (embeds the same keyid, binds to this claim, and verifies when the signer is
+    enrolled); a forged or unbacked keyid falls back to the retired
+    ``generated_by`` run axis so it cannot inflate the count beyond the soft
+    string axis. The ``k:`` / ``g:`` namespace stops a keyid aliasing a run
+    label. The model key carries the distinct-model/method axis
+    (see :func:`_line_model_key`).
     """
     rows = conn.execute(INDEPENDENCE_COUNTS_SQL, (content_id,)).fetchall()
-
-    supports: list[tuple[str, str]] = []
-    refutes: list[tuple[str, str]] = []
     for r in rows:
         # Recompute the per-line bearing from stored inputs. Every row written by
         # submit_finding was gated at write, so this is total for normal data. A
@@ -476,24 +543,67 @@ def independence_counts(conn: sqlite3.Connection, content_id: str) -> tuple[int,
             direction = compute_bearing(estimate, prediction).direction
         except Exception:
             continue
-        # Independence axis = distinct signer (asserter_keyid), the same WHO
-        # the REPLICATED promotion keys on. The denormalized column is not
-        # itself signed, so trust it only when the claim's bundle authenticates
-        # it (embeds the same keyid, binds to this claim, and verifies when the
-        # signer is enrolled). A forged or unbacked keyid falls back to the
-        # retired generated_by run axis so it cannot inflate the count beyond
-        # the soft string axis. The k:/g: namespace stops a keyid aliasing a run
-        # label.
         keyid = _authentic_signer_keyid(
             conn, r["claim_id"], r["asserter_keyid"], r["signature_bundle"],
         )
         run_token = f"k:{keyid}" if keyid is not None else f"g:{r['generated_by']}"
-        pair = (run_token, r["data_id"])
+        model_key = _line_model_key(r["model_lineage"])
+        yield direction, run_token, r["data_id"], model_key
+
+
+def independence_counts(conn: sqlite3.Connection, content_id: str) -> tuple[int, int]:
+    """(independent_support, independent_refute) by distinct signer + model, data guard.
+
+    Counted by distinct **signer** (the claim's ``asserter_keyid``) AND distinct
+    **model/method**, with a ``data_id`` guard (see :func:`_count_run_distinct`):
+    one signer yields at most one independent support and one independent refute,
+    and two same-model checks no longer read as two independent lines. This is
+    the same WHO axis the REPLICATED promotion query keys on, read from the same
+    denormalised claim column, and the same model axis the promotion gate now
+    reads off the evidence line, so promotion and trust counting can never
+    disagree. Legacy evidence lines whose claim predates the keyid column (NULL
+    ``asserter_keyid``) fall back to the retired ``generated_by`` run axis, and a
+    finding with no observed model call carries no model constraint, so both keep
+    their count instead of collapsing (status_policy@v3). The two run axes are
+    namespaced (``k:`` vs ``g:``) so a keyid can never alias a run label.
+    """
+    supports: list[tuple[str, str, tuple]] = []
+    refutes: list[tuple[str, str, tuple]] = []
+    for direction, run_token, data_id, model_key in _independence_units(
+        conn, content_id
+    ):
+        unit = (run_token, data_id, model_key)
         if direction is BearingDirection.SUPPORTS:
-            supports.append(pair)
+            supports.append(unit)
         elif direction is BearingDirection.REFUTES:
-            refutes.append(pair)
+            refutes.append(unit)
     return _count_run_distinct(supports), _count_run_distinct(refutes)
+
+
+def effective_independence(conn: sqlite3.Connection, content_id: str) -> dict:
+    """The effective-independence number for a proposition, with a soft flag.
+
+    ``number`` is the count of pairwise-distinct (model, data, signer) SUPPORTING
+    checks — the same model-aware axis :func:`independence_counts` promotes on, so
+    the two never disagree. ``soft`` is True when a supporting line carries PROXY
+    / UNVERIFIABLE model lineage: the count then rests on lineage that cannot
+    certify a distinct model, which the trust map surfaces as UNVERIFIABLE rather
+    than a confident number.
+
+    Coarse by design: distinct-model is binary this release. The graded
+    cross-model residual (how *far apart* two distinct models are) is DEFERRED —
+    named here, not computed.
+    """
+    supports: list[tuple[str, str, tuple]] = []
+    soft = False
+    for direction, run_token, data_id, model_key in _independence_units(
+        conn, content_id
+    ):
+        if direction is BearingDirection.SUPPORTS:
+            supports.append((run_token, data_id, model_key))
+            if model_key[0] == "soft":
+                soft = True
+    return {"number": _count_run_distinct(supports), "soft": soft}
 
 
 def get_proposition_row(

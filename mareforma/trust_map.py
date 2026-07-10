@@ -254,21 +254,55 @@ def _faithfulness_property(reexec_record: "dict | None") -> TrustProperty:
     )
 
 
-def _independence_property(claim: dict, n_roots: int) -> TrustProperty:
+def _independence_property(
+    claim: dict, n_roots: int, effective: "dict | None" = None,
+) -> TrustProperty:
     """Place the INDEPENDENCE axis, distinct from the support ladder.
 
-    Distinctness that rests on operator-mintable keys alone is UNVERIFIABLE: one
-    operator can mint any number of keys, so "two distinct signers" proves
-    nothing about independent lines of evidence when they all trace to one trust
-    root. Fewer than two enrolled roots (zero or one) is that unverifiable case:
-    zero roots is the most conservative reading, not a multi-root convergence.
-    Only two or more roots is the weak-convergence-prior case, and even then the
-    map does not translate a convergence marker into the word "independent".
+    For a finding (``effective`` supplied — the effective-independence record
+    from :func:`mareforma.trust._store.effective_independence`), the axis reports
+    the per-finding effective number of pairwise-distinct (model, data, signer)
+    supporting checks. Where a supporting line's model lineage is soft (PROXY /
+    UNVERIFIABLE) and no clean pair corroborates, the axis reads UNVERIFIABLE
+    rather than a confident number — a distinct model cannot be certified.
+    Coarse by design: distinct-model is binary this release; the graded
+    cross-model residual is DEFERRED, not computed.
 
-    This axis is a GRAPH-LEVEL disclosure of validator-root topology, not a
-    per-claim measurement: the residual says so, so a lone-signer claim is not
-    read as carrying a convergence prior it does not have.
+    For a non-finding claim (``effective`` is ``None``), the axis falls back to
+    the graph-level validator-root topology disclosure. Distinctness that rests
+    on operator-mintable keys alone is UNVERIFIABLE: one operator can mint any
+    number of keys, so "two distinct signers" proves nothing about independent
+    lines of evidence when they all trace to one trust root. Fewer than two
+    enrolled roots (zero or one) is that unverifiable case; only two or more is
+    the weak-convergence-prior case, and even then the map does not translate a
+    convergence marker into the word "independent". The residual says it is a
+    topology disclosure, not a per-claim measurement.
     """
+    if effective is not None:
+        number = int(effective.get("number", 0))
+        if effective.get("soft") and number < 2:
+            return TrustProperty(
+                name="independence",
+                tier=Tier.COMPUTED,
+                value="UNVERIFIABLE",
+                residual=(
+                    "a supporting line's model lineage is PROXY/UNVERIFIABLE, so "
+                    "a distinct model cannot be certified; independent "
+                    "corroboration is unverifiable (per-finding model/data/signer "
+                    "axis)"
+                ),
+            )
+        return TrustProperty(
+            name="independence",
+            tier=Tier.COMPUTED,
+            value=str(number),
+            residual=(
+                f"{number} pairwise-distinct (model, data, signer) supporting "
+                "check(s); coarse by design — distinct-model is binary this "
+                "release, the graded cross-model residual is DEFERRED, not "
+                "computed"
+            ),
+        )
     if n_roots < 2:
         detail = (
             "no trust root is enrolled" if n_roots == 0
@@ -412,11 +446,38 @@ def build_trust_map(
         # pubkey (the lean model has no key to check it against). Tell the two
         # apart so the map does not claim "re-verified" for a binding-only pass.
         asserter_enrolled = is_enrolled(conn, claim["asserter_keyid"])
+    effective = _effective_independence(conn, claim_id)
     return _assemble(
         claim, n_roots, has_inclusion,
         sig_verified=sig_verified, asserter_enrolled=asserter_enrolled,
         reexec_record=reexec_record,
+        effective_independence=effective,
     )
+
+
+def _effective_independence(conn, claim_id: str) -> "dict | None":
+    """The effective-independence record for a finding claim, or None.
+
+    A claim is a finding when a ``findings`` row binds it to a proposition; the
+    independence axis then reports the per-finding effective number over that
+    proposition's evidence lines. A plain claim (no finding row, or a graph whose
+    schema predates the evidence tree) has no such number, so the axis falls back
+    to the validator-topology disclosure.
+    """
+    import sqlite3
+
+    try:
+        row = conn.execute(
+            "SELECT content_id FROM findings WHERE claim_id = ? LIMIT 1",
+            (claim_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if row is None:
+        return None
+    from mareforma.trust._store import effective_independence
+
+    return effective_independence(conn, row["content_id"])
 
 
 def _has_rekor_inclusion(conn, claim_id: str) -> bool:
@@ -437,6 +498,7 @@ def _has_rekor_inclusion(conn, claim_id: str) -> bool:
 def _assemble(
     claim: dict, n_roots: int, has_inclusion: bool, *, sig_verified: "bool | None" = None,
     asserter_enrolled: "bool | None" = None, reexec_record: "dict | None" = None,
+    effective_independence: "dict | None" = None,
 ) -> TrustMap:
     """Assemble a TrustMap from an already-fetched claim dict (pure).
 
@@ -515,7 +577,7 @@ def _assemble(
         ),
     )
 
-    independence = _independence_property(claim, n_roots)
+    independence = _independence_property(claim, n_roots, effective_independence)
 
     ref = refutation_status(claim)
     contestation = TrustProperty(
