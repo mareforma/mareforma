@@ -1,0 +1,210 @@
+"""The absence demo, pinned so the example cannot rot.
+
+The two claims ``examples/02_compounding_agents`` makes, held as tests:
+
+- A finding whose analysis step never executed cannot earn GROUNDED. The
+  observer sees no cited read and returns UNGROUNDED; the trust map's grounding
+  edge names no observed source, so a number with no observed execution has an
+  empty provenance edge.
+- Two agents on the same model are one line of evidence. Effective independence
+  stays 1 across distinct signing keys and datasets, and rises only when a
+  genuinely different model checks the result.
+
+Both drive the real ``observe()`` path: the model call runs through an in-memory
+httpx transport, so the socket-boundary model capture is exercised offline,
+without an API key or a network.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import httpx
+
+import mareforma
+from mareforma import signing as _signing
+from mareforma.observe import ObservedGrounding, observe
+from mareforma.trust import (
+    Direction,
+    DirectionOfInterest,
+    EffectEstimate,
+    EffectType,
+    Prediction,
+    Proposition,
+)
+from mareforma.trust._store import effective_independence
+
+_ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+_OPENAI_URL = "https://api.openai.com/v1/chat/completions"
+_CLAUDE = "claude-3-5-sonnet-20241022"
+_GPT = "gpt-4o-2024-08-06"
+
+
+def _offline_client() -> httpx.Client:
+    """An httpx client whose transport answers locally — no network, no key."""
+    return httpx.Client(
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, json={}))
+    )
+
+
+def _proposition() -> Proposition:
+    return Proposition(
+        subject="cell type A",
+        relation="inhibitory connectivity onto",
+        object="cell type B",
+        direction=Direction.INCREASES,
+        scope={"region": "cortex", "species": "mouse"},
+    )
+
+
+def _plan() -> Prediction:
+    from mareforma.trust import TestType
+
+    return Prediction(
+        test_type=TestType.SUPERIORITY,
+        direction_of_interest=DirectionOfInterest.INCREASE,
+        alpha=0.05,
+        preregistered=True,
+    )
+
+
+def _estimate(n: int) -> EffectEstimate:
+    """A positive SMD with a 90% CI clear of zero — a supporting outcome."""
+    return EffectEstimate(
+        estimate_value=0.42,
+        effect_type=EffectType.SMD,
+        ci_lower=0.18,
+        ci_upper=0.66,
+        ci_level=0.90,
+        n_total=n,
+    )
+
+
+def _dataset(tmp_path: Path, name: str) -> Path:
+    p = tmp_path / f"dataset_{name}.csv"
+    rows = "\n".join(f"{i},{i * 2}" for i in range(1, 21))
+    p.write_text(f"pre,post\n{rows}\n")
+    return p
+
+
+def _model_check(client: httpx.Client, url: str, model: str, csv_path: Path):
+    """Call the model, then read the cited dataset, under one observe scope."""
+    with observe(cites=str(csv_path)) as handle:
+        client.post(
+            url,
+            json={
+                "model": model,
+                "temperature": 0.0,
+                "messages": [{"role": "user", "content": "analyze"}],
+            },
+        )
+        with open(csv_path) as fh:
+            fh.read()
+    return handle.verdict
+
+
+def _enroll_agents(graph, tmp_path: Path, names):
+    """Enroll each agent as a distinct LLM validator and open its graph handle."""
+    graphs = {}
+    for name in names:
+        kp = tmp_path / f"_{name}_key"
+        _signing.bootstrap_key(kp)
+        priv = _signing.load_private_key(kp)
+        graph.enroll_validator(
+            _signing.public_key_to_pem(priv.public_key()),
+            identity=name,
+            validator_type="llm",
+        )
+        graphs[name] = mareforma.open(tmp_path, key_path=kp)
+    return graphs
+
+
+def test_absence_catch(tmp_path: Path) -> None:
+    """A step that never executed cannot earn GROUNDED; its edge is empty."""
+    root_key = tmp_path / "_root_key"
+    _signing.bootstrap_key(root_key)
+    graph = mareforma.open(tmp_path, key_path=root_key)
+    try:
+        prop, plan = _proposition(), _plan()
+        graph.register_plan(prop, plan, generated_by="protocol")
+
+        # The analysis step never ran: nothing reads the cited dataset.
+        delta = _dataset(tmp_path, "delta")
+        with observe(cites=str(delta)) as handle:
+            pass
+        verdict = handle.verdict
+        assert verdict.grounding is ObservedGrounding.UNGROUNDED
+        # A number with no observed execution has an empty provenance edge.
+        assert verdict.grounded_sources == ()
+
+        result = graph.assert_finding(
+            prop,
+            plan,
+            _estimate(651),
+            data_id="dataset_delta",
+            data_source=str(delta),
+            generated_by="agent/absent-run",
+            grounding=verdict,
+        )
+        grounding = graph.trust_map(result["claim_id"]).get("grounding")
+        # Never GROUNDED, and the edge names no observed read.
+        assert grounding.value in {"UNGROUNDED", "OPAQUE"}
+        assert grounding.value != "GROUNDED"
+        assert "no cited read observed" in grounding.residual
+
+        # Contrast: the step runs and reads its data -> GROUNDED on that source.
+        client = _offline_client()
+        try:
+            alpha = _dataset(tmp_path, "alpha")
+            grounded = _model_check(client, _ANTHROPIC_URL, _CLAUDE, alpha)
+        finally:
+            client.close()
+        assert grounded.grounding is ObservedGrounding.GROUNDED
+        assert grounded.grounded_sources  # a non-empty provenance edge
+    finally:
+        graph.close()
+
+
+def test_compounding_same_model_not_independent(tmp_path: Path) -> None:
+    """Two same-model agents stay at 1; a different model raises it to 2."""
+    root_key = tmp_path / "_root_key"
+    _signing.bootstrap_key(root_key)
+    graph = mareforma.open(tmp_path, key_path=root_key)
+    agent_graphs = _enroll_agents(graph, tmp_path, ("agent-a", "agent-b", "agent-c"))
+    client = _offline_client()
+    try:
+        prop, plan = _proposition(), _plan()
+        graph.register_plan(prop, plan, generated_by="protocol")
+        cid = prop.content_id()
+
+        alpha = _dataset(tmp_path, "alpha")
+        beta = _dataset(tmp_path, "beta")
+        gamma = _dataset(tmp_path, "gamma")
+
+        # Two agents on the SAME model, distinct keys + distinct datasets.
+        agent_graphs["agent-a"].assert_finding(
+            prop, plan, _estimate(842), data_id="dataset_alpha",
+            data_source=str(alpha), generated_by="agent-a",
+            grounding=_model_check(client, _ANTHROPIC_URL, _CLAUDE, alpha),
+        )
+        line_b = agent_graphs["agent-b"].assert_finding(
+            prop, plan, _estimate(1104), data_id="dataset_beta",
+            data_source=str(beta), generated_by="agent-b",
+            grounding=_model_check(client, _ANTHROPIC_URL, _CLAUDE, beta),
+        )
+        # Distinct in every legacy axis, but one model: still one line.
+        assert effective_independence(graph._conn, cid)["number"] == 1
+        assert graph.trust_map(line_b["claim_id"]).get("independence").value == "1"
+
+        # A genuinely different model is a second independent line.
+        line_c = agent_graphs["agent-c"].assert_finding(
+            prop, plan, _estimate(970), data_id="dataset_gamma",
+            data_source=str(gamma), generated_by="agent-c",
+            grounding=_model_check(client, _OPENAI_URL, _GPT, gamma),
+        )
+        assert effective_independence(graph._conn, cid)["number"] == 2
+        assert graph.trust_map(line_c["claim_id"]).get("independence").value == "2"
+    finally:
+        client.close()
+        for g in agent_graphs.values():
+            g.close()
+        graph.close()

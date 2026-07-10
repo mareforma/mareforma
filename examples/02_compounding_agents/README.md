@@ -1,228 +1,185 @@
-# Compounding Agents
+# What the instrument refuses to count
 
-Two agents work sequentially on the same research question. Knowledge
-accumulates in the graph instead of evaporating between runs. The closing act
-tells the same story with the trust layer, where the support is **earned, not
-declared**.
+Two failure modes an honest trust layer has to catch, shown end to end:
+
+1. **Absence.** A finding whose analysis step never ran cannot earn `GROUNDED`.
+   The observer watched the scope, saw no cited read, and returns `UNGROUNDED` —
+   so the trust map's grounding edge names no source. A number with no observed
+   execution has an empty provenance edge, not a filled-in one.
+2. **Overcounted convergence.** Two agents on the same model that reach the same
+   answer are one line of evidence, not two. Distinct signing keys and distinct
+   datasets do not change that: effective independence stays at 1 until a
+   genuinely different model checks the result, and only then rises.
 
 Each step below is the code from
 [`02_compounding_agents.py`](02_compounding_agents.py) followed by the console
 output it prints.
 
 ```bash
-pip install langchain-core
 python 02_compounding_agents.py
 ```
 
-No API key required.
+No API key and no network required. The model calls run through an in-memory
+httpx transport, so the model capture at the socket boundary is real while the
+example runs anywhere.
 
-## Setup: a shared graph and per-agent tools
+## Setup: a shared graph, distinct agent keys, and datasets on disk
 
 ```python
-import json, tempfile
+import tempfile
 from pathlib import Path
+
+import httpx
 
 import mareforma
 from mareforma import signing as _signing
+from mareforma.observe import observe
 from mareforma.trust import (
     Direction, DirectionOfInterest, EffectEstimate, EffectType,
     Prediction, Proposition, TestType,
 )
-from langchain_core.tools import tool
 
 tmp = Path(tempfile.mkdtemp())
-key_path = tmp / "_example_key"
-_signing.bootstrap_key(key_path)
-graph = mareforma.open(tmp, key_path=key_path)
+root_key = tmp / "_root_key"
+_signing.bootstrap_key(root_key)
+graph = mareforma.open(tmp, key_path=root_key)
 
-# Two distinct lab keys for the converging claims. REPLICATED keys on the
-# signing key, so the two peers must sign with different keys.
-lab_a_key_path = tmp / "_lab_a_key"
-lab_b_key_path = tmp / "_lab_b_key"
-_signing.bootstrap_key(lab_a_key_path)
-_signing.bootstrap_key(lab_b_key_path)
-lab_a_priv = _signing.load_private_key(lab_a_key_path)
-lab_b_priv = _signing.load_private_key(lab_b_key_path)
+# Three agents, three distinct signing keys — the strongest legacy signal of
+# independent work. Each is enrolled as its own validator.
+agent_graphs = {}
+for name in ("agent-a", "agent-b", "agent-c"):
+    kp = tmp / f"_{name}_key"
+    _signing.bootstrap_key(kp)
+    priv = _signing.load_private_key(kp)
+    graph.enroll_validator(
+        _signing.public_key_to_pem(priv.public_key()),
+        identity=name, validator_type="llm")
+    agent_graphs[name] = mareforma.open(tmp, key_path=kp)
 
-# Enroll lab_b so analyst B can open the shared graph under its own key and sign
-# its own finding in the trust layer (the finding ladder counts distinct signers).
-graph.enroll_validator(
-    _signing.public_key_to_pem(lab_b_priv.public_key()), identity="lab_b")
+# An offline httpx client: the transport answers locally, and the observer still
+# reads the model off the request body at the socket boundary.
+client = httpx.Client(
+    transport=httpx.MockTransport(lambda req: httpx.Response(200, json={})))
 
-# query_graph is the shared read tool. The two converging claims below assert
-# via graph.assert_claim directly so each passes its own signer=; the
-# get_tools() closures bake in generated_by, not a signing key.
-query_graph, _ = [tool(fn) for fn in graph.get_tools(
-    generated_by="analyst/model-a/lab_a")]
-_, assert_finding_synth = [tool(fn) for fn in graph.get_tools(
-    generated_by="synthesizer/model-c/lab_b")]
-```
-
-## Agent A: two independent runs
-
-```python
-# Shared upstream anchor. seed=True asserts directly at ESTABLISHED with a
-# signed seed envelope (enrolled validators only); REPLICATED needs it.
-prior_ref = graph.assert_claim(
-    "Prior literature: cell type A → cell type B inhibitory connectivity",
-    classification="DERIVED", generated_by="agent_seed/literature", seed=True,
-)
-
-finding_a = graph.assert_claim(
-    "Cell type A forms the majority of inhibitory connections onto cell type B"
-    " (dataset_alpha, n=842, p<0.001)",
-    classification="ANALYTICAL", supports=[prior_ref],
-    source_name="dataset_alpha", generated_by="analyst/model-a/lab_a",
-    signer=lab_a_priv,
-)
-finding_b = graph.assert_claim(
-    "Cell type A dominates inhibitory input onto cell type B"
-    " (dataset_beta, n=1104, p<0.001)",
-    classification="ANALYTICAL", supports=[prior_ref],
-    source_name="dataset_beta", generated_by="analyst/model-b/lab_b",
-    signer=lab_b_priv,    # distinct key + same upstream: REPLICATED fires
-)
-```
-
-```
-  lab_a claim_id             36bda4ab…
-  lab_a support_level        PRELIMINARY
-  lab_b claim_id             2d170aaa…
-  lab_b support_level        REPLICATED
-
-  Two distinct signing keys, shared upstream: REPLICATED fires automatically.
-```
-
-## Agent B: Synthesizer
-
-```python
-# Query before asserting — the standard agent pattern. query_graph returns
-# LLM-safe text (sanitized, wrapped in <untrusted_data>) ready for a prompt.
-existing = json.loads(query_graph.invoke(
-    {"topic": "cell type A", "min_support": "REPLICATED"}))
-
-replicated_ids = [c["claim_id"] for c in existing]
-synthesis = assert_finding_synth.invoke({
-    "text": "Inhibitory dominance of cell type A over cell type B is a replicated finding"
-            " across independent datasets and consistent with prior literature",
-    "classification": "DERIVED", "supports": replicated_ids,
-})
-```
-
-```
-  query_graph('cell type A', min_support='REPLICATED') → 3 claims
-    [ESTABLISHED ] <untrusted_data>
-Prior literature: cell type A → cell type B inhi…
-    [REPLICATED  ] <untrusted_data>
-Cell type A dominates inhibitory input onto cell…
-    [REPLICATED  ] <untrusted_data>
-Cell type A forms the majority of inhibitory con…
-  synthesis claim_id         2a70d07f…
-  synthesis classification   DERIVED
-  synthesis support_level    REPLICATED
-  synthesis supports         3
-```
-
-## Graph state: the knowledge chain
-
-```python
-all_claims = graph.query()
-level_order = {"ESTABLISHED": 0, "REPLICATED": 1, "PRELIMINARY": 2}
-for c in sorted(all_claims, key=lambda x: level_order.get(x["support_level"], 3)):
-    print(f"[{c['support_level']:12}] [{c['classification']:10}]  {c['text'][:55]}…")
-```
-
-```
-  Total claims in graph: 4
-
-  [ESTABLISHED ] [DERIVED   ]  Prior literature: cell type A → cell type B inhibitory …
-  [REPLICATED  ] [DERIVED   ]  Inhibitory dominance of cell type A over cell type B is…
-  [REPLICATED  ] [ANALYTICAL]  Cell type A dominates inhibitory input onto cell type B…
-  [REPLICATED  ] [ANALYTICAL]  Cell type A forms the majority of inhibitory connection…
-```
-
-The chain is the point: `prior reference → ANALYTICAL (×2, independent) →
-REPLICATED → DERIVED`. Without querying first, Agent B would have asserted from
-scratch.
-
-## The trust layer: earned support
-
-The claim graph above tracks *who asserted what*: each agent picks its own
-classification and `supports[]` list. The trust layer makes the support
-*earned*. The question becomes a falsifiable `Proposition`; each analyst
-registers a `Prediction` **before** seeing the numbers; mareforma **computes**
-the bearing from the result and **derives** the status from independent runs.
-
-```python
-# The same research question, now as a truth-apt, falsifiable claim.
-prop = Proposition(
-    subject="cell type A", relation="inhibitory connectivity onto", object="cell type B",
-    direction=Direction.INCREASES, scope={"region": "cortex", "species": "mouse"},
-)
-# A pre-registered rule bound to the proposition before any data is seen.
+# A pre-registered decision rule, and two falsifiable propositions: the absence
+# demo and the independence demo use separate questions so neither leaks
+# evidence into the other's count.
 plan = Prediction(
     test_type=TestType.SUPERIORITY,
-    direction_of_interest=DirectionOfInterest.INCREASE, alpha=0.05, preregistered=True,
-)
-
-# Analyst A on dataset_alpha: a positive SMD with a 90% CI excluding zero.
-result_a = graph.assert_finding(
-    prop, plan,
-    EffectEstimate(estimate_value=0.42, effect_type=EffectType.SMD,
-                   ci_lower=0.18, ci_upper=0.66, ci_level=0.90, n_total=842),
-    data_id="dataset_alpha", generated_by="analyst/model-a/lab_a",
-)
-# Analyst B signs with its own key on a distinct dataset: the finding ladder
-# counts distinct signers, so B opens the shared graph under lab_b's key. Two
-# signers, two datasets: a second independent line.
-graph_b = mareforma.open(tmp, key_path=lab_b_key_path)
-result_b = graph_b.assert_finding(
-    prop, plan,
-    EffectEstimate(estimate_value=0.51, effect_type=EffectType.SMD,
-                   ci_lower=0.20, ci_upper=0.82, ci_level=0.90, n_total=1104),
-    data_id="dataset_beta", generated_by="analyst/model-b/lab_b",
-)
+    direction_of_interest=DirectionOfInterest.INCREASE, alpha=0.05, preregistered=True)
+prop_absence = Proposition(
+    subject="cell type A", relation="gap-junction coupling onto", object="cell type C",
+    direction=Direction.INCREASES, scope={"region": "cortex", "species": "mouse"})
+prop = Proposition(
+    subject="cell type A", relation="inhibitory connectivity onto", object="cell type B",
+    direction=Direction.INCREASES, scope={"region": "cortex", "species": "mouse"})
+graph.register_plan(prop_absence, plan, generated_by="protocol")
+graph.register_plan(prop, plan, generated_by="protocol")
 ```
 
-```
-  frame_id (the question)    e238fa89…
-  content_id (the answer)    bd5b2d04…
-  alpha bearing (computed)   supports
-  alpha status (derived)     PRELIMINARY
-  beta bearing (computed)    supports
-  beta status (derived)      CORROBORATED
-```
+## 1. Absence: a number with no observed execution
 
-Neither agent declared `supports`. mareforma computed each bearing from the
-pre-registered rule and derived `CORROBORATED` from two independent signers on
-two datasets.
-
-## Synthesizer: query the frame
+An agent reports a result, but the step that reads the data never ran. The
+observer saw the whole scope and no cited read, so the finding cannot earn
+`GROUNDED`.
 
 ```python
-# The frame is the question, not the wording. min_status filters on the
-# UNTESTED < PRELIMINARY < CORROBORATED support ladder.
-views = graph.query_frame(prop, min_status="PRELIMINARY")
+# The analysis step never executed: nothing reads the cited dataset.
+with observe(cites=str(delta_csv)) as handle:
+    pass
+absent_verdict = handle.verdict   # UNGROUNDED, grounded_sources empty
+
+absent = agent_graphs["agent-a"].assert_finding(
+    prop_absence, plan, estimate, data_id="dataset_delta",
+    data_source=str(delta_csv), generated_by="agent-a/absent-run",
+    grounding=absent_verdict)
+absent_map = graph.trust_map(absent["claim_id"])
 ```
 
 ```
-  query_frame(prop, min_status='PRELIMINARY') → 1 proposition(s)
-  status                     CORROBORATED
-  independent support lines  2
-  frame contest              consistent
+  observed grounding           UNGROUNDED
+  grounded sources             (none)
+  trust map grounding          UNGROUNDED
+    scope fully observed; no read matching the cited source returned data; grounded on: (no cited read observed); ...
 ```
 
-The bearing is a function of the registered rule and the realised numbers, so a
-refutation cannot be relabelled as support. Status is a count over independent
-data, not a self-declared label.
+The bearing still computes from the pre-registered rule, but the grounding axis
+reports `UNGROUNDED`: no observed read stands behind the number. The provenance
+edge is empty because nothing grounded it.
 
-## Using a real LLM
-
-The script uses explicit control flow to simulate what an LLM would decide. The
-same tools drive a real agent unchanged:
+The contrast is the same analysis, actually executed — the model is called and
+the cited dataset is read:
 
 ```python
-from langchain_openai import ChatOpenAI
-from langgraph.prebuilt import create_react_agent
-agent = create_react_agent(ChatOpenAI(model="gpt-4o"), tools=[query_graph, record_claim])
+with observe(cites=str(epsilon_csv)) as handle:
+    client.post(ANTHROPIC_URL, json={"model": "claude-3-5-sonnet-20241022", ...})
+    with open(epsilon_csv) as fh:
+        fh.read()
+grounded_verdict = handle.verdict   # GROUNDED, grounded on epsilon_csv
 ```
+
+```
+  observed grounding           GROUNDED
+  grounded sources             ['dataset_epsilon.csv']
+  trust map grounding          GROUNDED
+    the cited source was opened for reading and is non-empty (file; the open path proxies data flow by file size, it does not observe the bytes read); grounded on: .../dataset_epsilon.csv
+```
+
+## 2. Same-model convergence does not count twice
+
+`agent-a` runs the first grounded check on the shared question. A second agent,
+distinct key and distinct dataset, reaches the same answer — but on the same
+model. The instrument does not read that as a second independent line.
+
+```python
+verdict_a = model_check(client, ANTHROPIC_URL, "claude-3-5-sonnet-20241022", alpha_csv)
+agent_graphs["agent-a"].assert_finding(
+    prop, plan, estimate, data_id="dataset_alpha",
+    data_source=str(alpha_csv), generated_by="agent-a", grounding=verdict_a)
+
+verdict_b = model_check(client, ANTHROPIC_URL, "claude-3-5-sonnet-20241022", beta_csv)
+line_b = agent_graphs["agent-b"].assert_finding(
+    prop, plan, estimate, data_id="dataset_beta",
+    data_source=str(beta_csv), generated_by="agent-b", grounding=verdict_b)
+graph.trust_map(line_b["claim_id"]).get("independence").value   # "1"
+```
+
+```
+  agent-a model                claude-3-5-sonnet
+  agent-b model                claude-3-5-sonnet
+  distinct keys                yes
+  distinct datasets            yes
+  effective independence       1
+    1 pairwise-distinct (model, data, signer) supporting check(s); coarse by design ...
+```
+
+Distinct in every legacy axis — signer and dataset — but one model. Two
+same-model checks are one line of evidence, so the count holds at 1.
+
+## 3. A different model raises the count
+
+```python
+verdict_c = model_check(client, OPENAI_URL, "gpt-4o-2024-08-06", gamma_csv)
+line_c = agent_graphs["agent-c"].assert_finding(
+    prop, plan, estimate, data_id="dataset_gamma",
+    data_source=str(gamma_csv), generated_by="agent-c", grounding=verdict_c)
+graph.trust_map(line_c["claim_id"]).get("independence").value   # "2"
+```
+
+```
+  agent-c model                gpt-4o
+  effective independence       2
+    2 pairwise-distinct (model, data, signer) supporting check(s); coarse by design ...
+```
+
+A genuinely different model is a second line. The count moves from 1 to 2 only
+when the evidence is independent in the axis that matters — the model — not
+merely in the key that signed it.
+
+## Where the numbers come from
+
+The model is read off the request body at the socket boundary, which the
+producer does not control, so the lineage is `COMPUTED`. The grounding verdict
+comes from watching the scope for a read of the cited source. Both ride into the
+signed finding through `grounding=`, and the trust map places each on its own
+axis: grounding, and effective independence. Neither is a label the agent chose.
