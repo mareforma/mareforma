@@ -317,19 +317,21 @@ class TestAssertFindingRegression:
                 data_id="dataA", generated_by="lab_a",
             )
         # Return shape: the prior keys plus the additive per-line "bearings"
-        # and the additive observed "grounding" record (None when no verdict
-        # was supplied). A single-line finding carries one bearing entry.
+        # and the additive observed "grounding" record, plus the additive
+        # "model_lineage" record (both None when no verdict was supplied). A
+        # single-line finding carries one bearing entry.
         assert set(result) == {
             "finding_id", "content_id", "plan_id", "claim_id",
             "bearing", "bearings", "status", "idempotent", "proposition_status",
-            "grounding",
+            "grounding", "model_lineage",
         }
         assert result["bearing"]["direction"] == "supports"
         assert result["bearings"] == [{"direction": "supports", "significant": True}]
         assert result["idempotent"] is False
         assert result["status"] == Status.PRELIMINARY.value
-        # No observer was used, so the additive axis stays absent (None).
+        # No observer was used, so the additive axes stay absent (None).
         assert result["grounding"] is None
+        assert result["model_lineage"] is None
 
     def test_one_shot_synthesised_plan_is_not_preregistered(self, tmp_path: Path) -> None:
         h = _prop(Direction.DECREASES)

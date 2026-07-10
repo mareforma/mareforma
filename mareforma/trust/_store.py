@@ -195,6 +195,8 @@ def insert_finding(
     bearings: list[Bearing],
     lines: list[EvidenceLine],
     now: str,
+    *,
+    model_lineage: "str | None" = None,
 ) -> str:
     """Write the finding plus its N-line evidence tree; return finding_id.
 
@@ -206,6 +208,13 @@ def insert_finding(
     authoritative per-line bearings are the gate output over each stored estimate;
     :func:`independence_counts` recomputes them on read so that a multi-line
     finding whose lines disagree is counted per line, not off this cache.
+
+    ``model_lineage`` is the JSON model/method lineage the observer captured for
+    the authoring scope (COMPUTED / PROXY / UNVERIFIABLE), or None when no model
+    call was observed. It is written on every line of the finding: the scope
+    authors the finding as a whole, so its lineage attributes each line, and the
+    per-line column lets a reader key independence on distinct model as well as
+    signer and data.
     """
     if not lines:
         raise ValueError("a finding must carry at least one evidence line")
@@ -222,8 +231,9 @@ def insert_finding(
         line_id = _uuid()
         conn.execute(
             "INSERT INTO evidence_lines "
-            "(line_id, finding_id, modality, provenance_id, design_type, data_id, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(line_id, finding_id, modality, provenance_id, design_type, data_id, "
+            " model_lineage, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 line_id,
                 finding_id,
@@ -231,6 +241,7 @@ def insert_finding(
                 line.provenance_id,
                 line.design_type,
                 line.data_id,
+                model_lineage,
                 now,
             ),
         )
@@ -293,6 +304,28 @@ def finding_data_ids(conn: sqlite3.Connection, finding_id: str) -> set[str]:
         (finding_id,),
     ).fetchall()
     return {r["data_id"] for r in rows}
+
+
+def finding_model_lineage(
+    conn: sqlite3.Connection, finding_id: str
+) -> Optional[dict]:
+    """The model/method lineage recorded on a finding's evidence lines, or None.
+
+    The lineage is written identically on every line of a finding, so the first
+    non-NULL value represents the finding. Returns the parsed dict, or None when
+    the finding was authored without an observed model call.
+    """
+    row = conn.execute(
+        "SELECT model_lineage FROM evidence_lines "
+        "WHERE finding_id = ? AND model_lineage IS NOT NULL LIMIT 1",
+        (finding_id,),
+    ).fetchone()
+    if row is None or row["model_lineage"] is None:
+        return None
+    try:
+        return json.loads(row["model_lineage"])
+    except (ValueError, TypeError):
+        return None
 
 
 def _count_run_distinct(pairs: list[tuple[str, str]]) -> int:

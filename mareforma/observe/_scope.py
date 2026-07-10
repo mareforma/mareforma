@@ -89,6 +89,10 @@ class Scope:
         self.reads: list[ReadRecord] = []
         self.seams: list[SeamEvent] = []
         self.opens: list[str] = []
+        # Model/method lineage records captured in this span (a wrapped httpx
+        # POST body-parse, or a producer declaration). Empty when no model call
+        # authored the finding — the lineage is then absent, never fabricated.
+        self.models: list = []
         self._error: str | None = None
         self._token = None
 
@@ -101,6 +105,16 @@ class Scope:
 
     def record_seam(self, kind: str, detail: str) -> None:
         self.seams.append(SeamEvent(kind, detail))
+
+    def record_model(self, lineage) -> None:
+        self.models.append(lineage)
+
+    def model_lineage(self):
+        """The single finding-level model/method lineage, or None if no model
+        call was observed in this span."""
+        from ._lineage import collapse_lineage
+
+        return collapse_lineage(self.models)
 
     def record_open(self, path) -> None:
         if isinstance(path, str) and path:
@@ -146,6 +160,7 @@ class Scope:
             reads=reads,
             reads_seen=reads_seen,
             opens_detected=opens_detected,
+            model_lineage=self.model_lineage(),
         )
 
         if self._error is not None:

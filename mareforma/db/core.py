@@ -317,6 +317,7 @@ def open_db(root: Path) -> sqlite3.Connection:
         # them and the first `mareforma ingest` or hook event raises
         # 'no such table'.
         conn.executescript(_ADDITIVE_TABLES_SQL)
+        _ensure_evidence_lines_columns(conn)
         conn.commit()
         return conn
 
@@ -359,6 +360,7 @@ def open_db_from_db_path(db_path: "str | Path") -> sqlite3.Connection:
         conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
     else:
         conn.executescript(_ADDITIVE_TABLES_SQL)
+        _ensure_evidence_lines_columns(conn)
     conn.commit()
     return conn
 
@@ -479,6 +481,40 @@ def _grandfather_legacy_replicated(
             replicated_grandfathered=int(n),
         )
     return int(n)
+
+
+def _ensure_evidence_lines_columns(conn: sqlite3.Connection) -> None:
+    """Add the ``model_lineage`` column to legacy evidence_lines tables.
+
+    The trust-layer evidence tree is additive and not part of the signed
+    claim-envelope integrity surface, so in-place ALTER is safe: a NULL
+    ``model_lineage`` on an existing line is exactly a line authored without an
+    observed model call. CREATE TABLE IF NOT EXISTS on a fresh DB already creates
+    the column; this fills the gap on DBs created by older mareforma builds. Runs
+    after the additive-tables script, so the table itself is guaranteed present.
+    """
+    cols = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(evidence_lines)").fetchall()
+    }
+    if "model_lineage" not in cols:
+        try:
+            conn.execute("ALTER TABLE evidence_lines ADD COLUMN model_lineage TEXT")
+            conn.commit()
+        except sqlite3.OperationalError as exc:
+            # Concurrent open: another process won the ALTER race. Re-check
+            # before raising — "duplicate column name" is benign.
+            cols2 = {
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(evidence_lines)"
+                ).fetchall()
+            }
+            if "model_lineage" in cols2:
+                return
+            raise DatabaseError(
+                f"Could not add evidence_lines.model_lineage column: {exc}"
+            ) from exc
 
 
 def _ensure_doi_cache_columns(conn: sqlite3.Connection) -> None:

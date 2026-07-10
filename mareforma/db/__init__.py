@@ -67,6 +67,7 @@ from .core import (
     _db_path,
     _ensure_claims_columns_for_upgrade,
     _ensure_doi_cache_columns,
+    _ensure_evidence_lines_columns,
     _attach_supports_cache,
     # Serialization.
     _serialize_predicate_payload,

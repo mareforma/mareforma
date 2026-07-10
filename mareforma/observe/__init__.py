@@ -32,6 +32,7 @@ from ._binding import (
 )
 from ._citation import cited_set
 from ._doctor import coverage_report
+from ._lineage import ModelLineage, ModelLineageTier
 from ._scope import current_scope, scope_is_open
 from ._verdict import (
     GROUNDING_AXIS_VERSION,
@@ -51,6 +52,40 @@ from .oracle import (
     reconcile,
     scalar_reducer,
 )
+
+
+def declare_model(
+    model,
+    *,
+    method=None,
+    temperature=None,
+    top_p=None,
+    seed=None,
+    provider=None,
+):
+    """Declare the model behind the current scope (the PROXY lineage tier).
+
+    A cooperating producer whose model call does not route through a wrapped
+    ``httpx`` POST (a custom SDK, a batching layer) declares it here. A
+    declaration is always agent-attested, so it is PROXY — never COMPUTED, which
+    only a body-parse at the socket seam earns. A declared model whose base is
+    not declarable (a hosted fine-tune, a moving alias) is UNVERIFIABLE. A no-op
+    outside a scope, like every other recording chokepoint.
+    """
+    scope = current_scope()
+    if scope is None:
+        return
+    from ._lineage import resolve_lineage
+
+    scope.record_model(
+        resolve_lineage(
+            model,
+            source="declared",
+            method=method,
+            decoding={"temperature": temperature, "top_p": top_p, "seed": seed},
+            provider=provider,
+        )
+    )
 
 
 class ScopeNotClosedError(RuntimeError):
@@ -136,6 +171,10 @@ __all__ = [
     "GROUNDING_AXIS_VERSION",
     "current_scope",
     "scope_is_open",
+    # Model/method lineage captured at the call boundary.
+    "declare_model",
+    "ModelLineage",
+    "ModelLineageTier",
     # Coverage self-report (the doctor).
     "coverage_report",
     # Verdict↔citation binding.

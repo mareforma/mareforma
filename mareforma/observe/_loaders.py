@@ -496,12 +496,27 @@ def _wrap_httpx_clients_if_present() -> None:
         if real is not None:
             _reals["httpx.Client.get"] = real
             Client.get = _make_http_method_wrapper(real, streaming_kw=None)
+    # POST carries the model call: parse the request body for the model/method
+    # lineage at the socket seam. A streaming POST (body ``stream=true``) does
+    # not materialize the response, so its response is recorded as a socket seam
+    # rather than forced into memory — the request body is available either way,
+    # so the model is still captured.
+    if Client is not None and "httpx.Client.post" not in _reals:
+        real = getattr(Client, "post", None)
+        if real is not None:
+            _reals["httpx.Client.post"] = real
+            Client.post = _make_http_post_method_wrapper(real)
     AsyncClient = getattr(httpx, "AsyncClient", None)
     if AsyncClient is not None and "httpx.AsyncClient.get" not in _reals:
         real = getattr(AsyncClient, "get", None)
         if real is not None:
             _reals["httpx.AsyncClient.get"] = real
             AsyncClient.get = _make_async_http_method_wrapper(real, streaming=False)
+    if AsyncClient is not None and "httpx.AsyncClient.post" not in _reals:
+        real = getattr(AsyncClient, "post", None)
+        if real is not None:
+            _reals["httpx.AsyncClient.post"] = real
+            AsyncClient.post = _make_async_http_post_method_wrapper(real)
 
 
 def _wrap_aiohttp_if_present() -> None:
@@ -611,6 +626,128 @@ def _record_http_response(scope, args, kwargs, result) -> None:
     if scope.content_address:
         content_address = _maybe_content_address(result)
     _scope.record_read("http", url, _resp_nonempty(result), content_address)
+
+
+# -- model/method lineage at the POST seam -----------------------------------
+#
+# A model call is an HTTP POST whose JSON body names the model. Wrapping
+# Client.post / AsyncClient.post lets the observer parse that body at the socket
+# seam — the COMPUTED lineage tier, which the producer does not control. The
+# response side follows the existing streaming rule: a streaming POST (body
+# ``stream=true``) records a socket seam instead of materializing the body.
+
+def _make_http_post_method_wrapper(real):
+    """Wrap a bound ``Client.post`` that returns a response."""
+
+    def wrapper(self, *args, **kwargs):
+        result = real(self, *args, **kwargs)  # host errors propagate untouched
+        scope = _scope.current_scope()
+        if scope is None:
+            return result
+        try:
+            _record_http_post(scope, args, kwargs, result)
+        except BaseException as exc:  # noqa: BLE001
+            scope.mark_error(f"http loader wrapper failed: {type(exc).__name__}")
+        return result
+
+    return wrapper
+
+
+def _make_async_http_post_method_wrapper(real):
+    """Wrap a bound ``AsyncClient.post`` that returns a response."""
+
+    async def wrapper(self, *args, **kwargs):
+        result = await real(self, *args, **kwargs)  # host errors propagate
+        scope = _scope.current_scope()
+        if scope is None:
+            return result
+        try:
+            _record_http_post(scope, args, kwargs, result)
+        except BaseException as exc:  # noqa: BLE001
+            scope.mark_error(f"http loader wrapper failed: {type(exc).__name__}")
+        return result
+
+    return wrapper
+
+
+def _record_http_post(scope, args, kwargs, result) -> None:
+    # Parse the request body once and thread it to both consumers.
+    body = _request_json_body(kwargs)
+    _record_model_from_request(scope, args, kwargs, body)
+    if isinstance(body, dict) and bool(body.get("stream")):
+        # Streaming POST: the response body is not materialized at return.
+        # Record a socket seam rather than forcing the download into memory,
+        # matching the requests/aiohttp streaming seams.
+        scope.record_seam(
+            "socket", "streaming HTTP response; byte flow not observed"
+        )
+    else:
+        _record_http_response(scope, args, kwargs, result)
+
+
+def _record_model_from_request(scope, args, kwargs, body) -> None:
+    if not isinstance(body, dict):
+        return
+    model_id = body.get("model")
+    if not isinstance(model_id, str) or not model_id:
+        return
+    url = _resp_source(args, kwargs, None)
+    from ._lineage import resolve_lineage
+
+    lineage = resolve_lineage(
+        model_id,
+        source="socket",
+        method=_method_of(url),
+        decoding={
+            "temperature": body.get("temperature"),
+            "top_p": body.get("top_p"),
+            "seed": body.get("seed"),
+        },
+        provider=_provider_of(url),
+    )
+    scope.record_model(lineage)
+
+
+def _request_json_body(kwargs):
+    """The request JSON body of an httpx POST, or None.
+
+    ``json=`` is the common shape (a dict). ``content=`` / ``data=`` carry raw
+    bytes/str a caller may have serialized itself; parse those best-effort. A
+    non-JSON body yields None (no model to capture), never an error.
+    """
+    body = kwargs.get("json")
+    if isinstance(body, dict):
+        return body
+    for key in ("content", "data"):
+        raw = kwargs.get(key)
+        if isinstance(raw, (bytes, bytearray, str)):
+            try:
+                import json as _json
+
+                return _json.loads(raw)
+            except (ValueError, TypeError):
+                return None
+    return None
+
+
+def _provider_of(url) -> "str | None":
+    u = (url or "").lower()
+    if "anthropic" in u:
+        return "anthropic"
+    if "openai" in u:
+        return "openai"
+    return None
+
+
+def _method_of(url) -> "str | None":
+    """The request path — a stable tool/pipeline identity tag for the call."""
+    from urllib.parse import urlsplit
+
+    try:
+        path = urlsplit(url or "").path
+    except (ValueError, TypeError):
+        return None
+    return path or None
 
 
 # -- C-extension readers: h5py / pyarrow / netCDF4 ---------------------------

@@ -717,6 +717,15 @@ CREATE TABLE IF NOT EXISTS evidence_lines (
     provenance_id  TEXT,
     design_type    TEXT,
     data_id        TEXT NOT NULL,
+    -- Model/method lineage observed at the call boundary, as a JSON record
+    -- {tier, model_id, family_root, provider, version, method, decoding}. The
+    -- tier mirrors the data_id axis: COMPUTED (body-parse at the socket seam),
+    -- PROXY (producer-declared), UNVERIFIABLE (a fine-tune / alias / wrapper
+    -- whose base is not declarable). Identity only — it records which model and
+    -- method authored the line, never a claim about training-time contamination.
+    -- NULL on every line authored without an observed model call (including
+    -- every row that predates this column).
+    model_lineage  TEXT,
     created_at     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_line_finding ON evidence_lines(finding_id);

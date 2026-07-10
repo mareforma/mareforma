@@ -58,6 +58,18 @@ _LLM_WRAP_FIELDS = ("text", "comparison_summary")
 _LLM_SANITIZE_FIELDS = ("source_name", "generated_by", "validated_by")
 
 
+def _model_lineage_of(grounding):
+    """The model/method lineage a grounding verdict carries, or None.
+
+    Tolerant of a verdict without the field (a hand-built or pre-observer
+    verdict) and of a plain None, so the lineage thread never raises on an
+    absent or legacy verdict.
+    """
+    if grounding is None:
+        return None
+    return getattr(grounding, "model_lineage", None)
+
+
 def _format_row_for_llm(row: dict, prompt_safety) -> dict:
     """Apply prompt-safety sanitization to a claim row. Pure function;
     the ``prompt_safety`` module is passed in to keep the import lazy
@@ -1307,6 +1319,12 @@ class EpistemicGraph:
                 # freshly-passed one: an idempotent replay reuses the first
                 # write's signed claim and does not re-record grounding.
                 "grounding": self._stored_grounding(existing["claim_id"]),
+                # Likewise report the lineage stored on the existing finding's
+                # lines, not a freshly-captured one: the replay does not rewrite
+                # the evidence tree.
+                "model_lineage": _store.finding_model_lineage(
+                    self._conn, existing["finding_id"]
+                ),
             }
         if not _store.plan_exists(self._conn, plan_id):
             raise NoRegisteredPlanError(
@@ -1334,6 +1352,19 @@ class EpistemicGraph:
             content_id=cid,
         )
         data_sources = self._normalized_data_sources(evidence_lines)
+
+        # The model/method lineage the observer captured for the authoring scope
+        # (COMPUTED / PROXY / UNVERIFIABLE), or None when no model call was
+        # observed. It rides the grounding verdict from the observe() scope and
+        # is persisted on the evidence lines, not bound into the signed envelope:
+        # the model identity lives on the evidence tree, so a finding without an
+        # observed model call stays byte-identical to a pre-observer finding.
+        model_lineage = _model_lineage_of(grounding)
+        model_lineage_json = (
+            json.dumps(model_lineage.to_dict(), sort_keys=True, ensure_ascii=False)
+            if model_lineage is not None
+            else None
+        )
 
         # The claim idempotency_key: keep the exact single-line form for parity;
         # multi-line keys on a stable hash of the sorted dataset set.
@@ -1416,7 +1447,8 @@ class EpistemicGraph:
                     },
                 )
                 finding_id = _store.insert_finding(
-                    conn, cid, plan_id, claim_id, bearings, evidence_lines, now
+                    conn, cid, plan_id, claim_id, bearings, evidence_lines, now,
+                    model_lineage=model_lineage_json,
                 )
                 result_claim_id = claim_id
                 idempotent = False
@@ -1462,6 +1494,14 @@ class EpistemicGraph:
                 self._stored_grounding(result_claim_id)
                 if idempotent
                 else grounding_signed
+            ),
+            # The model/method lineage recorded on the finding's evidence lines,
+            # or None when no model call was observed. On an idempotent reuse,
+            # report the lineage stored on the reused finding, not the passed one.
+            "model_lineage": (
+                _store.finding_model_lineage(self._conn, finding_id)
+                if idempotent
+                else (model_lineage.to_dict() if model_lineage is not None else None)
             ),
         }
 

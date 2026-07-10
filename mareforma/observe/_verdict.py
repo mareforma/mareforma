@@ -139,6 +139,13 @@ class GroundingVerdict:
     # (uninstrumented reader). Powers the read-coverage-fraction measurement.
     reads_seen: int = 0
     opens_detected: int = 0
+    # The model/method lineage captured in the authoring scope, tiered like
+    # data_id (COMPUTED / PROXY / UNVERIFIABLE), or None when no model call was
+    # observed. Carried on the verdict so the observe -> assert_finding thread
+    # can persist it on the evidence line. It is NOT part of the signed receipt
+    # or its digest: the identity rides the evidence line, not the
+    # grounding envelope, so a pre-observer receipt digest is unchanged.
+    model_lineage: "ModelLineage | None" = None
 
     def receipt(self) -> dict:
         """The full, canonicalizable receipt of what the observer captured."""
