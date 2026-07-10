@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 
 import httpx
-import pytest
 
 import mareforma.observe as obs
 from mareforma.observe import ModelLineageTier, declare_model

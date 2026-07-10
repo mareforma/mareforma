@@ -671,9 +671,8 @@ def classify_support(value: str) -> str:
       * ``"claim"``: strict UUIDv4 shape, candidate graph-node edge.
         REPLICATED detection and cycle detection walk these.
       * ``"doi"``: DOI form (``10.<registrant>/<suffix>``) per Crossref +
-        DataCite syntax. Resolved against the DOI registry at assert
-        time; ineligible as a REPLICATED anchor (the upstream is not a
-        local claim).
+        DataCite syntax; ineligible as a REPLICATED anchor (the upstream
+        is not a local claim).
       * ``"external"``: anything else. Free-form strings (URLs, ORCID
         ids, lab-internal references). Stored verbatim, not walked, not
         resolved.

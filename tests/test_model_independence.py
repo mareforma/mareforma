@@ -19,33 +19,7 @@ import mareforma
 from mareforma.observe import GroundingVerdict, ObservedGrounding
 from mareforma.observe._lineage import resolve_lineage
 from mareforma.trust._store import effective_independence
-from tests._helpers import _bootstrap_key
-
-
-def _prop():
-    from mareforma.trust import Direction, Proposition
-
-    return Proposition(
-        subject="BRCA1", relation="affects", object="tumour growth",
-        direction=Direction.DECREASES,
-        scope={"population": "TNBC", "condition": "in vitro"},
-    )
-
-
-def _pred():
-    from mareforma.trust import DirectionOfInterest, Prediction, TestType
-
-    return Prediction(
-        TestType.SUPERIORITY,
-        direction_of_interest=DirectionOfInterest.DECREASE,
-        alpha=0.05,
-    )
-
-
-def _est():
-    from mareforma.trust import EffectEstimate, EffectType
-
-    return EffectEstimate(-0.8, EffectType.SMD, p_value=0.001)
+from tests._helpers import _bootstrap_key, _est, _pred, _prop
 
 
 def _verdict(model_id: str, *, source: str = "socket") -> GroundingVerdict:

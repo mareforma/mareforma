@@ -68,6 +68,39 @@ def _wipe_db(tmp_path: Path) -> None:
             p.unlink()
 
 
+def _prop():
+    """Build the canonical BRCA1 proposition the finding tests assert on.
+
+    Shared helper replacing the byte-identical copies that the model-lineage
+    and model-independence tests each defined locally.
+    """
+    from mareforma.trust import Direction, Proposition
+
+    return Proposition(
+        subject="BRCA1", relation="affects", object="tumour growth",
+        direction=Direction.DECREASES,
+        scope={"population": "TNBC", "condition": "in vitro"},
+    )
+
+
+def _pred():
+    """Build the canonical one-sided superiority prediction (alpha 0.05)."""
+    from mareforma.trust import DirectionOfInterest, Prediction, TestType
+
+    return Prediction(
+        TestType.SUPERIORITY,
+        direction_of_interest=DirectionOfInterest.DECREASE,
+        alpha=0.05,
+    )
+
+
+def _est():
+    """Build the canonical SMD effect estimate (-0.8, p=0.001)."""
+    from mareforma.trust import EffectEstimate, EffectType
+
+    return EffectEstimate(-0.8, EffectType.SMD, p_value=0.001)
+
+
 def _module_level_names(source_path: Path) -> list[str]:
     """Return every top-level name defined in *source_path*.
 

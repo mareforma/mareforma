@@ -15,33 +15,7 @@ from pathlib import Path
 import mareforma
 import mareforma.observe as mobs
 from mareforma.observe import declare_model
-from tests._helpers import _bootstrap_key
-
-
-def _prop():
-    from mareforma.trust import Direction, Proposition
-
-    return Proposition(
-        subject="BRCA1", relation="affects", object="tumour growth",
-        direction=Direction.DECREASES,
-        scope={"population": "TNBC", "condition": "in vitro"},
-    )
-
-
-def _pred():
-    from mareforma.trust import DirectionOfInterest, Prediction, TestType
-
-    return Prediction(
-        TestType.SUPERIORITY,
-        direction_of_interest=DirectionOfInterest.DECREASE,
-        alpha=0.05,
-    )
-
-
-def _est():
-    from mareforma.trust import EffectEstimate, EffectType
-
-    return EffectEstimate(-0.8, EffectType.SMD, p_value=0.001)
+from tests._helpers import _bootstrap_key, _est, _pred, _prop
 
 
 def _lineage_rows(tmp_path: Path) -> list[str | None]:
