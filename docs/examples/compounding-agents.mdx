@@ -1,90 +1,94 @@
 ---
 title: "Compounding Agents"
-description: "Two agents work sequentially. Knowledge accumulates in the graph instead of evaporating between runs."
+description: "What the instrument refuses to count: a finding whose step never ran, and same-model checks that only look independent."
 ---
 
 <Card title="View on GitHub" icon="github" href="https://github.com/mareforma/mareforma/tree/main/examples/02_compounding_agents">
   `examples/02_compounding_agents/`
 </Card>
 
-Agent A analyses two independent runs on distinct datasets, citing the same upstream evidence.
-Agent B queries the graph before asserting, finds the REPLICATED findings, and
-builds a DERIVED synthesis on top. The closing act tells the same story with the
-trust layer, where the support is earned rather than declared.
+Two failure modes an honest trust layer has to catch, shown end to end: a finding
+whose analysis step never ran, and two same-model agents whose agreement only
+looks like independent corroboration.
 
 ## Run
 
 ```bash
-pip install langchain-core
 cd examples/02_compounding_agents
 python 02_compounding_agents.py
 ```
 
-No API key required. To use a real LLM:
+No API key and no network required. The model calls run through an in-memory
+`httpx` transport, so the model capture at the socket boundary is real while the
+example runs anywhere.
+
+## 1. Absence: a number with no observed execution
+
+An agent reports a result, but the step that reads the data never ran. The
+observer watched the whole scope and saw no cited read, so the finding cannot
+earn `GROUNDED`.
 
 ```python
-from langchain_openai import ChatOpenAI
-from langgraph.prebuilt import create_react_agent
-agent = create_react_agent(ChatOpenAI(model="gpt-4o"), tools=[query_graph, record_claim])
+from mareforma.observe import observe
+
+# The analysis step never executed: nothing reads the cited dataset.
+with observe(cites=str(delta_csv)) as handle:
+    pass
+absent_verdict = handle.verdict   # UNGROUNDED, grounded_sources empty
+
+absent = agent_graphs["agent-a"].assert_finding(
+    prop_absence, plan, estimate, data_id="dataset_delta",
+    data_source=str(delta_csv), generated_by="agent-a/absent-run",
+    grounding=absent_verdict)
+graph.trust_map(absent["claim_id"])   # grounding axis: UNGROUNDED
 ```
 
-## Key pattern
+The bearing still computes from the pre-registered rule, but the grounding axis
+reports `UNGROUNDED`: no observed read stands behind the number, so the provenance
+edge is empty. The contrast is the same analysis actually executed, where the
+cited dataset is read inside the scope and the axis reads `GROUNDED`.
+
+## 2. Same-model convergence does not count twice
+
+`agent-a` runs the first grounded check. A second agent, distinct key and distinct
+dataset, reaches the same answer, but on the same model. The instrument does not
+read that as a second independent line.
 
 ```python
-@tool
-def query_graph(topic: str, min_support: str = "PRELIMINARY") -> str:
-    results = graph.query(topic, min_support=min_support)
-    return json.dumps([r["text"] for r in results])
+verdict_a = model_check(client, ANTHROPIC_URL, "claude-3-5-sonnet-20241022", alpha_csv)
+agent_graphs["agent-a"].assert_finding(
+    prop, plan, estimate, data_id="dataset_alpha",
+    data_source=str(alpha_csv), generated_by="agent-a", grounding=verdict_a)
 
-@tool
-def record_claim(text: str, classification: str, supports: list[str]) -> str:
-    return graph.assert_claim(
-        text, classification=classification, supports=supports,
-        generated_by="agent/synthesiser",
-    )
+verdict_b = model_check(client, ANTHROPIC_URL, "claude-3-5-sonnet-20241022", beta_csv)
+line_b = agent_graphs["agent-b"].assert_finding(
+    prop, plan, estimate, data_id="dataset_beta",
+    data_source=str(beta_csv), generated_by="agent-b", grounding=verdict_b)
+graph.trust_map(line_b["claim_id"]).get("independence").value   # "1"
 ```
 
-## The trust layer
+Distinct in every legacy axis, signer and dataset, but one model. Two same-model
+checks are one line of evidence, so effective independence holds at 1.
 
-The same question, now as a structured finding. Each analyst registers a
-prediction before seeing the numbers; mareforma computes the bearing and derives
-the status from independent runs.
+## 3. A different model raises the count
 
 ```python
-from mareforma.trust import (
-    Proposition, Direction, Prediction, TestType, DirectionOfInterest,
-    EffectEstimate, EffectType,
-)
-
-prop = Proposition(
-    subject="cell type A", relation="inhibitory connectivity onto",
-    object="cell type B", direction=Direction.INCREASES,
-    scope={"region": "cortex", "species": "mouse"},
-)
-plan = Prediction(
-    test_type=TestType.SUPERIORITY,
-    direction_of_interest=DirectionOfInterest.INCREASE, alpha=0.05,
-)
-
-# Analyst A on dataset_alpha: one independent line.
-graph.assert_finding(prop, plan,
-    EffectEstimate(estimate_value=0.42, effect_type=EffectType.SMD,
-                   ci_lower=0.18, ci_upper=0.66, ci_level=0.90, n_total=842),
-    data_id="dataset_alpha", generated_by="analyst/model-a/lab_a")
-
-# Analyst B is a distinct run on a distinct dataset: a second independent line.
-graph.assert_finding(prop, plan,
-    EffectEstimate(estimate_value=0.51, effect_type=EffectType.SMD,
-                   ci_lower=0.20, ci_upper=0.82, ci_level=0.90, n_total=1104),
-    data_id="dataset_beta", generated_by="analyst/model-b/lab_b")
-
-graph.query_frame(prop, min_status="PRELIMINARY")[0]["status"]   # "CORROBORATED"
+verdict_c = model_check(client, OPENAI_URL, "gpt-4o-2024-08-06", gamma_csv)
+line_c = agent_graphs["agent-c"].assert_finding(
+    prop, plan, estimate, data_id="dataset_gamma",
+    data_source=str(gamma_csv), generated_by="agent-c", grounding=verdict_c)
+graph.trust_map(line_c["claim_id"]).get("independence").value   # "2"
 ```
 
-Neither agent declared support: the bearing is computed from the pre-registered
-rule. The two lines are distinct runs (`generated_by`) on distinct datasets
-(`data_id`). On an unsigned graph, independence is counted on that run axis, so
-the proposition reaches `CORROBORATED`. When findings are signed, independence
-counts distinct *authenticated signers* instead: two analysts each write
-through a graph opened with their own key, so a single signer cannot
-self-corroborate. See [Findings](/concepts/findings).
+A genuinely different model is a second line. The count moves from 1 to 2 only when
+the evidence is independent in the axis that matters, the model, not merely in the
+key that signed it.
+
+## Where the numbers come from
+
+The model is read off the request body at the socket boundary, which the producer
+does not control, so the lineage is `COMPUTED`. The grounding verdict comes from
+watching the scope for a read of the cited source. Both ride into the signed
+finding through `grounding=`, and the trust map places each on its own axis:
+grounding, and effective independence. Neither is a label the agent chose. See
+[Findings](/concepts/findings) and [Grounding](/concepts/grounding).

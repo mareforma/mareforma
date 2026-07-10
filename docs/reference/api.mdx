@@ -140,7 +140,7 @@ claim_id = graph.assert_claim(
 | `idempotency_key` | `str \| None` | `None` | Unique key: same key returns existing `claim_id`, no INSERT. |
 | `status` | `str` | `"open"` | `open` \| `contested` \| `retracted` |
 | `artifact_hash` | `str \| None` | `None` | SHA-256 hex digest of the output bytes backing the claim. Secondary collapse check: equal data collapses two peers to one line (a byte-identical rerun is not corroboration), distinct data counts as independent, absent data (NULL) never blocks. |
-| `evidence` | `EvidenceVector \| dict \| None` | `None` | GRADE evidence vector for the claim, denormalised into the `ev_*` columns and stored as `evidence_json`. |
+| `evidence` | `dict \| None` | `None` | Optional opaque evidence-vector dict for the claim, denormalised into the `ev_*` columns and stored as `evidence_json`. Carried inside the signed predicate; mareforma does not interpret it. |
 | `seed` | `bool` | `False` | Insert directly at `ESTABLISHED` with a signed seed envelope. Only an enrolled validator can produce a seed. Used to bootstrap the ESTABLISHED-upstream chain on a fresh project. |
 | `predicate_payload` | `dict \| None` | `None` | Structured predicate body for typed adapters. Stored in the queryable `predicate_payload` column only, NOT bound into the signed envelope or chain hash. |
 | `original_signature_bundle` | `str \| None` | `None` | Source-side DSSE envelope preserved by federation-import flows. Validated only for JSON well-formedness at write time, never re-verified. |
@@ -157,7 +157,7 @@ claim_id = graph.assert_claim(
 - `ChainIntegrityError`: if the `prev_hash` append-only chain check fails
 - `DatabaseError`: on SQLite write failure
 
-**Side effect**: if ≥2 claims now share the same upstream in `supports[]` signed by distinct keys, all are promoted to `REPLICATED`. The promotion fires only when at least one upstream is itself `ESTABLISHED` (Cochrane / GRADE evidence chain, strict by default). When both peers supply `artifact_hash`, equal data collapses the pair to one line and does not promote on data alone; distinct data counts as independent; absent data never blocks.
+**Side effect**: if ≥2 claims now share the same upstream in `supports[]` signed by distinct keys, all are promoted to `REPLICATED`. The promotion fires only when at least one upstream is itself `ESTABLISHED` (the ESTABLISHED-upstream rule, strict by default, so replication-of-noise is not replication). When both peers supply `artifact_hash`, equal data collapses the pair to one line and does not promote on data alone; distinct data counts as independent; absent data never blocks.
 
 #### Idempotency
 
@@ -484,36 +484,6 @@ A "healthy" graph has zeros across the four drift counters. Non-zero values don'
 
 ---
 
-### `refresh_unresolved()`
-
-Retry external DOI verification for every claim currently flagged `unresolved=1`.
-
-```python
-result = graph.refresh_unresolved()
-# {"checked": N, "resolved": M, "still_unresolved": K}
-```
-
-DOIs in `supports[]`/`contradicts[]` are HEAD-checked against Crossref and DataCite at `assert_claim` time. If the registries are unreachable, the claim persists with `unresolved=True` and is ineligible for REPLICATED promotion until `refresh_unresolved()` confirms the DOIs.
-
-**Returns** `dict` with keys `checked`, `resolved`, `still_unresolved`.
-
----
-
-### `refresh_all_dois()`
-
-Force-re-resolve every DOI referenced anywhere in the graph, bypassing the 30-day positive cache. Use when you suspect a referenced DOI has been retracted or its registry state has changed since assertion.
-
-```python
-result = graph.refresh_all_dois()
-# {"checked": N, "still_resolved": M, "now_unresolved": K, "newly_failed": F}
-```
-
-`newly_failed` counts DOIs whose cache state flipped from resolved to unresolved (the drift signal operators usually want). Does NOT mutate `support_level` or per-claim `unresolved` flags; re-running a HEAD check is not strong enough evidence to demote across the trust ladder.
-
-**Returns** `dict` with keys `checked`, `still_resolved`, `now_unresolved`, `newly_failed`.
-
----
-
 ### `refresh_convergence()`
 
 Retry convergence detection (PRELIMINARY → REPLICATED) for every claim flagged `convergence_retry_needed=1`. Without this method, a swallowed SQLite error during detection would leave the claim stuck at PRELIMINARY forever.
@@ -767,7 +737,7 @@ conn = open_db_from_db_path("/tmp/custom.db")
 # Opens /tmp/custom.db, not /tmp/.mareforma/graph.db.
 ```
 
-Used internally by the v0.3.3 CLI subcommands (`ingest`, `ask`, `narrative`) when `--db` points outside `.mareforma/`.
+Use it when a caller needs to open a `graph.db` at a literal path outside the conventional `<root>/.mareforma/graph.db` layout.
 
 ### Capability-shaped predicate URI constants
 
@@ -845,25 +815,6 @@ canonicalize({"x": 1}, form=DSSE_JCS_NFC_V1)    # NFC-normalising, same bytes as
 ```
 
 Importing `mareforma.canonicalize` also registers the specialty forms `rdkit-canonical-smiles-v1`, `fasta-nfc-v1`, `pdb-atom-sorted-v1` via the auto-imported `specialty` submodule. RDKit canonicaliser gracefully falls back to NFC-stripped UTF-8 when `rdkit` isn't installed.
-
-### `mareforma.hooks`
-
-Claude Code `PreToolUse` handler. Records every tool invocation as a `prov:Activity` row in the project's `.mareforma/graph.db`.
-
-Opt in via `.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [{
-      "matcher": "",
-      "hooks": [{"type": "command", "command": "python -m mareforma.hooks"}]
-    }]
-  }
-}
-```
-
-`agent_activities` table is part of the canonical schema; the hook routes through `mareforma.db.open_db` so it inherits foreign-keys PRAGMA + schema validation. Hook exit is always 0; failures log to stderr but never propagate.
 
 ### `mareforma.adapters.*`
 

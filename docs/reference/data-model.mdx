@@ -25,19 +25,19 @@ All persistent state lives in a single SQLite file at `<project_root>/.mareforma
 | `contradicts_json` | TEXT | `[]` | No | JSON array of claim_ids this finding contests |
 | `comparison_summary` | TEXT | `NULL` | Yes | Human-readable diff note for contradictions. Editable on signed claims (not part of signed payload) |
 | `branch_id` | TEXT | `main` | No | Reserved for future branching; currently always `main` |
-| `unresolved` | INTEGER | `0` | No | `1` when a DOI in `supports[]`/`contradicts[]` could not be HEAD-checked against Crossref/DataCite. Blocks REPLICATED promotion until `refresh_unresolved()` clears it |
+| `unresolved` | INTEGER | `0` | No | Legacy quarantine flag, retained inert this release (always `0`). The column, its index, and `list_unresolved_claims` stay in the schema so restore and promotion counting round-trip unchanged |
 | `signature_bundle` | TEXT | `NULL` | Yes | DSSE v1 envelope wrapping an in-toto Statement v1 payload (`predicateType=urn:mareforma:predicate:claim:v1`). The signature covers the DSSE Pre-Authentication Encoding (PAE), not the payload bytes directly, so a signature on one `payloadType` cannot be replayed as a signature on another |
 | `transparency_logged` | INTEGER | `1` | No | `1` when the claim has been (or did not need to be) submitted to Sigstore-Rekor. Blocks REPLICATED until `refresh_unsigned()` flips it. **Restore** downgrades a TOML-asserted `1` to `0` when the bundle has no `rekor` block; hand-edited TOML cannot fake a Rekor inclusion |
 | `validation_signature` | TEXT | `NULL` | Yes | Signed `(claim_id, validator_keyid, validated_at)` envelope. CHECK constraint requires this on every `ESTABLISHED` row |
 | `validator_keyid` | TEXT | `NULL` | Yes | Denormalized signer keyid from `validation_signature` for indexable reputation aggregation |
 | `artifact_hash` | TEXT | `NULL` | Yes | SHA-256 hex digest of the output bytes (figure, CSV, model) backing the claim. Bound into the signed payload. Secondary collapse check: two peers with equal `artifact_hash` collapse to one line (a byte-identical rerun is not corroboration). Never a match requirement; NULL never blocks promotion |
 | `prev_hash` | TEXT | `NULL` | Yes | Append-only chain link `sha256(prev_chain_link \|\| canonical_statement_bytes)`. The chain input is the same bytes the signature covers, so chain integrity and signature integrity move together. UNIQUE partial index catches branched chains |
-| `ev_risk_of_bias` | INTEGER | `0` | No | GRADE downgrade domain in `[-2, 0]`. Methodological flaws (allocation, blinding, attrition). CHECK constraint bounds the value |
-| `ev_inconsistency` | INTEGER | `0` | No | GRADE downgrade domain in `[-2, 0]`. Heterogeneity of effect across studies |
-| `ev_indirectness` | INTEGER | `0` | No | GRADE downgrade domain in `[-2, 0]`. Population / intervention / outcome mismatch |
-| `ev_imprecision` | INTEGER | `0` | No | GRADE downgrade domain in `[-2, 0]`. Wide CIs / small N |
-| `ev_pub_bias` | INTEGER | `0` | No | GRADE downgrade domain in `[-2, 0]`. Selective reporting / file-drawer effect |
-| `evidence_json` | TEXT | `{}` | No | Full GRADE `EvidenceVector` serialized as canonical JSON: the five downgrade domains plus upgrade flags (`large_effect`, `dose_response`, `opposing_confounding`), `rationale` dict (required for any nonzero domain), and `reporting_compliance` list. Bound into the signed Statement; denormalized into the `ev_*` columns for queryable filters |
+| `ev_risk_of_bias` | INTEGER | `0` | No | Opaque evidence-vector downgrade domain in `[-2, 0]`, denormalised from `evidence_json`. CHECK constraint bounds the value. Default `0` |
+| `ev_inconsistency` | INTEGER | `0` | No | Opaque evidence-vector downgrade domain in `[-2, 0]`. Default `0` |
+| `ev_indirectness` | INTEGER | `0` | No | Opaque evidence-vector downgrade domain in `[-2, 0]`. Default `0` |
+| `ev_imprecision` | INTEGER | `0` | No | Opaque evidence-vector downgrade domain in `[-2, 0]`. Default `0` |
+| `ev_pub_bias` | INTEGER | `0` | No | Opaque evidence-vector downgrade domain in `[-2, 0]`. Default `0` |
+| `evidence_json` | TEXT | `{}` | No | Optional evidence-vector dict serialized as canonical JSON, carried inside the signed Statement and denormalised into the `ev_*` columns for queryable filters. mareforma stores it opaquely and does not interpret it; defaults to all-zeros so a claim without one produces byte-identical canonical bytes |
 | `statement_cid` | TEXT | `NULL` | Yes | Content identifier of the signed in-toto Statement: `sha256(canonicalize(statement))` hex. Restore re-derives this from the row's fields + `evidence_json` and refuses any mismatch with the stored value |
 | `t_invalid` | INTEGER | `NULL` | Yes | Invalidation timestamp set by the `contradiction_invalidates_older` trigger when a signed `contradiction_verdicts` row references this claim. Default `query()` / `search()` excludes invalidated rows; pass `include_invalidated=True` for audit-mode listings |
 | `convergence_retry_needed` | INTEGER | `0` | No | `1` when `_maybe_update_replicated` swallowed a SQLite error during the post-INSERT promotion check. `EpistemicGraph.refresh_convergence()` walks flagged rows to retry detection and clear the flag. Round-trips through `claims.toml` so the operator's audit list survives restore |
@@ -57,7 +57,7 @@ All persistent state lives in a single SQLite file at `<project_root>/.mareforma
 | `idx_claims_source` | `source_name` | Non-unique | Filters by data source |
 | `idx_claims_generated_by` | `generated_by` | Non-unique | Filters by agent |
 | `idx_claims_support_level` | `support_level` | Non-unique | Filters by trust tier |
-| `idx_claims_unresolved` | `unresolved` | Non-unique | Accelerates `refresh_unresolved()` |
+| `idx_claims_unresolved` | `unresolved` | Non-unique | Legacy index on the inert `unresolved` flag |
 | `idx_claims_transparency_logged` | `transparency_logged` | Non-unique | Accelerates `refresh_unsigned()` |
 | `idx_claims_artifact_hash` | `artifact_hash` | Unique (partial) | `WHERE artifact_hash IS NOT NULL`: only rows that supply a data hash |
 | `idx_claims_asserter_keyid` | `asserter_keyid` | Non-unique (partial) | `WHERE asserter_keyid IS NOT NULL`: the REPLICATED independence axis |
@@ -162,18 +162,6 @@ Append-only at the SQL layer: both UPDATE and DELETE are refused by triggers, mi
 | `raw_response_b64` | TEXT | Base64-encoded full Rekor response JSON, preserved so the recovery path can re-attach byte-identical coords to the augmented signature bundle |
 | `recorded_at` | TEXT | UTC ISO 8601 of the local write |
 
-## doi_cache table
-
-Persistent cache of DOI resolution results to avoid repeated network calls.
-
-| Field | Type | Description |
-|---|---|---|
-| `doi` | TEXT (PK) | Normalised DOI |
-| `resolved` | INTEGER | `1` if Crossref or DataCite confirmed it |
-| `registry` | TEXT | `crossref` / `datacite` / `NULL` |
-| `last_checked_at` | TEXT | UTC ISO 8601; TTLs are 30 days for resolved, 24 hours for unresolved |
-| `content_digest` | TEXT | SHA-256 hex of canonicalized registry metadata (title, year, container-title, author family names). NULL when the row carries only a HEAD-check result. `find_drifted_dois` compares a fresh fetch against this to detect post-publication corrections or retractions |
-
 ## validators table
 
 The per-project set of public keys allowed to promote claims to `ESTABLISHED`.
@@ -202,19 +190,6 @@ A root-signed, single-row (`id = 1`) declaration of project-wide trust policy. T
 | `signer_keyid` | TEXT | Keyid of the root that signed the policy envelope |
 | `envelope` | TEXT | Root-signed DSSE-style envelope; the authoritative copy of the policy |
 | `created_at` | TEXT | UTC ISO 8601 |
-
-## agent_activities table
-
-PROV-O Activity rows for ambient Claude Code tool calls, written by `mareforma.hooks.agent_hook`. High-volume, low-semantic-density data: most rows never escalate into signed claims, so they live outside the signed envelope chain.
-
-| Field | Type | Description |
-|---|---|---|
-| `id` | INTEGER (PK) | AUTOINCREMENT |
-| `session_id` | TEXT | Agent session identifier (nullable) |
-| `tool_name` | TEXT | The tool that was invoked |
-| `tool_input` | TEXT | Serialized tool input |
-| `started_at` | TEXT | UTC ISO 8601 |
-| `prov_type` | TEXT | PROV-O type, default `prov:Activity` |
 
 ## Trust layer tables
 
