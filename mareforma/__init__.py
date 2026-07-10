@@ -557,11 +557,48 @@ __all__ = [
 ]
 
 
+# Retired public support-level labels. REPLICATED and ESTABLISHED were the
+# public names for the top of the support ladder; the trust map now leads with
+# the effective-independence number, not a single support word, so these labels
+# are retired from the public surface. They keep working for one release as
+# string aliases and emit a DeprecationWarning when read via the public module;
+# a future release removes them. This is a public-label retirement ONLY: the
+# stored ``support_level`` strings and the promotion machinery are unchanged
+# (internal callers use the string literals directly, never this module
+# attribute, so the suite does not warn on itself).
+_DEPRECATED_SUPPORT_LABELS = ("REPLICATED", "ESTABLISHED")
+
+
+def __getattr__(name: str) -> str:
+    """PEP 562 hook: resolve a retired public label with a deprecation warning.
+
+    Only the two retired support-level labels are resolved here; every other
+    missing attribute stays an ``AttributeError`` so a typo on the public
+    surface is not silently swallowed.
+    """
+    if name in _DEPRECATED_SUPPORT_LABELS:
+        import warnings as _warnings
+
+        _warnings.warn(
+            f"The public support-level label `mareforma.{name}` is deprecated; "
+            "the trust map now leads with the effective-independence number, "
+            "not a support word. This alias will be removed in v0.4. Read the "
+            "independence axis of the trust map instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return name
+    raise AttributeError(f"module 'mareforma' has no attribute {name!r}")
+
+
 def __dir__() -> list[str]:
     """Filter ``dir(mareforma)`` to the public API.
 
     ``Path`` and ``TYPE_CHECKING`` are imported at module scope because
     ``open()`` uses them at runtime, but they should not surface in
-    tab-completion or be confused for public mareforma surface.
+    tab-completion or be confused for public mareforma surface. The retired
+    support labels are intentionally omitted: they resolve via
+    :func:`__getattr__` but stay out of tab-completion, matching their
+    deprecated status.
     """
     return sorted(__all__)
