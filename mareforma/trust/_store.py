@@ -127,6 +127,43 @@ def plan_exists(conn: sqlite3.Connection, plan_id: str) -> bool:
     return row is not None
 
 
+def plan_registration(
+    conn: sqlite3.Connection, plan_id: str
+) -> Optional[sqlite3.Row]:
+    """The ``registered_at`` + ``preregistered`` of a plan, or None if absent.
+
+    Read by the pre-registration guard: only a plan that claims pre-registration
+    (``preregistered = 1``) is gated on its registration time, so both fields are
+    fetched together.
+    """
+    return conn.execute(
+        "SELECT registered_at, preregistered FROM predictions "
+        "WHERE plan_id = ? LIMIT 1",
+        (plan_id,),
+    ).fetchone()
+
+
+def run_first_execution(
+    conn: sqlite3.Connection, run_token: str
+) -> Optional[str]:
+    """The earliest finding-execution timestamp attributed to *run_token*, or None.
+
+    A finding is a run's observed execution: it records an outcome the run
+    computed. The run's first execution is the earliest ``created_at`` over the
+    findings whose attestation claim carries this ``generated_by`` token. Returns
+    None when the run has authored no finding yet — it has not begun executing,
+    so no later plan can post-date it. ISO-8601 UTC timestamps compare
+    lexicographically, so ``MIN`` is the chronological earliest.
+    """
+    row = conn.execute(
+        "SELECT MIN(f.created_at) AS first_at FROM findings f "
+        "JOIN claims c ON c.claim_id = f.claim_id "
+        "WHERE c.generated_by = ?",
+        (run_token,),
+    ).fetchone()
+    return row["first_at"] if row is not None else None
+
+
 def get_plan_claim_id(conn: sqlite3.Connection, plan_id: str) -> Optional[str]:
     """The claim_id of the plan attestation written by ``register_plan``.
 

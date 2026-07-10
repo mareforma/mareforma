@@ -49,6 +49,23 @@ class FindingPlanForkError(TrustError):
     """
 
 
+class PostHocPlanError(TrustError):
+    """A plan claiming pre-registration was registered after the run began.
+
+    Raised by :meth:`EpistemicGraph.submit_finding` when the plan cited by a
+    finding was pre-registered (``preregistered=1``) but its ``registered_at``
+    post-dates the run's first observed execution — its earliest prior finding
+    under the same ``generated_by`` run token. Pre-registration only means
+    something when the decision rule is bound before the run produces outcomes;
+    honoring a rule registered after the run was already executing would launder
+    a post-hoc plan as a pre-registration, so the core refuses it rather than
+    counts it. A one-shot :meth:`EpistemicGraph.assert_finding` synthesises its
+    plan with ``preregistered=0`` and makes no such claim, so it never raises
+    this; a run that has authored no prior finding has not begun executing, so
+    nothing can post-date it.
+    """
+
+
 class InconsistentEstimateError(TrustError):
     """An EffectEstimate failed an input-consistency check.
 

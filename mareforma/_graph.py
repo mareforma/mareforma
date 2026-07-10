@@ -1166,6 +1166,7 @@ class EpistemicGraph:
             FindingPlanForkError,
             NoRegisteredPlanError,
             NonFalsifiablePropositionError,
+            PostHocPlanError,
             _store,
             compute_bearing,
         )
@@ -1333,6 +1334,34 @@ class EpistemicGraph:
                 "prediction) before submit_finding, or use assert_finding for "
                 "the one-shot path that registers the plan for you."
             )
+
+        # Pre-registration guard: a plan that CLAIMS
+        # pre-registration (preregistered=1) must have been registered BEFORE
+        # this run first executed. A run's first observed execution is its
+        # earliest prior finding under the same generated_by token; a plan whose
+        # registered_at post-dates it was written after the run was already
+        # producing outcomes, so honoring it would launder a post-hoc rule as a
+        # pre-registration. Refuse it here, before any write, exactly like the
+        # NoRegisteredPlanError above. A one-shot synthesised plan
+        # (preregistered=0) makes no pre-registration claim and is exempt, and a
+        # run with no prior finding has not begun, so nothing can post-date it.
+        # No in-transaction re-check is needed: a concurrent finding by this run
+        # can only land at a timestamp at or after now (>= registered_at on an
+        # honored path), so it cannot retroactively move the run's first
+        # execution before the plan's registration.
+        if generated_by is not None:
+            reg = _store.plan_registration(self._conn, plan_id)
+            if reg is not None and reg["preregistered"] == 1:
+                first_exec = _store.run_first_execution(self._conn, generated_by)
+                if first_exec is not None and reg["registered_at"] > first_exec:
+                    raise PostHocPlanError(
+                        f"plan {plan_id[:12]}… was registered at "
+                        f"{reg['registered_at']}, after run {generated_by!r} first "
+                        f"executed at {first_exec}. A plan registered once the run "
+                        "was already producing findings is not a pre-registration; "
+                        "it is refused, not honored. Pre-register the plan before "
+                        "the run executes, or submit under a fresh run token."
+                    )
 
         # Bind the grounding verdict to the finding's citation — AFTER the
         # idempotency check, so an idempotent replay (which reuses the first
