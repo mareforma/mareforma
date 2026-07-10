@@ -228,3 +228,71 @@ class TestEffectiveIndependenceNumber:
             assert eff["number"] == 1
             tmap = g.trust_map(r["claim_id"])
             assert tmap.get("independence").value == "UNVERIFIABLE"
+
+
+# ---------------------------------------------------------------------------
+# Human check: the highest-value independent source
+# ---------------------------------------------------------------------------
+
+class TestHumanIndependence:
+    def test_human_independence_counts(self, tmp_path: Path) -> None:
+        """A human check (no observed model call, signed by an enrolled human
+        validator) is the highest-value independent source: it counts on its own
+        axis and is never collapsed away as a same-model duplicate.
+
+        A human check plus a model check yields effective 2, where two same-model
+        checks yield 1 — so the human axis lifts effective independence above the
+        same-model floor.
+        """
+        # Scenario A: human check + model check on one proposition. The human
+        # signer opens the project first, so it auto-enrolls as the human root.
+        a = tmp_path / "a"
+        a.mkdir()
+        ka = _bootstrap_key(a, "human.key")   # enrolled human root
+        kb = _bootstrap_key(a, "model.key")
+        prop, pred = _prop(), _pred()
+        cid = prop.content_id()
+        with mareforma.open(a, key_path=ka) as g:
+            # No grounding -> no observed model call: a human check.
+            g.assert_finding(prop, pred, _est(), data_id="ds1", generated_by="run1")
+        with mareforma.open(a, key_path=kb) as g:
+            r = g.assert_finding(
+                prop, pred, _est(), data_id="ds2", generated_by="run2",
+                grounding=_verdict(_CLAUDE),  # a model check
+            )
+            assert effective_independence(g._conn, cid)["number"] == 2
+        # A second, same-model check does NOT collapse the human check away: the
+        # duplicate model folds to one, the human unit still stands -> still 2.
+        kc = _bootstrap_key(a, "model2.key")
+        with mareforma.open(a, key_path=kc) as g:
+            g.assert_finding(
+                prop, pred, _est(), data_id="ds3", generated_by="run3",
+                grounding=_verdict(_CLAUDE),  # same root as the kb model check
+            )
+            eff_a = effective_independence(g._conn, cid)
+            tmap = g.trust_map(r["claim_id"])
+        assert eff_a["number"] == 2
+        assert eff_a["soft"] is False
+        assert tmap.get("independence").value == "2"
+
+        # Scenario B: two same-model checks, no human check -> effective 1.
+        b = tmp_path / "b"
+        b.mkdir()
+        kd = _bootstrap_key(b, "d.key")
+        ke = _bootstrap_key(b, "e.key")
+        prop2, pred2 = _prop(), _pred()
+        with mareforma.open(b, key_path=kd) as g:
+            g.assert_finding(
+                prop2, pred2, _est(), data_id="ds1", generated_by="run1",
+                grounding=_verdict(_CLAUDE),
+            )
+        with mareforma.open(b, key_path=ke) as g:
+            g.assert_finding(
+                prop2, pred2, _est(), data_id="ds2", generated_by="run2",
+                grounding=_verdict(_CLAUDE),
+            )
+            eff_b = effective_independence(g._conn, prop2.content_id())
+        assert eff_b["number"] == 1
+
+        # The human axis lifts effective independence above the same-model floor.
+        assert eff_a["number"] > eff_b["number"]

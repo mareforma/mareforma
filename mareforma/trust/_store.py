@@ -331,12 +331,17 @@ def finding_model_lineage(
 def _collapse_run_model(keys: list[tuple]) -> tuple:
     """The single model state a run authored across its surviving datasets.
 
-    Conservative: any soft line makes the whole run soft (its independence cannot
-    be certified); two distinct COMPUTED roots under one run also collapse to
-    soft (a run that authored under more than one model cannot be pinned to a
+    A human line wins outright: a check a human authored is the strongest
+    independent axis and is never demoted by a model-lineage sibling under the
+    same signer (a run contributes at most one unit, so the highest-value key
+    stands). Otherwise: any soft line makes the whole run soft (its independence
+    cannot be certified); two distinct COMPUTED roots under one run also collapse
+    to soft (a run that authored under more than one model cannot be pinned to a
     single distinct one); a single COMPUTED root is that ``("model", root)``;
     otherwise the run made no model claim (``("absent",)``).
     """
+    if any(k[0] == "human" for k in keys):
+        return ("human",)
     if any(k[0] == "soft" for k in keys):
         return ("soft",)
     roots = {k[1] for k in keys if k[0] == "model"}
@@ -355,6 +360,11 @@ def _count_run_distinct(units: list[tuple[str, str, tuple]]) -> int:
     same-model checks — distinct signer and distinct dataset but the same
     COMPUTED model — are one line of evidence, not two, so they no longer promote
     on the signer + data axes alone.
+
+    A human check is the exception and the highest-value source: it needs no
+    distinct model (a human is not a model), so a human run counts per signer and
+    is never folded into a model root — a human check plus a model check reads as
+    two, where two same-model checks read as one.
 
     The count is order-free. Each dataset is first attributed to exactly one run
     (the smallest token, a deterministic tie-break), carrying that line's model
@@ -384,16 +394,19 @@ def _count_run_distinct(units: list[tuple[str, str, tuple]]) -> int:
     for run, model_key in best.values():
         run_models.setdefault(run, []).append(model_key)
 
+    human_runs: set[str] = set()
     computed_roots: set[str] = set()
     absent_runs: set[str] = set()
     for run, keys in run_models.items():
         state = _collapse_run_model(keys)
-        if state[0] == "model":
+        if state[0] == "human":
+            human_runs.add(run)
+        elif state[0] == "model":
             computed_roots.add(state[1])
         elif state[0] == "absent":
             absent_runs.add(run)
         # soft: contributes no independent unit
-    hard = len(computed_roots) + len(absent_runs)
+    hard = len(human_runs) + len(computed_roots) + len(absent_runs)
     if hard:
         return hard
     return 1 if run_models else 0
@@ -439,6 +452,31 @@ def _authentic_signer_keyid(
         return asserter_keyid
     except Exception:
         return None
+
+
+def _is_human_signer(conn: sqlite3.Connection, keyid: str) -> bool:
+    """True iff *keyid* is an enrolled validator whose type is ``human``.
+
+    The human-independence signal keys off the validator schema rather than a
+    new column: a check whose signer is an enrolled human validator is a human
+    check. ``is_enrolled`` walks the chain back to a self-signed root and
+    verifies each enrollment envelope — and the envelope binds ``validator_type``
+    (see :func:`mareforma.validators.verify_enrollment`), so a row whose type was
+    flipped by a direct SQL UPDATE fails the chain and is not treated as human.
+    Only an authenticated signer keyid (see :func:`_authentic_signer_keyid`) ever
+    reaches here, so an unbacked keyid cannot claim the human axis. Any structural
+    failure returns False: one un-resolvable signer must not deny the whole
+    proposition's count.
+    """
+    try:
+        from .. import validators as _validators
+
+        if not _validators.is_enrolled(conn, keyid):
+            return False
+        row = _validators.get_validator(conn, keyid)
+        return bool(row and row.get("validator_type") == "human")
+    except Exception:
+        return False
 
 
 # The read query behind independence_counts. Kept as a module constant so a
@@ -506,7 +544,9 @@ def _independence_units(conn: sqlite3.Connection, content_id: str):
     ``generated_by`` run axis so it cannot inflate the count beyond the soft
     string axis. The ``k:`` / ``g:`` namespace stops a keyid aliasing a run
     label. The model key carries the distinct-model/method axis
-    (see :func:`_line_model_key`).
+    (see :func:`_line_model_key`); a line with no observed model call whose signer
+    is an enrolled human validator is re-keyed ``("human",)`` — the human axis,
+    the highest-value independent source (see :func:`_is_human_signer`).
     """
     rows = conn.execute(INDEPENDENCE_COUNTS_SQL, (content_id,)).fetchall()
     for r in rows:
@@ -548,6 +588,15 @@ def _independence_units(conn: sqlite3.Connection, content_id: str):
         )
         run_token = f"k:{keyid}" if keyid is not None else f"g:{r['generated_by']}"
         model_key = _line_model_key(r["model_lineage"])
+        # A line with no observed model call, signed by an enrolled human
+        # validator, is a human check: the highest-value independent axis, which
+        # needs no distinct model. A line that DID observe a model call keeps its
+        # model key even under a human signer — the check was the model's, and
+        # the human only signed it — so the model-distinct axis still governs.
+        if model_key[0] == "absent" and keyid is not None and _is_human_signer(
+            conn, keyid
+        ):
+            model_key = ("human",)
         yield direction, run_token, r["data_id"], model_key
 
 
@@ -564,8 +613,10 @@ def independence_counts(conn: sqlite3.Connection, content_id: str) -> tuple[int,
     disagree. Legacy evidence lines whose claim predates the keyid column (NULL
     ``asserter_keyid``) fall back to the retired ``generated_by`` run axis, and a
     finding with no observed model call carries no model constraint, so both keep
-    their count instead of collapsing (status_policy@v3). The two run axes are
-    namespaced (``k:`` vs ``g:``) so a keyid can never alias a run label.
+    their count instead of collapsing (status_policy@v3). A no-model-call line
+    signed by an enrolled human validator counts on the human axis — the
+    highest-value independent source, never folded into a model root. The two run
+    axes are namespaced (``k:`` vs ``g:``) so a keyid can never alias a run label.
     """
     supports: list[tuple[str, str, tuple]] = []
     refutes: list[tuple[str, str, tuple]] = []
@@ -585,10 +636,13 @@ def effective_independence(conn: sqlite3.Connection, content_id: str) -> dict:
 
     ``number`` is the count of pairwise-distinct (model, data, signer) SUPPORTING
     checks — the same model-aware axis :func:`independence_counts` promotes on, so
-    the two never disagree. ``soft`` is True when a supporting line carries PROXY
-    / UNVERIFIABLE model lineage: the count then rests on lineage that cannot
-    certify a distinct model, which the trust map surfaces as UNVERIFIABLE rather
-    than a confident number.
+    the two never disagree. A supporting check a human authored (no observed model
+    call, signed by an enrolled human validator) counts as the highest-value
+    independent source: it needs no distinct model, so a human check plus a model
+    check reads as two where two same-model checks read as one. ``soft`` is True
+    when a supporting line carries PROXY / UNVERIFIABLE model lineage: the count
+    then rests on lineage that cannot certify a distinct model, which the trust
+    map surfaces as UNVERIFIABLE rather than a confident number.
 
     Coarse by design: distinct-model is binary this release. The graded
     cross-model residual (how *far apart* two distinct models are) is DEFERRED —
