@@ -61,7 +61,7 @@ class TestMapCommand:
             assert res.exit_code == 0
             doc = json.loads(res.output)
             assert doc["subject_id"] == cid
-            assert len(doc["properties"]) == 10
+            assert len(doc["properties"]) == 11
 
     def test_map_html_written_to_file(self, tmp_path: Path) -> None:
         r = CliRunner()

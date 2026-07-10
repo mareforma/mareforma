@@ -828,19 +828,22 @@ class EpistemicGraph:
         self._check_open()
         return _db.get_claim(self._conn, claim_id)
 
-    def trust_map(self, claim_id: str):
+    def trust_map(self, claim_id: str, *, reexec_record: "dict | None" = None):
         """Return the per-finding :class:`mareforma.trust_map.TrustMap` for a claim.
 
         A read-side artifact that places every trust property — attributability,
-        provenance, grounding, methodological validity, leakage, independence,
-        contestation, standing, trust-root, witnessing — at its tier with the
-        residual named. Adds no signed field; derived from what is already
-        stored. Returns ``None`` if the claim does not exist.
+        provenance, grounding, faithfulness, methodological validity, leakage,
+        independence, contestation, standing, trust-root, witnessing — at its
+        tier with the residual named. Adds no signed field; derived from what is
+        already stored. ``reexec_record`` optionally supplies a re-execution
+        faithfulness verdict to place on the PROXY-tier faithfulness axis; when
+        omitted that axis reads ``not present``. Returns ``None`` if the claim
+        does not exist.
         """
         self._check_open()
         from mareforma.trust_map import build_trust_map
 
-        return build_trust_map(self._conn, claim_id)
+        return build_trust_map(self._conn, claim_id, reexec_record=reexec_record)
 
     # ------------------------------------------------------------------
     # Trust layer: propositions, findings, derived Status

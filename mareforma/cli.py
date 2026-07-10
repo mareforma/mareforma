@@ -1040,9 +1040,10 @@ def map_cmd(claim_id: str, as_html: bool, as_json: bool,
     """Show the per-finding trust map for a claim.
 
     Places every trust property (attributability, provenance, grounding,
-    methodological validity, leakage, independence, contestation, standing,
-    trust-root, witnessing) at its tier with the residual named. A read-side
-    artifact: it adds no signed field and infers nothing it cannot compute.
+    faithfulness, methodological validity, leakage, independence, contestation,
+    standing, trust-root, witnessing) at its tier with the residual named. A
+    read-side artifact: it adds no signed field and infers nothing it cannot
+    compute.
 
     \b
     Examples:
@@ -1286,7 +1287,10 @@ def _redact_home(obj):
 @cli.command("reexec")
 @click.argument("run_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--json", "as_json", is_flag=True, help="Emit the verdict as JSON.")
-def reexec_cmd(run_path: Path, as_json: bool) -> None:
+@click.option("--map", "map_claim", default=None, metavar="CLAIM_ID",
+              help="Also render CLAIM_ID's trust map with the faithfulness "
+                   "verdict placed on its PROXY-tier axis.")
+def reexec_cmd(run_path: Path, as_json: bool, map_claim: str | None) -> None:
     """Re-run a recorded pipeline and check the reported number reproduces.
 
     RUN_PATH is a JSON run record: the recorded reported_value, a pipeline
@@ -1300,6 +1304,10 @@ def reexec_cmd(run_path: Path, as_json: bool) -> None:
     faithfulness is unknown, never a false REPRODUCED). It attests
     reproducibility, not correctness, and a same-arm re-run is not independence.
 
+    With --map CLAIM_ID it re-renders that claim's trust map with the verdict
+    placed on the faithfulness axis, so the proxy is read next to every other
+    trust property. The verdict is not stored; it is a read-side overlay.
+
     Exit code carries the verdict: 0 REPRODUCED, 1 DIVERGED,
     2 COULD_NOT_REEXECUTE, 3 malformed run record (a usage error, distinct from
     an honest inconclusive re-run).
@@ -1308,6 +1316,7 @@ def reexec_cmd(run_path: Path, as_json: bool) -> None:
     Examples:
         mareforma reexec run.json
         mareforma reexec run.json --json
+        mareforma reexec run.json --map <claim-id>
     """
     from mareforma.reexec import FaithfulnessVerdict, MalformedRunError, reexec
 
@@ -1333,6 +1342,20 @@ def reexec_cmd(run_path: Path, as_json: bool) -> None:
             _info(f"recorded: {result.recorded_value}  reproduced: —")
         _info(f"tolerance: abs={result.tolerance}  rel={result.rel_tolerance}")
         _info(f"residual: {result.residual}")
+
+    if map_claim is not None:
+        import mareforma
+
+        root = _read_only_root()
+        with mareforma.open(root) as graph:
+            tmap = graph.trust_map(map_claim, reexec_record=result.to_map_record())
+        if tmap is None:
+            _err(f"Claim '{map_claim}' not found; cannot render its trust map.")
+            sys.exit(1)
+        if as_json:
+            click.echo(json.dumps(tmap.to_dict(), indent=2))
+        else:
+            _echo_trust_map(tmap, redact_home=False)
 
     _exit = {
         FaithfulnessVerdict.REPRODUCED: 0,

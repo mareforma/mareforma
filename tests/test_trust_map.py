@@ -21,11 +21,12 @@ from mareforma.trust_map import (
 )
 from mareforma.trust_map_html import render_html
 
-# The ten properties the map must always place, in order.
+# The eleven properties the map must always place, in order.
 _EXPECTED_PROPERTIES = (
     "attributability",
     "provenance",
     "grounding",
+    "faithfulness",
     "methodological_validity",
     "leakage",
     "independence",
@@ -58,7 +59,7 @@ def _claim(**overrides) -> dict:
 
 
 class TestEveryPropertyPresent:
-    def test_all_ten_properties_present_with_tier_and_residual(self) -> None:
+    def test_all_properties_present_with_tier_and_residual(self) -> None:
         tmap = _assemble(_claim(), n_roots=1, has_inclusion=False)
         names = tuple(p.name for p in tmap.properties)
         assert names == _EXPECTED_PROPERTIES
@@ -123,6 +124,51 @@ class TestGroundingRow:
         g = tmap.get("grounding")
         assert g.value == "UNGROUNDED"
         assert g.tier is Tier.COMPUTED
+
+
+class TestFaithfulnessRow:
+    def test_no_record_renders_not_present(self) -> None:
+        # Faithfulness is not stored on the claim; with no re-execution supplied
+        # the axis reads "not present", never inferred.
+        tmap = _assemble(_claim(), n_roots=1, has_inclusion=False)
+        f = tmap.get("faithfulness")
+        assert f.value == NOT_PRESENT
+        assert f.tier is Tier.COMPUTED
+        assert "not checked" in f.residual
+
+    def test_reexec_map_is_proxy_named(self) -> None:
+        # A supplied REPRODUCED verdict places at the PROXY tier with the residual
+        # naming what reproducibility does NOT cover: not correctness, not
+        # independence. It must never read as truth or independence.
+        record = {"version": "v0.3.10", "verdict": "REPRODUCED",
+                  "residual": "same-arm re-run matched"}
+        tmap = _assemble(_claim(), n_roots=1, has_inclusion=False,
+                         reexec_record=record)
+        f = tmap.get("faithfulness")
+        assert f.value == "REPRODUCED"
+        assert f.tier is Tier.PROXIED
+        assert "not correct" in f.residual
+        assert "not an independent" in f.residual
+
+    def test_diverged_and_could_not_are_placed(self) -> None:
+        for verdict in ("DIVERGED", "COULD_NOT_REEXECUTE"):
+            tmap = _assemble(_claim(), n_roots=1, has_inclusion=False,
+                             reexec_record={"verdict": verdict, "residual": "r"})
+            f = tmap.get("faithfulness")
+            assert f.value == verdict
+            assert f.tier is Tier.PROXIED
+
+    def test_unrecognised_verdict_is_not_present(self) -> None:
+        # A hand-edited or future-shaped record must not overclaim a verdict the
+        # map does not understand.
+        tmap = _assemble(_claim(), n_roots=1, has_inclusion=False,
+                         reexec_record={"verdict": "TOTALLY_FINE"})
+        assert tmap.get("faithfulness").value == NOT_PRESENT
+
+    def test_malformed_record_is_not_present(self) -> None:
+        tmap = _assemble(_claim(), n_roots=1, has_inclusion=False,
+                         reexec_record="not a record")
+        assert tmap.get("faithfulness").value == NOT_PRESENT
 
 
 class TestIndependenceAxis:

@@ -317,3 +317,40 @@ class TestCli:
         assert res.exit_code == 0, res.output
         assert "tolerance:" in res.output
         assert "abs=0.01" in res.output
+
+    def test_map_overlay_places_the_verdict(self, tmp_path: Path) -> None:
+        # --map renders the claim's trust map with the faithfulness verdict on
+        # its PROXY axis, as a read-side overlay (never stored).
+        import mareforma
+
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            with mareforma.open(".") as g:
+                cid = g.assert_claim("f", classification="ANALYTICAL")
+            run = _run(
+                reported_value=_RECORDED_NUMBER,
+                pipeline={"target": "tests.test_reexec:deterministic_pipeline"},
+            )
+            Path("run.json").write_text(json.dumps(run), encoding="utf-8")
+            res = r.invoke(cli, ["reexec", "run.json", "--map", cid])
+            assert res.exit_code == 0, res.output
+            assert "TRUST MAP" in res.output
+            assert "faithfulness" in res.output
+            assert "REPRODUCED" in res.output
+            assert "PROXIED" in res.output
+
+    def test_map_overlay_unknown_claim_exits_one(self, tmp_path: Path) -> None:
+        import mareforma
+
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            with mareforma.open(".") as g:
+                g.assert_claim("f", classification="ANALYTICAL")
+            run = _run(
+                reported_value=_RECORDED_NUMBER,
+                pipeline={"target": "tests.test_reexec:deterministic_pipeline"},
+            )
+            Path("run.json").write_text(json.dumps(run), encoding="utf-8")
+            res = r.invoke(cli, ["reexec", "run.json", "--map", "does-not-exist"])
+            assert res.exit_code == 1
+            assert "not found" in res.output

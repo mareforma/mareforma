@@ -53,6 +53,19 @@ PRE_BINDING_GROUNDED_LABEL = "GROUNDED (pre-binding axis; citation binding not c
 # inferred to a confident answer.
 NOT_PRESENT = "not present"
 
+# The faithfulness verdicts the map will place. An ALLOWLIST: only these three
+# render as a faithfulness signal; any other value in a supplied record reads as
+# "not present", the honest fail-safe (a hand-edited or future-shaped record does
+# not overclaim a verdict the map does not understand).
+_FAITHFULNESS_VERDICTS = frozenset({"REPRODUCED", "DIVERGED", "COULD_NOT_REEXECUTE"})
+
+# Prepended to a faithfulness residual so the PROXY signal can never be read as
+# truth or as independence, whatever the verdict.
+_FAITHFULNESS_PROXY_NOTE = (
+    "re-execution proxy: reproducible is not correct, and a same-arm re-run is "
+    "not an independent line of evidence"
+)
+
 
 class Tier(str, Enum):
     """Where a property's answer comes from — the honesty of the signal.
@@ -207,6 +220,40 @@ def _grounding_property(claim: dict) -> TrustProperty:
     return TrustProperty(name="grounding", tier=tier, value=value, residual=residual)
 
 
+def _faithfulness_property(reexec_record: "dict | None") -> TrustProperty:
+    """Place the re-execution faithfulness axis (a PROXY-tier signal).
+
+    Faithfulness is not stored on the claim; it is supplied by a re-execution
+    run (see :mod:`mareforma.reexec`). When no run is supplied the axis renders
+    ``not present`` (never inferred): faithfulness was not checked. When a run is
+    supplied the verdict — REPRODUCED / DIVERGED / COULD_NOT_REEXECUTE — is placed
+    at the PROXY tier with the residual naming what reproducibility does NOT
+    cover, so it cannot be read as truth or as independence. A malformed or
+    unrecognised record reads as ``not present``, the fail-safe default.
+    """
+    record = parse_grounding_record(reexec_record)
+    verdict = record.get("verdict") if isinstance(record, dict) else None
+    if verdict not in _FAITHFULNESS_VERDICTS:
+        return TrustProperty(
+            name="faithfulness",
+            tier=Tier.COMPUTED,
+            value=NOT_PRESENT,
+            residual=(
+                "no re-execution recorded for this claim; whether the recorded "
+                "pipeline reproduces its number was not checked (a reproducibility "
+                "proxy, not correctness or independence)"
+            ),
+        )
+    reason = record.get("residual") or ""
+    residual = f"{_FAITHFULNESS_PROXY_NOTE}; {reason}" if reason else _FAITHFULNESS_PROXY_NOTE
+    return TrustProperty(
+        name="faithfulness",
+        tier=Tier.PROXIED,
+        value=verdict,
+        residual=residual,
+    )
+
+
 def _independence_property(claim: dict, n_roots: int) -> TrustProperty:
     """Place the INDEPENDENCE axis, distinct from the support ladder.
 
@@ -315,12 +362,21 @@ def _witnessing_property(claim: dict, has_inclusion: bool) -> TrustProperty:
     )
 
 
-def build_trust_map(conn, claim_id: str, *, single_domain: "bool | None" = None) -> "TrustMap | None":
+def build_trust_map(
+    conn,
+    claim_id: str,
+    *,
+    single_domain: "bool | None" = None,
+    reexec_record: "dict | None" = None,
+) -> "TrustMap | None":
     """Build the trust map for a stored claim, or ``None`` if it does not exist.
 
     ``conn`` is an open graph connection. ``single_domain`` may be passed to
     avoid a redundant validator-topology read when the caller already has it;
-    when ``None`` it is read from the graph.
+    when ``None`` it is read from the graph. ``reexec_record`` optionally carries
+    a re-execution faithfulness verdict (from :meth:`mareforma.reexec.ReexecResult.to_map_record`)
+    to place on the map's PROXY-tier faithfulness axis; when omitted the axis
+    reads ``not present``.
     """
     from mareforma.db import get_claim
 
@@ -359,6 +415,7 @@ def build_trust_map(conn, claim_id: str, *, single_domain: "bool | None" = None)
     return _assemble(
         claim, n_roots, has_inclusion,
         sig_verified=sig_verified, asserter_enrolled=asserter_enrolled,
+        reexec_record=reexec_record,
     )
 
 
@@ -379,7 +436,7 @@ def _has_rekor_inclusion(conn, claim_id: str) -> bool:
 
 def _assemble(
     claim: dict, n_roots: int, has_inclusion: bool, *, sig_verified: "bool | None" = None,
-    asserter_enrolled: "bool | None" = None,
+    asserter_enrolled: "bool | None" = None, reexec_record: "dict | None" = None,
 ) -> TrustMap:
     """Assemble a TrustMap from an already-fetched claim dict (pure).
 
@@ -435,6 +492,8 @@ def _assemble(
 
     grounding = _grounding_property(claim)
 
+    faithfulness = _faithfulness_property(reexec_record)
+
     methodological = TrustProperty(
         name="methodological_validity",
         tier=Tier.COMPUTED,
@@ -488,6 +547,7 @@ def _assemble(
         attributability,
         provenance,
         grounding,
+        faithfulness,
         methodological,
         leakage,
         independence,
