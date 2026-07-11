@@ -262,14 +262,16 @@ One attestation plus its computed bearing on a proposition under a plan.
 ### evidence_lines table
 
 One line of evidence; a finding may carry several. Independence is counted by
-distinct signing key, with `data_id` as a guard so the same dataset is not
-counted twice.
+pairwise-distinct model, dataset, and signer: a corroborating line counts only
+when it stands on a distinct model/method as well as a distinct signer and
+dataset, so a same-model rerun is one line, not two.
 
 | Field | Type | Notes |
 |---|---|---|
 | `line_id` | TEXT (PK) | UUID |
 | `finding_id` | TEXT | FK to `findings(finding_id)`. Indexed (`idx_line_finding`) |
 | `data_id` | TEXT | Dataset key; guards against counting the same dataset twice across runs. Content-addressed (`sha256:` prefix) when dataset bytes are supplied. Indexed (`idx_line_data`) |
+| `model_lineage` | TEXT | JSON record `{tier, model_id, family_root, provider, version, method, decoding}` of the model/method observed at the call boundary. Tier mirrors the `data_id` axis: `COMPUTED` (body-parse at the socket seam), `PROXY` (producer-declared), `UNVERIFIABLE` (a fine-tune / alias / wrapper whose base is not declarable). Identity only. NULL on every line authored without an observed model call (including rows that predate this column) |
 | `modality` / `provenance_id` / `design_type` | TEXT | Optional descriptors |
 | `created_at` | TEXT | UTC ISO 8601 |
 
@@ -299,9 +301,9 @@ The estimate the gate reads. Minimal metafor-named field set.
 | `n_total` | INTEGER | Optional total N |
 
 The `Status` of a proposition is not stored. It is derived on read from the
-independent supporting / refuting line counts, counted by distinct signing key
-(`status_policy@v3`), so improving the rule later is a new policy over the same
-data, not a migration.
+independent supporting / refuting line counts, counted by pairwise-distinct
+model, dataset, and signer (`status_policy@v3`), so improving the rule later is
+a new policy over the same data, not a migration.
 
 ## Schema versioning
 

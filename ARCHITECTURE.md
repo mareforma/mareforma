@@ -3,10 +3,11 @@
 ## In one sentence
 
 Mareforma is an opinionated wrapper around in-toto Statement v1 +
-DSSE PAE + local SQLite, with GRADE-shaped evidence vectors, signed
-convergence verdicts, execution-computed grounding (`observe()` records
-whether a finding's cited data actually flowed into it), and a read-side
-trust map, packaged as a Python library that an AI agent writes to as it
+DSSE PAE + local SQLite, with signed convergence verdicts,
+execution-computed grounding (`observe()` records whether a finding's
+cited data actually flowed into it), computed model/method lineage, and
+a read-side trust map that leads with a finding's effective-independence
+number, packaged as a Python library that an AI agent writes to as it
 works.
 
 ## The lane
@@ -14,8 +15,8 @@ works.
 Every individual capability mareforma uses exists in mature form
 elsewhere: Ed25519 signing (`cryptography`), DSSE envelopes (`in-toto`),
 Sigstore transparency (`rekor`), JSON canonicalization (RFC 8785-style),
-local-first SQLite (Datasette ecosystem), GRADE evidence grading
-(Cochrane). What is missing in OSS is the **combination**:
+local-first SQLite (Datasette ecosystem). What is missing in OSS is
+the **combination**:
 a runtime, opt-in, local Python library that takes those primitives
 and gives an agent a place to assert a claim, cite its upstream
 evidence, sign the assertion under a key the agent controls, and find
@@ -109,25 +110,36 @@ Three rules:
 
 1. **PRELIMINARY → REPLICATED is automatic, structural, and gated.**
    The new claim and a candidate peer must share at least one
-   `ESTABLISHED` upstream in `supports[]` and must carry **distinct,
-   non-NULL `asserter_keyid`** values: the signer keyid denormalized from
-   each claim's signature_bundle. An unsigned (NULL keyid) claim is not a
+   `ESTABLISHED` upstream in `supports[]`, carry **distinct, non-NULL
+   `asserter_keyid`** values (the signer keyid denormalized from each
+   claim's signature_bundle), and stand on a **distinct model/method**.
+   Convergence now requires a genuinely different model, not just a
+   different signer and dataset: two checks a run drove on the same model
+   are one line of evidence, not two, so a same-model rerun under distinct
+   keys no longer promotes. The distinct-model test reads the computed
+   model lineage recorded on each evidence line (see "Execution-observed
+   grounding" and the trust layer below); soft lineage (PROXY or
+   UNVERIFIABLE, a hosted fine-tune, a moving alias, or a wrapper whose
+   base is not declarable) cannot certify a distinct model and never earns
+   a second independent line, while a line with no observed model call
+   keeps the legacy signer axis. An unsigned (NULL keyid) claim is not a
    distinct signer and is never promoted, so two legacy NULL-keyid rows do
    not read as two signers. `generated_by` is a display label only and
    plays no part in the gate. `artifact_hash` is a secondary equal-data
    collapse: two converging claims that carry the same non-NULL hash are a
    byte-identical rerun, so they collapse to one line and do not promote on
    their own; a distinct hash, or an absent hash on either side, does not
-   block the distinct-signer convergence. Status, transparency log, and DOI
-   resolution gates apply too; see `_maybe_update_replicated_unlocked` in
-   db/core.py. Distinct keys are a cryptographic distinctness signal, NOT a
-   proof of apparatus independence. REPLICATED is a convergence signal, not
-   a truth claim. Opening with `strict_promotion=True` (opt-in, off by
-   default) turns the equal-data collapse into a hard gate: a pair then
-   promotes only when BOTH sides carry non-NULL data. Independence itself is
-   reported on its own axis by the read-side trust map (`graph.trust_map`),
-   which marks it `UNVERIFIABLE` when every validator traces to a single
-   trust root.
+   block the convergence. Status and transparency-log gates apply too; see
+   `_maybe_update_replicated_unlocked` in db/core.py. Distinct keys are a
+   cryptographic distinctness signal, NOT a proof of apparatus
+   independence. REPLICATED is a convergence signal, not a truth claim.
+   Opening with `strict_promotion=True` (opt-in, off by default) turns the
+   equal-data collapse into a hard gate: a pair then promotes only when
+   BOTH sides carry non-NULL data. Independence itself is reported on its
+   own axis by the read-side trust map (`graph.trust_map`), which surfaces
+   the effective-independence number and marks it `UNVERIFIABLE` when the
+   supporting lineage is too soft to certify a distinct model or when every
+   validator traces to a single trust root.
 2. **REPLICATED → ESTABLISHED is human-only.** `graph.validate()`
    requires an enrolled validator key whose `validator_type` is
    `'human'`. LLM-typed validators may sign validations but cannot
@@ -144,17 +156,31 @@ directly. It exists to break the chicken-and-egg of "REPLICATED needs
 an ESTABLISHED upstream that doesn't exist on a fresh graph yet", and
 it is gated to enrolled human-typed validators only.
 
+**`REPLICATED` and `ESTABLISHED` are deprecated public labels.** A
+single support word never carried the independence a reader needs, so
+the public surface now leads with the effective-independence number the
+trust map reports, not a rung name. The stored `support_level` strings
+and the promotion machinery are unchanged; only the two public labels
+`mareforma.REPLICATED` and `mareforma.ESTABLISHED` are retired. They
+resolve for one release as string aliases and emit a
+`DeprecationWarning`, and a later release removes them. Read the
+independence axis of the trust map instead.
+
 ## Trust map
 
-Four read-side CLI commands expose a claim's trust state without
+Three read-side CLI commands expose a claim's trust state without
 adding any signed field:
 
 - `mareforma map <claim>` renders the per-claim trust map
-  (`mareforma/trust_map.py`): each property (grounding, faithfulness,
-  independence, standing, witnessing, and the rest) placed at its tier.
-  `COMPUTED` means derived directly from stored evidence, `PROXIED` means
-  computed through a proxy signal whose bound is named, `DEFERRED` means not
-  evaluated this release with the residual named rather than guessed.
+  (`mareforma/trust_map.py`): each property (grounding, independence,
+  standing, witnessing, and the rest) placed at its tier. `COMPUTED`
+  means derived directly from stored evidence, `PROXIED` means computed
+  through a proxy signal whose bound is named, `DEFERRED` means not
+  evaluated this release with the residual named rather than guessed. The
+  independence axis leads the map: it reports the effective-independence
+  number (the count of pairwise-distinct model, data, and signer
+  supporting checks) and reads `UNVERIFIABLE` where a supporting line's
+  model lineage is too soft to certify a distinct model.
   `--json` and `--html` emit the same map for CI or review.
 - `mareforma verify <claim>` re-checks the signatures, the
   grounding-to-citation binding, and the displayed support level, and
@@ -164,20 +190,10 @@ adding any signed field:
   the grounding observer and reports what data actually flowed and
   where a silent fallback hid; with `--cites` it also computes the
   grounding verdict for those sources.
-- `mareforma reexec <run>` re-runs a recorded pipeline
-  (`mareforma/reexec.py`) and checks the reported number reproduces, as a
-  three-valued faithfulness proxy: `REPRODUCED`, `DIVERGED`, or
-  `COULD_NOT_REEXECUTE`. A run that rests on world contact, private data, or
-  expensive compute, or whose entry point will not resolve, raises, or returns
-  a non-number, is `COULD_NOT_REEXECUTE`, never a false `REPRODUCED`. The
-  verdict is a reproducibility proxy, not correctness and not independence; the
-  exit code carries it (`0`/`1`/`2`), and `--map <claim>` places it on that
-  claim's `PROXIED` faithfulness axis as a read-side overlay.
 
-The `map`, `verify`, `diagnose`, and `reexec` commands live in
+The `map`, `verify`, and `diagnose` commands live in
 `mareforma/cli.py`; the tier semantics and property placement live in
-`mareforma/trust_map.py`, and the faithfulness proxy in
-`mareforma/reexec.py`.
+`mareforma/trust_map.py`.
 
 ## Trust layer
 
@@ -190,7 +206,7 @@ v1, and every finding still rides a signed claim.
 Proposition (content_id, frame_id)
   ├─ Prediction (the pre-registered rule, append-only)
   └─ Finding ──▶ signed claim
-        └─ EvidenceLine[] (data_id) ──▶ Contrast ──▶ EffectEstimate
+        └─ EvidenceLine[] (data_id + model lineage) ──▶ Contrast ──▶ EffectEstimate
 ```
 
 A finding carries one evidence line or many. The single-line case is the common
@@ -208,20 +224,30 @@ Three rules:
    is also expressible as an ordered short-circuit `gates[]` chain (`gates_for`,
    `evaluate_gates`) over the existing prediction columns; the single binary gate
    is the one-element chain, bearing-identical to `compute_bearing`.
-2. **Status counts independent signers, not raw datasets.** `compute_status` in
-   [`mareforma/trust/status.py`](mareforma/trust/status.py) reads
-   `independent_support` and `independent_refute` (UNTESTED, PRELIMINARY,
-   CORROBORATED, REFUTED, CONTESTED). Independence is counted by distinct signer
-   (the finding claim's `asserter_keyid`, the same WHO axis the REPLICATED
-   promotion keys on, so promotion and counting agree by construction) with a
-   `data_id` guard: one signer contributes at most one support and one refute, so
-   a single signer cannot reach CORROBORATED on its own, and re-running the same
+2. **Status counts independent lines by distinct model, data, and signer.**
+   `compute_status` in [`mareforma/trust/status.py`](mareforma/trust/status.py)
+   reads `independent_support` and `independent_refute` (UNTESTED, PRELIMINARY,
+   CORROBORATED, REFUTED, CONTESTED). A corroborating line counts as independent
+   only when it stands on a **distinct model/method** as well as a distinct
+   signer and dataset: two checks on the same model are one line of evidence, not
+   two, so a same-model rerun no longer reaches CORROBORATED. The distinct-model
+   test reads the computed model lineage on each evidence line; soft lineage
+   (PROXY or UNVERIFIABLE) cannot certify a distinct model and never earns a
+   second line, and where a supporting line's lineage is soft the effective count
+   the trust map surfaces reads `UNVERIFIABLE` rather than a confident number. A
+   **human check is the highest-value independent source**: a supporting finding
+   with no observed model call, signed by an enrolled human validator
+   (`validator_type='human'`), needs no distinct model (a human is not a model)
+   and is never folded into a model root, so a human check plus a model check
+   reads as two where two same-model checks read as one. One signer still
+   contributes at most one support and one refute, and re-running the same
    dataset adds nothing. Where dataset bytes are supplied the `data_id` is
    content-addressed (`sha256:`); a string `data_id` stays a flagged fallback.
-   Legacy findings whose claim predates the keyid column (NULL `asserter_keyid`)
-   fall back to the retired `generated_by` run axis so their counts are
-   preserved. It is a versioned policy (`status_policy@v3`), recomputed on read,
-   never baked into the schema.
+   Legacy findings whose line carries no model lineage keep the distinct-signer
+   axis so their counts are preserved. It is a versioned policy, recomputed on
+   read, never baked into the schema. Distinct-model is binary this release; the
+   graded cross-model residual (how far apart two distinct models are) is named
+   but not computed.
 3. **Identity is the frozen kernel.** `content_id` (the answer) and `frame_id`
    (the question) are sha256 over RFC 8785 canonical bytes of normalized tokens
    ([`mareforma/trust/proposition.py`](mareforma/trust/proposition.py)). Same
@@ -236,6 +262,12 @@ The graph methods (`register_proposition`, `register_plan`, `submit_finding`,
 signed plan attestation before the numbers are seen, and `submit_finding` binds
 an outcome to it, signing the plan → finding edge into the finding claim's
 `supports[]`; `assert_finding` is the one-shot that composes both.
+Pre-registration only means something when the rule is bound before the run
+produces outcomes, so `submit_finding` refuses a plan whose `registered_at`
+post-dates the run's first observed execution (its earliest prior finding under
+the same `generated_by` run token) with `PostHocPlanError`, rather than
+laundering a post-hoc plan as a pre-registration. A one-shot `assert_finding`
+synthesises its plan with no pre-registration claim and never raises it.
 
 ## Contestation model
 
@@ -360,13 +392,6 @@ Tables:
   path.
 - `claims_fts`: FTS5 virtual table (independent of `claims`, not
   `content=` linked) for substring + tokenized search.
-- `doi_cache`: 30-day positive / 24-hour negative cache for DOI HEAD
-  checks against Crossref + DataCite.
-- `literature_claims`: paper-abstract claim drafts from `mareforma
-  ingest`, kept separate from the signed `claims` table so ingested
-  assertions stay drafts pending review.
-- `agent_activities`: `prov:Activity` rows written by the
-  `mareforma.hooks` Claude Code PreToolUse recorder.
 
 The six trust-layer tables (`propositions`, `predictions`, `findings`,
 `evidence_lines`, `contrasts`, `effect_estimates`) are described in the
@@ -474,7 +499,7 @@ cannot bypass them.
 
 The DSSE envelope signs an in-toto Statement v1 whose predicate
 binds the values in `mareforma.signing.SIGNED_FIELDS` plus the
-GRADE `EvidenceVector`. Any post-INSERT mutation of those values
+opaque `evidence` dict. Any post-INSERT mutation of those values
 on a signed row is refused at the SQL layer.
 
 | Field | Signed (predicate) | Mutable on a signed row |
@@ -504,7 +529,7 @@ on a signed row is refused at the SQL layer.
 |---|---|---|
 | The claim was signed by an enrolled key at insert time | yes (`signature_bundle` set + validator chain walk) | yes, re-verifies every envelope against the validator's PEM, refuses orphan signers |
 | The row's signed fields match the envelope | trigger blocks mutation; row never drifts unless a SQL-tamper bypasses Python | yes, re-derives canonical bytes and compares to `predicate.*`, refuses on mismatch |
-| EvidenceVector hasn't been tampered after signing | trigger blocks `ev_*` and `evidence_json` mutation | yes, re-derives the canonical evidence dict and compares to `predicate.evidence` |
+| The evidence dict hasn't been tampered after signing | trigger blocks `ev_*` and `evidence_json` mutation | yes, re-derives the canonical evidence dict and compares to `predicate.evidence` |
 | `statement_cid` cross-check | column never directly written by user code | yes, re-derives from the row's fields + evidence and compares to the stored `statement_cid` |
 | Validation envelope binds this claim | the gates: `_extract_validation_signer_keyid`, `_refuse_llm_validator`, `_refuse_self_validation`, `_verify_evidence_seen`, envelope/kwarg agreement; cryptographic verify on the envelope | yes, verifies the validation envelope's signature, then checks `claim_id` / `validator_keyid` / timestamp / `evidence_seen` fields against the row |
 | Contradiction verdict is signed by an enrolled validator | enforced at `record_contradiction_verdict`; chain walk via `is_enrolled` | yes, replays each verdict envelope in `created_at` order, verifies before INSERT, the contradiction trigger re-sets `t_invalid` |
@@ -541,7 +566,6 @@ this is the consolidated view.
 |---|---|
 | Colluding agents producing fake `REPLICATED` via two signing keys | distinct `asserter_keyid` is a cryptographic distinctness signal, not a proof of apparatus independence: one party can hold two keys. REPLICATED is a convergence signal, not a truth claim; the real trust anchor is human-validated ESTABLISHED. `single_trust_domain` discloses when all validators share one root, but does not prevent Sybils |
 | Misclassified `INFERRED` / `ANALYTICAL` / `DERIVED` | declared by the agent, not verified |
-| Fabricated DOI content (publisher silently replaces PDF) | DOIs are HEAD-checked, not content-verified |
 | Colluding log operator publishing two checkpoints to different audiences | needs gossip / witness protocols, out of scope for the single-checkpoint trust model |
 | Compromised log signing key | mareforma trusts whichever pubkey the caller pinned via TOFU; rotation requires deleting the pin |
 | Compromised user signing key | mareforma trusts the local Ed25519 key; key-management is the user's concern |
@@ -610,8 +634,8 @@ have no dependency on any adapter; an adapter that disappears does
 not break the contracts. URI constants live in
 `mareforma.predicate_types`: a single source of truth for the URIs
 the core reserves, re-exported at the top level for
-ergonomics. The core primitives (events, canonicalize, tools,
-hooks) each follow the same core-first rule.
+ergonomics. The core primitives (events, canonicalize, tools) each
+follow the same core-first rule.
 
 ## Execution-observed grounding
 
@@ -693,11 +717,13 @@ constructs, so the two can honestly disagree; `reconcile` labels
 What mareforma is NOT: trust is
 local to a project's enrolled validators; `classification` and
 `generated_by` are self-declared (mareforma is no stronger than
-agent discipline); Rekor inclusion is logged-not-proof-verified; DOIs
-are HEAD-checked-not-content-verified; contradiction is per-claim;
-`EvidenceVector` is GRADE-shaped storage, not GRADE evaluation; no
-automated fraud detection beyond the structural invariants
-mareforma enforces. Observed grounding computes FLOW of a cooperating
+agent discipline); Rekor inclusion is logged-not-proof-verified;
+contradiction is per-claim; the signed `evidence` dict is opaque
+storage, not an evaluated quality score; model lineage records model
+and method identity only, never a claim about training-time
+contamination; no automated fraud detection beyond the structural
+invariants mareforma enforces. Observed grounding computes FLOW of a
+cooperating
 producer, not correctness or influence: it has documented bounds (a
 load-once/reuse read looks UNGROUNDED, a stale-but-non-empty read looks
 GROUNDED, and anything across a spawn seam or uninstrumented reader is
