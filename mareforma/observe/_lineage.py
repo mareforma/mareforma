@@ -5,9 +5,12 @@ request the producer actually sent rather than from a self-declaration. The tier
 mirrors the ``data_id`` axis exactly:
 
 - ``COMPUTED``      — the model came from a body-parse at the socket seam (a
-                      wrapped ``httpx`` POST). The producer does not control this
-                      path, so it is the trustworthy tier, analogous to a
-                      content-addressed ``data_id``.
+                      wrapped ``httpx`` POST) addressed to a RECOGNIZED provider
+                      host. The producer controls neither the parse nor the
+                      destination, so it is the trustworthy tier, analogous to a
+                      content-addressed ``data_id``. A body-parse to an
+                      unrecognized host is producer-controlled, so it is
+                      UNVERIFIABLE, never COMPUTED.
 - ``PROXY``         — a cooperating producer declared the model out of band
                       (``declare_model``). Agent-attested and soft, analogous to
                       a string-fallback ``data_id``: it never reads as COMPUTED.
@@ -144,8 +147,19 @@ def resolve_lineage(
     if not declarable:
         tier = ModelLineageTier.UNVERIFIABLE
         root, version = None, None
-    elif source == "socket":
+    elif source == "socket" and provider:
+        # Observed at the seam AND addressed to a recognized provider host: the
+        # producer controls neither the body-parse nor the destination, so this
+        # is the trustworthy COMPUTED tier.
         tier = ModelLineageTier.COMPUTED
+    elif source == "socket":
+        # Observed at the seam but addressed to an UNRECOGNIZED host. The
+        # producer chose the endpoint, so a "model" field in a body they sent
+        # anywhere is producer-controlled and cannot certify a real model call.
+        # Soft, never COMPUTED — this is what stops a forged POST to an arbitrary
+        # host from minting a distinct model and faking independence.
+        tier = ModelLineageTier.UNVERIFIABLE
+        root, version = None, None
     else:
         tier = ModelLineageTier.PROXY
     return ModelLineage(

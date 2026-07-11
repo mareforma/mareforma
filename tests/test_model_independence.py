@@ -25,14 +25,22 @@ from tests._helpers import _bootstrap_key, _est, _pred, _prop
 def _verdict(model_id: str, *, source: str = "socket") -> GroundingVerdict:
     """A grounding verdict carrying a model lineage of the requested tier.
 
-    ``source="socket"`` earns COMPUTED (a body-parse at the seam), ``"declared"``
-    earns PROXY; a fine-tune / alias string is UNVERIFIABLE regardless. The
-    verdict itself is OPAQUE (the finding path only reads ``model_lineage`` off
-    it); grounding state is irrelevant to the independence count.
+    ``source="socket"`` to a RECOGNIZED provider host earns COMPUTED (a
+    body-parse at the seam), ``"declared"`` earns PROXY; a fine-tune / alias
+    string is UNVERIFIABLE regardless. The verdict itself is OPAQUE (the finding
+    path only reads ``model_lineage`` off it); grounding state is irrelevant to
+    the independence count.
     """
+    lower = model_id.lower()
+    provider = (
+        "anthropic" if lower.startswith("claude")
+        else "openai" if lower.startswith(("gpt", "o1", "o3", "o4", "chatgpt"))
+        else None
+    )
     lineage = resolve_lineage(
         model_id, source=source, method="m",
         decoding={"temperature": None, "top_p": None, "seed": None},
+        provider=provider,
     )
     return GroundingVerdict(
         grounding=ObservedGrounding.OPAQUE,
@@ -270,3 +278,33 @@ class TestHumanIndependence:
 
         # The human axis lifts effective independence above the same-model floor.
         assert eff_a["number"] > eff_b["number"]
+
+
+class TestForgedComputedIsRejected:
+    """COMPUTED requires a body-parse to a RECOGNIZED provider host.
+
+    A "model" field in a POST the producer sent to an arbitrary endpoint is
+    producer-controlled and must never mint COMPUTED, or a producer could forge
+    two distinct models from two request bodies and fake independence.
+    """
+
+    def test_socket_to_unrecognized_host_is_not_computed(self) -> None:
+        from mareforma.observe._lineage import ModelLineageTier
+
+        forged = resolve_lineage(
+            _GPT, source="socket", method="/v1/x", decoding={}, provider=None
+        )
+        assert forged.tier is ModelLineageTier.UNVERIFIABLE
+        real = resolve_lineage(
+            _GPT, source="socket", method="/v1/x", decoding={}, provider="openai"
+        )
+        assert real.tier is ModelLineageTier.COMPUTED
+
+    def test_two_forged_models_are_not_a_distinct_pair(self) -> None:
+        # Same real run, two forged distinct strings to arbitrary hosts: both are
+        # soft, so the pair is never model-distinct and can never promote.
+        from mareforma.observe._lineage import model_distinct_pair
+
+        a = resolve_lineage(_CLAUDE, source="socket", method="m", decoding={}, provider=None)
+        b = resolve_lineage(_GPT, source="socket", method="m", decoding={}, provider=None)
+        assert model_distinct_pair(a.to_dict(), b.to_dict()) is False

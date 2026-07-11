@@ -259,18 +259,7 @@ def compute_rolling_stats(
                 agg["score_n"] += 1
                 if score > 0.5:
                     agg["pass_n"] += 1
-        elif op == "doi_drift_scan":
-            drifted = ev.get("drifted")
-            total = ev.get("total_inspected")
-            if isinstance(drifted, int):
-                agg.setdefault("drifted_sum", 0)
-                agg.setdefault("drifted_n", 0)
-                agg["drifted_sum"] += drifted
-                agg["drifted_n"] += 1
-            if isinstance(total, int):
-                agg.setdefault("inspected_sum", 0)
-                agg["inspected_sum"] += total
-        elif op in ("refresh_unresolved", "refresh_unsigned"):
+        elif op == "refresh_unsigned":
             succeeded = ev.get("succeeded")
             if isinstance(succeeded, int):
                 agg.setdefault("succeeded_sum", 0)
@@ -291,14 +280,7 @@ def compute_rolling_stats(
             bucket["pass_rate"] = round(
                 agg["pass_n"] / agg["score_n"], 3,
             )
-        if op == "doi_drift_scan":
-            if agg.get("drifted_n"):
-                bucket["avg_drifted"] = round(
-                    agg["drifted_sum"] / agg["drifted_n"], 3,
-                )
-            if "inspected_sum" in agg:
-                bucket["total_inspected"] = agg["inspected_sum"]
-        if op in ("refresh_unresolved", "refresh_unsigned"):
+        if op == "refresh_unsigned":
             if agg.get("succeeded_n"):
                 bucket["avg_succeeded"] = round(
                     agg["succeeded_sum"] / agg["succeeded_n"], 3,

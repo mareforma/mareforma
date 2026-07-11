@@ -584,7 +584,14 @@ def _normalize_evidence(evidence: dict | None) -> dict:
     src = evidence or {}
     out: dict = {}
     for domain in _EVIDENCE_DOWNGRADE_DOMAINS:
-        out[domain] = src.get(domain, 0)
+        val = src.get(domain, 0)
+        if isinstance(val, bool) or not isinstance(val, int) or not -2 <= val <= 0:
+            raise ValueError(
+                f"evidence downgrade domain {domain!r} must be an integer in "
+                f"[-2, 0], got {val!r}: an out-of-range value must not sign into "
+                "the immutable predicate"
+            )
+        out[domain] = val
     for flag in _EVIDENCE_UPGRADE_FLAGS:
         out[flag] = src.get(flag, False)
     out["rationale"] = dict(src.get("rationale") or {})
@@ -592,8 +599,20 @@ def _normalize_evidence(evidence: dict | None) -> dict:
     if src.get("study_design") is not None:
         out["study_design"] = src["study_design"]
     if src.get("grounding_score") is not None:
-        out["grounding_score"] = float(src["grounding_score"])
-        out["grounding_rationale"] = src.get("grounding_rationale")
+        score = float(src["grounding_score"])
+        if not 0.0 <= score <= 1.0:
+            raise ValueError(
+                f"grounding_score must be in [0, 1], got {score!r}: an evidence "
+                "value out of range must not sign into the immutable predicate"
+            )
+        rationale = src.get("grounding_rationale")
+        if not (isinstance(rationale, str) and rationale.strip()):
+            raise ValueError(
+                "grounding_score requires a non-empty grounding_rationale: a "
+                "scored claim must say why, not carry a bare number in the record"
+            )
+        out["grounding_score"] = score
+        out["grounding_rationale"] = rationale
     return out
 
 

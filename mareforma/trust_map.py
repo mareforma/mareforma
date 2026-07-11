@@ -298,7 +298,7 @@ def _independence_property(
             value=str(number),
             residual=(
                 f"{number} pairwise-distinct (model, data, signer) supporting "
-                "check(s); coarse by design — distinct-model is binary this "
+                "check(s); coarse by design: distinct-model is binary this "
                 "release, the graded cross-model residual is DEFERRED, not "
                 "computed"
             ),

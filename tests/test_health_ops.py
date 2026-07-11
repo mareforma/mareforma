@@ -93,7 +93,7 @@ class TestHealthEventLog:
         _health.append_health_event(tmp_path, "grounding_verdict", score=0.4)
         _health.append_health_event(tmp_path, "grounding_verdict", score=0.8)
         _health.append_health_event(tmp_path, "provenance_query", depth=4)
-        _health.append_health_event(tmp_path, "doi_drift_scan", drifted=2)
+        _health.append_health_event(tmp_path, "refresh_unsigned", succeeded=2)
         stats = _health.compute_rolling_stats(tmp_path)
         assert stats["events_total"] == 5
         gv = stats["ops"]["grounding_verdict"]
@@ -101,7 +101,7 @@ class TestHealthEventLog:
         assert gv["avg_score"] == round((0.9 + 0.4 + 0.8) / 3, 3)
         assert gv["pass_rate"] == round(2 / 3, 3)
         assert stats["ops"]["provenance_query"]["avg_depth"] == 4.0
-        assert stats["ops"]["doi_drift_scan"]["avg_drifted"] == 2.0
+        assert stats["ops"]["refresh_unsigned"]["avg_succeeded"] == 2.0
 
     def test_compute_rolling_stats_last_n(self, tmp_path: Path) -> None:
         for i in range(10):
