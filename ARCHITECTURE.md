@@ -190,10 +190,25 @@ adding any signed field:
   the grounding observer and reports what data actually flowed and
   where a silent fallback hid; with `--cites` it also computes the
   grounding verdict for those sources.
+- `mareforma audit --findings findings.json -- python run.py` extends
+  diagnose to per-finding receipts for a pipeline that never imports
+  mareforma: the mapping names what each finding claims to cite, one
+  observed run yields one verdict per finding against that finding's
+  cited set, and each verdict is emitted as a plain receipt (feeds
+  `mareforma measure`) plus a DSSE-signed envelope `mareforma verify`
+  checks from public material alone. Nothing the target prints or
+  writes enters a verdict; the target does share the auditor's
+  interpreter, though, so the receipts grade a pipeline that does not
+  attack its auditor — a target written to defeat the audit could
+  fabricate what the observer records, and the signature attests the
+  auditor's observation, not the target's honesty. `--corpus` iterates
+  run specs, one fresh interpreter per run, resumable (resume honors
+  only a run record signed by the auditor's key), with a crashing
+  target's partial receipts and its own exit code recorded.
 
-The `map`, `verify`, and `diagnose` commands live in
-`mareforma/cli.py`; the tier semantics and property placement live in
-`mareforma/trust_map.py`.
+The `map`, `verify`, `diagnose`, and `audit` commands live in
+`mareforma/cli.py` (the audit runner in `mareforma/audit.py`); the tier
+semantics and property placement live in `mareforma/trust_map.py`.
 
 ## Trust layer
 
@@ -706,11 +721,17 @@ signer-axis counter would call independent that were one computed model counted
 twice). `summarize_pilot` runs a slim natural-prevalence pilot over a receipts
 file, reporting both arms with the honest OPAQUE-coverage bound: when OPAQUE
 dominates, the grounded prevalence reads as a lower bound, not a trustworthy
-number.
+number. `mareforma audit` produces such receipts for a pipeline that never
+imports mareforma: one signed, verifiable receipt per finding from a single
+observed run, computed only from what the observer recorded.
 
 The verdict is computed from execution of a **cooperating producer**: the
 binding is tamper-evidence over what a cooperating run did, not a proof
-against an adversarial operator. A finding is authored inside the scope and
+against an adversarial operator. The same limit holds with the roles
+reversed under `mareforma audit`: the audited target runs in the auditor's
+interpreter, so a target built to defeat the audit could fabricate what the
+observer records — audit widens who can be graded, not the adversary the
+grade withstands. A finding is authored inside the scope and
 signed after it closes; asserting a claim while its grounding scope is still
 open is refused.
 

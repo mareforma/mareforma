@@ -437,6 +437,14 @@ to see what the observer covers in your environment.
 Author inside the scope and sign after it closes: asserting a claim while its
 grounding scope is still open is refused.
 
+A pipeline that never imports mareforma can still be graded post hoc:
+`mareforma audit --findings findings.json -- python run.py` runs it under the
+same observer and emits one signed grounding receipt per finding, computed
+against each finding's cited sources with the binding semantics above. The
+target shares the auditor's interpreter, so the receipts grade a pipeline that
+does not attack its auditor; the signature attests the auditor's observation,
+not the target's honesty.
+
 **Model/method lineage.** Inside an `observe()` scope, mareforma also captures
 WHICH model authored the finding, computed from the request the producer
 actually sent at the `httpx` POST socket seam (the Anthropic and OpenAI request
