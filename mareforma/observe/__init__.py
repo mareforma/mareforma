@@ -56,6 +56,7 @@ from .oracle import (
     OracleResult,
     Reconciliation,
     declared_reducer,
+    numeric_extraction_reducer,
     perturbation_oracle,
     reconcile,
     scalar_reducer,
@@ -200,6 +201,7 @@ __all__ = [
     "MetricReducer",
     "scalar_reducer",
     "declared_reducer",
+    "numeric_extraction_reducer",
     # Aggregate measurement over many verdicts.
     "summarize",
     "GroundingReport",
