@@ -3,7 +3,7 @@
 A corroboration counts only when the two lines differ in model/method as well as
 signer and dataset. Two same-model checks (distinct signer, distinct data) are a
 single line of evidence, not independent corroboration, so they stay below
-CORROBORATED. Where the model lineage is soft (PROXY / UNVERIFIABLE) on either
+CONVERGENT. Where the model lineage is soft (PROXY / UNVERIFIABLE) on either
 side, the pair is UNVERIFIABLE for independence — never a silent pass. A finding
 with no observed model call carries no model constraint, so the pre-observer /
 legacy behaviour (distinct signer + data corroborate) is unchanged.
@@ -61,7 +61,7 @@ _FINETUNE = "ft:gpt-4o-2024-08-06:acme::rExAbC12"  # UNVERIFIABLE (no base)
 class TestModelDistinctness:
     def test_same_model_does_not_promote(self, tmp_path: Path) -> None:
         """Two checks — distinct signer, distinct data, SAME COMPUTED model —
-        are one line of evidence, not two: they stay below CORROBORATED."""
+        are one line of evidence, not two: they stay below CONVERGENT."""
         ka = _bootstrap_key(tmp_path, "ka.key")
         kb = _bootstrap_key(tmp_path, "kb.key")
         prop, pred = _prop(), _pred()
@@ -97,7 +97,7 @@ class TestModelDistinctness:
             )
             status = g.proposition_status(prop.content_id())
         assert status["independent_support"] == 2
-        assert status["status"] == "CORROBORATED"
+        assert status["status"] == "CONVERGENT"
 
     def test_soft_lineage_is_unverifiable(self, tmp_path: Path) -> None:
         """A PROXY (declared) lineage on one side makes the pair UNVERIFIABLE
@@ -151,7 +151,7 @@ class TestModelDistinctness:
             g.assert_finding(prop, pred, _est(), data_id="ds2", generated_by="run2")
             status = g.proposition_status(prop.content_id())
         assert status["independent_support"] == 2
-        assert status["status"] == "CORROBORATED"
+        assert status["status"] == "CONVERGENT"
 
 
 # ---------------------------------------------------------------------------

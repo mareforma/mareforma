@@ -6,6 +6,62 @@ description: "Notable changes across Mareforma releases."
 The authoritative changelog lives in [CHANGELOG.md](https://github.com/mareforma/mareforma/blob/main/CHANGELOG.md).
 This page mirrors it.
 
+## v0.3.10 - Unreleased
+
+### Added
+
+- **Model and method lineage on the evidence line.** The observer records which
+  model and method authored a finding, computed from the request the producer
+  sent. Tiered `COMPUTED` (a body-parse at a recognized provider host), `PROXY`
+  (a producer declaration), or `UNVERIFIABLE` (a fine-tune or wrapper whose base
+  is not declarable). Corroboration counts distinct models, and a human check is
+  the strongest independent source.
+- **Local models earn content-addressed lineage.** A call to a local inference
+  server is `COMPUTED` via a `weights-digest` attestor: the served weights' sha256
+  is the model's distinctness key, so two local models are told apart by their
+  weights, not a self-chosen name.
+- **Wider execution observation.** Grounding and lineage fire on the idioms real
+  pipelines use: reads through `io.open` (pathlib), model calls at `httpx` `send`
+  and the `aiohttp` seam (the provider SDK and litellm paths), and a cited
+  `polars` read grounds. A grounded read and a computed lineage are gated on a
+  successful response, so an error body never grounds a cited URL, and a `duckdb`
+  query floors to `OPAQUE` rather than a false `UNGROUNDED`.
+- **`mareforma audit`.** A post-hoc auditor that signs one grounding receipt per
+  finding, verifiable without the producer.
+- **Re-execution faithfulness proxy.** Re-runs a recorded step and reports whether
+  the result reproduces, placed on the trust map.
+- **Effective independence arm.** The measurement reports the effective-independence
+  distribution and the same-model-collapse rate, with a causal oracle prose path
+  and a pilot that states its `OPAQUE`-coverage bound.
+- **Pre-registration gate.** A plan registered after the run's first execution is
+  refused, so a rule cannot be back-dated to a run it did not precede.
+
+### Deprecated
+
+- **The public `REPLICATED` and `ESTABLISHED` labels.** They read as settled
+  conclusions the substrate does not compute. The internal support levels are
+  unchanged; only the public module attributes warn.
+
+### Removed
+
+- **The GRADE evidence vector, literature ingest** (`ingest`, `ask`, `narrative`),
+  **DOI network resolution** (the regex-only `is_doi` helper stays), **and activity
+  hooks.** Existing graphs open unchanged.
+
+### Changed
+
+- **The top status label `CORROBORATED` is renamed `CONVERGENT`.** The state and
+  its rule are unchanged: two or more independent-lineage supporting lines, none
+  refuting. The word changes because it over-claimed. Distinct-model is
+  necessary, not sufficient, for independence. `CONVERGENT` states the structural
+  fact that lineage-distinct lines converge and names cross-model error
+  correlation as the residual, rather than reading as a corroboration or
+  independence verdict. Reading `Status("CORROBORATED")` or `Status.CORROBORATED`
+  still resolves to `Status.CONVERGENT` this release and emits a
+  `DeprecationWarning`; a future release removes the alias. Status is recomputed
+  on read and never stored, so there is no stored-value migration. The policy
+  stamp moves from `status_policy@v3` to `status_policy@v4`.
+
 ## v0.3.9 - 2026-07-08
 
 Three passes that make trust honest and legible. The grounding verdict now binds to

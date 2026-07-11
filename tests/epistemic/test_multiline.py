@@ -167,7 +167,7 @@ class TestRunDistinct:
             g.assert_finding(h, _superiority(), _smd(-2.4, p=0.01), data_id="dB", generated_by="run2")
             status = g.proposition_status(h)
         assert status["independent_support"] == 2
-        assert status["status"] == Status.CORROBORATED.value
+        assert status["status"] == Status.CONVERGENT.value
 
     def test_single_multiline_finding_no_self_corroborate(self, tmp_path: Path) -> None:
         h = _prop()
@@ -332,4 +332,4 @@ class TestSingleLineParity:
             g.assert_finding(h, _superiority(), _smd(-2.6, p=0.003), data_id="dataA", generated_by="lab_a")
             g.assert_finding(h, _superiority(), _smd(-2.4, p=0.01), data_id="dataB", generated_by="lab_b")
             status = g.proposition_status(h)
-        assert status["status"] == Status.CORROBORATED.value
+        assert status["status"] == Status.CONVERGENT.value

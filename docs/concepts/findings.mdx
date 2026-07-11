@@ -148,21 +148,21 @@ come from different signers (the claim's signing key) and different datasets
 (`data_id`). Unsigned lines fall back to distinct `generated_by` run. One
 signer (or, for unsigned lines, one run) contributes at most one independent
 support and one independent refute, so a single signer cannot reach
-`CORROBORATED` on its own. A finding may carry several
+`CONVERGENT` on its own. A finding may carry several
 evidence lines, and each line's bearing is recomputed on read.
 
 | Status | Meaning |
 |---|---|
 | `UNTESTED` | No supporting or refuting lines yet. |
 | `PRELIMINARY` | Exactly one independent supporting line. |
-| `CORROBORATED` | Two or more independent supporting lines, none refuting. |
+| `CONVERGENT` | Two or more independent-lineage supporting lines converge, none refuting. A convergence marker, not a corroboration or independence verdict: cross-model error correlation is unmodeled and is the named residual. |
 | `REFUTED` | At least one independent refuting line, none supporting. |
 | `CONTESTED` | Independent support **and** independent refute on the same proposition. |
 
 `REFUTED` and `CONTESTED` are derived labels, not auto-refutation: `REFUTED`
 means "no surviving independent support," not "this proposition is false."
 
-Status is a **versioned policy** (`status_policy@v3`) over durable stored
+Status is a **versioned policy** (`status_policy@v4`) over durable stored
 counts, never baked into the schema. Improving the rule later is a new policy
 over the same data, not a migration.
 
@@ -189,13 +189,13 @@ result["bearing"]["direction"]   # "supports", computed
 result["status"]                  # "PRELIMINARY", one independent line
 ```
 
-A second independent run on the same proposition, on a distinct dataset, lifts
-it to `CORROBORATED`:
+A second independent-lineage run on the same proposition, on a distinct dataset
+and a distinct model, lifts it to `CONVERGENT`:
 
 ```python
 graph.assert_finding(prop, plan, est_beta, data_id="dataset_beta",
                      generated_by="analyst/model-b/lab_b")
-graph.proposition_status(prop)["status"]   # "CORROBORATED"
+graph.proposition_status(prop)["status"]   # "CONVERGENT"
 ```
 
 `assert_finding` is idempotent on `(content_id, data_id)`: re-asserting the same
@@ -231,7 +231,7 @@ The two layers answer different questions and run side by side:
 - **`support_level`** (`PRELIMINARY` / `REPLICATED` / `ESTABLISHED`, see
   [Trust](/concepts/trust)) is about a *claim's* provenance: did independent
   agents converge on a shared upstream, and did a human validate it.
-- **`Status`** (`UNTESTED`, `PRELIMINARY`, `CORROBORATED`, `REFUTED`,
+- **`Status`** (`UNTESTED`, `PRELIMINARY`, `CONVERGENT`, `REFUTED`,
   `CONTESTED`) is about a *proposition's* evidence: how many independent
   datasets support or refute it, with the direction of each computed from a
   pre-registered rule.

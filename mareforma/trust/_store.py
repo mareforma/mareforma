@@ -28,14 +28,14 @@ from .status import STATUS_POLICY, FrameStatus, Status, compute_status
 _SUPPORT_RANK = {
     Status.UNTESTED.value: 0,
     Status.PRELIMINARY.value: 1,
-    Status.CORROBORATED.value: 2,
+    Status.CONVERGENT.value: 2,
     Status.REFUTED.value: -1,
     Status.CONTESTED.value: -1,
 }
 
 # The only valid min_status floors are the three support-ladder statuses.
 _VALID_FLOORS = frozenset(
-    {Status.UNTESTED.value, Status.PRELIMINARY.value, Status.CORROBORATED.value}
+    {Status.UNTESTED.value, Status.PRELIMINARY.value, Status.CONVERGENT.value}
 )
 
 
@@ -650,7 +650,7 @@ def independence_counts(conn: sqlite3.Connection, content_id: str) -> tuple[int,
     disagree. Legacy evidence lines whose claim predates the keyid column (NULL
     ``asserter_keyid``) fall back to the retired ``generated_by`` run axis, and a
     finding with no observed model call carries no model constraint, so both keep
-    their count instead of collapsing (status_policy@v3). A no-model-call line
+    their count instead of collapsing (status_policy@v4). A no-model-call line
     signed by an enrolled human validator counts on the human axis — the
     highest-value independent source, never folded into a model root. The two run
     axes are namespaced (``k:`` vs ``g:``) so a keyid can never alias a run label.
@@ -803,7 +803,7 @@ def query_frame(
     """Everything known about a question (frame_id), each with its derived view.
 
     ``min_status`` filters to propositions at or above a floor on the
-    UNTESTED < PRELIMINARY < CORROBORATED support ladder. Only those three are
+    UNTESTED < PRELIMINARY < CONVERGENT support ladder. Only those three are
     valid floors; REFUTED and CONTESTED are off the ladder and are excluded by
     any floor.
     """

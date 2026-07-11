@@ -911,13 +911,15 @@ chain raises `NotImplementedError` until its precedence is designed.
 #### `compute_status(independent_support, independent_refute) -> Status`
 
 The state machine: `UNTESTED` (0, 0); `CONTESTED` (≥1 support and ≥1 refute);
-`REFUTED` (≥1 refute, 0 support); `CORROBORATED` (≥2 support, 0 refute);
-`PRELIMINARY` (exactly 1 support, 0 refute). `compute_frame_status(contrary_independent_support)`
+`REFUTED` (≥1 refute, 0 support); `CONVERGENT` (≥2 support, 0 refute);
+`PRELIMINARY` (exactly 1 support, 0 refute). `CONVERGENT` is a convergence
+marker, not a corroboration or independence verdict: cross-model error
+correlation is unmodeled and is the named residual. `compute_frame_status(contrary_independent_support)`
 returns `FrameStatus.CONTESTED` when a contrary proposition in the same frame
 has ≥1 independent supporting line, else `CONSISTENT`. Independence is counted by
 distinct run (`generated_by`) with a `data_id` guard, so one run yields at most
 one support and one refute. `STATUS_POLICY` is the policy stamp
-(`"status_policy@v3"`), independent of the package version.
+(`"status_policy@v4"`), independent of the package version.
 
 Errors: `TrustError` (base), `NonFalsifiablePropositionError`,
 `InconsistentEstimateError`, `NoRegisteredPlanError`, `FindingPlanForkError`.
@@ -999,7 +1001,7 @@ The stored proposition row as a dict, or `None`.
 
 Everything known about a question (frame), each entry a `proposition_status`
 view. Accepts a `frame_id` or a `Proposition`. `min_status` filters to a floor on
-the `UNTESTED < PRELIMINARY < CORROBORATED` ladder (the only valid floors;
+the `UNTESTED < PRELIMINARY < CONVERGENT` ladder (the only valid floors;
 `REFUTED` / `CONTESTED` are off the ladder and excluded by any floor). Raises
 `ValueError` on an invalid floor.
 

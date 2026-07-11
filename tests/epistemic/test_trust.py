@@ -29,7 +29,7 @@ Scenarios covered
     - EffectEstimate and Prediction reject inconsistent input
   Success criteria (graph, end to end)
     - record a finding and build on it by frame, no human in the loop
-    - two independent data lines reach CORROBORATED
+    - two independent data lines reach CONVERGENT
     - the same dataset does not re-count
     - an opposite outcome refutes, then contests
     - opposite findings surface a frame contest
@@ -236,8 +236,8 @@ class TestStatusMachine:
         [
             (0, 0, Status.UNTESTED),
             (1, 0, Status.PRELIMINARY),
-            (2, 0, Status.CORROBORATED),
-            (3, 0, Status.CORROBORATED),
+            (2, 0, Status.CONVERGENT),
+            (3, 0, Status.CONVERGENT),
             (0, 1, Status.REFUTED),
             (0, 2, Status.REFUTED),
             (1, 1, Status.CONTESTED),
@@ -366,7 +366,7 @@ class TestSuccessCriteria:
             graph.assert_finding(h, _superiority(), _smd(-2.4, p=0.01), data_id="dataB", generated_by="lab_b")
             status = graph.proposition_status(h)
         assert status["independent_support"] == 2
-        assert status["status"] == Status.CORROBORATED.value
+        assert status["status"] == Status.CONVERGENT.value
 
     def test_same_dataset_does_not_recount(self, tmp_path: Path) -> None:
         h = _prop(Direction.DECREASES)
@@ -466,13 +466,13 @@ class TestGraphBehaviour:
         h = _prop(Direction.DECREASES)
         # Unsigned graph so the two findings count as two independent lines
         # (legacy generated_by axis) — see test_two_independent_lines_reach_
-        # corroborated. CORROBORATED is what the min_status floor checks here.
+        # convergent. CONVERGENT is what the min_status floor checks here.
         with mareforma.open(tmp_path) as graph:
             graph.assert_finding(h, _superiority(), _smd(-2.6, p=0.003), data_id="dataA", generated_by="lab_a")
             preliminary_floor = graph.query_frame(h.frame_id(), min_status="PRELIMINARY")
-            corroborated_floor = graph.query_frame(h.frame_id(), min_status="CORROBORATED")
+            convergent_floor = graph.query_frame(h.frame_id(), min_status="CONVERGENT")
             graph.assert_finding(h, _superiority(), _smd(-2.4, p=0.01), data_id="dataB", generated_by="lab_b")
-            corroborated_after = graph.query_frame(h.frame_id(), min_status="CORROBORATED")
+            convergent_after = graph.query_frame(h.frame_id(), min_status="CONVERGENT")
         assert preliminary_floor  # one support meets a PRELIMINARY floor
-        assert corroborated_floor == []  # but not a CORROBORATED floor
-        assert corroborated_after  # two independent supports do
+        assert convergent_floor == []  # but not a CONVERGENT floor
+        assert convergent_after  # two independent supports do

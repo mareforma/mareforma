@@ -1713,7 +1713,7 @@ class EpistemicGraph:
         """Everything known about a question (frame_id), each with its derived
         view. Accepts a frame_id or a :class:`Proposition`. ``min_status``
         filters to propositions meeting a support floor on the
-        UNTESTED < PRELIMINARY < CORROBORATED ladder.
+        UNTESTED < PRELIMINARY < CONVERGENT ladder.
         """
         self._check_open()
         from mareforma.trust import _store

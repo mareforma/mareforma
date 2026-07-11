@@ -578,7 +578,7 @@ result["bearing"]["direction"]   # "supports", computed by the gate
 result["status"]                  # "PRELIMINARY" (one independent line)
 
 # A second check on a DISTINCT model (and dataset, and signer) lifts it to
-# CORROBORATED. A same-model rerun stays one line and does not.
+# CONVERGENT. A same-model rerun stays one line and does not.
 graph.proposition_status(prop)["status"]
 ```
 

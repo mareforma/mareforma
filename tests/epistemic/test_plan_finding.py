@@ -218,7 +218,7 @@ class TestSubmitFinding:
             graph.submit_finding(h, pred, _smd(-2.4, p=0.01), data_id="dataB", generated_by="lab_b")
             status = graph.proposition_status(h)
         assert status["independent_support"] == 2
-        assert status["status"] == Status.CORROBORATED.value
+        assert status["status"] == Status.CONVERGENT.value
 
     def test_dangling_plan_is_untested(self, tmp_path: Path) -> None:
         h = _prop(Direction.DECREASES)

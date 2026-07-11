@@ -242,10 +242,13 @@ Three rules:
 2. **Status counts independent lines by distinct model, data, and signer.**
    `compute_status` in [`mareforma/trust/status.py`](mareforma/trust/status.py)
    reads `independent_support` and `independent_refute` (UNTESTED, PRELIMINARY,
-   CORROBORATED, REFUTED, CONTESTED). A corroborating line counts as independent
-   only when it stands on a **distinct model/method** as well as a distinct
-   signer and dataset: two checks on the same model are one line of evidence, not
-   two, so a same-model rerun no longer reaches CORROBORATED. The distinct-model
+   CONVERGENT, REFUTED, CONTESTED). CONVERGENT is a convergence marker, not a
+   corroboration or independence verdict: it says two or more lineage-distinct
+   supporting lines converge, and names cross-model error correlation as the
+   unmodeled residual. A supporting line counts as independent only when it
+   stands on a **distinct model/method** as well as a distinct signer and
+   dataset: two checks on the same model are one line of evidence, not two, so a
+   same-model rerun no longer reaches CONVERGENT. The distinct-model
    test reads the computed model lineage on each evidence line; soft lineage
    (PROXY or UNVERIFIABLE) cannot certify a distinct model and never earns a
    second line, and where a supporting line's lineage is soft the effective count
@@ -659,12 +662,12 @@ it`) is computed from execution, not declared by the producer. The observer
 lives in [`mareforma/observe/`](mareforma/observe/).
 
 Wrap the span that authors a finding in `observe(cites=...)`. Inside it,
-wrapped loaders (`builtins.open` and `sqlite3.connect` always; `pandas`, the
-keep-alive HTTP clients `requests`/`httpx`/`aiohttp`, and the C-runtime
-scientific readers `h5py`/`pyarrow`/`netCDF4` only if the host already
-imported them, so no new core dep) record the reads that happen, and a
-PEP-578 audit hook plus direct thread-start wrapping record the spawn seams
-the loaders cannot see across. A loader imported INSIDE an open scope is
+wrapped loaders (`builtins.open`, `io.open`, and `sqlite3.connect` always, so
+`pathlib` reads are seen; `pandas`, `polars`, the keep-alive HTTP clients
+`requests`/`httpx`/`aiohttp`, and the C-runtime scientific readers
+`h5py`/`pyarrow`/`netCDF4` only if the host already imported them, so no new
+core dep) record the reads that happen, and a PEP-578 audit hook plus direct
+thread-start wrapping record the spawn seams the loaders cannot see across. A loader imported INSIDE an open scope is
 wrapped too, by a late-import hook. On exit the scope classifies into one of
 three states:
 

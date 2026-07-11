@@ -241,7 +241,7 @@ def _est():
 class TestTrustCounting:
     def test_same_signer_findings_count_as_one(self, tmp_path: Path) -> None:
         """Two findings written through ONE graph handle share one signer and
-        count as a single independent support (not CORROBORATED)."""
+        count as a single independent support (not CONVERGENT)."""
         root_key = _bootstrap_key(tmp_path, "root.key")
         prop, pred = _prop(), _pred()
         with mareforma.open(tmp_path, key_path=root_key) as g:
@@ -250,7 +250,7 @@ class TestTrustCounting:
             status = g.proposition_status(prop.content_id())
         # One distinct signer -> at most one independent support.
         assert status["independent_support"] == 1
-        assert status["status_policy"] == "status_policy@v3"
+        assert status["status_policy"] == "status_policy@v4"
 
     def test_distinct_signer_findings_corroborate(self, tmp_path: Path) -> None:
         """Each finding written through a graph handle opened with a DISTINCT
@@ -264,21 +264,21 @@ class TestTrustCounting:
             g.assert_finding(prop, pred, _est(), data_id="ds2", generated_by="run2")
             status = g.proposition_status(prop.content_id())
         assert status["independent_support"] == 2
-        assert status["status"] == "CORROBORATED"
+        assert status["status"] == "CONVERGENT"
 
     def test_legacy_null_keyid_findings_count_under_generated_by(
         self, tmp_path: Path,
     ) -> None:
         """Unsigned findings (NULL asserter_keyid) fall back to the generated_by
         axis: two with distinct generated_by + distinct data_id still
-        corroborate — no silent CORROBORATED downgrade."""
+        corroborate — no silent CONVERGENT downgrade."""
         prop, pred = _prop(), _pred()
         with mareforma.open(tmp_path) as g:  # no key -> unsigned findings
             g.assert_finding(prop, pred, _est(), data_id="ds1", generated_by="run1")
             g.assert_finding(prop, pred, _est(), data_id="ds2", generated_by="run2")
             status = g.proposition_status(prop.content_id())
         assert status["independent_support"] == 2
-        assert status["status"] == "CORROBORATED"
+        assert status["status"] == "CONVERGENT"
 
 
 # ===========================================================================

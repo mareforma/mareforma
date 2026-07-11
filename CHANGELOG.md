@@ -2,6 +2,73 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.10] - Unreleased
+
+### Added
+
+- **Model and method lineage on the evidence line.** The observer records which
+  model and method authored a finding, computed from the request the producer
+  actually sent. Tiered like `data_id`: COMPUTED (a body-parse at the socket seam
+  to a recognized provider host), PROXY (a producer declaration), UNVERIFIABLE (a
+  fine-tune, alias, or wrapper whose base is not declarable). Corroboration counts
+  distinct models, not distinct signers alone, and a human check counts as the
+  strongest independent source. Persisted additively on `evidence_lines`.
+- **Local models earn content-addressed lineage.** A call to a local inference
+  server (Ollama) is COMPUTED via a `weights-digest` attestor: the observer
+  resolves the served weights' sha256 from the running server and keys model
+  distinctness on the digest, so two local models are told apart by their weights,
+  not a self-chosen name. The `attestor` field (`provider-host`, `weights-digest`,
+  `declared`) records how each identity was established.
+- **Wider execution observation.** Grounding and lineage now fire on the idioms
+  real pipelines use: reads through `io.open` (pathlib `open`/`read_text`/
+  `read_bytes`, zipfile), model calls at `httpx` `Client`/`AsyncClient.send` and
+  the `aiohttp` request seam (the paths the provider SDKs and litellm take), and a
+  cited read through polars is GROUNDED. A grounded read and a computed lineage are
+  gated on a successful response, so an error body never grounds a cited URL and a
+  failed call never mints a model. A duckdb query, whose read path lives in the SQL
+  beyond the observer's view, floors a cited read to OPAQUE rather than a false
+  UNGROUNDED.
+- **`mareforma audit`.** A post-hoc auditor that signs one grounding receipt per
+  finding, verifiable independently of the producer, with corpus resume.
+- **Re-execution faithfulness proxy.** A `FaithfulnessVerdict` placed on the trust
+  map that re-runs a recorded step and reports whether the result reproduces.
+- **Effective independence and the prevalence pilot.** The independence arm reports
+  the effective-independence distribution and the same-model-collapse rate, with a
+  causal oracle prose path, kill-switch fixtures, and a slim pilot harness that
+  states its OPAQUE-coverage bound instead of reading a blind run as a prevalence.
+- **Pre-registration gate.** A plan registered after the run's first execution is
+  refused, so a plan cannot be back-dated to a run it did not precede.
+
+### Deprecated
+
+- **The public `REPLICATED` and `ESTABLISHED` labels.** They read as settled
+  conclusions the substrate does not compute. The internal DB support levels are
+  unchanged; only the public module attributes warn.
+
+### Removed
+
+- **The GRADE evidence vector** (`EvidenceVector`, `EvidenceVectorError`,
+  `VALID_STUDY_DESIGNS`), **literature ingest** (the `ingest`, `ask`, and
+  `narrative` commands and their exporters), **DOI network resolution** (the
+  regex-only `is_doi` format helper stays), and **activity hooks**. These were
+  surface the core does not need; their removal is asserted by tests.
+
+### Changed
+
+- **The top status label `CORROBORATED` is renamed `CONVERGENT`.** The state and
+  its rule are unchanged: two or more independent-lineage supporting lines, none
+  refuting. The word changes because it over-claimed. Distinct-model is
+  necessary, not sufficient, for independence: a kill-switch measured
+  distinct-provider model pairs as error-correlated as any pair (rho 0.484 vs
+  0.485). `CONVERGENT` states the structural fact that lineage-distinct lines
+  converge and names cross-model error correlation as the residual, rather than
+  reading as a corroboration or independence verdict. Reading
+  `Status("CORROBORATED")` or `Status.CORROBORATED` still resolves to
+  `Status.CONVERGENT` this release and emits a `DeprecationWarning`; a future
+  release removes the alias. Status is recomputed on read and never stored, so
+  there is no stored-value migration. The policy stamp moves from
+  `status_policy@v3` to `status_policy@v4`.
+
 ## [0.3.9] - 2026-07-08
 
 Three passes that make trust honest and legible. The grounding verdict now binds to
