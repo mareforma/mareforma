@@ -44,10 +44,12 @@ from ._verdict import (
 from .measure import (
     GroundingReport,
     IndependenceReport,
+    PilotReport,
     independence_records,
     summarize,
     summarize_independence,
     summarize_independence_receipts,
+    summarize_pilot,
     summarize_receipts,
 )
 from .oracle import (
@@ -211,4 +213,7 @@ __all__ = [
     "summarize_independence",
     "summarize_independence_receipts",
     "independence_records",
+    # The slim natural-prevalence pilot (both arms + the OPAQUE-coverage bound).
+    "PilotReport",
+    "summarize_pilot",
 ]

@@ -345,3 +345,72 @@ def independence_records(receipts: Iterable[dict]) -> list[dict]:
 def summarize_independence_receipts(receipts: Iterable[dict]) -> IndependenceReport:
     """Aggregate the independence records carried by a run's receipts."""
     return summarize_independence(independence_records(receipts))
+
+
+@dataclass(frozen=True)
+class PilotReport:
+    """A slim natural-prevalence pilot: both arms plus the honest coverage bound.
+
+    The pilot is the cheap pre-check before the full natural-corpus run (see the
+    kill-switch fixtures): a small receipts file of real findings yields the
+    grounding split and the independence distribution TOGETHER, with the OPAQUE
+    fraction reported as the honesty gate. When OPAQUE dominates, the observer
+    could not see enough of the pipeline for the split to be a trustworthy
+    prevalence number, so the report says so rather than over-claiming — the
+    grounded prevalence reads as a lower bound until the observer attaches deeper.
+    """
+
+    grounding: GroundingReport
+    independence: IndependenceReport
+
+    def opaque_dominates(self, threshold: float = 0.5) -> bool:
+        return self.grounding.opaque_dominates(threshold)
+
+    def coverage_bound(self) -> str:
+        """The honest one-line bound the OPAQUE fraction puts on the split."""
+        frac = self.grounding.opaque_fraction
+        if self.grounding.total == 0:
+            return "No findings to bound."
+        if self.opaque_dominates():
+            return (
+                f"OPAQUE covers {frac:.0%} of findings: the split is not yet a "
+                f"trustworthy prevalence number. Report grounded prevalence as a "
+                f"lower bound and attach deeper before publishing."
+            )
+        return (
+            f"OPAQUE covers {frac:.0%} of findings: the split is a lower bound on "
+            f"grounded prevalence to within that coverage gap."
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "n": self.grounding.total,
+            "grounding": self.grounding.to_dict(),
+            "independence": (
+                self.independence.to_dict() if self.independence.total else None
+            ),
+            "opaque_fraction": self.grounding.opaque_fraction,
+            "opaque_dominates": self.opaque_dominates(),
+            "coverage_bound": self.coverage_bound(),
+        }
+
+    def closing_sentence(self) -> str:
+        lead = self.grounding.closing_sentence()
+        if self.independence.total:
+            lead += " " + self.independence.closing_sentence()
+        return lead + " " + self.coverage_bound()
+
+
+def summarize_pilot(receipts: Iterable[dict]) -> PilotReport:
+    """Run the slim natural-prevalence pilot over a receipts file.
+
+    Reads the receipts once into a list (they are iterated twice: once for the
+    grounding split, once for the independence arm) and returns both reports plus
+    the OPAQUE-coverage bound. The independence arm is present only when a receipt
+    carries an ``independence`` record, so a grounding-only pilot still reports.
+    """
+    receipts = list(receipts)
+    return PilotReport(
+        grounding=summarize_receipts(receipts),
+        independence=summarize_independence(independence_records(receipts)),
+    )
