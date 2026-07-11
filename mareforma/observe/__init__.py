@@ -41,7 +41,15 @@ from ._verdict import (
     ReadRecord,
     SeamEvent,
 )
-from .measure import GroundingReport, summarize, summarize_receipts
+from .measure import (
+    GroundingReport,
+    IndependenceReport,
+    independence_records,
+    summarize,
+    summarize_independence,
+    summarize_independence_receipts,
+    summarize_receipts,
+)
 from .oracle import (
     MetricReducer,
     OracleInfluence,
@@ -196,4 +204,9 @@ __all__ = [
     "summarize",
     "GroundingReport",
     "summarize_receipts",
+    # The independence arm of the measurement.
+    "IndependenceReport",
+    "summarize_independence",
+    "summarize_independence_receipts",
+    "independence_records",
 ]

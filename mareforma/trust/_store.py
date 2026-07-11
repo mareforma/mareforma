@@ -685,6 +685,19 @@ def effective_independence(conn: sqlite3.Connection, content_id: str) -> dict:
     cross-model residual (how *far apart* two distinct models are) is DEFERRED —
     named here, not computed.
     """
+    supports, soft = _supporting_units(conn, content_id)
+    return {"number": _count_run_distinct(supports), "soft": soft}
+
+
+def _supporting_units(
+    conn: sqlite3.Connection, content_id: str
+) -> tuple[list[tuple[str, str, tuple]], bool]:
+    """The SUPPORTING ``(run, data, model)`` units for a proposition, plus soft.
+
+    The shared collection behind :func:`effective_independence` and
+    :func:`effective_independence_receipt`. ``soft`` is True when any supporting
+    line carried PROXY / UNVERIFIABLE model lineage.
+    """
     supports: list[tuple[str, str, tuple]] = []
     soft = False
     for direction, run_token, data_id, model_key in _independence_units(
@@ -694,7 +707,37 @@ def effective_independence(conn: sqlite3.Connection, content_id: str) -> dict:
             supports.append((run_token, data_id, model_key))
             if model_key[0] == "soft":
                 soft = True
-    return {"number": _count_run_distinct(supports), "soft": soft}
+    return supports, soft
+
+
+def effective_independence_receipt(
+    conn: sqlite3.Connection, content_id: str
+) -> dict:
+    """The per-finding independence record a measurement receipt carries.
+
+    Extends :func:`effective_independence` with ``naive``: the supporting count a
+    signer-axis counter would report BEFORE the model-distinct collapse, taken
+    over HARD (non-soft) lineage only. ``naive - number`` isolates the same-model
+    (COMPUTED) collapse — two distinct signers on one model that a naive counter
+    would read as two independent lines — while excluding soft-lineage weakening,
+    which ``soft`` reports separately. A measurement aggregates these records into
+    the independence arm of the report (see
+    :func:`mareforma.observe.measure.summarize_independence`).
+
+    ``naive`` counts distinct-signer supporting lines by re-keying every hard unit
+    to the model-absent axis (so no two lines collapse on their model root), then
+    reusing :func:`_count_run_distinct`. So a same-model pair reads ``naive=2,
+    number=1`` (collapse of 1); a distinct-model pair reads ``naive=2, number=2``
+    (no collapse); a soft-only body reads ``naive=0, number=1, soft=True`` — not a
+    collapse, an unverifiable count.
+    """
+    supports, soft = _supporting_units(conn, content_id)
+    number = _count_run_distinct(supports)
+    hard = [(run, data_id, mk) for run, data_id, mk in supports if mk[0] != "soft"]
+    naive = _count_run_distinct(
+        [(run, data_id, ("absent",)) for run, data_id, _mk in hard]
+    )
+    return {"number": number, "naive": naive, "soft": soft}
 
 
 def get_proposition_row(

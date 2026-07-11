@@ -170,3 +170,178 @@ def summarize_receipts(receipts: Iterable[dict]) -> GroundingReport:
     one holding the live verdicts.
     """
     return summarize(GroundingVerdict.from_receipt(r) for r in receipts)
+
+
+@dataclass(frozen=True)
+class IndependenceReport:
+    """The independence arm of the measurement, over per-finding receipts.
+
+    Where :class:`GroundingReport` answers "did the cited data flow," this answers
+    "how independent is the corroboration." Over a run's per-finding effective-
+    independence records it reports three numbers the paper's independence arm
+    needs:
+
+    - the DISTRIBUTION of the effective-independence number: what fraction of
+      findings sit at 1 (a single supporting line, no corroboration) versus >= 2
+      (genuinely corroborated by a distinct model / human / data);
+    - the UNVERIFIABLE fraction: findings whose supporting lineage is soft
+      (PROXY / UNVERIFIABLE), so the count rests on lineage that cannot certify a
+      distinct model;
+    - the SAME-MODEL-COLLAPSE rate: of the corroborating lines a naive signer-axis
+      counter would call independent, the fraction that were one COMPUTED model
+      counted twice (``naive - number`` summed, over the naive total).
+
+    A finding contributes a record ``{"number", "naive", "soft"}`` (see
+    :func:`mareforma.trust._store.effective_independence_receipt`).
+    """
+
+    total: int
+    at_zero: int
+    at_one: int
+    at_two_plus: int
+    unverifiable: int
+    naive_total: int
+    collapsed_total: int
+
+    def fraction_at_one(self) -> float:
+        return 0.0 if self.total == 0 else self.at_one / self.total
+
+    def fraction_two_plus(self) -> float:
+        return 0.0 if self.total == 0 else self.at_two_plus / self.total
+
+    @property
+    def unverifiable_fraction(self) -> float:
+        """Fraction of findings whose supporting lineage is soft (UNVERIFIABLE)."""
+        return 0.0 if self.total == 0 else self.unverifiable / self.total
+
+    @property
+    def same_model_collapse_rate(self) -> float:
+        """Fraction of naive-independent corroborations that were one model twice.
+
+        The numerator is the collapse (``naive - number`` summed over findings);
+        the denominator is the naive total (what a signer-axis counter would call
+        independent). Zero when nothing corroborated, never a divide-by-zero.
+        """
+        if self.naive_total == 0:
+            return 0.0
+        return self.collapsed_total / self.naive_total
+
+    def distribution(self) -> dict[str, float]:
+        """The effective-independence distribution as fractions of the total."""
+        if self.total == 0:
+            return {"0": 0.0, "1": 0.0, ">=2": 0.0}
+        return {
+            "0": self.at_zero / self.total,
+            "1": self.at_one / self.total,
+            ">=2": self.at_two_plus / self.total,
+        }
+
+    def to_dict(self) -> dict:
+        return {
+            "total": self.total,
+            "distribution_counts": {
+                "0": self.at_zero,
+                "1": self.at_one,
+                ">=2": self.at_two_plus,
+            },
+            "distribution": self.distribution(),
+            "unverifiable": self.unverifiable,
+            "unverifiable_fraction": self.unverifiable_fraction,
+            "naive_total": self.naive_total,
+            "collapsed_total": self.collapsed_total,
+            "same_model_collapse_rate": self.same_model_collapse_rate,
+        }
+
+    def closing_sentence(self) -> str:
+        """A plain-English one-line summary a reviewer can read without the JSON."""
+        if self.total == 0:
+            return "No independence records to measure."
+        d = self.distribution()
+        lead = (
+            f"Across {self.total} findings: {d['1']:.0%} rest on a single line "
+            f"(effective independence 1), {d['>=2']:.0%} are corroborated (>= 2)."
+        )
+        if self.unverifiable:
+            lead += (
+                f" {self.unverifiable_fraction:.0%} are UNVERIFIABLE (soft lineage)."
+            )
+        if self.collapsed_total:
+            lead += (
+                f" {self.same_model_collapse_rate:.0%} of naive corroborations were "
+                f"one model counted twice."
+            )
+        return lead
+
+
+def _as_int(value: object) -> int:
+    """Coerce a receipt field to a non-negative int, defaulting to 0.
+
+    A hand-authored or older record may carry a missing, null, or non-numeric
+    field; the independence arm degrades it to 0 rather than raising, so one bad
+    record never denies the whole report.
+    """
+    try:
+        return max(0, int(value))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
+def summarize_independence(records: Iterable[dict]) -> IndependenceReport:
+    """Aggregate per-finding independence records into the independence report.
+
+    Each record is ``{"number": <effective>, "naive": <signer-axis hard count>,
+    "soft": <bool>}`` as written by
+    :func:`mareforma.trust._store.effective_independence_receipt`. Missing fields
+    degrade to their conservative default (``number``/``naive`` 0, ``soft`` False)
+    so a hand-authored or older record still aggregates rather than raising.
+    """
+    total = at_zero = at_one = at_two_plus = 0
+    unverifiable = naive_total = collapsed_total = 0
+    for rec in records:
+        total += 1
+        number = _as_int(rec.get("number"))
+        naive = _as_int(rec.get("naive"))
+        if bool(rec.get("soft")):
+            unverifiable += 1
+        if number <= 0:
+            at_zero += 1
+        elif number == 1:
+            at_one += 1
+        else:
+            at_two_plus += 1
+        naive_total += naive
+        # naive is the signer-axis count over HARD lineage and number folds the
+        # model axis, so number <= naive on any hard body; clamp defensively so a
+        # malformed record can never make the collapse negative.
+        collapsed_total += max(0, naive - number)
+    return IndependenceReport(
+        total=total,
+        at_zero=at_zero,
+        at_one=at_one,
+        at_two_plus=at_two_plus,
+        unverifiable=unverifiable,
+        naive_total=naive_total,
+        collapsed_total=collapsed_total,
+    )
+
+
+def independence_records(receipts: Iterable[dict]) -> list[dict]:
+    """The per-finding independence records carried by a run's receipts.
+
+    A combined receipt carries the grounding fields plus an ``"independence"``
+    sub-record. This pulls the sub-records present, so a run that wrote both arms
+    to one receipts file reports the independence arm alongside the grounding
+    split, and a receipts file with no independence records yields an empty list
+    (the independence arm is simply not reported, never fabricated).
+    """
+    out: list[dict] = []
+    for r in receipts:
+        rec = r.get("independence")
+        if isinstance(rec, dict):
+            out.append(rec)
+    return out
+
+
+def summarize_independence_receipts(receipts: Iterable[dict]) -> IndependenceReport:
+    """Aggregate the independence records carried by a run's receipts."""
+    return summarize_independence(independence_records(receipts))

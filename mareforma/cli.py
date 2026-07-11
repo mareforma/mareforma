@@ -1201,14 +1201,21 @@ def measure_cmd(receipts_path: str, as_json: bool, redact_home: bool) -> None:
     RECEIPTS_PATH is a JSON array of verdict receipts, or a JSONL file with one
     receipt per line (as written by a measurement run). The report gives the
     GROUNDED / UNGROUNDED / OPAQUE split, the incidental-read rate, mean read
-    coverage, and OPAQUE bucketed by seam kind.
+    coverage, and OPAQUE bucketed by seam kind. When a receipt carries an
+    ``independence`` record, the independence arm is reported alongside it: the
+    effective-independence distribution, the UNVERIFIABLE fraction, and the
+    same-model-collapse rate.
 
     \b
     Examples:
         mareforma measure run-receipts.jsonl
         mareforma measure run-receipts.json --json --redact-home
     """
-    from mareforma.observe import summarize_receipts
+    from mareforma.observe import (
+        independence_records,
+        summarize_independence,
+        summarize_receipts,
+    )
 
     try:
         receipts = _load_receipts(Path(receipts_path))
@@ -1216,13 +1223,20 @@ def measure_cmd(receipts_path: str, as_json: bool, redact_home: bool) -> None:
         _err(f"Could not read receipts: {exc}")
         sys.exit(1)
 
-    report = summarize_receipts(receipts).to_dict()
-    closing = summarize_receipts(receipts).closing_sentence()
+    grounding = summarize_receipts(receipts)
+    report = grounding.to_dict()
+    closing = grounding.closing_sentence()
+    indep = summarize_independence(independence_records(receipts))
+    indep_report = indep.to_dict() if indep.total else None
+    indep_closing = indep.closing_sentence() if indep.total else None
     if redact_home:
         report = _redact_home(report)
         closing = _redact_home(closing)
     if as_json:
-        click.echo(json.dumps({**report, "summary": closing}, indent=2, sort_keys=True))
+        payload = {**report, "summary": closing}
+        if indep_report is not None:
+            payload["independence"] = {**indep_report, "summary": indep_closing}
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
         return
     _ok(f"Grounding report over {report['total']} findings")
     counts = report["counts"]
@@ -1236,6 +1250,21 @@ def measure_cmd(receipts_path: str, as_json: bool, redact_home: bool) -> None:
     if report["mean_read_coverage"] is not None:
         _info(f"mean read coverage: {report['mean_read_coverage']:.0%}")
     click.echo(closing)
+    if indep_report is not None:
+        _ok(f"Independence report over {indep_report['total']} findings")
+        dist = indep_report["distribution_counts"]
+        _info(
+            f"effective independence: {dist['1']} at 1, {dist['>=2']} at >=2"
+            + (f", {dist['0']} at 0" if dist["0"] else "")
+        )
+        _info(
+            f"UNVERIFIABLE (soft lineage): {indep_report['unverifiable']} "
+            f"({indep_report['unverifiable_fraction']:.0%})"
+        )
+        _info(
+            f"same-model-collapse rate: {indep_report['same_model_collapse_rate']:.0%}"
+        )
+        click.echo(indep_closing)
 
 
 def _load_receipts(path: Path) -> list:
