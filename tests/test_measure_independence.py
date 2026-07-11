@@ -12,8 +12,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import mareforma
-from mareforma.observe import GroundingVerdict, ObservedGrounding
-from mareforma.observe._lineage import resolve_lineage
 from mareforma.observe.measure import (
     IndependenceReport,
     independence_records,
@@ -21,7 +19,7 @@ from mareforma.observe.measure import (
     summarize_independence_receipts,
 )
 from mareforma.trust._store import effective_independence_receipt
-from tests._helpers import _bootstrap_key, _est, _pred, _prop
+from tests._helpers import _bootstrap_key, _est, _pred, _prop, _verdict
 
 
 _CLAUDE = "claude-3-5-sonnet-20241022"  # COMPUTED root: claude-3-5-sonnet
@@ -30,30 +28,6 @@ _GPT = "gpt-4o-2024-08-06"              # COMPUTED root: gpt-4o
 
 def _rec(number: int, naive: int, soft: bool = False) -> dict:
     return {"number": number, "naive": naive, "soft": soft}
-
-
-def _verdict(model_id: str, *, source: str = "socket") -> GroundingVerdict:
-    """A grounding verdict carrying a model lineage of the requested tier.
-
-    ``source="socket"`` to a recognized provider host earns COMPUTED, ``declared``
-    earns PROXY; a fine-tune / alias string is UNVERIFIABLE regardless. The
-    verdict is OPAQUE — the finding path only reads its ``model_lineage``.
-    """
-    lower = model_id.lower()
-    provider = (
-        "anthropic" if lower.startswith("claude")
-        else "openai" if lower.startswith(("gpt", "o1", "o3", "o4", "chatgpt"))
-        else None
-    )
-    lineage = resolve_lineage(
-        model_id, source=source, method="m",
-        decoding={"temperature": None, "top_p": None, "seed": None},
-        provider=provider,
-    )
-    return GroundingVerdict(
-        grounding=ObservedGrounding.OPAQUE, reason="test lineage",
-        model_lineage=lineage,
-    )
 
 
 # -- aggregation over hand-authored records ---------------------------------

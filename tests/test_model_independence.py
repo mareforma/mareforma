@@ -16,37 +16,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import mareforma
-from mareforma.observe import GroundingVerdict, ObservedGrounding
 from mareforma.observe._lineage import resolve_lineage
 from mareforma.trust._store import effective_independence
-from tests._helpers import _bootstrap_key, _est, _pred, _prop
-
-
-def _verdict(model_id: str, *, source: str = "socket") -> GroundingVerdict:
-    """A grounding verdict carrying a model lineage of the requested tier.
-
-    ``source="socket"`` to a RECOGNIZED provider host earns COMPUTED (a
-    body-parse at the seam), ``"declared"`` earns PROXY; a fine-tune / alias
-    string is UNVERIFIABLE regardless. The verdict itself is OPAQUE (the finding
-    path only reads ``model_lineage`` off it); grounding state is irrelevant to
-    the independence count.
-    """
-    lower = model_id.lower()
-    provider = (
-        "anthropic" if lower.startswith("claude")
-        else "openai" if lower.startswith(("gpt", "o1", "o3", "o4", "chatgpt"))
-        else None
-    )
-    lineage = resolve_lineage(
-        model_id, source=source, method="m",
-        decoding={"temperature": None, "top_p": None, "seed": None},
-        provider=provider,
-    )
-    return GroundingVerdict(
-        grounding=ObservedGrounding.OPAQUE,
-        reason="test lineage",
-        model_lineage=lineage,
-    )
+from tests._helpers import _bootstrap_key, _est, _pred, _prop, _verdict
 
 
 _CLAUDE = "claude-3-5-sonnet-20241022"   # COMPUTED root: claude-3-5-sonnet

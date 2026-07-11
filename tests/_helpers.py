@@ -101,6 +101,36 @@ def _est():
     return EffectEstimate(-0.8, EffectType.SMD, p_value=0.001)
 
 
+def _verdict(model_id: str, *, source: str = "socket"):
+    """A grounding verdict carrying a model lineage of the requested tier.
+
+    ``source="socket"`` to a recognized provider host earns COMPUTED, ``declared``
+    earns PROXY; a fine-tune / alias string is UNVERIFIABLE regardless. The
+    verdict is OPAQUE (the finding path only reads its ``model_lineage``; grounding
+    state is irrelevant to the independence count). Shared helper replacing the
+    code-identical copies the model-independence and measure-independence tests
+    each defined locally.
+    """
+    from mareforma.observe import GroundingVerdict, ObservedGrounding
+    from mareforma.observe._lineage import resolve_lineage
+
+    lower = model_id.lower()
+    provider = (
+        "anthropic" if lower.startswith("claude")
+        else "openai" if lower.startswith(("gpt", "o1", "o3", "o4", "chatgpt"))
+        else None
+    )
+    lineage = resolve_lineage(
+        model_id, source=source, method="m",
+        decoding={"temperature": None, "top_p": None, "seed": None},
+        provider=provider,
+    )
+    return GroundingVerdict(
+        grounding=ObservedGrounding.OPAQUE, reason="test lineage",
+        model_lineage=lineage,
+    )
+
+
 def _module_level_names(source_path: Path) -> list[str]:
     """Return every top-level name defined in *source_path*.
 
