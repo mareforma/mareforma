@@ -7,8 +7,6 @@ the thin-sigma guard off must not move a verdict the older tests fixed.
 """
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from mareforma.observe.oracle import (
