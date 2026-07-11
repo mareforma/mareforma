@@ -697,7 +697,16 @@ sufficient.
 `mareforma observe --doctor` reports which loaders are wrapped and which seams
 force OPAQUE in the current environment; `mareforma measure` aggregates a run's
 verdict receipts into the GROUNDED / UNGROUNDED / OPAQUE split, bucketed by
-seam kind.
+seam kind. When a receipt also carries a per-finding effective-independence
+record (`effective_independence_receipt`), `measure` reports the independence
+arm alongside the split: the distribution of the effective number (a single
+supporting line versus corroboration at two or more), the fraction UNVERIFIABLE
+where the lineage is soft, and the same-model-collapse rate (corroborations a
+signer-axis counter would call independent that were one computed model counted
+twice). `summarize_pilot` runs a slim natural-prevalence pilot over a receipts
+file, reporting both arms with the honest OPAQUE-coverage bound: when OPAQUE
+dominates, the grounded prevalence reads as a lower bound, not a trustworthy
+number.
 
 The verdict is computed from execution of a **cooperating producer**: the
 binding is tamper-evidence over what a cooperating run did, not a proof
@@ -711,6 +720,14 @@ re-runs the pipeline, and checks whether the finding moves. Flow (did the
 bytes arrive) and influence (does the finding depend on them) are different
 constructs, so the two can honestly disagree; `reconcile` labels
 "read the data then ignored it" a construct difference, not a detector error.
+A prose finding is reduced to a scalar by a declared reducer:
+`numeric_extraction_reducer` pulls the reported number out of an answer with no
+model, so the oracle stays model-independent, while a reducer that runs a model
+(an embedding or LLM judge) sets `reinserts_model=True` and the result records
+it. A `multiplicity` control widens the decision threshold when a finding is one
+of many (so the noisiest of a family cannot cross the bar by chance), and a
+thin-sigma guard widens it when the noise floor rests on too few repeats; both
+default off, so the scalar path is unchanged.
 
 ## Honest scope
 
