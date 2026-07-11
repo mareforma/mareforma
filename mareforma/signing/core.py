@@ -108,6 +108,8 @@ PAYLOAD_TYPE_VALIDATOR_ENROLLMENT = "application/vnd.mareforma.validator-enrollm
 PAYLOAD_TYPE_VALIDATION = "application/vnd.mareforma.validation+json"
 PAYLOAD_TYPE_SEED = "application/vnd.mareforma.seed+json"
 PAYLOAD_TYPE_PROJECT_POLICY = "application/vnd.mareforma.project-policy+json"
+PAYLOAD_TYPE_AUDIT_RECEIPT = "application/vnd.mareforma.audit-receipt+json"
+PAYLOAD_TYPE_AUDIT_RUN = "application/vnd.mareforma.audit-run+json"
 
 # Predicate fields bound by a claim signature. After Statement v1 these
 # live inside ``statement.predicate``; the tuple is the contract restore
@@ -762,6 +764,51 @@ def sign_project_policy(
     return _build_envelope(
         payload, private_key,
         payload_type=PAYLOAD_TYPE_PROJECT_POLICY,
+    )
+
+
+def sign_audit_receipt(
+    record: dict[str, Any],
+    private_key: Ed25519PrivateKey,
+) -> dict[str, Any]:
+    """Sign a per-finding audit receipt.
+
+    The record is a grounding-verdict receipt plus the ``finding_id`` and run
+    context the auditor attests it for. Unlike the flat fixed-field records
+    above, a receipt carries nested variable-length evidence (reads, seams),
+    so the payload is the RFC 8785 canonical bytes of the whole record — the
+    same canonicalization the claim path signs — rather than a fixed field
+    list that would silently drop evidence. The payload type is distinct so an
+    audit receipt cannot be substituted for a claim, validation, or policy
+    envelope, or vice versa.
+    """
+    from .._canonical import canonicalize
+
+    return _build_envelope(
+        canonicalize(record), private_key,
+        payload_type=PAYLOAD_TYPE_AUDIT_RECEIPT,
+    )
+
+
+def sign_audit_run(
+    record: dict[str, Any],
+    private_key: Ed25519PrivateKey,
+) -> dict[str, Any]:
+    """Sign an audit run record so a corpus resume trusts only verifiable state.
+
+    The run record carries the target, exit code, observed reads/seams, coverage,
+    and the ``completed`` flag. Signing it makes the resume key the auditor's
+    signature, not an unsigned file on disk: a run record a hostile target
+    pre-planted cannot carry this signature, so it re-runs instead of skipping.
+    The payload is the RFC 8785 canonical bytes of the whole record, and the
+    payload type is distinct so a run record cannot be substituted for a receipt,
+    claim, validation, or policy envelope, or vice versa.
+    """
+    from .._canonical import canonicalize
+
+    return _build_envelope(
+        canonicalize(record), private_key,
+        payload_type=PAYLOAD_TYPE_AUDIT_RUN,
     )
 
 

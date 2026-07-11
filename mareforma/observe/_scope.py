@@ -221,9 +221,10 @@ class Scope:
         # No qualifying cited read. Did anything hide one? Fold in the coverage
         # gaps that a fully-observed scope cannot rule out: a cited source opened
         # through an uninstrumented reader, a cited C-extension file whose bytes
-        # never emit a PEP-578 event, and a cited URL with no observed HTTP read.
-        # Each becomes a coverage-gap seam, which the relevance matrix below
-        # treats as blocking every citation kind (fail-closed).
+        # never emit a PEP-578 event, a cited URL with no observed HTTP read, and
+        # a content-address citation whose match the observer never had the hash
+        # to attempt. Each becomes a coverage-gap seam, which the relevance
+        # matrix below treats as blocking every citation kind (fail-closed).
         read_idents = {normalize_identifier(r.identifier) for r in reads}
         for op in self.opens:
             n = normalize_identifier(op)
@@ -253,6 +254,32 @@ class Scope:
                         "cited URL with no observed HTTP read; coverage unknown",
                     )
                 )
+            elif kind == "content-address":
+                # A sha256: citation matches by hash of the read's bytes. With
+                # hashing off no read carries one, so a non-match is guaranteed
+                # regardless of what was read; with hashing on, an unhashed
+                # non-empty read (the open path never hashes) could still have
+                # carried the cited bytes. Either way the absence of a match is
+                # not evidence of absence.
+                if not self.content_address:
+                    seams.append(
+                        SeamEvent(
+                            "coverage-gap",
+                            "content-address citation without content "
+                            "addressing enabled; reads were not hashed",
+                        )
+                    )
+                elif any(
+                    r.nonempty and r.content_address is None for r in reads
+                ):
+                    seams.append(
+                        SeamEvent(
+                            "coverage-gap",
+                            "content-address citation alongside unhashed "
+                            "non-empty reads; the cited bytes could have "
+                            "arrived through one",
+                        )
+                    )
 
         # Seam-relevance matrix. A seam blocks UNGROUNDED only if it could have
         # hidden a read of a citation kind actually in the set (conservative-ANY:
@@ -286,6 +313,23 @@ class Scope:
             seams=tuple(seams),
             **base,
         )
+
+    def classify_against(self, cited: tuple[str, ...]) -> GroundingVerdict:
+        """Classify this scope's captured evidence against a different cited set.
+
+        The post-hoc auditor computes one verdict per finding from a single
+        observed run: the evidence (reads, seams, opens, lineage) is shared and
+        only the cited set differs per finding. The records are copied onto a
+        fresh scope so :meth:`classify` stays the one classification routine
+        and no call mutates the observed scope.
+        """
+        other = Scope(cited, content_address=self.content_address)
+        other.reads = list(self.reads)
+        other.seams = list(self.seams)
+        other.opens = list(self.opens)
+        other.models = list(self.models)
+        other._error = self._error
+        return other.classify()
 
 
 def enter(cited: tuple[str, ...], *, content_address: bool = False) -> Scope:

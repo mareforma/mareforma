@@ -140,7 +140,9 @@ def observe(cites=None, *, content_address: bool = False):
         Opt in to content-address matching: a read matches a cited ``sha256:``
         data_id when the hash of its returned bytes equals it. Off by default,
         because identifier matching avoids hashing large reads on the common
-        path.
+        path. With hashing off no read can ever match a ``sha256:`` citation,
+        so such a finding floors to OPAQUE (a named coverage gap), never a
+        confident UNGROUNDED.
 
     Yields
     ------

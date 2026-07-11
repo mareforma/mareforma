@@ -745,6 +745,71 @@ class _VerifyCommand(click.Command):
             raise
 
 
+def _verify_signed_file(path: Path, as_json: bool) -> int:
+    """Route a signed file to its verifier by payload type.
+
+    A per-finding audit receipt and a bundle are both DSSE envelopes; the
+    ``payloadType`` names which one this is, so the router never guesses from
+    the filename. A file that is not JSON at all falls through to the bundle
+    verifier, which reports the precise failure.
+    """
+    from mareforma import signing as _signing
+
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        doc = None
+    if (
+        isinstance(doc, dict)
+        and doc.get("payloadType") == _signing.PAYLOAD_TYPE_AUDIT_RECEIPT
+    ):
+        return _verify_audit_receipt_file(path, doc, as_json)
+    return _verify_bundle_file(path, as_json)
+
+
+def _verify_audit_receipt_file(path: Path, envelope: dict, as_json: bool) -> int:
+    """Verify a signed per-finding audit receipt with public material only.
+
+    Same auditor posture as the bundle path: the local key's public half is
+    the material a solo operator has; an absent key is UNVERIFIABLE (exit 2),
+    a failed signature or a grounding-binding violation is a definite failure
+    (exit 1).
+    """
+    from mareforma import signing as _signing
+    from mareforma.audit import verify_audit_receipt
+
+    def emit(verdict: str, code: int, reason: str) -> int:
+        if as_json:
+            click.echo(json.dumps(
+                {"target": str(path), "target_kind": "audit-receipt",
+                 "verdict": verdict, "exit_code": code, "reason": reason},
+                indent=2))
+        elif code == _VERIFY_OK:
+            _ok(reason)
+        else:
+            _err(reason)
+        return code
+
+    key_path = _signing.default_key_path()
+    if not key_path.exists():
+        return emit(
+            "unverifiable", _VERIFY_UNVERIFIABLE,
+            "no public key available to verify this receipt (no local key "
+            "found). This is unverifiable, not a failure; supply the "
+            "signer's key.")
+    try:
+        public_key = _signing.load_private_key(key_path).public_key()
+        ok, reason = verify_audit_receipt(envelope, public_key)
+    except _signing.InvalidEnvelopeError as exc:
+        return emit("tampered", _VERIFY_FAIL, f"malformed audit receipt: {exc}")
+    except _signing.SigningError as exc:
+        return emit("unverifiable", _VERIFY_UNVERIFIABLE,
+                    f"could not load the local key to verify: {exc}")
+    if not ok:
+        return emit("tampered", _VERIFY_FAIL, reason)
+    return emit("verified", _VERIFY_OK, reason)
+
+
 def _verify_bundle_file(path: Path, as_json: bool) -> int:
     """Verify a signed bundle with public material only. Returns an exit code.
 
@@ -976,12 +1041,13 @@ def _verify_export_dir(path: Path, as_json: bool) -> int:
               help="Rewrite $HOME to ~ in the printed trust map (never applied "
                    "to signed receipts).")
 def verify(target: str, as_json: bool, redact_home: bool) -> None:
-    """Verify a claim, a signed bundle, or an export directory (the audit receipt).
+    """Verify a claim, a signed bundle, an audit receipt, or an export directory.
 
     TARGET is detected by shape: an existing file is verified as a signed
-    bundle; an existing directory as an export dir; anything else as a claim id
-    resolved against the local project. Verifying a claim uses only public
-    material (auditor mode) and prints its trust map.
+    bundle or, by its payload type, as a per-finding audit receipt; an
+    existing directory as an export dir; anything else as a claim id resolved
+    against the local project. Verifying a claim uses only public material
+    (auditor mode) and prints its trust map.
 
     \b
     Exit codes (stable, for CI gates):
@@ -995,6 +1061,7 @@ def verify(target: str, as_json: bool, redact_home: bool) -> None:
         mareforma verify <claim-id>
         mareforma verify <claim-id> --json
         mareforma verify mareforma-bundle.json
+        mareforma verify audit/envelopes/001-finding.json
         mareforma verify ./export-dir
     """
     p = Path(target)
@@ -1003,7 +1070,7 @@ def verify(target: str, as_json: bool, redact_home: bool) -> None:
             if p.is_dir():
                 code = _verify_export_dir(p, as_json)
             else:
-                code = _verify_bundle_file(p, as_json)
+                code = _verify_signed_file(p, as_json)
         else:
             code = _verify_claim(target, as_json, redact_home)
     except Exception as exc:  # noqa: BLE001
@@ -1134,6 +1201,77 @@ def diagnose_cmd(cites: tuple[str, ...], as_json: bool, redact_home: bool,
 
     sys.exit(run_diagnose(
         list(command), cites=list(cites), as_json=as_json,
+        redact_home=(_redact_home if redact_home else None),
+    ))
+
+
+@cli.command("audit", context_settings={"ignore_unknown_options": True})
+@click.option("--findings", "findings_path", default=None, metavar="FILE",
+              help="JSON object mapping finding_id to its cited source(s). "
+                   "Required unless --corpus is given.")
+@click.option("--corpus", "corpus_dir", default=None, metavar="DIR",
+              help="Directory of run specs (*.json, each carrying 'command' "
+                   "and 'findings'). Resumable; one fresh interpreter per run.")
+@click.option("--out", "out_dir", default="mareforma-audit", show_default=True,
+              metavar="DIR",
+              help="Output directory for the run record, receipts, and signed "
+                   "envelopes.")
+@click.option("--key", "key_path", default=None, metavar="FILE",
+              help="Auditor signing key (defaults to the bootstrap key).")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Emit the run record as JSON.")
+@click.option("--redact-home", "redact_home", is_flag=True, default=False,
+              help="Rewrite $HOME to ~ in the printed report (never applied "
+                   "to signed receipts).")
+@click.argument("command", nargs=-1, type=click.UNPROCESSED)
+def audit_cmd(findings_path: str | None, corpus_dir: str | None, out_dir: str,
+              key_path: str | None, as_json: bool, redact_home: bool,
+              command: tuple[str, ...]) -> None:
+    """Audit a third-party pipeline: one signed grounding receipt per finding.
+
+    Runs COMMAND in-process under the grounding observer, exactly like
+    diagnose; the target never imports mareforma. The findings mapping names
+    what each finding claims to cite, the observer alone supplies what
+    happened, and nothing the target prints or writes enters a verdict. Each
+    finding gets a verdict receipt (``receipts.jsonl`` feeds ``mareforma
+    measure``) plus a signed envelope ``mareforma verify`` checks from public
+    material alone. Exits with the target's own exit code; a crashing target
+    still emits its partial receipts.
+
+    The target shares the auditor's interpreter (in-process observation is
+    what makes its reads visible), so the receipts grade a pipeline that does
+    not attack its auditor: a target written to defeat the audit could
+    fabricate what the observer records. The signature attests the auditor's
+    observation, not the target's honesty.
+
+    With --corpus, iterates run specs instead: one fresh interpreter per run,
+    resumable (a run whose signed record verifies as complete is skipped on
+    re-invocation).
+
+    \b
+    Examples:
+        mareforma audit --findings findings.json -- python analysis.py
+        mareforma audit --findings findings.json --out audit/ -- -m mypkg.run
+        mareforma audit --corpus runs/ --out audit/
+    """
+    from mareforma.audit import run_audit, run_corpus
+
+    if corpus_dir and (findings_path or command):
+        raise click.UsageError(
+            "--corpus takes run specs; drop --findings and the command")
+    if corpus_dir and (as_json or redact_home):
+        raise click.UsageError(
+            "--json and --redact-home apply to a single run, not --corpus")
+    if corpus_dir:
+        sys.exit(run_corpus(corpus_dir, out_dir=out_dir, key_path=key_path))
+    if not findings_path:
+        raise click.UsageError("audit needs --findings FILE (or --corpus DIR)")
+    if not command:
+        raise click.UsageError(
+            "audit needs a target after `--`, e.g. `-- python analysis.py`")
+    sys.exit(run_audit(
+        list(command), findings_path=findings_path, out_dir=out_dir,
+        key_path=key_path, as_json=as_json,
         redact_home=(_redact_home if redact_home else None),
     ))
 
