@@ -1,32 +1,49 @@
 """Loader wrapping: proxy data-ingress calls to record what flowed.
 
-The rule: wrap stdlib loaders (``builtins.open``,
+The rule: wrap stdlib loaders (``builtins.open``, ``io.open``,
 ``sqlite3.connect``) unconditionally, and wrap third-party loaders ONLY if the
 host already imported them. mareforma never imports a third-party loader to wrap
-it — no new core deps, coverage documented as "wraps X if you use X." The wrapped
-third-party loaders are ``pandas``; the keep-alive HTTP clients ``requests``
-(module ``get`` + ``Session.get``/``request``), ``httpx`` (module ``get`` +
-``Client``/``AsyncClient`` ``get``), and ``aiohttp`` (``ClientSession``, recorded
-as a network seam because its body streams); and the C-runtime scientific readers
-``h5py.File``, ``pyarrow.parquet``/``feather.read_table``, and ``netCDF4.Dataset``.
+it, so there are no new core deps and coverage is documented as "wraps X if you
+use X."
+
+Reads. ``builtins.open`` and ``io.open`` cover the stdlib read paths, so
+``pathlib.Path.open``/``read_text``/``read_bytes`` and ``zipfile``, which route
+through ``io.open``, are seen. ``sqlite3`` observes the rows it returns. The
+wrapped third-party readers are ``pandas`` and the eager ``polars`` readers (a
+returned frame's row count is the non-empty signal), and the C-runtime scientific
+readers ``h5py.File``, ``pyarrow.parquet``/``feather.read_table``, and
+``netCDF4.Dataset`` (a stat-size proxy). A ``duckdb`` query reads its path from
+inside the SQL, beyond the observer's view, so it records a per-invocation
+coverage-gap seam rather than a denied read.
+
+HTTP and model lineage. ``requests`` (module ``get`` + ``Session`` verbs) and
+``httpx`` (module ``get`` + ``Client``/``AsyncClient`` ``get``) record a read;
+``aiohttp`` records a network seam because its body streams. A model call is an
+HTTP POST whose body names the model: the ``httpx`` ``Client``/``AsyncClient``
+``post`` and ``send`` wrappers and the ``aiohttp`` request wrapper parse that body
+for the model lineage, the paths the provider SDKs and litellm take. A grounded
+read and a computed lineage are gated on a 2xx response, so an error body never
+grounds a cited URL and a failed call never mints a model. A call to a local
+inference server is content-addressed by the served weights' digest, resolved from
+the running server through a scope-detached probe.
+
 A loader imported INSIDE an open scope is caught too, by the late-import hook.
 
-What the wrappers do not cover (``io.open``, ``os.open``,
-``pathlib.Path.open``, ``mmap``, an unwrapped C-extension reader) is covered
-honestly by the audit hook's open/seam detection and the classifier's
-coverage-gap floors, not silently missed: a cited C-runtime file with no observed
-read floors to ``OPAQUE`` ("bytes not observable via PEP-578"), never a false
-``UNGROUNDED``.
+What the wrappers do not cover (``os.open``, ``mmap``, an unwrapped C-extension
+reader) is covered honestly by the audit hook's open/seam detection and the
+classifier's coverage-gap floors, not silently missed: a cited file with no
+observed read floors to ``OPAQUE`` ("bytes not observable via PEP-578"), never a
+false ``UNGROUNDED``.
 
 Every wrapper obeys two invariants:
 
-- Transparent outside a scope. With no active scope the wrapper delegates
-  straight to the real callable — no observation cost, no behavior change.
-- Fail-safe. The real call runs OUTSIDE the observation try-block,
-  so a host-side failure (a missing file, a bad query) propagates to the host
-  exactly as it would unwrapped. Only the observer's OWN logic is wrapped in
-  the try, and any failure there marks the scope opaque and is swallowed —
-  nothing the observer does re-raises into the host.
+- Transparent outside a scope. With no active scope the wrapper delegates straight
+  to the real callable, at no observation cost and with no behavior change.
+- Fail-safe. The real call runs OUTSIDE the observation try-block, so a host-side
+  failure (a missing file, a bad query) propagates to the host exactly as it would
+  unwrapped. Only the observer's OWN logic is in the try, and any failure there
+  marks the scope opaque and is swallowed; nothing the observer does re-raises into
+  the host.
 
 All ingress is recorded through the single :func:`mareforma.observe._scope.record_read`
 chokepoint, so the recording rule lives in exactly one place.
@@ -34,10 +51,8 @@ chokepoint, so the recording rule lives in exactly one place.
 Coverage bound: a loader must be OPENED inside the scope to be observed. A file
 handle or database connection created before the scope (a module-level or pooled
 connection) and reused inside it is not swapped for an observing wrapper, so its
-reads are invisible and the finding reads as UNGROUNDED. This is the same class
-of documented limit as a value loaded once and reused: flow observation sees the
-reads that happen through loaders it wrapped at open time, not resources opened
-earlier. Open the cited source inside the scope for it to count.
+reads are invisible and the finding reads as UNGROUNDED. Open the cited source
+inside the scope for it to count.
 """
 from __future__ import annotations
 
@@ -66,7 +81,8 @@ _install_lock = threading.Lock()
 # while a scope is open, so a loader imported INSIDE the observed span (the
 # flagship diagnose command imports its loaders inside the scope) is still caught.
 _WRAPPABLE_TOP_LEVEL: frozenset[str] = frozenset(
-    {"pandas", "httpx", "requests", "aiohttp", "h5py", "pyarrow", "netCDF4"}
+    {"pandas", "httpx", "requests", "aiohttp", "h5py", "pyarrow", "netCDF4",
+     "polars", "duckdb"}
 )
 
 
@@ -401,6 +417,8 @@ def _wrap_third_party_if_present() -> None:
     _wrap_h5py_if_present()
     _wrap_pyarrow_if_present()
     _wrap_netcdf4_if_present()
+    _wrap_polars_if_present()
+    _wrap_duckdb_if_present()
 
 
 # -- late-import hook: wrap a loader imported while a scope is open -----------
@@ -452,6 +470,81 @@ def _wrap_pandas_if_present() -> None:
             continue
         _reals[key] = real
         setattr(pd, name, _make_return_value_wrapper(real, "pandas", _df_source, _df_nonempty))
+
+
+def _pl_source(args, kwargs, result) -> str:
+    # polars eager readers take the path as ``source`` (kwarg) or the first
+    # positional argument.
+    src = kwargs.get("source")
+    if src is None and args:
+        src = args[0]
+    return _path_str(src) if src is not None else ""
+
+
+def _wrap_polars_if_present() -> None:
+    # polars reads through its Rust core with no Python open, so a cited read is
+    # invisible to the open hook and would floor to a false UNGROUNDED. Wrapping
+    # the EAGER readers records the read at return with result-nonemptiness. The
+    # lazy scanners (``scan_*``) are deliberately NOT wrapped: they read nothing
+    # at call time, so measuring them would either force a collect or misreport.
+    pl = sys.modules.get("polars")
+    if pl is None:
+        return
+    for name in ("read_csv", "read_parquet", "read_ipc", "read_json",
+                 "read_ndjson", "read_avro", "read_excel"):
+        key = f"polars.{name}"
+        if key in _reals:
+            continue
+        real = getattr(pl, name, None)
+        if real is None:
+            continue
+        _reals[key] = real
+        setattr(pl, name, _make_return_value_wrapper(real, "polars", _pl_source, _df_nonempty))
+
+
+def _make_duckdb_seam_wrapper(real):
+    """Wrap a duckdb entry point to record a per-invocation coverage-gap seam.
+
+    duckdb reads a path named INSIDE the SQL string through its C++ core: the
+    observer can neither see the read nor extract the path from the query, so a
+    cited duckdb read must not be a confident UNGROUNDED. Recording a coverage-gap
+    seam per query floors a cited source the query might have read to OPAQUE,
+    while a source genuinely read through an instrumented path still wins GROUNDED
+    (reads beat seams). This never grounds a duckdb read; it only refuses to deny
+    one the observer could not see.
+    """
+
+    def wrapper(*args, **kwargs):
+        result = real(*args, **kwargs)  # host errors propagate untouched
+        scope = _scope.current_scope()
+        if scope is None:
+            return result
+        try:
+            scope.record_seam(
+                "coverage-gap",
+                "duckdb query read through an uninstrumented engine; the path in "
+                "the SQL is not observable, so a cited read cannot be denied",
+            )
+        except BaseException as exc:  # noqa: BLE001
+            scope.mark_error(f"duckdb wrapper failed: {type(exc).__name__}")
+        return result
+
+    return wrapper
+
+
+def _wrap_duckdb_if_present() -> None:
+    duckdb = sys.modules.get("duckdb")
+    if duckdb is None:
+        return
+    for name in ("sql", "execute", "query", "read_csv", "read_parquet", "read_json"):
+        key = f"duckdb.{name}"
+        if key in _reals:
+            continue
+        real = getattr(duckdb, name, None)
+        if real is None:
+            continue
+        _reals[key] = real
+        setattr(duckdb, name, _make_duckdb_seam_wrapper(real))
 
 
 def _wrap_httpx_if_present() -> None:

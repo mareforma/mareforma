@@ -336,6 +336,116 @@ def test_aiohttp_request_records_a_socket_seam():
     assert any(s.kind == "socket" for s in verdict.seams)
 
 
+# -- read reach: io.open / pathlib -------------------------------------------
+
+def test_pathlib_read_is_grounded(tmp_path):
+    # pathlib.Path.open / read_text / read_bytes call io.open, a separate
+    # reference from builtins.open. Wrapping io.open reaches them: a cited
+    # pathlib read is GROUNDED, not OPAQUE-coverage-gap.
+    from pathlib import Path
+
+    p = Path(tmp_path / "d.csv")
+    p.write_text("col\n1\n2\n")
+    with obs.observe(cites=str(p)) as h:
+        p.read_text()
+    assert h.verdict.grounding is OG.GROUNDED
+
+    with obs.observe(cites=str(p)) as h:
+        with p.open() as f:
+            f.read()
+    assert h.verdict.grounding is OG.GROUNDED
+
+
+def test_builtins_open_recorded_once_not_doubled(tmp_path):
+    # Wrapping both builtins.open and io.open must not double-record: each name
+    # calls its own captured original, so one open is one read.
+    p = str(tmp_path / "d.csv")
+    open(p, "w").write("col\n1\n")
+    with obs.observe(cites=p) as h:
+        open(p).read()
+    assert h.verdict.grounding is OG.GROUNDED
+    assert h.verdict.reads_seen == 1
+
+
+def test_post_open_stat_race_is_opaque_not_ungrounded(tmp_path, monkeypatch):
+    # The open SUCCEEDS, then stat fails (a delete race). The bytes flowed
+    # through the fd, so this must floor to OPAQUE (coverage-gap), never a
+    # confident false UNGROUNDED off a stat that could not be read.
+    from mareforma.observe import _loaders
+    p = str(tmp_path / "d.csv")
+    open(p, "w").write("x\n1\n2\n")
+    real_stat = _loaders.os.stat
+
+    def racing_stat(path, *a, **k):
+        if str(path) == p:
+            raise FileNotFoundError(p)  # unlinked between open and stat
+        return real_stat(path, *a, **k)
+
+    monkeypatch.setattr(_loaders.os, "stat", racing_stat)
+    with obs.observe(cites=p) as h:
+        open(p).read()
+    assert h.verdict.grounding is OG.OPAQUE
+    assert any(s.kind == "coverage-gap" for s in h.verdict.seams)
+
+
+# -- status-gating: an error body is not a read ------------------------------
+
+def test_http_error_body_is_not_grounded(httpx_mock):
+    # A 404 that still returns a non-empty body must NOT ground a cited URL: the
+    # bytes are an error page, not the cited data. Status-blind grounding would
+    # read the error body as a real read; the cited URL floors to OPAQUE instead.
+    import httpx
+
+    url = "https://example.org/data.csv"
+    httpx_mock.add_response(url=url, status_code=404, text="not found\n")
+    client = httpx.Client()
+    with obs.observe(cites=url) as h:
+        client.get(url)
+    client.close()
+    assert h.verdict.grounding is not OG.GROUNDED
+
+
+def test_observer_error_does_not_default_to_grounded(httpx_mock):
+    # A non-success response the observer records must fail closed, not assume a
+    # read happened off the error body.
+    import httpx
+
+    url = "https://example.org/data.csv"
+    httpx_mock.add_response(url=url, status_code=500, text="err\n")
+    client = httpx.Client()
+    with obs.observe(cites=url) as h:
+        client.get(url)
+    client.close()
+    assert h.verdict.grounding is not OG.GROUNDED
+
+
+# -- false-UNGROUNDED containment: engines that own their I/O -----------------
+
+def test_polars_read_csv_is_grounded(tmp_path):
+    # polars reads through its Rust core, no Python open, so a cited read was a
+    # false UNGROUNDED. Wrapping the eager readers records it: GROUNDED.
+    pl = pytest.importorskip("polars")
+    p = str(tmp_path / "d.csv")
+    open(p, "w").write("x\n1\n2\n3\n")
+    with obs.observe(cites=p) as h:
+        pl.read_csv(p)
+    assert h.verdict.grounding is OG.GROUNDED
+
+
+def test_duckdb_path_read_is_opaque_not_ungrounded(tmp_path):
+    # duckdb reads a path named INSIDE the SQL string through its C++ core: the
+    # observer cannot extract the path or see the read, so a cited duckdb read
+    # floors to OPAQUE (a per-invocation coverage-gap seam), never a confident
+    # false UNGROUNDED.
+    duckdb = pytest.importorskip("duckdb")
+    p = str(tmp_path / "d.csv")
+    open(p, "w").write("x\n1\n2\n3\n")
+    with obs.observe(cites=p) as h:
+        duckdb.sql(f"SELECT * FROM '{p}'").fetchall()
+    assert h.verdict.grounding is OG.OPAQUE
+    assert any(s.kind == "coverage-gap" for s in h.verdict.seams)
+
+
 # -- C-extension readers -----------------------------------------------------
 
 def test_cited_h5_with_no_wrapper_is_opaque_floor(tmp_path):
