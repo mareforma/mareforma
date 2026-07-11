@@ -599,7 +599,13 @@ def _normalize_evidence(evidence: dict | None) -> dict:
     if src.get("study_design") is not None:
         out["study_design"] = src["study_design"]
     if src.get("grounding_score") is not None:
-        score = float(src["grounding_score"])
+        raw = src["grounding_score"]
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise ValueError(
+                f"grounding_score must be a number in [0, 1], got {raw!r}: a "
+                "flag is not a score and must not sign into the predicate"
+            )
+        score = float(raw)
         if not 0.0 <= score <= 1.0:
             raise ValueError(
                 f"grounding_score must be in [0, 1], got {score!r}: an evidence "
@@ -1670,12 +1676,16 @@ def _maybe_update_replicated_unlocked(
     # Model/method independence gate. A converging peer counts only when its
     # model lineage is distinct from the new claim's: two same-model checks
     # (COMPUTED, same family root) are one line of evidence, not two, even under
-    # distinct signers, and a pair with soft (PROXY/UNVERIFIABLE) lineage on
-    # either side is UNVERIFIABLE for independence — never a silent pass. Absent
-    # lineage (no observed model call — every plain claims-graph peer) imposes no
-    # model constraint, so the default claims path is unchanged. This reads the
-    # SAME axis the trust-layer independence count keys on, so promotion and
-    # trust counting cannot disagree.
+    # distinct signers; a pair with soft (PROXY/UNVERIFIABLE) lineage on either
+    # side is UNVERIFIABLE for independence, never a silent pass; absent lineage
+    # (no observed model call) imposes no model constraint. It uses the same key
+    # as the read-side count (``model_distinct_pair`` / ``independence_model_key``).
+    # NOTE: the load-bearing model-independence signal is that read-side
+    # effective-independence number (``trust_map`` / ``effective_independence``),
+    # NOT this gate. REPLICATED is a deprecated public label, and on the primary
+    # path a plain claims-graph claim carries no finding lineage (findings are
+    # read after this runs), so both sides read absent and this filter is a
+    # consistent no-op here rather than the enforcement point.
     from mareforma.observe._lineage import model_distinct_pair
 
     new_lineage = _claim_model_lineage(conn, new_claim_id)

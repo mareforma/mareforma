@@ -134,7 +134,6 @@ def append_health_event(
 
     ``op`` is a short identifier of the operation
     (``"provenance_query"``, ``"grounding_verdict"``,
-    ``"doi_drift_scan"``, ``"refresh_unresolved"``,
     ``"refresh_unsigned"``). ``outcome`` is ``"ok"`` / ``"fail"`` /
     ``"partial"``. Extra ``counters`` are merged into the JSON line
     verbatim: keep them small and JSON-encodable.
@@ -195,8 +194,7 @@ def compute_rolling_stats(
 
     * ``provenance_query`` → ``avg_depth``
     * ``grounding_verdict`` → ``avg_score`` + ``pass_rate`` (score > 0.5)
-    * ``doi_drift_scan`` → ``avg_drifted`` + ``total_inspected``
-    * ``refresh_unresolved`` / ``refresh_unsigned`` → ``avg_succeeded``
+    * ``refresh_unsigned`` → ``avg_succeeded``
 
     Missing or malformed lines are skipped without raising; the log
     is operator-visible diagnostics, not a mareforma-trust surface.

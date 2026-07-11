@@ -20,6 +20,11 @@ class TestEvidenceValidation:
         with pytest.raises(ValueError):
             _normalize_evidence({"grounding_score": 0.5})
 
+    def test_bool_grounding_score_rejected(self) -> None:
+        # bool is int in Python; True must not sign as a 1.0 score.
+        with pytest.raises(ValueError):
+            _normalize_evidence({"grounding_score": True, "grounding_rationale": "x"})
+
     def test_grounding_score_empty_rationale_rejected(self) -> None:
         with pytest.raises(ValueError):
             _normalize_evidence({"grounding_score": 0.5, "grounding_rationale": "  "})

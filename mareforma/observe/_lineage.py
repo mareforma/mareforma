@@ -6,11 +6,13 @@ mirrors the ``data_id`` axis exactly:
 
 - ``COMPUTED``      — the model came from a body-parse at the socket seam (a
                       wrapped ``httpx`` POST) addressed to a RECOGNIZED provider
-                      host. The producer controls neither the parse nor the
-                      destination, so it is the trustworthy tier, analogous to a
-                      content-addressed ``data_id``. A body-parse to an
-                      unrecognized host is producer-controlled, so it is
-                      UNVERIFIABLE, never COMPUTED.
+                      host. The producer cannot name an arbitrary model to an
+                      arbitrary endpoint, so this is the trustworthy tier,
+                      analogous to a content-addressed ``data_id``. Its residual:
+                      it is still the model field of the producer's own request,
+                      read off the wire, not a response-attested fact. A
+                      body-parse to an unrecognized host is fully
+                      producer-controlled, so it is UNVERIFIABLE, never COMPUTED.
 - ``PROXY``         — a cooperating producer declared the model out of band
                       (``declare_model``). Agent-attested and soft, analogous to
                       a string-fallback ``data_id``: it never reads as COMPUTED.
@@ -149,8 +151,9 @@ def resolve_lineage(
         root, version = None, None
     elif source == "socket" and provider:
         # Observed at the seam AND addressed to a recognized provider host: the
-        # producer controls neither the body-parse nor the destination, so this
-        # is the trustworthy COMPUTED tier.
+        # producer cannot name an arbitrary model to an arbitrary endpoint, so
+        # this is the trustworthy COMPUTED tier (still the model field of their
+        # own request read off the wire, not a response-attested fact).
         tier = ModelLineageTier.COMPUTED
     elif source == "socket":
         # Observed at the seam but addressed to an UNRECOGNIZED host. The

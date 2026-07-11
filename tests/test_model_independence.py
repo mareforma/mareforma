@@ -308,3 +308,42 @@ class TestForgedComputedIsRejected:
         a = resolve_lineage(_CLAUDE, source="socket", method="m", decoding={}, provider=None)
         b = resolve_lineage(_GPT, source="socket", method="m", decoding={}, provider=None)
         assert model_distinct_pair(a.to_dict(), b.to_dict()) is False
+
+    def test_provider_gate_matches_host_not_substring(self) -> None:
+        # COMPUTED is gated on this, so it must match the parsed HOST, not a
+        # substring of the producer-controlled URL. A producer must not earn a
+        # provider by naming one anywhere in a URL they own.
+        from mareforma.observe._loaders import _provider_of
+
+        assert _provider_of("https://api.anthropic.com/v1/messages") == "anthropic"
+        assert _provider_of("https://api.openai.com/v1/chat/completions") == "openai"
+        assert _provider_of("https://evil.com/anthropic") is None
+        assert _provider_of("http://localhost:8080/openai") is None
+        assert _provider_of("https://api.anthropic.com.attacker.net/v1") is None
+        assert _provider_of("https://anthropic.attacker.com/x?u=api.openai.com") is None
+
+
+class TestHumanAxisIsLoadBearing:
+    """The human axis must genuinely change the count, not read like an absent line.
+
+    A human line WINS a run outright (``_collapse_run_model``): a run that also
+    authored a soft (UNVERIFIABLE) line counts because the human rescues it, where
+    an absent line would leave the run soft and uncounted. This isolates the axis
+    so the guarantee is not a tautology against the legacy absent semantics.
+    """
+
+    def test_human_line_rescues_an_otherwise_soft_run(self) -> None:
+        from mareforma.trust._store import _count_run_distinct
+
+        with_human = _count_run_distinct([
+            ("a", "d1", ("model", "gpt-4o")),   # a distinct computed model: 1
+            ("b", "d2", ("soft",)),             # run b also authored a soft line
+            ("b", "d3", ("human",)),            # a human check wins run b: +1
+        ])
+        without_human = _count_run_distinct([
+            ("a", "d1", ("model", "gpt-4o")),
+            ("b", "d2", ("soft",)),
+            ("b", "d3", ("absent",)),           # demoted: run b is soft -> 0
+        ])
+        assert with_human == 2
+        assert without_human == 1

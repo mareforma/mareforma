@@ -731,10 +731,25 @@ def _request_json_body(kwargs):
 
 
 def _provider_of(url) -> "str | None":
-    u = (url or "").lower()
-    if "anthropic" in u:
+    """The recognized model provider for a request URL, matched on the HOST.
+
+    COMPUTED lineage is gated on this, so the match must be on the parsed host,
+    never a substring of the whole (producer-controlled) URL: a POST to
+    ``https://evil.com/anthropic`` or ``api.anthropic.com.attacker.net`` must NOT
+    read as a provider, or a producer could mint a COMPUTED distinct model by
+    naming a provider anywhere in a URL they control. The suffix match accepts
+    only genuine sub-domains of the provider's own registered domain, which an
+    attacker cannot forge.
+    """
+    from urllib.parse import urlsplit
+
+    try:
+        host = (urlsplit(url or "").hostname or "").lower()
+    except (ValueError, TypeError):
+        return None
+    if host == "api.anthropic.com" or host.endswith(".anthropic.com"):
         return "anthropic"
-    if "openai" in u:
+    if host == "api.openai.com" or host.endswith(".openai.com"):
         return "openai"
     return None
 
