@@ -66,6 +66,7 @@ mareforma bootstrap   # optional: sign your claims and enable the public log
 | **Trust map** | `mareforma map <claim>` places every trust property (grounding, independence, contestation, witnessing) at its tier, and states plainly what it does not evaluate. |
 | **Audit-grade verify** | `mareforma verify <claim>` re-checks signatures, the grounding-to-citation binding, and support level, with stable exit codes for CI (0 verified, 1 tampered, 2 unverifiable). |
 | **Diagnose a run** | `mareforma diagnose -- python run.py` runs a target under the observer and reports what data actually flowed, and where a silent fallback hid. |
+| **Audit a pipeline** | `mareforma audit --findings map.json -- python run.py` runs a pipeline that never imports mareforma and signs one grounding receipt per finding, from the observer alone. |
 | **Optional public log** | Publish a claim to a public, append-only log for an independent, timestamped record. |
 | **Local-first** | Runs on local SQLite. Network only for the optional log. |
 
