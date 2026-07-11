@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 
 import httpx
+import pytest
 
 import mareforma.observe as obs
 from mareforma.observe import ModelLineageTier, declare_model
@@ -88,6 +89,94 @@ def test_httpx_post_model_captured_openai(httpx_mock):
     assert any(s.kind == "socket" for s in verdict.seams)
 
 
+# -- COMPUTED via the SDK send() path ----------------------------------------
+
+def test_httpx_client_send_captures_model(httpx_mock):
+    # The openai/anthropic SDKs and litellm build an httpx.Request and dispatch
+    # it via client.send(request) — they never pass json= to a wrapped .post.
+    # Lineage must still be COMPUTED from the pre-built request body.
+    httpx_mock.add_response(url=_ANTHROPIC_URL, json={"content": []})
+    client = httpx.Client()
+    with obs.observe() as h:
+        req = client.build_request(
+            "POST", _ANTHROPIC_URL,
+            json={"model": "claude-3-5-sonnet-20241022",
+                  "messages": [{"role": "user", "content": "hi"}]},
+        )
+        client.send(req)
+    client.close()
+    lineage = h.verdict.model_lineage
+    assert lineage is not None
+    assert lineage.tier is ModelLineageTier.COMPUTED
+    assert lineage.model_id == "claude-3-5-sonnet-20241022"
+    assert lineage.provider == "anthropic"
+
+
+def test_httpx_async_client_send_captures_model(httpx_mock):
+    httpx_mock.add_response(url=_OPENAI_URL, json={"choices": []})
+
+    async def go():
+        client = httpx.AsyncClient()
+        with obs.observe() as h:
+            req = client.build_request(
+                "POST", _OPENAI_URL,
+                json={"model": "gpt-4o-2024-08-06",
+                      "messages": [{"role": "user", "content": "hi"}]},
+            )
+            await client.send(req)
+        await client.aclose()
+        return h.verdict.model_lineage
+
+    lineage = asyncio.run(go())
+    assert lineage is not None
+    assert lineage.tier is ModelLineageTier.COMPUTED
+    assert lineage.model_id == "gpt-4o-2024-08-06"
+
+
+def test_send_non_2xx_records_no_lineage(httpx_mock):
+    httpx_mock.add_response(url=_ANTHROPIC_URL, status_code=500, json={"error": "x"})
+    client = httpx.Client()
+    with obs.observe() as h:
+        req = client.build_request(
+            "POST", _ANTHROPIC_URL,
+            json={"model": "claude-3-5-sonnet-20241022",
+                  "messages": [{"role": "user", "content": "hi"}]},
+        )
+        client.send(req)
+    client.close()
+    assert h.verdict.model_lineage is None
+
+
+def test_aiohttp_request_captures_model():
+    # litellm's default transport is aiohttp; ClientSession._request exposes the
+    # JSON body in kwargs, so the model is captured without consuming the stream.
+    pytest.importorskip("aiohttp")
+
+    from mareforma.observe import _loaders
+
+    class _Resp:
+        status = 200
+
+    async def fake_request(self, *a, **k):
+        return _Resp()
+
+    wrapper = _loaders._make_aiohttp_request_wrapper(fake_request)
+
+    async def go():
+        with obs.observe() as h:
+            await wrapper(
+                object(), "POST", _ANTHROPIC_URL,
+                json={"model": "claude-3-5-sonnet-20241022",
+                      "messages": [{"role": "user", "content": "hi"}]},
+            )
+        return h.verdict.model_lineage
+
+    lineage = asyncio.run(go())
+    assert lineage is not None
+    assert lineage.tier is ModelLineageTier.COMPUTED
+    assert lineage.model_id == "claude-3-5-sonnet-20241022"
+
+
 # -- PROXY: producer-declared ------------------------------------------------
 
 def test_producer_wrapper_is_proxy():
@@ -112,6 +201,24 @@ def test_producer_wrapper_is_proxy():
 def test_no_model_call_leaves_lineage_absent():
     with obs.observe() as h:
         _ = 2 + 2  # no model call in scope
+    assert h.verdict.model_lineage is None
+
+
+# -- a failed call mints no lineage ------------------------------------------
+
+def test_non_2xx_post_records_no_lineage(httpx_mock):
+    # A POST to a recognized provider host that fails (401 no-credentials, 500,
+    # etc.) is a model call that never executed. Minting COMPUTED off the request
+    # body would attribute a run that did not happen: no lineage on non-2xx.
+    httpx_mock.add_response(url=_ANTHROPIC_URL, status_code=401, json={"error": "x"})
+    client = httpx.Client()
+    with obs.observe() as h:
+        client.post(
+            _ANTHROPIC_URL,
+            json={"model": "claude-3-5-sonnet-20241022",
+                  "messages": [{"role": "user", "content": "hi"}]},
+        )
+    client.close()
     assert h.verdict.model_lineage is None
 
 

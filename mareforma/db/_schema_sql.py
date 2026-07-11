@@ -642,8 +642,12 @@ CREATE TABLE IF NOT EXISTS evidence_lines (
     design_type    TEXT,
     data_id        TEXT NOT NULL,
     -- Model/method lineage observed at the call boundary, as a JSON record
-    -- {tier, model_id, family_root, provider, version, method, decoding}. The
-    -- tier mirrors the data_id axis: COMPUTED (body-parse at the socket seam),
+    -- {tier, model_id, family_root, provider, version, method, decoding,
+    -- attestor, digest}. attestor names how the identity was established
+    -- (provider-host, weights-digest for a local model, or declared); digest is
+    -- the served weights' sha256 for a weights-digest lineage and its
+    -- distinctness key. The tier mirrors the data_id axis: COMPUTED (body-parse
+    -- at the socket seam, or a local weights digest),
     -- PROXY (producer-declared), UNVERIFIABLE (a fine-tune / alias / wrapper
     -- whose base is not declarable). Identity only — it records which model and
     -- method authored the line, never a claim about training-time contamination.

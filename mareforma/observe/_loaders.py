@@ -87,6 +87,7 @@ def ensure_installed() -> None:
         if _installed:
             return
         _wrap_open()
+        _wrap_io_open()
         _wrap_sqlite()
         _wrap_thread_seams()
         _wrap_executor_seams()
@@ -114,11 +115,14 @@ def refresh_third_party() -> None:
 
 # -- stdlib: always ----------------------------------------------------------
 
-def _wrap_open() -> None:
-    if "open" in _reals:
-        return
-    real_open = builtins.open
-    _reals["open"] = real_open
+def _make_observed_open(real_open):
+    """An open() wrapper that records a cited read, bound to ``real_open``.
+
+    Shared by the ``builtins.open`` and ``io.open`` wrappers. Each wrapper calls
+    its OWN captured original, so a single open is recorded exactly once — the
+    two names are distinct references (wrapping ``builtins.open`` never rebinds
+    ``io.open``), and neither delegates to the other by name.
+    """
 
     def observed_open(file, mode="r", *args, **kwargs):
         result = real_open(file, mode, *args, **kwargs)  # host errors propagate
@@ -148,7 +152,45 @@ def _wrap_open() -> None:
             scope.mark_error(f"open wrapper failed: {type(exc).__name__}")
         return result
 
-    builtins.open = observed_open
+    return observed_open
+
+
+def _wrap_open() -> None:
+    if "open" in _reals:
+        return
+    _reals["open"] = builtins.open
+    builtins.open = _make_observed_open(builtins.open)
+
+
+def _wrap_io_open() -> None:
+    # pathlib.Path.open / read_text / read_bytes, zipfile, and a direct io.open
+    # all call io.open, a SEPARATE reference from builtins.open. Wrapping
+    # builtins.open alone misses the dominant modern read idiom (pathlib), which
+    # then floors to OPAQUE-coverage-gap through the audit hook. Wrapping io.open
+    # closes that reach gap at the chokepoint, on the same stat-proxy read tier.
+    import io as _io
+
+    if "io.open" in _reals:
+        return
+    real = getattr(_io, "open", None)
+    if real is None:
+        return
+    _reals["io.open"] = real
+    wrapped = _make_observed_open(real)
+    _io.open = wrapped
+    # On Python 3.10 and earlier, pathlib routes Path.open through a
+    # _NormalAccessor whose ``open`` captured io.open by reference at import,
+    # before this wrap runs, so pathlib reads would bypass the rebinding above
+    # and floor to OPAQUE. Rebind that captured reference too, as a staticmethod
+    # so the accessor instance is not bound in as the file argument. Python 3.11+
+    # removed the accessor and calls io.open at the module attribute, so the
+    # lookup is None there and this is a no-op.
+    import pathlib as _pathlib
+
+    accessor = getattr(_pathlib, "_NormalAccessor", None)
+    if accessor is not None and getattr(accessor, "open", None) is real:
+        _reals["pathlib._NormalAccessor.open"] = accessor.open
+        accessor.open = staticmethod(wrapped)
 
 
 def _wrap_sqlite() -> None:
@@ -506,6 +548,15 @@ def _wrap_httpx_clients_if_present() -> None:
         if real is not None:
             _reals["httpx.Client.post"] = real
             Client.post = _make_http_post_method_wrapper(real)
+    # send() is the SDK/litellm chokepoint: the openai/anthropic SDKs build a
+    # Request and call send() directly, bypassing the json= .post wrapper. Wrap it
+    # for lineage so the independence axis fires on real pipelines, not only on
+    # hand-rolled .post callers.
+    if Client is not None and "httpx.Client.send" not in _reals:
+        real = getattr(Client, "send", None)
+        if real is not None:
+            _reals["httpx.Client.send"] = real
+            Client.send = _make_http_send_wrapper(real)
     AsyncClient = getattr(httpx, "AsyncClient", None)
     if AsyncClient is not None and "httpx.AsyncClient.get" not in _reals:
         real = getattr(AsyncClient, "get", None)
@@ -517,6 +568,11 @@ def _wrap_httpx_clients_if_present() -> None:
         if real is not None:
             _reals["httpx.AsyncClient.post"] = real
             AsyncClient.post = _make_async_http_post_method_wrapper(real)
+    if AsyncClient is not None and "httpx.AsyncClient.send" not in _reals:
+        real = getattr(AsyncClient, "send", None)
+        if real is not None:
+            _reals["httpx.AsyncClient.send"] = real
+            AsyncClient.send = _make_async_http_send_wrapper(real)
 
 
 def _wrap_aiohttp_if_present() -> None:
@@ -532,8 +588,10 @@ def _wrap_aiohttp_if_present() -> None:
     # aiohttp streams the body (await resp.read() happens in host code, after our
     # wrapper returns), so we never see the bytes: record a socket seam. All
     # ClientSession.get/post/... route through _request, so one wrap covers them.
+    # The wrapper also parses the request JSON body for model lineage (litellm's
+    # default transport is aiohttp) without consuming the response stream.
     _reals["aiohttp.ClientSession._request"] = real
-    Session._request = _make_async_http_method_wrapper(real, streaming=True)
+    Session._request = _make_aiohttp_request_wrapper(real)
 
 
 def _make_http_method_wrapper(real, *, streaming_kw, method_arg=False):
@@ -670,10 +728,91 @@ def _make_async_http_post_method_wrapper(real):
     return wrapper
 
 
+def _make_http_send_wrapper(real):
+    """Wrap ``httpx.Client.send(request)`` — the SDK/litellm model-call path.
+
+    Captures model lineage only; grounding reads stay with the verb wrappers, so
+    ``send`` never records an http read (which would risk grounding a finding off
+    an API error body). A ``.post(json=)`` call routes through ``send`` too, so
+    lineage may be recorded twice — benign: equal lineages collapse to one.
+    """
+
+    def wrapper(self, *args, **kwargs):
+        result = real(self, *args, **kwargs)  # host errors propagate untouched
+        scope = _scope.current_scope()
+        if scope is None:
+            return result
+        try:
+            request = kwargs.get("request") or (args[0] if args else None)
+            if request is not None:
+                _record_model_from_httpx_request(scope, request, result)
+        except BaseException as exc:  # noqa: BLE001
+            scope.mark_error(f"http loader wrapper failed: {type(exc).__name__}")
+        return result
+
+    return wrapper
+
+
+def _make_async_http_send_wrapper(real):
+    """Wrap ``httpx.AsyncClient.send(request)`` (async SDK model-call path)."""
+
+    async def wrapper(self, *args, **kwargs):
+        result = await real(self, *args, **kwargs)  # host errors propagate
+        scope = _scope.current_scope()
+        if scope is None:
+            return result
+        try:
+            request = kwargs.get("request") or (args[0] if args else None)
+            if request is not None:
+                _record_model_from_httpx_request(scope, request, result)
+        except BaseException as exc:  # noqa: BLE001
+            scope.mark_error(f"http loader wrapper failed: {type(exc).__name__}")
+        return result
+
+    return wrapper
+
+
+def _make_aiohttp_request_wrapper(real):
+    """Wrap ``aiohttp.ClientSession._request`` — litellm's default transport.
+
+    aiohttp streams the response body (read in host code after we return), so the
+    response is recorded as a socket seam, never a grounding read. But the request
+    JSON body is available in kwargs without touching the stream, so a model call
+    over aiohttp still yields COMPUTED lineage (2xx-gated like every seam).
+    """
+
+    async def wrapper(self, *args, **kwargs):
+        result = await real(self, *args, **kwargs)  # host errors propagate
+        scope = _scope.current_scope()
+        if scope is None:
+            return result
+        try:
+            scope.record_seam(
+                "socket", "streaming HTTP response; byte flow not observed"
+            )
+            body = _request_json_body(kwargs)
+            if isinstance(body, dict):
+                _record_model_lineage(scope, body, _aiohttp_url(args, kwargs), result)
+        except BaseException as exc:  # noqa: BLE001
+            scope.mark_error(f"http loader wrapper failed: {type(exc).__name__}")
+        return result
+
+    return wrapper
+
+
+def _aiohttp_url(args, kwargs) -> str:
+    # aiohttp _request(self, method, url, ...): the URL is the 2nd positional arg
+    # (args[0] is the HTTP verb), or the ``url`` kwarg.
+    url = kwargs.get("url")
+    if url is None and len(args) >= 2:
+        url = args[1]
+    return str(url or "")
+
+
 def _record_http_post(scope, args, kwargs, result) -> None:
     # Parse the request body once and thread it to both consumers.
     body = _request_json_body(kwargs)
-    _record_model_from_request(scope, args, kwargs, body)
+    _record_model_from_request(scope, args, kwargs, body, result)
     if isinstance(body, dict) and bool(body.get("stream")):
         # Streaming POST: the response body is not materialized at return.
         # Record a socket seam rather than forcing the download into memory,
@@ -685,13 +824,33 @@ def _record_http_post(scope, args, kwargs, result) -> None:
         _record_http_response(scope, args, kwargs, result)
 
 
-def _record_model_from_request(scope, args, kwargs, body) -> None:
+def _record_model_from_request(scope, args, kwargs, body, result) -> None:
     if not isinstance(body, dict):
+        return
+    url = _resp_source(args, kwargs, None)
+    _record_model_lineage(scope, body, url, result)
+
+
+def _record_model_lineage(scope, body, url, result) -> None:
+    """Resolve and record lineage from a parsed model-call body + request URL.
+
+    Shared tail for every model-call seam (``.post``, ``.send``, aiohttp). Gated
+    on a 2xx response: a call that failed (or a response the observer cannot
+    read) never executed, so minting COMPUTED off the request body would
+    attribute a run that did not happen. Records no lineage on failure rather
+    than a downgraded record, which would collapse a later successful retry of
+    the same model to UNVERIFIABLE.
+    """
+    if not isinstance(body, dict) or _response_ok(result) is not True:
         return
     model_id = body.get("model")
     if not isinstance(model_id, str) or not model_id:
         return
-    url = _resp_source(args, kwargs, None)
+    provider = _provider_of(url)
+    # A local inference server (no recognized remote host) can be content-
+    # addressed by the served weights' digest — a verifiable distinct identity a
+    # local model name lacks. Probed only for local servers, never a remote host.
+    digest = _probe_ollama_digest(url, model_id) if provider is None else None
     from ._lineage import resolve_lineage
 
     lineage = resolve_lineage(
@@ -703,9 +862,36 @@ def _record_model_from_request(scope, args, kwargs, body) -> None:
             "top_p": body.get("top_p"),
             "seed": body.get("seed"),
         },
-        provider=_provider_of(url),
+        provider=provider,
+        digest=digest,
     )
     scope.record_model(lineage)
+
+
+def _record_model_from_httpx_request(scope, request, result) -> None:
+    """Capture lineage from a pre-built ``httpx.Request`` (the SDK ``send`` path).
+
+    The openai/anthropic SDKs and litellm build a ``Request`` and dispatch it via
+    ``client.send(request)`` — the model never passes through a wrapped ``.post``
+    ``json=`` kwarg. The request body has already been serialized to bytes on the
+    request object, so it is read WITHOUT calling ``request.read()``/``aread()``
+    (which would consume a streaming upload and change host behavior). A
+    non-buffered/streaming body yields no lineage rather than a guess.
+    """
+    try:
+        raw = request.content  # already-built bytes; never triggers a stream read
+    except BaseException:  # noqa: BLE001 - streaming/unread body: no lineage
+        return
+    if not isinstance(raw, (bytes, bytearray)) or not raw:
+        return
+    try:
+        import json as _json
+
+        body = _json.loads(raw)
+    except (ValueError, TypeError):
+        return
+    url = str(getattr(request, "url", "") or "")
+    _record_model_lineage(scope, body, url, result)
 
 
 def _request_json_body(kwargs):
@@ -752,6 +938,81 @@ def _provider_of(url) -> "str | None":
     if host == "api.openai.com" or host.endswith(".openai.com"):
         return "openai"
     return None
+
+
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0", ""})
+
+
+def _ollama_server_base(url) -> "str | None":
+    """The base URL of a LOCAL Ollama server for a request URL, or None.
+
+    Recognized by a loopback host on Ollama's port (11434) or its ``/api/`` path
+    — the fingerprint from the local-inference-server survey. Only a local server
+    is ever probed; a remote unrecognized host is never contacted.
+    """
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(url or "")
+    except (ValueError, TypeError):
+        return None
+    host = (parts.hostname or "").lower()
+    if host not in _LOCAL_HOSTS:
+        return None
+    if parts.port == 11434 or (parts.path or "").startswith("/api/"):
+        port = parts.port or 11434
+        return f"{parts.scheme or 'http'}://{parts.hostname}:{port}"
+    return None
+
+
+def _probe_ollama_digest(url, model_id) -> "str | None":
+    """Best-effort weights digest for a local Ollama model, scope-detached.
+
+    Queries the running server (``/api/ps`` loaded runner, then ``/api/tags``
+    installed) for the served model's manifest sha256 — the digest of the weights
+    that served the call. DETACHES the observer scope so this probe records
+    nothing into the scope under measurement (its own socket/read events no-op),
+    uses a hard short timeout, and returns None on any failure — never raises,
+    never blocks the inference path. A concurrent tag remap between the call and
+    this probe is a named residual; the digest is self-attested regardless.
+
+    The probe REFUSES to follow redirects and caps the response body: a server at
+    the loopback base could otherwise 302 the probe to a non-local host (the
+    ``_LOCAL_HOSTS`` allowlist gates only the initial target) or slow-drip an
+    unbounded body under the per-socket timeout. Both stay on the loopback host
+    with a bounded read, honouring "a remote host is never contacted."
+    """
+    base = _ollama_server_base(url)
+    if not base:
+        return None
+    token = _scope._active.set(None)  # detach: loader wrappers + audit hook no-op
+    try:
+        import json as _json
+        import urllib.error
+        import urllib.request
+
+        # An opener with NO redirect handler: a 3xx is returned as-is, never
+        # followed off the loopback host, so the allowlisted base is the only
+        # host contacted. HTTP(S) handlers only.
+        opener = urllib.request.OpenerDirector()
+        opener.add_handler(urllib.request.HTTPHandler())
+        opener.add_handler(urllib.request.HTTPSHandler())
+        _MAX = 2 * 1024 * 1024  # cap the body so a hostile server cannot exhaust memory
+        for path in ("/api/ps", "/api/tags"):
+            try:
+                req = urllib.request.Request(base + path, method="GET")
+                with opener.open(req, timeout=1.5) as resp:
+                    data = _json.loads(resp.read(_MAX))
+            except BaseException:  # noqa: BLE001 - best effort; any failure -> None
+                continue
+            for m in data.get("models", []) or []:
+                if model_id in (m.get("name"), m.get("model")):
+                    dig = m.get("digest")
+                    if isinstance(dig, str) and dig:
+                        return dig if dig.startswith("sha256:") else "sha256:" + dig
+        return None
+    finally:
+        _scope._active.reset(token)
 
 
 def _method_of(url) -> "str | None":
@@ -949,8 +1210,10 @@ def _file_read_signal(identifier: str) -> tuple[bool, bool]:
     stat size of 0 even when the read delivers bytes, so it must never be called
     ``nonempty=False`` and allowed to drive a false ``UNGROUNDED`` — the caller
     records a coverage-gap seam for a cited non-regular source instead, forcing
-    ``OPAQUE``. A missing / unstattable target is treated as a regular empty
-    read (opening a truly absent file would already have raised before here).
+    ``OPAQUE``. An unstattable target (the open succeeded but stat then raised, a
+    delete race) is reported as NON-regular for the same reason: its bytes are
+    unobservable, so a cited read floors to ``OPAQUE``, never a false
+    ``UNGROUNDED``.
     """
     try:
         import stat as _stat
@@ -960,7 +1223,11 @@ def _file_read_signal(identifier: str) -> tuple[bool, bool]:
             return True, st.st_size > 0
         return False, False
     except OSError:
-        return True, False
+        # The open already returned a handle; stat failing now (a delete race, a
+        # permission change) means we cannot observe the bytes, so report it as
+        # non-regular. The caller records a coverage-gap seam for a cited source
+        # and floors to OPAQUE, never a confident false UNGROUNDED empty read.
+        return False, False
 
 
 def _reads_cited(scope, identifier: str) -> bool:
@@ -996,15 +1263,38 @@ def _resp_source(args, kwargs, result) -> str:
     return str(getattr(result, "url", "")) or ""
 
 
+def _response_ok(result):
+    """Whether an HTTP response is a success, library-agnostic.
+
+    ``httpx`` and ``requests`` expose ``status_code``; ``aiohttp`` exposes
+    ``status``. A shape the observer cannot read returns ``None`` — callers
+    treat that as fail-closed (neither ground the read nor mint lineage) rather
+    than assume the call succeeded. Shared by the read and lineage paths so a
+    single rule governs both.
+    """
+    code = getattr(result, "status_code", None)
+    if code is None:
+        code = getattr(result, "status", None)
+    if isinstance(code, int):
+        return code < 400
+    return None
+
+
 def _resp_nonempty(result) -> bool:
+    # A non-success response carries an error body, not the cited data; and a
+    # response the observer cannot introspect is not evidence of a read. Both
+    # fail closed to "not a read" so a cited URL floors to OPAQUE, never GROUNDED
+    # off an error page.
     try:
+        if _response_ok(result) is not True:
+            return False
         content = getattr(result, "content", None)
         if content is not None:
             return len(content) > 0
         text = getattr(result, "text", None)
         return bool(text)
     except BaseException:  # noqa: BLE001
-        return True
+        return False
 
 
 def _maybe_content_address(result):

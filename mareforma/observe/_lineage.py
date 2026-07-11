@@ -77,6 +77,20 @@ class ModelLineage:
     version: str | None
     method: str | None
     decoding: dict
+    # How the model identity was established, recorded so the trust map never
+    # blurs a third-party-attested identity with a self-attested one:
+    #   ``provider-host``  — observed at the seam to a recognized remote host.
+    #   ``weights-digest`` — a local inference server's content digest of the
+    #                        served weights (self-attested: the producer controls
+    #                        the machine, so it is COMPUTED-grade DISCRIMINATION,
+    #                        not third-party attestation — the operator-Sybil
+    #                        residual is named, not closed).
+    #   ``declared``       — a producer declaration (PROXY).
+    attestor: str | None = None
+    # The content digest of the served weights for a ``weights-digest`` lineage
+    # (``sha256:...``); the distinctness key for local models, which root to no
+    # known remote family.
+    digest: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -87,6 +101,8 @@ class ModelLineage:
             "version": self.version,
             "method": self.method,
             "decoding": dict(self.decoding),
+            "attestor": self.attestor,
+            "digest": self.digest,
         }
 
     @classmethod
@@ -99,6 +115,8 @@ class ModelLineage:
             version=d.get("version"),
             method=d.get("method"),
             decoding=dict(d.get("decoding") or {}),
+            attestor=d.get("attestor"),
+            digest=d.get("digest"),
         )
 
 
@@ -137,6 +155,7 @@ def resolve_lineage(
     method: str | None,
     decoding: dict,
     provider: str | None = None,
+    digest: str | None = None,
 ) -> ModelLineage:
     """Tier a captured or declared model.
 
@@ -144,8 +163,31 @@ def resolve_lineage(
     ``"declared"`` for a producer declaration (PROXY). Either way, a string whose
     base is not declarable is UNVERIFIABLE — soft lineage dominates the source
     tier, so a fine-tune or alias never reads as COMPUTED or PROXY.
+
+    ``digest`` is the content digest of the served weights for a LOCAL inference
+    server (Ollama), resolved by the observer from the running server. A local
+    model roots to no known remote family, so its digest — not a family root — is
+    its verifiable distinct identity: a seam capture WITH a digest is COMPUTED via
+    the ``weights-digest`` attestor, bypassing the family-prefix gate.
     """
+    if source == "socket" and digest:
+        # Local content-addressed identity. COMPUTED-grade discrimination: two
+        # distinct digests are provably distinct weights; the same digest is
+        # provably the same. Self-attested (the producer's own machine), recorded
+        # as such via the attestor field — not third-party host attestation.
+        return ModelLineage(
+            tier=ModelLineageTier.COMPUTED,
+            model_id=(model_id or "").strip(),
+            family_root=None,
+            provider=None,
+            version=None,
+            method=method,
+            decoding=dict(decoding),
+            attestor="weights-digest",
+            digest=digest,
+        )
     root, version, declarable = _family_root(model_id)
+    attestor = None
     if not declarable:
         tier = ModelLineageTier.UNVERIFIABLE
         root, version = None, None
@@ -155,6 +197,7 @@ def resolve_lineage(
         # this is the trustworthy COMPUTED tier (still the model field of their
         # own request read off the wire, not a response-attested fact).
         tier = ModelLineageTier.COMPUTED
+        attestor = "provider-host"
     elif source == "socket":
         # Observed at the seam but addressed to an UNRECOGNIZED host. The
         # producer chose the endpoint, so a "model" field in a body they sent
@@ -165,6 +208,7 @@ def resolve_lineage(
         root, version = None, None
     else:
         tier = ModelLineageTier.PROXY
+        attestor = "declared"
     return ModelLineage(
         tier=tier,
         model_id=(model_id or "").strip(),
@@ -173,6 +217,8 @@ def resolve_lineage(
         version=version,
         method=method,
         decoding=dict(decoding),
+        attestor=attestor,
+        digest=None,
     )
 
 
@@ -203,9 +249,15 @@ def independence_model_key(lineage: "dict | None") -> tuple:
     if not isinstance(lineage, dict):
         return ("soft",)
     tier = lineage.get("tier")
-    root = lineage.get("family_root")
-    if tier == ModelLineageTier.COMPUTED.value and root:
-        return ("model", root)
+    if tier == ModelLineageTier.COMPUTED.value:
+        # A local content-addressed model roots to no known remote family; its
+        # weights digest is its verifiable distinct identity.
+        digest = lineage.get("digest")
+        if lineage.get("attestor") == "weights-digest" and digest:
+            return ("model", "digest:" + digest)
+        root = lineage.get("family_root")
+        if root:
+            return ("model", root)
     return ("soft",)
 
 
@@ -230,21 +282,34 @@ def collapse_lineage(records: list[ModelLineage]) -> ModelLineage | None:
     """The single finding-level lineage for a scope's captured model records.
 
     One record is returned as-is. When a scope captured several, the tier is the
-    most conservative present (UNVERIFIABLE if any is soft or the roots disagree,
-    else PROXY if any is agent-declared, else COMPUTED), so a mixed authoring
-    span never over-claims a clean single model.
+    most conservative present (UNVERIFIABLE if any is soft or the identities
+    disagree, else PROXY if any is agent-declared, else COMPUTED), so a mixed
+    authoring span never over-claims a clean single model.
+
+    A model identity is a remote family root OR a local weights digest — two
+    distinct LOCAL models have ``family_root is None`` and are told apart only by
+    their digests, so distinctness counts BOTH. A mixed or downgraded span drops
+    the identity fields (root, digest, attestor) so the finding-level lineage
+    never carries a stale digest that ``independence_model_key`` would key on.
     """
     if not records:
         return None
     if len(records) == 1:
         return records[0]
-    distinct_roots = {r.family_root for r in records if r.family_root is not None}
+    roots = {r.family_root for r in records if r.family_root is not None}
+    digests = {r.digest for r in records if r.digest is not None}
     tiers = {r.tier for r in records}
-    if ModelLineageTier.UNVERIFIABLE in tiers or len(distinct_roots) > 1:
-        tier = ModelLineageTier.UNVERIFIABLE
-    elif ModelLineageTier.PROXY in tiers:
-        tier = ModelLineageTier.PROXY
-    else:
-        tier = ModelLineageTier.COMPUTED
-    root = next(iter(distinct_roots)) if len(distinct_roots) == 1 else None
-    return replace(records[0], tier=tier, family_root=root)
+    # More than one distinct model identity (a root and a digest are different
+    # models) is a mixed span, never a single clean model.
+    mixed = (len(roots) + len(digests)) > 1
+    if ModelLineageTier.UNVERIFIABLE in tiers or mixed:
+        return replace(
+            records[0], tier=ModelLineageTier.UNVERIFIABLE,
+            family_root=None, digest=None, attestor=None,
+        )
+    tier = ModelLineageTier.PROXY if ModelLineageTier.PROXY in tiers else ModelLineageTier.COMPUTED
+    # Not mixed: at most one root and one digest, and never both — every record
+    # shares the single surviving identity, so records[0] carries it correctly.
+    root = next(iter(roots)) if roots else None
+    digest = next(iter(digests)) if digests else None
+    return replace(records[0], tier=tier, family_root=root, digest=digest)

@@ -65,6 +65,44 @@ def test_content_address_cited_socket_seam_is_opaque():
     assert h.verdict.grounding is OG.OPAQUE
 
 
+def test_content_address_cited_without_hashing_is_opaque(tmp_path):
+    # Content addressing off: no read carries a hash, so a sha256: citation can
+    # never match — even when the cited bytes WERE read. Absence of a match is
+    # not evidence of absence; a confident UNGROUNDED here would be false.
+    import hashlib
+
+    data = tmp_path / "d.bin"
+    data.write_bytes(b"payload-bytes")
+    ca = "sha256:" + hashlib.sha256(b"payload-bytes").hexdigest()
+    with obs.observe(cites=ca) as h:
+        open(data, "rb").read()
+    assert h.verdict.grounding is OG.OPAQUE
+    assert any(s.kind == "coverage-gap" for s in h.verdict.seams)
+
+
+def test_content_address_cited_hashing_on_unhashed_read_is_opaque(tmp_path):
+    # Hashing on, but the bytes arrived through the open path, which cannot
+    # hash them: the unhashed non-empty read could have carried the cited
+    # bytes, so absence of a hash match still cannot be trusted.
+    import hashlib
+
+    data = tmp_path / "d.bin"
+    data.write_bytes(b"payload-bytes")
+    ca = "sha256:" + hashlib.sha256(b"payload-bytes").hexdigest()
+    with obs.observe(cites=ca, content_address=True) as h:
+        open(data, "rb").read()
+    assert h.verdict.grounding is OG.OPAQUE
+
+
+def test_content_address_cited_hashing_on_no_reads_is_ungrounded():
+    # The floor is conditional, not blanket: hashing on and nothing read in a
+    # fully observed scope means no channel could have carried the cited
+    # bytes, and UNGROUNDED keeps its teeth.
+    with obs.observe(cites="sha256:" + "a" * 64, content_address=True) as h:
+        pass
+    assert h.verdict.grounding is OG.UNGROUNDED
+
+
 def test_mixed_file_url_socket_seam_is_opaque():
     # Conservative-ANY: a set with one URL citation is blocked by a socket seam
     # even though the file member alone would not be.
