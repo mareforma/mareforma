@@ -82,11 +82,12 @@ def test_pilot_harness_emits_bounded_report():
     assert d["independence"] is not None
     assert d["independence"]["total"] == 30
     # The independence arm computed the collapse and the unverifiable fraction.
-    # 20 GROUNDED contribute naive 2 / collapse 0, 7 UNGROUNDED naive 2 / collapse 1,
-    # 3 OPAQUE naive 1 / collapse 0 → 7 collapsed of 57 naive lines.
+    # 20 GROUNDED naive 2 / collapse 0, 7 UNGROUNDED naive 2 / collapse 1; the 3
+    # OPAQUE naive 1 are single lines, not corroborations, excluded from the
+    # denominator. The collapse rate is over CORROBORATIONS (naive>=2): 7 of 54.
     assert d["independence"]["collapsed_total"] == 7
-    assert d["independence"]["naive_total"] == 57
-    assert d["independence"]["same_model_collapse_rate"] == pytest.approx(7 / 57)
+    assert d["independence"]["naive_total"] == 54
+    assert d["independence"]["same_model_collapse_rate"] == pytest.approx(7 / 54)
     assert d["independence"]["unverifiable"] == 3
     # OPAQUE is a minority here: the bound is stated but does not dominate.
     assert report.opaque_dominates() is False

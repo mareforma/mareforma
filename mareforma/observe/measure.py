@@ -218,9 +218,12 @@ class IndependenceReport:
     def same_model_collapse_rate(self) -> float:
         """Fraction of naive-independent corroborations that were one model twice.
 
-        The numerator is the collapse (``naive - number`` summed over findings);
-        the denominator is the naive total (what a signer-axis counter would call
-        independent). Zero when nothing corroborated, never a divide-by-zero.
+        The numerator is the collapse (``naive - number`` summed over
+        corroborations); the denominator is the naive supporting lines from
+        CORROBORATIONS only (findings with ``naive >= 2``) — a single supporting
+        line is not a corroboration and never dilutes it, so the rate cannot be
+        understated by padding. Zero when nothing corroborated, never a
+        divide-by-zero.
         """
         if self.naive_total == 0:
             return 0.0
@@ -309,11 +312,16 @@ def summarize_independence(records: Iterable[dict]) -> IndependenceReport:
             at_one += 1
         else:
             at_two_plus += 1
-        naive_total += naive
-        # naive is the signer-axis count over HARD lineage and number folds the
-        # model axis, so number <= naive on any hard body; clamp defensively so a
+        # The collapse rate is over CORROBORATIONS: a body a naive signer-axis
+        # counter would call independent (naive >= 2). A single supporting line
+        # (naive <= 1) is not a corroboration and must not dilute the denominator,
+        # which would UNDERSTATE the same-model collapse — the audited-pipeline-
+        # favorable direction the measurement exists to expose. naive folds the
+        # model axis into number (number <= naive on any hard body); clamp so a
         # malformed record can never make the collapse negative.
-        collapsed_total += max(0, naive - number)
+        if naive >= 2:
+            naive_total += naive
+            collapsed_total += max(0, naive - number)
     return IndependenceReport(
         total=total,
         at_zero=at_zero,

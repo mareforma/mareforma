@@ -85,9 +85,10 @@ def test_same_model_collapse_rate():
 
 
 def test_same_model_collapse_rate_zero_when_no_corroboration():
-    # Nothing corroborated (all single lines): the rate is 0, never a divide error.
+    # All single lines (naive < 2): a single line is not a corroboration, so the
+    # collapse denominator is 0 and the rate is 0 — never a divide error.
     report = summarize_independence([_rec(1, 1), _rec(1, 1)])
-    assert report.naive_total == 2
+    assert report.naive_total == 0
     assert report.collapsed_total == 0
     assert report.same_model_collapse_rate == 0.0
 

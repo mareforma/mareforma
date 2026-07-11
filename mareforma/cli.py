@@ -1216,6 +1216,7 @@ def measure_cmd(receipts_path: str, as_json: bool, redact_home: bool) -> None:
         summarize_independence,
         summarize_receipts,
     )
+    from mareforma.observe.measure import PilotReport
 
     try:
         receipts = _load_receipts(Path(receipts_path))
@@ -1229,11 +1230,15 @@ def measure_cmd(receipts_path: str, as_json: bool, redact_home: bool) -> None:
     indep = summarize_independence(independence_records(receipts))
     indep_report = indep.to_dict() if indep.total else None
     indep_closing = indep.closing_sentence() if indep.total else None
+    # The always-on honesty bound: grounded prevalence is a lower bound to within
+    # the OPAQUE coverage gap, whatever the OPAQUE fraction — never printed only
+    # when OPAQUE dominates.
+    coverage_bound = PilotReport(grounding=grounding, independence=indep).coverage_bound()
     if redact_home:
         report = _redact_home(report)
         closing = _redact_home(closing)
     if as_json:
-        payload = {**report, "summary": closing}
+        payload = {**report, "summary": closing, "coverage_bound": coverage_bound}
         if indep_report is not None:
             payload["independence"] = {**indep_report, "summary": indep_closing}
         click.echo(json.dumps(payload, indent=2, sort_keys=True))
@@ -1250,6 +1255,7 @@ def measure_cmd(receipts_path: str, as_json: bool, redact_home: bool) -> None:
     if report["mean_read_coverage"] is not None:
         _info(f"mean read coverage: {report['mean_read_coverage']:.0%}")
     click.echo(closing)
+    click.echo(coverage_bound)
     if indep_report is not None:
         _ok(f"Independence report over {indep_report['total']} findings")
         dist = indep_report["distribution_counts"]
