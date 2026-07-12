@@ -87,11 +87,14 @@ key_path = tmp / "_example_key"
 _signing.bootstrap_key(key_path)
 graph = mareforma.open(tmp, key_path=key_path)
 
-# Each lab signs with its own key. The signing key is the independence unit:
-# REPLICATED fires when two claims share an ESTABLISHED upstream and are signed
-# by DISTINCT keys. generated_by is a display label, not what drives REPLICATED.
-# In real use each lab runs its own `mareforma bootstrap`; here we mint both keys
-# inline and pass them per-call via signer=.
+# Each lab signs with its own key. Distinct signing keys drive the REPLICATED
+# support level (two claims that share an ESTABLISHED upstream, signed by DISTINCT
+# keys). Distinct signers are not effective independence, though: that counts
+# distinct MODELS, so two labs on one model stay at effective independence 1, and
+# the spurious case below shows REPLICATED firing on nothing. generated_by is a
+# display label, not what drives either. In real use each lab runs its own
+# `mareforma bootstrap`; here we mint both keys inline and pass them per-call via
+# signer=.
 lab_a_key_path = tmp / "_lab_a_key"
 lab_b_key_path = tmp / "_lab_b_key"
 _signing.bootstrap_key(lab_a_key_path)
@@ -281,9 +284,12 @@ support_2 = c_rep2["support_level"] if c_rep2 else "—"
 
 if support_1 == "REPLICATED" or support_2 == "REPLICATED":
     print("  ✓ REPLICATED: distinct signing keys, shared upstream, independent data paths.")
-    print("    The finding holds across datasets. Genuine replication.")
+    print("    The labs replicated across datasets. REPLICATED is a support label,")
+    print("    though: read effective independence to know a distinct model checked")
+    print("    the finding, not two runs of one. The spurious contrast below shows")
+    print("    REPLICATED firing on nothing.")
 else:
-    print("  Claims are PRELIMINARY — replication pending.")
+    print("  Claims are PRELIMINARY: replication pending.")
 
 
 # ---------------------------------------------------------------------------

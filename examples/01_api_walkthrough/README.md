@@ -131,11 +131,12 @@ id_b = graph.assert_claim(
 
 ```python
 # REPLICATED fires when >=2 claims share the same upstream in supports[], are
-# signed by DISTINCT keys, and that upstream is itself ESTABLISHED (Cochrane /
-# GRADE methodology: replication-of-noise is not replication). The signing key
-# is the independence unit; generated_by is a display label and does not drive
-# promotion. seed=True inserts the upstream directly at ESTABLISHED via a
-# signed envelope.
+# signed by DISTINCT keys, and that upstream is itself ESTABLISHED
+# (replication-of-noise is not replication). Distinct signing keys are the legacy
+# independence signal, used when no model lineage is observed; effective
+# independence counts distinct model and method. generated_by is a display label
+# and does not drive promotion. seed=True inserts the upstream directly at
+# ESTABLISHED via a signed envelope.
 lab_a_priv = _signing.load_private_key(lab_a_key_path)
 lab_b_priv = _signing.load_private_key(lab_b_key_path)
 

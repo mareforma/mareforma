@@ -167,9 +167,10 @@ sep("5. REPLICATED (automatic)")
 
 # REPLICATED fires when >=2 claims share the same upstream in supports[],
 # are signed by DISTINCT keys, and the shared upstream is itself
-# ESTABLISHED. The signing key is the independence unit; generated_by is a
-# display label and does not drive promotion. The ESTABLISHED-upstream
-# condition (Cochrane / GRADE methodology: replication-of-noise is not
+# ESTABLISHED. Distinct signing keys are the legacy independence signal, used
+# when no model lineage is observed; effective independence counts distinct
+# model and method. generated_by is a display label and does not drive
+# promotion. The ESTABLISHED-upstream condition (replication-of-noise is not
 # replication) is satisfied here by asserting the upstream as a seed claim,
 # inserted directly at ESTABLISHED with a signed seed envelope.
 

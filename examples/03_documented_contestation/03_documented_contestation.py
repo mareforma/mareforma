@@ -9,30 +9,30 @@ No API key required.
 
 Story
 -----
-An ESTABLISHED finding sits in the graph — two independent agents converged
-on it and a human validated it.
+A well-supported finding sits in the graph: two lab agents converged on it and a
+human validated it. What a reader trusts is its effective independence, the count
+of pairwise-distinct (model, data, signer) checks behind it, not a support label.
 
-A new agent runs a larger analysis on a different cohort and gets a result
-in tension with the established consensus. The agent does not discard its
-finding. It asserts it explicitly, naming the tension with contradicts=.
+A new agent runs a larger analysis on a different cohort and gets a result in
+tension with the prior. The agent does not discard its finding. It asserts it
+explicitly, naming the tension with contradicts=.
 
 Both claims coexist in the graph:
-  - the ESTABLISHED consensus
+  - the prior, well-supported consensus
   - the new ANALYTICAL challenge, with its own provenance
 
-This is how science actually works. The graph captures the debate,
-not just the winning side. A documented contradiction is more valuable
-than silence.
+This is how science actually works. The graph captures the debate, not just the
+winning side. A documented contradiction is more valuable than silence.
 
 LangChain integration
 ---------------------
 graph.get_tools(generated_by="...") returns [query_graph, record_claim] as plain
-callables. Wrap with @tool for LangChain. generated_by is baked into the closure
-as a display label. It does not drive REPLICATED: the signing key
-(asserter_keyid) is the independence unit. The two converging consensus claims
-below are therefore asserted with graph.assert_claim(signer=...) under two
-distinct lab keys, not through the langchain tools, which sign with the one
-loaded key.
+callables. Wrap with @tool for LangChain. generated_by is a display label; it does
+not drive the trust axes. Effective independence counts distinct model and method,
+so two checks on one model do not both count; the signing key separates asserters
+but distinct signers alone do not raise it. The two converging consensus claims
+below are asserted with graph.assert_claim(signer=...) under two distinct lab keys,
+not through the langchain tools, which sign with the one loaded key.
 
     from langchain_openai import ChatOpenAI
     from langgraph.prebuilt import create_react_agent
@@ -129,8 +129,9 @@ upstream_ref = graph.assert_claim(
 )
 
 # Two converging claims on the same ESTABLISHED upstream, signed by DISTINCT
-# keys. The signing key (asserter_keyid) is the independence unit, so REPLICATED
-# fires here; generated_by is a display label only. Asserted via
+# keys, so the REPLICATED support level fires. Distinct signers are the legacy
+# independence signal; effective independence counts distinct model. generated_by
+# is a display label only. Asserted via
 # graph.assert_claim(signer=...) because the langchain tools sign with the one
 # loaded key and could not converge.
 consensus_a = graph.assert_claim(

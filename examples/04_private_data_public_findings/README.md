@@ -18,10 +18,11 @@ No API key required.
 
 ## Setup: distinct keys per lab, plus a provenance-trace tool
 
-The signing key is the independence unit. REPLICATED fires when two claims share
-an ESTABLISHED upstream and are signed by **distinct keys**. `generated_by` is a
-display label, not what drives REPLICATED. Each lab signs with its own key,
-passed per-call via `signer=`.
+Distinct signing keys are the legacy independence signal, used when no model
+lineage is observed; effective independence counts distinct model and method. Two
+claims that share an ESTABLISHED upstream, signed by **distinct keys**, reach the
+REPLICATED support level. `generated_by` is a display label, not what drives it.
+Each lab signs with its own key, passed per-call via `signer=`.
 
 ```python
 # get_tools() gives the read tool; the write tool binds the graph's default key,
@@ -162,7 +163,10 @@ for c in graph.query("Target T"):
   Target T activity in condition C is specific … PRELIMINARY
 
   ✓ REPLICATED: distinct signing keys, shared upstream, independent data paths.
-    The finding holds across datasets. Genuine replication.
+    The labs replicated across datasets. REPLICATED is a support label,
+    though: read effective independence to know a distinct model checked
+    the finding, not two runs of one. The spurious contrast below shows
+    REPLICATED firing on nothing.
 ```
 
 ## Q3: Provenance distance, and the spurious-replication trap
