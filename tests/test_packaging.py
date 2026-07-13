@@ -11,6 +11,8 @@ Regression guards for the packaging issues:
        lockfile that is not committed.
 - #30  a PEP 639 string ``project.license`` requires a setuptools>=77 build
        floor; the floor must not permit versions that reject the string form.
+- #31  the ``test-heavy`` extra installs exactly the loader libs the grounding
+       tests skip on, and carries no heavy dep no test references.
 
 Each guard fails on the pre-fix tree.
 """
@@ -33,6 +35,11 @@ import pytest
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 DEPENDABOT = REPO_ROOT / ".github" / "dependabot.yml"
+TESTS_DIR = REPO_ROOT / "tests"
+
+# ``setuptools`` is a build backend, not a heavy loader; tests importorskip it
+# to build the sdist, and it never belongs in the test-heavy runtime extra.
+_BUILD_ONLY_IMPORTS = frozenset({"setuptools"})
 
 # Files whose absence from an sdist turns the shipped suite into an
 # unrunnable pile of imports.
@@ -110,6 +117,61 @@ def test_license_string_requires_setuptools_77_floor():
     assert floor is not None and floor >= (77,), (
         f"project.license is a PEP 639 string but the setuptools build floor "
         f"is {floor}; the string form needs setuptools>=77"
+    )
+
+
+def _requirement_name(req):
+    """Return the base distribution name of a requirement string.
+
+    ``netCDF4>=1.6`` -> ``netCDF4``; ``polars`` -> ``polars``.
+    """
+    return re.split(r"[<>=!~;\s\[]", req, maxsplit=1)[0]
+
+
+def _importorskipped_modules():
+    """Every top-level module the test suite gates on via ``importorskip``."""
+    modules = set()
+    for path in TESTS_DIR.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        modules.update(re.findall(r"importorskip\(\s*[\"']([A-Za-z0-9_]+)", text))
+    return modules
+
+
+def _tests_reference(name):
+    """True when the distribution name is used by a test under ``tests/``.
+
+    This packaging module is skipped: it names every heavy dep in prose (docstrings,
+    assertion messages), so counting it would let any extra reference itself.
+    """
+    this_file = pathlib.Path(__file__).resolve()
+    return any(
+        name in path.read_text(encoding="utf-8")
+        for path in TESTS_DIR.rglob("*.py")
+        if path.resolve() != this_file
+    )
+
+
+def test_test_heavy_extra_matches_the_loaders_it_exercises():
+    """#31: the heavy leg must install every loader the grounding tests skip on
+    (polars, duckdb were importorskip'd but installed by no extra), and must not
+    carry a heavy dep no test references (netCDF4 was shipped with zero test use).
+    """
+    data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    heavy = {_requirement_name(req) for req in data["project"]["optional-dependencies"]["test-heavy"]}
+
+    # Direction 1: no importorskip'd loader is missing from the heavy extra.
+    gated = _importorskipped_modules() - _BUILD_ONLY_IMPORTS
+    missing = sorted(gated - heavy)
+    assert not missing, (
+        f"the test-heavy extra omits libs the grounding tests importorskip, so "
+        f"those pins skip on every CI leg: {missing}"
+    )
+
+    # Direction 2: no heavy dep sits in the extra with nothing referencing it.
+    unreferenced = sorted(name for name in heavy if not _tests_reference(name))
+    assert not unreferenced, (
+        f"the test-heavy extra installs deps no test references, so CI pays to "
+        f"build wheels that guard nothing: {unreferenced}"
     )
 
 

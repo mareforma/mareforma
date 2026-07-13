@@ -35,8 +35,8 @@ jobs:
 
   test-heavy:
     # One pinned leg that installs the heavy scientific + networking loaders
-    # (h5py, netCDF4, pyarrow, pandas, aiohttp, requests) so the grounding tests that
-    # skip elsewhere actually run. Pinned to 3.13 because cp314 wheels for the
+    # (h5py, pyarrow, pandas, polars, duckdb, aiohttp, requests) so the grounding tests
+    # that skip elsewhere actually run. Pinned to 3.13 because cp314 wheels for the
     # native scientific deps may not exist yet. HTTP tests mock the network.
     runs-on: ubuntu-latest
     steps:
