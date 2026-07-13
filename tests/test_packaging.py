@@ -9,6 +9,8 @@ Regression guards for the packaging issues:
        in the dev extra (nothing imports it).
 - #55  the Dependabot config produces real updates and never advertises a
        lockfile that is not committed.
+- #30  a PEP 639 string ``project.license`` requires a setuptools>=77 build
+       floor; the floor must not permit versions that reject the string form.
 
 Each guard fails on the pre-fix tree.
 """
@@ -81,6 +83,33 @@ def test_no_dead_git_extra_and_no_gitpython_dev():
     dev = extras.get("dev", [])
     assert not any(req.lower().startswith("gitpython") for req in dev), (
         "gitpython is unused; it must not sit in the dev extra"
+    )
+
+
+def _setuptools_floor(requires):
+    """Return the ``setuptools>=X.Y`` build floor as an int tuple, or None."""
+    for req in requires:
+        match = re.match(r"\s*setuptools\s*>=\s*([\d.]+)", req)
+        if match:
+            return tuple(int(part) for part in match.group(1).split("."))
+    return None
+
+
+def test_license_string_requires_setuptools_77_floor():
+    """#30: setuptools accepts a string ``project.license`` (PEP 639 SPDX)
+    only from 77.0.0 on; every earlier version rejects it. A string license
+    with a floor below 77 cannot build with its own stated minimum toolchain.
+    """
+    data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    license_field = data["project"]["license"]
+    # Table form ({"file": ...}/{"text": ...}) predates PEP 639 and builds on
+    # old setuptools; this guard only binds the SPDX string form.
+    if not isinstance(license_field, str):
+        pytest.skip("license is a table; the setuptools>=77 floor does not bind")
+    floor = _setuptools_floor(data["build-system"]["requires"])
+    assert floor is not None and floor >= (77,), (
+        f"project.license is a PEP 639 string but the setuptools build floor "
+        f"is {floor}; the string form needs setuptools>=77"
     )
 
 
