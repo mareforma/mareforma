@@ -30,9 +30,10 @@ private / link-local / multicast / unspecified addresses, including
 the IPv4 embedded in an IPv6 form (IPv4-mapped / NAT64), numeric IP
 shortcuts in any radix (``127.1``, ``2130706433``, ``0177.0.0.1``,
 ``0x7f000001``), Unicode-digit host forms, and the ``localhost``
-aliases. :func:`fetch_inclusion_proof` and :func:`fetch_log_pubkey`
-both re-validate the URL at function entry so direct callers (tests,
-scripts) cannot bypass the defense by skipping :func:`mareforma.open`.
+aliases. :func:`submit_to_rekor`, :func:`fetch_inclusion_proof`, and
+:func:`fetch_log_pubkey` all re-validate the URL at function entry so
+direct callers (tests, scripts) cannot bypass the defense by skipping
+:func:`mareforma.open`.
 """
 
 from __future__ import annotations
@@ -299,6 +300,7 @@ def submit_to_rekor(
     *,
     rekor_url: str,
     timeout: float = _REKOR_TIMEOUT,
+    allow_insecure: bool = False,
 ) -> tuple[bool, Optional[dict[str, Any]]]:
     """Submit a signed envelope to a Rekor transparency log.
 
@@ -324,11 +326,26 @@ def submit_to_rekor(
 
     Failure modes
     -------------
-    Network errors, timeouts, non-2xx, oversized responses, and Rekor
-    responses that fail body-matches-submission verification all return
-    ``(False, None)``, never raise. Caller persists the claim with
+    A ``rekor_url`` that fails the SSRF / scheme check, network errors,
+    timeouts, non-2xx, oversized responses, and Rekor responses that
+    fail body-matches-submission verification all return ``(False,
+    None)``, never raise. Caller persists the claim with
     ``transparency_logged=0`` and retries later via ``refresh_unsigned()``.
+    Pass ``allow_insecure=True`` to reach a private Rekor on a
+    non-public address (the ``trust_insecure_rekor`` session opt-in).
     """
+    # Re-validate the rekor_url at entry so the SSRF / scheme defense is a
+    # property of this function, not the call graph. mareforma.open()
+    # validates once at session start; direct callers (tests, ad-hoc
+    # scripts) would otherwise POST to an unvalidated URL, unlike the
+    # fetch paths which already re-validate. This function never raises,
+    # so a validation failure maps to the same (False, None) contract as
+    # a network error. Pass allow_insecure=True to reach a private Rekor
+    # on a non-public address (the trust_insecure_rekor session opt-in).
+    try:
+        validate_rekor_url(rekor_url, allow_insecure=allow_insecure)
+    except SigningError:
+        return (False, None)
     try:
         payload_bytes = base64.standard_b64decode(envelope["payload"])
         sig_b64 = envelope["signatures"][0]["sig"]
