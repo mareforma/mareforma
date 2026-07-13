@@ -355,7 +355,12 @@ class TestCli:
             assert "REPRODUCED" in res.output
             assert "PROXIED" in res.output
 
-    def test_map_overlay_unknown_claim_exits_one(self, tmp_path: Path) -> None:
+    def test_map_overlay_unknown_claim_exits_usage_error(
+        self, tmp_path: Path,
+    ) -> None:
+        # A mistyped --map id on an otherwise-REPRODUCED run is a usage error,
+        # not a divergence: it must exit 3 (the usage/malformed code), never 1
+        # (DIVERGED), so a CI gate does not misread a typo as a failed re-run.
         r = CliRunner()
         with r.isolated_filesystem(temp_dir=tmp_path):
             with mareforma.open(".") as g:
@@ -366,5 +371,7 @@ class TestCli:
             )
             Path("run.json").write_text(json.dumps(run), encoding="utf-8")
             res = r.invoke(cli, ["reexec", "run.json", "--map", "does-not-exist"])
-            assert res.exit_code == 1
+            assert res.exit_code == 3
             assert "not found" in res.output
+            # The faithfulness verdict still prints before the lookup error.
+            assert "REPRODUCED" in res.output

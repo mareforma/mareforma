@@ -1481,8 +1481,9 @@ def reexec_cmd(run_path: Path, as_json: bool, map_claim: str | None) -> None:
     trust property. The verdict is not stored; it is a read-side overlay.
 
     Exit code carries the verdict: 0 REPRODUCED, 1 DIVERGED,
-    2 COULD_NOT_REEXECUTE, 3 malformed run record (a usage error, distinct from
-    an honest inconclusive re-run).
+    2 COULD_NOT_REEXECUTE, 3 usage error (a malformed run record, or a --map
+    claim id that does not exist, both distinct from an honest inconclusive
+    re-run).
 
     \b
     Examples:
@@ -1523,7 +1524,7 @@ def reexec_cmd(run_path: Path, as_json: bool, map_claim: str | None) -> None:
             tmap = graph.trust_map(map_claim, reexec_record=result.to_map_record())
         if tmap is None:
             _err(f"Claim '{map_claim}' not found; cannot render its trust map.")
-            sys.exit(1)
+            sys.exit(3)
         if as_json:
             click.echo(json.dumps(tmap.to_dict(), indent=2))
         else:
