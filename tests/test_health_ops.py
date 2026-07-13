@@ -126,6 +126,26 @@ class TestHealthEventLog:
         # it silently.
         assert stats["malformed_lines"] == 1
 
+    def test_valid_json_non_object_line_counted_malformed(
+        self, tmp_path: Path,
+    ) -> None:
+        # A line that parses as valid JSON but is not an object (a
+        # scalar or list from a hand edit, a torn append, or a foreign
+        # writer) must be counted as malformed, not crash the stats
+        # aggregation with an AttributeError on ``ev.get``.
+        path = tmp_path / ".mareforma" / "health.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            '{"op":"good","outcome":"ok"}\n'
+            "42\n"
+            '"stray"\n'
+            "[1, 2]\n"
+            '{"op":"alsogood","outcome":"ok"}\n'
+        )
+        stats = _health.compute_rolling_stats(tmp_path)
+        assert stats["events_total"] == 2
+        assert stats["malformed_lines"] == 3
+
     def test_write_failure_does_not_raise(
         self, tmp_path: Path, monkeypatch,
     ) -> None:

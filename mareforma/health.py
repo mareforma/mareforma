@@ -218,10 +218,16 @@ def compute_rolling_stats(
                 if not line:
                     continue
                 try:
-                    buffer.append(json.loads(line))
+                    obj = json.loads(line)
                 except (json.JSONDecodeError, TypeError, ValueError):
                     malformed_lines += 1
                     continue
+                # Valid JSON that is not an object (a scalar or list) is
+                # malformed for aggregation: the loop below reads ``ev.get``.
+                if not isinstance(obj, dict):
+                    malformed_lines += 1
+                    continue
+                buffer.append(obj)
     except OSError:
         return {"events_total": 0, "ops": {}, "read_error": True}
     events = list(buffer)
