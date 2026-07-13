@@ -24,14 +24,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import httpx
+
 import mareforma
 from mareforma.observe import ObservedGrounding, observe
-from mareforma.observe._lineage import ModelLineageTier, resolve_lineage
+from mareforma.observe._lineage import ModelLineageTier
 from mareforma.observe.measure import summarize
 from mareforma.trust._store import effective_independence_receipt
 from tests._helpers import _bootstrap_key, _est, _pred, _prop
 
 _CLAUDE = "claude-3-5-sonnet-20241022"  # a recognized-family COMPUTED root
+_ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"  # a recognized provider host
+_ARBITRARY_URL = "https://producer-chosen.example/v1/messages"  # an unrecognized host
 
 
 @dataclass(frozen=True)
@@ -44,23 +48,32 @@ class KillSwitchOutcome:
     caught: bool
 
 
-def _computed_verdict(model_id: str):
-    """An OPAQUE grounding verdict carrying a COMPUTED model lineage.
+def _offline_client() -> httpx.Client:
+    """An httpx client whose transport answers locally — no network, no key."""
+    return httpx.Client(
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, json={}))
+    )
 
-    The finding path reads only the lineage off the verdict, so the grounding
-    state is irrelevant here; the recognized provider host is what earns COMPUTED.
+
+def _observed_grounding(client: httpx.Client, url: str, csv_path: Path):
+    """Drive one ``observe()`` scope: a real socket model call plus a cited read.
+
+    The observer derives the provider from the request host and parses the model
+    off the POST body itself, so the model lineage on the verdict is COMPUTED (or
+    UNVERIFIABLE for an unrecognized host) because the seam earned it, not because
+    a fixture handed the provider in.
     """
-    from mareforma.observe import GroundingVerdict
-
-    lineage = resolve_lineage(
-        model_id, source="socket", method="m",
-        decoding={"temperature": None, "top_p": None, "seed": None},
-        provider="anthropic",
-    )
-    return GroundingVerdict(
-        grounding=ObservedGrounding.OPAQUE, reason="lineage carrier",
-        model_lineage=lineage,
-    )
+    with observe(cites=str(csv_path)) as h:
+        client.post(
+            url,
+            json={
+                "model": _CLAUDE,
+                "temperature": 0.0,
+                "messages": [{"role": "user", "content": "analyze"}],
+            },
+        )
+        open(str(csv_path)).read()
+    return h.verdict
 
 
 def silent_zero_row_fallback(tmp_path: Path) -> KillSwitchOutcome:
@@ -99,14 +112,24 @@ def excluded_partition(tmp_path: Path) -> KillSwitchOutcome:
 def same_model_corroboration(tmp_path: Path) -> KillSwitchOutcome:
     ka = _bootstrap_key(tmp_path, "ks3_a.key")
     kb = _bootstrap_key(tmp_path, "ks3_b.key")
+    data_a = tmp_path / "ks3_a.csv"
+    data_a.write_text("x\n1\n")
+    data_b = tmp_path / "ks3_b.csv"
+    data_b.write_text("x\n2\n")
     prop, pred = _prop(), _pred()
-    with mareforma.open(tmp_path, key_path=ka) as g:
-        g.assert_finding(prop, pred, _est(), data_id="ks3_ds1", generated_by="ks3_r1",
-                         grounding=_computed_verdict(_CLAUDE))
-    with mareforma.open(tmp_path, key_path=kb) as g:
-        g.assert_finding(prop, pred, _est(), data_id="ks3_ds2", generated_by="ks3_r2",
-                         grounding=_computed_verdict(_CLAUDE))
-        rec = effective_independence_receipt(g._conn, prop.content_id())
+    client = _offline_client()
+    try:
+        # Both checks run the SAME model through the real socket seam, so the
+        # observer mints each COMPUTED lineage from the recognized host itself.
+        with mareforma.open(tmp_path, key_path=ka) as g:
+            g.assert_finding(prop, pred, _est(), data_id="ks3_ds1", generated_by="ks3_r1",
+                             grounding=_observed_grounding(client, _ANTHROPIC_URL, data_a))
+        with mareforma.open(tmp_path, key_path=kb) as g:
+            g.assert_finding(prop, pred, _est(), data_id="ks3_ds2", generated_by="ks3_r2",
+                             grounding=_observed_grounding(client, _ANTHROPIC_URL, data_b))
+            rec = effective_independence_receipt(g._conn, prop.content_id())
+    finally:
+        client.close()
     # A naive signer counter sees two lines; the model-aware number stays 1.
     caught = rec["number"] == 1 and rec["naive"] == 2
     return KillSwitchOutcome(
@@ -151,19 +174,25 @@ def decoy_incidental_read(tmp_path: Path) -> KillSwitchOutcome:
 
 
 def unrecognized_host_model(tmp_path: Path) -> KillSwitchOutcome:
-    # A body-parse to an UNRECOGNIZED host (no provider): the producer chose the
-    # endpoint, so the "model" field is producer-controlled and cannot mint a
-    # distinct model. Even a recognized-family string stays UNVERIFIABLE.
-    lineage = resolve_lineage(
-        _CLAUDE, source="socket", method="m",
-        decoding={"temperature": None, "top_p": None, "seed": None},
-        provider=None,
-    )
-    caught = lineage.tier is ModelLineageTier.UNVERIFIABLE
+    # A body-parse to an UNRECOGNIZED host: the producer chose the endpoint, so the
+    # "model" field is producer-controlled and cannot mint a distinct model. The
+    # call goes through the real socket seam, so the observer derives no provider
+    # from the arbitrary host itself and tiers the lineage UNVERIFIABLE — even for
+    # a recognized-family string.
+    data = tmp_path / "ks6.csv"
+    data.write_text("x\n1\n")
+    client = _offline_client()
+    try:
+        verdict = _observed_grounding(client, _ARBITRARY_URL, data)
+    finally:
+        client.close()
+    lineage = verdict.model_lineage
+    caught = lineage is not None and lineage.tier is ModelLineageTier.UNVERIFIABLE
+    observed = lineage.tier.value if lineage is not None else "no-lineage"
     return KillSwitchOutcome(
         "unrecognized_host_model",
         "a model call to an arbitrary host is UNVERIFIABLE, not a distinct model",
-        lineage.tier.value, caught,
+        observed, caught,
     )
 
 

@@ -13,7 +13,13 @@ from pathlib import Path
 import pytest
 
 from mareforma.observe import summarize_pilot
-from tests.fixtures.killswitch import KILL_SWITCHES, run_all
+from mareforma.observe import _loaders
+from tests.fixtures.killswitch import (
+    KILL_SWITCHES,
+    run_all,
+    same_model_corroboration,
+    unrecognized_host_model,
+)
 
 
 # -- kill-switch A: all six caught ------------------------------------------
@@ -37,6 +43,30 @@ def test_killswitch_all_six_caught(tmp_path: Path):
 def test_each_killswitch_is_distinct():
     names = [c.__name__ for c in KILL_SWITCHES]
     assert len(set(names)) == len(names) == 6
+
+
+def test_model_axis_killswitches_break_when_provider_derivation_breaks(
+    tmp_path: Path, monkeypatch
+):
+    """The two model-axis fixtures must route through the observer's socket seam.
+
+    If a fixture hand-feeds the provider instead of driving ``observe()``, an
+    observer-side regression in host recognition leaves the kill-switch green and
+    the pre-spend gate greenlights a blind observer. Break ``_provider_of`` in
+    each direction and the fixtures must stop reporting ``caught`` -- proof they
+    exercise ``_provider_of`` rather than a hardcoded provider.
+    """
+    # Break Anthropic recognition: the same-model call can no longer mint a
+    # COMPUTED distinct model, so the same-model collapse (naive 2 -> number 1)
+    # never forms and the kill-switch stops firing.
+    monkeypatch.setattr(_loaders, "_provider_of", lambda url: None)
+    assert same_model_corroboration(tmp_path).caught is False
+
+    # Recognize an arbitrary host as a provider: the producer-controlled endpoint
+    # now mints COMPUTED, so the "unrecognized host is UNVERIFIABLE" guard no
+    # longer holds and the kill-switch stops firing.
+    monkeypatch.setattr(_loaders, "_provider_of", lambda url: "anthropic")
+    assert unrecognized_host_model(tmp_path).caught is False
 
 
 # -- the slim natural-prevalence pilot --------------------------------------
