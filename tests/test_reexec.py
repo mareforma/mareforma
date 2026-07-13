@@ -134,6 +134,23 @@ class TestCouldNotReexecute:
         assert result.verdict is FaithfulnessVerdict.COULD_NOT_REEXECUTE
         assert "could not be resolved" in result.residual
 
+    def test_import_time_raise_is_could_not(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        # A target module whose top-level code raises an exception outside the
+        # narrow resolution tuple (here RuntimeError) is could-not, not a crash
+        # that escapes the never-raises contract.
+        (tmp_path / "badmod_probe.py").write_text(
+            'raise RuntimeError("boom at import")\n'
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+        result = reexec(
+            {"reported_value": 1.0, "pipeline": {"target": "badmod_probe:fn"}}
+        )
+        assert result.verdict is FaithfulnessVerdict.COULD_NOT_REEXECUTE
+        assert "could not be resolved" in result.residual
+        assert "boom at import" in result.residual
+
     def test_non_numeric_result_is_could_not(self) -> None:
         # A pipeline that returns a non-number gives no number to compare.
         result = reexec(

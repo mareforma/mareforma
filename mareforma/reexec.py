@@ -348,7 +348,7 @@ def reexec(
     # 2. Resolve the entry point. An unresolvable target is could-not, not a crash.
     try:
         fn = _resolve_target(pipeline, registry)
-    except (MalformedRunError, ImportError, AttributeError, TypeError, ValueError) as exc:
+    except Exception as exc:  # noqa: BLE001 — import-time failure is could-not, honestly
         return _could_not(
             record,
             f"recorded pipeline entry point could not be resolved ({exc}); the "
