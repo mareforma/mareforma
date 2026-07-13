@@ -83,6 +83,16 @@ class TestClaimList:
             assert "No mareforma project" in result.output
             assert not (Path(fs) / ".mareforma" / "graph.db").exists()
 
+    def test_no_project_hint_names_a_real_command(self, tmp_path: Path) -> None:
+        """The no-project hint must point at `claim add`, the registered
+        subcommand, not the nonexistent `claim assert`."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            result = runner.invoke(cli, ["status"], catch_exceptions=False)
+        assert result.exit_code == 1
+        assert "claim add" in result.output
+        assert "claim assert" not in result.output
+
     def test_list_shows_added_claim(self, tmp_path: Path) -> None:
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):

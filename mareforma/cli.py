@@ -64,7 +64,7 @@ def _read_only_root() -> Path:
     if root is None:
         _err(
             "No mareforma project here or in any parent directory. Write a "
-            "claim first (e.g. `mareforma claim assert ...`) to create one."
+            "claim first (e.g. `mareforma claim add ...`) to create one."
         )
         sys.exit(1)
     return root
