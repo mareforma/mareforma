@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 from pathlib import Path
@@ -227,6 +228,8 @@ class TestExport:
     def test_export_json_flag_emits_valid_json(self, tmp_path: Path) -> None:
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
+            import mareforma
+            mareforma.open(".").close()  # empty project
             result = runner.invoke(cli, ["export", "--json"], catch_exceptions=False)
         data = json.loads(result.output)
         assert "@context" in data
@@ -246,10 +249,73 @@ class TestExport:
     def test_export_creates_file(self, tmp_path: Path) -> None:
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
+            import mareforma
+            mareforma.open(".").close()  # empty project
             result = runner.invoke(cli, ["export"], catch_exceptions=False)
             written = Path(os.getcwd()) / "ontology.jsonld"
         assert result.exit_code == 0
         assert written.exists()
+
+    def test_export_from_bare_directory_exits_1(self, tmp_path: Path) -> None:
+        """export must not mint a phantom empty graph.db under a success
+        banner; with no project at or above cwd it reports and exits 1."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            result = runner.invoke(cli, ["export"], catch_exceptions=False)
+            assert result.exit_code == 1
+            assert "No mareforma project" in result.output
+            assert not (Path(fs) / ".mareforma" / "graph.db").exists()
+
+    def test_export_from_subdirectory_exports_parent_claims(
+        self, tmp_path: Path,
+    ) -> None:
+        """Run from a subdirectory of a real project, export must walk up and
+        export the parent's claims, not a shadow empty graph in the subdir."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            runner.invoke(cli, ["claim", "add", "Parent claim DEF"],
+                          catch_exceptions=False)
+            sub = Path(fs) / "sub" / "deeper"
+            sub.mkdir(parents=True)
+            os.chdir(sub)
+            result = runner.invoke(cli, ["export", "--json"],
+                                   catch_exceptions=False)
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            claims = [n for n in data["@graph"] if n.get("@type") == "mare:Claim"]
+            assert len(claims) == 1
+            assert "Parent claim DEF" in claims[0]["claimText"]
+            assert not (sub / ".mareforma" / "graph.db").exists()
+
+    def test_export_bundle_from_subdirectory_finds_parent(
+        self, tmp_path: Path,
+    ) -> None:
+        """--bundle from a subdirectory must package the parent project, not
+        emit an empty bundle from a phantom graph in the subdir."""
+        import mareforma
+        from mareforma import signing as _signing
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            key_path = _signing.default_key_path()
+            if not key_path.exists():
+                _signing.bootstrap_key(key_path)
+            with mareforma.open(".") as g:
+                g.assert_claim("seeded", generated_by="seed", seed=True)
+            sub = Path(fs) / "sub"
+            sub.mkdir()
+            os.chdir(sub)
+            result = runner.invoke(cli, ["export", "--bundle"],
+                                   catch_exceptions=False)
+            assert result.exit_code == 0, result.output
+            assert not (sub / ".mareforma" / "graph.db").exists()
+            bundle = Path(fs) / "mareforma-bundle.json"
+            assert bundle.exists()
+            subjects = json.loads(
+                base64.standard_b64decode(
+                    json.loads(bundle.read_text())["payload"]
+                )
+            )["subject"]
+            assert len(subjects) == 1
 
 
 # ---------------------------------------------------------------------------

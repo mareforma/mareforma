@@ -595,7 +595,7 @@ def export(
         mareforma export --format=ro-crate-1.2 --output crate-metadata.json
         cat ontology.jsonld | jq '.["@graph"][]'
     """
-    root = _root()
+    root = _read_only_root()
 
     if bundle and fmt != "jsonld":
         _err(
