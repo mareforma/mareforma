@@ -195,6 +195,49 @@ class TestAuditSingleRun:
             failed = r.invoke(cli, ["verify", str(tampered)])
             assert failed.exit_code == 1, failed.output
 
+    def test_receipt_signed_with_nondefault_key_reads_unverifiable(
+        self, tmp_path: Path,
+    ) -> None:
+        # A receipt signed with a non-default auditor key must read as
+        # UNVERIFIABLE (exit 2) against the default key, never tampered
+        # (exit 1): a wrong verification key is not proof of tamper.
+        data = tmp_path / "data.csv"
+        data.write_text("x\n1\n")
+        script = _script(tmp_path, f"open({str(data)!r}).read()\n")
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            auditor = _bootstrap_key(Path("."), "auditor.key")
+            out = Path("audit-out")
+            res = _audit(r, Path("."), script, {"f1": str(data)}, out, auditor)
+            assert res.exit_code == 0, res.output
+            envelope_path = next((out / "envelopes").glob("*.json"))
+
+            verified = r.invoke(cli, ["verify", str(envelope_path)])
+            assert verified.exit_code == 2, verified.output
+
+    def test_receipt_verifies_when_pinned_to_the_signer_key(
+        self, tmp_path: Path,
+    ) -> None:
+        # Pointing verify at the auditor's own key with --key confirms the
+        # receipt, exit 0.
+        data = tmp_path / "data.csv"
+        data.write_text("x\n1\n")
+        script = _script(tmp_path, f"open({str(data)!r}).read()\n")
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            auditor = _bootstrap_key(Path("."), "auditor.key")
+            out = Path("audit-out")
+            res = _audit(r, Path("."), script, {"f1": str(data)}, out, auditor)
+            assert res.exit_code == 0, res.output
+            envelope_path = next((out / "envelopes").glob("*.json"))
+
+            pinned = r.invoke(
+                cli, ["verify", str(envelope_path), "--key", str(auditor)])
+            assert pinned.exit_code == 0, pinned.output
+            assert "verified" in pinned.output
+
     def test_audit_grounded_binding_violation_fails_verify(
         self, tmp_path: Path,
     ) -> None:

@@ -745,13 +745,16 @@ class _VerifyCommand(click.Command):
             raise
 
 
-def _verify_signed_file(path: Path, as_json: bool) -> int:
+def _verify_signed_file(
+    path: Path, as_json: bool, key_path: str | None = None,
+) -> int:
     """Route a signed file to its verifier by payload type.
 
     A per-finding audit receipt and a bundle are both DSSE envelopes; the
     ``payloadType`` names which one this is, so the router never guesses from
     the filename. A file that is not JSON at all falls through to the bundle
-    verifier, which reports the precise failure.
+    verifier, which reports the precise failure. ``key_path`` (from ``--key``)
+    pins the signer's key when the default local key is not the signer.
     """
     from mareforma import signing as _signing
 
@@ -763,20 +766,24 @@ def _verify_signed_file(path: Path, as_json: bool) -> int:
         isinstance(doc, dict)
         and doc.get("payloadType") == _signing.PAYLOAD_TYPE_AUDIT_RECEIPT
     ):
-        return _verify_audit_receipt_file(path, doc, as_json)
-    return _verify_bundle_file(path, as_json)
+        return _verify_audit_receipt_file(path, doc, as_json, key_path)
+    return _verify_bundle_file(path, as_json, key_path)
 
 
-def _verify_audit_receipt_file(path: Path, envelope: dict, as_json: bool) -> int:
+def _verify_audit_receipt_file(
+    path: Path, envelope: dict, as_json: bool, key_path: str | None = None,
+) -> int:
     """Verify a signed per-finding audit receipt with public material only.
 
-    Same auditor posture as the bundle path: the local key's public half is
-    the material a solo operator has; an absent key is UNVERIFIABLE (exit 2),
-    a failed signature or a grounding-binding violation is a definite failure
-    (exit 1).
+    Same auditor posture as the bundle path: the key's public half is the
+    material a verifier has; an absent key is UNVERIFIABLE (exit 2), a
+    grounding-binding violation or a tampered payload is a definite failure
+    (exit 1). A receipt signed with a different key than the one supplied is
+    UNVERIFIABLE (wrong key, not tamper) unless the caller pinned that key
+    with ``--key``, in which case the mismatch is a definite failure.
     """
     from mareforma import signing as _signing
-    from mareforma.audit import verify_audit_receipt
+    from mareforma.audit import RECEIPT_KEY_MISMATCH_REASON, verify_audit_receipt
 
     def emit(verdict: str, code: int, reason: str) -> int:
         if as_json:
@@ -790,39 +797,56 @@ def _verify_audit_receipt_file(path: Path, envelope: dict, as_json: bool) -> int
             _err(reason)
         return code
 
-    key_path = _signing.default_key_path()
-    if not key_path.exists():
+    pinned = key_path is not None
+    verify_key_path = Path(key_path) if pinned else _signing.default_key_path()
+    if not verify_key_path.exists():
+        if pinned:
+            return emit(
+                "unverifiable", _VERIFY_UNVERIFIABLE,
+                f"no signer key at {verify_key_path}. This is unverifiable, "
+                "not a failure; supply an existing key with --key.")
         return emit(
             "unverifiable", _VERIFY_UNVERIFIABLE,
             "no public key available to verify this receipt (no local key "
             "found). This is unverifiable, not a failure; supply the "
-            "signer's key.")
+            "signer's key with --key.")
     try:
-        public_key = _signing.load_private_key(key_path).public_key()
+        public_key = _signing.load_private_key(verify_key_path).public_key()
         ok, reason = verify_audit_receipt(envelope, public_key)
     except _signing.InvalidEnvelopeError as exc:
         return emit("tampered", _VERIFY_FAIL, f"malformed audit receipt: {exc}")
     except _signing.SigningError as exc:
         return emit("unverifiable", _VERIFY_UNVERIFIABLE,
-                    f"could not load the local key to verify: {exc}")
+                    f"could not load the key to verify: {exc}")
     if not ok:
+        if reason == RECEIPT_KEY_MISMATCH_REASON and not pinned:
+            return emit(
+                "unverifiable", _VERIFY_UNVERIFIABLE,
+                "this receipt was signed with a different key than the local "
+                "one. This is unverifiable, not a failure; pin the signer's "
+                "key with --key.")
         return emit("tampered", _VERIFY_FAIL, reason)
     return emit("verified", _VERIFY_OK, reason)
 
 
-def _verify_bundle_file(path: Path, as_json: bool) -> int:
+def _verify_bundle_file(
+    path: Path, as_json: bool, key_path: str | None = None,
+) -> int:
     """Verify a signed bundle with public material only. Returns an exit code.
 
     Auditor posture: verification needs only the public key. The local signing
     key (its public half) is the material a solo operator has; when it is absent
     the bundle is UNVERIFIABLE (exit 2), never a failure (exit 1) — the auditor
-    lacks the key, the bundle is not proven tampered.
+    lacks the key, the bundle is not proven tampered. ``key_path`` (from
+    ``--key``) pins the signer's key when the default local key is not it.
     """
     from mareforma import signing as _signing
     from mareforma.export_bundle import BundleVerificationError, verify_bundle
 
-    key_path = _signing.default_key_path()
-    if not key_path.exists():
+    verify_key_path = (
+        Path(key_path) if key_path is not None else _signing.default_key_path()
+    )
+    if not verify_key_path.exists():
         reason = (
             "no public key available to verify this bundle (no local key found). "
             "This is unverifiable, not a failure; supply the signer's key."
@@ -836,7 +860,7 @@ def _verify_bundle_file(path: Path, as_json: bool) -> int:
             _err(reason)
         return _VERIFY_UNVERIFIABLE
     try:
-        private_key = _signing.load_private_key(key_path)
+        private_key = _signing.load_private_key(verify_key_path)
         statement = verify_bundle(path, private_key.public_key())
     except BundleVerificationError as exc:
         reason = f"bundle verification failed: {exc}"
@@ -1040,7 +1064,12 @@ def _verify_export_dir(path: Path, as_json: bool) -> int:
 @click.option("--redact-home", "redact_home", is_flag=True, default=False,
               help="Rewrite $HOME to ~ in the printed trust map (never applied "
                    "to signed receipts).")
-def verify(target: str, as_json: bool, redact_home: bool) -> None:
+@click.option("--key", "key_path", default=None, metavar="FILE",
+              help="Signer key to verify a bundle or audit receipt against "
+                   "(defaults to the local bootstrap key). Pin this when the "
+                   "receipt was signed with a non-default auditor key.")
+def verify(target: str, as_json: bool, redact_home: bool,
+           key_path: str | None) -> None:
     """Verify a claim, a signed bundle, an audit receipt, or an export directory.
 
     TARGET is detected by shape: an existing file is verified as a signed
@@ -1048,6 +1077,10 @@ def verify(target: str, as_json: bool, redact_home: bool) -> None:
     existing directory as an export dir; anything else as a claim id resolved
     against the local project. Verifying a claim uses only public material
     (auditor mode) and prints its trust map.
+
+    A receipt or bundle signed with a non-default auditor key reads as
+    unverifiable against the local key; pin the signer with ``--key`` to reach
+    a definite verdict.
 
     \b
     Exit codes (stable, for CI gates):
@@ -1061,7 +1094,7 @@ def verify(target: str, as_json: bool, redact_home: bool) -> None:
         mareforma verify <claim-id>
         mareforma verify <claim-id> --json
         mareforma verify mareforma-bundle.json
-        mareforma verify audit/envelopes/001-finding.json
+        mareforma verify audit/envelopes/001-finding.json --key auditor.key
         mareforma verify ./export-dir
     """
     p = Path(target)
@@ -1070,7 +1103,7 @@ def verify(target: str, as_json: bool, redact_home: bool) -> None:
             if p.is_dir():
                 code = _verify_export_dir(p, as_json)
             else:
-                code = _verify_signed_file(p, as_json)
+                code = _verify_signed_file(p, as_json, key_path)
         else:
             code = _verify_claim(target, as_json, redact_home)
     except Exception as exc:  # noqa: BLE001

@@ -132,6 +132,16 @@ def _safe_name(finding_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", finding_id)[:80] or "finding"
 
 
+# The receipt's signature does not verify because the ENVELOPE names a
+# different signing key than the one supplied (keyid mismatch), as opposed to
+# a signature that fails over the right key (a tampered payload). Both make
+# verify_envelope return False; only the keyid tells them apart. The caller
+# treats a key mismatch as unverifiable (wrong key), not tamper.
+RECEIPT_KEY_MISMATCH_REASON = (
+    "receipt signed by a key other than the one supplied"
+)
+
+
 def verify_audit_receipt(envelope: dict, public_key) -> tuple[bool, str]:
     """Verify one signed audit receipt from public material alone.
 
@@ -143,19 +153,36 @@ def verify_audit_receipt(envelope: dict, public_key) -> tuple[bool, str]:
       GROUNDED record must ground on at least one source the finding cites,
       or the signature would attest an unbound GROUNDED.
 
-    Returns ``(ok, reason)``. Structural problems raise
-    :class:`mareforma.signing.InvalidEnvelopeError` so the caller can
-    distinguish a malformed envelope from a wrong key.
+    Returns ``(ok, reason)``. A signature that fails because the envelope
+    names a different key returns :data:`RECEIPT_KEY_MISMATCH_REASON` so the
+    caller can report a wrong key as unverifiable rather than tamper.
+    Structural problems raise :class:`mareforma.signing.InvalidEnvelopeError`
+    so the caller can distinguish a malformed envelope from a wrong key.
     """
     import base64
 
     from mareforma.observe._binding import check_grounding_binding
-    from mareforma.signing import PAYLOAD_TYPE_AUDIT_RECEIPT, verify_envelope
+    from mareforma.signing import (
+        PAYLOAD_TYPE_AUDIT_RECEIPT,
+        public_key_id,
+        verify_envelope,
+    )
+
+    # A keyid mismatch and a bad signature both make verify_envelope return
+    # False; separate them here so a wrong verification key does not read as
+    # tamper. The payload is untouched, so the keyid still identifies the
+    # actual signer.
+    try:
+        sig_keyid = envelope["signatures"][0]["keyid"]
+    except (KeyError, IndexError, TypeError):
+        sig_keyid = None
+    if sig_keyid is not None and sig_keyid != public_key_id(public_key):
+        return False, RECEIPT_KEY_MISMATCH_REASON
 
     if not verify_envelope(
         envelope, public_key, expected_payload_type=PAYLOAD_TYPE_AUDIT_RECEIPT
     ):
-        return False, "signature does not verify against this key"
+        return False, "signature does not verify (receipt payload may be tampered)"
     record = json.loads(base64.standard_b64decode(envelope["payload"]))
     if record.get("grounding") == "GROUNDED":
         binding = check_grounding_binding(
