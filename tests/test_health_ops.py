@@ -309,10 +309,10 @@ class TestGraphEmitsHealthEvents:
 
 
 class TestActivityCommand:
-    def test_activity_empty_project(self, tmp_path: Path) -> None:
-        runner = CliRunner()
-        with runner.isolated_filesystem(temp_dir=tmp_path):
-            result = runner.invoke(_cli, ["activity"])
+    def test_activity_empty_project(self, tmp_path: Path, monkeypatch) -> None:
+        mareforma.open(tmp_path).close()  # project with no operational events
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(_cli, ["activity"])
         assert result.exit_code == 0
         assert "Events scanned: 0" in result.output
 
@@ -342,6 +342,30 @@ class TestActivityCommand:
         parsed = json.loads(result.output)
         assert parsed["events_total"] >= 1
         assert "provenance_query" in parsed["ops"]
+
+    def test_activity_finds_the_project_from_a_subdirectory(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        # activity must walk up to the enclosing project like status does,
+        # not read the empty cwd and report zero events.
+        with mareforma.open(tmp_path) as graph:
+            a = graph.assert_claim("a")
+            graph.query_provenance(a)
+        sub = tmp_path / "sub" / "deeper"
+        sub.mkdir(parents=True)
+        monkeypatch.chdir(sub)
+        result = CliRunner().invoke(_cli, ["activity"])
+        assert result.exit_code == 0, result.output
+        assert "provenance_query" in result.output
+        assert "No operational events recorded yet." not in result.output
+
+    def test_activity_without_a_project_exits_nonzero(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(_cli, ["activity"])
+        assert result.exit_code == 1
+        assert "No mareforma project" in result.output
 
 
 class TestStatsDeprecationAlias:

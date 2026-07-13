@@ -496,7 +496,7 @@ def activity_cmd(as_json: bool, last_n: int | None) -> None:
         mareforma activity --json
     """
     from mareforma.health import compute_rolling_stats
-    root = _root()
+    root = _read_only_root()
     stats = compute_rolling_stats(root, last_n=last_n)
     if as_json:
         click.echo(json.dumps(stats, indent=2, sort_keys=True))
