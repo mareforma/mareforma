@@ -17,10 +17,18 @@ import re
 
 import click
 
+import mareforma
 from mareforma.cli import cli
 from mareforma.trust import STATUS_POLICY
+from tests._helpers import _bootstrap_key, _est, _pred, _prop
 
-DOCS = pathlib.Path(__file__).resolve().parent.parent / "docs"
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+DOCS = ROOT / "docs"
+
+
+def _python_blocks(text: str) -> list[str]:
+    """Return the bodies of every fenced ``python`` block in *text*."""
+    return re.findall(r"```python\n(.*?)```", text, re.DOTALL)
 
 # Reference/concept pages that state the *current* policy stamp. The
 # changelog legitimately records superseded stamps, so it is excluded.
@@ -59,6 +67,41 @@ def test_export_format_choices_documented():
     assert "--format" in cli_doc, "cli.mdx does not document the --format option"
     for choice in _export_format_choices():
         assert choice in cli_doc, f"cli.mdx does not document --format={choice}"
+
+
+def test_findings_convergent_example_uses_a_distinct_signer(tmp_path):
+    """#28: the findings.mdx CONVERGENT recipe must reach CONVERGENT when run.
+
+    The status counts independence by distinct signer, so two supporting lines
+    converge only when a second signing key backs the second finding. A recipe
+    that reuses one open graph (one key) stays PRELIMINARY, so the concept page
+    must show the second finding signed under a distinct ``key_path``.
+    """
+    prop, plan, est = _prop(), _pred(), _est()
+
+    # Reusing one signer stays PRELIMINARY: that is the trap the old snippet set.
+    ka = _bootstrap_key(tmp_path, "lab_a.key")
+    with mareforma.open(tmp_path, key_path=ka) as g:
+        g.assert_finding(prop, plan, est, data_id="dataset_alpha",
+                         generated_by="analyst/model-a/lab_a")
+        g.assert_finding(prop, plan, est, data_id="dataset_beta",
+                         generated_by="analyst/model-b/lab_b")
+        assert g.proposition_status(prop)["status"] == "PRELIMINARY"
+
+    # A distinct signer on a distinct dataset is the second independent line.
+    kb = _bootstrap_key(tmp_path, "lab_b.key")
+    with mareforma.open(tmp_path, key_path=kb) as g:
+        g.assert_finding(prop, plan, est, data_id="dataset_gamma",
+                         generated_by="analyst/model-c/lab_c")
+        assert g.proposition_status(prop)["status"] == "CONVERGENT"
+
+    # The page's CONVERGENT snippet must show the distinct-signer form.
+    findings = (DOCS / "concepts" / "findings.mdx").read_text(encoding="utf-8")
+    convergent = [b for b in _python_blocks(findings) if '"CONVERGENT"' in b]
+    assert convergent, "findings.mdx has no CONVERGENT example block"
+    assert all("key_path" in b for b in convergent), (
+        "the CONVERGENT example must open the graph under a second signing key"
+    )
 
 
 def test_prov_o_claim_is_scoped_to_default_format():
