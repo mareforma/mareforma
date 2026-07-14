@@ -630,6 +630,7 @@ CREATE TABLE IF NOT EXISTS findings (
     created_at        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_find_content ON findings(content_id);
+CREATE INDEX IF NOT EXISTS idx_find_claim   ON findings(claim_id);
 
 -- One independent line of evidence. data_id is the distinct-artifact key the
 -- independence heuristic counts over: two lines are independent iff their
