@@ -1680,7 +1680,26 @@ def _maybe_update_replicated_unlocked(
     if not established_anchors:
         return
 
-    placeholders = ",".join("?" * len(established_anchors))
+    # Candidate peers: the claims that cite one of the established anchors.
+    # Found through the indexed reverse-edge cache (idx_supports_reverse) rather
+    # than json_each over every claim, so the per-insert cost is O(deg(anchor))
+    # instead of O(N) — the same reverse store walk_upstream / walk_downstream
+    # already use. The cache is a rebuildable convenience, so it only narrows the
+    # candidate set; each candidate's authoritative supports_json is re-checked
+    # below before it can promote, so a stale or drifted edge cannot slip a claim
+    # that does not actually cite the anchor into a promotion.
+    anchor_placeholders = ",".join("?" * len(established_anchors))
+    candidate_ids = [
+        r["claim_id"] for r in conn.execute(
+            f"SELECT DISTINCT claim_id FROM supports_cache.claim_supports "
+            f"WHERE supports_claim_id IN ({anchor_placeholders}) "
+            f"AND claim_id != ?",
+            (*established_anchors, new_claim_id),
+        ).fetchall()
+    ]
+    if not candidate_ids:
+        return
+
     # status='open' filter on the peer: a contested or retracted peer
     # is editorially tainted and must not participate in REPLICATED
     # convergence. Without this, an adversary could plant a born-retracted
@@ -1693,12 +1712,12 @@ def _maybe_update_replicated_unlocked(
     strict_peer_clause = (
         "\n          AND c.artifact_hash IS NOT NULL" if strict_promotion else ""
     )
+    cand_placeholders = ",".join("?" * len(candidate_ids))
     rows = conn.execute(
         f"""
-        SELECT DISTINCT c.claim_id, c.asserter_keyid
-        FROM claims c, json_each(c.supports_json) j
-        WHERE j.value IN ({placeholders})
-          AND c.claim_id != ?
+        SELECT c.claim_id, c.asserter_keyid, c.supports_json
+        FROM claims c
+        WHERE c.claim_id IN ({cand_placeholders})
           AND c.asserter_keyid IS NOT NULL
           AND c.asserter_keyid != ?
           AND c.support_level != 'ESTABLISHED'
@@ -1722,9 +1741,25 @@ def _maybe_update_replicated_unlocked(
               AND c.artifact_hash = ?
           ){strict_peer_clause}
         """,
-        (*established_anchors, new_claim_id, new_asserter_keyid,
-         artifact_hash, artifact_hash),
+        (*candidate_ids, new_asserter_keyid, artifact_hash, artifact_hash),
     ).fetchall()
+
+    # Authoritative anchor re-check against claims.supports_json — the cache
+    # narrows, the claims row decides. A candidate stays only when its own
+    # supports_json genuinely cites one of the established anchors, so a stale or
+    # drifted cache edge cannot carry a non-citing claim into the promotion.
+    anchor_set = set(established_anchors)
+    confirmed = []
+    for r in rows:
+        try:
+            refs = json.loads(r["supports_json"] or "[]")
+        except (ValueError, TypeError):
+            continue
+        if isinstance(refs, list) and any(
+            isinstance(ref, str) and ref in anchor_set for ref in refs
+        ):
+            confirmed.append(r)
+    rows = confirmed
 
     if not rows:
         return
