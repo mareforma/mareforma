@@ -2469,20 +2469,25 @@ def validate_claim(
     Parameters
     ----------
     validation_signature:
-        Optional JSON-encoded DSSE-style envelope binding
+        Required JSON-encoded DSSE-style envelope binding
         ``(claim_id, validator_keyid, validated_at, evidence_seen)``.
         Produced by :func:`mareforma.signing.sign_validation` and stored
         verbatim on the row so the validation event itself is
         independently verifiable (tampering with
         ``validated_by``/``validated_at``/``evidence_seen`` post-hoc is
-        detectable).
+        detectable). Promotion to ESTABLISHED is gated on this envelope:
+        an unsigned call raises ``ValueError`` up front because the
+        storage layer refuses an ESTABLISHED row with a NULL signature,
+        so there is no unsigned promotion path.
     validated_at:
-        Optional ISO 8601 UTC timestamp to write to the row. When the
-        caller has already signed a validation envelope binding a
-        timestamp, the SAME timestamp must be threaded through here so
-        the envelope's ``validated_at`` matches the row's
-        ``validated_at`` byte-for-byte. If ``None``, a fresh timestamp
-        is generated, appropriate only for the legacy unsigned path.
+        Optional ISO 8601 UTC timestamp to write to the row. The caller
+        signs a validation envelope binding a timestamp, so the SAME
+        timestamp must be threaded through here for the envelope's
+        ``validated_at`` to match the row's ``validated_at``
+        byte-for-byte; a divergent value is rejected by the
+        envelope-agreement gate. If ``None``, a fresh timestamp is
+        generated (only self-consistent when the envelope was signed
+        against that exact value).
     evidence_seen:
         Optional list of claim_ids the validator declares to have
         reviewed before signing the promotion. ``None`` is normalized
@@ -2534,10 +2539,12 @@ def validate_claim(
     ClaimNotFoundError
         If no claim with claim_id exists.
     ValueError
-        If the claim's support_level is not 'REPLICATED', or its
-        status is not 'open' (contested/retracted claims are editorially
-        tainted and must not be promoted; revisit the editorial flag via
-        update_claim before validating).
+        If ``validation_signature`` is ``None`` (promotion requires a
+        signed envelope; there is no unsigned path), or if the claim's
+        support_level is not 'REPLICATED', or its status is not 'open'
+        (contested/retracted claims are editorially tainted and must not
+        be promoted; revisit the editorial flag via update_claim before
+        validating).
     InvalidValidationEnvelopeError
         If the validation envelope is malformed, wrong-typed, signed
         by a non-enrolled key, fails cryptographic verification, or
@@ -2553,6 +2560,19 @@ def validate_claim(
         not point to an existing claim, or points to a claim with
         ``created_at > validated_at``.
     """
+    if validation_signature is None:
+        # Promotion to ESTABLISHED writes validation_signature straight
+        # from this kwarg. A NULL signature is refused by both the table
+        # CHECK and the claims_update_state_check trigger, so an unsigned
+        # call could only ever surface as an IllegalStateTransitionError
+        # that reads like row corruption. Reject it here with a message
+        # that names the real requirement.
+        raise ValueError(
+            f"validate_claim for claim '{claim_id}' requires a signed "
+            "validation envelope; promotion to ESTABLISHED has no unsigned "
+            "path. Build the envelope with mareforma.signing.sign_validation "
+            "or call graph.validate() from an enrolled session."
+        )
     row = conn.execute(
         "SELECT support_level, status, signature_bundle, t_invalid "
         "FROM claims WHERE claim_id = ?",
@@ -2619,9 +2639,9 @@ def validate_claim(
     #      timestamp, validator_keyid, and evidence_seen all must
     #      agree byte-for-byte.
     #
-    # The legacy unsigned path (validation_signature=None) bypasses
-    # this whole block; that path is being phased out by
-    # ``mareforma.open(require_signed=True)`` downstream.
+    # An unsigned call was rejected up front, so validation_signature is
+    # always present here; the ``is not None`` guard below is a defensive
+    # restatement of that contract, not a live unsigned branch.
     validator_keyid: str | None = None
     env: dict | None = None
     declared_type: str | None = None
@@ -2782,11 +2802,14 @@ def validate_claim(
     try:
         if _own_txn:
             conn.execute("BEGIN IMMEDIATE")
-        # COALESCE on validator_keyid: a legacy unsigned re-validate
-        # (validation_signature=None) must NOT wipe a previously-set
-        # validator_keyid. The state-check trigger permits
-        # ESTABLISHED → ESTABLISHED, so a second call would otherwise
-        # NULL the column and tank the validator's reputation count.
+        # COALESCE on validator_keyid guards a repeat signed re-validate.
+        # The state-check trigger permits ESTABLISHED → ESTABLISHED, so a
+        # second promotion can land on an already-validated row. Each
+        # signed call carries its own authenticated validator_keyid
+        # (unsigned calls are rejected up front), so the new signer's
+        # keyid is written; COALESCE is the belt that keeps a stray NULL
+        # from clearing the column and tanking a validator's reputation
+        # count.
         cur = conn.execute(
             """
             UPDATE claims

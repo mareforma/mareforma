@@ -1525,6 +1525,53 @@ class TestValidationEnvelopeKwargAgreement:
             assert g.get_claim(cid_b)["support_level"] == "ESTABLISHED"
 
 
+class TestValidateClaimRequiresSignedEnvelope:
+    """Promotion to ESTABLISHED is gated on a signed validation envelope.
+    There is no unsigned promotion path: the storage guards refuse an
+    ESTABLISHED row with a NULL signature, so an unsigned call must fail
+    up front with a clear ValueError that names the real requirement,
+    not an IllegalStateTransitionError that reads like row corruption."""
+
+    def _setup_replicated(self, graph):
+        sa, sb = _two_signers(graph._root)
+        seed = graph.assert_claim("anchor", generated_by="seed", seed=True)
+        graph.assert_claim("a", generated_by="lab_a", supports=[seed], signer=sa)
+        cid_b = graph.assert_claim("b", generated_by="lab_b", supports=[seed], signer=sb)
+        return seed, cid_b
+
+    def test_unsigned_call_raises_valueerror(self, tmp_path):
+        from mareforma import db as _db
+        from mareforma.db import IllegalStateTransitionError
+        root_key = _bootstrap_key(tmp_path, "root.key")
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            _, cid_b = self._setup_replicated(g)
+            with pytest.raises(ValueError, match="signed validation envelope"):
+                _db.validate_claim(
+                    g._conn, g._root, cid_b, validated_by="human-alice",
+                )
+            # The error is not the storage-guard transition error.
+            with pytest.raises(ValueError) as excinfo:
+                _db.validate_claim(
+                    g._conn, g._root, cid_b, validated_by="human-alice",
+                )
+            assert not isinstance(excinfo.value, IllegalStateTransitionError)
+            # The claim was not promoted.
+            assert g.get_claim(cid_b)["support_level"] == "REPLICATED"
+
+    def test_signed_call_still_promotes(self, tmp_path):
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        other_key = _bootstrap_key(tmp_path, "validator.key")
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            _, cid_b = self._setup_replicated(g)
+            g.enroll_validator(_pem_of(other_key), identity="reviewer")
+
+        with mareforma.open(tmp_path, key_path=other_key) as g:
+            g.validate(cid_b)
+            assert g.get_claim(cid_b)["support_level"] == "ESTABLISHED"
+
+
 # ---------------------------------------------------------------------------
 # Validation envelope cryptographic verification
 # ---------------------------------------------------------------------------
