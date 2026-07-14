@@ -641,7 +641,9 @@ def _authentic_model_key(
     return independence_model_key(signed)
 
 
-def _independence_units(conn: sqlite3.Connection, content_id: str):
+def _independence_units(
+    conn: sqlite3.Connection, content_id: str, *, memo: "dict | None" = None
+):
     """Yield ``(direction, run_token, data_id, model_key)`` per gateable line.
 
     The shared read path behind :func:`independence_counts` and
@@ -665,7 +667,18 @@ def _independence_units(conn: sqlite3.Connection, content_id: str):
     model call whose signer
     is an enrolled human validator is re-keyed ``("human",)`` — the human axis,
     the highest-value independent source (see :func:`_is_human_signer`).
+
+    ``memo`` is an optional per-read-call cache. The signer/model axis of a line
+    (``run_token`` and ``model_key``) is constant per claim — the authenticating
+    columns are written identically on every line of a finding — so it is
+    computed once per ``claim_id`` and reused, sparing the repeated Ed25519
+    verify a multi-line finding, and a frame read that walks the same claim as a
+    contrary, would otherwise pay. Only ``direction`` and ``data_id`` vary per
+    line. A claim belongs to exactly one proposition, so the cache never
+    collides across content_ids sharing a memo. Absent ``memo``, a fresh local
+    cache still dedups within the single call.
     """
+    per_claim = memo.setdefault("signer", {}) if memo is not None else {}
     rows = conn.execute(INDEPENDENCE_COUNTS_SQL, (content_id,)).fetchall()
     for r in rows:
         # Recompute the per-line bearing from stored inputs. Every row written by
@@ -701,26 +714,37 @@ def _independence_units(conn: sqlite3.Connection, content_id: str):
             direction = compute_bearing(estimate, prediction).direction
         except Exception:
             continue
-        keyid = _authentic_signer_keyid(
-            conn, r["claim_id"], r["asserter_keyid"], r["signature_bundle"],
-        )
-        run_token = f"k:{keyid}" if keyid is not None else f"g:{r['generated_by']}"
-        model_key = _authentic_model_key(
-            conn, r["claim_id"], r["model_lineage"], r["signature_bundle"],
-        )
-        # A line with no observed model call, signed by an enrolled human
-        # validator, is a human check: the highest-value independent axis, which
-        # needs no distinct model. A line that DID observe a model call keeps its
-        # model key even under a human signer — the check was the model's, and
-        # the human only signed it — so the model-distinct axis still governs.
-        if model_key[0] == "absent" and keyid is not None and _is_human_signer(
-            conn, keyid
-        ):
-            model_key = ("human",)
+        claim_id = r["claim_id"]
+        cached = per_claim.get(claim_id)
+        if cached is None:
+            keyid = _authentic_signer_keyid(
+                conn, claim_id, r["asserter_keyid"], r["signature_bundle"],
+            )
+            run_token = (
+                f"k:{keyid}" if keyid is not None else f"g:{r['generated_by']}"
+            )
+            model_key = _authentic_model_key(
+                conn, claim_id, r["model_lineage"], r["signature_bundle"],
+            )
+            # A line with no observed model call, signed by an enrolled human
+            # validator, is a human check: the highest-value independent axis,
+            # which needs no distinct model. A line that DID observe a model call
+            # keeps its model key even under a human signer — the check was the
+            # model's, and the human only signed it — so the model-distinct axis
+            # still governs.
+            if model_key[0] == "absent" and keyid is not None and _is_human_signer(
+                conn, keyid
+            ):
+                model_key = ("human",)
+            cached = (run_token, model_key)
+            per_claim[claim_id] = cached
+        run_token, model_key = cached
         yield direction, run_token, r["data_id"], model_key
 
 
-def independence_counts(conn: sqlite3.Connection, content_id: str) -> tuple[int, int]:
+def independence_counts(
+    conn: sqlite3.Connection, content_id: str, *, memo: "dict | None" = None
+) -> tuple[int, int]:
     """(independent_support, independent_refute) by distinct signer + model, data guard.
 
     Counted by distinct **signer** (the claim's ``asserter_keyid``) AND distinct
@@ -737,18 +761,31 @@ def independence_counts(conn: sqlite3.Connection, content_id: str) -> tuple[int,
     signed by an enrolled human validator counts on the human axis — the
     highest-value independent source, never folded into a model root. The two run
     axes are namespaced (``k:`` vs ``g:``) so a keyid can never alias a run label.
+
+    ``memo`` is an optional per-read-call cache. A proposition's counts are
+    constant within one read call, so a ``query_frame`` pass that counts a
+    proposition once for itself and again for every sibling walking it as a
+    contrary computes it once and reuses the result, sharing the same cache with
+    :func:`_independence_units` so a claim's signature verifies once per call.
     """
+    if memo is not None:
+        counts_cache = memo.setdefault("counts", {})
+        if content_id in counts_cache:
+            return counts_cache[content_id]
     supports: list[tuple[str, str, tuple]] = []
     refutes: list[tuple[str, str, tuple]] = []
     for direction, run_token, data_id, model_key in _independence_units(
-        conn, content_id
+        conn, content_id, memo=memo
     ):
         unit = (run_token, data_id, model_key)
         if direction is BearingDirection.SUPPORTS:
             supports.append(unit)
         elif direction is BearingDirection.REFUTES:
             refutes.append(unit)
-    return _count_run_distinct(supports), _count_run_distinct(refutes)
+    result = (_count_run_distinct(supports), _count_run_distinct(refutes))
+    if memo is not None:
+        memo["counts"][content_id] = result
+    return result
 
 
 def effective_independence(conn: sqlite3.Connection, content_id: str) -> dict:
@@ -843,11 +880,13 @@ def get_proposition_row(
 
 
 def _frame_status(
-    conn: sqlite3.Connection, frame_id: str, direction: Direction
+    conn: sqlite3.Connection, frame_id: str, direction: Direction,
+    *, memo: "dict | None" = None,
 ) -> FrameStatus:
     """CONTESTED iff some contrary proposition in the same frame has >=1
     independent supporting line; CONSISTENT otherwise. Stops at the first such
-    contrary.
+    contrary. ``memo`` shares the per-call independence cache (see
+    :func:`independence_counts`).
     """
     contraries = [d.value for d in direction.contrary_set if d != direction]
     if not contraries:
@@ -859,26 +898,37 @@ def _frame_status(
         (frame_id, *contraries),
     ).fetchall()
     for r in rows:
-        support, _ = independence_counts(conn, r["content_id"])
+        support, _ = independence_counts(conn, r["content_id"], memo=memo)
         if support >= 1:
             return FrameStatus.CONTESTED
     return FrameStatus.CONSISTENT
 
 
-def proposition_status(conn: sqlite3.Connection, content_id: str) -> Optional[dict]:
+def proposition_status(
+    conn: sqlite3.Connection, content_id: str, *, memo: "dict | None" = None
+) -> Optional[dict]:
     """The retrieval view: derived Status + counts + frame contest, or None.
 
     ``status`` is the same-proposition state (support vs refute lines on this
     content_id). ``frame_status`` is the separate frame-level contest (a contrary
     proposition in the same frame has independent support). They are two
     different signals and never the same number.
+
+    ``memo`` is an optional per-read-call cache shared between the own-status
+    count and the frame-contest count so each proposition's counts (and each
+    claim's signature verify) are computed once per call. Defaults to a fresh
+    cache, so a standalone call still shares work between its two passes.
     """
+    if memo is None:
+        memo = {}
     row = get_proposition_row(conn, content_id)
     if row is None:
         return None
-    support, refute = independence_counts(conn, content_id)
+    support, refute = independence_counts(conn, content_id, memo=memo)
     status = compute_status(support, refute)
-    frame_status = _frame_status(conn, row["frame_id"], Direction(row["direction"]))
+    frame_status = _frame_status(
+        conn, row["frame_id"], Direction(row["direction"]), memo=memo
+    )
     return {
         "content_id": content_id,
         "frame_id": row["frame_id"],
@@ -912,9 +962,14 @@ def query_frame(
     rows = conn.execute(
         "SELECT content_id FROM propositions WHERE frame_id = ?", (frame_id,)
     ).fetchall()
+    # One memo for the whole frame read: proposition_status counts each
+    # proposition for itself and again as a contrary of its siblings, so sharing
+    # the cache across the frame collapses those repeats to one compute (and one
+    # signature verify) per proposition.
+    memo: dict = {}
     out: list[dict] = []
     for r in rows:
-        view = proposition_status(conn, r["content_id"])
+        view = proposition_status(conn, r["content_id"], memo=memo)
         if view is None:
             continue
         if floor is not None and _SUPPORT_RANK[view["status"]] < floor:
