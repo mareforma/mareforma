@@ -268,9 +268,11 @@ def _independence_property(
     Coarse by design: distinct-model is binary this release; the graded
     cross-model residual is DEFERRED, not computed. When the number stands but
     every signer traces to a single trust root (``n_roots < 2``), the residual
-    names that operator-Sybil topology: distinct signers are operator-mintable,
-    so the count rests on distinct model/human lines within one trust domain, not
-    independence across operators.
+    names that operator-Sybil topology: the operator owns every enrolled key, so
+    every axis is operator-assertable (the signer keys are mintable and the model
+    lineage is signed by the operator's own key, so a distinct model is not
+    cross-checked by an independent party). The number is producer-assertable
+    within one trust domain, not certified independence across operators.
 
     For a non-finding claim (``effective`` is ``None``), the axis falls back to
     the graph-level validator-root topology disclosure. Distinctness that rests
@@ -302,23 +304,27 @@ def _independence_property(
             "release, the graded cross-model residual is DEFERRED, not "
             "computed"
         )
-        # Operator-Sybil disclosure: distinct signers under a single trust root
-        # are operator-mintable, so the number rests on distinct model/human
-        # lines within one trust domain, NOT cross-operator independence. The
-        # model-distinct number still stands (distinct models are real evidence),
-        # but the residual names the single root so it is not over-read. Mirrors
-        # the plain-claim branch below, which the finding branch previously
-        # skipped.
+        # Operator-Sybil disclosure: under a single trust root the operator owns
+        # every enrolled key, so every axis of distinctness is operator-assertable,
+        # not just the signer. The signer keys are operator-mintable, and the
+        # model lineage each finding binds is signed by the operator's own
+        # enrolled key, so a distinct model is not cross-checked by an independent
+        # party: the operator can re-sign a fabricated lineage under a key it
+        # controls. The number is producer-assertable within one trust domain,
+        # not certified cross-model independence, so the residual names it; a
+        # certified number needs distinct trust roots.
         if n_roots < 2:
             detail = (
                 "no trust root is enrolled" if n_roots == 0
                 else "all validators trace to a single trust root"
             )
             residual += (
-                f"; {detail}, so distinct-signer distinctness rests on "
-                "operator-mintable keys alone; the count rests on distinct "
-                "model/human lines within one trust domain, not independence "
-                "across operators"
+                f"; {detail}, so every axis of distinctness is "
+                "operator-assertable: the signer keys are operator-mintable and "
+                "the model lineage is signed by the operator's own key, so a "
+                "distinct model is not cross-checked by an independent party. "
+                "The count is producer-assertable within one trust domain, not "
+                "certified independence across operators"
             )
         return TrustProperty(
             name="independence",

@@ -1,14 +1,12 @@
 """The finding independence axis discloses single-root operator-Sybil topology.
 
-The README promises the map marks independence honest "when every signer traces
-back to one operator who could have made all the keys." The non-finding branch
-enforces that (``n_roots < 2`` → UNVERIFIABLE), but the finding branch returned a
-confident number without ever consulting ``n_roots``. A single operator can mint
-several keys and submit distinct-signer findings; the effective number must not
-read as cross-operator independence with no disclosure of the single-root
-topology. The model-distinct number still stands (distinct models are real
-evidence), but the residual names the single trust root so it is not mistaken for
-independence across operators.
+Under a single trust root the operator owns every enrolled key, so every axis of
+distinctness is operator-assertable: the signer keys are mintable and the model
+lineage each finding binds is signed by the operator's own key, so a distinct
+model is not cross-checked by an independent party. The independence number is a
+count, not certified cross-operator independence; the residual names the
+single-root topology on both the signer and the model axis so the number is not
+over-read. A certified number needs distinct trust roots.
 """
 from __future__ import annotations
 
@@ -27,17 +25,30 @@ _GPT = "gpt-4o-2024-08-06"
 class TestFindingSingleRootResidual:
     def test_single_root_finding_names_the_residual(self) -> None:
         """A finding independence number under a single trust root carries the
-        single-root caveat in its residual (the finding branch consulted
-        n_roots)."""
+        single-root caveat in its residual."""
         tmap = _assemble(
             _claim(), n_roots=1, has_inclusion=False,
             effective_independence={"number": 2, "soft": False},
         )
         ind = tmap.get("independence")
-        # The model-distinct number still stands: distinct models are evidence.
+        # The number is a count; the residual discloses the single-root topology.
         assert ind.value == "2"
-        # ...but the residual now discloses the single-root topology.
         assert "single trust root" in ind.residual
+
+    def test_single_root_residual_names_the_model_axis(self) -> None:
+        """Under a single trust root the residual discloses that the model axis,
+        not only the signer, is operator-assertable, so the count is not read as
+        certified cross-model independence. The operator owns the enrolled key
+        that signs each finding's lineage and can re-sign a fabricated distinct
+        model, so the distinctness is producer-assertable."""
+        tmap = _assemble(
+            _claim(), n_roots=1, has_inclusion=False,
+            effective_independence={"number": 2, "soft": False},
+        )
+        residual = tmap.get("independence").residual
+        assert "model lineage is signed by the operator's own key" in residual
+        assert "producer-assertable" in residual
+        assert "not certified independence across operators" in residual
 
     def test_zero_root_finding_names_no_root_enrolled(self) -> None:
         tmap = _assemble(
