@@ -475,19 +475,20 @@ contamination.
 | Level | Meaning | How reached |
 |---|---|---|
 | `PRELIMINARY` | One agent claimed it | Automatic on first assertion |
-| `REPLICATED` | ≥2 distinct-model, distinct-signer checks converged on the same upstream | Automatic at INSERT |
+| `REPLICATED` | ≥2 distinct-signer checks converged on the same ESTABLISHED upstream | Automatic at INSERT |
 | `ESTABLISHED` | Human-validated | `graph.validate()` only, requires REPLICATED first |
 
 `REPLICATED` fires automatically when ≥2 claims share the same upstream
 claim_id in `supports[]`, carry **distinct, non-NULL `asserter_keyid`** values
-(the signer keyid from each claim's signature), stand on a **distinct
-model/method**, **AND** at least one of those upstreams is itself `ESTABLISHED`.
-Convergence now requires a genuinely different model, not just a different
-signer: two checks on the same model are one line of evidence, so a same-model
-rerun under distinct keys does not promote. The distinct-model test reads the
-computed model lineage on each finding's evidence line; soft lineage (PROXY /
-UNVERIFIABLE) cannot certify a distinct model, and a line with no observed model
-call keeps the legacy signer axis. Claims signed by the same key, and unsigned
+(the signer keyid from each claim's signature), **AND** at least one of those
+upstreams is itself `ESTABLISHED`. Promotion keys on the signer axis. The
+load-bearing model-independence signal is the read-side effective-independence
+number `graph.trust_map` reports (`effective_independence`), not this promotion.
+The promotion path does run a `model_distinct_pair` filter, but it is a
+defensive gate that stays inert on the primary path: a claim's finding model
+lineage is written after promotion runs, so both sides read absent and the
+filter passes everything through. Read the independence axis to tell a distinct
+model from a same-model rerun. Claims signed by the same key, and unsigned
 claims, do not converge; equal `artifact_hash` collapses two peers to one line.
 Distinct keys are a cryptographic distinctness signal, not a proof of apparatus
 independence. REPLICATED is a convergence signal, not a truth claim, and the

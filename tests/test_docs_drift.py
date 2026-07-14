@@ -116,6 +116,38 @@ def test_prov_o_claim_is_scoped_to_default_format():
         )
 
 
+def test_replicated_promotion_docs_do_not_overclaim_the_model_gate(tmp_path):
+    """#33: the REPLICATED promotion prose must not claim a distinct-model gate.
+
+    On the primary path a claim's finding model lineage is written after
+    promotion runs, so the promotion-time ``model_distinct_pair`` filter reads
+    absent on both sides and passes everything through. The load-bearing
+    model-independence signal is the read-side effective-independence number.
+    So two distinct signers on a shared ESTABLISHED upstream still promote to
+    REPLICATED regardless of model, and the docs must not say otherwise.
+    """
+    from mareforma import signing as _signing
+
+    ka = _bootstrap_key(tmp_path, "root.key")
+    sa = _signing.load_private_key(_bootstrap_key(tmp_path, "a.key"))
+    sb = _signing.load_private_key(_bootstrap_key(tmp_path, "b.key"))
+    with mareforma.open(tmp_path, key_path=ka) as g:
+        up = g.assert_claim("anchor", generated_by="seed", seed=True)
+        a = g.assert_claim("A", supports=[up], generated_by="lab_a", signer=sa)
+        b = g.assert_claim("B", supports=[up], generated_by="lab_b", signer=sb)
+        # No finding lineage on these claims, so the model gate is a no-op: a
+        # same-(absent-)model pair under distinct keys promotes all the same.
+        assert g.get_claim(a)["support_level"] == "REPLICATED"
+        assert g.get_claim(b)["support_level"] == "REPLICATED"
+
+    for name in ("AGENTS.md", "ARCHITECTURE.md"):
+        text = (ROOT / name).read_text(encoding="utf-8")
+        assert "genuinely different model" not in text, (
+            f"{name} overclaims a distinct-model REPLICATED promotion gate; the "
+            "read-side effective-independence number is the model signal"
+        )
+
+
 def _section(text: str, heading: str) -> str:
     """Return *text* from *heading* up to the next same-or-higher heading."""
     start = text.index(heading)

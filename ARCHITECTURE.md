@@ -110,19 +110,17 @@ Three rules:
 
 1. **PRELIMINARY → REPLICATED is automatic, structural, and gated.**
    The new claim and a candidate peer must share at least one
-   `ESTABLISHED` upstream in `supports[]`, carry **distinct, non-NULL
+   `ESTABLISHED` upstream in `supports[]` and carry **distinct, non-NULL
    `asserter_keyid`** values (the signer keyid denormalized from each
-   claim's signature_bundle), and stand on a **distinct model/method**.
-   Convergence now requires a genuinely different model, not just a
-   different signer and dataset: two checks a run drove on the same model
-   are one line of evidence, not two, so a same-model rerun under distinct
-   keys no longer promotes. The distinct-model test reads the computed
-   model lineage recorded on each evidence line (see "Execution-observed
-   grounding" and the trust layer below); soft lineage (PROXY or
-   UNVERIFIABLE, a hosted fine-tune, a moving alias, or a wrapper whose
-   base is not declarable) cannot certify a distinct model and never earns
-   a second independent line, while a line with no observed model call
-   keeps the legacy signer axis. An unsigned (NULL keyid) claim is not a
+   claim's signature_bundle). Promotion keys on the signer axis. The
+   load-bearing model-independence signal is the read-side
+   effective-independence number the trust map reports, not this promotion.
+   The promotion path does run a `model_distinct_pair` filter, but it stays
+   inert on the primary path: a claim's finding model lineage is written
+   after promotion runs, so both sides read absent and the filter passes
+   everything through (see "Execution-observed grounding" and the trust
+   layer below for where the model axis is enforced, on read). An unsigned
+   (NULL keyid) claim is not a
    distinct signer and is never promoted, so two legacy NULL-keyid rows do
    not read as two signers. `generated_by` is a display label only and
    plays no part in the gate. `artifact_hash` is a secondary equal-data
