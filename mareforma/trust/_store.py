@@ -574,11 +574,12 @@ def _signed_model_lineage(
     ``evidence_lines.model_lineage`` column against material the signer covered.
     Returns the signed lineage dict only when the bundle (a) is a claim envelope
     that (b) binds to this ``claim_id``, (c) carries a model lineage on its
-    observed record, and (d) verifies against the pubkey when the signer is an
-    enrolled validator. A v1 finding (no signed lineage), an unsigned claim, or
-    any structural failure returns None — the caller then treats the line as
-    soft, never a fabricated distinct model. Never raises: one un-authenticatable
-    line must not deny the whole proposition's count.
+    observed record, and (d) is signed by an enrolled validator whose signature
+    verifies. A non-enrolled signer (whose bundle cannot be verified), a bad
+    signature, a v1 finding (no signed lineage), an unsigned claim, or any
+    structural failure returns None — the caller then treats the line as soft,
+    never a fabricated distinct model. Never raises: one un-authenticatable line
+    must not deny the whole proposition's count.
     """
     if not bundle_json:
         return None
@@ -598,11 +599,17 @@ def _signed_model_lineage(
             return None
         keyid = env["signatures"][0]["keyid"]
         signer_row = _validators.get_validator(conn, keyid)
-        if signer_row is not None:
-            pem = base64.standard_b64decode(signer_row["pubkey_pem"])
-            pub = _signing.public_key_from_pem(pem)
-            if not _signing.verify_envelope(env, pub):
-                return None
+        if signer_row is None:
+            # Fail closed: a non-enrolled signer's bundle cannot be verified, so
+            # its lineage is unauthenticated. Trusting it lets a producer sign a
+            # fabricated distinct model with a throwaway key and inflate the
+            # count (the read-side parallel of the forged-column defence). An
+            # unauthenticatable line reads soft, never a counted model.
+            return None
+        pem = base64.standard_b64decode(signer_row["pubkey_pem"])
+        pub = _signing.public_key_from_pem(pem)
+        if not _signing.verify_envelope(env, pub):
+            return None
         return lineage
     except Exception:
         return None

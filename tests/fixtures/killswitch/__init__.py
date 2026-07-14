@@ -31,7 +31,7 @@ from mareforma.observe import ObservedGrounding, observe
 from mareforma.observe._lineage import ModelLineageTier
 from mareforma.observe.measure import summarize
 from mareforma.trust._store import effective_independence_receipt
-from tests._helpers import _bootstrap_key, _est, _pred, _prop
+from tests._helpers import _bootstrap_key, _enroll_key, _est, _pred, _prop
 
 _CLAUDE = "claude-3-5-sonnet-20241022"  # a recognized-family COMPUTED root
 _ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"  # a recognized provider host
@@ -119,6 +119,9 @@ def excluded_partition(tmp_path: Path) -> KillSwitchOutcome:
 def same_model_corroboration(tmp_path: Path) -> KillSwitchOutcome:
     ka = _bootstrap_key(tmp_path, "ks3_a.key")
     kb = _bootstrap_key(tmp_path, "ks3_b.key")
+    # kb is enrolled under the root so its observed lineage authenticates on
+    # read; only a verified line joins the naive count that the collapse acts on.
+    _enroll_key(tmp_path, ka, kb)
     data_a = tmp_path / "ks3_a.csv"
     data_a.write_text("x\n1\n")
     data_b = tmp_path / "ks3_b.csv"

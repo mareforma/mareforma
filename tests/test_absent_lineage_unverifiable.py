@@ -17,7 +17,9 @@ from mareforma.trust._store import (
     effective_independence,
     effective_independence_receipt,
 )
-from tests._helpers import _bootstrap_key, _est, _pred, _prop, _verdict
+from tests._helpers import (
+    _bootstrap_key, _enroll_key, _est, _pred, _prop, _verdict,
+)
 
 _CLAUDE = "claude-3-5-sonnet-20241022"
 _GPT = "gpt-4o-2024-08-06"
@@ -53,6 +55,7 @@ class TestAbsentLineageIsUnverifiable:
         ka = _bootstrap_key(tmp_path, "ka.key")
         kb = _bootstrap_key(tmp_path, "kb.key")
         kc = _bootstrap_key(tmp_path, "kc.key")
+        _enroll_key(tmp_path, ka, kb)  # so kb's distinct model authenticates
         prop, pred = _prop(), _pred()
         cid = prop.content_id()
         with mareforma.open(tmp_path, key_path=ka) as g:

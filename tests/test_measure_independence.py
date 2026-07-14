@@ -19,7 +19,9 @@ from mareforma.observe.measure import (
     summarize_independence_receipts,
 )
 from mareforma.trust._store import effective_independence_receipt
-from tests._helpers import _bootstrap_key, _est, _pred, _prop, _verdict
+from tests._helpers import (
+    _bootstrap_key, _enroll_key, _est, _pred, _prop, _verdict,
+)
 
 
 _CLAUDE = "claude-3-5-sonnet-20241022"  # COMPUTED root: claude-3-5-sonnet
@@ -115,6 +117,7 @@ def test_receipt_same_model_reads_naive_two_number_one(tmp_path: Path):
     # counter sees 2, the model-aware effective number is 1 — one collapse.
     ka = _bootstrap_key(tmp_path, "ka.key")
     kb = _bootstrap_key(tmp_path, "kb.key")
+    _enroll_key(tmp_path, ka, kb)
     prop, pred = _prop(), _pred()
     with mareforma.open(tmp_path, key_path=ka) as g:
         g.assert_finding(prop, pred, _est(), data_id="ds1", generated_by="run1",
@@ -129,6 +132,7 @@ def test_receipt_same_model_reads_naive_two_number_one(tmp_path: Path):
 def test_receipt_distinct_model_does_not_collapse(tmp_path: Path):
     ka = _bootstrap_key(tmp_path, "ka.key")
     kb = _bootstrap_key(tmp_path, "kb.key")
+    _enroll_key(tmp_path, ka, kb)
     prop, pred = _prop(), _pred()
     with mareforma.open(tmp_path, key_path=ka) as g:
         g.assert_finding(prop, pred, _est(), data_id="ds1", generated_by="run1",

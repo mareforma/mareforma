@@ -56,6 +56,23 @@ def _pem_of(key_path: Path) -> bytes:
     )
 
 
+def _enroll_key(tmp_path: Path, root_key: Path, new_key: Path,
+                identity: str = "second@lab.example") -> None:
+    """Enroll ``new_key`` as a validator under the project's root.
+
+    The root (``root_key``, the first key opened) signs an enrollment for
+    ``new_key``'s public half, so a finding signed by ``new_key`` verifies on
+    read. Without this, ``new_key`` is a non-enrolled signer whose model lineage
+    reads soft (fail closed) and never counts as a distinct model.
+    """
+    import mareforma
+    from mareforma import validators as _validators
+    new_pem = _pem_of(new_key)
+    with mareforma.open(tmp_path, key_path=root_key) as graph:
+        _validators.enroll_validator(
+            graph._conn, graph._signer, new_pem, identity=identity)
+
+
 def _wipe_db(tmp_path: Path) -> None:
     """Delete ``graph.db`` and its WAL/SHM sidecars under ``tmp_path/.mareforma``.
 

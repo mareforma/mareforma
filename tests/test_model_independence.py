@@ -18,7 +18,9 @@ from pathlib import Path
 import mareforma
 from mareforma.observe._lineage import resolve_lineage
 from mareforma.trust._store import effective_independence
-from tests._helpers import _bootstrap_key, _est, _pred, _prop, _verdict
+from tests._helpers import (
+    _bootstrap_key, _enroll_key, _est, _pred, _prop, _verdict,
+)
 
 
 _CLAUDE = "claude-3-5-sonnet-20241022"   # COMPUTED root: claude-3-5-sonnet
@@ -53,9 +55,12 @@ class TestModelDistinctness:
 
     def test_distinct_model_promotes(self, tmp_path: Path) -> None:
         """Distinct signer + distinct data + distinct COMPUTED model still
-        corroborate — the model axis does not block a genuinely different one."""
+        corroborate — the model axis does not block a genuinely different one.
+        The second signer is enrolled so its distinct model authenticates on
+        read; only a verified distinct model counts (fail closed)."""
         ka = _bootstrap_key(tmp_path, "ka.key")
         kb = _bootstrap_key(tmp_path, "kb.key")
+        _enroll_key(tmp_path, ka, kb)
         prop, pred = _prop(), _pred()
         with mareforma.open(tmp_path, key_path=ka) as g:
             g.assert_finding(
@@ -138,6 +143,8 @@ class TestEffectiveIndependenceNumber:
         ka = _bootstrap_key(tmp_path, "ka.key")
         kb = _bootstrap_key(tmp_path, "kb.key")
         kc = _bootstrap_key(tmp_path, "kc.key")
+        _enroll_key(tmp_path, ka, kb, identity="b@lab")
+        _enroll_key(tmp_path, ka, kc, identity="c@lab")
         prop, pred = _prop(), _pred()
         cid = prop.content_id()
 
@@ -204,6 +211,7 @@ class TestHumanIndependence:
         a.mkdir()
         ka = _bootstrap_key(a, "human.key")   # enrolled human root
         kb = _bootstrap_key(a, "model.key")
+        _enroll_key(a, ka, kb, identity="model@lab")
         prop, pred = _prop(), _pred()
         cid = prop.content_id()
         with mareforma.open(a, key_path=ka) as g:
@@ -218,6 +226,7 @@ class TestHumanIndependence:
         # A second, same-model check does NOT collapse the human check away: the
         # duplicate model folds to one, the human unit still stands -> still 2.
         kc = _bootstrap_key(a, "model2.key")
+        _enroll_key(a, ka, kc, identity="model2@lab")
         with mareforma.open(a, key_path=kc) as g:
             g.assert_finding(
                 prop, pred, _est(), data_id="ds3", generated_by="run3",
