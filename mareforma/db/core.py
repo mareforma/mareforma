@@ -700,6 +700,57 @@ def _is_claim_id(value: str) -> bool:
     return bool(_CLAIM_ID_RE.match(value))
 
 
+def _validate_claim_text(text: str) -> str:
+    """Enforce the write-side text invariants and return the clean text.
+
+    Shared by ``add_claim`` and ``update_claim`` so the two write paths cannot
+    drift: both reject empty text, cap the length at ``_MAX_CLAIM_TEXT_LEN``, and
+    run sanitize-on-write (stripping zero-width / bidi / tag-plane codepoints)
+    BEFORE the text is stored or signed. Any consumer reading ``text`` directly
+    then sees a clean, bounded string.
+    """
+    if not text or not text.strip():
+        raise ValueError("Claim text cannot be empty.")
+    if len(text) > _MAX_CLAIM_TEXT_LEN:
+        raise ValueError(
+            f"Claim text exceeds {_MAX_CLAIM_TEXT_LEN}-char cap "
+            f"(got {len(text)}). Split the finding into smaller claims "
+            "and link them via supports=[]."
+        )
+    from mareforma import prompt_safety as _ps
+    cleaned = _ps.sanitize_for_llm(text.strip())
+    if not cleaned or not cleaned.strip():
+        raise ValueError(
+            "Claim text became empty after stripping zero-width / control "
+            "characters. The input contained no visible content."
+        )
+    return cleaned
+
+
+def _refuse_supports_contradicts_overlap(
+    supports: "list | None", contradicts: "list | None",
+) -> None:
+    """Refuse a claim that supports AND contradicts the same upstream UUID.
+
+    A row that simultaneously builds on and refutes the same upstream is
+    logically incoherent (a reader cannot tell which relation is real). Only
+    UUID-shaped refs are compared; DOI / external string refs are out of scope.
+    Shared by ``add_claim`` and ``update_claim`` (an edit to either side can
+    create the overlap) so the gate cannot drift between the two write paths.
+    """
+    if supports and contradicts:
+        sup_ids = {s for s in supports if isinstance(s, str) and _is_claim_id(s)}
+        con_ids = {c for c in contradicts if isinstance(c, str) and _is_claim_id(c)}
+        overlap = sup_ids & con_ids
+        if overlap:
+            raise ValueError(
+                f"supports[] and contradicts[] reference the same "
+                f"upstream claim(s): {sorted(overlap)}. A claim that "
+                "simultaneously builds on and refutes the same upstream "
+                "is logically incoherent; pick one relation."
+            )
+
+
 # Three-way classification of ``supports[]`` and ``contradicts[]`` entries.
 # The flat string API stays — mareforma auto-classifies each entry so
 # JSON-LD export, audit helpers, and future query surfaces can distinguish
@@ -1101,26 +1152,9 @@ def add_claim(
     SigningError
         If ``require_rekor=True`` and the Rekor submission fails.
     """
-    if not text or not text.strip():
-        raise ValueError("Claim text cannot be empty.")
-    if len(text) > _MAX_CLAIM_TEXT_LEN:
-        raise ValueError(
-            f"Claim text exceeds {_MAX_CLAIM_TEXT_LEN}-char cap "
-            f"(got {len(text)}). Split the finding into smaller claims "
-            "and link them via supports=[]."
-        )
-    # Sanitize-on-write strips zero-width / bidi / Goodside-tag-plane
-    # codepoints BEFORE the text is signed. Defense in depth: any
-    # consumer that reads ``text`` directly (not just ``query_for_llm``)
-    # gets a clean string, and the signed payload binds the cleaned
-    # form so downstream verifiers see what the LLM will see.
-    from mareforma import prompt_safety as _ps
-    text = _ps.sanitize_for_llm(text.strip())
-    if not text or not text.strip():
-        raise ValueError(
-            "Claim text became empty after stripping zero-width / control "
-            "characters. The input contained no visible content."
-        )
+    # Enforce the empty / cap / sanitize-on-write invariants. Shared with
+    # update_claim so the two write paths cannot drift.
+    text = _validate_claim_text(text)
     if classification not in VALID_CLASSIFICATIONS:
         raise ValueError(
             f"Unknown classification '{classification}'. "
@@ -1168,24 +1202,10 @@ def add_claim(
     supports_json = json.dumps(supports or [])
     contradicts_json = json.dumps(contradicts or [])
 
-    # Refuse a claim that simultaneously supports AND contradicts the
-    # same upstream — the row would be logically incoherent
-    # (downstream readers cannot tell which interpretation is "real").
-    # Compare on UUID-shaped refs only; DOI / arXiv / external string
-    # refs are out of scope for this gate (a claim citing the same
-    # paper both as supporting evidence and as a contrary point may be
-    # legitimate at the citation level).
-    if supports and contradicts:
-        sup_ids = {s for s in supports if isinstance(s, str) and _is_claim_id(s)}
-        con_ids = {c for c in contradicts if isinstance(c, str) and _is_claim_id(c)}
-        overlap = sup_ids & con_ids
-        if overlap:
-            raise ValueError(
-                f"supports[] and contradicts[] reference the same "
-                f"upstream claim(s): {sorted(overlap)}. A claim that "
-                "simultaneously builds on and refutes the same upstream "
-                "is logically incoherent; pick one relation."
-            )
+    # Refuse a claim that simultaneously supports AND contradicts the same
+    # upstream — the row would be logically incoherent (downstream readers
+    # cannot tell which interpretation is "real"). Shared with update_claim.
+    _refuse_supports_contradicts_overlap(supports, contradicts)
 
     # Cycle / self-loop check on supports[]. DOI entries are external
     # references and not graph nodes — _check_no_cycle filters them
@@ -3362,15 +3382,25 @@ def update_claim(
         validate_status(status)
         new_status = status
     if text is not None:
-        if not text.strip():
-            raise ValueError("Claim text cannot be empty.")
-        new_text = text.strip()
+        # Same empty / cap / sanitize-on-write gate add_claim applies, so an
+        # edit cannot re-introduce an injection payload, blow past the cap, or
+        # leak an unsanitized string into the FTS index via the update trigger.
+        new_text = _validate_claim_text(text)
     if supports is not None:
         new_supports_json = json.dumps(supports)
     if contradicts is not None:
         new_contradicts_json = json.dumps(contradicts)
     if comparison_summary is not None:
         new_comparison_summary = comparison_summary
+
+    # Refuse a support+contradict on the same upstream, the same incoherent
+    # state add_claim rejects. Check the EFFECTIVE post-update lists (the new
+    # side where provided, else the existing one) since an edit to either side
+    # can create the overlap.
+    _refuse_supports_contradicts_overlap(
+        json.loads(new_supports_json or "[]"),
+        json.loads(new_contradicts_json or "[]"),
+    )
 
     # DOIs are no longer network-resolved, so a supports/contradicts edit
     # clears any legacy `unresolved` quarantine rather than re-checking.

@@ -81,6 +81,8 @@ from .core import (
     _normalize_evidence,
     # Support classification + cycle detection.
     _is_claim_id,
+    _validate_claim_text,
+    _refuse_supports_contradicts_overlap,
     classify_support,
     classify_supports,
     _check_no_cycle,

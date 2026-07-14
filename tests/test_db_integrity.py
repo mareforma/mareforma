@@ -17,6 +17,7 @@ from mareforma.db import (
     get_claim,
     open_db,
     open_db_from_db_path,
+    update_claim,
 )
 
 
@@ -121,6 +122,53 @@ def test_cross_thread_writes_do_not_merge_and_lose(tmp_path: Path) -> None:
         # B's claim must survive A's rollback: it belongs to B's own committed
         # transaction, not A's aborted one.
         assert g.get_claim(b_result[0]) is not None
+
+
+def test_update_claim_sanitizes_text_on_write(tmp_path: Path) -> None:
+    """update_claim must strip zero-width / bidi codepoints like add_claim.
+
+    Sanitize-on-write is defense in depth so any consumer reading text directly
+    gets a clean string. update_claim wrote text verbatim, so an edit could
+    re-introduce the injection surface add_claim exists to close, and the FTS
+    trigger copied it into the search index too.
+    """
+    (tmp_path / ".mareforma").mkdir(parents=True, exist_ok=True)
+    conn = open_db(tmp_path)
+    try:
+        cid = add_claim(conn, tmp_path, "clean text")
+        # U+202E (RTL override) + U+200B (zero-width space) inside the edit.
+        update_claim(conn, tmp_path, cid, text="x ‮vil​ y")
+        stored = get_claim(conn, cid)["text"]
+        assert "‮" not in stored
+        assert "​" not in stored
+    finally:
+        conn.close()
+
+
+def test_update_claim_enforces_the_text_cap(tmp_path: Path) -> None:
+    """update_claim must reject text past the cap add_claim enforces."""
+    (tmp_path / ".mareforma").mkdir(parents=True, exist_ok=True)
+    conn = open_db(tmp_path)
+    try:
+        cid = add_claim(conn, tmp_path, "clean text")
+        with pytest.raises(ValueError):
+            update_claim(conn, tmp_path, cid, text="A" * 200_000)
+    finally:
+        conn.close()
+
+
+def test_update_claim_refuses_supports_contradicts_overlap(tmp_path: Path) -> None:
+    """update_claim must refuse a support+contradict on the same upstream,
+    the same logically-incoherent state add_claim rejects."""
+    (tmp_path / ".mareforma").mkdir(parents=True, exist_ok=True)
+    conn = open_db(tmp_path)
+    try:
+        up = add_claim(conn, tmp_path, "an upstream claim")
+        cid = add_claim(conn, tmp_path, "a downstream claim")
+        with pytest.raises(ValueError):
+            update_claim(conn, tmp_path, cid, supports=[up], contradicts=[up])
+    finally:
+        conn.close()
 
 
 def test_literal_path_open_can_write_a_claim(tmp_path: Path) -> None:
