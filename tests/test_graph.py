@@ -1947,3 +1947,27 @@ class TestHealth:
         graph.close()
         with pytest.raises(RuntimeError, match="EpistemicGraph is closed"):
             graph.health()
+
+
+class TestQueryDocstringRefutationExample:
+    """`query`'s docstring documents ``refutation_filter``, a query-only
+    feature. Its composition examples must not call ``search`` with that
+    kwarg: ``search`` does not accept it, so the documented snippet would
+    raise ``TypeError`` if a reader copied it."""
+
+    def test_query_docstring_has_no_search_refutation_example(self):
+        doc = mareforma.EpistemicGraph.query.__doc__
+        # The broken example called graph.search(..., refutation_filter=...).
+        # After the fix the composition block routes refutation_filter only
+        # through query, so no search() call should appear here.
+        assert "graph.search(" not in doc
+
+    def test_search_rejects_refutation_filter_but_query_accepts(self, tmp_path):
+        with mareforma.open(tmp_path) as g:
+            g.assert_claim("gene therapy result", generated_by="lab")
+            with pytest.raises(TypeError):
+                g.search("gene", refutation_filter="clean")
+            rows = g.query(
+                "gene", refutation_filter="clean", include_unverified=True,
+            )
+            assert isinstance(rows, list)

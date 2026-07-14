@@ -530,8 +530,10 @@ class EpistemicGraph:
                     include_invalidated=True,
                 )
 
-                # full-text search within unverified preliminary work
-                graph.search(
+                # clean claims mentioning "gene therapy" within
+                # unverified preliminary work. refutation_filter is a
+                # query-only feature; the search method does not accept it.
+                graph.query(
                     "gene therapy",
                     refutation_filter="clean",
                     include_unverified=True,
