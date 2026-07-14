@@ -39,10 +39,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mareforma import db as _db
-# NOTE: mareforma.signing is imported lazily inside refresh_unsigned so that
-# unsigned-only users can still open the graph even if the cryptography
-# extension fails at import time. Don't promote this to a module-level
-# import without weighing that failure-mode tradeoff.
+# NOTE: mareforma.signing is imported lazily inside the methods that need
+# it (refresh_unsigned, validate, and friends) as a plain local import.
+# This does NOT preserve any unsigned-only open path: `import mareforma`
+# re-exports from mareforma.signing (see __init__), which imports
+# cryptography eagerly, so a broken cryptography extension fails at
+# `import mareforma` before any graph can be opened. The lazy import is
+# a local-import convenience, not a degraded-mode guarantee.
 
 if TYPE_CHECKING:
     import sqlite3

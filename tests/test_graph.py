@@ -1949,6 +1949,59 @@ class TestHealth:
             graph.health()
 
 
+class TestUnsignedOpenFallbackDoesNotExist:
+    """The old NOTE in _graph.py claimed the lazy signing import let
+    unsigned-only users open the graph even with a broken cryptography
+    extension. `import mareforma` re-exports from mareforma.signing (and
+    thus imports cryptography) eagerly, so that fallback cannot exist."""
+
+    def test_import_mareforma_fails_without_cryptography(self):
+        import subprocess
+        import sys
+        import textwrap
+
+        script = textwrap.dedent(
+            """
+            import sys
+            import importlib.abc
+
+            class _Blocker(importlib.abc.MetaPathFinder):
+                def find_spec(self, name, path, target=None):
+                    if name == "cryptography" or name.startswith("cryptography."):
+                        raise ImportError("cryptography extension unavailable")
+                    return None
+
+            for mod in list(sys.modules):
+                if mod == "cryptography" or mod.startswith("cryptography."):
+                    del sys.modules[mod]
+            sys.meta_path.insert(0, _Blocker())
+
+            try:
+                import mareforma  # noqa: F401
+            except ImportError:
+                print("BLOCKED")
+            else:
+                print("IMPORTED")
+            """
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True,
+        )
+        # import mareforma hard-fails: no unsigned-only open path survives.
+        assert "BLOCKED" in result.stdout, result.stdout + result.stderr
+
+    def test_note_does_not_promise_unsigned_open_fallback(self):
+        import inspect
+
+        from mareforma import _graph
+
+        src = inspect.getsource(_graph)
+        # The dead promise was that unsigned-only users "can still open the
+        # graph" with a broken cryptography extension. The comment must not
+        # claim a property the package does not have.
+        assert "still open the graph" not in src
+
+
 class TestQueryDocstringRefutationExample:
     """`query`'s docstring documents ``refutation_filter``, a query-only
     feature. Its composition examples must not call ``search`` with that
