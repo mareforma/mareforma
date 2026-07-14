@@ -98,6 +98,48 @@ class TestKeyLifecycle:
         mode = stat.S_IMODE(key_path.stat().st_mode)
         assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
 
+    def test_overwrite_save_is_durable_and_unpredictable(
+        self, tmp_path, monkeypatch,
+    ):
+        # #49: key rotation (non-exclusive save over an existing key) must
+        # fsync the temp file before the rename and use an unpredictable temp
+        # name, so a power loss in the writeback window cannot leave a
+        # zero-byte key and two concurrent rotations cannot share one
+        # predictable temp.
+        key = generate_keypair()
+        key_path = tmp_path / "signing.key"
+        key_path.write_bytes(b"old key material")  # rotation overwrites
+
+        events = []
+        real_fsync, real_replace = os.fsync, os.replace
+
+        def rec_fsync(fd):
+            events.append(("fsync", fd))
+            return real_fsync(fd)
+
+        replaced = {}
+
+        def rec_replace(src, dst):
+            events.append(("replace",))
+            replaced["src"] = str(src)
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(os, "fsync", rec_fsync)
+        monkeypatch.setattr(os, "replace", rec_replace)
+        save_private_key(key, key_path)
+
+        kinds = [e[0] for e in events]
+        assert "fsync" in kinds, "temp key file was never fsynced before rename"
+        assert kinds.index("fsync") < kinds.index("replace"), (
+            "the key file was renamed into place before being fsynced"
+        )
+        assert replaced["src"] != str(key_path) + ".tmp", (
+            "key rotation used the predictable shared temp name path + '.tmp'"
+        )
+        # The rotated key round-trips.
+        assert (load_private_key(key_path).public_key().public_bytes_raw()
+                == key.public_key().public_bytes_raw())
+
     def test_load_rejects_world_readable_key(self, tmp_path):
         key = generate_keypair()
         key_path = tmp_path / "key"

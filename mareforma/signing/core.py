@@ -284,14 +284,43 @@ def save_private_key(
         os.close(fd)
         return
 
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    # Create with 0600 from the start so the key never exists with looser perms.
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # Rotation path. Mirror the durable atomic write the claims.toml backup
+    # uses: an unpredictable temp name in the key's own directory (two
+    # concurrent overwrites cannot share and clobber one predictable temp),
+    # fsync the data before the rename (a power loss in the writeback window
+    # cannot leave path pointing at an empty or truncated key once os.replace
+    # has already destroyed the old one), then a best-effort directory fsync so
+    # the rename itself survives a crash.
+    import tempfile
+
+    fd, tmp_name = tempfile.mkstemp(
+        prefix="." + path.name + ".", suffix=".tmp", dir=str(path.parent),
+    )
     try:
-        os.write(fd, pem)
-    finally:
-        os.close(fd)
-    os.replace(tmp, path)
+        with os.fdopen(fd, "wb") as f:
+            # fdopen now owns fd, so it is closed even if fchmod raises.
+            # mkstemp already creates at 0o600; fchmod restates the intent so
+            # the key never exists with looser perms even if the umask changes.
+            os.fchmod(f.fileno(), 0o600)
+            f.write(pem)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+    if hasattr(os, "O_DIRECTORY"):
+        try:
+            dir_fd = os.open(str(path.parent), os.O_DIRECTORY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
 
 
 def load_private_key(path: Path) -> Ed25519PrivateKey:
