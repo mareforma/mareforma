@@ -238,6 +238,34 @@ class TestAuditSingleRun:
             assert pinned.exit_code == 0, pinned.output
             assert "verified" in pinned.output
 
+    def test_audit_run_record_verify_is_not_tampered(
+        self, tmp_path: Path,
+    ) -> None:
+        # #47: `verify run.json` must not read the auditor's own signed run
+        # record as tampered. The record's signature is authentic and its
+        # `completed` flag is what resume trusts; a passing signature here is
+        # not a claim verdict, so verify reports UNVERIFIABLE (use resume),
+        # never the bundle-shaped tamper failure it fell through to before.
+        data = tmp_path / "data.csv"
+        data.write_text("a,b\n1,2\n")
+        script = _script(tmp_path, f"open({str(data)!r}).read()\n")
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            auditor = _bootstrap_key(Path("."), "auditor.key")
+            out = Path("audit-out")
+            res = _audit(r, Path("."), script, {"f1": str(data)}, out, auditor)
+            assert res.exit_code == 0, res.output
+            run_json = out / "run.json"
+            assert (json.loads(run_json.read_text())["payloadType"]
+                    == signing.PAYLOAD_TYPE_AUDIT_RUN)
+
+            verified = r.invoke(
+                cli, ["verify", "--json", str(run_json), "--key", str(auditor)])
+            assert verified.exit_code == 2, verified.output  # UNVERIFIABLE
+            payload = json.loads(verified.output)
+            assert payload["verdict"] == "unverifiable"
+            assert payload["target_kind"] == "audit-run"
+
     def test_audit_grounded_binding_violation_fails_verify(
         self, tmp_path: Path,
     ) -> None:

@@ -767,7 +767,61 @@ def _verify_signed_file(
         and doc.get("payloadType") == _signing.PAYLOAD_TYPE_AUDIT_RECEIPT
     ):
         return _verify_audit_receipt_file(path, doc, as_json, key_path)
+    if (
+        isinstance(doc, dict)
+        and doc.get("payloadType") == _signing.PAYLOAD_TYPE_AUDIT_RUN
+    ):
+        return _verify_audit_run_file(path, doc, as_json, key_path)
     return _verify_bundle_file(path, as_json, key_path)
+
+
+def _verify_audit_run_file(
+    path: Path, envelope: dict, as_json: bool, key_path: str | None = None,
+) -> int:
+    """Report on a signed audit ``run.json`` without ever calling it tamper.
+
+    The run record is the auditor's own DSSE envelope; its ``completed`` flag
+    is the corpus resume key read by ``_run_completed``, not a claim verdict.
+    So a valid signature here is UNVERIFIABLE (use resume, not verify), never
+    ``_VERIFY_OK``; an absent or wrong key is UNVERIFIABLE too. This type never
+    reaches the bundle verifier, so an authentic record can never read as the
+    ``_VERIFY_FAIL`` tamper class the way a bundle payload-type mismatch does.
+    """
+    from mareforma import signing as _signing
+    from mareforma.signing import verify_envelope
+
+    def emit(reason: str) -> int:
+        if as_json:
+            click.echo(json.dumps(
+                {"target": str(path), "target_kind": "audit-run",
+                 "verdict": "unverifiable", "exit_code": _VERIFY_UNVERIFIABLE,
+                 "reason": reason},
+                indent=2))
+        else:
+            _err(reason)
+        return _VERIFY_UNVERIFIABLE
+
+    pinned = key_path is not None
+    verify_key_path = Path(key_path) if pinned else _signing.default_key_path()
+    if not verify_key_path.exists():
+        return emit(
+            "no signer key available to check this audit run record. This is "
+            "unverifiable, not a failure; audit run records are trusted via "
+            "resume, not verify.")
+    try:
+        public_key = _signing.load_private_key(verify_key_path).public_key()
+    except _signing.SigningError as exc:
+        return emit(f"could not load the key to check this run record: {exc}")
+    ok = verify_envelope(
+        envelope, public_key,
+        expected_payload_type=_signing.PAYLOAD_TYPE_AUDIT_RUN)
+    if ok:
+        return emit(
+            "audit run record: signature checks out. This is not a claim "
+            "verdict; a run record is trusted through resume, not verify.")
+    return emit(
+        "audit run record: signature did not check out with this key. Pin the "
+        "auditor's key with --key. Run records are trusted via resume.")
 
 
 def _verify_audit_receipt_file(
