@@ -61,6 +61,7 @@ import os
 import sqlite3
 import sys
 import threading
+import time
 import _thread
 from typing import Any
 
@@ -1098,8 +1099,38 @@ def _ollama_server_base(url) -> "str | None":
     return None
 
 
+# A model call loop hits the same (server, model) thousands of times and the
+# digest never changes within a run, so the probe result is memoized behind a
+# short TTL. The TTL (not an unbounded cache) keeps the concurrent-tag-remap
+# residual named in the probe docstring bounded rather than pinned for the whole
+# run. Negative results are cached too, so a miss is not re-probed on every call.
+_OLLAMA_DIGEST_TTL = 60.0  # seconds
+_ollama_digest_cache: "dict[tuple[str, str], tuple[float, str | None]]" = {}
+
+
 def _probe_ollama_digest(url, model_id) -> "str | None":
     """Best-effort weights digest for a local Ollama model, scope-detached.
+
+    Memoized per ``(server base, model)`` behind ``_OLLAMA_DIGEST_TTL`` so a long
+    agent loop resolves the digest once and reuses it instead of firing a probe
+    per inference call. The first miss runs the network body below; later calls
+    within the TTL, hit or miss, reuse the stored answer.
+    """
+    base = _ollama_server_base(url)
+    if not base:
+        return None
+    key = (base, model_id)
+    now = time.monotonic()
+    hit = _ollama_digest_cache.get(key)
+    if hit is not None and now - hit[0] < _OLLAMA_DIGEST_TTL:
+        return hit[1]
+    digest = _query_ollama_digest(base, model_id)
+    _ollama_digest_cache[key] = (now, digest)
+    return digest
+
+
+def _query_ollama_digest(base, model_id) -> "str | None":
+    """Query a local Ollama server for a model's weights digest, scope-detached.
 
     Queries the running server (``/api/ps`` loaded runner, then ``/api/tags``
     installed) for the served model's manifest sha256 — the digest of the weights
@@ -1115,9 +1146,6 @@ def _probe_ollama_digest(url, model_id) -> "str | None":
     unbounded body under the per-socket timeout. Both stay on the loopback host
     with a bounded read, honouring "a remote host is never contacted."
     """
-    base = _ollama_server_base(url)
-    if not base:
-        return None
     token = _scope._active.set(None)  # detach: loader wrappers + audit hook no-op
     try:
         import json as _json
