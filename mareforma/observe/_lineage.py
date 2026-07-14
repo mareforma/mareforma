@@ -281,10 +281,13 @@ def model_distinct_pair(a: "dict | None", b: "dict | None") -> bool:
 def collapse_lineage(records: list[ModelLineage]) -> ModelLineage | None:
     """The single finding-level lineage for a scope's captured model records.
 
-    One record is returned as-is. When a scope captured several, the tier is the
-    most conservative present (UNVERIFIABLE if any is soft or the identities
-    disagree, else PROXY if any is agent-declared, else COMPUTED), so a mixed
-    authoring span never over-claims a clean single model.
+    One record is returned as-is. When a scope captured several, the tier is
+    UNVERIFIABLE if any record is soft or the identities disagree; otherwise every
+    record shares one identity, and a seam-verified COMPUTED wins over a producer
+    declaration of the SAME model (redundant agreement, not conflict), so PROXY
+    survives only for an all-declared span. A mixed authoring span never
+    over-claims a clean single model, and an agreeing declaration never downgrades
+    a capture it corroborates.
 
     A model identity is a remote family root OR a local weights digest — two
     distinct LOCAL models have ``family_root is None`` and are told apart only by
@@ -307,7 +310,12 @@ def collapse_lineage(records: list[ModelLineage]) -> ModelLineage | None:
             records[0], tier=ModelLineageTier.UNVERIFIABLE,
             family_root=None, digest=None, attestor=None,
         )
-    tier = ModelLineageTier.PROXY if ModelLineageTier.PROXY in tiers else ModelLineageTier.COMPUTED
+    # Past the mixed/UNVERIFIABLE guard every record shares one identity, so a
+    # PROXY record here is a producer RE-declaring what a COMPUTED capture already
+    # verified — redundant agreement, not conflict. A seam capture wins: COMPUTED
+    # stands whenever any record carries it, and PROXY only survives when no seam
+    # capture backs the shared identity (an all-declared span).
+    tier = ModelLineageTier.COMPUTED if ModelLineageTier.COMPUTED in tiers else ModelLineageTier.PROXY
     # Not mixed: at most one root and one digest, and never both — every record
     # shares the single surviving identity, so records[0] carries it correctly.
     root = next(iter(roots)) if roots else None
