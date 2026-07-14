@@ -34,7 +34,7 @@ from ._canonical import canonicalize
 # Version of the trust-map shape. Bound into the rendered record so a consumer
 # knows which property set + tier semantics produced it, and a future revision
 # is distinguishable rather than silently reinterpreted.
-TRUST_MAP_VERSION = "v0.3.9"
+TRUST_MAP_VERSION = "v0.3.10"
 
 # Observed-grounding axis versions KNOWN to carry the verdict↔citation binding.
 # An ALLOWLIST, not a denylist: only a GROUNDED verdict stamped with one of these

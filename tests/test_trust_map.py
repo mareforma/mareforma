@@ -37,6 +37,23 @@ _EXPECTED_PROPERTIES = (
     "witnessing",
 )
 
+# The map shape pinned per trust-map version: the ordered property-name set plus
+# whether the independence axis emits a per-finding numeric value. Changing the
+# emitted property set or the independence value semantics requires a new key
+# here, which forces a deliberate TRUST_MAP_VERSION bump. The guards below assert
+# the live version stamp names a pinned shape and the emitted map matches it, so
+# a shape change under a stale stamp fails loudly instead of two releases sharing
+# one version string.
+_SHAPE_BY_VERSION = {
+    "v0.3.10": {
+        "properties": _EXPECTED_PROPERTIES,
+        # v0.3.10 independence reports a per-finding numeric count of pairwise
+        # distinct (model, data, signer) checks; v0.3.9 emitted only the closed
+        # word set {UNVERIFIABLE, MULTI_ROOT}.
+        "independence_numeric": True,
+    },
+}
+
 
 class TestEveryPropertyPresent:
     def test_all_properties_present_with_tier_and_residual(self) -> None:
@@ -53,6 +70,41 @@ class TestEveryPropertyPresent:
         assert tmap.version == TRUST_MAP_VERSION
         assert tmap.subject_kind == "claim"
         assert tmap.subject_id == "cid-9"
+
+
+class TestVersionShapeIsPinned:
+    """Guard the version stamp against a silent map-shape change.
+
+    A version-keyed golden of the emitted property set and the independence value
+    shape. Replaces the tautological ``version == TRUST_MAP_VERSION`` check, which
+    compared the constant to itself and could not catch a shape change that left
+    the constant untouched.
+    """
+
+    def test_live_version_names_a_pinned_shape(self) -> None:
+        assert TRUST_MAP_VERSION in _SHAPE_BY_VERSION, (
+            f"{TRUST_MAP_VERSION} has no pinned map shape; a shape change must "
+            "add a _SHAPE_BY_VERSION entry and bump TRUST_MAP_VERSION deliberately"
+        )
+
+    def test_emitted_property_set_matches_the_pin(self) -> None:
+        shape = _SHAPE_BY_VERSION.get(TRUST_MAP_VERSION)
+        assert shape is not None, f"no pinned shape for {TRUST_MAP_VERSION}"
+        tmap = _assemble(_claim(), n_roots=1, has_inclusion=False)
+        names = tuple(p.name for p in tmap.properties)
+        assert names == shape["properties"]
+
+    def test_independence_value_shape_matches_the_pin(self) -> None:
+        shape = _SHAPE_BY_VERSION.get(TRUST_MAP_VERSION)
+        assert shape is not None, f"no pinned shape for {TRUST_MAP_VERSION}"
+        # A finding with an effective-independence record exercises the per-finding
+        # numeric value that v0.3.10 introduced onto this axis.
+        tmap = _assemble(
+            _claim(), n_roots=2, has_inclusion=False,
+            effective_independence={"number": 2, "soft": False},
+        )
+        value = tmap.get("independence").value
+        assert value.isdigit() is shape["independence_numeric"]
 
 
 class TestGroundingRow:
