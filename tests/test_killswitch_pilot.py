@@ -16,6 +16,7 @@ from mareforma.observe import summarize_pilot
 from mareforma.observe import _loaders
 from tests.fixtures.killswitch import (
     KILL_SWITCHES,
+    register_model_responses,
     run_all,
     same_model_corroboration,
     unrecognized_host_model,
@@ -24,8 +25,8 @@ from tests.fixtures.killswitch import (
 
 # -- kill-switch A: all six caught ------------------------------------------
 
-def test_killswitch_all_six_caught(tmp_path: Path):
-    outcomes = run_all(tmp_path)
+def test_killswitch_all_six_caught(tmp_path: Path, httpx_mock):
+    outcomes = run_all(tmp_path, httpx_mock)
     assert len(outcomes) == 6, "there are exactly six kill-switch fixtures"
     missed = [o.name for o in outcomes if not o.caught]
     assert not missed, (
@@ -46,7 +47,7 @@ def test_each_killswitch_is_distinct():
 
 
 def test_model_axis_killswitches_break_when_provider_derivation_breaks(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, httpx_mock
 ):
     """The two model-axis fixtures must route through the observer's socket seam.
 
@@ -56,9 +57,11 @@ def test_model_axis_killswitches_break_when_provider_derivation_breaks(
     each direction and the fixtures must stop reporting ``caught`` -- proof they
     exercise ``_provider_of`` rather than a hardcoded provider.
     """
-    # Break Anthropic recognition: the same-model call can no longer mint a
-    # COMPUTED distinct model, so the same-model collapse (naive 2 -> number 1)
-    # never forms and the kill-switch stops firing.
+    register_model_responses(httpx_mock)
+    # Break Anthropic recognition: the same-model calls now derive no provider, so
+    # the seam tiers each UNVERIFIABLE (soft) instead of COMPUTED. Soft lineage
+    # drops the naive hard-line count to 0, so the naive-2/number-1 same-model
+    # collapse never forms and the kill-switch stops firing.
     monkeypatch.setattr(_loaders, "_provider_of", lambda url: None)
     assert same_model_corroboration(tmp_path).caught is False
 

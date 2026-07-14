@@ -48,11 +48,18 @@ class KillSwitchOutcome:
     caught: bool
 
 
-def _offline_client() -> httpx.Client:
-    """An httpx client whose transport answers locally — no network, no key."""
-    return httpx.Client(
-        transport=httpx.MockTransport(lambda req: httpx.Response(200, json={}))
-    )
+def register_model_responses(httpx_mock) -> None:
+    """Register canned 2xx bodies for the two model-axis host URLs.
+
+    ``pytest_httpx`` patches ``HTTPTransport.handle_request`` but leaves a real
+    ``httpx.HTTPTransport`` on the client, so a plain ``httpx.Client()`` reads as a
+    genuine network transport at the seam (unlike an offline ``MockTransport``,
+    which the observer classifies as a producer-controlled declaration and tiers
+    PROXY). That is what lets the same-model call earn COMPUTED and the arbitrary
+    host earn UNVERIFIABLE, both through the observer's own host recognition.
+    """
+    httpx_mock.add_response(url=_ANTHROPIC_URL, json={}, is_reusable=True)
+    httpx_mock.add_response(url=_ARBITRARY_URL, json={}, is_reusable=True)
 
 
 def _observed_grounding(client: httpx.Client, url: str, csv_path: Path):
@@ -117,7 +124,7 @@ def same_model_corroboration(tmp_path: Path) -> KillSwitchOutcome:
     data_b = tmp_path / "ks3_b.csv"
     data_b.write_text("x\n2\n")
     prop, pred = _prop(), _pred()
-    client = _offline_client()
+    client = httpx.Client()
     try:
         # Both checks run the SAME model through the real socket seam, so the
         # observer mints each COMPUTED lineage from the recognized host itself.
@@ -181,7 +188,7 @@ def unrecognized_host_model(tmp_path: Path) -> KillSwitchOutcome:
     # a recognized-family string.
     data = tmp_path / "ks6.csv"
     data.write_text("x\n1\n")
-    client = _offline_client()
+    client = httpx.Client()
     try:
         verdict = _observed_grounding(client, _ARBITRARY_URL, data)
     finally:
@@ -207,6 +214,12 @@ KILL_SWITCHES = (
 )
 
 
-def run_all(tmp_path: Path) -> list[KillSwitchOutcome]:
-    """Run the six kill-switch fixtures and return their outcomes."""
+def run_all(tmp_path: Path, httpx_mock) -> list[KillSwitchOutcome]:
+    """Run the six kill-switch fixtures and return their outcomes.
+
+    The two model-axis fixtures drive real ``httpx.Client()`` calls through the
+    observer's socket seam, so ``httpx_mock`` supplies their canned provider
+    responses (see :func:`register_model_responses`).
+    """
+    register_model_responses(httpx_mock)
     return [case(tmp_path) for case in KILL_SWITCHES]
