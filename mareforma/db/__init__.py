@@ -176,6 +176,7 @@ from .restore import (
     _parse_observed_grounding,
     _verify_grounding_binding_on_read,
     _verify_replicated_corroboration,
+    _validate_section_shape,
     _verify_and_insert_replication_verdict,
     _verify_and_insert_contradiction_verdict,
     _verify_and_insert_project_policy,

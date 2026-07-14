@@ -269,12 +269,31 @@ def restore(
         )
 
     try:
-        data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+        raw_text = toml_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        # The path exists but cannot be read (permission denied, or it resolves
+        # to a directory). Surface the documented RestoreError rather than a raw
+        # OSError/IsADirectoryError traceback to an operator mid-recovery.
+        raise RestoreError(
+            f"claims.toml at {toml_path} could not be read: {exc}",
+            kind="toml_unreadable",
+        ) from exc
+    try:
+        data = tomllib.loads(raw_text)
     except tomllib.TOMLDecodeError as exc:
         raise RestoreError(
             f"claims.toml at {toml_path} is malformed: {exc}",
             kind="toml_malformed",
         ) from exc
+
+    # Validate section shapes before any sort touches them: a tampered
+    # claims.toml can set a section to a scalar or plant a scalar entry, and the
+    # sort helpers call .items()/.get() on them and would leak a raw
+    # AttributeError past the documented RestoreError contract.
+    for _section_name in (
+        "validators", "claims", "replication_verdicts", "contradiction_verdicts",
+    ):
+        _validate_section_shape(data.get(_section_name), _section_name)
 
     validators_section: dict = data.get("validators", {}) or {}
     claims_section: dict = data.get("claims", {}) or {}
@@ -1224,6 +1243,33 @@ def _verify_and_insert_project_policy(
         (1 if rekor_required else 0, signer_keyid, envelope_json, created_at),
     )
     return rekor_required
+
+
+def _validate_section_shape(section: Any, name: str) -> None:
+    """Confirm a claims.toml section is a table of tables before iteration.
+
+    An absent section (None) is fine. A present section must be a table whose
+    every entry is itself a table, since the restore sort helpers call
+    ``.items()`` on the section and ``.get()`` on each entry. A scalar in place
+    of either would leak a raw ``AttributeError`` past the documented
+    ``RestoreError`` contract, so name the offending section/entry and raise
+    ``RestoreError(kind='toml_malformed')`` instead.
+    """
+    if section is None:
+        return
+    if not isinstance(section, dict):
+        raise RestoreError(
+            f"claims.toml section [{name}] must be a table, got "
+            f"{type(section).__name__}.",
+            kind="toml_malformed",
+        )
+    for entry_key, entry_val in section.items():
+        if not isinstance(entry_val, dict):
+            raise RestoreError(
+                f"claims.toml entry [{name}.{entry_key}] must be a table, got "
+                f"{type(entry_val).__name__}.",
+                kind="toml_malformed",
+            )
 
 
 def _required_field(d: dict, key: str, context: str) -> Any:
