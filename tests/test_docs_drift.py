@@ -148,6 +148,28 @@ def test_replicated_promotion_docs_do_not_overclaim_the_model_gate(tmp_path):
         )
 
 
+def test_deprecated_label_note_matches_deprecated_labels(tmp_path=None):
+    """#48: the "deprecated public labels" note must list only the real aliases.
+
+    Only ``REPLICATED`` and ``ESTABLISHED`` are retired public labels resolved as
+    one-release aliases (``mareforma._DEPRECATED_SUPPORT_LABELS``); ``PRELIMINARY``
+    was never a module attribute and is not deprecated. The note on both pages
+    must name exactly the aliases the code honors.
+    """
+    known = {"PRELIMINARY", "REPLICATED", "ESTABLISHED"}
+    expected = set(mareforma._DEPRECATED_SUPPORT_LABELS)
+    for page in (DOCS / "concepts" / "trust.mdx",
+                 DOCS / "for-agents" / "agents.mdx"):
+        text = page.read_text(encoding="utf-8")
+        idx = text.index("are deprecated public labels")
+        window = text[idx - 160:idx]
+        listed = {label for label in known if f"`{label}`" in window}
+        assert listed == expected, (
+            f"{page.name} lists {listed} as deprecated public labels; the code "
+            f"deprecates only {expected}"
+        )
+
+
 def _section(text: str, heading: str) -> str:
     """Return *text* from *heading* up to the next same-or-higher heading."""
     start = text.index(heading)

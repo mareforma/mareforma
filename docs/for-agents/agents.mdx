@@ -211,14 +211,15 @@ for the full model.
 ## Support levels
 
 <Warning>
-  `PRELIMINARY` / `REPLICATED` / `ESTABLISHED` are deprecated public labels this
-  release, kept working as a one-release alias. They still fire and gate as
-  described below, but the lead independence signal is the effective-independence
-  number on `mareforma map`: the count of pairwise-distinct (model, data, signer)
-  checks behind a finding. Read the number, not the label.
+  `REPLICATED` / `ESTABLISHED` are deprecated public labels this release, kept
+  working as a one-release alias; `PRELIMINARY` stays a stored `support_level`.
+  All three still fire and gate as described below, but the lead independence
+  signal is the effective-independence number on `mareforma map`: the count of
+  pairwise-distinct (model, data, signer) checks behind a finding. Read the
+  number, not the label.
 </Warning>
 
-| Level (deprecated alias) | Meaning | How reached |
+| Level | Meaning | How reached |
 |---|---|---|
 | `PRELIMINARY` | One agent claimed it | Automatic on first assertion |
 | `REPLICATED` | ≥2 claims under distinct signing keys converged on the same upstream | Automatic at INSERT |
