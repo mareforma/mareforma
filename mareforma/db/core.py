@@ -319,8 +319,18 @@ def open_db(root: Path) -> sqlite3.Connection:
         conn.commit()
         return conn
 
-    except sqlite3.OperationalError as exc:
-        raise DatabaseError(f"Could not open database at {path}: {exc}") from exc
+    except sqlite3.Error as exc:
+        # sqlite3.DatabaseError ('file is not a database') is the PARENT of
+        # OperationalError, so a corrupt or truncated graph.db raised it at the
+        # PRAGMA user_version read and sailed past a narrow OperationalError
+        # catch as a bare traceback. Catch the whole sqlite3.Error family so the
+        # documented "Raises DatabaseError on SQLite errors" contract holds and
+        # the corruption case reaches the claims.toml remediation.
+        raise DatabaseError(
+            f"Could not open database at {path}: {exc}. If graph.db is "
+            "corrupt or truncated, delete .mareforma/graph.db and start "
+            "fresh; claims.toml is a human-readable record of the prior state."
+        ) from exc
 
 
 def open_db_from_db_path(db_path: "str | Path") -> sqlite3.Connection:
@@ -346,28 +356,38 @@ def open_db_from_db_path(db_path: "str | Path") -> sqlite3.Connection:
     # schema script (idempotent). This preserves the user-supplied
     # filename instead of silently rewriting it under .mareforma/.
     db_file.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(
-        str(db_file), check_same_thread=False, factory=_GraphConnection
-    )
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version == 0:
-        conn.executescript(_SCHEMA_SQL)
-        conn.executescript(_ADDITIVE_TABLES_SQL)
-        conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
-    else:
-        conn.executescript(_ADDITIVE_TABLES_SQL)
-        _ensure_evidence_lines_columns(conn)
-    conn.commit()
-    # Attach the rebuildable supports cache just like open_db does. Without
-    # it add_claim's unconditional supports-edge maintenance hits
-    # 'no such table: supports_cache.cache_meta' and every write fails,
-    # even a claim with no supports. The parent directory is the "project
-    # root" for cache lookups per this function's own docstring, so the
-    # sidecar lands at <parent>/.mareforma/claim_supports_cache.db.
-    _attach_supports_cache(conn, db_file.parent)
-    return conn
+    try:
+        conn = sqlite3.connect(
+            str(db_file), check_same_thread=False, factory=_GraphConnection
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version == 0:
+            conn.executescript(_SCHEMA_SQL)
+            conn.executescript(_ADDITIVE_TABLES_SQL)
+            conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+        else:
+            conn.executescript(_ADDITIVE_TABLES_SQL)
+            _ensure_evidence_lines_columns(conn)
+        conn.commit()
+        # Attach the rebuildable supports cache just like open_db does. Without
+        # it add_claim's unconditional supports-edge maintenance hits
+        # 'no such table: supports_cache.cache_meta' and every write fails,
+        # even a claim with no supports. The parent directory is the "project
+        # root" for cache lookups per this function's own docstring, so the
+        # sidecar lands at <parent>/.mareforma/claim_supports_cache.db.
+        _attach_supports_cache(conn, db_file.parent)
+        return conn
+    except sqlite3.Error as exc:
+        # Same contract as open_db: a corrupt or truncated file raises
+        # sqlite3.DatabaseError at the PRAGMA read, which is NOT an
+        # OperationalError. Wrap the whole sqlite3.Error family so a literal
+        # path never leaks a raw sqlite3 exception.
+        raise DatabaseError(
+            f"Could not open database at {db_file}: {exc}. If the file is "
+            "corrupt or truncated, delete it and restore from claims.toml."
+        ) from exc
 
 
 def _ensure_claims_columns_for_upgrade(
