@@ -360,6 +360,13 @@ def open_db_from_db_path(db_path: "str | Path") -> sqlite3.Connection:
         conn.executescript(_ADDITIVE_TABLES_SQL)
         _ensure_evidence_lines_columns(conn)
     conn.commit()
+    # Attach the rebuildable supports cache just like open_db does. Without
+    # it add_claim's unconditional supports-edge maintenance hits
+    # 'no such table: supports_cache.cache_meta' and every write fails,
+    # even a claim with no supports. The parent directory is the "project
+    # root" for cache lookups per this function's own docstring, so the
+    # sidecar lands at <parent>/.mareforma/claim_supports_cache.db.
+    _attach_supports_cache(conn, db_file.parent)
     return conn
 
 
