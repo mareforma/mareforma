@@ -6,9 +6,9 @@
 </p>
 
 <p align="center">
-  <strong>Verify your AI scientists' findings the way science verifies itself</strong>
+  <strong>Where AI discovery becomes science</strong>
   <br>
-  <sub>signed provenance · computed grounding · effective independence · local-first</sub>
+  <sub>trust earned, not declared · uses real data · effectively independent · publicly verifiable · local-first</sub>
 </p>
 
 <p align="center">
@@ -48,7 +48,7 @@ graph.assert_claim(
 )
 ```
 
-A finding whose step never executed cannot earn `GROUNDED`. The observer watched the scope, saw no cited read, and returns `UNGROUNDED`, so the trust map's grounding edge names no source. The model filling the gap from memory is caught at the boundary, by observation, not by a label the agent chose. [Example 02](examples/02_compounding_agents/) runs the absence catch end to end.
+A finding whose step never ran cannot earn `GROUNDED`. The observer saw no read of the cited data, so it returns `UNGROUNDED`. The model that filled the gap from memory is caught by what ran, not by a label it chose. [Example 02](examples/02_compounding_agents/) runs this catch end to end.
 
 ## Install
 
@@ -63,8 +63,8 @@ mareforma bootstrap   # optional: sign your claims and enable the public log
 |---|---|
 | **Signed claims** | Each claim shows who stands behind it and cannot be altered unnoticed. |
 | **Grounding check** | Computes whether a finding actually rests on data it read, or on the model's memory, by observing the run. |
-| **Trust map** | `mareforma map <claim>` places every trust property (grounding, independence, contestation, witnessing) at its tier, and states plainly what it does not evaluate. |
-| **Audit-grade verify** | `mareforma verify <claim>` re-checks signatures, the grounding-to-citation binding, and support level, with stable exit codes for CI (0 verified, 1 tampered, 2 unverifiable). |
+| **Trust map** | `mareforma map <claim>` shows every trust property (grounding, independence, contestation, witnessing) with how far it can be trusted, and says plainly what it cannot check. |
+| **Verify** | `mareforma verify <claim>` re-checks the signatures, that the grounding verdict matches the data the finding cites, and the support level, with stable exit codes for CI (0 verified, 1 tampered, 2 unverifiable). |
 | **Diagnose a run** | `mareforma diagnose -- python run.py` runs a target under the observer and reports what data actually flowed, and where a silent fallback hid. |
 | **Audit a pipeline** | `mareforma audit --findings map.json -- python run.py` runs a pipeline that never imports mareforma and signs one grounding receipt per finding, from the observer alone. |
 | **Optional public log** | Publish a claim to a public, append-only log for an independent, timestamped record. |
@@ -72,19 +72,11 @@ mareforma bootstrap   # optional: sign your claims and enable the public log
 
 ## Reading trust from the graph
 
-Trust is a property of a claim's position in the graph, never a self-reported score. The lead signal is **effective independence**: the number of pairwise-distinct (model, data, signer) checks behind a finding. Two agents on the same model that converge are one line of evidence, not two, so the count holds until a genuinely different model, or a human check, raises it. `mareforma map <claim>` reports the number and marks it `UNVERIFIABLE` when the model lineage is too soft to tell distinct checks apart, or when every validator traces to a single trust root (the honest reading when one operator could mint every key).
+Trust comes from a claim's place in the graph, never from a self-reported score. The lead signal is **effective independence**: how many checks behind a finding differ in model, data, and signer. Two agents on the same model are one line of evidence, not two, so the count holds until a genuinely different model, or a human check, raises it. `mareforma map <claim>` reports the number and marks it `UNVERIFIABLE` when it cannot tell the models apart. When every signer traces back to one operator who could have made all the keys, it names that single trust root on the count: the number then rests on distinct model or human lines within one trust domain, not independence across operators.
 
 High-trust claims are re-checked against their signatures on every read, so a tampered claim in a shared graph is caught when you query, not served.
 
-The older support labels still resolve this release, as deprecated one-release aliases. Read the effective-independence number, not the label:
-
-| Level (deprecated alias) | Meaning |
-|---|---|
-| `PRELIMINARY` | One agent asserted it. No independent agreement yet. |
-| `REPLICATED` | Two signers converged on the same finding. A convergence marker, not proof of independence: signing keys are operator-mintable, so distinct signatures are a weak prior. |
-| `ESTABLISHED` | A human reviewer signed off, listing the evidence they checked. |
-
-Classification stays a secondary axis the agent declares: `INFERRED` (model reasoning), `ANALYTICAL` (analysis run against real data), `DERIVED` (built on higher-trust claims). It is a declaration, kept honest by the computed grounding verdict above, never the trust signal on its own.
+Classification stays a secondary label the agent declares: `INFERRED` (model reasoning), `ANALYTICAL` (analysis run against real data), `DERIVED` (built on higher-trust claims). It is a declaration, kept honest by the computed grounding verdict above, never the trust signal on its own.
 
 ## Examples
 
@@ -93,8 +85,8 @@ Classification stays a secondary axis the agent declares: `INFERRED` (model reas
 | 01 | [API Walkthrough](examples/01_api_walkthrough/) | The full API in one runnable script |
 | 02 | [Compounding Agents](examples/02_compounding_agents/) | The absence catch and computed independence, run end to end |
 | 03 | [Documented Contestation](examples/03_documented_contestation/) | An agent challenges established consensus |
-| 04 | [Private Data, Public Findings](examples/04_private_data_public_findings/) | Two labs share provenance without sharing data |
-| 05 | [Drug Target Provenance](examples/05_drug_target_provenance/) | A real research agent with honest evidence labels |
+| 04 | [Private Data, Public Findings](examples/04_private_data_public_findings/) | Two labs share how they reached a finding without sharing the data |
+| 05 | [Drug Target Provenance](examples/05_drug_target_provenance/) | A real research agent that labels which findings come from real data and which from the model's guess |
 | 06 | [Verify in CI](examples/06_ci_verify/) | `mareforma verify` as a GitHub Actions gate, keyed on exit codes |
 
 <hr>

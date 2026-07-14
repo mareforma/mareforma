@@ -20,6 +20,7 @@ from mareforma.trust_map import (
     _assemble,
 )
 from mareforma.trust_map_html import render_html
+from tests._helpers import _claim
 
 # The eleven properties the map must always place, in order.
 _EXPECTED_PROPERTIES = (
@@ -35,27 +36,6 @@ _EXPECTED_PROPERTIES = (
     "trust_root",
     "witnessing",
 )
-
-
-def _claim(**overrides) -> dict:
-    """A minimal claim row dict for _assemble, with sane defaults."""
-    base = {
-        "claim_id": "11111111-2222-3333-4444-555555555555",
-        "text": "a finding",
-        "classification": "ANALYTICAL",
-        "support_level": "PRELIMINARY",
-        "status": "open",
-        "supports_json": "[]",
-        "contradicts_json": "[]",
-        "asserter_keyid": "abcdef0123456789",
-        "signature_bundle": "{}",
-        "transparency_logged": 1,
-        "verified": True,
-        "observed_grounding": None,
-        "t_invalid": None,
-    }
-    base.update(overrides)
-    return base
 
 
 class TestEveryPropertyPresent:

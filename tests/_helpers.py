@@ -101,6 +101,32 @@ def _est():
     return EffectEstimate(-0.8, EffectType.SMD, p_value=0.001)
 
 
+def _claim(**overrides) -> dict:
+    """A minimal claim row dict for ``trust_map._assemble``, with sane defaults.
+
+    Shared builder for the trust-map tests; ``**overrides`` set individual
+    fields. Replaces the byte-identical copies test_trust_map and
+    test_trust_map_single_root each defined locally.
+    """
+    base = {
+        "claim_id": "11111111-2222-3333-4444-555555555555",
+        "text": "a finding",
+        "classification": "ANALYTICAL",
+        "support_level": "PRELIMINARY",
+        "status": "open",
+        "supports_json": "[]",
+        "contradicts_json": "[]",
+        "asserter_keyid": "abcdef0123456789",
+        "signature_bundle": "{}",
+        "transparency_logged": 1,
+        "verified": True,
+        "observed_grounding": None,
+        "t_invalid": None,
+    }
+    base.update(overrides)
+    return base
+
+
 def _verdict(model_id: str, *, source: str = "socket"):
     """A grounding verdict carrying a model lineage of the requested tier.
 
