@@ -1605,11 +1605,20 @@ def _maybe_update_replicated_unlocked(
     # below). Short-circuit before the SELECT so neither the new row
     # nor any open peer is promoted.
     new_status_row = conn.execute(
-        "SELECT status, asserter_keyid, observed_grounding, t_invalid "
-        "FROM claims WHERE claim_id = ?",
+        "SELECT status, support_level, asserter_keyid, observed_grounding, "
+        "t_invalid FROM claims WHERE claim_id = ?",
         (new_claim_id,),
     ).fetchone()
     if new_status_row is None or new_status_row["status"] != "open":
+        return
+    # An already-ESTABLISHED new claim (a seed) is not a convergence candidate:
+    # the candidate-peer SELECT below already excludes ESTABLISHED rows as peers
+    # (support_level != 'ESTABLISHED'), so the new claim must be held to the same
+    # bar. Without this a seed citing a shared anchor rode its own promotion into
+    # peer_ids, and the promotion UPDATE then attempted an illegal
+    # ESTABLISHED -> REPLICATED transition that aborted the whole statement,
+    # stranding the honest peer and setting a retry flag no retry could clear.
+    if new_status_row["support_level"] == "ESTABLISHED":
         return
     # A claim a signed contradiction verdict marked invalid (t_invalid set) must
     # not climb the trust ladder through convergence, nor ride an honest peer's
