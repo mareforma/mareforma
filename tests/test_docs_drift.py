@@ -114,3 +114,31 @@ def test_prov_o_claim_is_scoped_to_default_format():
         assert "--format=prov-o" in cli_doc or "`prov-o`" in cli_doc, (
             "the PROV-O-conformance caveat must name the prov-o format"
         )
+
+
+def _section(text: str, heading: str) -> str:
+    """Return *text* from *heading* up to the next same-or-higher heading."""
+    start = text.index(heading)
+    level = heading[: len(heading) - len(heading.lstrip("#"))]
+    rest = text[start + len(heading):]
+    ahead = re.search(rf"^#{{1,{len(level)}}} ", rest, re.MULTILINE)
+    return rest[: ahead.start()] if ahead else rest
+
+
+def test_api_compute_status_counts_independence_by_signer():
+    """#29: the compute_status reference must count independence by signer.
+
+    Independence keys on the claim's ``asserter_keyid``, with ``generated_by``
+    only the fallback for legacy or unsigned lines. The reference elsewhere says
+    so (the REPLICATED rows), so the compute_status paragraph must not claim
+    ``generated_by`` is the primary counting axis.
+    """
+    api = (DOCS / "reference" / "api.mdx").read_text(encoding="utf-8")
+    section = _section(api, "#### `compute_status(")
+    assert "asserter_keyid" in section, (
+        "compute_status must describe independence in signer (asserter_keyid) terms"
+    )
+    collapsed = " ".join(section.split())
+    assert "counted by distinct run (`generated_by`)" not in collapsed, (
+        "compute_status must not name generated_by as the primary independence axis"
+    )

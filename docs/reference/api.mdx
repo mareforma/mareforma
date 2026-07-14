@@ -917,8 +917,10 @@ marker, not a corroboration or independence verdict: cross-model error
 correlation is unmodeled and is the named residual. `compute_frame_status(contrary_independent_support)`
 returns `FrameStatus.CONTESTED` when a contrary proposition in the same frame
 has ≥1 independent supporting line, else `CONSISTENT`. Independence is counted by
-distinct run (`generated_by`) with a `data_id` guard, so one run yields at most
-one support and one refute. `STATUS_POLICY` is the policy stamp
+distinct signer (the claim's `asserter_keyid`) with `data_id` and model lineage
+as guards, so one signer yields at most one support and one refute; distinct
+`generated_by` run is only the fallback for legacy or unsigned lines.
+`STATUS_POLICY` is the policy stamp
 (`"status_policy@v4"`), independent of the package version.
 
 Errors: `TrustError` (base), `NonFalsifiablePropositionError`,
