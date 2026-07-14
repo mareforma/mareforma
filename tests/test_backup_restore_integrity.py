@@ -8,6 +8,11 @@ from __future__ import annotations
 
 import os
 
+try:
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:  # pragma: no cover -- 3.10 path
+    import tomli as tomllib  # type: ignore[no-redef]
+
 import mareforma
 from tests._helpers import _bootstrap_key
 
@@ -166,3 +171,65 @@ def test_close_inside_a_nested_defer_backup_still_flushes_the_batch(
             assert conn_id not in _core._backup_suspended  # no leaked key
 
     assert "claim written mid batch" in out.read_text()
+
+
+def test_null_other_claim_id_verdict_does_not_break_the_backup(tmp_path, capsys):
+    """A single-row cross-method verdict stores other_claim_id=None. The backup
+    must not choke on the NULL: tomli_w cannot serialize None, and the blanket
+    except turned that into a permanent silent stall where claims.toml froze."""
+    from tests._helpers import _load_signer
+
+    root_key = _bootstrap_key(tmp_path, "root.key")
+    member_key = _bootstrap_key(tmp_path, "member.key")
+    out = tmp_path / "claims.toml"
+
+    with mareforma.open(tmp_path, key_path=root_key) as g:
+        # The member claim is signed by a distinct key: a verdict issuer cannot
+        # verdict a claim it authored (self-verdicts are refused).
+        member = g.assert_claim("a claim that got a cross-method verdict",
+                                generated_by="x", signer=_load_signer(member_key))
+        g.record_replication_verdict(
+            verdict_id="v_single", cluster_id="c1", member_claim_id=member,
+            other_claim_id=None, method="cross-method",
+        )
+        # A claim asserted AFTER the NULL verdict must still land in the backup.
+        later = g.assert_claim("a claim asserted after the verdict",
+                               generated_by="x")
+
+    err = capsys.readouterr().err
+    assert "claims.toml backup failed" not in err
+
+    data = tomllib.loads(out.read_text())
+    assert later in data["claims"]
+    assert "v_single" in data.get("replication_verdicts", {})
+    # The NULL key is simply omitted, not serialized as a value.
+    assert "other_claim_id" not in data["replication_verdicts"]["v_single"]
+
+
+def test_null_integrated_time_rekor_entry_does_not_break_the_backup(
+    tmp_path, capsys,
+):
+    """A rekor inclusion row can carry a NULL integrated_time (a malformed
+    integratedTime in the log response). The backup must omit the key rather
+    than hand None to the TOML serializer."""
+    root_key = _bootstrap_key(tmp_path, "root.key")
+    out = tmp_path / "claims.toml"
+
+    with mareforma.open(tmp_path, key_path=root_key) as g:
+        cid = g.assert_claim("a witnessed claim", generated_by="x")
+        g._conn.execute(
+            "INSERT INTO rekor_inclusions "
+            "(claim_id, uuid, log_index, integrated_time, raw_response_b64, "
+            " recorded_at) VALUES (?, ?, ?, NULL, ?, ?)",
+            (cid, "uuid-abc", 1, "cmF3", "2026-01-01T00:00:00Z"),
+        )
+        g._conn.commit()
+        # Trigger a fresh backup that reads the NULL-integrated_time row.
+        g.assert_claim("another claim to force a backup", generated_by="x")
+
+    err = capsys.readouterr().err
+    assert "claims.toml backup failed" not in err
+
+    data = tomllib.loads(out.read_text())
+    assert cid in data.get("rekor_inclusions", {})
+    assert "integrated_time" not in data["rekor_inclusions"][cid]

@@ -5041,16 +5041,22 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
             data["replication_verdicts"] = {}
             for v in rep_rows:
                 vid = v["verdict_id"]
-                data["replication_verdicts"][vid] = {
+                # other_claim_id is NULL for a single-row cross-method verdict.
+                # TOML cannot serialize None, so emit the key only when present,
+                # mirroring the conditional-key pattern in the claims section.
+                # restore reads it with .get(), so an absent key yields None.
+                verdict_entry: dict[str, Any] = {
                     "cluster_id": v["cluster_id"],
                     "member_claim_id": v["member_claim_id"],
-                    "other_claim_id": v["other_claim_id"],
                     "method": v["method"],
                     "confidence_json": v["confidence_json"],
                     "issuer_keyid": v["issuer_keyid"],
                     "signature": base64.b64encode(v["signature"]).decode("ascii"),
                     "created_at": v["created_at"],
                 }
+                if v["other_claim_id"] is not None:
+                    verdict_entry["other_claim_id"] = v["other_claim_id"]
+                data["replication_verdicts"][vid] = verdict_entry
         con_rows = list_contradiction_verdicts(conn, include_invalidated=True)
         if con_rows:
             data["contradiction_verdicts"] = {}
@@ -5077,13 +5083,19 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
         if rekor_rows:
             data["rekor_inclusions"] = {}
             for r in rekor_rows:
-                data["rekor_inclusions"][r["claim_id"]] = {
+                # integrated_time is NULL when the log response carried a
+                # malformed integratedTime. Emit the key only when present so
+                # None is never handed to the TOML serializer; restore reads it
+                # with .get() and tolerates its absence.
+                rekor_entry: dict[str, Any] = {
                     "uuid": r["uuid"],
                     "log_index": r["log_index"],
-                    "integrated_time": r["integrated_time"],
                     "raw_response_b64": r["raw_response_b64"],
                     "recorded_at": r["recorded_at"],
                 }
+                if r["integrated_time"] is not None:
+                    rekor_entry["integrated_time"] = r["integrated_time"]
+                data["rekor_inclusions"][r["claim_id"]] = rekor_entry
 
         # Project policy: a root-signed, project-wide trust declaration. The
         # signed envelope is the authority restore verifies; the flat fields
