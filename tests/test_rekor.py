@@ -741,6 +741,42 @@ class TestRefreshUnsigned:
             result = graph.refresh_unsigned()
         assert result == {"checked": 0, "logged": 0, "still_unlogged": 0}
 
+    def test_refresh_unsigned_logs_a_clean_grounded_claim(
+        self, tmp_path: Path, httpx_mock,
+    ) -> None:
+        """A grounded claim whose initial submit failed re-logs cleanly.
+
+        The live-payload re-derivation must include observed_grounding, which the
+        signing path binds into the envelope. Omitting it makes the drift guard
+        fire on an untampered grounded row and refuse it forever."""
+        import warnings
+
+        httpx_mock.add_response(method="POST", url=_TEST_REKOR_URL, status_code=503)
+        record = {
+            "version": "v0.3.9", "grounding": "GROUNDED",
+            "reason": "a read matching the cited source returned non-empty data",
+            "cited_sources": ["/data/set.csv"],
+            "receipt_digest": "sha256:deadbeef",
+        }
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(
+            tmp_path, key_path=key_path, rekor_url=_TEST_REKOR_URL,
+        ) as graph:
+            claim_id = graph.assert_claim(
+                "grounded finding", observed_grounding=record,
+            )
+            assert graph.get_claim(claim_id)["transparency_logged"] == 0
+
+            _mirror_rekor(httpx_mock)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                result = graph.refresh_unsigned()
+            assert graph.get_claim(claim_id)["transparency_logged"] == 1
+
+        drift = [w for w in caught if "drifted" in str(w.message)]
+        assert not drift, "a clean grounded row was falsely flagged as drifted"
+        assert result == {"checked": 1, "logged": 1, "still_unlogged": 0}
+
     def test_refresh_unsigned_clears_pending_claims(
         self, tmp_path: Path, httpx_mock,
     ) -> None:

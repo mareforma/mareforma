@@ -2507,7 +2507,7 @@ class EpistemicGraph:
                 evidence_dict = json.loads(claim.get("evidence_json") or "{}")
             except (ValueError, TypeError):
                 evidence_dict = {}
-            live_payload = _signing.canonical_statement({
+            live_fields = {
                 "claim_id": cid,
                 "text": claim["text"],
                 "classification": claim["classification"],
@@ -2517,7 +2517,20 @@ class EpistemicGraph:
                 "source_name": claim.get("source_name"),
                 "artifact_hash": claim.get("artifact_hash"),
                 "created_at": claim["created_at"],
-            }, evidence_dict)
+            }
+            # A grounded claim binds its observed_grounding verdict into the
+            # signed payload, so the re-derivation must include it or the drift
+            # guard fires on every untampered grounded row. Add the key only when
+            # present, mirroring the restore path, so pre-observer claims stay
+            # byte-identical.
+            from mareforma.db.restore import _parse_observed_grounding
+
+            observed_grounding = _parse_observed_grounding(
+                claim.get("observed_grounding")
+            )
+            if observed_grounding is not None:
+                live_fields["observed_grounding"] = observed_grounding
+            live_payload = _signing.canonical_statement(live_fields, evidence_dict)
             if live_payload != payload_bytes:
                 warnings.warn(
                     f"Claim {cid} row drifted from its signed payload; "
