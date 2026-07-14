@@ -69,6 +69,26 @@ def test_export_format_choices_documented():
         assert choice in cli_doc, f"cli.mdx does not document --format={choice}"
 
 
+def test_every_cli_command_documented():
+    """#46: every visible top-level command is documented in cli.mdx.
+
+    Reads the command list from ``cli.commands`` in code, the same source of
+    truth ``_export_format_choices`` uses, so it fails whenever a future
+    command drifts out of the reference, not only for today's ``audit`` and
+    ``reexec`` gaps. Hidden/deprecated commands (e.g. ``stats``) are excluded
+    because they are absent from ``--help`` and the reference by design. The
+    check requires the canonical ``mareforma <cmd>`` form rather than a bare
+    substring, so a command whose name is also a common word (``key``,
+    ``map``, ``status``) cannot read as documented by coincidence.
+    """
+    cli_doc = (DOCS / "reference" / "cli.mdx").read_text(encoding="utf-8")
+    visible = [name for name, cmd in cli.commands.items()
+               if not getattr(cmd, "hidden", False)]
+    missing = sorted(name for name in visible
+                     if f"mareforma {name}" not in cli_doc)
+    assert not missing, f"cli.mdx omits visible command(s): {missing}"
+
+
 def test_findings_convergent_example_uses_a_distinct_signer(tmp_path):
     """#28: the findings.mdx CONVERGENT recipe must reach CONVERGENT when run.
 
