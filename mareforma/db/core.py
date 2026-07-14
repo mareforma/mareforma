@@ -21,7 +21,7 @@ import uuid
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from ._schema_sql import (  # noqa: F401
     _ADDITIVE_TABLES_SQL,
@@ -4487,17 +4487,19 @@ def _read_path_row(
 
 def _project_verified_rows(
     conn: sqlite3.Connection,
-    rows: list,
+    rows: "Iterable",
     *,
     limit: int,
     include_unverified: bool,
 ) -> list[dict]:
-    """Filter and project already-fetched rows for a read surface.
+    """Filter and project rows for a read surface, stopping at ``limit`` survivors.
 
     Computes the per-call reputation, enrolled set, and trust-domain disclosure
     once, then applies :func:`_read_path_row` in sorted order until ``limit``
     survivors are collected. The single ordered fetch happens in the caller, so
-    the table is sorted once, not re-sorted per batch.
+    the table is sorted once, not re-sorted per batch. ``rows`` may be a live
+    cursor: the early break then stops fetching, so the common path pulls a
+    handful of rows rather than the whole scan ceiling.
     """
     reputation = _compute_validator_reputation(conn)
     enrolled_keyids = _enrolled_validator_keyids(conn)
@@ -4668,13 +4670,15 @@ def query_claims(
         f"created_at DESC LIMIT ?"
     )
     try:
-        rows = conn.execute(
-            base_sql, params + [_read_scan_ceiling(limit)],
-        ).fetchall()
+        cursor = conn.execute(base_sql, params + [_read_scan_ceiling(limit)])
     except sqlite3.OperationalError as exc:
         raise DatabaseError(f"Failed to query claims: {exc}") from exc
+    # Step the live cursor rather than .fetchall(): _project_verified_rows breaks
+    # at `limit` survivors, and on the common path (the first `limit` rows all
+    # survive) that break stops fetching too, so the ceiling stays the worst-case
+    # bound for the adversarial drain path instead of the per-call materialisation.
     return _project_verified_rows(
-        conn, rows, limit=limit, include_unverified=include_unverified,
+        conn, cursor, limit=limit, include_unverified=include_unverified,
     )
 
 
@@ -4814,9 +4818,7 @@ def search_claims(
         f"ORDER BY rank LIMIT ?"
     )
     try:
-        rows = conn.execute(
-            base_sql, params + [_read_scan_ceiling(limit)],
-        ).fetchall()
+        cursor = conn.execute(base_sql, params + [_read_scan_ceiling(limit)])
     except sqlite3.OperationalError as exc:
         # FTS5 raises OperationalError on malformed MATCH syntax.
         # Wrap so callers don't have to import sqlite3 to pattern-match.
@@ -4826,8 +4828,10 @@ def search_claims(
                 f"Search query {query!r} is not valid FTS5 syntax: {msg}"
             ) from exc
         raise DatabaseError(f"Failed to search claims: {exc}") from exc
+    # Step the ranked cursor lazily: _project_verified_rows stops at `limit`
+    # survivors, so the common path fetches a handful, not the whole ceiling.
     return _project_verified_rows(
-        conn, rows, limit=limit, include_unverified=include_unverified,
+        conn, cursor, limit=limit, include_unverified=include_unverified,
     )
 
 
