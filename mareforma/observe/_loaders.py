@@ -1404,12 +1404,17 @@ def _response_ok(result):
     treat that as fail-closed (neither ground the read nor mint lineage) rather
     than assume the call succeeded. Shared by the read and lineage paths so a
     single rule governs both.
+
+    Only 2xx counts as success. httpx does not follow redirects by default, so a
+    3xx is a short "moved" stub the observer received in place of the cited bytes
+    or the model answer: grounding a read or minting lineage off it would attest
+    delivery that never happened.
     """
     code = getattr(result, "status_code", None)
     if code is None:
         code = getattr(result, "status", None)
     if isinstance(code, int):
-        return code < 400
+        return 200 <= code < 300
     return None
 
 
