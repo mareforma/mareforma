@@ -191,6 +191,51 @@ class TestQueryProvenance:
         assert lineage["upstream"] == []
         assert lineage["downstream"] == []
 
+    def test_update_claim_supports_refreshes_provenance(
+        self, tmp_path: Path,
+    ) -> None:
+        # #10: editing an unsigned claim's supports must maintain the supports
+        # cache in the same transaction, so query_provenance stops serving the
+        # pre-edit lineage. The COUNT(*)-only staleness heuristic never trips
+        # on an in-place UPDATE, so the edges must be maintained directly.
+        with mareforma.open(tmp_path) as graph:
+            a = graph.assert_claim("a")
+            c = graph.assert_claim("c")
+            b = graph.assert_claim("b", supports=[a])
+            before = {e["claim_id"]
+                      for e in graph.query_provenance(a)["downstream"]}
+            assert b in before
+            graph.update_claim(b, supports=[c])  # repoint b from a to c
+            a_down = {e["claim_id"]
+                      for e in graph.query_provenance(a)["downstream"]}
+            c_down = {e["claim_id"]
+                      for e in graph.query_provenance(c)["downstream"]}
+        assert b not in a_down, "stale edge: b still shows as downstream of a"
+        assert b in c_down, "new edge missing: b should be downstream of c"
+
+    def test_delete_claim_drops_its_cache_edges(
+        self, tmp_path: Path,
+    ) -> None:
+        # #10: deleting an unsigned claim must remove its cache edges in the
+        # same transaction. A reopen rebuilds the cache (delete changes the
+        # claim count, so is_cache_stale trips), which would mask this, so the
+        # assertion is on the same connection: the edge must be gone now, not
+        # left dangling until the next open.
+        with mareforma.open(tmp_path) as graph:
+            a = graph.assert_claim("a")
+            b = graph.assert_claim("b", supports=[a])
+        conn = _db.open_db(tmp_path)
+        try:
+            _db.delete_claim(conn, tmp_path, b)
+            dangling = conn.execute(
+                "SELECT 1 FROM supports_cache.claim_supports "
+                "WHERE claim_id = ? OR supports_claim_id = ?",
+                (b, b),
+            ).fetchall()
+        finally:
+            conn.close()
+        assert dangling == [], "deleted claim left dangling supports-cache edges"
+
 
 # ----------------------------------------------------------------------------
 # Multi-signature DSSE for claim-with-roles:v1

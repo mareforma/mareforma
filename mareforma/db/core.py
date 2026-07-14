@@ -3518,6 +3518,14 @@ def update_claim(
                     new_comparison_summary, new_unresolved, _now(), claim_id,
                 ),
             )
+            if supports_changed:
+                # Keep the supports cache in step with the edited edges. The
+                # count-only staleness heuristic never trips on an in-place
+                # UPDATE, so the edges must be maintained here or
+                # query_provenance serves the pre-edit lineage forever.
+                from mareforma import _supports
+                _supports.replace_supports_edges(
+                    conn, claim_id, json.loads(new_supports_json))
             if needs_replicated_check:
                 # Best-effort convergence: never crash an update, but keep a
                 # stranded re-check retryable (retry flag + health event).
@@ -3550,6 +3558,10 @@ def delete_claim(conn: sqlite3.Connection, root: Path, claim_id: str) -> None:
         raise ClaimNotFoundError(f"Claim '{claim_id}' not found.")
     try:
         conn.execute("DELETE FROM claims WHERE claim_id = ?", (claim_id,))
+        # Drop the row's cache edges in the same transaction so downstream and
+        # upstream walks stop surfacing a dangling claim before the next open.
+        from mareforma import _supports
+        _supports.remove_claim_edges(conn, claim_id)
         conn.commit()
     except sqlite3.IntegrityError as exc:
         raise _signed_delete_error(exc, claim_id) from exc
@@ -3944,6 +3956,12 @@ def delete_claims_by_generated_by(
         conn.execute(
             f"DELETE FROM claims WHERE claim_id IN ({placeholders})", claim_ids
         )
+        # Drop every deleted claim's cache edges in the same transaction, and
+        # decrement the staleness counter once per removed claim.
+        from mareforma import _supports
+        for deleted_id in claim_ids:
+            _supports.remove_claim_edges(conn, deleted_id, count_delta=0)
+        _supports._bump_source_count(conn, delta=-len(claim_ids))
         conn.commit()
     except sqlite3.IntegrityError as exc:
         raise _signed_delete_error(exc) from exc

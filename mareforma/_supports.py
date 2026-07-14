@@ -273,6 +273,59 @@ def record_supports_edges(
     _bump_source_count(conn, delta=1)
 
 
+def replace_supports_edges(
+    conn: sqlite3.Connection,
+    claim_id: str,
+    supports: list[str] | None,
+) -> None:
+    """Re-derive a claim's edges after its ``supports_json`` was edited.
+
+    Called by :func:`mareforma.db.update_claim` *inside* its transaction when
+    an unsigned claim's supports change. Drops the claim's existing edges and
+    re-inserts from the new list, filtering non-UUID refs like
+    :func:`record_supports_edges`. Does NOT touch
+    ``cache_meta.source_claim_count``: an in-place edit changes no claim count,
+    and the count-only staleness heuristic must not be nudged out of step.
+    """
+    conn.execute(
+        "DELETE FROM supports_cache.claim_supports WHERE claim_id = ?",
+        (claim_id,),
+    )
+    if not supports:
+        return
+    for position, ref in enumerate(supports):
+        if isinstance(ref, str) and _UUID_RE.match(ref):
+            conn.execute(
+                "INSERT OR IGNORE INTO supports_cache.claim_supports "
+                "(claim_id, supports_claim_id, position) "
+                "VALUES (?, ?, ?)",
+                (claim_id, ref, position),
+            )
+
+
+def remove_claim_edges(
+    conn: sqlite3.Connection,
+    claim_id: str,
+    *,
+    count_delta: int = -1,
+) -> None:
+    """Drop a deleted claim's edges in both directions.
+
+    Called by :func:`mareforma.db.delete_claim` *inside* its transaction. A
+    delete leaves edges pointing to and from the row; remove both so downstream
+    and upstream walks stop surfacing the dangling claim. ``count_delta``
+    decrements ``source_claim_count`` by the number of claims removed so the
+    staleness counter stays in step with the claim count.
+    """
+    conn.execute(
+        "DELETE FROM supports_cache.claim_supports "
+        "WHERE claim_id = ? OR supports_claim_id = ?",
+        (claim_id, claim_id),
+    )
+    if count_delta:
+        _bump_source_count(conn, delta=count_delta)
+
+
 def _bump_source_count(conn: sqlite3.Connection, *, delta: int) -> None:
     """Increment the staleness counter (creating the row if absent)."""
     row = conn.execute(
