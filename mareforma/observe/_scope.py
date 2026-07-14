@@ -20,7 +20,11 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 
-from ._citation import citation_kind, normalize_identifier, read_matches_citation
+from ._citation import (
+    citation_kind,
+    normalize_identifier,
+    read_norm_matches,
+)
 from ._verdict import GroundingVerdict, ObservedGrounding, ReadRecord, SeamEvent
 
 # Which citation kinds a socket seam can hide a read of. A socket delivers bytes
@@ -95,6 +99,10 @@ class Scope:
         self.models: list = []
         self._error: str | None = None
         self._token = None
+        # (normalized identifier, ReadRecord) for each read, computed once and
+        # reused across every classify pass. The post-hoc auditor shares this so
+        # a corpus audit normalizes the shared reads once, not once per finding.
+        self._norm_reads: "list[tuple[str, ReadRecord]] | None" = None
 
     # -- recording (called by loaders + audit hook; must never raise upward) --
 
@@ -132,6 +140,28 @@ class Scope:
 
     # -- classification ------------------------------------------------------
 
+    def _normalized_reads(self) -> "list[tuple[str, ReadRecord]]":
+        """Each read paired with its normalized identifier, computed once.
+
+        ``normalize_identifier`` reaches ``os.path.realpath``; caching the result
+        keeps that syscall to one per read for the whole scope rather than once
+        per read per classify pass per finding.
+        """
+        if self._norm_reads is None:
+            # Memoize per raw identifier: a per-record read loop records the same
+            # path thousands of times, so realpath runs once per DISTINCT
+            # identifier rather than once per read.
+            cache: dict[str, str] = {}
+            pairs = []
+            for r in self.reads:
+                norm = cache.get(r.identifier)
+                if norm is None:
+                    norm = normalize_identifier(r.identifier)
+                    cache[r.identifier] = norm
+                pairs.append((norm, r))
+            self._norm_reads = pairs
+        return self._norm_reads
+
     def classify(self) -> GroundingVerdict:
         """Compute the verdict from captured reads, seams, and opens.
 
@@ -146,6 +176,7 @@ class Scope:
         """
         cited = self.cited
         reads = tuple(self.reads)
+        norm_reads = self._normalized_reads()
         seams = list(self.seams)
         # Read coverage is a property of the FILE surface only: the audit hook's
         # open events are file opens, and the coverage gap it measures is the
@@ -171,9 +202,9 @@ class Scope:
                 **base,
             )
 
-        for r in reads:
-            if r.nonempty and read_matches_citation(
-                r.identifier, r.content_address, cited
+        for norm, r in norm_reads:
+            if r.nonempty and read_norm_matches(
+                norm, r.content_address, cited
             ):
                 # Be honest about what "non-empty" means per loader: sqlite and
                 # http wrappers see the actual returned rows/bytes, but the
@@ -203,17 +234,15 @@ class Scope:
                     for c in cited
                     if any(
                         rr.nonempty
-                        and read_matches_citation(
-                            rr.identifier, rr.content_address, (c,)
-                        )
-                        for rr in reads
+                        and read_norm_matches(rn, rr.content_address, (c,))
+                        for rn, rr in norm_reads
                     )
                 )
                 return GroundingVerdict(
                     grounding=ObservedGrounding.GROUNDED,
                     reason=reason,
                     grounded_sources=grounded,
-                    matched_identifier=normalize_identifier(r.identifier),
+                    matched_identifier=norm,
                     seams=tuple(seams),
                     **base,
                 )
@@ -225,7 +254,7 @@ class Scope:
         # a content-address citation whose match the observer never had the hash
         # to attempt. Each becomes a coverage-gap seam, which the relevance
         # matrix below treats as blocking every citation kind (fail-closed).
-        read_idents = {normalize_identifier(r.identifier) for r in reads}
+        read_idents = {norm for norm, _ in norm_reads}
         for op in self.opens:
             n = normalize_identifier(op)
             if n in cited and n not in read_idents:
@@ -329,6 +358,10 @@ class Scope:
         other.opens = list(self.opens)
         other.models = list(self.models)
         other._error = self._error
+        # The reads are identical across findings, so the normalized form is too:
+        # share it so a corpus audit normalizes the shared reads once, not once
+        # per finding. Only the cited set differs per call.
+        other._norm_reads = self._normalized_reads()
         return other.classify()
 
 
