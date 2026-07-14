@@ -562,6 +562,85 @@ def _line_model_key(raw: "str | None") -> tuple:
     return independence_model_key(lineage)
 
 
+def _signed_model_lineage(
+    conn: sqlite3.Connection,
+    claim_id: str,
+    bundle_json: "str | None",
+) -> "dict | None":
+    """The model lineage the claim's SIGNED envelope binds, or None.
+
+    A finding binds its model lineage into the signed observed record
+    (``finding/v2``), so the read path can re-authenticate the denormalized
+    ``evidence_lines.model_lineage`` column against material the signer covered.
+    Returns the signed lineage dict only when the bundle (a) is a claim envelope
+    that (b) binds to this ``claim_id``, (c) carries a model lineage on its
+    observed record, and (d) verifies against the pubkey when the signer is an
+    enrolled validator. A v1 finding (no signed lineage), an unsigned claim, or
+    any structural failure returns None — the caller then treats the line as
+    soft, never a fabricated distinct model. Never raises: one un-authenticatable
+    line must not deny the whole proposition's count.
+    """
+    if not bundle_json:
+        return None
+    try:
+        from .. import signing as _signing
+        from .. import validators as _validators
+
+        env = json.loads(bundle_json)
+        pred = _signing.claim_predicate_from_envelope(env)
+        if pred.get("claim_id") != claim_id:
+            return None
+        grounding = pred.get("observed_grounding")
+        if not isinstance(grounding, dict):
+            return None
+        lineage = grounding.get("model_lineage")
+        if not isinstance(lineage, dict):
+            return None
+        keyid = env["signatures"][0]["keyid"]
+        signer_row = _validators.get_validator(conn, keyid)
+        if signer_row is not None:
+            pem = base64.standard_b64decode(signer_row["pubkey_pem"])
+            pub = _signing.public_key_from_pem(pem)
+            if not _signing.verify_envelope(env, pub):
+                return None
+        return lineage
+    except Exception:
+        return None
+
+
+def _authentic_model_key(
+    conn: sqlite3.Connection,
+    claim_id: str,
+    raw_column: "str | None",
+    bundle_json: "str | None",
+) -> tuple:
+    """The independence model key for a line, read from SIGNED material.
+
+    The ``evidence_lines.model_lineage`` column is denormalized and unsigned, so
+    a direct/foreign writer can rewrite it to a fabricated distinct COMPUTED root
+    to inflate independence. We therefore key on the SIGNED lineage the claim's
+    envelope binds, never the raw column:
+
+    - a NULL column made no model claim → ``("absent",)`` (the legacy signer axis
+      still applies; a human line is re-keyed upstream);
+    - a present column whose claim carries an authenticated signed lineage keys on
+      that signed copy, so a forged column cannot move the count;
+    - a present column with no authenticatable signed lineage (a v1 finding, an
+      unsigned claim, or a bundle that does not verify) reads ``("soft",)`` — a
+      distinct model that cannot be certified, never counted.
+
+    This is the model-axis parallel of :func:`_authentic_signer_keyid`.
+    """
+    from mareforma.observe._lineage import independence_model_key
+
+    if raw_column is None:
+        return ("absent",)
+    signed = _signed_model_lineage(conn, claim_id, bundle_json)
+    if signed is None:
+        return ("soft",)
+    return independence_model_key(signed)
+
+
 def _independence_units(conn: sqlite3.Connection, content_id: str):
     """Yield ``(direction, run_token, data_id, model_key)`` per gateable line.
 
@@ -580,8 +659,10 @@ def _independence_units(conn: sqlite3.Connection, content_id: str):
     enrolled); a forged or unbacked keyid falls back to the retired
     ``generated_by`` run axis so it cannot inflate the count beyond the soft
     string axis. The ``k:`` / ``g:`` namespace stops a keyid aliasing a run
-    label. The model key carries the distinct-model/method axis
-    (see :func:`_line_model_key`); a line with no observed model call whose signer
+    label. The model key carries the distinct-model/method axis, read from the
+    SIGNED lineage rather than the unsigned column so a forged column cannot
+    inflate the count (see :func:`_authentic_model_key`); a line with no observed
+    model call whose signer
     is an enrolled human validator is re-keyed ``("human",)`` — the human axis,
     the highest-value independent source (see :func:`_is_human_signer`).
     """
@@ -624,7 +705,9 @@ def _independence_units(conn: sqlite3.Connection, content_id: str):
             conn, r["claim_id"], r["asserter_keyid"], r["signature_bundle"],
         )
         run_token = f"k:{keyid}" if keyid is not None else f"g:{r['generated_by']}"
-        model_key = _line_model_key(r["model_lineage"])
+        model_key = _authentic_model_key(
+            conn, r["claim_id"], r["model_lineage"], r["signature_bundle"],
+        )
         # A line with no observed model call, signed by an enrolled human
         # validator, is a human check: the highest-value independent axis, which
         # needs no distinct model. A line that DID observe a model call keeps its

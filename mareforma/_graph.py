@@ -1373,16 +1373,25 @@ class EpistemicGraph:
 
         # The model/method lineage the observer captured for the authoring scope
         # (COMPUTED / PROXY / UNVERIFIABLE), or None when no model call was
-        # observed. It rides the grounding verdict from the observe() scope and
-        # is persisted on the evidence lines, not bound into the signed envelope:
-        # the model identity lives on the evidence tree, so a finding without an
-        # observed model call stays byte-identical to a pre-observer finding.
+        # observed. It rides the grounding verdict from the observe() scope. The
+        # denormalised evidence-line column keys the independence read, but that
+        # column is unsigned, so it also rides the SIGNED observed record here:
+        # the read side re-authenticates the column against this signed copy (the
+        # same defence the signer column already earns), and a v1 finding that
+        # carries no signed lineage reads soft rather than a fabricated distinct
+        # model. A finding without an observed model call adds no key, so it stays
+        # byte-identical to a pre-observer finding.
         model_lineage = _model_lineage_of(grounding)
         model_lineage_json = (
             json.dumps(model_lineage.to_dict(), sort_keys=True, ensure_ascii=False)
             if model_lineage is not None
             else None
         )
+        if model_lineage is not None and grounding_signed is not None:
+            grounding_signed = {
+                **grounding_signed,
+                "model_lineage": model_lineage.to_dict(),
+            }
 
         # The claim idempotency_key: keep the exact single-line form for parity;
         # multi-line keys on a stable hash of the sorted dataset set.
@@ -1445,7 +1454,11 @@ class EpistemicGraph:
                     idempotency_key=finding_key,
                     observed_grounding=grounding_signed,
                     predicate_payload={
-                        "trust": "finding/v1",
+                        # v2 binds the model lineage into the signed observed
+                        # record (see grounding_signed above); a v1 finding has
+                        # lineage on the evidence tree only, which the read side
+                        # treats as unverifiable rather than a distinct model.
+                        "trust": "finding/v2",
                         "content_id": cid,
                         "frame_id": proposition.frame_id(),
                         "plan_id": plan_id,
