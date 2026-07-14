@@ -124,6 +124,98 @@ class TestRecordReplicationVerdict:
 
 
 # ---------------------------------------------------------------------------
+# Verdict-path promotion gates: grounding, signer, transparency
+# ---------------------------------------------------------------------------
+
+class TestVerdictPromotionGates:
+    """The verdict path must apply the same computed gates the convergence
+    path applies to the PRELIMINARY → REPLICATED transition. An enrolled
+    issuer must not be able to launder an UNGROUNDED or unsigned claim into
+    the trust ladder."""
+
+    def _set_grounding(self, tmp_path: Path, root_key: Path,
+                       claim_id: str, verdict: str) -> None:
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            g._conn.execute(
+                "UPDATE claims SET observed_grounding = ? WHERE claim_id = ?",
+                (json.dumps({"grounding": verdict}), claim_id),
+            )
+            g._conn.commit()
+
+    def test_ungrounded_claim_not_promoted_by_verdict(
+        self, tmp_path: Path,
+    ) -> None:
+        root_key, issuer_key, a, b, _, _ = _seed_two_claims(tmp_path)
+        # Execution observed 'a' as UNGROUNDED: no real data flowed. A
+        # replication verdict must not ride it into REPLICATED, while its
+        # grounded peer 'b' (NULL verdict) still promotes.
+        self._set_grounding(tmp_path, root_key, a, "UNGROUNDED")
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            g.record_replication_verdict(
+                verdict_id="rv_ung", cluster_id="cl_ung",
+                member_claim_id=a, other_claim_id=b,
+                method="semantic-cluster", confidence={},
+            )
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            assert g.get_claim(a)["support_level"] == "PRELIMINARY"
+            assert g.get_claim(b)["support_level"] == "REPLICATED"
+            # The verdict is still recorded even though 'a' did not promote.
+            assert g.replication_verdicts(member_claim_id=a)
+
+    def test_opaque_claim_not_promoted_by_verdict(self, tmp_path: Path) -> None:
+        root_key, issuer_key, a, _, _, _ = _seed_two_claims(tmp_path)
+        self._set_grounding(tmp_path, root_key, a, "OPAQUE")
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            g.record_replication_verdict(
+                verdict_id="rv_op", cluster_id="cl_op",
+                member_claim_id=a, other_claim_id=None,
+                method="semantic-cluster", confidence={},
+            )
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            assert g.get_claim(a)["support_level"] == "PRELIMINARY"
+
+    def test_unsigned_claim_not_promoted_by_verdict(
+        self, tmp_path: Path,
+    ) -> None:
+        root_key, issuer_key, a, b, _, _ = _seed_two_claims(tmp_path)
+        # Strip 'a' of its asserter_keyid: an unsigned / legacy row is not a
+        # valid distinct signer and must not be laundered to REPLICATED.
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            g._conn.execute(
+                "UPDATE claims SET asserter_keyid = NULL WHERE claim_id = ?",
+                (a,),
+            )
+            g._conn.commit()
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            g.record_replication_verdict(
+                verdict_id="rv_uns", cluster_id="cl_uns",
+                member_claim_id=a, other_claim_id=b,
+                method="semantic-cluster", confidence={},
+            )
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            assert g.get_claim(a)["support_level"] == "PRELIMINARY"
+            assert g.get_claim(b)["support_level"] == "REPLICATED"
+
+    def test_grounded_claim_still_promoted_by_verdict(
+        self, tmp_path: Path,
+    ) -> None:
+        # A recorded GROUNDED verdict must NOT block promotion — the gate is
+        # additive, not a new hurdle for honestly grounded claims.
+        root_key, issuer_key, a, b, _, _ = _seed_two_claims(tmp_path)
+        self._set_grounding(tmp_path, root_key, a, "GROUNDED")
+        self._set_grounding(tmp_path, root_key, b, "GROUNDED")
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            g.record_replication_verdict(
+                verdict_id="rv_g", cluster_id="cl_g",
+                member_claim_id=a, other_claim_id=b,
+                method="semantic-cluster", confidence={},
+            )
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            assert g.get_claim(a)["support_level"] == "REPLICATED"
+            assert g.get_claim(b)["support_level"] == "REPLICATED"
+
+
+# ---------------------------------------------------------------------------
 # record_contradiction_verdict + t_invalid trigger
 # ---------------------------------------------------------------------------
 

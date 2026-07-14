@@ -3991,14 +3991,44 @@ def record_replication_verdict(
         # PRELIMINARY (do not downgrade an ESTABLISHED claim) AND not
         # invalidated (a signed contradiction verdict is terminal —
         # a later replication verdict must not silently re-promote).
-        conn.execute(
-            f"UPDATE claims SET support_level = 'REPLICATED', updated_at = ? "
-            f"WHERE claim_id IN ({placeholders}) "
-            f"AND support_level = 'PRELIMINARY' "
-            f"AND status = 'open' "
-            f"AND t_invalid IS NULL",
-            (created_at, *members),
-        )
+        #
+        # The verdict path enforces the SAME computed gates the convergence
+        # path applies to this identical PRELIMINARY → REPLICATED transition:
+        # a claim execution observed as NOT grounded (UNGROUNDED / OPAQUE), an
+        # unsigned / legacy row (NULL asserter_keyid, not a valid distinct
+        # signer), or one whose transparency log is not settled must not ride a
+        # verdict into the trust ladder. Without them an enrolled issuer could
+        # launder an UNGROUNDED or unsigned claim to REPLICATED, and from there
+        # validate() lifts it to ESTABLISHED. These gates are read inside the
+        # same BEGIN IMMEDIATE transaction and applied through the shared
+        # `_observed_grounding_promotes` helper (the convergence path gates its
+        # new claim the same way), so a mixed batch still promotes the
+        # qualifying members and the verdict is recorded either way. The
+        # concurrency-sensitive gates (t_invalid, status) stay on the UPDATE's
+        # WHERE to close the TOCTOU window if a member is invalidated after the
+        # read.
+        gate_rows = conn.execute(
+            f"SELECT claim_id, observed_grounding, asserter_keyid, "
+            f"transparency_logged FROM claims "
+            f"WHERE claim_id IN ({placeholders})",
+            members,
+        ).fetchall()
+        promotable = [
+            r["claim_id"] for r in gate_rows
+            if r["asserter_keyid"] is not None
+            and r["transparency_logged"] == 1
+            and _observed_grounding_promotes(r["observed_grounding"])
+        ]
+        if promotable:
+            promote_placeholders = ",".join("?" * len(promotable))
+            conn.execute(
+                f"UPDATE claims SET support_level = 'REPLICATED', updated_at = ? "
+                f"WHERE claim_id IN ({promote_placeholders}) "
+                f"AND support_level = 'PRELIMINARY' "
+                f"AND status = 'open' "
+                f"AND t_invalid IS NULL",
+                (created_at, *promotable),
+            )
         if _own_txn:
             conn.commit()
     except sqlite3.IntegrityError as exc:
