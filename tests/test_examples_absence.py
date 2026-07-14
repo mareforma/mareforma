@@ -164,13 +164,21 @@ def test_absence_catch(tmp_path: Path) -> None:
         graph.close()
 
 
-def test_compounding_same_model_not_independent(tmp_path: Path) -> None:
-    """Two same-model agents stay at 1; a different model raises it to 2."""
+def test_compounding_same_model_not_independent(tmp_path: Path, httpx_mock) -> None:
+    """Two same-model agents stay at 1; a different model raises it to 2.
+
+    COMPUTED lineage requires a real network transport (a producer-controlled
+    offline transport is a PROXY declaration, not a socket capture), so the model
+    call runs through a plain ``httpx.Client`` whose network transport is patched
+    by ``httpx_mock`` — the SDK path a genuine provider call takes.
+    """
+    httpx_mock.add_response(url=_ANTHROPIC_URL, json={"content": []}, is_reusable=True)
+    httpx_mock.add_response(url=_OPENAI_URL, json={"choices": []})
     root_key = tmp_path / "_root_key"
     _signing.bootstrap_key(root_key)
     graph = mareforma.open(tmp_path, key_path=root_key)
     agent_graphs = _enroll_agents(graph, tmp_path, ("agent-a", "agent-b", "agent-c"))
-    client = _offline_client()
+    client = httpx.Client()
     try:
         prop, plan = _proposition(), _plan()
         graph.register_plan(prop, plan, generated_by="protocol")

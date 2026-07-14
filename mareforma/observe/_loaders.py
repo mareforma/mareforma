@@ -796,7 +796,7 @@ def _make_http_post_method_wrapper(real):
         if scope is None:
             return result
         try:
-            _record_http_post(scope, args, kwargs, result)
+            _record_http_post(scope, self, args, kwargs, result)
         except BaseException as exc:  # noqa: BLE001
             scope.mark_error(f"http loader wrapper failed: {type(exc).__name__}")
         return result
@@ -813,7 +813,7 @@ def _make_async_http_post_method_wrapper(real):
         if scope is None:
             return result
         try:
-            _record_http_post(scope, args, kwargs, result)
+            _record_http_post(scope, self, args, kwargs, result)
         except BaseException as exc:  # noqa: BLE001
             scope.mark_error(f"http loader wrapper failed: {type(exc).__name__}")
         return result
@@ -838,7 +838,7 @@ def _make_http_send_wrapper(real):
         try:
             request = kwargs.get("request") or (args[0] if args else None)
             if request is not None:
-                _record_model_from_httpx_request(scope, request, result)
+                _record_model_from_httpx_request(scope, self, request, result)
         except BaseException as exc:  # noqa: BLE001
             scope.mark_error(f"http loader wrapper failed: {type(exc).__name__}")
         return result
@@ -857,7 +857,7 @@ def _make_async_http_send_wrapper(real):
         try:
             request = kwargs.get("request") or (args[0] if args else None)
             if request is not None:
-                _record_model_from_httpx_request(scope, request, result)
+                _record_model_from_httpx_request(scope, self, request, result)
         except BaseException as exc:  # noqa: BLE001
             scope.mark_error(f"http loader wrapper failed: {type(exc).__name__}")
         return result
@@ -902,10 +902,10 @@ def _aiohttp_url(args, kwargs) -> str:
     return str(url or "")
 
 
-def _record_http_post(scope, args, kwargs, result) -> None:
+def _record_http_post(scope, client, args, kwargs, result) -> None:
     # Parse the request body once and thread it to both consumers.
     body = _request_json_body(kwargs)
-    _record_model_from_request(scope, args, kwargs, body, result)
+    _record_model_from_request(scope, client, args, kwargs, body, result)
     if isinstance(body, dict) and bool(body.get("stream")):
         # Streaming POST: the response body is not materialized at return.
         # Record a socket seam rather than forcing the download into memory,
@@ -917,14 +917,41 @@ def _record_http_post(scope, args, kwargs, result) -> None:
         _record_http_response(scope, args, kwargs, result)
 
 
-def _record_model_from_request(scope, args, kwargs, body, result) -> None:
+def _record_model_from_request(scope, client, args, kwargs, body, result) -> None:
     if not isinstance(body, dict):
         return
     url = _resp_source(args, kwargs, None)
-    _record_model_lineage(scope, body, url, result)
+    _record_model_lineage(scope, body, url, result, client=client)
 
 
-def _record_model_lineage(scope, body, url, result) -> None:
+def _transport_is_networked(client, url) -> bool:
+    """Whether an httpx client answers *url* through a real network transport.
+
+    COMPUTED is gated on this. The provider HOST is genuine, but the 2xx
+    response is produced by the client's transport, so a producer-supplied
+    in-process transport (``httpx.MockTransport``, WSGI/ASGI, or a custom class)
+    answers ``200`` offline and certifies no model call. Only httpx's own network
+    transports earn COMPUTED — an ALLOWLIST, so an unknown transport fails safe to
+    producer-controlled (PROXY) rather than being trusted. ``client is None`` (a
+    seam with no httpx client, e.g. aiohttp) reads as networked: this gate governs
+    the httpx transport path only.
+    """
+    if client is None:
+        return True
+    try:
+        import httpx
+
+        networked = (httpx.HTTPTransport, httpx.AsyncHTTPTransport)
+        try:
+            transport = client._transport_for_url(httpx.URL(url))
+        except BaseException:  # noqa: BLE001 - URL/mount resolution quirk
+            transport = getattr(client, "_transport", None)
+        return isinstance(transport, networked)
+    except BaseException:  # noqa: BLE001 - httpx absent or shape changed
+        return True
+
+
+def _record_model_lineage(scope, body, url, result, *, client=None) -> None:
     """Resolve and record lineage from a parsed model-call body + request URL.
 
     Shared tail for every model-call seam (``.post``, ``.send``, aiohttp). Gated
@@ -933,22 +960,35 @@ def _record_model_lineage(scope, body, url, result) -> None:
     attribute a run that did not happen. Records no lineage on failure rather
     than a downgraded record, which would collapse a later successful retry of
     the same model to UNVERIFIABLE.
+
+    ``client`` is the httpx client behind the seam, when there is one. A
+    producer-controlled transport (a local ``MockTransport``, WSGI/ASGI, or a
+    custom class) authors its own 2xx, so it certifies no real model call: the
+    lineage is recorded as a producer DECLARATION (PROXY), never COMPUTED, so an
+    offline transport cannot forge verified cross-model independence.
     """
     if not isinstance(body, dict) or _response_ok(result) is not True:
         return
     model_id = body.get("model")
     if not isinstance(model_id, str) or not model_id:
         return
+    networked = _transport_is_networked(client, url)
     provider = _provider_of(url)
     # A local inference server (no recognized remote host) can be content-
     # addressed by the served weights' digest — a verifiable distinct identity a
-    # local model name lacks. Probed only for local servers, never a remote host.
-    digest = _probe_ollama_digest(url, model_id) if provider is None else None
+    # local model name lacks. Probed only for a real local server, never a remote
+    # host and never a producer-controlled transport.
+    digest = (
+        _probe_ollama_digest(url, model_id)
+        if provider is None and networked
+        else None
+    )
     from ._lineage import resolve_lineage
 
     lineage = resolve_lineage(
         model_id,
-        source="socket",
+        # A producer-controlled transport is a declaration, not a socket capture.
+        source="socket" if networked else "declared",
         method=_method_of(url),
         decoding={
             "temperature": body.get("temperature"),
@@ -961,7 +1001,7 @@ def _record_model_lineage(scope, body, url, result) -> None:
     scope.record_model(lineage)
 
 
-def _record_model_from_httpx_request(scope, request, result) -> None:
+def _record_model_from_httpx_request(scope, client, request, result) -> None:
     """Capture lineage from a pre-built ``httpx.Request`` (the SDK ``send`` path).
 
     The openai/anthropic SDKs and litellm build a ``Request`` and dispatch it via
@@ -984,7 +1024,7 @@ def _record_model_from_httpx_request(scope, request, result) -> None:
     except (ValueError, TypeError):
         return
     url = str(getattr(request, "url", "") or "")
-    _record_model_lineage(scope, body, url, result)
+    _record_model_lineage(scope, body, url, result, client=client)
 
 
 def _request_json_body(kwargs):
