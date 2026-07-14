@@ -760,9 +760,10 @@ def effective_independence(conn: sqlite3.Connection, content_id: str) -> dict:
     call, signed by an enrolled human validator) counts as the highest-value
     independent source: it needs no distinct model, so a human check plus a model
     check reads as two where two same-model checks read as one. ``soft`` is True
-    when a supporting line carries PROXY / UNVERIFIABLE model lineage: the count
-    then rests on lineage that cannot certify a distinct model, which the trust
-    map surfaces as UNVERIFIABLE rather than a confident number.
+    when a supporting line carries PROXY / UNVERIFIABLE model lineage or no
+    observed model call at all: the count then rests on lineage that cannot
+    certify a distinct model, which the trust map surfaces as UNVERIFIABLE rather
+    than a confident number.
 
     Coarse by design: distinct-model is binary this release. The graded
     cross-model residual (how *far apart* two distinct models are) is DEFERRED —
@@ -779,7 +780,15 @@ def _supporting_units(
 
     The shared collection behind :func:`effective_independence` and
     :func:`effective_independence_receipt`. ``soft`` is True when any supporting
-    line carried PROXY / UNVERIFIABLE model lineage.
+    line carried PROXY / UNVERIFIABLE model lineage, or no observed model call at
+    all (absent): the per-finding disclosure certifies a distinct model only for
+    observed calls, so an unobserved model cannot be told apart and is soft here.
+    Absent is re-keyed to soft so it adds no confident hard unit, dropping the
+    count to the single-line floor rather than reverting to the pre-v0.3.10 signer
+    axis. This narrows only the map's per-finding certification; the legacy status
+    ladder (:func:`independence_counts`) still counts distinct signers. A human
+    check is re-keyed ``("human",)`` upstream, so it is never absent here and
+    keeps its axis.
     """
     supports: list[tuple[str, str, tuple]] = []
     soft = False
@@ -787,6 +796,8 @@ def _supporting_units(
         conn, content_id
     ):
         if direction is BearingDirection.SUPPORTS:
+            if model_key[0] == "absent":
+                model_key = ("soft",)
             supports.append((run_token, data_id, model_key))
             if model_key[0] == "soft":
                 soft = True
