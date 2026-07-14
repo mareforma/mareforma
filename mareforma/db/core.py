@@ -2680,13 +2680,23 @@ def validate_claim(
     _verify_evidence_seen(
         conn, claim_id, evidence_seen or [], now,
     )
+    # The early gate above ran in an autocommit SELECT, then the crypto and
+    # evidence-citation checks ran with no transaction open. Wrap the write in
+    # BEGIN IMMEDIATE and re-assert the gate on the UPDATE itself so a signed
+    # contradiction (t_invalid) or retraction (status) that lands in the
+    # check-to-write window cannot ride into ESTABLISHED. Mirrors
+    # record_replication_verdict's guarded promotion; when the caller already
+    # holds a transaction its outer commit flushes this write.
+    _own_txn = not conn.in_transaction
     try:
+        if _own_txn:
+            conn.execute("BEGIN IMMEDIATE")
         # COALESCE on validator_keyid: a legacy unsigned re-validate
         # (validation_signature=None) must NOT wipe a previously-set
         # validator_keyid. The state-check trigger permits
         # ESTABLISHED → ESTABLISHED, so a second call would otherwise
         # NULL the column and tank the validator's reputation count.
-        conn.execute(
+        cur = conn.execute(
             """
             UPDATE claims
             SET support_level = 'ESTABLISHED',
@@ -2696,17 +2706,37 @@ def validate_claim(
                 validator_keyid = COALESCE(?, validator_keyid),
                 updated_at   = ?
             WHERE claim_id = ?
+              AND support_level = 'REPLICATED'
+              AND status = 'open'
+              AND t_invalid IS NULL
             """,
             (validated_by, now, validation_signature, validator_keyid,
              now, claim_id),
         )
-        conn.commit()
+        if cur.rowcount == 0:
+            # The guarded UPDATE matched nothing: a concurrent signed
+            # contradiction set t_invalid (or a retraction flipped status)
+            # after the early gate passed. Refuse rather than commit a silent
+            # no-op, mirroring the early t_invalid refusal above.
+            if _own_txn:
+                conn.rollback()
+            raise ValueError(
+                f"Claim '{claim_id}' was invalidated by a signed contradiction "
+                "verdict during validation (the check-to-write window closed). "
+                "Refuse to promote an invalidated claim to ESTABLISHED."
+            )
+        if _own_txn:
+            conn.commit()
     except sqlite3.IntegrityError as exc:
+        if _own_txn:
+            conn.rollback()
         translated = _state_error_from_integrity(exc)
         if translated is not None:
             raise translated from exc
         raise DatabaseError(f"Failed to validate claim '{claim_id}': {exc}") from exc
     except sqlite3.OperationalError as exc:
+        if _own_txn:
+            conn.rollback()
         raise DatabaseError(f"Failed to validate claim '{claim_id}': {exc}") from exc
     _backup_claims_toml(conn, root)
 
