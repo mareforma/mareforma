@@ -30,8 +30,10 @@ Flow
 from __future__ import annotations
 
 import base64
+import functools
 import json
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -83,6 +85,33 @@ def _format_row_for_llm(row: dict, prompt_safety) -> dict:
     return out
 
 
+def _synchronized(method):
+    """Serialize a graph mutation under the graph's re-entrant lock.
+
+    The connection is opened with ``check_same_thread=False``, so one graph may
+    be driven from several threads. Transaction ownership in the db layer is
+    decided by ``not conn.in_transaction`` — a connection-wide property that
+    cannot tell "this thread is nested in its own BEGIN" from "another thread
+    holds a transaction on the shared connection." A second thread would read a
+    first thread's open ``BEGIN IMMEDIATE`` as its own, skip its own
+    transaction, and silently join (and, on the first thread's rollback, lose)
+    its write.
+
+    Wrapping every mutating method with this decorator makes at most one thread
+    a writer at a time, so ``not conn.in_transaction`` becomes a thread-correct
+    ownership test. The lock is an ``RLock`` so the existing nested-call pattern
+    (``submit_finding`` calling ``assert_claim`` inside one transaction, on the
+    same thread) re-enters instead of deadlocking. Read-only methods are left
+    unwrapped: SQLite serves them from the committed snapshot and they must not
+    block behind a long write.
+    """
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
 class EpistemicGraph:
     """Agent-native interface to a local mareforma epistemic graph.
 
@@ -103,6 +132,10 @@ class EpistemicGraph:
     ) -> None:
         self._conn = conn
         self._root = root
+        # Re-entrant lock serializing graph mutations across threads. See
+        # _synchronized: the connection is shareable across threads, so writers
+        # must not race on transaction ownership.
+        self._lock = threading.RLock()
         self._signer = signer
         self._rekor_url = rekor_url
         self._require_rekor = require_rekor
@@ -163,6 +196,7 @@ class EpistemicGraph:
     # Core API
     # ------------------------------------------------------------------
 
+    @_synchronized
     def assert_claim(
         self,
         text: str,
@@ -533,6 +567,7 @@ class EpistemicGraph:
             refutation_filter=refutation_filter,
         )
 
+    @_synchronized
     def update_claim(
         self,
         claim_id: str,
@@ -674,6 +709,7 @@ class EpistemicGraph:
     # Verdict-issuer protocol
     # ------------------------------------------------------------------
 
+    @_synchronized
     def record_replication_verdict(
         self,
         *,
@@ -740,6 +776,7 @@ class EpistemicGraph:
             signer=self._signer,
         )
 
+    @_synchronized
     def record_contradiction_verdict(
         self,
         *,
@@ -850,6 +887,7 @@ class EpistemicGraph:
     # Trust layer: propositions, findings, derived Status
     # ------------------------------------------------------------------
 
+    @_synchronized
     def register_proposition(self, proposition: "Proposition") -> str:
         """Register a falsifiable :class:`mareforma.trust.Proposition`.
 
@@ -872,6 +910,7 @@ class EpistemicGraph:
         with self._conn:
             return _store.register_proposition(self._conn, proposition, now)
 
+    @_synchronized
     def register_plan(
         self,
         proposition: "Proposition",
@@ -946,6 +985,7 @@ class EpistemicGraph:
         )
         return plan_id
 
+    @_synchronized
     def assert_finding(
         self,
         proposition: "Proposition",
@@ -1089,6 +1129,7 @@ class EpistemicGraph:
             grounding_strict=grounding_strict,
         )
 
+    @_synchronized
     def submit_finding(
         self,
         proposition: "Proposition",
@@ -1775,6 +1816,7 @@ class EpistemicGraph:
         )
         return [_format_row_for_llm(row, _ps) for row in rows]
 
+    @_synchronized
     def validate(
         self,
         claim_id: str,
@@ -1903,6 +1945,7 @@ class EpistemicGraph:
             evidence_seen=evidence_seen_normalized,
         )
 
+    @_synchronized
     def enroll_validator(
         self,
         pubkey_pem: bytes,
@@ -1963,6 +2006,7 @@ class EpistemicGraph:
             identity=identity, validator_type=validator_type,
         )
 
+    @_synchronized
     def require_rekor_witnessing(self) -> dict:
         """Declare that this project's findings must be witnessed by the
         transparency log before they can converge.
@@ -2021,6 +2065,7 @@ class EpistemicGraph:
         from mareforma import validators as _validators
         return _validators.list_validators(self._conn)
 
+    @_synchronized
     def refresh_convergence(self) -> dict[str, int]:
         """Retry convergence detection for every flagged claim.
 
@@ -2346,6 +2391,7 @@ class EpistemicGraph:
         self._check_open()
         return _db.find_dangling_supports(self._conn)
 
+    @_synchronized
     def refresh_unsigned(self) -> dict[str, int]:
         """Retry Rekor submission for every signed-but-not-logged claim.
 
@@ -2843,6 +2889,7 @@ class EpistemicGraph:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    @_synchronized
     def backup(self) -> None:
         """Write ``claims.toml`` now, the recovery source for ``restore``.
 
