@@ -17,6 +17,7 @@ import tomli_w
 
 import mareforma
 from mareforma import signing as _signing
+from mareforma.db import RestoreError
 from tests._helpers import _bootstrap_key, _pem_of
 
 try:
@@ -134,7 +135,7 @@ def test_restore_refuses_a_forged_replicated_support_level(
         cid = g.assert_claim("lonely claim, no converging peer", generated_by="x")
         assert g.get_claim(cid)["support_level"] == "PRELIMINARY"
 
-    from mareforma.db import open_db, _backup_claims_toml, RestoreError
+    from mareforma.db import open_db, _backup_claims_toml
     conn = open_db(tmp_path)
     _backup_claims_toml(conn, tmp_path)
     conn.close()
@@ -245,7 +246,7 @@ def test_enforce_requires_a_signed_policy(tmp_path: Path) -> None:
 
     _wipe_graph_db(tmp_path)
     log_pubkey = _pem_of(_bootstrap_key(tmp_path, "log.key"))
-    with pytest.raises(Exception) as exc:
+    with pytest.raises(RestoreError) as exc:
         mareforma.restore(
             tmp_path, rekor_log_pubkey_pem=log_pubkey, enforce_rekor_policy=True,
         )
@@ -261,7 +262,7 @@ def test_enforce_requires_a_pinned_log_key(tmp_path: Path) -> None:
         g.require_rekor_witnessing()
 
     _wipe_graph_db(tmp_path)
-    with pytest.raises(Exception) as exc:
+    with pytest.raises(RestoreError) as exc:
         mareforma.restore(tmp_path, enforce_rekor_policy=True)
     assert "requires rekor_log_pubkey_pem" in str(exc.value)
 
@@ -280,7 +281,7 @@ def test_restore_refuses_a_tampered_project_policy(tmp_path: Path) -> None:
     toml_path.write_text(tomli_w.dumps(data), encoding="utf-8")
 
     _wipe_graph_db(tmp_path)
-    with pytest.raises(Exception) as exc:
+    with pytest.raises(RestoreError) as exc:
         mareforma.restore(tmp_path)
     assert "not match the signed envelope" in str(exc.value)
 
@@ -308,7 +309,7 @@ def test_enforced_policy_rejects_an_empty_inclusion_body(tmp_path: Path) -> None
 
     _wipe_graph_db(tmp_path)
     log_pubkey = _pem_of(_bootstrap_key(tmp_path, "log.key"))
-    with pytest.raises(Exception) as exc:
+    with pytest.raises(RestoreError) as exc:
         mareforma.restore(
             tmp_path, rekor_log_pubkey_pem=log_pubkey, enforce_rekor_policy=True,
         )
@@ -369,7 +370,7 @@ def test_restore_rejects_a_rekor_proof_copied_from_another_claim(
 
     _wipe_graph_db(tmp_path)
     log_pubkey = _pem_of(_bootstrap_key(tmp_path, "log.key"))
-    with pytest.raises(Exception) as exc:
+    with pytest.raises(RestoreError) as exc:
         mareforma.restore(tmp_path, rekor_log_pubkey_pem=log_pubkey)
     assert "does not bind" in str(exc.value)
 
@@ -421,3 +422,67 @@ def test_restore_preserves_the_full_trust_layer(tmp_path: Path) -> None:
     assert set(pre) == set(post)
     for cid in pre:
         assert pre[cid] == post[cid], f"trust columns drifted for {cid}"
+
+
+def test_restore_rebuilds_the_finding_evidence_tree(tmp_path: Path) -> None:
+    """A finding's proposition / prediction / findings / evidence tree must
+    survive the documented delete-and-restore recovery, including the signed
+    model lineage denormalized onto the evidence line.
+
+    The #23 round-trip predated the v0.3.9 trust tables and never extended to
+    them, so after restore proposition_status returned None and the findings /
+    evidence_lines rows were gone though the finding's signed claim survived.
+    """
+    from tests._helpers import _est, _pred, _prop, _verdict
+
+    key = _bootstrap_key(tmp_path, "root.key")
+    prop, pred = _prop(), _pred()
+    content_id = prop.content_id()
+
+    with mareforma.open(tmp_path, key_path=key) as g:
+        g.assert_finding(
+            prop, pred, _est(), data_id="ds1", generated_by="run1",
+            grounding=_verdict("gpt-4o-2024-08-06", source="declared"),
+        )
+        conn = g._conn
+        pre_findings = conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0]
+        pre_lines = conn.execute(
+            "SELECT COUNT(*) FROM evidence_lines"
+        ).fetchone()[0]
+        pre_contrasts = conn.execute(
+            "SELECT COUNT(*) FROM contrasts"
+        ).fetchone()[0]
+        pre_estimates = conn.execute(
+            "SELECT COUNT(*) FROM effect_estimates"
+        ).fetchone()[0]
+        pre_lineage = conn.execute(
+            "SELECT model_lineage FROM evidence_lines "
+            "WHERE model_lineage IS NOT NULL LIMIT 1"
+        ).fetchone()[0]
+        assert g.proposition_status(content_id) is not None
+        assert pre_findings >= 1 and pre_lines >= 1
+        assert pre_lineage is not None
+
+    _wipe_graph_db(tmp_path)
+    mareforma.restore(tmp_path)
+
+    with mareforma.open(tmp_path, key_path=key) as g:
+        conn = g._conn
+        assert g.proposition_status(content_id) is not None
+        assert conn.execute(
+            "SELECT COUNT(*) FROM findings"
+        ).fetchone()[0] == pre_findings
+        assert conn.execute(
+            "SELECT COUNT(*) FROM evidence_lines"
+        ).fetchone()[0] == pre_lines
+        assert conn.execute(
+            "SELECT COUNT(*) FROM contrasts"
+        ).fetchone()[0] == pre_contrasts
+        assert conn.execute(
+            "SELECT COUNT(*) FROM effect_estimates"
+        ).fetchone()[0] == pre_estimates
+        post_lineage = conn.execute(
+            "SELECT model_lineage FROM evidence_lines "
+            "WHERE model_lineage IS NOT NULL LIMIT 1"
+        ).fetchone()[0]
+        assert post_lineage == pre_lineage

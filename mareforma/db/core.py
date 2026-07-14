@@ -4917,6 +4917,67 @@ def set_project_policy(
     return get_project_policy(conn)
 
 
+# Trust-layer tables round-tripped through claims.toml, in foreign-key order
+# (parents before children) so restore can replay them without FK violations:
+# predictions -> propositions, findings -> propositions/predictions/claims,
+# evidence_lines -> findings, contrasts -> evidence_lines,
+# effect_estimates -> contrasts. Each tuple is
+# (section_name, table, primary_key, ordered non-PK columns). The explicit
+# column list avoids SELECT * coupling and is the single source of truth shared
+# by the backup reader and the restore writer.
+_TRUST_TABLE_BACKUP: tuple = (
+    ("propositions", "propositions", "content_id", (
+        "frame_id", "subject", "relation", "object", "direction",
+        "scope_json", "magnitude", "content_id_policy", "schema_version",
+        "created_at",
+    )),
+    ("predictions", "predictions", "plan_id", (
+        "content_id", "inference_regime", "test_type", "direction_of_interest",
+        "equivalence_lower", "equivalence_upper", "alpha", "preregistered",
+        "registered_at",
+    )),
+    ("findings", "findings", "finding_id", (
+        "content_id", "plan_id", "claim_id", "bearing_direction", "created_at",
+    )),
+    ("evidence_lines", "evidence_lines", "line_id", (
+        "finding_id", "modality", "provenance_id", "design_type", "data_id",
+        "model_lineage", "created_at",
+    )),
+    ("contrasts", "contrasts", "contrast_id", (
+        "line_id", "control_type",
+    )),
+    ("effect_estimates", "effect_estimates", "estimate_id", (
+        "contrast_id", "estimate_value", "effect_type", "scale", "p_value",
+        "ci_lower", "ci_upper", "ci_level", "n_total",
+    )),
+)
+
+
+def _backup_trust_tables(conn: sqlite3.Connection, data: dict) -> None:
+    """Add the populated trust-layer tables to the backup ``data`` dict.
+
+    Each table becomes a TOML section keyed by its primary key, with NULL-valued
+    columns omitted (TOML cannot serialize None, and restore reads each column
+    with a NULL default). The finding tree is reconstructable on restore from
+    these rows, which hang off the finding's own signed attestation claim.
+    """
+    for section, table, pk, cols in _TRUST_TABLE_BACKUP:
+        rows = conn.execute(
+            f"SELECT {pk}, {', '.join(cols)} FROM {table}"
+        ).fetchall()
+        if not rows:
+            continue
+        section_data: dict[str, Any] = {}
+        for r in rows:
+            entry: dict[str, Any] = {}
+            for col in cols:
+                value = r[col]
+                if value is not None:
+                    entry[col] = value
+            section_data[r[pk]] = entry
+        data[section] = section_data
+
+
 def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
     """Write all claims AND validators to claims.toml in the project root.
 
@@ -5108,6 +5169,12 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
                 "envelope": policy_row["envelope"],
                 "created_at": policy_row["created_at"],
             }
+
+        # Trust layer (propositions, predictions, findings, evidence_lines,
+        # contrasts, effect_estimates). Round-trip these query-side tables so
+        # the documented delete-and-restore recovery rebuilds the finding tree,
+        # not just the surviving finding claims. Emitted only when populated.
+        _backup_trust_tables(conn, data)
 
         out = root / "claims.toml"
         payload = tomli_w.dumps(data).encode("utf-8")

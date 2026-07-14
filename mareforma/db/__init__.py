@@ -160,6 +160,8 @@ from .core import (
     get_validator_reputation,
     # Internal helpers.
     _now,
+    _TRUST_TABLE_BACKUP,
+    _backup_trust_tables,
     _backup_claims_toml,
     _backup_suspended,
     suspend_backup,
@@ -177,6 +179,7 @@ from .restore import (
     _verify_grounding_binding_on_read,
     _verify_replicated_corroboration,
     _validate_section_shape,
+    _restore_trust_tables,
     _verify_and_insert_replication_verdict,
     _verify_and_insert_contradiction_verdict,
     _verify_and_insert_project_policy,

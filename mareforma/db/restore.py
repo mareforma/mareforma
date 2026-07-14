@@ -33,6 +33,7 @@ from .core import (
     _verdict_canonical_payload,
     _REPLICATION_VERDICT_FIELDS,
     _CONTRADICTION_VERDICT_FIELDS,
+    _TRUST_TABLE_BACKUP,
 )
 
 
@@ -826,6 +827,15 @@ def restore(
                             stacklevel=2,
                         )
 
+            # Trust layer: replay the finding tree (propositions, predictions,
+            # findings, evidence_lines, contrasts, effect_estimates). Runs after
+            # the claims loop so findings.claim_id foreign keys resolve. The
+            # rows hang off finding attestation claims that restore already
+            # verified; the signed model lineage each line carries also lives in
+            # the finding claim's observed_grounding, which round-trips on the
+            # claims path, so the independence read re-authenticates it as before.
+            _restore_trust_tables(conn, data)
+
             # Refuse a REPLICATED level no distinct-signer corroboration backs.
             # support_level is not signed, so this runs after the full graph +
             # verdicts are in place and re-derives the promotion invariant from
@@ -872,6 +882,42 @@ def restore(
         }
     finally:
         conn.close()
+
+
+def _restore_trust_tables(conn: sqlite3.Connection, data: dict) -> None:
+    """Replay the trust-layer finding tree from claims.toml.
+
+    Walks ``_TRUST_TABLE_BACKUP`` in foreign-key order (parents before children)
+    and inserts each populated section. NULL-valued columns were omitted from the
+    backup, so each column reads with a NULL default. The section shapes are
+    validated first (restore's tamper threat model), and foreign-key or CHECK
+    violations translate to RestoreError rather than a raw IntegrityError. The
+    rows hang off finding attestation claims restore already verified, so no
+    per-row signature check is added here; the finding claim's signed
+    ``observed_grounding`` (round-tripped on the claims path) remains the
+    authority the independence read re-authenticates the model lineage against.
+    """
+    for section, table, pk, cols in _TRUST_TABLE_BACKUP:
+        section_data = data.get(section)
+        if not section_data:
+            continue
+        _validate_section_shape(section_data, section)
+        all_cols = (pk, *cols)
+        placeholders = ", ".join("?" * len(all_cols))
+        insert_sql = (
+            f"INSERT INTO {table} ({', '.join(all_cols)}) "
+            f"VALUES ({placeholders})"
+        )
+        for pk_value, entry in section_data.items():
+            values = [pk_value, *(entry.get(col) for col in cols)]
+            try:
+                conn.execute(insert_sql, values)
+            except sqlite3.IntegrityError as exc:
+                raise RestoreError(
+                    f"Trust-layer row {pk_value!r} in [{section}] could not be "
+                    f"restored: {exc}",
+                    kind="claim_unverified",
+                ) from exc
 
 
 def _verify_replicated_corroboration(conn: sqlite3.Connection) -> None:
