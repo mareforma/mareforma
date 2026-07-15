@@ -447,18 +447,27 @@ not the target's honesty.
 
 **Model/method lineage.** Inside an `observe()` scope, mareforma also captures
 WHICH model authored the finding, computed from the request the producer
-actually sent at the `httpx` POST socket seam (the Anthropic and OpenAI request
-shapes, streaming included) rather than from a self-declaration. The lineage is
-tiered like `data_id`: `COMPUTED` for a body-parse at the seam (the producer
-does not control this path), `PROXY` for a cooperating producer's out-of-band
-`declare_model`, and `UNVERIFIABLE` for soft lineage (a hosted fine-tune, a
-moving alias, or a wrapper whose base is not declarable). A distinct model
-STRING is not, by itself, a distinct model: it family-roots to its declarable
-base, else it reads `UNVERIFIABLE`, never a fabricated distinct model. The
-lineage rides on the finding's evidence line and feeds the effective-
-independence count (see Support levels and the Trust layer below). It records
-model and method identity only, never a claim about training-time
-contamination.
+actually sent rather than from a self-declaration. It parses the model at the
+`httpx` `post` and `send` seams and the `aiohttp` request seam, the paths the
+provider SDKs and litellm take, and gates the capture on a 2xx response so a
+failed call never mints a model. The lineage is tiered like `data_id`:
+`COMPUTED` for a body-parse at the seam (the producer does not control this
+path), `PROXY` for a cooperating producer's out-of-band `declare_model`, and
+`UNVERIFIABLE` for soft lineage (a hosted fine-tune, a moving alias, or a wrapper
+whose base is not declarable). A recognized provider host is COMPUTED by its
+request; a local inference server is COMPUTED by the served weights' digest,
+recorded through a `weights-digest` attestor so two local models are told apart
+by their weights, not a self-chosen name. The probe accepts only a
+content-addressed digest: an Ollama-compatible surface that answers with a
+constant sentinel or a hash of the model name yields no digest, and the call
+stays `UNVERIFIABLE`. A distinct model STRING is not, by itself, a distinct
+model: it family-roots to its declarable base, and an open-weight name to its
+family release (`llama-3.1`, `deepseek-v3`), so one release served under two
+provider names is one model; a name that roots to neither reads
+`UNVERIFIABLE`, never a fabricated distinct model. The lineage rides on the
+finding's evidence line and feeds the effective-independence count (see Support
+levels and the Trust layer below). It records model and method identity only,
+never a claim about training-time contamination.
 
 ---
 
