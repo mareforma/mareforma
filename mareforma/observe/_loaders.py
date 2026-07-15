@@ -136,7 +136,7 @@ def _make_observed_open(real_open):
     """An open() wrapper that records a cited read, bound to ``real_open``.
 
     Shared by the ``builtins.open`` and ``io.open`` wrappers. Each wrapper calls
-    its OWN captured original, so a single open is recorded exactly once — the
+    its OWN captured original, so a single open is recorded exactly once, the
     two names are distinct references (wrapping ``builtins.open`` never rebinds
     ``io.open``), and neither delegates to the other by name.
     """
@@ -235,7 +235,7 @@ def _wrap_sqlite() -> None:
             # The caller pinned their own connection factory, so our observing
             # cursor is not installed and any read through this connection is
             # invisible. Record a coverage gap so absence of a cited read
-            # degrades to OPAQUE rather than a confident UNGROUNDED — the read
+            # degrades to OPAQUE rather than a confident UNGROUNDED, the read
             # may have happened where we could not see it.
             scope = _scope.current_scope()
             if scope is not None:
@@ -330,7 +330,7 @@ class _ObservedConnection(sqlite3.Connection):
 # emits NO thread-start audit event before 3.12 (3.12 raises
 # _thread.start_new_thread and 3.13+ _thread.start_joinable_thread). A
 # thread-hidden read would then give a
-# CONFIDENT FALSE UNGROUNDED — the exact failure OPAQUE exists to prevent. So
+# CONFIDENT FALSE UNGROUNDED, the exact failure OPAQUE exists to prevent. So
 # the robust mechanism wraps the thread entry points directly, which works on
 # every supported version; the audit-hook thread events stay as extra 3.12+
 # coverage for threads spawned via C paths.
@@ -348,7 +348,7 @@ def _wrap_thread_seams() -> None:
     threading.Thread.start = observed_start
 
     # threading captured its own reference to _thread.start_new_thread at import
-    # time, so patching _thread here does NOT double-count threading.Thread — it
+    # time, so patching _thread here does NOT double-count threading.Thread, it
     # only catches callers using the raw low-level API.
     real_snt = _thread.start_new_thread
     _reals["_thread.start_new_thread"] = real_snt
@@ -368,7 +368,7 @@ def _wrap_executor_seams() -> None:
     ``_wrap_thread_seams`` only catches a thread *started* inside the scope. A
     reused ``ThreadPoolExecutor`` whose worker threads were spawned before the
     scope opened would run a read on a pre-existing thread the scope's contextvar
-    never reaches — neither wrapped nor seamed, so an unseen read read as a
+    never reaches, neither wrapped nor seamed, so an unseen read read as a
     confident UNGROUNDED. Wrapping ``submit``/``map`` records the seam at the
     hand-off point instead, turning that blind spot into OPAQUE. Class-level and
     a no-op outside a scope, exactly like the Thread.start wrapper.
@@ -429,7 +429,7 @@ def _wrap_import_hook() -> None:
 
     ``refresh_third_party()`` runs only at scope ENTRY, so a loader imported
     INSIDE an open scope (as diagnose and any observe() user does) would never
-    be wrapped — its reads would go unseen and the finding read as a confident
+    be wrapped, its reads would go unseen and the finding read as a confident
     false UNGROUNDED. Wrapping ``builtins.__import__`` closes that: when a scope
     is open and one of the wrappable modules finishes importing, the third-party
     wrap re-runs. Fail-safe (any error is swallowed) and cheap when idle (a
@@ -486,8 +486,9 @@ def _wrap_polars_if_present() -> None:
     # polars reads through its Rust core with no Python open, so a cited read is
     # invisible to the open hook and would floor to a false UNGROUNDED. Wrapping
     # the EAGER readers records the read at return with result-nonemptiness. The
-    # lazy scanners (``scan_*``) are deliberately NOT wrapped: they read nothing
-    # at call time, so measuring them would either force a collect or misreport.
+    # lazy scanners (``scan_*``) read nothing at call time; their read happens in
+    # ``LazyFrame.collect``, wrapped below with a coverage-gap seam so a cited
+    # lazy read floors to OPAQUE rather than a confident false UNGROUNDED.
     pl = sys.modules.get("polars")
     if pl is None:
         return
@@ -501,6 +502,50 @@ def _wrap_polars_if_present() -> None:
             continue
         _reals[key] = real
         setattr(pl, name, _make_return_value_wrapper(real, "polars", _pl_source, _df_nonempty))
+    # A lazy scan reads nothing at call time; the read happens inside
+    # ``LazyFrame.collect`` through the Rust core, invisible to the open hook,
+    # so a cited lazy read would floor to a confident false UNGROUNDED. Record a
+    # coverage-gap seam at collect so a cited read through lazy polars floors to
+    # OPAQUE instead. This never grounds a lazy read; a source genuinely read
+    # through an instrumented eager path still wins GROUNDED (reads beat seams).
+    lf_cls = getattr(pl, "LazyFrame", None)
+    if lf_cls is None:
+        return
+    key = "polars.LazyFrame.collect"
+    real_collect = getattr(lf_cls, "collect", None)
+    if real_collect is not None and key not in _reals:
+        _reals[key] = real_collect
+        setattr(lf_cls, "collect", _make_lazy_polars_seam_wrapper(real_collect))
+
+
+def _make_lazy_polars_seam_wrapper(real):
+    """Wrap ``LazyFrame.collect`` to record a per-invocation coverage-gap seam.
+
+    A lazy scan defers the read to collect, which runs through the polars Rust
+    core with no Python open: the observer can neither see the read nor recover
+    the scanned path, so a cited lazy read must not be a confident UNGROUNDED.
+    The seam floors a cited source the collect might have read to OPAQUE, while a
+    source genuinely read through an instrumented eager path still wins GROUNDED
+    (reads beat seams). This never grounds a lazy read; it only refuses to deny
+    one the observer could not see.
+    """
+
+    def wrapper(*args, **kwargs):
+        result = real(*args, **kwargs)  # host errors propagate untouched
+        scope = _scope.current_scope()
+        if scope is None:
+            return result
+        try:
+            scope.record_seam(
+                "coverage-gap",
+                "lazy polars collect read through an uninstrumented engine; the "
+                "scanned path is not observable, so a cited read cannot be denied",
+            )
+        except BaseException as exc:  # noqa: BLE001
+            scope.mark_error(f"polars lazy wrapper failed: {type(exc).__name__}")
+        return result
+
+    return wrapper
 
 
 def _make_duckdb_seam_wrapper(real):
@@ -533,11 +578,14 @@ def _make_duckdb_seam_wrapper(real):
     return wrapper
 
 
+_DUCKDB_QUERY_ENTRIES = ("sql", "execute", "query", "read_csv", "read_parquet", "read_json")
+
+
 def _wrap_duckdb_if_present() -> None:
     duckdb = sys.modules.get("duckdb")
     if duckdb is None:
         return
-    for name in ("sql", "execute", "query", "read_csv", "read_parquet", "read_json"):
+    for name in _DUCKDB_QUERY_ENTRIES:
         key = f"duckdb.{name}"
         if key in _reals:
             continue
@@ -546,6 +594,24 @@ def _wrap_duckdb_if_present() -> None:
             continue
         _reals[key] = real
         setattr(duckdb, name, _make_duckdb_seam_wrapper(real))
+    # The module-level functions run only on the default in-memory connection.
+    # The canonical idiom, and the only one that reaches a persistent .duckdb
+    # file, is duckdb.connect().execute/.sql/..., whose reads route through the
+    # same uninstrumented core. Wrap the connection class's query methods so a
+    # cited read through a connection floors to OPAQUE, never a false UNGROUNDED.
+    # Instance attributes are read-only, so the wrap is on the class.
+    conn_cls = getattr(duckdb, "DuckDBPyConnection", None)
+    if conn_cls is None:
+        return
+    for name in _DUCKDB_QUERY_ENTRIES:
+        key = f"duckdb.DuckDBPyConnection.{name}"
+        if key in _reals:
+            continue
+        real = getattr(conn_cls, name, None)
+        if real is None:
+            continue
+        _reals[key] = real
+        setattr(conn_cls, name, _make_duckdb_seam_wrapper(real))
 
 
 def _wrap_httpx_if_present() -> None:
@@ -578,12 +644,12 @@ def _wrap_requests_if_present() -> None:
 #
 # The module-level httpx.get / requests.get are wrapped above. But real agents
 # reuse a pooled Session / Client opened BEFORE the scope, so no new socket
-# connects inside it (keep-alive) and no socket seam fires — an unwrapped pooled
+# connects inside it (keep-alive) and no socket seam fires, an unwrapped pooled
 # retrieval reads as a confident false UNGROUNDED. Wrapping the session methods
 # closes that. Streaming responses (stream=True, aiohttp, httpx.stream) do not
 # have their body available at wrapper return, so they record a SOCKET seam
 # (network delivery the observer did not see) rather than a header-based
-# GROUNDED or a false UNGROUNDED — socket seams block URL/content-address
+# GROUNDED or a false UNGROUNDED, socket seams block URL/content-address
 # citations but leave a file-cited finding's tell intact.
 
 def _wrap_requests_session_if_present() -> None:
@@ -597,10 +663,10 @@ def _wrap_requests_session_if_present() -> None:
     # request (method-aware, so the URL is recorded, not the HTTP verb) captures
     # direct request() calls and every verb of a plain Session. The verbs are ALSO
     # wrapped so a Session SUBCLASS that overrides request (a common auth/retry SDK
-    # pattern) is still observed through its inherited verbs — otherwise its pooled
+    # pattern) is still observed through its inherited verbs, otherwise its pooled
     # reads would land a confident false UNGROUNDED. A base-Session verb call
     # double-records the same URL (verb wrapper + inner request wrapper); that is
-    # benign — matching is existential, the identifier is identical, and http reads
+    # benign, matching is existential, the identifier is identical, and http reads
     # are not counted in the coverage fraction.
     if "requests.Session.request" not in _reals:
         real = getattr(Session, "request", None)
@@ -635,7 +701,7 @@ def _wrap_httpx_clients_if_present() -> None:
     # POST carries the model call: parse the request body for the model/method
     # lineage at the socket seam. A streaming POST (body ``stream=true``) does
     # not materialize the response, so its response is recorded as a socket seam
-    # rather than forced into memory — the request body is available either way,
+    # rather than forced into memory, the request body is available either way,
     # so the model is still captured.
     if Client is not None and "httpx.Client.post" not in _reals:
         real = getattr(Client, "post", None)
@@ -695,8 +761,8 @@ def _make_http_method_wrapper(real, *, streaming_kw, method_arg=False):
     materialized at return (``"stream"`` for requests); a streaming call records
     a socket seam instead of a read. ``method_arg`` is True for a shared
     ``request(self, method, url, ...)`` method (requests ``Session.request``):
-    the leading HTTP verb is dropped before recording so the URL — not the string
-    ``"GET"`` — is read as the source.
+    the leading HTTP verb is dropped before recording so the URL, not the string
+    ``"GET"``, is read as the source.
     """
 
     def wrapper(self, *args, **kwargs):
@@ -784,7 +850,7 @@ def _record_http_response(scope, args, kwargs, result) -> None:
 #
 # A model call is an HTTP POST whose JSON body names the model. Wrapping
 # Client.post / AsyncClient.post lets the observer parse that body at the socket
-# seam — the COMPUTED lineage tier, which the producer does not control. The
+# seam, the COMPUTED lineage tier, which the producer does not control. The
 # response side follows the existing streaming rule: a streaming POST (body
 # ``stream=true``) records a socket seam instead of materializing the body.
 
@@ -823,12 +889,12 @@ def _make_async_http_post_method_wrapper(real):
 
 
 def _make_http_send_wrapper(real):
-    """Wrap ``httpx.Client.send(request)`` — the SDK/litellm model-call path.
+    """Wrap ``httpx.Client.send(request)``, the SDK/litellm model-call path.
 
     Captures model lineage only; grounding reads stay with the verb wrappers, so
     ``send`` never records an http read (which would risk grounding a finding off
     an API error body). A ``.post(json=)`` call routes through ``send`` too, so
-    lineage may be recorded twice — benign: equal lineages collapse to one.
+    lineage may be recorded twice, benign: equal lineages collapse to one.
     """
 
     def wrapper(self, *args, **kwargs):
@@ -867,7 +933,7 @@ def _make_async_http_send_wrapper(real):
 
 
 def _make_aiohttp_request_wrapper(real):
-    """Wrap ``aiohttp.ClientSession._request`` — litellm's default transport.
+    """Wrap ``aiohttp.ClientSession._request``, litellm's default transport.
 
     aiohttp streams the response body (read in host code after we return), so the
     response is recorded as a socket seam, never a grounding read. But the request
@@ -932,7 +998,7 @@ def _transport_is_networked(client, url) -> bool:
     response is produced by the client's transport, so a producer-supplied
     in-process transport (``httpx.MockTransport``, WSGI/ASGI, or a custom class)
     answers ``200`` offline and certifies no model call. Only httpx's own network
-    transports earn COMPUTED — an ALLOWLIST, so an unknown transport fails safe to
+    transports earn COMPUTED, an ALLOWLIST, so an unknown transport fails safe to
     producer-controlled (PROXY) rather than being trusted. ``client is None`` (a
     seam with no httpx client, e.g. aiohttp) reads as networked: this gate governs
     the httpx transport path only.
@@ -976,7 +1042,7 @@ def _record_model_lineage(scope, body, url, result, *, client=None) -> None:
     networked = _transport_is_networked(client, url)
     provider = _provider_of(url)
     # A local inference server (no recognized remote host) can be content-
-    # addressed by the served weights' digest — a verifiable distinct identity a
+    # addressed by the served weights' digest, a verifiable distinct identity a
     # local model name lacks. Probed only for a real local server, never a remote
     # host and never a producer-controlled transport.
     digest = (
@@ -1006,7 +1072,7 @@ def _record_model_from_httpx_request(scope, client, request, result) -> None:
     """Capture lineage from a pre-built ``httpx.Request`` (the SDK ``send`` path).
 
     The openai/anthropic SDKs and litellm build a ``Request`` and dispatch it via
-    ``client.send(request)`` — the model never passes through a wrapped ``.post``
+    ``client.send(request)``, the model never passes through a wrapped ``.post``
     ``json=`` kwarg. The request body has already been serialized to bytes on the
     request object, so it is read WITHOUT calling ``request.read()``/``aread()``
     (which would consume a streaming upload and change host behavior). A
@@ -1081,7 +1147,7 @@ def _ollama_server_base(url) -> "str | None":
     """The base URL of a LOCAL Ollama server for a request URL, or None.
 
     Recognized by a loopback host on Ollama's port (11434) or its ``/api/`` path
-    — the fingerprint from the local-inference-server survey. Only a local server
+   , the fingerprint from the local-inference-server survey. Only a local server
     is ever probed; a remote unrecognized host is never contacted.
     """
     from urllib.parse import urlsplit
@@ -1133,10 +1199,10 @@ def _query_ollama_digest(base, model_id) -> "str | None":
     """Query a local Ollama server for a model's weights digest, scope-detached.
 
     Queries the running server (``/api/ps`` loaded runner, then ``/api/tags``
-    installed) for the served model's manifest sha256 — the digest of the weights
+    installed) for the served model's manifest sha256, the digest of the weights
     that served the call. DETACHES the observer scope so this probe records
     nothing into the scope under measurement (its own socket/read events no-op),
-    uses a hard short timeout, and returns None on any failure — never raises,
+    uses a hard short timeout, and returns None on any failure, never raises,
     never blocks the inference path. A concurrent tag remap between the call and
     this probe is a named residual; the digest is self-attested regardless.
 
@@ -1177,7 +1243,7 @@ def _query_ollama_digest(base, model_id) -> "str | None":
 
 
 def _method_of(url) -> "str | None":
-    """The request path — a stable tool/pipeline identity tag for the call."""
+    """The request path, a stable tool/pipeline identity tag for the call."""
     from urllib.parse import urlsplit
 
     try:
@@ -1193,7 +1259,7 @@ def _method_of(url) -> "str | None":
 # NO Python PEP-578 event, so a cited read of one is invisible to the open hook
 # and the classifier floors it to OPAQUE. Wrapping the reader records the read
 # directly so a cited scientific-data read reaches GROUNDED. Only-if-imported,
-# like the other third-party wrappers — mareforma never imports these itself.
+# like the other third-party wrappers, mareforma never imports these itself.
 
 def _wrap_h5py_if_present() -> None:
     h5py = sys.modules.get("h5py")
@@ -1235,7 +1301,7 @@ def _wrap_netcdf4_if_present() -> None:
 def _record_c_ext_read(args, kwargs) -> None:
     """Record a C-extension read of the path (stat-based non-emptiness proxy).
 
-    The same honest proxy the builtins.open path uses — the C reader's byte flow
+    The same honest proxy the builtins.open path uses, the C reader's byte flow
     is not observable either. No-op outside a scope; never raises into host code.
     """
     scope = _scope.current_scope()
@@ -1268,7 +1334,7 @@ def _make_c_ext_wrapper(real):
 def _make_c_ext_class_wrapper(real_cls):
     """Wrap a C-extension reader CLASS (h5py.File / netCDF4.Dataset) as a subclass,
     so ``isinstance(f, h5py.File)`` and ``class X(h5py.File)`` keep working after
-    instrumentation — replacing the class with a plain function makes those raise
+    instrumentation, replacing the class with a plain function makes those raise
     ``TypeError``. Mirrors the sqlite path, which subclasses Cursor/Connection for
     the same reason. If the type is not subclassable, fall back to the function
     wrapper (isinstance is then not preserved, but the read is still recorded).
@@ -1290,7 +1356,7 @@ def _make_c_ext_class_wrapper(real_cls):
         return _WrappedCExtReader
     except TypeError:
         # Not subclassable (some C-extension types): degrade to the function
-        # wrapper — the read is still recorded, only isinstance is not preserved.
+        # wrapper, the read is still recorded, only isinstance is not preserved.
         return _make_c_ext_wrapper(real_cls)
 
 
@@ -1369,7 +1435,7 @@ def _file_read_signal(identifier: str) -> tuple[bool, bool]:
     trusted ONLY for regular files, whose stat size is meaningful. A non-regular
     target (fifo, character/block device, socket file, procfs entry) reports a
     stat size of 0 even when the read delivers bytes, so it must never be called
-    ``nonempty=False`` and allowed to drive a false ``UNGROUNDED`` — the caller
+    ``nonempty=False`` and allowed to drive a false ``UNGROUNDED``, the caller
     records a coverage-gap seam for a cited non-regular source instead, forcing
     ``OPAQUE``. An unstattable target (the open succeeded but stat then raised, a
     delete race) is reported as NON-regular for the same reason: its bytes are
@@ -1428,7 +1494,7 @@ def _response_ok(result):
     """Whether an HTTP response is a success, library-agnostic.
 
     ``httpx`` and ``requests`` expose ``status_code``; ``aiohttp`` exposes
-    ``status``. A shape the observer cannot read returns ``None`` — callers
+    ``status``. A shape the observer cannot read returns ``None``, callers
     treat that as fail-closed (neither ground the read nor mint lineage) rather
     than assume the call succeeded. Shared by the read and lineage paths so a
     single rule governs both.

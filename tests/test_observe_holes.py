@@ -2,7 +2,7 @@
 
 UNGROUNDED must mean "the scope was fully observed and the cited data did not
 arrive," never "the observer could not see the read." These tests pin the holes
-that violated it — pooled HTTP sessions, C-runtime file readers — as OPAQUE, and
+that violated it, pooled HTTP sessions, C-runtime file readers, as OPAQUE, and
 pin the seam-relevance matrix that keeps a socket seam from hiding the UNGROUNDED
 tell on a local-file citation. Each is a known-bound regression guard: a change
 that reopens the hole (flips one of these back to a confident UNGROUNDED, or a
@@ -37,7 +37,7 @@ def test_file_cited_socket_seam_stays_ungrounded():
         except OSError:
             pass
     assert h.verdict.grounding is OG.UNGROUNDED
-    # The seam is still recorded — it is just not relevant to a file citation.
+    # The seam is still recorded, it is just not relevant to a file citation.
     assert any(s.kind == "socket" for s in h.verdict.seams)
 
 
@@ -67,7 +67,7 @@ def test_content_address_cited_socket_seam_is_opaque():
 
 def test_content_address_cited_without_hashing_is_opaque(tmp_path):
     # Content addressing off: no read carries a hash, so a sha256: citation can
-    # never match — even when the cited bytes WERE read. Absence of a match is
+    # never match, even when the cited bytes WERE read. Absence of a match is
     # not evidence of absence; a confident UNGROUNDED here would be false.
     import hashlib
 
@@ -200,7 +200,7 @@ def test_requests_session_empty_body_is_ungrounded():
         rsps.add(responses.GET, url, body="", status=200)
         with obs.observe(cites=url) as h:
             session.get(url)
-    # The HTTP read WAS observed and returned empty — genuine absence, the silent
+    # The HTTP read WAS observed and returned empty, genuine absence, the silent
     # fallback tell. UNGROUNDED here is honest (contrast the no-call case, which
     # is OPAQUE because coverage is unknown).
     assert h.verdict.grounding is OG.UNGROUNDED
@@ -238,7 +238,7 @@ def test_requests_session_streaming_is_opaque_not_grounded():
 def test_requests_session_post_is_recorded_by_url_not_method():
     # Regression: every verb routes through Session.request(method, url), so the
     # observer records the URL, never the HTTP method string. Before the fix a
-    # wrapped `request` read args[0] ("POST") as the source — a cited POST went
+    # wrapped `request` read args[0] ("POST") as the source, a cited POST went
     # unrecorded (false OPAQUE) and every GET logged a spurious "GET" read.
     responses = pytest.importorskip("responses")
     requests = pytest.importorskip("requests")
@@ -265,7 +265,7 @@ def test_requests_session_subclass_overriding_request_is_observed():
 
     class DirectSession(requests.Session):
         def request(self, method, url, *args, **kwargs):
-            # Custom transport, no super().request() call — only the inherited
+            # Custom transport, no super().request() call, only the inherited
             # verb wrapper can observe this response.
             resp = requests.Response()
             resp.status_code = 200
@@ -312,7 +312,7 @@ def test_httpx_async_client_get_is_recorded(httpx_mock):
 
 def test_aiohttp_request_records_a_socket_seam():
     # aiohttp streams the body (read in host code after our wrapper returns), so
-    # the wrapper records a socket seam rather than a header-based read — a pooled
+    # the wrapper records a socket seam rather than a header-based read, a pooled
     # aiohttp GET of a cited URL therefore lands OPAQUE, never false UNGROUNDED.
     # Driven through the wrapper directly with a stub coroutine so the test needs
     # no live network (aioresponses does not track current aiohttp).
@@ -432,6 +432,20 @@ def test_polars_read_csv_is_grounded(tmp_path):
     assert h.verdict.grounding is OG.GROUNDED
 
 
+def test_polars_lazy_scan_collect_is_opaque_not_ungrounded(tmp_path):
+    # A lazy scan defers the read to collect, which runs through the Rust core
+    # with no observable path, so a cited lazy read must floor to OPAQUE (a
+    # coverage-gap seam), never a confident false UNGROUNDED that brands a
+    # genuinely data-grounded finding as a silent failure.
+    pl = pytest.importorskip("polars")
+    p = str(tmp_path / "d.csv")
+    open(p, "w").write("x\n1\n2\n3\n")
+    with obs.observe(cites=p) as h:
+        pl.scan_csv(p).collect()
+    assert h.verdict.grounding is OG.OPAQUE
+    assert any(s.kind == "coverage-gap" for s in h.verdict.seams)
+
+
 def test_duckdb_path_read_is_opaque_not_ungrounded(tmp_path):
     # duckdb reads a path named INSIDE the SQL string through its C++ core: the
     # observer cannot extract the path or see the read, so a cited duckdb read
@@ -442,6 +456,36 @@ def test_duckdb_path_read_is_opaque_not_ungrounded(tmp_path):
     open(p, "w").write("x\n1\n2\n3\n")
     with obs.observe(cites=p) as h:
         duckdb.sql(f"SELECT * FROM '{p}'").fetchall()
+    assert h.verdict.grounding is OG.OPAQUE
+    assert any(s.kind == "coverage-gap" for s in h.verdict.seams)
+
+
+def test_duckdb_connection_read_is_opaque_not_ungrounded(tmp_path):
+    # The connection idiom, duckdb.connect().execute/.sql, is the canonical usage
+    # and the only path to a persistent .duckdb file. Its reads route through the
+    # same uninstrumented core as the module-level functions, so a cited read
+    # through a connection must floor to OPAQUE (a coverage-gap seam), never a
+    # confident false UNGROUNDED that brands a genuinely data-grounded finding as
+    # a silent failure.
+    duckdb = pytest.importorskip("duckdb")
+    p = str(tmp_path / "d.csv")
+    open(p, "w").write("x\n1\n2\n3\n")
+    with obs.observe(cites=p) as h:
+        duckdb.connect().execute(f"SELECT * FROM read_csv_auto('{p}')").fetchall()
+    assert h.verdict.grounding is OG.OPAQUE
+    assert any(s.kind == "coverage-gap" for s in h.verdict.seams)
+
+
+def test_duckdb_persistent_db_connection_read_is_opaque(tmp_path):
+    # A persistent .duckdb file is reachable only through a connection, never the
+    # module-level functions. A cited read through it floors to OPAQUE, not a
+    # false UNGROUNDED.
+    duckdb = pytest.importorskip("duckdb")
+    p = str(tmp_path / "d.csv")
+    open(p, "w").write("x\n1\n2\n3\n")
+    with obs.observe(cites=p) as h:
+        conn = duckdb.connect(str(tmp_path / "store.duckdb"))
+        conn.sql(f"SELECT * FROM '{p}'").fetchall()
     assert h.verdict.grounding is OG.OPAQUE
     assert any(s.kind == "coverage-gap" for s in h.verdict.seams)
 
@@ -473,7 +517,7 @@ def test_wrapped_h5py_read_is_grounded(tmp_path):
 
 def test_wrapped_h5py_grounded_reason_does_not_overclaim_byte_flow(tmp_path):
     # The C-extension readers use a stat-based non-emptiness proxy exactly like
-    # builtins.open — they never see the bytes. The signed reason must say so, not
+    # builtins.open, they never see the bytes. The signed reason must say so, not
     # claim the read "returned non-empty data" as the sqlite/http wrappers (which
     # do observe returns) may.
     h5py = pytest.importorskip("h5py")
