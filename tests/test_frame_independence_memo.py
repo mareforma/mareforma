@@ -1,4 +1,4 @@
-"""#39: a frame read must verify each claim's signature at most once.
+"""a frame read must verify each claim's signature at most once.
 
 Independence counts drive an Ed25519 verify per evidence line, and one
 ``query_frame`` call recomputes the same per-proposition counts several times:

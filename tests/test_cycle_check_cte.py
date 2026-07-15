@@ -1,4 +1,4 @@
-"""#33: the cycle check is one recursive CTE, not a query per node.
+"""the cycle check is one recursive CTE, not a query per node.
 
 ``_check_no_cycle`` walked ``supports[]`` with a Python DFS that ran one
 ``SELECT`` per visited claim, so its cost scaled with the depth of the

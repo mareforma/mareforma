@@ -47,7 +47,7 @@ def _root(crate: dict) -> dict:
 
 
 def test_ro_crate_root_has_license_resolving_to_entity(tmp_path: Path) -> None:
-    """#29: root license references a contextual entity in the graph."""
+    """root license references a contextual entity in the graph."""
     _seed(tmp_path)
     crate = build_crate(tmp_path)
     root = _root(crate)
@@ -89,7 +89,7 @@ def test_ro_crate_rejects_empty_license_override(tmp_path: Path) -> None:
 
 
 def test_ro_crate_date_published_never_null(tmp_path: Path) -> None:
-    """#29: datePublished is present even for an empty graph."""
+    """datePublished is present even for an empty graph."""
     with mareforma.open(tmp_path):
         pass  # bootstrap only — zero claims
     crate = build_crate(tmp_path)
@@ -97,7 +97,7 @@ def test_ro_crate_date_published_never_null(tmp_path: Path) -> None:
 
 
 def test_ro_crate_mentions_actions_haspart_data(tmp_path: Path) -> None:
-    """#29: CreateActions ride under mentions; data entities under hasPart."""
+    """CreateActions ride under mentions; data entities under hasPart."""
     a, b = _seed(tmp_path)
     crate = build_crate(tmp_path)
     root = _root(crate)
@@ -112,7 +112,7 @@ def test_ro_crate_mentions_actions_haspart_data(tmp_path: Path) -> None:
 
 
 def test_prov_o_uses_rdfs_label(tmp_path: Path) -> None:
-    """#48: rdfs:label with an rdfs context, never prov:label."""
+    """rdfs:label with an rdfs context, never prov:label."""
     _seed(tmp_path)
     doc = build_prov_o(tmp_path)
     assert "rdfs" in doc["@context"], "@context must map the rdfs prefix"
@@ -125,5 +125,5 @@ def test_prov_o_uses_rdfs_label(tmp_path: Path) -> None:
 
 
 def test_prov_context_declares_rdfs() -> None:
-    """#48: the module-level context constant carries the rdfs mapping."""
+    """the module-level context constant carries the rdfs mapping."""
     assert PROV_CONTEXT.get("rdfs") == "http://www.w3.org/2000/01/rdf-schema#"

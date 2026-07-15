@@ -348,7 +348,7 @@ class TestApiVersion:
         return c
 
     def test_neighbouring_major_rejected(self, monkeypatch):
-        """#49: 'v10'/'v1beta2' share a prefix with 'v1' but are a
+        """'v10'/'v1beta2' share a prefix with 'v1' but are a
         different major and must be rejected, not accepted by startswith."""
         for bogus in (f"{SUPPORTED_API_VERSION}0", f"{SUPPORTED_API_VERSION}beta2"):
             c = self._client_reporting(monkeypatch, bogus)

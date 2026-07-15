@@ -101,7 +101,7 @@ class TestKeyLifecycle:
     def test_overwrite_save_is_durable_and_unpredictable(
         self, tmp_path, monkeypatch,
     ):
-        # #49: key rotation (non-exclusive save over an existing key) must
+        # key rotation (non-exclusive save over an existing key) must
         # fsync the temp file before the rename and use an unpredictable temp
         # name, so a power loss in the writeback window cannot leave a
         # zero-byte key and two concurrent rotations cannot share one

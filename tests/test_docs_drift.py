@@ -50,7 +50,7 @@ def _export_format_choices():
 
 
 def test_status_policy_stamp_documented_matches_code():
-    """#44: each current-policy page names the live stamp and no stale one."""
+    """each current-policy page names the live stamp and no stale one."""
     for page in _POLICY_PAGES:
         text = page.read_text(encoding="utf-8")
         stamps = set(_POLICY_STAMP_RE.findall(text))
@@ -62,7 +62,7 @@ def test_status_policy_stamp_documented_matches_code():
 
 
 def test_export_format_choices_documented():
-    """#54: every --format choice from the CLI appears in cli.mdx."""
+    """every --format choice from the CLI appears in cli.mdx."""
     cli_doc = (DOCS / "reference" / "cli.mdx").read_text(encoding="utf-8")
     assert "--format" in cli_doc, "cli.mdx does not document the --format option"
     for choice in _export_format_choices():
@@ -70,7 +70,7 @@ def test_export_format_choices_documented():
 
 
 def test_every_cli_command_documented():
-    """#46: every visible top-level command is documented in cli.mdx.
+    """every visible top-level command is documented in cli.mdx.
 
     Reads the command list from ``cli.commands`` in code, the same source of
     truth ``_export_format_choices`` uses, so it fails whenever a future
@@ -90,7 +90,7 @@ def test_every_cli_command_documented():
 
 
 def test_findings_convergent_example_uses_a_distinct_signer(tmp_path):
-    """#28: the findings.mdx CONVERGENT recipe must reach CONVERGENT when run.
+    """the findings.mdx CONVERGENT recipe must reach CONVERGENT when run.
 
     The status counts independence by distinct signer, so two supporting lines
     converge only when a second signing key backs the second finding. A recipe
@@ -125,7 +125,7 @@ def test_findings_convergent_example_uses_a_distinct_signer(tmp_path):
 
 
 def test_prov_o_claim_is_scoped_to_default_format():
-    """#54: the 'NOT PROV-O-conformant' line no longer reads as a blanket
+    """the 'NOT PROV-O-conformant' line no longer reads as a blanket
     claim now that --format=prov-o emits real W3C PROV-O."""
     cli_doc = (DOCS / "reference" / "cli.mdx").read_text(encoding="utf-8")
     # If the page still warns about PROV-O non-conformance, it must also
@@ -137,7 +137,7 @@ def test_prov_o_claim_is_scoped_to_default_format():
 
 
 def test_replicated_promotion_docs_do_not_overclaim_the_model_gate(tmp_path):
-    """#33: the REPLICATED promotion prose must not claim a distinct-model gate.
+    """the REPLICATED promotion prose must not claim a distinct-model gate.
 
     On the primary path a claim's finding model lineage is written after
     promotion runs, so the promotion-time ``model_distinct_pair`` filter reads
@@ -169,7 +169,7 @@ def test_replicated_promotion_docs_do_not_overclaim_the_model_gate(tmp_path):
 
 
 def test_deprecated_label_note_matches_deprecated_labels(tmp_path=None):
-    """#48: the "deprecated public labels" note must list only the real aliases.
+    """the "deprecated public labels" note must list only the real aliases.
 
     Only ``REPLICATED`` and ``ESTABLISHED`` are retired public labels resolved as
     one-release aliases (``mareforma._DEPRECATED_SUPPORT_LABELS``); ``PRELIMINARY``
@@ -200,7 +200,7 @@ def _section(text: str, heading: str) -> str:
 
 
 def test_api_compute_status_counts_independence_by_signer():
-    """#29: the compute_status reference must count independence by signer.
+    """the compute_status reference must count independence by signer.
 
     Independence keys on the claim's ``asserter_keyid``, with ``generated_by``
     only the fallback for legacy or unsigned lines. The reference elsewhere says

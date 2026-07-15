@@ -1,4 +1,4 @@
-"""#50: the per-connection chain-verification cache is real.
+"""the per-connection chain-verification cache is real.
 
 Stdlib ``sqlite3.Connection`` rejects attribute assignment, so the old
 ``setattr(conn, ...)`` cache silently fell back to a fresh empty set on

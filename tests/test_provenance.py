@@ -194,7 +194,7 @@ class TestQueryProvenance:
     def test_update_claim_supports_refreshes_provenance(
         self, tmp_path: Path,
     ) -> None:
-        # #10: editing an unsigned claim's supports must maintain the supports
+        # editing an unsigned claim's supports must maintain the supports
         # cache in the same transaction, so query_provenance stops serving the
         # pre-edit lineage. The COUNT(*)-only staleness heuristic never trips
         # on an in-place UPDATE, so the edges must be maintained directly.
@@ -216,7 +216,7 @@ class TestQueryProvenance:
     def test_delete_claim_drops_its_cache_edges(
         self, tmp_path: Path,
     ) -> None:
-        # #10: deleting an unsigned claim must remove its cache edges in the
+        # deleting an unsigned claim must remove its cache edges in the
         # same transaction. A reopen rebuilds the cache (delete changes the
         # claim count, so is_cache_stale trips), which would mask this, so the
         # assertion is on the same connection: the edge must be gone now, not

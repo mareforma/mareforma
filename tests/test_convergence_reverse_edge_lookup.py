@@ -1,4 +1,4 @@
-"""#19: the REPLICATED convergence candidate lookup must not full-scan.
+"""the REPLICATED convergence candidate lookup must not full-scan.
 
 The candidate-peer query joined ``claims`` against ``json_each(supports_json)``,
 which no index can serve, so every converging insert scanned and JSON-parsed the

@@ -72,7 +72,7 @@ def _build_sdist_names():
 
 
 def test_sdist_ships_complete_runnable_suite():
-    """#45: conftest + helpers + every test subpackage ride in the sdist."""
+    """conftest + helpers + every test subpackage ride in the sdist."""
     names = _build_sdist_names()
     missing = [f for f in _REQUIRED_SDIST_TEST_FILES if f not in names]
     assert not missing, f"sdist omits runnable-suite files: {missing}"
@@ -83,7 +83,7 @@ def test_sdist_ships_complete_runnable_suite():
 
 
 def test_no_dead_git_extra_and_no_gitpython_dev():
-    """#56: the [git] extra is gone and gitpython is out of dev."""
+    """the [git] extra is gone and gitpython is out of dev."""
     data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
     extras = data["project"].get("optional-dependencies", {})
     assert "git" not in extras, "the dead [git] extra must be removed"
@@ -103,7 +103,7 @@ def _setuptools_floor(requires):
 
 
 def test_license_string_requires_setuptools_77_floor():
-    """#30: setuptools accepts a string ``project.license`` (PEP 639 SPDX)
+    """setuptools accepts a string ``project.license`` (PEP 639 SPDX)
     only from 77.0.0 on; every earlier version rejects it. A string license
     with a floor below 77 cannot build with its own stated minimum toolchain.
     """
@@ -152,7 +152,7 @@ def _tests_reference(name):
 
 
 def test_test_heavy_extra_matches_the_loaders_it_exercises():
-    """#31: the heavy leg must install every loader the grounding tests skip on
+    """the heavy leg must install every loader the grounding tests skip on
     (polars, duckdb were importorskip'd but installed by no extra), and must not
     carry a heavy dep no test references (netCDF4 was shipped with zero test use).
     """
@@ -176,7 +176,7 @@ def test_test_heavy_extra_matches_the_loaders_it_exercises():
 
 
 def test_dependabot_produces_real_updates():
-    """#55: both ecosystems scheduled, and no uncommitted lockfile claim."""
+    """both ecosystems scheduled, and no uncommitted lockfile claim."""
     text = DEPENDABOT.read_text(encoding="utf-8")
     ecosystems = set(re.findall(r"package-ecosystem:\s*[\"']?([\w-]+)", text))
     assert {"github-actions", "pip"} <= ecosystems, (

@@ -1,4 +1,4 @@
-"""#20: findings must carry a claim_id index for the write and read paths.
+"""findings must carry a claim_id index for the write and read paths.
 
 Three shipped paths resolve ``findings.claim_id``: the trust-map effective-
 independence lookup, the ``_claim_model_lineage`` join run per convergence peer,
