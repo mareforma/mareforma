@@ -1,4 +1,4 @@
-"""tests/conftest.py — shared pytest fixtures for mareforma tests."""
+"""tests/conftest.py, shared pytest fixtures for mareforma tests."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ def _isolate_xdg_config(tmp_path, monkeypatch):
 
     Function-scoped tmp_path (not session-scoped tmp_path_factory) so two
     tests that both bootstrap the default key path don't collide on the
-    second run — bootstrap_key now uses O_CREAT|O_EXCL and would fail the
+    second run, bootstrap_key now uses O_CREAT|O_EXCL and would fail the
     loser with a SigningError.
     """
     sandbox = tmp_path / "xdg"
@@ -30,7 +30,7 @@ def _isolate_predicate_registry():
 
     ``mareforma.predicate_types`` keeps registered URIs in a module-
     level dict. Tests that exercise ``register_predicate`` would
-    otherwise leak entries between tests — green-alone, red-in-suite.
+    otherwise leak entries between tests, green-alone, red-in-suite.
     """
     from mareforma import predicate_types as _pt
     snapshot = dict(_pt._registry)

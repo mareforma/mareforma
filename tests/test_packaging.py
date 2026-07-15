@@ -2,16 +2,16 @@
 
 Regression guards for the packaging issues:
 
-- #45  the sdist must ship a *runnable* test suite (conftest, shared
+- the sdist must ship a *runnable* test suite (conftest, shared
        helpers, and every subpackage) or none at all. Completeness is the
        shipped choice, so this pins the complete tree.
-- #56  no dead ``[git]`` optional-dependency extra and no ``gitpython``
+- no dead ``[git]`` optional-dependency extra and no ``gitpython``
        in the dev extra (nothing imports it).
-- #55  the Dependabot config produces real updates and never advertises a
+- the Dependabot config produces real updates and never advertises a
        lockfile that is not committed.
-- #30  a PEP 639 string ``project.license`` requires a setuptools>=77 build
+- a PEP 639 string ``project.license`` requires a setuptools>=77 build
        floor; the floor must not permit versions that reject the string form.
-- #31  the ``test-heavy`` extra installs exactly the loader libs the grounding
+- the ``test-heavy`` extra installs exactly the loader libs the grounding
        tests skip on, and carries no heavy dep no test references.
 
 Each guard fails on the pre-fix tree.
@@ -54,7 +54,7 @@ def _build_sdist_names():
     return the archive member paths relative to the sdist root."""
     # setuptools is a BUILD-system dependency (pyproject [build-system].requires),
     # not a runtime or test dependency, and modern pip no longer seeds it into a
-    # venv. Skip rather than hard-fail when a clean environment lacks it — the
+    # venv. Skip rather than hard-fail when a clean environment lacks it, the
     # PEP 517 build supplies it at build time regardless.
     build_meta = pytest.importorskip("setuptools.build_meta")
 
@@ -78,7 +78,7 @@ def test_sdist_ships_complete_runnable_suite():
     assert not missing, f"sdist omits runnable-suite files: {missing}"
     for subdir in _REQUIRED_SDIST_TEST_SUBDIRS:
         assert any(n.startswith(subdir) for n in names), (
-            f"sdist omits the {subdir} test subpackage — suite is not runnable"
+            f"sdist omits the {subdir} test subpackage, suite is not runnable"
         )
 
 
@@ -185,7 +185,7 @@ def test_dependabot_produces_real_updates():
     intervals = re.findall(r"interval:\s*[\"']?([\w-]+)", text)
     assert len(intervals) >= 2, "each ecosystem needs a schedule interval"
     # A config that names a lockfile it does not commit produces no updates
-    # from that lockfile — the #55 defect. Guard against reintroducing it.
+    # from that lockfile. Guard against reintroducing it.
     for lockfile in _KNOWN_LOCKFILES:
         if lockfile in text:
             assert (REPO_ROOT / lockfile).exists(), (

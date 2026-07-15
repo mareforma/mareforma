@@ -75,7 +75,7 @@ def test_signed_non_rekor_claim_keeps_transparency_and_still_converges(
     assert _trust_columns(tmp_path)[c1]["transparency_logged"] == 1
 
     # A second distinct-signer peer added post-restore promotes BOTH to
-    # REPLICATED — only possible if c1 stayed transparency-eligible.
+    # REPLICATED, only possible if c1 stayed transparency-eligible.
     with mareforma.open(tmp_path, key_path=root_key) as g:
         c2 = g.assert_claim(
             "converged", supports=[seed], generated_by="B", signer=val_signer,
@@ -127,7 +127,7 @@ def test_restore_refuses_a_forged_replicated_support_level(
 ) -> None:
     """``support_level`` is not a signed field. A tampered claims.toml can flip
     a lone PRELIMINARY claim to REPLICATED, forging distinct-signer
-    corroboration that never happened — the claim signature still verifies.
+    corroboration that never happened, the claim signature still verifies.
     Restore must re-derive REPLICATED from the signed supports graph + verified
     asserter identities and refuse a level no corroboration backs."""
     root_key = _bootstrap_key(tmp_path, "root.key")
@@ -152,8 +152,8 @@ def test_restore_refuses_a_forged_replicated_support_level(
 
 
 def test_restore_preserves_a_corroborated_replicated(tmp_path: Path) -> None:
-    """A genuinely converged REPLICATED pair — distinct signers on a shared
-    ESTABLISHED anchor — survives backup + restore. The corroboration is
+    """A genuinely converged REPLICATED pair, distinct signers on a shared
+    ESTABLISHED anchor, survives backup + restore. The corroboration is
     re-derivable from the signed supports graph, so the level is kept and the
     forgery check does not false-reject an honest promotion."""
     root_key = _bootstrap_key(tmp_path, "root.key")
@@ -376,9 +376,9 @@ def test_restore_rejects_a_rekor_proof_copied_from_another_claim(
 
 
 def test_restore_preserves_the_full_trust_layer(tmp_path: Path) -> None:
-    """Round-trip a graph carrying every trust-layer state promotion reads —
+    """Round-trip a graph carrying every trust-layer state promotion reads , 
     REPLICATED level, contradiction invalidation, signer identity, transparency
-    — and assert the recovered columns are identical to the originals."""
+   , and assert the recovered columns are identical to the originals."""
     root_key = _bootstrap_key(tmp_path, "root.key")
     val_key = _bootstrap_key(tmp_path, "val.key")
     val2_key = _bootstrap_key(tmp_path, "val2.key")
@@ -429,7 +429,7 @@ def test_restore_rebuilds_the_finding_evidence_tree(tmp_path: Path) -> None:
     survive the documented delete-and-restore recovery, including the signed
     model lineage denormalized onto the evidence line.
 
-    The #23 round-trip predated the v0.3.9 trust tables and never extended to
+    The prior claims.toml round-trip predated the v0.3.9 trust tables and never extended to
     them, so after restore proposition_status returned None and the findings /
     evidence_lines rows were gone though the finding's signed claim survived.
     """

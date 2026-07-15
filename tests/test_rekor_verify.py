@@ -1,4 +1,4 @@
-"""tests/test_rekor_verify.py — RFC 6962 Merkle inclusion + checkpoint
+"""tests/test_rekor_verify.py, RFC 6962 Merkle inclusion + checkpoint
 signature verification (live functions in :mod:`mareforma.signing`).
 
 Synthesizes Merkle trees of varying sizes and known Ed25519 / ECDSA
@@ -124,7 +124,7 @@ class TestComputeLeafHash:
 
 
 # ---------------------------------------------------------------------------
-# Merkle inclusion proof — happy paths
+# Merkle inclusion proof, happy paths
 # ---------------------------------------------------------------------------
 
 
@@ -147,7 +147,7 @@ class TestMerkleInclusionHappy:
 
 
 # ---------------------------------------------------------------------------
-# Merkle inclusion proof — adversarial
+# Merkle inclusion proof, adversarial
 # ---------------------------------------------------------------------------
 
 
@@ -254,7 +254,7 @@ class TestCheckpointParsing:
         text = (
             "origin\nnot-a-number\n"
             + base64.standard_b64encode(b"\x00" * 32).decode()
-            + "\n\n— name "
+            + "\n\n,  name "
             + base64.standard_b64encode(b"\x00" * 4 + b"\x00" * 64).decode()
             + "\n"
         )
@@ -266,7 +266,7 @@ class TestCheckpointParsing:
         text = (
             "origin\n1\n"
             + base64.standard_b64encode(b"\x00" * 16).decode()
-            + "\n\n— name "
+            + "\n\n,  name "
             + base64.standard_b64encode(b"\x00" * 4 + b"\x00" * 64).decode()
             + "\n"
         )
@@ -278,7 +278,7 @@ class TestCheckpointParsing:
         text = (
             "origin\n1\n"
             + base64.standard_b64encode(b"\x00" * 32).decode()
-            + "\n— name AAAAAA\n"
+            + "\n,  name AAAAAA\n"
         )
         with pytest.raises(_signing.RekorInclusionError) as exc_info:
             _signing.parse_rekor_checkpoint(text)
@@ -306,9 +306,30 @@ class TestCheckpointParsing:
             _signing.parse_rekor_checkpoint(text)
         assert exc_info.value.reason == "checkpoint_malformed"
 
+    def test_delimiter_is_the_transparency_dev_em_dash(self) -> None:
+        # The signed-note signature line delimiter is fixed by the
+        # transparency-dev format at U+2014 EM DASH. Pin the literal byte so a
+        # prose sweep cannot silently retune it to another character and leave
+        # every genuine Rekor checkpoint rejected as malformed.
+        assert _signing._SIGNED_NOTE_DASH == "—"
+
+    def test_genuine_em_dash_signature_line_parses(self) -> None:
+        # Build the signature line from a hardcoded U+2014, not the module
+        # constant, so this fixture stays honest even if the constant drifts.
+        text = (
+            "origin\n1\n"
+            + base64.standard_b64encode(b"\x00" * 32).decode()
+            + "\n\n— name "
+            + base64.standard_b64encode(b"\x00" * 4 + b"\x00" * 64).decode()
+            + "\n"
+        )
+        parsed = _signing.parse_rekor_checkpoint(text)
+        assert len(parsed["signatures"]) == 1
+        assert parsed["signatures"][0][0] == "name"
+
 
 # ---------------------------------------------------------------------------
-# Checkpoint signature verification — Ed25519
+# Checkpoint signature verification, Ed25519
 # ---------------------------------------------------------------------------
 
 
@@ -371,7 +392,7 @@ class TestCheckpointSignatureEd25519:
 
 
 # ---------------------------------------------------------------------------
-# Checkpoint signature verification — ECDSA-P256
+# Checkpoint signature verification, ECDSA-P256
 # ---------------------------------------------------------------------------
 
 
@@ -665,7 +686,7 @@ class TestM4UuidValidation:
     def test_uuid_hex_with_tree_id_accepted(self, monkeypatch) -> None:
         """The tree-id-prefixed form ``<treehex>-<entryhex>`` is the
         Rekor shard-aware uuid shape and must pass the validator's uuid
-        regex — it should reach the HTTP fetch, not be refused as
+        regex, it should reach the HTTP fetch, not be refused as
         malformed.
 
         The HTTP layer is mocked so the test isolates the regex decision:
@@ -690,7 +711,7 @@ class TestM4UuidValidation:
                 "https://rekor.test.example/api/v1/log/entries",
             )
         # The regex accepted the uuid: the fetch was reached with the uuid
-        # appended, and the only failure is the mocked network error —
+        # appended, and the only failure is the mocked network error , 
         # a regex refusal would never call stream and would carry
         # reason "malformed_proof".
         assert seen["url"] == (

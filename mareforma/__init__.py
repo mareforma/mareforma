@@ -101,7 +101,7 @@ def open(  # noqa: A001
         from a prior open(), it is loaded automatically.
     strict_promotion:
         When True, REPLICATED promotion additionally requires non-NULL
-        ``artifact_hash`` on BOTH sides of a converging pair — an operator
+        ``artifact_hash`` on BOTH sides of a converging pair, an operator
         who wants data-distinctness as a hard gate, not just distinct
         signers. Off by default (the default rule promotes on the
         distinct-signer axis alone; absent data never blocks). Opt-in and
@@ -164,14 +164,14 @@ def open(  # noqa: A001
     # Rekor log-operator pubkey resolution with TOFU pin. The pinned PEM
     # lives at <root>/.mareforma/rekor_log_pubkey.pem after first use.
     # Resolution precedence:
-    #   1. rekor_log_pubkey_pem (explicit bytes)        — highest
+    #   1. rekor_log_pubkey_pem (explicit bytes)       , highest
     #   2. rekor_log_pubkey_path (explicit filesystem)
-    #   3. pinned file from prior open()                — TOFU continuation
-    #   4. None                                          — verification disabled
+    #   3. pinned file from prior open()               , TOFU continuation
+    #   4. None                                         , verification disabled
     if rekor_log_pubkey_pem is not None and rekor_log_pubkey_path is not None:
         raise ValueError(
             "Pass either rekor_log_pubkey_pem or rekor_log_pubkey_path, "
-            "not both — the two are mutually exclusive."
+            "not both, the two are mutually exclusive."
         )
     if rekor_log_pubkey_path is not None:
         rekor_log_pubkey_pem = Path(rekor_log_pubkey_path).read_bytes()
@@ -182,7 +182,7 @@ def open(  # noqa: A001
     elif rekor_log_pubkey_pem is not None and _pinned_path.exists():
         # TOFU pin enforcement: refuse silent log-key rotation. Compare
         # the pinned PEM and the supplied PEM by their CANONICAL DER
-        # bytes — line-wrap width (64 vs 76 columns) and trailing
+        # bytes, line-wrap width (64 vs 76 columns) and trailing
         # CR/LF differences make two semantically-identical PEMs
         # byte-unequal, so a literal-bytes ``.strip()`` check would
         # produce spurious mismatch errors and lock the operator out.
@@ -197,7 +197,7 @@ def open(  # noqa: A001
         # First use: persist the pin ATOMICALLY. Two concurrent
         # ``mareforma.open()`` calls with different keys could
         # otherwise both see ``_pinned_path.exists() == False`` and
-        # race to write — the loser would silently overwrite the
+        # race to write, the loser would silently overwrite the
         # winner's pin. ``O_CREAT|O_EXCL`` makes the creation
         # mutually-exclusive: the loser gets ``FileExistsError`` and
         # is routed through the mismatch-check branch instead of
@@ -292,7 +292,7 @@ def schema() -> dict:
                 "trigger": "automatic",
                 "condition": (
                     "≥2 claims signed by different validator keys (distinct "
-                    "asserter keyids — the per-claim signing key, not the agent "
+                    "asserter keyids, the per-claim signing key, not the agent "
                     "label) support the same ESTABLISHED upstream claim_id in "
                     "supports[]; each claim must be transparency-logged, "
                     "grounded, and free of a signed contradiction verdict"
@@ -304,7 +304,7 @@ def schema() -> dict:
                 "trigger": "validator",
                 "condition": (
                     "graph.validate(claim_id) by an enrolled validator whose "
-                    "key signed neither converging claim — no automated path"
+                    "key signed neither converging claim, no automated path"
                 ),
             },
         ],
@@ -385,7 +385,7 @@ def restore(
 # document these as raise paths from the public API (assert_claim,
 # validate, update_claim, restore, refresh_unsigned, etc.), and users
 # previously had to import them from submodules (mareforma.db,
-# mareforma.signing, mareforma.validators) — some of which are
+# mareforma.signing, mareforma.validators), some of which are
 # underscore-prefixed and therefore confusing. Make the catch surface
 # match the documented contract by exposing everything at the top level.
 from mareforma.db import (

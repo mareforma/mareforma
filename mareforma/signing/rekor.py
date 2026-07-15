@@ -245,7 +245,7 @@ def validate_rekor_url(url: str, *, allow_insecure: bool = False) -> None:
     try:
         ip = ipaddress.ip_address(hostname)
     except ValueError:
-        # Not a strict IP literal — apply the DNS-shortcut bypass guards.
+        # Not a strict IP literal, apply the DNS-shortcut bypass guards.
         hl = hostname.lower()
         if (
             hl in _LOOPBACK_DNS_NAMES
@@ -266,7 +266,7 @@ def validate_rekor_url(url: str, *, allow_insecure: bool = False) -> None:
             )
         shortcut_ip = numeric_shortcut_ipv4(hostname)
         if shortcut_ip is not None and is_blocked_ip(shortcut_ip):
-            # 127.1, 2130706433, 0x7f000001, 0177.0.0.1 etc. — ipaddress
+            # 127.1, 2130706433, 0x7f000001, 0177.0.0.1 etc., ipaddress
             # rejects these but socket.getaddrinfo (any radix) resolves
             # them to the internal address below.
             raise SigningError(
@@ -275,7 +275,7 @@ def validate_rekor_url(url: str, *, allow_insecure: bool = False) -> None:
                 "Pass trust_insecure_rekor=True if this is intentional."
             )
         return
-    # IP literal path — classify the literal AND any IPv4 embedded in an
+    # IP literal path, classify the literal AND any IPv4 embedded in an
     # IPv6 form (IPv4-mapped, 6to4, NAT64), which the outer flags miss.
     candidates: list["ipaddress.IPv4Address | ipaddress.IPv6Address"] = [ip]
     embedded = embedded_ipv4(ip)
@@ -489,26 +489,26 @@ def attach_rekor_entry(
 #
 # A Rekor entry includes a ``verification.inclusionProof`` block carrying:
 #
-#   - ``logIndex``     — 0-indexed position of the entry's leaf in the tree
-#   - ``treeSize``     — total number of leaves in the tree at proof time
-#   - ``hashes``       — list of hex-encoded sibling hashes from the leaf
+#   - ``logIndex``    , 0-indexed position of the entry's leaf in the tree
+#   - ``treeSize``    , total number of leaves in the tree at proof time
+#   - ``hashes``      , list of hex-encoded sibling hashes from the leaf
 #                        up to the root, in audit-path order
-#   - ``rootHash``     — hex of the tree's Merkle root at proof time
-#   - ``checkpoint``   — a signed-note text whose third line is the same
+#   - ``rootHash``    , hex of the tree's Merkle root at proof time
+#   - ``checkpoint``  , a signed-note text whose third line is the same
 #                        rootHash (base64), bound to the log's public key
 #                        via the signature on the note
 #
 # Verification has two independent parts:
 #
-#   1. **Merkle inclusion** — recompute the leaf hash from the entry body,
+#   1. **Merkle inclusion**, recompute the leaf hash from the entry body,
 #      walk the audit path applying the RFC 6962 rule at each step, and
 #      compare against ``rootHash``. This catches "the log returned a
 #      tampered or fabricated entry".
 #
-#   2. **Checkpoint signature** — verify the signed-note over the
+#   2. **Checkpoint signature**, verify the signed-note over the
 #      checkpoint text against the log's known public key. This catches
 #      "the log unilaterally chose a root hash to cover for tampering".
-#      Without this step, Merkle inclusion alone proves nothing — the
+#      Without this step, Merkle inclusion alone proves nothing, the
 #      log operator could supply any root that hashes its forgery.
 #
 # Both parts are necessary; mareforma refuses inclusions that fail
@@ -602,7 +602,7 @@ def verify_merkle_inclusion_proof(
         if not isinstance(sibling, (bytes, bytearray)) or len(sibling) != 32:
             return False
         if sn == 0:
-            # Past the right edge of the tree — proof has more hashes
+            # Past the right edge of the tree, proof has more hashes
             # than the audit path actually needs. Reject as malformed
             # rather than silently accept.
             return False
@@ -626,7 +626,7 @@ def verify_merkle_inclusion_proof(
 
     # All audit-path hashes consumed and we should be at the root.
     if sn != 0:
-        # We stopped before reaching the root — proof was too short.
+        # We stopped before reaching the root, proof was too short.
         return False
     return r == bytes(root_hash)
 
@@ -710,7 +710,7 @@ def parse_rekor_checkpoint(checkpoint_text: str) -> dict[str, Any]:
     # Reject CR characters in the body section. A proxy that rewrote
     # LF→CRLF would corrupt the bytes the log operator signed, and
     # signature verification would then fail-closed with
-    # ``checkpoint_bad_sig`` — accurate-but-misleading: the bytes
+    # ``checkpoint_bad_sig``, accurate-but-misleading: the bytes
     # never were what the operator signed, they were mangled in
     # transit. Surface that distinction up-front with a clearer
     # ``checkpoint_malformed`` reason.
@@ -754,7 +754,7 @@ def parse_rekor_checkpoint(checkpoint_text: str) -> dict[str, Any]:
         line = raw_line.rstrip("\r")
         if not line:
             continue
-        # Each line: "— <name> <base64-encoded-sig-with-prefix>"
+        # Each line: ",  <name> <base64-encoded-sig-with-prefix>"
         prefix = _SIGNED_NOTE_DASH + " "
         if not line.startswith(prefix):
             raise RekorInclusionError(
@@ -881,7 +881,7 @@ def verify_rekor_checkpoint(
     if isinstance(public_key, Ed25519PublicKey):
         pass
     elif isinstance(public_key, _ec.EllipticCurvePublicKey):
-        # P-256 only — Sigstore Rekor v1 uses secp256r1. Reject other
+        # P-256 only, Sigstore Rekor v1 uses secp256r1. Reject other
         # curves at type-check time with a precise reason instead of
         # letting them fall through to a generic ``checkpoint_bad_sig``.
         if not isinstance(public_key.curve, _ec.SECP256R1):
@@ -902,7 +902,7 @@ def verify_rekor_checkpoint(
     if expected_root_hash is not None and parsed["root_hash"] != expected_root_hash:
         raise RekorInclusionError(
             "checkpoint's root hash does not match the inclusion proof's "
-            "root — possible signature-vs-proof splicing attack",
+            "root, possible signature-vs-proof splicing attack",
             reason="checkpoint_root_mismatch",
         )
     if expected_tree_size is not None and parsed["tree_size"] != expected_tree_size:
@@ -990,7 +990,7 @@ def verify_rekor_inclusion(
     # and ``int(True)`` is 1. A hostile Rekor returning ``42.5`` would
     # otherwise surface as ``merkle_root_mismatch`` rather than the
     # accurate ``malformed_proof``. ``bool`` is a subclass of ``int``,
-    # so the order of checks matters — bool first.
+    # so the order of checks matters, bool first.
     for name, raw in (("logIndex", raw_log_index), ("treeSize", raw_tree_size)):
         if isinstance(raw, bool) or not isinstance(raw, int):
             raise RekorInclusionError(
@@ -1055,7 +1055,7 @@ def verify_rekor_inclusion(
             # Fallback: some Rekor versions return the checkpoint
             # itself base64-encoded. Decode and retry. If the decode
             # ALSO fails, re-raise the ORIGINAL ``checkpoint_malformed``
-            # — not the raw ValueError/binascii.Error — so callers
+            #, not the raw ValueError/binascii.Error, so callers
             # relying on the documented RekorInclusionError-only
             # contract never see a leaked decode exception.
             try:
@@ -1108,7 +1108,7 @@ def fetch_inclusion_proof(
     # uuid validation. Rekor entry uuids are hex-encoded SHA-256
     # digests, optionally prefixed with a tree-id (also hex). A uuid
     # containing ``?``, ``#``, ``/``, or path-traversal segments
-    # would shift the GET URL — even with a constant host, that's a
+    # would shift the GET URL, even with a constant host, that's a
     # query-string smuggling primitive a hostile Rekor could exploit
     # by returning a crafted uuid in the submit response. Validate
     # before substitution.
@@ -1287,7 +1287,7 @@ def fetch_log_pubkey(
             f"Rekor GET {pubkey_url} failed: {exc}"
         ) from exc
 
-    # PEM check — must contain a BEGIN/END public-key block. Wider
+    # PEM check, must contain a BEGIN/END public-key block. Wider
     # check than load_pem_public_key alone so the operator sees a
     # clear error when the log served HTML / JSON / nothing useful.
     if b"-----BEGIN PUBLIC KEY-----" not in body:

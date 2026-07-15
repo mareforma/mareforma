@@ -1,5 +1,5 @@
 """
-tests/test_signing.py — Ed25519 keypair lifecycle + DSSE-style envelope.
+tests/test_signing.py, Ed25519 keypair lifecycle + DSSE-style envelope.
 
 Covers:
   - default_key_path honours XDG_CONFIG_HOME
@@ -154,7 +154,7 @@ class TestKeyLifecycle:
             load_private_key(tmp_path / "absent")
 
     def test_load_rejects_non_ed25519_key(self, tmp_path):
-        # RSA key from the cryptography stdlib — not Ed25519, must fail loudly.
+        # RSA key from the cryptography stdlib, not Ed25519, must fail loudly.
         from cryptography.hazmat.primitives.asymmetric import rsa
         from cryptography.hazmat.primitives import serialization
 
@@ -218,7 +218,7 @@ class TestSignVerify:
         assert stmt["_type"] == "https://in-toto.io/Statement/v1"
         assert stmt["predicateType"] == "urn:mareforma:predicate:claim:v1"
         predicate = claim_predicate_from_envelope(envelope)
-        # Field-by-field check — extras like updated_at must NOT appear in
+        # Field-by-field check, extras like updated_at must NOT appear in
         # the signed predicate (only the canonical _SIGNED_FIELDS + evidence).
         assert predicate["claim_id"] == fields["claim_id"]
         assert predicate["text"] == fields["text"]
@@ -275,7 +275,7 @@ class TestSignVerify:
     def test_same_claim_signs_deterministically(self):
         """Ed25519 signatures over identical bytes are themselves identical
         (no random nonce). Two signs of the same claim with the same key
-        must produce byte-identical envelopes — important for cache and
+        must produce byte-identical envelopes, important for cache and
         idempotency reasoning."""
         key = generate_keypair()
         env_a = sign_claim(_claim_fields(), key)
@@ -284,7 +284,7 @@ class TestSignVerify:
 
 
 # ---------------------------------------------------------------------------
-# claim_predicate_from_envelope — subject/predicate consistency
+# claim_predicate_from_envelope, subject/predicate consistency
 # ---------------------------------------------------------------------------
 
 class TestSubjectPredicateConsistency:
@@ -293,7 +293,7 @@ class TestSubjectPredicateConsistency:
     a signer could issue a Statement v1 where the subject names a
     different claim_id (or carries a different text digest) than the
     predicate asserts. The bytes verify but the two halves of the
-    envelope point at different things — an in-toto consumer keying
+    envelope point at different things, an in-toto consumer keying
     off subject sees a different identity than mareforma's predicate.
     """
 
@@ -342,7 +342,7 @@ class TestSubjectPredicateConsistency:
                 "sig": base64.standard_b64encode(sig).decode("ascii"),
             }],
         }
-        # Cryptographically valid envelope — verify succeeds.
+        # Cryptographically valid envelope, verify succeeds.
         assert verify_envelope(envelope, key.public_key()) is True
         # But the consistency check refuses it.
         with pytest.raises(InvalidEnvelopeError, match="subject.name"):
@@ -422,7 +422,7 @@ class TestPublicKeyPEM:
 
 
 # ---------------------------------------------------------------------------
-# Private key on-disk storage — parent dir perms, race-safe creation
+# Private key on-disk storage, parent dir perms, race-safe creation
 # ---------------------------------------------------------------------------
 
 class TestPrivateKeyStorage:

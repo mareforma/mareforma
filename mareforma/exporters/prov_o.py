@@ -335,7 +335,7 @@ def validate_prov_o(doc: dict[str, Any]) -> None:
                 target = link.get("@id")
                 referenced = by_id.get(target) if target else None
                 # External references (no @id in our graph) are allowed
-                # — PROV-O does not require the target be in-document.
+                #, PROV-O does not require the target be in-document.
                 if referenced is not None and referenced.get(
                     "@type"
                 ) != "prov:Entity":

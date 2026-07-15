@@ -3,7 +3,7 @@
 Two failure modes an honest trust layer has to catch, shown end to end:
 
 1. **Absence.** A finding whose analysis step never ran cannot earn `GROUNDED`.
-   The observer watched the scope, saw no cited read, and returns `UNGROUNDED` —
+   The observer watched the scope, saw no cited read, and returns `UNGROUNDED` , 
    so the trust map's grounding edge names no source. A number with no observed
    execution has an empty provenance edge, not a filled-in one.
 2. **Overcounted convergence.** Two agents on the same model that reach the same
@@ -44,7 +44,7 @@ root_key = tmp / "_root_key"
 _signing.bootstrap_key(root_key)
 graph = mareforma.open(tmp, key_path=root_key)
 
-# Three agents, three distinct signing keys — the strongest legacy signal of
+# Three agents, three distinct signing keys, the strongest legacy signal of
 # independent work. Each is enrolled as its own validator.
 agent_graphs = {}
 for name in ("agent-a", "agent-b", "agent-c"):
@@ -107,7 +107,7 @@ The bearing still computes from the pre-registered rule, but the grounding axis
 reports `UNGROUNDED`: no observed read stands behind the number. The provenance
 edge is empty because nothing grounded it.
 
-The contrast is the same analysis, actually executed — the model is called and
+The contrast is the same analysis, actually executed, the model is called and
 the cited dataset is read:
 
 ```python
@@ -128,7 +128,7 @@ grounded_verdict = handle.verdict   # GROUNDED, grounded on epsilon_csv
 ## 2. Same-model convergence does not count twice
 
 `agent-a` runs the first grounded check on the shared question. A second agent,
-distinct key and distinct dataset, reaches the same answer — but on the same
+distinct key and distinct dataset, reaches the same answer, but on the same
 model. The instrument does not read that as a second independent line.
 
 ```python
@@ -153,7 +153,7 @@ graph.trust_map(line_b["claim_id"]).get("independence").value   # "1"
     1 pairwise-distinct (model, data, signer) supporting check(s); coarse by design ...
 ```
 
-Distinct in every legacy axis — signer and dataset — but one model. Two
+Distinct in every legacy axis, signer and dataset, but one model. Two
 same-model checks are one line of evidence, so the count holds at 1.
 
 ## 3. A different model raises the count
@@ -173,7 +173,7 @@ graph.trust_map(line_c["claim_id"]).get("independence").value   # "2"
 ```
 
 A genuinely different model is a second line. The count moves from 1 to 2 only
-when the evidence is independent in the axis that matters — the model — not
+when the evidence is independent in the axis that matters, the model, not
 merely in the key that signed it.
 
 ## Where the numbers come from

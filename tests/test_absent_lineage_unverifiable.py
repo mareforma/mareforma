@@ -5,7 +5,7 @@ the observer never saw a model call (a subprocess, an unsupported SDK, or
 ``grounding=None``), the per-finding effective-independence disclosure must not
 revert to the pre-v0.3.10 signer axis and print a confident number: it cannot
 tell the models apart, so the trust map reads UNVERIFIABLE. The legacy status
-ladder (independence_counts) still counts distinct signers — this narrows only
+ladder (independence_counts) still counts distinct signers, this narrows only
 the per-finding certification the map surfaces.
 """
 from __future__ import annotations
@@ -30,7 +30,7 @@ class TestAbsentLineageIsUnverifiable:
         self, tmp_path: Path,
     ) -> None:
         """Two supporting lines with no observed model call, distinct signers,
-        distinct data: the effective number does not read a confident 2 — the
+        distinct data: the effective number does not read a confident 2, the
         models were never observed, so it is soft / UNVERIFIABLE."""
         # Unsigned graph: neither line is an enrolled human validator, so both
         # carry absent (not human) lineage.

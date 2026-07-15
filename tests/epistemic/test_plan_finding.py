@@ -369,7 +369,7 @@ class TestAssertFindingRegression:
         assert row["preregistered"] == 0  # one-shot, not a real pre-registration
 
     def test_one_shot_bad_estimate_leaves_nothing(self, tmp_path: Path) -> None:
-        """A rejected one-shot finding writes no proposition, plan, or claim —
+        """A rejected one-shot finding writes no proposition, plan, or claim , 
         v0.3.4's all-or-nothing behaviour is preserved through the refactor."""
         from mareforma.trust import InconsistentEstimateError
         h = _prop(Direction.DECREASES)
@@ -452,7 +452,7 @@ class TestPreregistrationGuard:
             graph.register_plan(h1, pred, generated_by="lab_a")
             graph.submit_finding(h1, pred, _smd(-2.6, p=0.003),
                                  data_id="dataA", generated_by="lab_a")
-            # Only NOW — after lab_a has already produced a finding — is a second
+            # Only NOW, after lab_a has already produced a finding, is a second
             # plan registered. It cannot be a pre-registration for lab_a's work.
             graph.register_plan(h2, pred, generated_by="lab_a")
             n_findings = graph._conn.execute(

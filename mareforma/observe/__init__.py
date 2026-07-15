@@ -3,7 +3,7 @@
 The public surface of the observer. Wrap the span that authors a finding in
 ``observe(...)``; inside it, wrapped loaders and a PEP-578 audit hook record
 what data actually flowed. On exit the observer computes a
-:class:`GroundingVerdict` — ``GROUNDED``, ``UNGROUNDED``, or ``OPAQUE`` — from
+:class:`GroundingVerdict`, ``GROUNDED``, ``UNGROUNDED``, or ``OPAQUE``, from
 what it saw, never from what the producer declared. Pass the verdict to
 ``assert_finding(..., grounding=verdict)`` to bind it into the signed envelope.
 
@@ -16,7 +16,7 @@ what it saw, never from what the producer declared. Pass the verdict to
 The verdict is computed from execution of a COOPERATING producer: the binding is
 tamper-evidence over what a cooperating run did, not a proof against an
 adversarial operator. A finding must be AUTHORED inside the scope and SIGNED
-after it closes — asserting a claim while the grounding scope is still open is a
+after it closes, asserting a claim while the grounding scope is still open is a
 sign-after-author violation and raises.
 """
 from __future__ import annotations
@@ -78,7 +78,7 @@ def declare_model(
 
     A cooperating producer whose model call does not route through a wrapped
     ``httpx`` POST (a custom SDK, a batching layer) declares it here. A
-    declaration is always agent-attested, so it is PROXY — never COMPUTED, which
+    declaration is always agent-attested, so it is PROXY, never COMPUTED, which
     only a body-parse at the socket seam earns. A declared model whose base is
     not declarable (a hosted fine-tune, a moving alias) is UNVERIFIABLE. A no-op
     outside a scope, like every other recording chokepoint.
@@ -115,7 +115,7 @@ class ObserveHandle:
         """The computed verdict. Available only after the ``with`` block closes.
 
         The verdict is a function of the whole observed span, so it cannot be
-        read while the span is still open — reading it early would classify an
+        read while the span is still open, reading it early would classify an
         incomplete observation. Access it after the block.
         """
         if self._verdict is None:
@@ -133,7 +133,7 @@ def observe(cites=None, *, content_address: bool = False):
     Parameters
     ----------
     cites:
-        The source(s) the finding cites — a path, a URL, a ``sha256:`` data_id,
+        The source(s) the finding cites, a path, a URL, a ``sha256:`` data_id,
         or an iterable of these. A read GROUNDS the finding only when it matches
         one of these; an incidental read (config, tokenizer, cache) does not.
     content_address:

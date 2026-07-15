@@ -1,5 +1,5 @@
 """
-tests/test_graph.py — EpistemicGraph: mareforma.open(), assert_claim(),
+tests/test_graph.py, EpistemicGraph: mareforma.open(), assert_claim(),
 query(), get_claim(), validate(), and mareforma.schema().
 
 Coverage
@@ -83,7 +83,7 @@ def test_open_default_path_uses_cwd(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# assert_claim() — classification
+# assert_claim(), classification
 # ---------------------------------------------------------------------------
 
 def test_assert_claim_default_classification_is_inferred(tmp_path):
@@ -117,14 +117,14 @@ def test_assert_claim_invalid_classification_raises(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# assert_claim() — idempotency
+# assert_claim(), idempotency
 # ---------------------------------------------------------------------------
 
 def test_assert_claim_idempotency_key_no_duplicate(tmp_path):
     with mareforma.open(tmp_path) as graph:
         id1 = graph.assert_claim("finding A", idempotency_key="run1_claim0")
         id2 = graph.assert_claim("finding A", idempotency_key="run1_claim0")
-        # Unsigned mode — no validators table; opt out of the default
+        # Unsigned mode, no validators table; opt out of the default
         # enrolled-identity filter so the rows surface.
         all_claims = graph.query(include_unverified=True)
     assert id1 == id2
@@ -140,7 +140,7 @@ def test_assert_claim_different_keys_creates_two(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# assert_claim() — REPLICATED trigger
+# assert_claim(), REPLICATED trigger
 # ---------------------------------------------------------------------------
 
 def test_assert_claim_replicated_triggers_on_independent_agents(tmp_path):
@@ -393,7 +393,7 @@ def test_schema_is_stable_across_calls():
 def test_schema_replicated_rule_is_the_distinct_signer_model():
     """schema() is a machine contract agents follow. It must describe the
     distinct-signer convergence rule, not the retired single-key generated_by
-    rule — an agent following the old text signs both claims with one key and
+    rule, an agent following the old text signs both claims with one key and
     never promotes."""
     s = mareforma.schema()
     rep = next(
@@ -417,7 +417,7 @@ def test_get_tools_returns_two_callables(tmp_path):
     """The agent-tool callables must be live when the graph is open AND
     must refuse to operate after the context manager closes the
     connection. ``callable()`` alone is True for any function and proves
-    nothing about post-close behavior — exercise both states explicitly.
+    nothing about post-close behavior, exercise both states explicitly.
     """
     import json
     key_path = _bootstrap_key(tmp_path)
@@ -450,7 +450,7 @@ def test_get_tools_returns_two_callables(tmp_path):
 def test_get_tools_query_returns_valid_json(tmp_path):
     import json
     # Bootstrap a key so the root auto-enrolls and the claim's signing
-    # keyid is in the validators table — the default LLM-tool query
+    # keyid is in the validators table, the default LLM-tool query
     # filter (include_unverified=False) excludes unverified PRELIMINARY.
     key_path = _bootstrap_key(tmp_path)
     with mareforma.open(tmp_path, key_path=key_path) as graph:
@@ -459,7 +459,7 @@ def test_get_tools_query_returns_valid_json(tmp_path):
         result = query_graph("Target T")
     data = json.loads(result)
     assert len(data) == 1
-    # query_graph routes through query_for_llm — text is wrapped in
+    # query_graph routes through query_for_llm, text is wrapped in
     # <untrusted_data> so the consuming LLM treats it as data, not
     # instructions. The substring is still present.
     assert "Target T is elevated" in data[0]["text"]
@@ -475,7 +475,7 @@ def test_get_tools_query_neutralises_forged_delimiter(tmp_path):
     A claim text containing a forged `</untrusted_data>` close tag must
     not break out of the wrapper when delivered through the tool path.
     Before the Finding 1 fix, query_graph used the raw query() and
-    returned the forged tag verbatim — this test pins the safe path so
+    returned the forged tag verbatim, this test pins the safe path so
     a future refactor reopening the bypass is caught."""
     import json
     key_path = _bootstrap_key(tmp_path)
@@ -538,7 +538,7 @@ def test_get_tools_supports_none_is_valid(tmp_path):
 
 
 class TestClaimIdRegexStrictV4:
-    """The graph's claim_id pattern is strict UUIDv4 — version=4 in
+    """The graph's claim_id pattern is strict UUIDv4, version=4 in
     the third group, variant in {8,9,a,b} in the fourth. Non-v4 UUIDs
     in ``supports[]`` are treated as external references (like DOIs),
     not as graph-node candidates."""
@@ -564,16 +564,16 @@ class TestClaimIdRegexStrictV4:
         assert not _is_claim_id("12345678-1234-5234-8234-123456789012")
 
     def test_zero_uuid_rejected(self):
-        """The all-zeros nil UUID is rejected — version nibble is 0."""
+        """The all-zeros nil UUID is rejected, version nibble is 0."""
         from mareforma.db import _is_claim_id
         assert not _is_claim_id("00000000-0000-0000-0000-000000000000")
 
     def test_invalid_variant_rejected(self):
         """Variant nibble must be in {8, 9, a, b} (binary 10xx)."""
         from mareforma.db import _is_claim_id
-        # Variant 0 (binary 0xxx) — RFC 4122 says NCS reserved, not v4.
+        # Variant 0 (binary 0xxx), RFC 4122 says NCS reserved, not v4.
         assert not _is_claim_id("12345678-1234-4234-0234-123456789012")
-        # Variant c (binary 110x) — Microsoft GUID reserved.
+        # Variant c (binary 110x), Microsoft GUID reserved.
         assert not _is_claim_id("12345678-1234-4234-c234-123456789012")
 
     def test_substrate_generated_ids_match(self, tmp_path):
@@ -586,7 +586,7 @@ class TestClaimIdRegexStrictV4:
 
     def test_non_v4_in_supports_not_flagged_as_dangling(self, tmp_path):
         """A non-v4 UUID-shape in supports[] is treated as external, not
-        dangling — find_dangling_supports skips it."""
+        dangling, find_dangling_supports skips it."""
         non_v4 = "12345678-1234-1234-1234-123456789012"  # version=1
         with mareforma.open(tmp_path) as graph:
             graph.assert_claim(
@@ -639,7 +639,7 @@ class TestClassifySupports:
             ]
 
     def test_non_v4_uuid_classified_as_external(self, tmp_path):
-        """Non-v4 UUIDs are not graph nodes — they fall to external."""
+        """Non-v4 UUIDs are not graph nodes, they fall to external."""
         non_v4 = "12345678-1234-1234-1234-123456789012"  # version=1
         with mareforma.open(tmp_path) as graph:
             result = graph.classify_supports([non_v4])
@@ -855,7 +855,7 @@ class TestConvergenceErrorCounter:
             assert graph.convergence_errors >= 1
 
     def test_counter_is_read_only(self, tmp_path):
-        """`convergence_errors` is exposed as a property — direct writes
+        """`convergence_errors` is exposed as a property, direct writes
         raise AttributeError so callers cannot manufacture a clean signal."""
         key_path = _bootstrap_key(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as graph:
@@ -933,7 +933,7 @@ class TestConvergenceRetryQueue:
             )
             assert graph.health()["convergence_retry_pending"] == 1
 
-            # Phase two: restore the real detection, retry — flag clears.
+            # Phase two: restore the real detection, retry, flag clears.
             monkeypatch.setattr(_db_core, "_maybe_update_replicated_unlocked", original)
             result = graph.refresh_convergence()
             assert result["checked"] == 1
@@ -1172,7 +1172,7 @@ class TestRekorSagaAtomicity:
             # match what Rekor witnessed.
             assert get_rekor_inclusion(graph._conn, cid_a) is not None
 
-            # Re-do submit_to_rekor as failing — confirm refresh_unsigned
+            # Re-do submit_to_rekor as failing, confirm refresh_unsigned
             # takes neither path (replay nor submit) on the drifted row.
             def _fail(*_a, **_k):
                 return False, None
@@ -1250,7 +1250,7 @@ class TestRekorSagaAtomicity:
             original = get_rekor_inclusion(graph._conn, cid)
             assert original is not None
 
-            # Retry the sidecar write with a DIFFERENT entry — should
+            # Retry the sidecar write with a DIFFERENT entry, should
             # be a silent no-op, preserving the original.
             forged_entry = {
                 "uuid": "forged" * 6,
@@ -1272,7 +1272,7 @@ class TestRekorSagaAtomicity:
 class TestEvidenceSeenBinding:
     """`graph.validate()` accepts an optional ``evidence_seen`` list
     that names the claim_ids the validator reviewed. The list is bound
-    into the signed validation envelope — empty list is a positive
+    into the signed validation envelope, empty list is a positive
     'reviewed nothing' admission, not an absent field."""
 
     def _setup_replicated(self, graph, root_key):
@@ -1739,14 +1739,14 @@ class TestValidationEnvelopeCryptographicVerification:
     def test_wrong_payload_type_envelope_is_refused(self, tmp_path):
         """Passing a CLAIM envelope (in-toto Statement v1) where a
         VALIDATION envelope is expected is refused with a payloadType
-        message — cross-type acceptance is exactly what attackers exploit."""
+        message, cross-type acceptance is exactly what attackers exploit."""
         from mareforma import db as _db
         from mareforma.db import InvalidValidationEnvelopeError
         root_key = _bootstrap_key(tmp_path, "root.key")
 
         with mareforma.open(tmp_path, key_path=root_key) as g:
             seed, cid_b = self._setup_replicated(g)
-            # Steal cid_b's own signature_bundle — a claim envelope.
+            # Steal cid_b's own signature_bundle, a claim envelope.
             claim_bundle = g.get_claim(cid_b)["signature_bundle"]
 
         with mareforma.open(tmp_path, key_path=root_key) as g:
@@ -1935,7 +1935,7 @@ class TestHealth:
             assert len(graph.find_dangling_supports()) == 1
 
     def test_health_is_read_only(self, tmp_path):
-        """Two consecutive calls produce identical results — no side effects."""
+        """Two consecutive calls produce identical results, no side effects."""
         with mareforma.open(tmp_path) as graph:
             graph.assert_claim("c", generated_by="agent")
             h1 = graph.health()

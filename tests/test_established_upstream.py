@@ -1,4 +1,4 @@
-"""tests/test_established_upstream.py — ESTABLISHED-upstream gate + seed.
+"""tests/test_established_upstream.py, ESTABLISHED-upstream gate + seed.
 
 Covers:
   - REPLICATED requires an ESTABLISHED upstream (strict by default)
@@ -29,7 +29,7 @@ def _key(tmp_path: Path) -> Path:
 
 
 def _validator_key(tmp_path: Path) -> Path:
-    """A second key for validation — the graph refuses self-validation,
+    """A second key for validation, the graph refuses self-validation,
     so promotion tests need a key distinct from the one signing claims."""
     key_path = tmp_path / "_validator_key"
     if not key_path.exists():
@@ -165,14 +165,14 @@ class TestBootstrapIntegration:
             assert g.get_claim(a)["support_level"] == "REPLICATED"
             g.enroll_validator(_validator_pem(tmp_path), identity="v")
 
-        # Promote A to ESTABLISHED via validate() — under the validator key
+        # Promote A to ESTABLISHED via validate(), under the validator key
         # (the graph refuses self-validation).
         with mareforma.open(tmp_path, key_path=_validator_key(tmp_path)) as g:
             g.validate(a)
             assert g.get_claim(a)["support_level"] == "ESTABLISHED"
 
         # The validated claim is itself an ESTABLISHED upstream for
-        # downstream peers — REPLICATED chain continues from it. New
+        # downstream peers, REPLICATED chain continues from it. New
         # claims are asserted by the root key again.
         with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
             d = g.assert_claim("downstream", supports=[a], generated_by="D", signer=sa)

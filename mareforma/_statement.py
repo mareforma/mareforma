@@ -111,7 +111,7 @@ def build_statement(
         the signed predicate ONLY when present, so a claim asserted without the
         observer produces byte-identical bytes to a pre-observer claim. Its
         absence in an envelope is read as "no observed verdict was recorded,"
-        never as tampering — a claim signed before this field existed still
+        never as tampering, a claim signed before this field existed still
         verifies. The declared ``classification`` above is untouched: the
         observed axis is additive and lives in a separate value space.
     """

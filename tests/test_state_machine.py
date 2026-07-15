@@ -1,4 +1,4 @@
-"""tests/test_state_machine.py — DB-layer state-machine + prev_hash chain.
+"""tests/test_state_machine.py, DB-layer state-machine + prev_hash chain.
 
 Covers:
   - SQLite triggers reject illegal state transitions with translated
@@ -43,7 +43,7 @@ def _now_iso() -> str:
 
 class TestInsertTrigger:
     def test_preliminary_insert_allowed(self, tmp_path: Path) -> None:
-        # The standard add_claim path — sanity check the trigger doesn't
+        # The standard add_claim path, sanity check the trigger doesn't
         # reject the legal case.
         conn = open_db(tmp_path)
         try:
@@ -76,7 +76,7 @@ class TestInsertTrigger:
             conn.close()
 
     def test_preliminary_with_validation_rejected(self, tmp_path: Path) -> None:
-        """A PRELIMINARY row that carries validated_by is incoherent — reject."""
+        """A PRELIMINARY row that carries validated_by is incoherent, reject."""
         conn = open_db(tmp_path)
         try:
             with pytest.raises(sqlite3.IntegrityError, match="preliminary_with_validation"):
@@ -96,7 +96,7 @@ class TestInsertTrigger:
 
 
 # ---------------------------------------------------------------------------
-# UPDATE trigger — transitions
+# UPDATE trigger, transitions
 # ---------------------------------------------------------------------------
 
 
@@ -283,7 +283,7 @@ class TestPrevHashChain:
 
     def test_prev_hash_unique_catches_duplicate(self, tmp_path: Path) -> None:
         """A manual INSERT that re-uses an existing prev_hash hits the
-        UNIQUE index. UNIQUE is the backstop to BEGIN IMMEDIATE — if
+        UNIQUE index. UNIQUE is the backstop to BEGIN IMMEDIATE, if
         someone bypasses the Python write path, the index catches them."""
         with mareforma.open(tmp_path) as g:
             cid = g.assert_claim("first")
@@ -393,7 +393,7 @@ class TestSignedFieldsAppendOnly:
 
     def test_unsigned_row_allows_text_update(self, tmp_path: Path) -> None:
         """Unsigned claims (no key configured) are not under append-only
-        protection — the trigger gates on OLD.signature_bundle IS NOT NULL."""
+        protection, the trigger gates on OLD.signature_bundle IS NOT NULL."""
         with mareforma.open(tmp_path) as g:
             cid = g.assert_claim("draft")
             # No signature → trigger does not fire.
@@ -418,7 +418,7 @@ class TestSignedFieldsAppendOnly:
 
 
 # ---------------------------------------------------------------------------
-# Append-only — signed rows refuse DELETE
+# Append-only, signed rows refuse DELETE
 # ---------------------------------------------------------------------------
 
 
@@ -430,7 +430,7 @@ class TestSignedDeleteAppendOnly:
     TOML as if the claim never existed, and the entire "append-only
     over the signed predicate" framing would be half-implemented
     (UPDATE-of-signed-fields was already locked; DELETE was not).
-    Unsigned claims remain deletable — they carry no cryptographic
+    Unsigned claims remain deletable, they carry no cryptographic
     commitment and the trust ladder does not extend to them.
     """
 
@@ -460,7 +460,7 @@ class TestSignedDeleteAppendOnly:
         """The user-facing ``db.delete_claim`` helper must surface the
         trigger's refusal as the documented typed error, not a raw
         sqlite3.IntegrityError a public-API caller cannot reasonably
-        catch (#42)."""
+        catch."""
         from mareforma.db import delete_claim as _delete
         cid, g = self._signed_claim(tmp_path)
         try:
@@ -474,7 +474,7 @@ class TestSignedDeleteAppendOnly:
     def test_unsigned_claim_remains_deletable(self, tmp_path: Path) -> None:
         """Unsigned mode (no key, no signature_bundle) is not under
         append-only protection. The trigger gates on
-        OLD.signature_bundle IS NOT NULL — unsigned rows pass through."""
+        OLD.signature_bundle IS NOT NULL, unsigned rows pass through."""
         from mareforma.db import delete_claim as _delete
         with mareforma.open(tmp_path) as g:
             cid = g.assert_claim("draft unsigned")

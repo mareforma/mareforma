@@ -9,22 +9,22 @@ with a computed result.
 
 Three states, and only three:
 
-- ``GROUNDED``   — a read that matches the finding's cited source returned
+- ``GROUNDED``  , a read that matches the finding's cited source returned
                    non-empty data inside the observed scope. For the
                    ``builtins.open`` path this is a stat-based proxy (the cited
                    file was opened for reading and is non-empty); the sqlite and
                    http wrappers observe the actual returned rows/bytes. So for a
                    plain file GROUNDED means "the cited data was accessed and has
                    content," not that the bytes were provably consumed.
-- ``UNGROUNDED`` — no qualifying cited read, and nothing hid one: the scope was
+- ``UNGROUNDED``, no qualifying cited read, and nothing hid one: the scope was
                    fully observed and the cited data genuinely did not arrive.
                    This is the silent-fallback tell. One residual bound: a read
                    through a resource opened BEFORE the scope (a module-level or
                    pooled connection reused inside it) is neither wrapped nor
-                   seamed, so it can read as UNGROUNDED — open the cited source
+                   seamed, so it can read as UNGROUNDED, open the cited source
                    inside the scope for the tell to hold (see the coverage-bound
                    note in :mod:`mareforma.observe._loaders`).
-- ``OPAQUE``     — the observer could not see. A spawn seam (thread, subprocess,
+- ``OPAQUE``    , the observer could not see. A spawn seam (thread, subprocess,
                    uninstrumented socket) or an uninstrumented read of the cited
                    source occurred, so absence cannot be trusted. Never a
                    confident verdict across a boundary the observer cannot cross.
@@ -50,7 +50,7 @@ from .._canonical import canonicalize
 # rides INSIDE the signed record (``cited_sources``), so verify-on-read can
 # re-check the verdict against the finding's citation instead of trusting the
 # write-time result. A v0.3.8 envelope omits ``cited_sources``; its absence is
-# "the citation binding was not checkable," never tampering — the pre-binding
+# "the citation binding was not checkable," never tampering, the pre-binding
 # label the auditor surface renders.
 GROUNDING_AXIS_VERSION = "v0.3.9"
 
@@ -68,7 +68,7 @@ class ObservedGrounding(str, Enum):
         UNGROUNDED and OPAQUE are both non-promoting: a finding whose data did
         not observably flow, or whose flow could not be observed, must not lift
         a proposition up the support ladder. Grounding is a necessary floor,
-        never sufficient — promotion still needs the independent-signer counts.
+        never sufficient, promotion still needs the independent-signer counts.
         """
         return self is ObservedGrounding.GROUNDED
 
@@ -79,7 +79,7 @@ class ReadRecord:
 
     ``identifier`` is the normalized handle the read touched: an absolute file
     path, a database connection target, or a ``scheme://host/path`` for a URL.
-    ``nonempty`` is whether the read returned any bytes or rows — an empty read
+    ``nonempty`` is whether the read returned any bytes or rows, an empty read
     of a cited source is the silent-fallback signature, so it is recorded as a
     read that happened but carried nothing. ``content_address`` is the
     ``sha256:`` digest of the returned bytes, filled in only on the opt-in
@@ -99,7 +99,7 @@ class SeamEvent:
     ``kind`` is ``thread`` / ``subprocess`` / ``socket`` / ``coverage-gap``.
     ``detail`` is a short, non-sensitive descriptor (the audit event name, the
     connection host, or the cited path opened via an uninstrumented reader). A
-    seam inside a scope with no qualifying cited read forces ``OPAQUE`` — the
+    seam inside a scope with no qualifying cited read forces ``OPAQUE``, the
     read could have happened on the far side of the seam.
     """
 
@@ -113,7 +113,7 @@ class GroundingVerdict:
 
     The verdict is what a human stakes trust on: one of three states, a plain
     reason, and the cited sources it was computed against. The receipt is the
-    full evidence — every read and seam the observer captured — so the verdict
+    full evidence, every read and seam the observer captured, so the verdict
     can be audited rather than taken on faith. Only the receipt DIGEST is bound
     into the signed envelope (:meth:`to_signed_dict`), to keep envelopes small.
     mareforma does NOT persist the full receipt itself; the digest commits to
@@ -124,7 +124,7 @@ class GroundingVerdict:
     grounding: ObservedGrounding
     reason: str
     cited_sources: tuple[str, ...] = ()
-    # The cited sources a matching non-empty read was actually observed for — the
+    # The cited sources a matching non-empty read was actually observed for, the
     # subset of ``cited_sources`` that GROUNDED the verdict. The binding gate
     # checks THIS against the finding's citation, never the full declared
     # ``cited_sources``: a producer who lists a dataset in ``cites`` but reads
@@ -185,7 +185,7 @@ class GroundingVerdict:
         """The compact record bound INTO the signed in-toto statement.
 
         Carries the verdict, the reason, the cited set it was computed against,
-        the receipt digest, and the axis version — enough to re-check the verdict
+        the receipt digest, and the axis version, enough to re-check the verdict
         AND its binding to the finding's citation on read, and to confirm an
         out-of-band receipt is unmutated for a caller that keeps one, without
         inflating the envelope with the full read list. mareforma binds the
@@ -248,7 +248,7 @@ class GroundingVerdict:
 
         ``reads_seen / opens_detected``. ``None`` when nothing was opened (the
         fraction is undefined, not zero). A value below 1.0 means the observer
-        detected data-ingress it could not see the bytes of — the honest
+        detected data-ingress it could not see the bytes of, the honest
         coverage bound the measurement reports.
         """
         if self.opens_detected <= 0:

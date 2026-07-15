@@ -62,7 +62,7 @@ def test_same_model_collapse_rate():
 
 def test_same_model_collapse_rate_zero_when_no_corroboration():
     # All single lines (naive < 2): a single line is not a corroboration, so the
-    # collapse denominator is 0 and the rate is 0 — never a divide error.
+    # collapse denominator is 0 and the rate is 0, never a divide error.
     report = summarize_independence([_rec(1, 1), _rec(1, 1)])
     assert report.naive_total == 0
     assert report.collapsed_total == 0
@@ -114,7 +114,7 @@ def test_independence_records_pulls_the_sub_records():
 
 def test_receipt_same_model_reads_naive_two_number_one(tmp_path: Path):
     # Two same-model COMPUTED checks (distinct signer + data): a naive signer
-    # counter sees 2, the model-aware effective number is 1 — one collapse.
+    # counter sees 2, the model-aware effective number is 1, one collapse.
     ka = _bootstrap_key(tmp_path, "ka.key")
     kb = _bootstrap_key(tmp_path, "kb.key")
     _enroll_key(tmp_path, ka, kb)

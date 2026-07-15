@@ -55,7 +55,7 @@ if TYPE_CHECKING:
 # the LLM is likely to splice into a reasoning step.
 _LLM_WRAP_FIELDS = ("text", "comparison_summary")
 
-# Fields that get sanitize-only — short labels we don't wrap because
+# Fields that get sanitize-only, short labels we don't wrap because
 # delimiters would add noise without containing anything an attacker
 # could realistically use as a multi-line injection payload.
 _LLM_SANITIZE_FIELDS = ("source_name", "generated_by", "validated_by")
@@ -93,7 +93,7 @@ def _synchronized(method):
 
     The connection is opened with ``check_same_thread=False``, so one graph may
     be driven from several threads. Transaction ownership in the db layer is
-    decided by ``not conn.in_transaction`` — a connection-wide property that
+    decided by ``not conn.in_transaction``, a connection-wide property that
     cannot tell "this thread is nested in its own BEGIN" from "another thread
     holds a transaction on the shared connection." A second thread would read a
     first thread's open ``BEGIN IMMEDIATE`` as its own, skip its own
@@ -164,7 +164,7 @@ class EpistemicGraph:
 
         # Bootstrap-of-trust: the first key opened against a fresh project's
         # graph.db auto-enrolls as the root validator. This is silent and
-        # idempotent — subsequent opens with the same key are no-ops. New
+        # idempotent, subsequent opens with the same key are no-ops. New
         # validators (beyond the root) are added explicitly via the
         # `mareforma validator add` CLI or validators.enroll_validator().
         #
@@ -226,7 +226,7 @@ class EpistemicGraph:
         #     to ``mareforma.open(key_path=...)``. When supplied, the
         #     claim is signed with this key instead. Note: this does
         #     NOT check that the signer's keyid is enrolled in the
-        #     validators table — same trust model as
+        #     validators table, same trust model as
         #     ``mareforma.open(key_path=...)`` (anyone can sign, but
         #     only enrolled keys can ``validate()`` claims to
         #     ESTABLISHED). Use for multi-signer hosts that have
@@ -238,7 +238,7 @@ class EpistemicGraph:
         #     ingested-trace/v1, wet-lab-assay/<class>/v1, etc.).
         #     Stored in the ``predicate_payload`` column for
         #     queryable filters. NOTE: this column is NOT bound into
-        #     the signed envelope or chain hash — it is a query-side
+        #     the signed envelope or chain hash, it is a query-side
         #     denormalisation only. Adapters that depend on
         #     cryptographic integrity of the predicate body should
         #     encode it inside the claim text JSON; this column is
@@ -356,7 +356,7 @@ class EpistemicGraph:
         # so the score is signed alongside the rest of the claim. A
         # broken sensor (any Exception subclass: bad shape, model
         # failure, OSError, KeyError, IndexError, network error, etc.)
-        # does NOT block assertion — we log a warning and drop the
+        # does NOT block assertion, we log a warning and drop the
         # score. BaseException-only failures (KeyboardInterrupt /
         # SystemExit / MemoryError) propagate so signal-driven
         # shutdown still works. Asserter philosophy: mareforma
@@ -874,9 +874,9 @@ class EpistemicGraph:
     def trust_map(self, claim_id: str, *, reexec_record: "dict | None" = None):
         """Return the per-finding :class:`mareforma.trust_map.TrustMap` for a claim.
 
-        A read-side artifact that places every trust property — attributability,
+        A read-side artifact that places every trust property, attributability,
         provenance, grounding, faithfulness, methodological validity, leakage,
-        independence, contestation, standing, trust-root, witnessing — at its
+        independence, contestation, standing, trust-root, witnessing, at its
         tier with the residual named. Adds no signed field; derived from what is
         already stored. ``reexec_record`` optionally supplies a re-execution
         faithfulness verdict to place on the PROXY-tier faithfulness axis; when
@@ -1398,7 +1398,7 @@ class EpistemicGraph:
                         "the run executes, or submit under a fresh run token."
                     )
 
-        # Bind the grounding verdict to the finding's citation — AFTER the
+        # Bind the grounding verdict to the finding's citation, AFTER the
         # idempotency check, so an idempotent replay (which reuses the first
         # write's stored verdict and discards this one) never fires a spurious
         # downgrade health event or raises in strict mode for a result that is
@@ -1455,7 +1455,7 @@ class EpistemicGraph:
         # Authoritative existence + fork + plan checks AND all writes run in one
         # transaction (BEGIN IMMEDIATE). The finding claim is written INSIDE this
         # transaction via assert_claim, which joins an open transaction
-        # (conn.in_transaction) rather than committing its own — so a fork or
+        # (conn.in_transaction) rather than committing its own, so a fork or
         # existence race that takes a non-insert branch rolls the claim back
         # instead of stranding a committed, signed claim on the chain.
         now = _now()
@@ -1610,7 +1610,7 @@ class EpistemicGraph:
         (version, grounding, reason, cited_sources, grounded_sources,
         receipt_digest) bound into the signed envelope, or None when no verdict
         was supplied. This does NOT
-        cross-check the finding's citation — that is :meth:`_bind_grounding`,
+        cross-check the finding's citation, that is :meth:`_bind_grounding`,
         which the write path calls instead.
         """
         if grounding is None:
@@ -1715,7 +1715,7 @@ class EpistemicGraph:
             record["reason"] = f"{record.get('reason', '')} [no finding citation to bind]"
             return record
 
-        # DISJOINT. Only a GROUNDED verdict is unsafe to store as-is — an OPAQUE
+        # DISJOINT. Only a GROUNDED verdict is unsafe to store as-is, an OPAQUE
         # or UNGROUNDED verdict does not promote and does not claim the data
         # arrived, so a mismatched cited set on it is not a false trust signal.
         if record.get("grounding") != ObservedGrounding.GROUNDED.value:
@@ -1927,7 +1927,7 @@ class EpistemicGraph:
         # and again inside db.validate_claim) would diverge by microseconds
         # and silently defeat the tamper-evidence claim.
         now = _db._now()
-        # Normalize evidence_seen — None → []. Always present in the
+        # Normalize evidence_seen, None → []. Always present in the
         # signed envelope so an empty list is an *explicit* statement
         # (the validator reviewed nothing) rather than an absent field.
         evidence_seen_normalized = list(evidence_seen) if evidence_seen else []
@@ -2239,7 +2239,7 @@ class EpistemicGraph:
         # reviewer / validator). The keyid IS cryptographically bound
         # (each signature is verified over the PAE on disk during
         # restore). The ``role`` string sits on the signature entry
-        # and is NOT covered by the signed payload bytes — see
+        # and is NOT covered by the signed payload bytes, see
         # :func:`mareforma.signing.sign_claim_with_roles` for the
         # trust boundary. The field is exposed here as
         # ``role_attestations_unverified`` so callers can't mistake
@@ -2338,7 +2338,7 @@ class EpistemicGraph:
         # query_provenance is an AUDIT surface; show the verdicts that
         # invalidated the focal claim. Without include_invalidated=True
         # a signed contradiction verdict against this claim would be
-        # filtered out — exactly the verdict the operator needs to see
+        # filtered out, exactly the verdict the operator needs to see
         # when investigating provenance of an invalidated claim.
         verdicts_for = _db.list_contradiction_verdicts(
             self._conn, claim_id=claim_id, include_invalidated=True,
@@ -2555,7 +2555,7 @@ class EpistemicGraph:
             # Placed AFTER the drift guard so a tampered row cannot ride
             # the sidecar replay to re-attach valid Rekor coords to
             # invalid payload bytes. The drift guard refusal is uniform
-            # across both the replay and re-submit paths — there is no
+            # across both the replay and re-submit paths, there is no
             # way to launder a stale signature through this method.
             saved_entry = _db.get_rekor_inclusion(self._conn, cid)
             if saved_entry is not None:
@@ -2619,7 +2619,7 @@ class EpistemicGraph:
                 # above instead.
                 if not _db._record_rekor_inclusion(self._conn, cid, entry):
                     # Sidecar write itself failed (rare; emits its own
-                    # warning). Leave the row unlogged — refresh_unsigned
+                    # warning). Leave the row unlogged, refresh_unsigned
                     # will retry, accepting the duplicate-Rekor-entry
                     # risk documented in _record_rekor_inclusion.
                     still_unlogged += 1
@@ -2883,7 +2883,7 @@ class EpistemicGraph:
 
         # The column is part of the current schema and ``open_db``
         # column-presence-checks every open, so any reachable conn
-        # here has the column. No defensive try/except needed — a
+        # here has the column. No defensive try/except needed, a
         # missing column would mean a corrupt graph.db, which is the
         # operator-level concern open_db already raises for.
         convergence_retry_pending = _count(

@@ -54,7 +54,7 @@ class PostHocPlanError(TrustError):
 
     Raised by :meth:`EpistemicGraph.submit_finding` when the plan cited by a
     finding was pre-registered (``preregistered=1``) but its ``registered_at``
-    post-dates the run's first observed execution — its earliest prior finding
+    post-dates the run's first observed execution, its earliest prior finding
     under the same ``generated_by`` run token. Pre-registration only means
     something when the decision rule is bound before the run produces outcomes;
     honoring a rule registered after the run was already executing would launder

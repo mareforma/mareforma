@@ -38,8 +38,8 @@ TRUST_MAP_VERSION = "v0.3.10"
 
 # Observed-grounding axis versions KNOWN to carry the verdict↔citation binding.
 # An ALLOWLIST, not a denylist: only a GROUNDED verdict stamped with one of these
-# is presented as a bound GROUNDED. Anything else — a missing/absent version, a
-# hand-edited record, an older axis, or a future axis that drops binding — reads
+# is presented as a bound GROUNDED. Anything else, a missing/absent version, a
+# hand-edited record, an older axis, or a future axis that drops binding, reads
 # as pre-binding ("citation binding not checkable"), which is the honest, fail-
 # safe default. A denylist would let an unknown/absent version overclaim as bound.
 _BINDING_AXIS_VERSIONS = frozenset({"v0.3.9"})
@@ -68,12 +68,12 @@ _FAITHFULNESS_PROXY_NOTE = (
 
 
 class Tier(str, Enum):
-    """Where a property's answer comes from — the honesty of the signal.
+    """Where a property's answer comes from, the honesty of the signal.
 
-    - ``COMPUTED``  — derived directly from stored evidence this release.
-    - ``PROXIED``   — computed through a proxy signal whose bound is named
+    - ``COMPUTED`` , derived directly from stored evidence this release.
+    - ``PROXIED``  , computed through a proxy signal whose bound is named
                       (e.g. a file read observed by stat, not by byte).
-    - ``DEFERRED``  — not evaluated this release; the residual is named so the
+    - ``DEFERRED`` , not evaluated this release; the residual is named so the
                       gap is explicit rather than silent.
     """
 
@@ -87,7 +87,7 @@ class TrustProperty:
     """One property of a claim's trust, placed at its tier with the residual.
 
     ``name`` is the property (``grounding``, ``independence``, …). ``tier`` is
-    where the answer comes from. ``value`` is the property's state — a verdict, a
+    where the answer comes from. ``value`` is the property's state, a verdict, a
     count, a level, or ``None`` / :data:`NOT_PRESENT` when there is nothing to
     show. ``residual`` names what the answer does NOT cover: the honest bound on
     a computed value, or the reason a deferred property is deferred.
@@ -161,14 +161,14 @@ def parse_grounding_record(value) -> "dict | None":
 def _short(keyid: str | None) -> str:
     """First 12 hex chars of a keyid for display, or a placeholder."""
     if not keyid:
-        return "—"
+        return "n/a"
     return f"{keyid[:12]}…"
 
 
 def _grounding_property(claim: dict) -> TrustProperty:
     """Place the observed-grounding axis, carrying the verdict reason + cited set.
 
-    A pre-observer claim (no stored verdict) renders ``not present`` — never
+    A pre-observer claim (no stored verdict) renders ``not present``, never
     inferred. A GROUNDED verdict on a pre-binding axis renders with the
     pre-binding label so an auditor sees the citation binding was not checkable
     when it was computed.
@@ -226,7 +226,7 @@ def _faithfulness_property(reexec_record: "dict | None") -> TrustProperty:
     Faithfulness is not stored on the claim; it is supplied by a re-execution
     run (see :mod:`mareforma.reexec`). When no run is supplied the axis renders
     ``not present`` (never inferred): faithfulness was not checked. When a run is
-    supplied the verdict — REPRODUCED / DIVERGED / COULD_NOT_REEXECUTE — is placed
+    supplied the verdict, REPRODUCED / DIVERGED / COULD_NOT_REEXECUTE, is placed
     at the PROXY tier with the residual naming what reproducibility does NOT
     cover, so it cannot be read as truth or as independence. A malformed or
     unrecognised record reads as ``not present``, the fail-safe default.
@@ -259,12 +259,12 @@ def _independence_property(
 ) -> TrustProperty:
     """Place the INDEPENDENCE axis, distinct from the support ladder.
 
-    For a finding (``effective`` supplied — the effective-independence record
+    For a finding (``effective`` supplied, the effective-independence record
     from :func:`mareforma.trust._store.effective_independence`), the axis reports
     the per-finding effective number of pairwise-distinct (model, data, signer)
     supporting checks. Where a supporting line's model lineage is soft (PROXY /
     UNVERIFIABLE) and no clean pair corroborates, the axis reads UNVERIFIABLE
-    rather than a confident number — a distinct model cannot be certified.
+    rather than a confident number, a distinct model cannot be certified.
     Coarse by design: distinct-model is binary this release; the graded
     cross-model residual is DEFERRED, not computed. When the number stands but
     every signer traces to a single trust root (``n_roots < 2``), the residual
@@ -452,7 +452,7 @@ def build_trust_map(
         n_roots = len(_validators.enrollment_roots(conn))
     else:
         # Explicit override (a caller that already knows the topology): the bool
-        # maps to a representative count — a single domain is one root, "not
+        # maps to a representative count, a single domain is one root, "not
         # single" is two. A zero-root graph is only reached via the graph read
         # above, where its distinct three-way handling matters.
         n_roots = 1 if single_domain else 2

@@ -1,13 +1,13 @@
 """Doc-drift guards: reference docs must track the code they describe.
 
-- #44  the documented status-policy stamp must equal ``STATUS_POLICY`` in
+- the documented status-policy stamp must equal ``STATUS_POLICY`` in
        code (the docs lagged at ``@v2`` while the code moved to ``@v3``).
-- #54  every ``mareforma export --format`` choice defined in the CLI must
+- every ``mareforma export --format`` choice defined in the CLI must
        be documented, and the blanket "NOT PROV-O-conformant" claim must
        be scoped now that a ``prov-o`` format exists.
 
 Both read the source of truth from code, so they fail whenever the docs
-fall behind a future change — not just today's drift.
+fall behind a future change, not just today's drift.
 """
 
 from __future__ import annotations

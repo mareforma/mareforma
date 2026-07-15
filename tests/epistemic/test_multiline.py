@@ -230,7 +230,7 @@ class TestCountRunDistinct:
 
     def test_same_model_distinct_runs_collapses(self) -> None:
         # Distinct signers + distinct data but the SAME COMPUTED model root is one
-        # line of evidence, not two — the model axis collapses it.
+        # line of evidence, not two, the model axis collapses it.
         same = ("model", "claude-3-5-sonnet")
         assert _count_run_distinct(
             [("r1", "dA", same), ("r2", "dB", same)]

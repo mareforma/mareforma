@@ -9,8 +9,8 @@ function of the recorded evidence.
 Scope is held in a :class:`contextvars.ContextVar`, not thread-local, so it
 propagates correctly into ``asyncio`` tasks (the event loop copies the context
 into each task). It deliberately does NOT reach library-spawned threads or a
-pipeline that owns its own loop. Work handed off inside the scope — a thread
-started (``Thread.start``) or a thread-pool submit/map — is caught at the
+pipeline that owns its own loop. Work handed off inside the scope, a thread
+started (``Thread.start``) or a thread-pool submit/map, is caught at the
 hand-off and recorded as a seam, so an unseeable read there becomes ``OPAQUE``
 rather than a confident false ``UNGROUNDED``. A resource opened BEFORE the scope
 and reused inside it (a module-level handle or pooled connection) stays the
@@ -42,8 +42,8 @@ def _seam_blocks_ungrounded(seam_kind: str, cited_kinds: set[str]) -> bool:
     """Whether a seam of this kind blocks an UNGROUNDED verdict for this cited set.
 
     Conservative-ANY: the seam blocks if it could have hidden a read of ANY
-    citation kind present. Fail-closed on both axes — an unknown seam kind blocks
-    everything, and an unknown citation kind is blocked by every seam — so a gap
+    citation kind present. Fail-closed on both axes, an unknown seam kind blocks
+    everything, and an unknown citation kind is blocked by every seam, so a gap
     the matrix does not model lands OPAQUE, never a confident UNGROUNDED. An empty
     citation set has no tell to recover, so any seam blocks.
     """
@@ -100,7 +100,7 @@ class Scope:
         self.failed_opens: list[tuple[str, str]] = []
         # Model/method lineage records captured in this span (a wrapped httpx
         # POST body-parse, or a producer declaration). Empty when no model call
-        # authored the finding — the lineage is then absent, never fabricated.
+        # authored the finding, the lineage is then absent, never fabricated.
         self.models: list = []
         self._error: str | None = None
         self._token = None
@@ -177,8 +177,8 @@ class Scope:
         Order of decision:
           1. Any observer-internal error → OPAQUE (we cannot trust ourselves).
           2. A cited read returned non-empty data → GROUNDED.
-          3. Otherwise, if anything could have hidden a read — a spawn seam, or
-             a cited path opened through an uninstrumented reader — → OPAQUE.
+          3. Otherwise, if anything could have hidden a read, a spawn seam, or
+             a cited path opened through an uninstrumented reader, → OPAQUE.
           4. Only when the scope was fully seen and no cited data arrived →
              UNGROUNDED. This is the sole path to UNGROUNDED, which is what
              makes UNGROUNDED trustworthy.
@@ -233,7 +233,7 @@ class Scope:
                         "a read matching the cited source returned non-empty "
                         f"data ({r.kind})"
                     )
-                # The cited sources an actual non-empty read was observed for —
+                # The cited sources an actual non-empty read was observed for , 
                 # every cited entry that a read bound to, not just the first. The
                 # binding gate checks THESE against the finding's citation, never
                 # the declared `cited`: a decoy read of one cited source cannot
@@ -348,7 +348,7 @@ class Scope:
         # Seam-relevance matrix. A seam blocks UNGROUNDED only if it could have
         # hidden a read of a citation kind actually in the set (conservative-ANY:
         # one relevant citation is enough). A socket seam cannot deliver a local
-        # file read, so it does NOT block a file-cited finding — that is the tell
+        # file read, so it does NOT block a file-cited finding, that is the tell
         # a silent fallback on an LLM-shaped pipeline leaves behind. It DOES block
         # URL- and content-address-cited findings (bytes can arrive over the
         # network). Subprocess / thread / coverage-gap seams, and any unknown
@@ -419,7 +419,7 @@ def exit(scope: Scope) -> None:
 
 def record_read(kind: str, identifier: str, nonempty: bool, content_address=None) -> None:
     """Record one read against the active scope, if any. The one place every
-    wrapped loader routes ingress through — so the recording rule lives once.
+    wrapped loader routes ingress through, so the recording rule lives once.
     """
     scope = _active.get()
     if scope is not None:

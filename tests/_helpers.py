@@ -179,7 +179,7 @@ def _module_level_names(source_path: Path) -> list[str]:
 
     Captures ``def``, ``async def``, ``class`` definitions, and module-
     level assignments (both annotated and unannotated). Does NOT
-    capture imported names — those are explicitly excluded so the test
+    capture imported names, those are explicitly excluded so the test
     only enforces re-export of names that originate in this submodule.
     """
     tree = ast.parse(source_path.read_text(encoding="utf-8"))

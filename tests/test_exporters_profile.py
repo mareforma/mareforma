@@ -1,17 +1,17 @@
 """Exporter profile conformance: RO-Crate root entity and PROV-O labels.
 
-- #29  the RO-Crate root data entity must carry a ``license`` and a
+- the RO-Crate root data entity must carry a ``license`` and a
        non-null ``datePublished``, and it must separate data entities
        (``hasPart``) from provenance actions (``mentions``) per the
        Process Run Crate profile.
-- #48  PROV-O labels must use ``rdfs:label`` (with an ``rdfs`` context
+- PROV-O labels must use ``rdfs:label`` (with an ``rdfs`` context
        mapping), not the non-existent ``prov:label`` a strict consumer
        rejects.
 
 Both fail on the pre-fix tree.
 
 Scope note: these check the SHAPE of the exported entities (key presence,
-in-graph @id resolution, label vocabulary) — not full profile conformance.
+in-graph @id resolution, label vocabulary), not full profile conformance.
 They do not run an RO-Crate validator, a JSON-LD processor, or SHACL/OWL over
 PROV-O, so a genuine profile violation (e.g. a ``hasPart`` member that is a
 contextual entity rather than a data entity) would not be caught here. Treat
@@ -61,7 +61,7 @@ def test_ro_crate_root_has_license_resolving_to_entity(tmp_path: Path) -> None:
 
 def test_ro_crate_license_override_propagates(tmp_path: Path) -> None:
     """The build_crate(license_id=, license_name=) override reaches the root
-    entity and its contextual license entity — a producer who knows their data's
+    entity and its contextual license entity, a producer who knows their data's
     license can pin it instead of the CC-BY-4.0 default."""
     _seed(tmp_path)
     custom_id = "https://opensource.org/licenses/MIT"
@@ -91,7 +91,7 @@ def test_ro_crate_rejects_empty_license_override(tmp_path: Path) -> None:
 def test_ro_crate_date_published_never_null(tmp_path: Path) -> None:
     """datePublished is present even for an empty graph."""
     with mareforma.open(tmp_path):
-        pass  # bootstrap only — zero claims
+        pass  # bootstrap only, zero claims
     crate = build_crate(tmp_path)
     assert _root(crate).get("datePublished"), "datePublished must be non-null"
 

@@ -3,7 +3,7 @@ name: Tests
 # Run on every push and every PR, plus manual dispatch from the Actions
 # tab. The prior config triggered only on `main`, which meant feature
 # branches (where all dev actually happens) never got pytest on a clean
-# checkout — that's how `test_canonical.py` shipped with a hardcoded
+# checkout, that's how `test_canonical.py` shipped with a hardcoded
 # absolute path that only resolved on one machine.
 on:
   push:
@@ -57,7 +57,7 @@ jobs:
   examples:
     # Smoke-test the LangChain quickstart examples end-to-end. These are
     # what every first-time reader of the repo will run; if any break,
-    # the next negative review writes itself. Only examples 01-04 — 05
+    # the next negative review writes itself. Only examples 01-04, 05
     # needs OPENAI_API_KEY + a 21 GB MedeaDB download.
     runs-on: ubuntu-latest
     steps:
@@ -74,14 +74,14 @@ jobs:
           pip install -e ".[dev]"
           pip install langchain-core
 
-      - name: Example 01 — API walkthrough
+      - name: Example 01, API walkthrough
         run: python examples/01_api_walkthrough/01_api_walkthrough.py
 
-      - name: Example 02 — compounding agents
+      - name: Example 02, compounding agents
         run: python examples/02_compounding_agents/02_compounding_agents.py
 
-      - name: Example 03 — documented contestation
+      - name: Example 03, documented contestation
         run: python examples/03_documented_contestation/03_documented_contestation.py
 
-      - name: Example 04 — private data, public findings
+      - name: Example 04, private data, public findings
         run: python examples/04_private_data_public_findings/04_private_data_public_findings.py

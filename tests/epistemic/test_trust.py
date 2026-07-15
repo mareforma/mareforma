@@ -359,7 +359,7 @@ class TestSuccessCriteria:
         # key, so two findings through ONE signed handle share one keyid and
         # count once. Open UNSIGNED so asserter_keyid is NULL and the legacy
         # generated_by axis applies: two unsigned findings with distinct
-        # generated_by + distinct data_id are two independent lines — the two
+        # generated_by + distinct data_id are two independent lines, the two
         # labs this test models.
         with mareforma.open(tmp_path) as graph:
             graph.assert_finding(h, _superiority(), _smd(-2.6, p=0.003), data_id="dataA", generated_by="lab_a")
@@ -465,7 +465,7 @@ class TestGraphBehaviour:
     def test_query_frame_min_status_filter(self, tmp_path: Path) -> None:
         h = _prop(Direction.DECREASES)
         # Unsigned graph so the two findings count as two independent lines
-        # (legacy generated_by axis) — see test_two_independent_lines_reach_
+        # (legacy generated_by axis), see test_two_independent_lines_reach_
         # convergent. CONVERGENT is what the min_status floor checks here.
         with mareforma.open(tmp_path) as graph:
             graph.assert_finding(h, _superiority(), _smd(-2.6, p=0.003), data_id="dataA", generated_by="lab_a")

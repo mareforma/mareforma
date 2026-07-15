@@ -91,7 +91,7 @@ def _compute_traffic_light(report: HealthReport) -> tuple[str, str]:
     established = report.support_level_breakdown.get("ESTABLISHED", 0)
     replicated = report.support_level_breakdown.get("REPLICATED", 0)
     if established + replicated == 0:
-        return "yellow", "All claims are PRELIMINARY — no independent replication yet."
+        return "yellow", "All claims are PRELIMINARY, no independent replication yet."
 
     return "green", "At least one independently replicated or validated claim."
 
@@ -104,7 +104,7 @@ def _compute_traffic_light(report: HealthReport) -> tuple[str, str]:
 # append-only JSONL trail of operational signals (provenance queries,
 # grounding verdicts, DOI drift scans, refresh retries). Operators
 # read rolling rates off the trail via :func:`compute_rolling_stats`
-# and the ``mareforma activity`` CLI. Best-effort write — a failure to
+# and the ``mareforma activity`` CLI. Best-effort write, a failure to
 # append is logged via a RuntimeWarning and the underlying operation
 # still completes.
 

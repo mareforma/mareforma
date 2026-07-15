@@ -8,9 +8,9 @@ on exit one verdict per finding is computed from the SHARED observed evidence
 against that finding's cited set, with the same bind-time citation semantics a
 cooperating producer gets. Each verdict is emitted twice:
 
-- ``receipts.jsonl`` — one plain verdict receipt per finding, directly
+- ``receipts.jsonl``, one plain verdict receipt per finding, directly
   consumable by ``mareforma measure`` and ``summarize_pilot``;
-- ``envelopes/<n>-<finding_id>.json`` — the same record DSSE-signed with the
+- ``envelopes/<n>-<finding_id>.json``, the same record DSSE-signed with the
   auditor's key, checkable by ``mareforma verify`` from public material alone.
 
 No self-report: nothing the target prints, writes, or declares enters a
@@ -22,11 +22,11 @@ The trust boundary is the shared interpreter. Running the target in-process is
 what lets the observer see its reads at all, and it is also the limit: a target
 written to defeat the audit can import the observer's internals and fabricate
 reads, or patch the auditor itself. The receipts therefore grade a pipeline
-that does not attack its auditor — the silent fallback, the unread citation —
+that does not attack its auditor, the silent fallback, the unread citation , 
 and the signature attests the auditor's observation, not the target's honesty.
 
-Corpus mode iterates run specs with one fresh interpreter per run — a target
-cannot poison the observation of the next — and is resumable: a run is skipped
+Corpus mode iterates run specs with one fresh interpreter per run, a target
+cannot poison the observation of the next, and is resumable: a run is skipped
 on re-invocation only when its record is complete AND verifies against the
 auditor's key, so state a target planted on disk cannot mark a run done.
 """
@@ -105,7 +105,7 @@ def _finding_verdict(scope, cited: tuple[str, ...]):
     """One finding's verdict from the shared observed evidence.
 
     Classification is pure and should not raise, but if it ever does the
-    receipt degrades to an honest OPAQUE rather than losing the finding —
+    receipt degrades to an honest OPAQUE rather than losing the finding , 
     the same posture as the ``observe()`` teardown.
     """
     from mareforma.observe import GroundingVerdict, ObservedGrounding
@@ -246,11 +246,11 @@ def run_audit(
         try:
             _run_target(list(command))
         except click.UsageError:
-            # Bad invocation of audit itself — re-raise so click reports it.
+            # Bad invocation of audit itself, re-raise so click reports it.
             raise
         except SystemExit as exc:
             exit_code = _exit_code_of(exc)
-        except BaseException:  # noqa: BLE001 — a target crash is expected input
+        except BaseException:  # noqa: BLE001, a target crash is expected input
             crashed = True
             exit_code = 1
             tb_text = traceback.format_exc()
@@ -259,7 +259,7 @@ def run_audit(
 
     # Verdicts and receipts are computed AFTER the scope closes, only from what
     # the observer recorded. The target's stdout, files, and exit status never
-    # feed a verdict — that is the no-self-report guarantee.
+    # feed a verdict, that is the no-self-report guarantee.
     records = []
     for fid, cited in findings.items():
         verdict = _finding_verdict(scope, cited)
@@ -310,7 +310,7 @@ def run_audit(
         run_record["traceback"] = tb_text
     # The run record lands last, signed: its ``completed`` flag is the resume
     # key, so a run killed mid-write never reads as complete, and resume honors
-    # the flag only inside an envelope the auditor's key verifies — the record
+    # the flag only inside an envelope the auditor's key verifies, the record
     # sits where the audited target could write.
     (out / RUN_RECORD_FILE).write_text(
         json.dumps(signing.sign_audit_run(run_record, signer), indent=2) + "\n",
@@ -371,8 +371,8 @@ def _run_completed(run_dir: Path, public_key) -> bool:
 
     The record sits where an audited target could write, so the ``completed``
     flag is honored only inside a run-record envelope that verifies against
-    the auditor's key. A plain, unsigned, or unverifiable ``run.json`` — the
-    state a hostile run A could plant in run B's directory — reads as not
+    the auditor's key. A plain, unsigned, or unverifiable ``run.json``, the
+    state a hostile run A could plant in run B's directory, reads as not
     complete, and the run re-executes.
     """
     import base64
@@ -389,14 +389,14 @@ def _run_completed(run_dir: Path, public_key) -> bool:
             return False
         record = json.loads(base64.standard_b64decode(envelope["payload"]))
         return bool(record.get("completed"))
-    except Exception:  # noqa: BLE001 — any defect in the record means re-run
+    except Exception:  # noqa: BLE001, any defect in the record means re-run
         return False
 
 
 def _load_spec(spec_path: Path) -> dict:
     """Load one run spec: ``{"command": [...], "findings": {...}}``.
 
-    A malformed spec aborts the corpus with the spec named — the corpus is the
+    A malformed spec aborts the corpus with the spec named, the corpus is the
     auditor's own input, so failing fast beats auditing the wrong thing.
     """
     try:
@@ -457,7 +457,7 @@ def run_corpus(corpus_dir, *, out_dir, key_path) -> int:
 
     A crashed TARGET is data, not an audit failure: its run still completes
     with partial receipts and its exit code recorded. The corpus fails (exit 1)
-    only when a run produced no complete record — the audit machinery itself
+    only when a run produced no complete record, the audit machinery itself
     broke, and re-invocation will retry exactly those runs.
     """
     from mareforma import signing

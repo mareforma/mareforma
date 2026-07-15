@@ -8,7 +8,7 @@ Coverage:
 - self-validation gate walks every signature on the envelope
 - self-verdict gate walks every signature on both referenced claims
 - legacy single-signature envelopes still verify under the verifier
-  (regression — multi-sig must not break single-sig)
+  (regression, multi-sig must not break single-sig)
 - PROV-O JSON-LD exporter + four-invariant validator
 """
 from __future__ import annotations
@@ -81,7 +81,7 @@ class TestSupportsCache:
 
     def test_cache_rebuild_after_corruption(self, tmp_path: Path) -> None:
         # Corrupting the cache file (NOT deleting it) must trigger
-        # auto-rebuild on next open — operators shouldn't have to
+        # auto-rebuild on next open, operators shouldn't have to
         # diagnose SQLite "file is not a database" errors for a
         # non-signed cache.
         with mareforma.open(tmp_path) as graph:
@@ -334,7 +334,7 @@ class TestMultiSigDSSE:
 
     def test_verify_envelope_multi_rejects_role_less_signature(self) -> None:
         # A legacy single-sig envelope (no role field) does NOT verify
-        # under the multi-sig verifier — callers must use verify_envelope.
+        # under the multi-sig verifier, callers must use verify_envelope.
         key = _signing.generate_keypair()
         envelope = _signing.sign_claim(self._statement_fields(), key)
         # Forge a "claim-with-roles"-shaped call expecting role tags.
@@ -593,12 +593,12 @@ class TestProvOExport:
 
 
 # ----------------------------------------------------------------------------
-# Hardening regressions surfaced by adversarial review
+# Provenance hardening regressions
 # ----------------------------------------------------------------------------
 
 
 class TestSupportsCacheWalMode:
-    """The cache db must run in WAL — same journal mode as graph.db —
+    """The cache db must run in WAL, same journal mode as graph.db , 
     so cross-DB transaction semantics are consistent and any future
     code that relies on atomic-together commits has a hope of it."""
 
@@ -629,7 +629,7 @@ class TestRestoreVerifiesEverySignatureInMultiSigEnvelope:
     ) -> None:
         # The HARD case: the extra signature carries an ENROLLED
         # keyid (so the orphan-signer gate passes) but the sig bytes
-        # are forged — this exercises the cryptographic verify path,
+        # are forged, this exercises the cryptographic verify path,
         # not just the keyid lookup.
         import base64 as _b64
         from mareforma.db import RestoreError
@@ -671,7 +671,7 @@ class TestRestoreVerifiesEverySignatureInMultiSigEnvelope:
         )
         with pytest.raises(RestoreError) as ei:
             mareforma.restore(tmp_path)
-        # The cryptographic verify path catches this — kind is
+        # The cryptographic verify path catches this, kind is
         # claim_unverified, not orphan_signer.
         assert ei.value.kind == "claim_unverified"
 
@@ -791,7 +791,7 @@ class TestSelfValidationRejectsEmptySignatures:
 
 class TestQueryProvenanceShowsInvalidatingVerdict:
     """When a claim is contradicted by a signed verdict, the verdict
-    that invalidated it MUST appear in query_provenance — without
+    that invalidated it MUST appear in query_provenance, without
     that, the audit surface silently hides the verdict the operator
     is investigating."""
 

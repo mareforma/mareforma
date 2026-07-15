@@ -1,10 +1,10 @@
 """
-examples/02_compounding_agents.py — What the instrument refuses to count.
+examples/02_compounding_agents.py, What the instrument refuses to count.
 
 Two failure modes an honest trust layer has to catch, shown end to end.
 
 1. Absence. A finding whose analysis step never ran cannot earn GROUNDED. The
-   observer watched the scope, saw no cited read, and returns UNGROUNDED — so
+   observer watched the scope, saw no cited read, and returns UNGROUNDED, so
    the trust map shows an empty provenance edge: no observed execution stands
    behind the number. A finding whose step DID run and read its data reads
    GROUNDED on that source.
@@ -55,7 +55,7 @@ def show(label: str, value: object) -> None:
 
 
 def _offline_client() -> httpx.Client:
-    """An httpx client whose transport answers locally — no network, no key.
+    """An httpx client whose transport answers locally, no network, no key.
 
     The observer wraps ``httpx.Client.post`` and parses the request body for the
     model field. That capture happens at the socket boundary regardless of where
@@ -98,7 +98,7 @@ def absent_check(csv_path: Path):
     return handle.verdict
 
 
-# A positive standardised mean difference with a 90% CI clear of zero — the same
+# A positive standardised mean difference with a 90% CI clear of zero, the same
 # supporting outcome for every check below, so only the model differs.
 def _estimate(n: int) -> EffectEstimate:
     return EffectEstimate(
@@ -140,7 +140,7 @@ for name in ("agent-a", "agent-b", "agent-c"):
     agent_graphs[name] = mareforma.open(tmp, key_path=kp)
 
 # Datasets: distinct, non-empty CSV files. Distinct data is the other legacy
-# signal of independence — and, like distinct keys, not enough on its own.
+# signal of independence, and, like distinct keys, not enough on its own.
 datasets = {}
 for name in ("alpha", "beta", "gamma", "delta", "epsilon"):
     p = tmp / f"dataset_{name}.csv"
@@ -178,13 +178,13 @@ graph.register_plan(prop, plan, generated_by="protocol")
 
 
 # ---------------------------------------------------------------------------
-# 1. The absence catch — a number with no observed execution
+# 1. The absence catch, a number with no observed execution
 # ---------------------------------------------------------------------------
 # An agent reports a result, but the step that reads the data never ran. The
 # observer saw the whole scope and no cited read, so the finding cannot earn
 # GROUNDED. It reads UNGROUNDED, and its provenance edge is empty.
 
-sep("1. Absence — a finding whose step never executed")
+sep("1. Absence, a finding whose step never executed")
 
 absent_verdict = absent_check(datasets["delta"])
 show("observed grounding", absent_verdict.grounding.value)
@@ -209,7 +209,7 @@ print("  grounding axis reports UNGROUNDED: no observed read stands behind the")
 print("  number. Absence is caught, not filled in.")
 
 # The contrast: the same question, this time actually executed.
-sep("   Contrast — the step runs and reads its data")
+sep("   Contrast, the step runs and reads its data")
 
 grounded_verdict = model_check(
     client, _ANTHROPIC_URL, "claude-3-5-sonnet-20241022", datasets["epsilon"]
@@ -235,10 +235,10 @@ print(f"    {grounded_map.get('grounding').residual}")
 # 2. Same-model convergence does not count twice
 # ---------------------------------------------------------------------------
 # agent-a runs the first grounded check on the shared question. A second agent,
-# distinct key and distinct dataset, reaches the same answer — but on the same
+# distinct key and distinct dataset, reaches the same answer, but on the same
 # model. The instrument does not read that as a second independent line.
 
-sep("2. Two agents, same model — effective independence stays 1")
+sep("2. Two agents, same model, effective independence stays 1")
 
 verdict_a = model_check(
     client, _ANTHROPIC_URL, "claude-3-5-sonnet-20241022", datasets["alpha"]
@@ -274,7 +274,7 @@ show("effective independence", map_b.get("independence").value)
 print(f"    {map_b.get('independence').residual}")
 
 print()
-print("  Distinct in every legacy axis — signer and dataset — but one model.")
+print("  Distinct in every legacy axis, signer and dataset, but one model.")
 print("  Two same-model checks are one line of evidence, so the count holds at 1.")
 
 
@@ -282,7 +282,7 @@ print("  Two same-model checks are one line of evidence, so the count holds at 1
 # 3. A different model raises the count
 # ---------------------------------------------------------------------------
 
-sep("3. A different model checks the result — independence rises")
+sep("3. A different model checks the result, independence rises")
 
 verdict_c = model_check(
     client, _OPENAI_URL, "gpt-4o-2024-08-06", datasets["gamma"]
@@ -303,8 +303,8 @@ print(f"    {map_c.get('independence').residual}")
 
 print()
 print("  A genuinely different model is a second line. The count moves from 1")
-print("  to 2 only when the evidence is independent in the axis that matters —")
-print("  the model — not merely in the key that signed it.")
+print("  to 2 only when the evidence is independent in the axis that matters , ")
+print("  the model, not merely in the key that signed it.")
 
 
 # ---------------------------------------------------------------------------

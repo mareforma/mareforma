@@ -199,7 +199,7 @@ class TestVerdictPromotionGates:
     def test_grounded_claim_still_promoted_by_verdict(
         self, tmp_path: Path,
     ) -> None:
-        # A recorded GROUNDED verdict must NOT block promotion — the gate is
+        # A recorded GROUNDED verdict must NOT block promotion, the gate is
         # additive, not a new hurdle for honestly grounded claims.
         root_key, issuer_key, a, b, _, _ = _seed_two_claims(tmp_path)
         self._set_grounding(tmp_path, root_key, a, "GROUNDED")
@@ -293,11 +293,11 @@ class TestLLMContradictionGate:
     """Symmetric to the LLM-promotion gate on validate_claim.
 
     A signed contradiction sets ``t_invalid`` on the older claim via the
-    ``contradiction_invalidates_older`` trigger — effectively demoting
+    ``contradiction_invalidates_older`` trigger, effectively demoting
     it from default ``query()`` results. The human-only rule must apply
     in BOTH directions: humans-only-to-promote AND humans-only-to-demote.
     Without this gate, an enrolled LLM key could mark down any
-    human-validated ESTABLISHED claim by signing a contradiction —
+    human-validated ESTABLISHED claim by signing a contradiction , 
     breaking the README's promotion-requires-human framing on the
     demotion side.
     """
@@ -332,7 +332,7 @@ class TestLLMContradictionGate:
                     member_claim_id=a, other_claim_id=b,
                     confidence={"stance": "refutes"},
                 )
-        # And the older claim's t_invalid is still NULL — the gate
+        # And the older claim's t_invalid is still NULL, the gate
         # fired BEFORE the INSERT, not after.
         with mareforma.open(tmp_path, key_path=root_key) as g:
             assert g.get_claim(a)["t_invalid"] is None
@@ -361,7 +361,7 @@ class TestLLMContradictionGate:
 
 class TestVerdictChainWalkEnforced:
     """_require_enrolled_issuer must walk the enrollment chain via
-    validators.is_enrolled — same gate as seed and validate. A tampered
+    validators.is_enrolled, same gate as seed and validate. A tampered
     DB row whose enrollment chain breaks must be rejected even though
     its keyid still exists in the validators table."""
 
@@ -380,7 +380,7 @@ class TestVerdictChainWalkEnforced:
             )
             g._conn.commit()
         # Now the issuer (whose row still exists) tries to write a
-        # verdict — chain walk fails, verdict refused.
+        # verdict, chain walk fails, verdict refused.
         with mareforma.open(tmp_path, key_path=issuer_key) as g:
             with pytest.raises(_db.VerdictIssuerError,
                                match="chain does not verify|not enrolled"):
@@ -396,7 +396,7 @@ class TestVerdictChainWalkEnforced:
 # ---------------------------------------------------------------------------
 
 class TestUnsignedModeRefusesVerdict:
-    """A graph opened without a signing key cannot record verdicts —
+    """A graph opened without a signing key cannot record verdicts , 
     the wrapper raises VerdictIssuerError before touching the DB."""
 
     def test_unsigned_graph_refuses_record_replication(
@@ -568,7 +568,7 @@ class TestTriggerIdempotencyAndOrdering:
                 confidence={},
             )
             second = g.get_claim(a)["t_invalid"]
-        assert first == second  # idempotent — earlier timestamp preserved
+        assert first == second  # idempotent, earlier timestamp preserved
 
     def test_invalidation_independent_of_argument_order(
         self, tmp_path: Path,
@@ -607,7 +607,7 @@ class TestInvalidatedClaimRefusesValidation:
     """validate_claim must refuse to promote a claim that's already
     been invalidated by a signed contradiction verdict. Without this,
     an enrolled human validator could lift an already-refuted claim
-    REPLICATED → ESTABLISHED — riding past the terminal evidence of
+    REPLICATED → ESTABLISHED, riding past the terminal evidence of
     the signed contradiction."""
 
     def test_validate_refuses_t_invalid_claim(self, tmp_path: Path) -> None:
@@ -826,12 +826,12 @@ class TestRestoreVerdicts:
         mareforma.restore(tmp_path)
         with mareforma.open(tmp_path, key_path=root_key) as g:
             # Both claims are now invalidated by the contradiction
-            # verdict — use audit mode to inspect the round-tripped
+            # verdict, use audit mode to inspect the round-tripped
             # verdicts.
             reps = g.replication_verdicts(include_invalidated=True)
             cons = g.contradiction_verdicts(include_invalidated=True)
             # t_invalid was re-derived by the trigger on contradiction
-            # INSERT — not directly round-tripped via TOML.
+            # INSERT, not directly round-tripped via TOML.
             assert g.get_claim(a)["t_invalid"] is not None
         assert len(reps) == 1
         assert reps[0]["verdict_id"] == "rv_rt"
@@ -975,7 +975,7 @@ class TestRestorePreservesNonRekorTransparency:
     (transparency_logged=1); restore must preserve that so REPLICATED's
     transparency_logged=1 gate still passes after recovery. Witnessed state
     for a Rekor-enabled claim is derived from the [rekor_inclusions] sidecar,
-    not the unsigned rekor block inside signature_bundle — the forge-refusal
+    not the unsigned rekor block inside signature_bundle, the forge-refusal
     path lives in test_restore_trust_layer."""
 
     def test_non_rekor_claim_keeps_transparency_on_restore(

@@ -40,7 +40,7 @@ _GPT = "gpt-4o-2024-08-06"
 
 
 def _offline_client() -> httpx.Client:
-    """An httpx client whose transport answers locally — no network, no key."""
+    """An httpx client whose transport answers locally, no network, no key."""
     return httpx.Client(
         transport=httpx.MockTransport(lambda req: httpx.Response(200, json={}))
     )
@@ -68,7 +68,7 @@ def _plan() -> Prediction:
 
 
 def _estimate(n: int) -> EffectEstimate:
-    """A positive SMD with a 90% CI clear of zero — a supporting outcome."""
+    """A positive SMD with a 90% CI clear of zero, a supporting outcome."""
     return EffectEstimate(
         estimate_value=0.42,
         effect_type=EffectType.SMD,
@@ -170,7 +170,7 @@ def test_compounding_same_model_not_independent(tmp_path: Path, httpx_mock) -> N
     COMPUTED lineage requires a real network transport (a producer-controlled
     offline transport is a PROXY declaration, not a socket capture), so the model
     call runs through a plain ``httpx.Client`` whose network transport is patched
-    by ``httpx_mock`` — the SDK path a genuine provider call takes.
+    by ``httpx_mock``, the SDK path a genuine provider call takes.
     """
     httpx_mock.add_response(url=_ANTHROPIC_URL, json={"content": []}, is_reusable=True)
     httpx_mock.add_response(url=_OPENAI_URL, json={"choices": []})

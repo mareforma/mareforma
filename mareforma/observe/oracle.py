@@ -8,7 +8,7 @@ same with different data, which is the signature of a silent fallback.
 
 The oracle is the observer's validation because it is independent: it never
 reads the observer's log, so a detector that agreed with itself cannot look
-correct here. It also handles the honest hard case — a stochastic pipeline
+correct here. It also handles the honest hard case, a stochastic pipeline
 (an LLM at nonzero temperature) moves run to run even with fixed input, so a
 naive "did it change" test would call everything influenced. The oracle measures
 that run-to-run noise first and only calls INFLUENCED when the perturbation moves
@@ -53,8 +53,8 @@ class MetricReducer:
 
     The oracle needs one number per finding. For a numeric finding that is
     ``float(finding)``. For a PROSE finding (the text output of a RAG or
-    agent pipeline) the caller must supply a reduction — a named extraction to a
-    scalar — and DECLARE what it is, because the choice of reducer is a
+    agent pipeline) the caller must supply a reduction, a named extraction to a
+    scalar, and DECLARE what it is, because the choice of reducer is a
     measurement decision a reviewer must be able to audit. In particular an
     embedding-distance or LLM-judge reducer re-inserts a model into the ground
     truth the oracle is supposed to provide independently; that is sometimes the
@@ -187,8 +187,8 @@ class OracleResult:
     def reinserts_model(self) -> bool:
         """Whether the declared reducer ran a model to reduce the finding.
 
-        True means the ground truth is no longer model-independent — the oracle's
-        one guarantee — so the measurement must surface it. Read it off the result
+        True means the ground truth is no longer model-independent, the oracle's
+        one guarantee, so the measurement must surface it. Read it off the result
         rather than re-inspecting the reducer.
         """
         return bool(self.reducer and self.reducer.reinserts_model)
@@ -260,9 +260,9 @@ def perturbation_oracle(
         across many findings, a fixed ``noise_multiplier`` lets the noisiest
         finding cross the bar by chance, so the family produces false INFLUENCED
         calls at a rate that grows with the count. Passing the family size adds
-        ``sqrt(2 * ln(multiplicity))`` sigmas to the multiplier — the scale of the
+        ``sqrt(2 * ln(multiplicity))`` sigmas to the multiplier, the scale of the
         largest spurious deviation expected across ``multiplicity`` standard
-        draws — so the control is applied BEFORE any influence number is computed.
+        draws, so the control is applied BEFORE any influence number is computed.
         ``1`` (the default) adds nothing: a single finding needs no correction.
     thin_sigma_guard:
         When True, widen the noise margin by a small-sample factor whenever the
@@ -402,7 +402,7 @@ def reconcile(
       nothing to reconcile against the oracle.
     - UNGROUNDED + INFLUENCED → TENSION: the data demonstrably influences the
       finding, yet the observer saw no cited read. This is the one combination
-      worth investigating — the observer likely missed a read (a coverage gap).
+      worth investigating, the observer likely missed a read (a coverage gap).
     - anything + UNDECIDABLE → INCONCLUSIVE: the oracle could not decide.
     """
     if oracle is OracleInfluence.UNDECIDABLE:

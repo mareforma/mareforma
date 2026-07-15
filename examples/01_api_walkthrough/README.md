@@ -40,7 +40,7 @@ _signing.bootstrap_key(lab_b_key_path)
 graph = mareforma.open(tmp, key_path=agent_key_path)
 
 # Enroll the reviewer as a second validator. Section 6 needs a validator whose
-# key differs from the claim's signer — mareforma refuses self-validation.
+# key differs from the claim's signer, mareforma refuses self-validation.
 reviewer_priv = _signing.load_private_key(reviewer_key_path)
 reviewer_pem = _signing.public_key_to_pem(reviewer_priv.public_key())
 graph.enroll_validator(reviewer_pem, identity="jane@lab.org")
@@ -54,12 +54,12 @@ graph.enroll_validator(reviewer_pem, identity="jane@lab.org")
 ## 2. Assert claims
 
 ```python
-# INFERRED — default. LLM reasoning without explicit grounding.
+# INFERRED, default. LLM reasoning without explicit grounding.
 c_inferred = graph.assert_claim(
     "Cell type A receives more inhibitory input than cell type B",
 )
 
-# ANALYTICAL — deterministic analysis against source data. Agent-declared.
+# ANALYTICAL, deterministic analysis against source data. Agent-declared.
 # Only use this when the data pipeline actually ran and produced output.
 c_analytical = graph.assert_claim(
     "Cell type A receives more inhibitory input than cell type B (n=1,204, p<0.001)",
@@ -69,7 +69,7 @@ c_analytical = graph.assert_claim(
     supports=["upstream_ref_A"],
 )
 
-# DERIVED — explicitly built on claims already in the graph.
+# DERIVED, explicitly built on claims already in the graph.
 c_derived = graph.assert_claim(
     "Inhibitory specialisation of cell type A is a conserved motif",
     classification="DERIVED",
@@ -171,7 +171,7 @@ rep_b = graph.assert_claim(
 
 ```python
 # validate() requires support_level == REPLICATED. No agent can self-promote.
-graph.validate(c_inferred)            # PRELIMINARY — raises ValueError
+graph.validate(c_inferred)            # PRELIMINARY, raises ValueError
 
 # Re-open under the reviewer key so the validator differs from rep_a's signer
 # (mareforma refuses self-validation). evidence_seen names the upstream claims
@@ -196,12 +196,12 @@ graph = mareforma.open(tmp, key_path=agent_key_path)
 ## 7. Operational surfaces
 
 ```python
-# graph.health() — single-call audit summary. Non-zero values flag work to do;
+# graph.health(), single-call audit summary. Non-zero values flag work to do;
 # mareforma reports the counters, it does not decide if anything is wrong.
 h = graph.health()
 
-# graph.classify_supports() — see how each supports[]/contradicts[] entry routes:
-# claim (v4 UUID — a graph node), doi (Crossref/DataCite syntax), or external.
+# graph.classify_supports(), see how each supports[]/contradicts[] entry routes:
+# claim (v4 UUID, a graph node), doi (Crossref/DataCite syntax), or external.
 mixed = [upstream, "10.1038/cure", "https://example.org/preprint"]
 graph.classify_supports(mixed)
 ```
@@ -223,7 +223,7 @@ graph.classify_supports(mixed)
 
 ```python
 # ✗ ANALYTICAL on a failed data pipeline. If the pipeline returned null, the
-#   finding came from LLM prior knowledge — recording it as ANALYTICAL is a
+#   finding came from LLM prior knowledge, recording it as ANALYTICAL is a
 #   permanent epistemic lie. Classify honestly from what actually ran.
 data_result = None                      # simulate silent pipeline failure
 honest_classification = "ANALYTICAL" if data_result is not None else "INFERRED"

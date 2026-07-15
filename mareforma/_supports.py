@@ -69,7 +69,7 @@ __all__ = [
 
 CACHE_FILENAME = "claim_supports_cache.db"
 
-# Strict UUIDv4 — version nibble == 4, variant nibble in {8,9,a,b}.
+# Strict UUIDv4, version nibble == 4, variant nibble in {8,9,a,b}.
 # Matches mareforma.db._is_claim_id; duplicated here to keep this
 # module a leaf with no circular import on db.
 _UUID_RE = re.compile(
@@ -80,7 +80,7 @@ _UUID_RE = re.compile(
 # WAL on both DBs so a writer holding the graph.db lock isn't blocked by
 # cache readers, and so the cache journal mode matches the main graph
 # (SQLite restricts atomic cross-database commits when journal modes
-# differ — running both in WAL keeps the mode consistent).
+# differ, running both in WAL keeps the mode consistent).
 _CACHE_SCHEMA = """
 PRAGMA supports_cache.journal_mode=WAL;
 
@@ -258,7 +258,7 @@ def record_supports_edges(
     triggers a full rebuild via :func:`is_cache_stale`.
     """
     if not supports:
-        # Still bump the count — every claim INSERT changes the source
+        # Still bump the count, every claim INSERT changes the source
         # claim count, regardless of whether it has UUID-shaped refs.
         _bump_source_count(conn, delta=1)
         return

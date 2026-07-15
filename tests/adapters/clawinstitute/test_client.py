@@ -2,20 +2,20 @@
 
 Conceptual clusters:
 
-- :class:`TestClientProtocol` — runtime_checkable structural shape.
-- :class:`TestConstructor` — env / arg precedence, missing creds.
-- :class:`TestPoolLifecycle` — pooled httpx.Client + close()
+- :class:`TestClientProtocol`, runtime_checkable structural shape.
+- :class:`TestConstructor`, env / arg precedence, missing creds.
+- :class:`TestPoolLifecycle`, pooled httpx.Client + close()
   idempotency, request-after-close refusal.
-- :class:`TestStatusMapping` — 401/403/404/5xx → typed exceptions.
-- :class:`TestNetworkErrorMapping` — timeout / connect error mapping.
-- :class:`TestResponseShapeValidation` — non-JSON, non-object,
+- :class:`TestStatusMapping`, 401/403/404/5xx → typed exceptions.
+- :class:`TestNetworkErrorMapping`, timeout / connect error mapping.
+- :class:`TestResponseShapeValidation`, non-JSON, non-object,
   missing 'posts' field.
-- :class:`TestList` — list_workspace_posts happy path.
-- :class:`TestUrlQuoting` — workspace_id / post_id quoted to refuse
+- :class:`TestList`, list_workspace_posts happy path.
+- :class:`TestUrlQuoting`, workspace_id / post_id quoted to refuse
   path traversal.
-- :class:`TestKwargRejection` — _request refuses verify / follow_redirects.
-- :class:`TestApiVersion` — version pin match / mismatch.
-- :class:`TestExceptionTaxonomy` — every typed error shares parent.
+- :class:`TestKwargRejection`, _request refuses verify / follow_redirects.
+- :class:`TestApiVersion`, version pin match / mismatch.
+- :class:`TestExceptionTaxonomy`, every typed error shares parent.
 """
 
 from __future__ import annotations
@@ -300,7 +300,7 @@ class TestUrlQuoting:
 
 class TestKwargRejection:
     def test_request_rejects_arbitrary_kwargs(self):
-        """_request only accepts params + json_body — caller cannot pass
+        """_request only accepts params + json_body, caller cannot pass
         verify=False or follow_redirects=True to bypass TLS / token
         safety."""
         c = HttpxClient(base_url="https://x", token="t")

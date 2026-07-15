@@ -2,19 +2,19 @@
 
 Before spending on a natural-corpus run, the instrument has to prove it catches
 the failures it claims to. Each fixture below builds ONE such failure with the
-real observer / measurement / trust machinery — no mocks of the thing under test
-— and reports whether the instrument caught it. If any one is missed, the
+real observer / measurement / trust machinery, no mocks of the thing under test
+,  and reports whether the instrument caught it. If any one is missed, the
 measurement is not yet trustworthy and the run stops before any spend. These are
 seeded dissociation fixtures with known ground truth, not a prevalence estimate.
 
 The six failures:
 
-1. a silent zero-row fallback  — a cited read that returned nothing must not be GROUNDED;
-2. an excluded partition       — a cited source that was never read is named, not hidden;
-3. a same-model corroboration  — two checks on one model stay effective-independence 1;
-4. a number with no execution  — a finding with no observed cited read is UNGROUNDED (empty provenance);
-5. a decoy incidental read     — a non-cited read is refused as grounding;
-6. an unrecognized-host model  — a model call to an arbitrary host is UNVERIFIABLE, not a distinct model.
+1. a silent zero-row fallback , a cited read that returned nothing must not be GROUNDED;
+2. an excluded partition      , a cited source that was never read is named, not hidden;
+3. a same-model corroboration , two checks on one model stay effective-independence 1;
+4. a number with no execution , a finding with no observed cited read is UNGROUNDED (empty provenance);
+5. a decoy incidental read    , a non-cited read is refused as grounding;
+6. an unrecognized-host model , a model call to an arbitrary host is UNVERIFIABLE, not a distinct model.
 
 ``run_all(tmp_path)`` runs the six and returns their outcomes; the test asserts
 every one was caught.
@@ -187,7 +187,7 @@ def unrecognized_host_model(tmp_path: Path) -> KillSwitchOutcome:
     # A body-parse to an UNRECOGNIZED host: the producer chose the endpoint, so the
     # "model" field is producer-controlled and cannot mint a distinct model. The
     # call goes through the real socket seam, so the observer derives no provider
-    # from the arbitrary host itself and tiers the lineage UNVERIFIABLE — even for
+    # from the arbitrary host itself and tiers the lineage UNVERIFIABLE, even for
     # a recognized-family string.
     data = tmp_path / "ks6.csv"
     data.write_text("x\n1\n")

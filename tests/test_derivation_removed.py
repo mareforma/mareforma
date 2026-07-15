@@ -1,7 +1,7 @@
 """Regression guard: the core-derived classification engine is gone.
 
-Closes #19 (defeated keyword classifier), #30 (defect in it), and #38
-(missing coverage) by removal, not repair. The keyword-derived
+Removes the defeated keyword classifier, the defect in it, and the missing
+coverage by deletion, not repair. The keyword-derived
 ANALYTICAL/INFERRED classifier contradicted the "grounding is computed"
 story; the execution-observed grounding axis replaced it. This guard
 fails on the pre-removal tree (where ``mareforma.derivation`` still
@@ -21,7 +21,7 @@ import mareforma
 
 
 def test_derivation_package_is_gone():
-    """The whole subpackage no longer imports — removal, not deprecation."""
+    """The whole subpackage no longer imports, removal, not deprecation."""
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("mareforma.derivation")
 

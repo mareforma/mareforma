@@ -247,7 +247,7 @@ class TestAttributability:
     def test_non_enrolled_asserter_is_not_claimed_reverified(self) -> None:
         # verify_claim_signatures passes a non-enrolled asserter on the
         # claim-binding alone (no pubkey to check the signature against), so the
-        # map must NOT render "re-verified" — that would overclaim a check that
+        # map must NOT render "re-verified", that would overclaim a check that
         # never happened. asserter_enrolled=False is the honest signal.
         tmap = _assemble(_claim(), n_roots=1, has_inclusion=False,
                          sig_verified=True, asserter_enrolled=False)
@@ -357,14 +357,14 @@ class TestHtmlRender:
     def test_render_golden(self) -> None:
         html = render_html(self._fixed_map())
         # Structural anchors an auditor / paper figure relies on.
-        assert "<title>trust map — claim fixed-claim-id</title>" in html
+        assert "<title>trust map, claim fixed-claim-id</title>" in html
         assert "map v0.3.9" in html
         assert ">grounding<" in html
         assert ">GROUNDED<" in html
         assert ">DEFERRED<" in html
         # A None value renders as an em-dash placeholder, never "None".
         assert ">None<" not in html
-        assert "—" in html
+        assert ", " in html
 
     def test_html_escapes_dynamic_text(self) -> None:
         tmap = TrustMap("v1", "claim", "<script>x</script>",

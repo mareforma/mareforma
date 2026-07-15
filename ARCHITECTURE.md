@@ -197,7 +197,7 @@ adding any signed field:
   checks from public material alone. Nothing the target prints or
   writes enters a verdict; the target does share the auditor's
   interpreter, though, so the receipts grade a pipeline that does not
-  attack its auditor — a target written to defeat the audit could
+  attack its auditor, a target written to defeat the audit could
   fabricate what the observer records, and the signature attests the
   auditor's observation, not the target's honesty. `--corpus` iterates
   run specs, one fresh interpreter per run, resumable (resume honors
@@ -731,7 +731,7 @@ binding is tamper-evidence over what a cooperating run did, not a proof
 against an adversarial operator. The same limit holds with the roles
 reversed under `mareforma audit`: the audited target runs in the auditor's
 interpreter, so a target built to defeat the audit could fabricate what the
-observer records — audit widens who can be graded, not the adversary the
+observer records, audit widens who can be graded, not the adversary the
 grade withstands. A finding is authored inside the scope and
 signed after it closes; asserting a claim while its grounding scope is still
 open is refused.

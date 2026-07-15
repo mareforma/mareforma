@@ -1,11 +1,11 @@
-"""tests/test_rekor_ssrf_hardening.py — SSRF-guard hardening for rekor.py.
+"""tests/test_rekor_ssrf_hardening.py, SSRF-guard hardening for rekor.py.
 
 Covers:
   - validate_rekor_url rejects non-base-10 numeric IP shortcuts (hex,
     mixed-hex-dotted), Unicode-digit host forms, and the NAT64 literal
-    that embeds an internal IPv4 (#37).
+    that embeds an internal IPv4.
   - submit_to_rekor re-validates rekor_url at entry so direct callers
-    cannot bypass the SSRF / scheme defense the fetch paths enforce (#38).
+    cannot bypass the SSRF / scheme defense the fetch paths enforce.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ def _sample_envelope():
 
 
 # ---------------------------------------------------------------------------
-# #37 — numeric-shortcut / Unicode-digit / NAT64 bypasses
+# numeric-shortcut / Unicode-digit / NAT64 bypasses
 # ---------------------------------------------------------------------------
 
 class TestSsrfRadixAndEmbeddedBypasses:
@@ -66,7 +66,7 @@ class TestSsrfRadixAndEmbeddedBypasses:
 
 
 # ---------------------------------------------------------------------------
-# #38 — submit_to_rekor must re-validate at entry
+# submit_to_rekor must re-validate at entry
 # ---------------------------------------------------------------------------
 
 class TestSubmitToRekorValidatesUrl:

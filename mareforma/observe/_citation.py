@@ -10,7 +10,7 @@ Two match modes:
 
 - Identifier match (default). The read's normalized identifier equals a cited
   source: same absolute file path, same database connection target, or same
-  ``scheme://host/path`` for a URL. Cheap — no hashing of large reads on the
+  ``scheme://host/path`` for a URL. Cheap, no hashing of large reads on the
   common path.
 - Content-address match (opt-in). When the finding cites a ``sha256:`` data_id,
   a read matches if the content-address of its returned bytes equals that
@@ -101,14 +101,14 @@ _C_EXTENSION_SUFFIXES: frozenset[str] = frozenset(
 def citation_kind(identifier: str) -> str:
     """Classify a normalized cited identifier into a coverage kind.
 
-    - ``"content-address"`` — a ``sha256:`` data_id. Its bytes can arrive over any
+    - ``"content-address"``, a ``sha256:`` data_id. Its bytes can arrive over any
       channel (disk or network), so a socket seam is relevant to it.
-    - ``"url"`` — an ``http``/``https``/``ftp`` location. Delivered over a socket.
-    - ``"c-extension-file"`` — a local path whose suffix is read through a C
+    - ``"url"``, an ``http``/``https``/``ftp`` location. Delivered over a socket.
+    - ``"c-extension-file"``, a local path whose suffix is read through a C
       runtime, invisible to the PEP-578 open hook.
-    - ``"file"`` — any other local path. An in-process read of it hits the open
+    - ``"file"``, any other local path. An in-process read of it hits the open
       audit event, so a socket seam cannot have hidden it.
-    - ``"unknown"`` — anything else (an opaque DB target); treated fail-closed.
+    - ``"unknown"``, anything else (an opaque DB target); treated fail-closed.
     """
     if not isinstance(identifier, str) or not identifier:
         return "unknown"

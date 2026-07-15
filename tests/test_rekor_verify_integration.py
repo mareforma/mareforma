@@ -1,4 +1,4 @@
-"""tests/test_rekor_verify_integration.py — end-to-end Merkle inclusion
+"""tests/test_rekor_verify_integration.py, end-to-end Merkle inclusion
 verification through ``mareforma.open()``.
 
 Drives the full submit-time saga with a mocked Rekor that returns both
@@ -43,7 +43,7 @@ def _build_rekor_post_response(
     """The body shape Rekor returns from a POST /log/entries.
 
     submit_to_rekor verifies the embedded record encodes OUR hash + sig
-    — the mock must mirror them back faithfully or the submit itself
+   , the mock must mirror them back faithfully or the submit itself
     fails before our verification path runs.
     """
     record = {
@@ -79,7 +79,7 @@ def _build_rekor_get_response_with_proof(
     """The body Rekor returns from GET /log/entries/{uuid}: same shape
     as POST but with a verification.inclusionProof block attached.
 
-    ``post_body_dict`` is the dict whose uuid → entry — we pull the
+    ``post_body_dict`` is the dict whose uuid → entry, we pull the
     entry, place it at ``target_index`` in a synthetic tree of
     ``tree_leaves`` leaves, build the audit path, and sign a checkpoint
     over the resulting root.
@@ -126,7 +126,7 @@ def _wire_rekor_mock(
     ``log_key``.
 
     If ``override_root`` is set, the checkpoint is signed over a
-    DIFFERENT root than the proof actually proves — used to simulate
+    DIFFERENT root than the proof actually proves, used to simulate
     a hostile log that signs an inconsistent checkpoint.
     """
     import httpx
@@ -186,7 +186,7 @@ def _wire_rekor_mock(
 
 
 # ---------------------------------------------------------------------------
-# Happy path — submit-time verification succeeds
+# Happy path, submit-time verification succeeds
 # ---------------------------------------------------------------------------
 
 
@@ -227,7 +227,7 @@ class TestSubmitTimeVerificationHappy:
 
 
 # ---------------------------------------------------------------------------
-# Adversarial — submit-time verification fails
+# Adversarial, submit-time verification fails
 # ---------------------------------------------------------------------------
 
 
@@ -322,7 +322,7 @@ class TestTOFUPin:
         assert claim["transparency_logged"] == 1
 
     def test_rotation_silent_refused(self, tmp_path):
-        """A different pubkey than the pinned one raises SigningError —
+        """A different pubkey than the pinned one raises SigningError , 
         refusing silent log-operator-key rotation."""
         log_key_old = Ed25519PrivateKey.generate()
         log_key_new = Ed25519PrivateKey.generate()
@@ -351,7 +351,7 @@ class TestTOFUPin:
 
 
 # ---------------------------------------------------------------------------
-# Opt-in vs opt-out — pubkey supplied vs omitted, pin behavior on first use
+# Opt-in vs opt-out, pubkey supplied vs omitted, pin behavior on first use
 # ---------------------------------------------------------------------------
 
 
@@ -413,7 +413,7 @@ class TestOptInAndOptOut:
         assert pin_path.read_bytes() == log_pem
 
     def test_no_rekor_url_no_verification_no_fetch(self, tmp_path, httpx_mock):
-        """When ``rekor_url`` is unset, Rekor is fully disabled — no
+        """When ``rekor_url`` is unset, Rekor is fully disabled, no
         submit, no fetch, no pin. The claim persists locally signed but
         ``transparency_logged=1`` (the default for non-Rekor flows)."""
         key_path = _bootstrap_key(tmp_path)
@@ -464,7 +464,7 @@ class TestM2DerComparison:
         ):
             pass
         # Second open: supply the differently-wrapped PEM. Must NOT
-        # raise — DER bytes match.
+        # raise, DER bytes match.
         with mareforma.open(
             tmp_path, key_path=key_path,
             rekor_url=_TEST_REKOR_URL, trust_insecure_rekor=True,
@@ -473,7 +473,7 @@ class TestM2DerComparison:
             pass
 
     def test_different_key_refused_on_second_open(self, tmp_path):
-        """Genuine key rotation IS refused — the operator must delete
+        """Genuine key rotation IS refused, the operator must delete
         the pin file to rotate."""
         key_a = Ed25519PrivateKey.generate()
         key_b = Ed25519PrivateKey.generate()
@@ -496,7 +496,7 @@ class TestM2DerComparison:
 
 class TestM3AtomicPinWrite:
     """M3: pin write is atomic (O_CREAT|O_EXCL). A pin file that
-    already exists is detected — caller is routed through the
+    already exists is detected, caller is routed through the
     mismatch-check branch even on the "first use" code path."""
 
     def test_pre_existing_pin_file_triggers_mismatch_check(self, tmp_path):

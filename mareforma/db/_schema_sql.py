@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS claims (
     -- contradiction_invalidates_older trigger when a signed
     -- contradiction_verdicts row references this claim. NULL for
     -- non-invalidated claims. The column is intentionally OUTSIDE
-    -- the claims_signed_fields_no_laundering watch list — invalidation
+    -- the claims_signed_fields_no_laundering watch list, invalidation
     -- IS a legitimate mutation, gated by the trigger that only fires
     -- on a signed verdict INSERT from an enrolled validator.
     t_invalid       INTEGER,
@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS claims (
     -- unless someone retries. EpistemicGraph.refresh_convergence()
     -- walks every flagged row, re-runs detection, and clears the flag
     -- on success. Like ``unresolved``, this column is OUTSIDE the
-    -- claims_signed_fields_no_laundering watch list — flipping it is
+    -- claims_signed_fields_no_laundering watch list, flipping it is
     -- a legitimate operational mutation, not predicate tampering.
     convergence_retry_needed INTEGER NOT NULL DEFAULT 0
                             CHECK (convergence_retry_needed IN (0, 1)),
@@ -101,7 +101,7 @@ CREATE TABLE IF NOT EXISTS claims (
     -- of truth. Adapters that need cryptographic integrity of the
     -- predicate body must encode it inside the claim text JSON.
     -- Idempotency reconciliation does NOT compare this field for the
-    -- same reason — federation exports that drop the column would
+    -- same reason, federation exports that drop the column would
     -- otherwise round-trip differently than direct asserts.
     predicate_payload TEXT NOT NULL DEFAULT '',
     -- Federation-import preservation. When a claim is re-asserted on
@@ -154,7 +154,7 @@ CREATE INDEX IF NOT EXISTS idx_claims_transparency_logged
     ON claims(transparency_logged);
 CREATE INDEX IF NOT EXISTS idx_claims_artifact_hash
     ON claims(artifact_hash) WHERE artifact_hash IS NOT NULL;
--- Partial index on flagged retries only — refresh_convergence iterates
+-- Partial index on flagged retries only, refresh_convergence iterates
 -- this set; the index keeps the walk O(retry-pending) rather than O(N).
 CREATE INDEX IF NOT EXISTS idx_claims_convergence_retry
     ON claims(claim_id) WHERE convergence_retry_needed = 1;
@@ -241,7 +241,7 @@ END;
 -- + signature binds every SIGNED_FIELDS value plus the evidence
 -- vector + the statement_cid anchor. Without this trigger,
 -- a direct `UPDATE claims SET ev_risk_of_bias = 0 WHERE …` would
--- silently retroactively upgrade a claim's evidence quality —
+-- silently retroactively upgrade a claim's evidence quality , 
 -- signature verification on the unchanged envelope would still
 -- pass, but the row no longer matches what was signed. Refuse the
 -- mutation at the SQL layer; the envelope is the canonical source.
@@ -298,7 +298,7 @@ END;
 -- context that points to it). The whole "append-only over the signed
 -- predicate" framing requires this trigger as the twin of
 -- claims_signed_fields_no_laundering. Unsigned claims (legacy / no-key
--- mode) remain deletable — they carry no cryptographic commitment.
+-- mode) remain deletable, they carry no cryptographic commitment.
 CREATE TRIGGER IF NOT EXISTS claims_signed_no_delete
 BEFORE DELETE ON claims
 WHEN OLD.signature_bundle IS NOT NULL
@@ -412,7 +412,7 @@ BEGIN
 END;
 
 -- Append-only verdicts. Any UPDATE on the immutable columns of an
--- existing row is refused — the envelope is the source of truth,
+-- existing row is refused, the envelope is the source of truth,
 -- and a forged UPDATE would put the row out of sync with what was
 -- signed. The only mutation on these tables is INSERT.
 CREATE TRIGGER IF NOT EXISTS replication_verdicts_append_only
@@ -453,7 +453,7 @@ END;
 -- contradiction on an already-invalidated claim is a no-op rather
 -- than overwriting the earlier invalidation timestamp.
 --
--- DESIGN RULE — DO NOT PROPAGATE DOWNSTREAM. The trigger marks only the
+-- DESIGN RULE, DO NOT PROPAGATE DOWNSTREAM. The trigger marks only the
 -- directly-contradicted claim. Claims that cited the now-invalidated one
 -- via ``supports[]`` are unaffected. This is a deliberate boundary, not
 -- an oversight: transitive falsification is a different model with
@@ -486,7 +486,7 @@ END;
 -- Full-text search over claim text. Independent FTS5 virtual table
 -- (not content=claims) so the storage cost is the only price of the
 -- search feature and the sync triggers below stay readable.
--- ``claim_id`` is UNINDEXED — stored for join-back but not tokenized.
+-- ``claim_id`` is UNINDEXED, stored for join-back but not tokenized.
 -- The unicode61 tokenizer is locale-agnostic; remove_diacritics=2 folds
 -- accented characters so "gene" matches "géné".
 CREATE VIRTUAL TABLE IF NOT EXISTS claims_fts USING fts5(
@@ -650,7 +650,7 @@ CREATE TABLE IF NOT EXISTS evidence_lines (
     -- distinctness key. The tier mirrors the data_id axis: COMPUTED (body-parse
     -- at the socket seam, or a local weights digest),
     -- PROXY (producer-declared), UNVERIFIABLE (a fine-tune / alias / wrapper
-    -- whose base is not declarable). Identity only — it records which model and
+    -- whose base is not declarable). Identity only, it records which model and
     -- method authored the line, never a claim about training-time contamination.
     -- NULL on every line authored without an observed model call (including
     -- every row that predates this column).
@@ -694,7 +694,7 @@ CREATE INDEX IF NOT EXISTS idx_estimate_contrast ON effect_estimates(contrast_id
 """
 
 
-# Explicit column list — avoids SELECT * coupling to schema changes.
+# Explicit column list, avoids SELECT * coupling to schema changes.
 # Source of truth for the column-presence check in open_db().
 _CLAIM_COLUMNS = (
     "claim_id", "text", "classification", "support_level",

@@ -220,7 +220,7 @@ class IndependenceReport:
 
         The numerator is the collapse (``naive - number`` summed over
         corroborations); the denominator is the naive supporting lines from
-        CORROBORATIONS only (findings with ``naive >= 2``) — a single supporting
+        CORROBORATIONS only (findings with ``naive >= 2``), a single supporting
         line is not a corroboration and never dilutes it, so the rate cannot be
         understated by padding. Zero when nothing corroborated, never a
         divide-by-zero.
@@ -315,7 +315,7 @@ def summarize_independence(records: Iterable[dict]) -> IndependenceReport:
         # The collapse rate is over CORROBORATIONS: a body a naive signer-axis
         # counter would call independent (naive >= 2). A single supporting line
         # (naive <= 1) is not a corroboration and must not dilute the denominator,
-        # which would UNDERSTATE the same-model collapse — the audited-pipeline-
+        # which would UNDERSTATE the same-model collapse, the audited-pipeline-
         # favorable direction the measurement exists to expose. naive folds the
         # model axis into number (number <= naive on any hard body); clamp so a
         # malformed record can never make the collapse negative.
@@ -364,7 +364,7 @@ class PilotReport:
     grounding split and the independence distribution TOGETHER, with the OPAQUE
     fraction reported as the honesty gate. When OPAQUE dominates, the observer
     could not see enough of the pipeline for the split to be a trustworthy
-    prevalence number, so the report says so rather than over-claiming — the
+    prevalence number, so the report says so rather than over-claiming, the
     grounded prevalence reads as a lower bound until the observer attaches deeper.
     """
 

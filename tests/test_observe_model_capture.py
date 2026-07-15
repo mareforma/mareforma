@@ -93,7 +93,7 @@ def test_httpx_post_model_captured_openai(httpx_mock):
 
 def test_httpx_client_send_captures_model(httpx_mock):
     # The openai/anthropic SDKs and litellm build an httpx.Request and dispatch
-    # it via client.send(request) — they never pass json= to a wrapped .post.
+    # it via client.send(request), they never pass json= to a wrapped .post.
     # Lineage must still be COMPUTED from the pre-built request body.
     httpx_mock.add_response(url=_ANTHROPIC_URL, json={"content": []})
     client = httpx.Client()
@@ -182,7 +182,7 @@ def test_aiohttp_request_captures_model():
 def test_producer_wrapper_is_proxy():
     # A cooperating producer that does not route through a wrapped httpx POST
     # declares the model. A declaration is agent-attested, so it is PROXY even
-    # for a base that would family-root cleanly — never COMPUTED.
+    # for a base that would family-root cleanly, never COMPUTED.
     with obs.observe() as h:
         declare_model(
             "claude-3-5-sonnet-20241022",

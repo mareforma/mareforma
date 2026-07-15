@@ -151,7 +151,7 @@ def run_first_execution(
     A finding is a run's observed execution: it records an outcome the run
     computed. The run's first execution is the earliest ``created_at`` over the
     findings whose attestation claim carries this ``generated_by`` token. Returns
-    None when the run has authored no finding yet — it has not begun executing,
+    None when the run has authored no finding yet, it has not begun executing,
     so no later plan can post-date it. ISO-8601 UTC timestamps compare
     lexicographically, so ``MIN`` is the chronological earliest.
     """
@@ -394,20 +394,20 @@ def _count_run_distinct(units: list[tuple[str, str, tuple]]) -> int:
 
     A unit of independent evidence requires a fresh run (``generated_by`` /
     signer), a fresh dataset (``data_id``), AND a distinct model/method. Two
-    same-model checks — distinct signer and distinct dataset but the same
-    COMPUTED model — are one line of evidence, not two, so they no longer promote
+    same-model checks, distinct signer and distinct dataset but the same
+    COMPUTED model, are one line of evidence, not two, so they no longer promote
     on the signer + data axes alone.
 
     A human check is the exception and the highest-value source: it needs no
     distinct model (a human is not a model), so a human run counts per signer and
-    is never folded into a model root — a human check plus a model check reads as
+    is never folded into a model root, a human check plus a model check reads as
     two, where two same-model checks read as one.
 
     The count is order-free. Each dataset is first attributed to exactly one run
     (the smallest token, a deterministic tie-break), carrying that line's model
     key, so a re-appearing dataset counts once. The surviving datasets are then
-    grouped by run — this preserves the "one signer contributes at most one
-    unit" cap — and each run's model state is resolved
+    grouped by run, this preserves the "one signer contributes at most one
+    unit" cap, and each run's model state is resolved
     (see :func:`_collapse_run_model`). The answer folds the two axes:
 
     - COMPUTED runs collapse by family root, so two distinct signers on the same
@@ -415,7 +415,7 @@ def _count_run_distinct(units: list[tuple[str, str, tuple]]) -> int:
     - absent runs (no observed model call) keep the legacy signer axis, so every
       pre-observer finding is unchanged;
     - soft runs (PROXY / UNVERIFIABLE) are UNVERIFIABLE for independence and add
-      no unit, so a soft pair cannot silently corroborate — never a silent pass.
+      no unit, so a soft pair cannot silently corroborate, never a silent pass.
 
     A body of only-soft or single lines still stands at one supporting line
     (PRELIMINARY), never zero: soft lineage weakens independence, it does not
@@ -497,7 +497,7 @@ def _is_human_signer(conn: sqlite3.Connection, keyid: str) -> bool:
     The human-independence signal keys off the validator schema rather than a
     new column: a check whose signer is an enrolled human validator is a human
     check. ``is_enrolled`` walks the chain back to a self-signed root and
-    verifies each enrollment envelope — and the envelope binds ``validator_type``
+    verifies each enrollment envelope, and the envelope binds ``validator_type``
     (see :func:`mareforma.validators.verify_enrollment`), so a row whose type was
     flipped by a direct SQL UPDATE fails the chain and is not treated as human.
     Only an authenticated signer keyid (see :func:`_authentic_signer_keyid`) ever
@@ -518,7 +518,7 @@ def _is_human_signer(conn: sqlite3.Connection, keyid: str) -> bool:
 
 # The read query behind independence_counts. Kept as a module constant so a
 # regression test can pin its EXPLAIN QUERY PLAN (no full scan of
-# effect_estimates — the join stays keyed through idx_contrast_line and
+# effect_estimates, the join stays keyed through idx_contrast_line and
 # idx_estimate_contrast).
 INDEPENDENCE_COUNTS_SQL = (
     "SELECT el.data_id AS data_id, el.model_lineage AS model_lineage, "
@@ -577,7 +577,7 @@ def _signed_model_lineage(
     observed record, and (d) is signed by an enrolled validator whose signature
     verifies. A non-enrolled signer (whose bundle cannot be verified), a bad
     signature, a v1 finding (no signed lineage), an unsigned claim, or any
-    structural failure returns None — the caller then treats the line as soft,
+    structural failure returns None, the caller then treats the line as soft,
     never a fabricated distinct model. Never raises: one un-authenticatable line
     must not deny the whole proposition's count.
     """
@@ -633,7 +633,7 @@ def _authentic_model_key(
     - a present column whose claim carries an authenticated signed lineage keys on
       that signed copy, so a forged column cannot move the count;
     - a present column with no authenticatable signed lineage (a v1 finding, an
-      unsigned claim, or a bundle that does not verify) reads ``("soft",)`` — a
+      unsigned claim, or a bundle that does not verify) reads ``("soft",)``, a
       distinct model that cannot be certified, never counted.
 
     This is the model-axis parallel of :func:`_authentic_signer_keyid`.
@@ -672,12 +672,12 @@ def _independence_units(
     SIGNED lineage rather than the unsigned column so a forged column cannot
     inflate the count (see :func:`_authentic_model_key`); a line with no observed
     model call whose signer
-    is an enrolled human validator is re-keyed ``("human",)`` — the human axis,
+    is an enrolled human validator is re-keyed ``("human",)``, the human axis,
     the highest-value independent source (see :func:`_is_human_signer`).
 
     ``memo`` is an optional per-read-call cache. The signer/model axis of a line
-    (``run_token`` and ``model_key``) is constant per claim — the authenticating
-    columns are written identically on every line of a finding — so it is
+    (``run_token`` and ``model_key``) is constant per claim, the authenticating
+    columns are written identically on every line of a finding, so it is
     computed once per ``claim_id`` and reused, sparing the repeated Ed25519
     verify a multi-line finding, and a frame read that walks the same claim as a
     contrary, would otherwise pay. Only ``direction`` and ``data_id`` vary per
@@ -736,8 +736,8 @@ def _independence_units(
             # A line with no observed model call, signed by an enrolled human
             # validator, is a human check: the highest-value independent axis,
             # which needs no distinct model. A line that DID observe a model call
-            # keeps its model key even under a human signer — the check was the
-            # model's, and the human only signed it — so the model-distinct axis
+            # keeps its model key even under a human signer, the check was the
+            # model's, and the human only signed it, so the model-distinct axis
             # still governs.
             if model_key[0] == "absent" and keyid is not None and _is_human_signer(
                 conn, keyid
@@ -765,7 +765,7 @@ def independence_counts(
     ``asserter_keyid``) fall back to the retired ``generated_by`` run axis, and a
     finding with no observed model call carries no model constraint, so both keep
     their count instead of collapsing (status_policy@v4). A no-model-call line
-    signed by an enrolled human validator counts on the human axis — the
+    signed by an enrolled human validator counts on the human axis, the
     highest-value independent source, never folded into a model root. The two run
     axes are namespaced (``k:`` vs ``g:``) so a keyid can never alias a run label.
 
@@ -799,7 +799,7 @@ def effective_independence(conn: sqlite3.Connection, content_id: str) -> dict:
     """The effective-independence number for a proposition, with a soft flag.
 
     ``number`` is the count of pairwise-distinct (model, data, signer) SUPPORTING
-    checks — the same model-aware axis :func:`independence_counts` promotes on, so
+    checks, the same model-aware axis :func:`independence_counts` promotes on, so
     the two never disagree. A supporting check a human authored (no observed model
     call, signed by an enrolled human validator) counts as the highest-value
     independent source: it needs no distinct model, so a human check plus a model
@@ -810,7 +810,7 @@ def effective_independence(conn: sqlite3.Connection, content_id: str) -> dict:
     than a confident number.
 
     Coarse by design: distinct-model is binary this release. The graded
-    cross-model residual (how *far apart* two distinct models are) is DEFERRED —
+    cross-model residual (how *far apart* two distinct models are) is DEFERRED , 
     named here, not computed.
     """
     supports, soft = _supporting_units(conn, content_id)
@@ -856,8 +856,8 @@ def effective_independence_receipt(
     Extends :func:`effective_independence` with ``naive``: the supporting count a
     signer-axis counter would report BEFORE the model-distinct collapse, taken
     over HARD (non-soft) lineage only. ``naive - number`` isolates the same-model
-    (COMPUTED) collapse — two distinct signers on one model that a naive counter
-    would read as two independent lines — while excluding soft-lineage weakening,
+    (COMPUTED) collapse, two distinct signers on one model that a naive counter
+    would read as two independent lines, while excluding soft-lineage weakening,
     which ``soft`` reports separately. A measurement aggregates these records into
     the independence arm of the report (see
     :func:`mareforma.observe.measure.summarize_independence`).
@@ -866,7 +866,7 @@ def effective_independence_receipt(
     to the model-absent axis (so no two lines collapse on their model root), then
     reusing :func:`_count_run_distinct`. So a same-model pair reads ``naive=2,
     number=1`` (collapse of 1); a distinct-model pair reads ``naive=2, number=2``
-    (no collapse); a soft-only body reads ``naive=0, number=1, soft=True`` — not a
+    (no collapse); a soft-only body reads ``naive=0, number=1, soft=True``, not a
     collapse, an unverifiable count.
     """
     supports, soft = _supporting_units(conn, content_id)

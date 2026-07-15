@@ -46,14 +46,14 @@ class TestRefutationStatusPresenter:
 
     def test_signed_verdict_beats_status(self) -> None:
         # If a signed contradiction verdict has fired, it takes
-        # precedence over any editorial status — strongest signal wins.
+        # precedence over any editorial status, strongest signal wins.
         row = {"t_invalid": "2026-05-22T00:00:00+00:00", "status": "contested"}
         rs = mareforma.refutation_status(row)
         assert rs["state"] == "contradicted"
 
     def test_partial_row_raises(self) -> None:
         # A hand-crafted dict missing 'status' would otherwise fall
-        # through to a confidently-wrong "clean" — refuse instead.
+        # through to a confidently-wrong "clean", refuse instead.
         with pytest.raises(ValueError, match="missing 'status'"):
             mareforma.refutation_status({"t_invalid": None})
         with pytest.raises(ValueError, match="must be a dict"):
@@ -131,7 +131,7 @@ class TestRefutationFilter:
         self, tmp_path: Path,
     ) -> None:
         # A row that is BOTH retracted AND contradicted should surface
-        # under refutation_filter="retracted" — otherwise the filter
+        # under refutation_filter="retracted", otherwise the filter
         # silently under-counts every retracted-and-contradicted row.
         asserter = tmp_path / "asserter.key"
         issuer = tmp_path / "issuer.key"
@@ -307,7 +307,7 @@ class TestGroundingSensorPlumbing:
         # Rewrite evidence_json with a forged grounding_score.
         toml_path = tmp_path / "claims.toml"
         text = toml_path.read_text()
-        # The evidence_json value contains "grounding_score":0.3 — flip
+        # The evidence_json value contains "grounding_score":0.3, flip
         # to 0.99 directly in the TOML.
         tampered = text.replace(
             '\\"grounding_score\\":0.3',
@@ -327,7 +327,7 @@ class TestGroundingSensorPlumbing:
         self, tmp_path: Path,
     ) -> None:
         # The lock states future verifiers can re-run independently
-        # but their verdicts are NOT stored on the claim — confirm by
+        # but their verdicts are NOT stored on the claim, confirm by
         # writing one score, asserting, then verifying restore round-
         # trips the signed score unchanged.
         key_path = tmp_path / "asserter.key"
@@ -431,7 +431,7 @@ class TestVerifierHardening:
     ) -> None:
         # The graph catches `Exception` (so a flaky NLI / network
         # verifier degrades gracefully) but MUST NOT catch
-        # `BaseException` subclasses — Ctrl-C during a long-running
+        # `BaseException` subclasses, Ctrl-C during a long-running
         # assertion has to actually interrupt the process. Regression
         # against a refactor that widens the except clause.
         class _Interrupt:

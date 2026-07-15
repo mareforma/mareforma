@@ -4,7 +4,7 @@ The observer records WHICH model and method authored a finding, computed from th
 request the producer actually sent rather than from a self-declaration. The tier
 mirrors the ``data_id`` axis exactly:
 
-- ``COMPUTED``      — the model came from a body-parse at the socket seam (a
+- ``COMPUTED``     , the model came from a body-parse at the socket seam (a
                       wrapped ``httpx`` POST) addressed to a RECOGNIZED provider
                       host. The producer cannot name an arbitrary model to an
                       arbitrary endpoint, so this is the trustworthy tier,
@@ -13,13 +13,13 @@ mirrors the ``data_id`` axis exactly:
                       read off the wire, not a response-attested fact. A
                       body-parse to an unrecognized host is fully
                       producer-controlled, so it is UNVERIFIABLE, never COMPUTED.
-- ``PROXY``         — a cooperating producer declared the model out of band
+- ``PROXY``        , a cooperating producer declared the model out of band
                       (``declare_model``). Agent-attested and soft, analogous to
                       a string-fallback ``data_id``: it never reads as COMPUTED.
-- ``UNVERIFIABLE``  — the lineage is soft: a hosted fine-tune, a moving alias, or
+- ``UNVERIFIABLE`` , the lineage is soft: a hosted fine-tune, a moving alias, or
                       a wrapper whose base model is not declarable. A distinct
                       model STRING does not, by itself, read as a distinct model
-                      — it family-roots to its base where declarable, else it is
+                     , it family-roots to its base where declarable, else it is
                       UNVERIFIABLE, never a fabricated distinct model.
 
 The model interior is identity-only. This records the model/method identity; it
@@ -113,7 +113,7 @@ class ModelLineage:
     """The model/method identity behind a finding, with its computed tier.
 
     ``model_id`` is the raw model string as seen. ``family_root`` is the base the
-    string roots to when declarable (else ``None`` — the UNVERIFIABLE marker).
+    string roots to when declarable (else ``None``, the UNVERIFIABLE marker).
     ``decoding`` carries the sampling parameters (``temperature``, ``top_p``,
     ``seed``) the request declared. ``method`` is the tool/pipeline identity: the
     request path for a socket-seam capture, or the producer's tag for a
@@ -129,13 +129,13 @@ class ModelLineage:
     decoding: dict
     # How the model identity was established, recorded so the trust map never
     # blurs a third-party-attested identity with a self-attested one:
-    #   ``provider-host``  — observed at the seam to a recognized remote host.
-    #   ``weights-digest`` — a local inference server's content digest of the
+    #   ``provider-host`` , observed at the seam to a recognized remote host.
+    #   ``weights-digest``, a local inference server's content digest of the
     #                        served weights (self-attested: the producer controls
     #                        the machine, so it is COMPUTED-grade DISCRIMINATION,
-    #                        not third-party attestation — the operator-Sybil
+    #                        not third-party attestation, the operator-Sybil
     #                        residual is named, not closed).
-    #   ``declared``       — a producer declaration (PROXY).
+    #   ``declared``      , a producer declaration (PROXY).
     attestor: str | None = None
     # The content digest of the served weights for a ``weights-digest`` lineage
     # (``sha256:...``); the distinctness key for local models, which root to no
@@ -215,12 +215,12 @@ def resolve_lineage(
 
     ``source`` is ``"socket"`` for a body-parse at the seam (COMPUTED) or
     ``"declared"`` for a producer declaration (PROXY). Either way, a string whose
-    base is not declarable is UNVERIFIABLE — soft lineage dominates the source
+    base is not declarable is UNVERIFIABLE, soft lineage dominates the source
     tier, so a fine-tune or alias never reads as COMPUTED or PROXY.
 
     ``digest`` is the content digest of the served weights for a LOCAL inference
     server (Ollama), resolved by the observer from the running server. A local
-    model roots to no known remote family, so its digest — not a family root — is
+    model roots to no known remote family, so its digest, not a family root, is
     its verifiable distinct identity: a seam capture WITH a digest is COMPUTED via
     the ``weights-digest`` attestor, bypassing the family-prefix gate.
     """
@@ -228,7 +228,7 @@ def resolve_lineage(
         # Local content-addressed identity. COMPUTED-grade discrimination: two
         # distinct digests are provably distinct weights; the same digest is
         # provably the same. Self-attested (the producer's own machine), recorded
-        # as such via the attestor field — not third-party host attestation.
+        # as such via the attestor field, not third-party host attestation.
         return ModelLineage(
             tier=ModelLineageTier.COMPUTED,
             model_id=(model_id or "").strip(),
@@ -256,7 +256,7 @@ def resolve_lineage(
         # Observed at the seam but addressed to an UNRECOGNIZED host. The
         # producer chose the endpoint, so a "model" field in a body they sent
         # anywhere is producer-controlled and cannot certify a real model call.
-        # Soft, never COMPUTED — this is what stops a forged POST to an arbitrary
+        # Soft, never COMPUTED, this is what stops a forged POST to an arbitrary
         # host from minting a distinct model and faking independence.
         tier = ModelLineageTier.UNVERIFIABLE
         root, version = None, None
@@ -281,21 +281,21 @@ def independence_model_key(lineage: "dict | None") -> tuple:
 
     Returns one of three keys, mirroring the tier's trust:
 
-    - ``("model", root)`` — COMPUTED lineage rooted to a declarable base: a
+    - ``("model", root)``, COMPUTED lineage rooted to a declarable base: a
       verifiable distinct model. Two lines collapse on this key iff their roots
       match, so a same-model rerun (even under distinct signers) is not a second
       independent line.
-    - ``("soft",)`` — PROXY / UNVERIFIABLE lineage (or COMPUTED without a root,
+    - ``("soft",)``, PROXY / UNVERIFIABLE lineage (or COMPUTED without a root,
       defensively): present but not a verifiable model, so it can never certify a
       distinct model and never earns an independent unit.
-    - ``("absent",)`` — no observed model call. The line made no model claim, so
+    - ``("absent",)``, no observed model call. The line made no model claim, so
       it imposes no model constraint and keeps the legacy signer axis; every
       pre-observer finding lands here.
 
     ``lineage`` is the parsed ``model_lineage`` record (a dict) or ``None``.
     Only ``None`` reads as absent (no model call observed); a present-but-empty
     or non-conforming record (including a non-dict from a tampered column) reads
-    as soft (fail-closed — a record we cannot make sense of never certifies a
+    as soft (fail-closed, a record we cannot make sense of never certifies a
     distinct model, and never crashes the count).
     """
     if lineage is None:
@@ -318,8 +318,8 @@ def independence_model_key(lineage: "dict | None") -> tuple:
 def model_distinct_pair(a: "dict | None", b: "dict | None") -> bool:
     """Whether two lineages count as model-distinct for an independence pair.
 
-    ``False`` when the pair is UNVERIFIABLE — soft lineage on either side, so a
-    distinct model cannot be certified — or when both are the SAME COMPUTED model
+    ``False`` when the pair is UNVERIFIABLE, soft lineage on either side, so a
+    distinct model cannot be certified, or when both are the SAME COMPUTED model
     (equal family roots). ``True`` when both are COMPUTED with distinct roots, or
     when at least one side made no model claim (legacy absent lineage imposes no
     constraint). Soft never a silent pass: a soft side always reads ``False``.
@@ -343,7 +343,7 @@ def collapse_lineage(records: list[ModelLineage]) -> ModelLineage | None:
     over-claims a clean single model, and an agreeing declaration never downgrades
     a capture it corroborates.
 
-    A model identity is a remote family root OR a local weights digest — two
+    A model identity is a remote family root OR a local weights digest, two
     distinct LOCAL models have ``family_root is None`` and are told apart only by
     their digests, so distinctness counts BOTH. A mixed or downgraded span drops
     the identity fields (root, digest, attestor) so the finding-level lineage
@@ -366,11 +366,11 @@ def collapse_lineage(records: list[ModelLineage]) -> ModelLineage | None:
         )
     # Past the mixed/UNVERIFIABLE guard every record shares one identity, so a
     # PROXY record here is a producer RE-declaring what a COMPUTED capture already
-    # verified — redundant agreement, not conflict. A seam capture wins: COMPUTED
+    # verified, redundant agreement, not conflict. A seam capture wins: COMPUTED
     # stands whenever any record carries it, and PROXY only survives when no seam
     # capture backs the shared identity (an all-declared span).
     tier = ModelLineageTier.COMPUTED if ModelLineageTier.COMPUTED in tiers else ModelLineageTier.PROXY
-    # Not mixed: at most one root and one digest, and never both — every record
+    # Not mixed: at most one root and one digest, and never both, every record
     # shares the single surviving identity, so records[0] carries it correctly.
     root = next(iter(roots)) if roots else None
     digest = next(iter(digests)) if digests else None
