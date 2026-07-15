@@ -73,6 +73,37 @@ _FAITHFULNESS_PROXY_NOTE = (
 )
 
 
+class TrustMapVersionError(RuntimeError):
+    """The trust-map code version disagrees with the package it ships inside.
+
+    ``TRUST_MAP_VERSION`` witnesses this module's property set and tier
+    semantics; ``mareforma.__version__`` names the package the module is packaged
+    within. A build that ships a stale ``trust_map`` beside a differently
+    versioned package renders a map whose logic does not match the version it
+    reports, so a residual can be under-named while the map still reads as
+    authoritative. The map builder fails closed on that state instead of
+    presenting a map whose honesty it cannot vouch for.
+    """
+
+
+def _require_consistent_version() -> None:
+    """Fail closed unless the trust-map code version matches the package version.
+
+    Refusing here keeps a drifted build from silently emitting a trust map: an
+    inconsistent build cannot promise that its independence residual (or any
+    axis) matches the version it stamps, so it must not present one.
+    """
+    from mareforma import __version__ as package_version
+
+    stamped = TRUST_MAP_VERSION.removeprefix("v")
+    if stamped != package_version:
+        raise TrustMapVersionError(
+            f"trust-map code version {TRUST_MAP_VERSION!r} does not match package "
+            f"version {package_version!r}: this build is inconsistent, so its "
+            "trust map cannot be trusted to match the shipped logic"
+        )
+
+
 class Tier(str, Enum):
     """Where a property's answer comes from, the honesty of the signal.
 
@@ -582,6 +613,10 @@ def _assemble(
     (binding only, no pubkey to check against), so the map must not claim the
     signature was cryptographically re-verified.
     """
+    # Refuse before stamping: a build whose trust-map code drifted from the
+    # package version cannot vouch that this map's residuals match the shipped
+    # logic, so it fails closed rather than present a possibly under-named axis.
+    _require_consistent_version()
     from mareforma.db import refutation_status
 
     supports = claim.get("supports_json")
