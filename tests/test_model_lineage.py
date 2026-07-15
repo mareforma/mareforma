@@ -230,15 +230,16 @@ def test_probe_extracts_digest_from_api_ps(monkeypatch):
     import json
     import urllib.request
     from mareforma.observe import _loaders
+    digest = "7df6b6e0" * 8  # a full sha256 payload, as a real server returns
     payload = json.dumps(
-        {"models": [{"name": "qwen3:0.6b", "digest": "7df6b6e0"}]}
+        {"models": [{"name": "qwen3:0.6b", "digest": digest}]}
     ).encode()
     monkeypatch.setattr(
         urllib.request.OpenerDirector, "open",
         lambda self, req, timeout=None: _FakeResp(payload),
     )
     dig = _loaders._probe_ollama_digest("http://localhost:11434/api/chat", "qwen3:0.6b")
-    assert dig == "sha256:7df6b6e0"  # normalized with the sha256: prefix
+    assert dig == "sha256:" + digest  # normalized with the sha256: prefix
 
 
 def test_probe_returns_none_on_failure(monkeypatch):

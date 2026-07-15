@@ -1195,6 +1195,38 @@ def _probe_ollama_digest(url, model_id) -> "str | None":
     return digest
 
 
+def _content_addressed_digest(dig, names) -> "str | None":
+    """The normalized ``sha256:<64hex>`` digest iff it can be a content address.
+
+    The probe's trigger (a loopback ``/api/`` server) is satisfied by more than
+    Ollama: other local servers ship Ollama-compatible surfaces whose ``digest``
+    is not a hash of the served weights. SGLang answers with a hardcoded non-hex
+    sentinel, and LocalAI answers with the sha256 of the producer-chosen model
+    NAME. Accepting either would mint a COMPUTED weights-digest lineage off a
+    fabricated identity, and the fake digest would score as a DISTINCT model,
+    forging cross-model independence. So the digest must be a well-formed sha256
+    payload (kills the sentinel) and must not equal the sha256 of any of the
+    model's own name strings (kills the name-hash). Anything else fails closed
+    to None, the call stays UNVERIFIABLE. Residual: a server that fabricates a
+    plausible random digest is the operator-Sybil boundary already named on the
+    ``weights-digest`` attestor, not a new one.
+    """
+    import hashlib
+    import re as _re
+
+    if not isinstance(dig, str) or not dig:
+        return None
+    mo = _re.match(r"^(?:sha256:)?([0-9a-f]{64})$", dig)
+    if mo is None:
+        return None
+    payload = mo.group(1)
+    for name in names:
+        if isinstance(name, str) and name:
+            if payload == hashlib.sha256(name.encode("utf-8")).hexdigest():
+                return None
+    return "sha256:" + payload
+
+
 def _query_ollama_digest(base, model_id) -> "str | None":
     """Query a local Ollama server for a model's weights digest, scope-detached.
 
@@ -1205,6 +1237,10 @@ def _query_ollama_digest(base, model_id) -> "str | None":
     uses a hard short timeout, and returns None on any failure, never raises,
     never blocks the inference path. A concurrent tag remap between the call and
     this probe is a named residual; the digest is self-attested regardless.
+
+    The answer is gated through :func:`_content_addressed_digest`: a digest an
+    Ollama-compatible surface fabricated (a constant sentinel, a name hash) is
+    rejected rather than minted into a COMPUTED identity.
 
     The probe REFUSES to follow redirects and caps the response body: a server at
     the loopback base could otherwise 302 the probe to a non-local host (the
@@ -1234,9 +1270,11 @@ def _query_ollama_digest(base, model_id) -> "str | None":
                 continue
             for m in data.get("models", []) or []:
                 if model_id in (m.get("name"), m.get("model")):
-                    dig = m.get("digest")
-                    if isinstance(dig, str) and dig:
-                        return dig if dig.startswith("sha256:") else "sha256:" + dig
+                    dig = _content_addressed_digest(
+                        m.get("digest"), (model_id, m.get("name"), m.get("model"))
+                    )
+                    if dig is not None:
+                        return dig
         return None
     finally:
         _scope._active.reset(token)

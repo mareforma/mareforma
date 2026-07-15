@@ -38,8 +38,10 @@ def _clear_probe_cache():
 
 
 def test_repeated_calls_probe_the_server_once(monkeypatch):
+    # A realistic manifest digest: the probe only accepts a full sha256 payload.
+    digest = "a" * 64
     payload = json.dumps(
-        {"models": [{"name": "cachedmodel", "digest": "abc"}]}
+        {"models": [{"name": "cachedmodel", "digest": digest}]}
     ).encode()
     opens: list[str] = []
 
@@ -52,7 +54,7 @@ def test_repeated_calls_probe_the_server_once(monkeypatch):
         dig = _loaders._probe_ollama_digest(
             "http://localhost:11434/api/chat", "cachedmodel"
         )
-        assert dig == "sha256:abc"
+        assert dig == "sha256:" + digest
     assert len(opens) == 1  # one probe, then the cache serves the rest
 
 
