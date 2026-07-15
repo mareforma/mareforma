@@ -241,7 +241,7 @@ class TestAuditSingleRun:
     def test_audit_run_record_verify_is_not_tampered(
         self, tmp_path: Path,
     ) -> None:
-        # #47: `verify run.json` must not read the auditor's own signed run
+        # `verify run.json` must not read the auditor's own signed run
         # record as tampered. The record's signature is authentic and its
         # `completed` flag is what resume trusts; a passing signature here is
         # not a claim verdict, so verify reports UNVERIFIABLE (use resume),
@@ -525,3 +525,35 @@ class TestAuditCorpus:
         assert receipts[0]["grounding"] == "GROUNDED"
         run = _read_run(out / "exits")
         assert run["exit_code"] == 7
+
+
+class TestAuditReceiptPublicVerify:
+    """A signed audit receipt is publicly verifiable: a third party who holds
+    only the auditor's exported public key can confirm it, without ever seeing
+    the private key."""
+
+    def test_receipt_verifies_with_public_pem_only(self, tmp_path: Path) -> None:
+        data = tmp_path / "data.csv"
+        data.write_text("x\n1\n")
+        script = _script(tmp_path, f"open({str(data)!r}).read()\n")
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            auditor = _bootstrap_key(Path("."), "auditor.key")
+            out = Path("audit-out")
+            res = _audit(r, Path("."), script, {"f1": str(data)}, out, auditor)
+            assert res.exit_code == 0, res.output
+            envelope_path = next((out / "envelopes").glob("*.json"))
+
+            # Export the public half only, the material a third party gets.
+            shown = r.invoke(
+                cli, ["key", "show", "--pem", "--key-path", str(auditor)])
+            assert shown.exit_code == 0, shown.output
+            pub = Path("auditor_pub.pem")
+            pub.write_text(shown.output)
+            assert b"PRIVATE" not in pub.read_bytes()
+
+            verified = r.invoke(
+                cli, ["verify", str(envelope_path), "--key", str(pub)])
+            assert verified.exit_code == 0, verified.output
+            assert "verified" in verified.output

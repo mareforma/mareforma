@@ -129,7 +129,7 @@ SIGNED_FIELDS = (
 
 # Fields included in the signed payload of a validator enrollment.
 # ``validator_type`` is bound here so a verifier can detect post-hoc
-# tampering of a row from 'llm' to 'human' (or vice versa) — the value
+# tampering of a row from 'llm' to 'human' (or vice versa), the value
 # is part of what the parent signed off on at enroll time.
 _ENROLLMENT_FIELDS = (
     "keyid",
@@ -144,12 +144,12 @@ _ENROLLMENT_FIELDS = (
 #
 # ``evidence_seen`` is a list of claim_ids the validator declares to have
 # reviewed before signing the promotion. The field is ALWAYS present in
-# the signed payload — an empty list is a positive statement that the
+# the signed payload, an empty list is a positive statement that the
 # validator reviewed nothing, which is then visible in the audit trail
 # rather than hidden by absence. The validator's enumeration is
 # self-declared (mareforma cannot prove the validator actually
 # opened the cited claims) but every cited entry must exist in the
-# graph and predate the validation timestamp — that part mareforma
+# graph and predate the validation timestamp, that part mareforma
 # DOES verify at write and at restore.
 _VALIDATION_FIELDS = (
     "claim_id",
@@ -272,7 +272,7 @@ def save_private_key(
         except OSError:
             # If the write failed (disk full, IO error), the O_EXCL'd file
             # is on disk but empty. Without cleanup, the next bootstrap
-            # hits FileExistsError and reports "key already exists" — a
+            # hits FileExistsError and reports "key already exists", a
             # misleading message that strands the user behind a zero-byte
             # file they don't know to delete. Unlink before re-raising.
             os.close(fd)
@@ -360,7 +360,7 @@ def load_private_key(path: Path) -> Ed25519PrivateKey:
     try:
         pem = path.read_bytes()
         key = serialization.load_pem_private_key(pem, password=None)
-    except Exception as exc:  # noqa: BLE001 — propagate as SigningError
+    except Exception as exc:  # noqa: BLE001, propagate as SigningError
         raise SigningError(f"Failed to load private key at {path}: {exc}") from exc
     if not isinstance(key, Ed25519PrivateKey):
         raise SigningError(
@@ -805,8 +805,8 @@ def sign_audit_receipt(
     The record is a grounding-verdict receipt plus the ``finding_id`` and run
     context the auditor attests it for. Unlike the flat fixed-field records
     above, a receipt carries nested variable-length evidence (reads, seams),
-    so the payload is the RFC 8785 canonical bytes of the whole record — the
-    same canonicalization the claim path signs — rather than a fixed field
+    so the payload is the RFC 8785 canonical bytes of the whole record, the
+    same canonicalization the claim path signs, rather than a fixed field
     list that would silently drop evidence. The payload type is distinct so an
     audit receipt cannot be substituted for a claim, validation, or policy
     envelope, or vice versa.
@@ -1008,7 +1008,7 @@ def claim_predicate_from_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
     expected_digest = _stmt.text_sha256(predicate.get("text") or "")
     if digest["sha256"] != expected_digest:
         raise InvalidEnvelopeError(
-            "subject.digest.sha256 does not match predicate.text — "
+            "subject.digest.sha256 does not match predicate.text, "
             "envelope subject and predicate disagree"
         )
     return predicate
@@ -1060,8 +1060,8 @@ def bootstrap_key(
         save_private_key(key, target, exclusive=True)
     except FileExistsError as exc:
         raise SigningError(
-            f"Key already exists at {target}. Refuse to overwrite — every "
+            f"Key already exists at {target}. Refuse to overwrite, every "
             "claim signed by the existing key would become unverifiable. "
-            "Pass overwrite=True if this is intentional."
+            "Overwriting is required to replace it."
         ) from exc
     return target, public_key_id(key.public_key())

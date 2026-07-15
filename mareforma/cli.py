@@ -58,7 +58,7 @@ def _discover_root(start: "Path | None" = None) -> "Path | None":
 def _read_only_root() -> Path:
     """Resolve the project root for a read-only command, or exit 1 if none.
 
-    Never creates a project — that is a write-path side effect.
+    Never creates a project, that is a write-path side effect.
     """
     root = _discover_root()
     if root is None:
@@ -86,7 +86,7 @@ _TIER_FG = {"COMPUTED": "green", "PROXIED": "yellow", "DEFERRED": "white"}
 
 
 def _trust_map_plaintext(tmap) -> str:
-    """Unstyled text rendering of a TrustMap — for writing to a file (no ANSI)."""
+    """Unstyled text rendering of a TrustMap, for writing to a file (no ANSI)."""
     lines = [
         "TRUST MAP",
         f"  {tmap.subject_kind} {tmap.subject_id}",
@@ -94,7 +94,7 @@ def _trust_map_plaintext(tmap) -> str:
         "",
     ]
     for p in tmap.properties:
-        val = "—" if p.value is None else str(p.value)
+        val = ", " if p.value is None else str(p.value)
         lines.append(f"  {p.name:24} [{p.tier.value:8}] {val}")
         lines.append(f"      {p.residual}")
         lines.append("")
@@ -112,7 +112,7 @@ def _echo_trust_map(tmap, *, redact_home: bool = False) -> None:
     click.echo("")
     for p in tmap.properties:
         color = _TIER_FG.get(p.tier.value, "white")
-        val = "—" if p.value is None else str(p.value)
+        val = ", " if p.value is None else str(p.value)
         click.echo(
             "  " + click.style(f"{p.name:24}", bold=True) + " "
             + click.style(f"[{p.tier.value:8}]", fg=color) + " "
@@ -133,7 +133,7 @@ def cli() -> None:
 
 
 # ---------------------------------------------------------------------------
-# bootstrap — one-time identity setup
+# bootstrap, one-time identity setup
 # ---------------------------------------------------------------------------
 
 @cli.command("bootstrap")
@@ -168,7 +168,8 @@ def bootstrap_cmd(key_path: str | None, overwrite: bool) -> None:
     try:
         path, keyid = _signing.bootstrap_key(target, overwrite=overwrite)
     except _signing.SigningError as exc:
-        _err(str(exc))
+        hint = " Pass --overwrite to replace it." if not overwrite else ""
+        _err(f"{exc}{hint}")
         sys.exit(1)
 
     _ok(f"Generated signing key at {path}")
@@ -187,7 +188,7 @@ def bootstrap_cmd(key_path: str | None, overwrite: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
-# key — inspect the locally-configured signing key
+# key, inspect the locally-configured signing key
 # ---------------------------------------------------------------------------
 
 @cli.group()
@@ -249,7 +250,7 @@ def key_show(key_path: str | None, as_pem: bool, as_keyid: bool) -> None:
     pem_bytes = _signing.public_key_to_pem(public)
 
     if as_pem:
-        # Raw PEM to stdout — no styling, no trailing newline added beyond
+        # Raw PEM to stdout, no styling, no trailing newline added beyond
         # the PEM's own. Designed for `> pub.pem` redirection.
         click.echo(pem_bytes.decode("ascii"), nl=False)
         return
@@ -266,7 +267,7 @@ def key_show(key_path: str | None, as_pem: bool, as_keyid: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
-# validator — manage the per-project validators table
+# validator, manage the per-project validators table
 # ---------------------------------------------------------------------------
 
 @cli.group()
@@ -310,7 +311,7 @@ def validator_add(pubkey_arg: str, identity: str, validator_type: str) -> None:
     from mareforma import signing as _signing
     from mareforma import validators as _validators
 
-    # 64 KB is generous — Ed25519 PEM public keys are well under 1 KB.
+    # 64 KB is generous, Ed25519 PEM public keys are well under 1 KB.
     # The cap prevents `--pubkey /var/log/syslog` (or any oversized
     # readable file) from loading megabytes into RAM before PEM parsing
     # rejects them.
@@ -425,6 +426,7 @@ def status_cmd(as_json: bool) -> None:
         mareforma status --json
     """
     import dataclasses
+    import sqlite3
     from mareforma.db import open_db, DatabaseError
     from mareforma.health import compute_health
 
@@ -436,7 +438,7 @@ def status_cmd(as_json: bool) -> None:
             report = compute_health(root, conn)
         finally:
             conn.close()
-    except DatabaseError as exc:
+    except (DatabaseError, sqlite3.DatabaseError) as exc:
         _err(f"Could not read graph.db: {exc}")
         sys.exit(1)
 
@@ -673,7 +675,7 @@ def export(
         return
 
     if bundle:
-        # Signed bundle path — needs a key.
+        # Signed bundle path, needs a key.
         from mareforma import signing as _signing
         from mareforma.export_bundle import write_bundle
         try:
@@ -713,11 +715,11 @@ def export(
         sys.exit(1)
 
 
-# verify exit-code contract (E3 — stable across releases, keyed by CI gates):
+# verify exit-code contract (E3, stable across releases, keyed by CI gates):
 #   0  verified
 #   1  tamper or binding violation (a definite NO)
-#   2  unverifiable (missing material to reach a verdict — not a NO)
-#   3  usage error (a bad flag / missing argument — NOT one of the above)
+#   2  unverifiable (missing material to reach a verdict, not a NO)
+#   3  usage error (a bad flag / missing argument, NOT one of the above)
 # The split between 1 and 2 is the whole point: a CI gate must be able to tell
 # "this claim is tampered" from "I could not check this claim." Click defaults a
 # usage error to exit 2, which would collide with "unverifiable"; the command
@@ -732,7 +734,7 @@ class _VerifyCommand(click.Command):
     """A command whose click usage errors exit 3, distinct from the 0/1/2 verdicts.
 
     A bad flag or missing argument is neither "verified", "tampered", nor
-    "unverifiable" — surfacing it as exit 2 would let a CI gate misread a typo as
+    "unverifiable", surfacing it as exit 2 would let a CI gate misread a typo as
     "could not verify." Bumping the usage-error exit code keeps the verdict codes
     unambiguous.
     """
@@ -775,6 +777,29 @@ def _verify_signed_file(
     return _verify_bundle_file(path, as_json, key_path)
 
 
+def _load_verify_public_key(path: Path):
+    """Load the public half a verifier needs, from a private key or a public PEM.
+
+    An audit receipt is verified with the auditor's public key, so a third party
+    who holds only the exported public PEM (``mareforma key show --pem``) can
+    check it. A private key file yields its public half; a public PEM is used as
+    is. Anything else raises ``SigningError`` so the caller reports it as
+    unverifiable, never a false tamper.
+    """
+    from mareforma import signing as _signing
+
+    try:
+        return _signing.load_private_key(path).public_key()
+    except _signing.SigningError:
+        pass
+    try:
+        return _signing.public_key_from_pem(path.read_bytes())
+    except Exception as exc:  # noqa: BLE001
+        raise _signing.SigningError(
+            f"{path} is neither a signing key nor a public key PEM"
+        ) from exc
+
+
 def _verify_audit_run_file(
     path: Path, envelope: dict, as_json: bool, key_path: str | None = None,
 ) -> int:
@@ -809,7 +834,7 @@ def _verify_audit_run_file(
             "unverifiable, not a failure; audit run records are trusted via "
             "resume, not verify.")
     try:
-        public_key = _signing.load_private_key(verify_key_path).public_key()
+        public_key = _load_verify_public_key(verify_key_path)
     except _signing.SigningError as exc:
         return emit(f"could not load the key to check this run record: {exc}")
     ok = verify_envelope(
@@ -865,7 +890,7 @@ def _verify_audit_receipt_file(
             "found). This is unverifiable, not a failure; supply the "
             "signer's key with --key.")
     try:
-        public_key = _signing.load_private_key(verify_key_path).public_key()
+        public_key = _load_verify_public_key(verify_key_path)
         ok, reason = verify_audit_receipt(envelope, public_key)
     except _signing.InvalidEnvelopeError as exc:
         return emit("tampered", _VERIFY_FAIL, f"malformed audit receipt: {exc}")
@@ -890,7 +915,7 @@ def _verify_bundle_file(
 
     Auditor posture: verification needs only the public key. The local signing
     key (its public half) is the material a solo operator has; when it is absent
-    the bundle is UNVERIFIABLE (exit 2), never a failure (exit 1) — the auditor
+    the bundle is UNVERIFIABLE (exit 2), never a failure (exit 1), the auditor
     lacks the key, the bundle is not proven tampered. ``key_path`` (from
     ``--key``) pins the signer's key when the default local key is not it.
     """
@@ -962,7 +987,7 @@ def _verify_claim(target: str, as_json: bool, redact_home: bool) -> int:
     from mareforma.trust_map import build_trust_map, parse_grounding_record
 
     def emit_json(payload: dict) -> None:
-        # Every JSON path — success AND failure — honors --redact-home. The
+        # Every JSON path, success AND failure, honors --redact-home. The
         # tampered/unverifiable payloads embed the trust map whose residuals
         # carry cited-source paths, so a dropped redaction here would leak
         # $HOME on exactly the receipt an auditor forwards.
@@ -1008,7 +1033,7 @@ def _verify_claim(target: str, as_json: bool, redact_home: bool) -> int:
 
             # Grounding→citation binding re-check. Bind on ``grounded_sources``
             # (the cited sources a read was actually observed for), not the
-            # declared ``cited_sources`` — matching the write side and the
+            # declared ``cited_sources``, matching the write side and the
             # verify-on-read path (mareforma.db.restore). A producer who declares
             # a dataset in cites but reads only a decoy grounds on the decoy, so
             # the declared set would falsely MATCH. The check runs even when the
@@ -1060,9 +1085,9 @@ def _verify_claim(target: str, as_json: bool, redact_home: bool) -> int:
 def _claim_bound_sources(claim: dict) -> list[str]:
     """The finding's bound data-source identifiers for the binding re-check.
 
-    Read from the SIGNED predicate payload — the normalized ``data_sources`` the
+    Read from the SIGNED predicate payload, the normalized ``data_sources`` the
     finding declares its grounding is over, plus any content-addressed
-    ``data_ids`` — exactly the set the write side bound against and the
+    ``data_ids``, exactly the set the write side bound against and the
     verify-on-read path re-checks (see
     :func:`mareforma.db.restore._verify_grounding_binding_on_read`). NOT the
     claim's ``supports`` (claim-id / DOI upstreams that would never intersect a
@@ -1163,9 +1188,9 @@ def verify(target: str, as_json: bool, redact_home: bool,
     except Exception as exc:  # noqa: BLE001
         # An unexpected failure means we could not reach a verdict, which is
         # UNVERIFIABLE (exit 2), NOT a tamper (exit 1). Letting it escape would
-        # surface as Python's exit 1 — the exact 1-vs-2 confusion the stable
+        # surface as Python's exit 1, the exact 1-vs-2 confusion the stable
         # exit-code contract exists to prevent for CI gates.
-        reason = f"verification could not complete: {type(exc).__name__}"
+        reason = f"verification could not complete: {exc or type(exc).__name__}"
         if as_json:
             click.echo(json.dumps(
                 {"target": target, "verdict": "unverifiable",
@@ -1209,10 +1234,16 @@ def map_cmd(claim_id: str, as_html: bool, as_json: bool,
         sys.exit(1)
 
     import mareforma
+    import sqlite3
+    from mareforma.db import DatabaseError
 
     root = _read_only_root()
-    with mareforma.open(root) as graph:
-        tmap = graph.trust_map(claim_id)
+    try:
+        with mareforma.open(root) as graph:
+            tmap = graph.trust_map(claim_id)
+    except (DatabaseError, sqlite3.DatabaseError) as exc:
+        _err(f"Could not read graph.db: {exc}")
+        sys.exit(1)
 
     if tmap is None:
         _err(f"Claim '{claim_id}' not found.")
@@ -1364,7 +1395,7 @@ def audit_cmd(findings_path: str | None, corpus_dir: str | None, out_dir: str,
 
 
 # ---------------------------------------------------------------------------
-# observe — coverage self-report (the doctor)
+# observe, coverage self-report (the doctor)
 # ---------------------------------------------------------------------------
 
 @cli.command("observe")
@@ -1400,7 +1431,7 @@ def observe_cmd(doctor: bool, as_json: bool) -> None:
             mark, note = "·", "importable, not yet active"
         else:
             mark, note = " ", "not installed"
-        _info(f"{mark} {row['loader']} — {note}")
+        _info(f"{mark} {row['loader']}, {note}")
     click.echo(click.style("  seams that force OPAQUE:", bold=True))
     for row in report["seam_kinds"]:
         _info(f"{row['kind']}: {row['effect']}")
@@ -1410,7 +1441,7 @@ def observe_cmd(doctor: bool, as_json: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
-# measure — aggregate grounding verdicts into the paper's number
+# measure, aggregate grounding verdicts into the paper's number
 # ---------------------------------------------------------------------------
 
 @cli.command("measure")
@@ -1456,7 +1487,7 @@ def measure_cmd(receipts_path: str, as_json: bool, redact_home: bool) -> None:
     indep_report = indep.to_dict() if indep.total else None
     indep_closing = indep.closing_sentence() if indep.total else None
     # The always-on honesty bound: grounded prevalence is a lower bound to within
-    # the OPAQUE coverage gap, whatever the OPAQUE fraction — never printed only
+    # the OPAQUE coverage gap, whatever the OPAQUE fraction, never printed only
     # when OPAQUE dominates.
     coverage_bound = PilotReport(grounding=grounding, independence=indep).coverage_bound()
     if redact_home:
@@ -1506,13 +1537,18 @@ def _load_receipts(path: Path) -> list:
         data = json.loads(text)
         if not isinstance(data, list):
             raise ValueError("expected a JSON array of receipts")
-        return data
-    receipts = []
-    for line in text.splitlines():
-        line = line.strip()
-        if line:
-            receipts.append(json.loads(line))
-    return receipts
+    else:
+        data = []
+        for line in text.splitlines():
+            line = line.strip()
+            if line:
+                data.append(json.loads(line))
+    for i, receipt in enumerate(data):
+        if not isinstance(receipt, dict):
+            raise ValueError(
+                f"receipt {i} is a {type(receipt).__name__}, expected a JSON object"
+            )
+    return data
 
 
 def _redact_home(obj):
@@ -1522,7 +1558,7 @@ def _redact_home(obj):
     must match the bytes that were signed). Recurses through dicts and lists.
     """
     home = str(Path.home())
-    # A one-character home (``/`` — a root container with HOME=/) would turn this
+    # A one-character home (``/``, a root container with HOME=/) would turn this
     # into a global slash→tilde corruptor, mangling every path in the artifact.
     # Only redact a real, multi-character home prefix.
     redact = len(home) > 1 and home != "~"
@@ -1540,7 +1576,7 @@ def _redact_home(obj):
 
 
 # ---------------------------------------------------------------------------
-# reexec — re-run a recorded pipeline and check the number reproduces
+# reexec, re-run a recorded pipeline and check the number reproduces
 # ---------------------------------------------------------------------------
 
 @cli.command("reexec")
@@ -1599,7 +1635,7 @@ def reexec_cmd(run_path: Path, as_json: bool, map_claim: str | None) -> None:
         if result.reproduced_value is not None:
             _info(f"recorded: {result.recorded_value}  reproduced: {result.reproduced_value}")
         else:
-            _info(f"recorded: {result.recorded_value}  reproduced: —")
+            _info(f"recorded: {result.recorded_value}  reproduced: , ")
         _info(f"tolerance: abs={result.tolerance}  rel={result.rel_tolerance}")
         _info(f"residual: {result.residual}")
 
@@ -1695,7 +1731,7 @@ def claim_add(text, classification, status, source_name, supports, contradicts,
         sys.exit(1)
     except MareformaError as exc:
         # Belt-and-suspenders for any future MareformaError subclass we
-        # haven't enumerated here — better a generic message than a
+        # haven't enumerated here, better a generic message than a
         # traceback.
         _err(str(exc))
         sys.exit(1)
@@ -1867,7 +1903,7 @@ def claim_validate(claim_id, validated_by):
         _err(str(exc))
         sys.exit(1)
     except SelfValidationError as exc:
-        # Common first-run trip-up — the user opened the graph with the
+        # Common first-run trip-up, the user opened the graph with the
         # same key that signed the claim. Surface mareforma's
         # explanation and the exact remediation command.
         _err(str(exc))

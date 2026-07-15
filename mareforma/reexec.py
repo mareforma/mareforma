@@ -1,7 +1,7 @@
 """``mareforma reexec``: re-run a recorded pipeline and check the number reproduces.
 
-A computed-PROXY faithfulness check. Given a *recorded run* — a declarative
-record that names how to re-execute a pipeline and the number it reported —
+A computed-PROXY faithfulness check. Given a *recorded run*, a declarative
+record that names how to re-execute a pipeline and the number it reported , 
 :func:`reexec` re-executes that pipeline in a clean scope and compares the
 re-produced number to the recorded one within a declared tolerance.
 
@@ -19,7 +19,7 @@ PROXY tier, so faithfulness never reads as truth or as independence.
 The load-bearing honesty rule: **never return ``REPRODUCED`` where the
 re-execution could not actually run.** A run the recorder marked non-reexecutable
 (world contact, private data, expensive compute), a pipeline whose entry point
-will not resolve, a re-execution that raises, or one that returns a non-number —
+will not resolve, a re-execution that raises, or one that returns a non-number , 
 each is ``COULD_NOT_REEXECUTE``. The verdict is three-valued precisely so an
 inconclusive re-run is honest, never a false ``REPRODUCED`` and never silently a
 ``DIVERGED`` (a broken re-run is not evidence of divergence).
@@ -70,10 +70,10 @@ NON_REEXECUTABLE_REASONS = frozenset(
 class FaithfulnessVerdict(str, Enum):
     """The three-valued outcome of a re-execution faithfulness check.
 
-    - ``REPRODUCED`` — the pipeline re-ran and matched the recorded number
+    - ``REPRODUCED``, the pipeline re-ran and matched the recorded number
       within the declared tolerance.
-    - ``DIVERGED`` — the pipeline re-ran and produced a different number.
-    - ``COULD_NOT_REEXECUTE`` — the re-execution could not run (declared
+    - ``DIVERGED``, the pipeline re-ran and produced a different number.
+    - ``COULD_NOT_REEXECUTE``, the re-execution could not run (declared
       non-reexecutable, unresolvable, raised, or returned no number); the
       honest verdict when there is no number to compare.
     """
@@ -88,7 +88,7 @@ class MalformedRunError(ValueError):
 
     Distinct from a ``COULD_NOT_REEXECUTE`` verdict: that is an honest answer
     about a well-formed run the checker could not re-execute. A malformed record
-    is a usage error — there is nothing to check.
+    is a usage error, there is nothing to check.
     """
 
 
@@ -133,7 +133,7 @@ class ReexecResult:
     ``recorded_value`` is the number the run reported; ``reproduced_value`` is
     what the re-execution produced (``None`` when it could not run).
     ``tolerance`` / ``rel_tolerance`` are the declared bounds the comparison
-    used. ``residual`` names what the verdict does NOT cover — the reproducible
+    used. ``residual`` names what the verdict does NOT cover, the reproducible
     != correct / != independent bound on a conclusive verdict, or the reason the
     re-execution could not run.
     """
@@ -209,6 +209,11 @@ def _normalize_run(run: Any) -> dict:
     else:
         raise MalformedRunError(
             f"run must be a record dict or a path to one, got {type(run).__name__}"
+        )
+
+    if not isinstance(record, Mapping):
+        raise MalformedRunError(
+            f"run record must be a JSON object, got {type(record).__name__}"
         )
 
     reported = _as_number(record.get("reported_value"))
@@ -313,8 +318,8 @@ def reexec(
 
     *run* is a run record (dict) or a path to a JSON record. It carries the
     recorded ``reported_value``, a ``pipeline`` naming how to re-execute, an
-    optional declared ``tolerance`` / ``rel_tolerance``, and — when the run
-    cannot be re-run faithfully — ``reexecutable: false`` with a
+    optional declared ``tolerance`` / ``rel_tolerance``, and, when the run
+    cannot be re-run faithfully, ``reexecutable: false`` with a
     ``not_reexecutable_reason`` from :data:`NON_REEXECUTABLE_REASONS`.
 
     ``registry`` optionally maps a pipeline ``target`` to a callable, so a caller
@@ -323,7 +328,7 @@ def reexec(
     list of positional args) and must return a number.
 
     Raises :class:`MalformedRunError` for a record that is not well-formed;
-    every well-formed run returns a :class:`ReexecResult`, never an exception —
+    every well-formed run returns a :class:`ReexecResult`, never an exception , 
     a re-execution that fails is reported as ``COULD_NOT_REEXECUTE``, never a
     false ``REPRODUCED`` and never a spurious ``DIVERGED``.
     """
@@ -348,7 +353,7 @@ def reexec(
     # 2. Resolve the entry point. An unresolvable target is could-not, not a crash.
     try:
         fn = _resolve_target(pipeline, registry)
-    except Exception as exc:  # noqa: BLE001 — import-time failure is could-not, honestly
+    except Exception as exc:  # noqa: BLE001, import-time failure is could-not, honestly
         return _could_not(
             record,
             f"recorded pipeline entry point could not be resolved ({exc}); the "
@@ -360,7 +365,7 @@ def reexec(
     try:
         with _clean_scope():
             raw = fn(**args) if isinstance(args, Mapping) else fn(*args)
-    except Exception as exc:  # noqa: BLE001 — any target failure is could-not, honestly
+    except Exception as exc:  # noqa: BLE001, any target failure is could-not, honestly
         return _could_not(
             record,
             f"re-execution raised ({type(exc).__name__}: {exc}); a failed re-run "

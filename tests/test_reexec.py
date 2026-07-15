@@ -2,9 +2,9 @@
 
 The proxy re-runs a recorded pipeline and checks the reported number reproduces,
 three-valued: REPRODUCED / DIVERGED / COULD_NOT_REEXECUTE. These pin the load-
-bearing honesty rule — a run that cannot be re-executed (declared
+bearing honesty rule, a run that cannot be re-executed (declared
 non-reexecutable, unresolvable, raising, or returning a non-number) is
-COULD_NOT_REEXECUTE, never a false REPRODUCED and never a spurious DIVERGED — and
+COULD_NOT_REEXECUTE, never a false REPRODUCED and never a spurious DIVERGED, and
 the deterministic reproduce / perturb-to-diverge / tolerance paths.
 """
 from __future__ import annotations
@@ -73,7 +73,7 @@ class TestDeterministicReproduces:
         assert reexec(run, registry={"pipe": lambda: 1.005}).verdict is (
             FaithfulnessVerdict.REPRODUCED
         )
-        # Just outside the declared tolerance diverges — the bound is honored.
+        # Just outside the declared tolerance diverges, the bound is honored.
         assert reexec(run, registry={"pipe": lambda: 1.05}).verdict is (
             FaithfulnessVerdict.DIVERGED
         )
@@ -117,7 +117,7 @@ class TestCouldNotReexecute:
         assert reason in result.residual
 
     def test_raise_is_could_not_not_diverged(self) -> None:
-        # A re-execution that RAISES is could-not, never a spurious DIVERGED — a
+        # A re-execution that RAISES is could-not, never a spurious DIVERGED, a
         # failed re-run is not evidence that the number changed.
         def boom() -> float:
             raise RuntimeError("pipeline blew up")
@@ -210,6 +210,22 @@ class TestLoadFromFile:
         path.write_text("{not json", encoding="utf-8")
         with pytest.raises(MalformedRunError):
             reexec(path)
+
+    def test_non_object_json_file_raises_malformed(self, tmp_path: Path) -> None:
+        # A file whose JSON parses to a list, string, or number is well-formed
+        # JSON but not a run record. It must reach the same malformed path as
+        # unparseable text, not a raw AttributeError from a later .get().
+        for body in ("[1, 2, 3]", '"hello"', "42", "null"):
+            path = tmp_path / "run.json"
+            path.write_text(body, encoding="utf-8")
+            with pytest.raises(MalformedRunError):
+                reexec(path)
+
+    def test_cli_non_object_json_exits_malformed(self, tmp_path: Path) -> None:
+        path = tmp_path / "run.json"
+        path.write_text("[1, 2, 3]", encoding="utf-8")
+        result = CliRunner().invoke(cli, ["reexec", str(path)])
+        assert result.exit_code == 3
 
 
 class TestResultShape:

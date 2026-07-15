@@ -35,13 +35,15 @@ The most dangerous result an AI scientist returns is the one that looks right bu
 Mareforma catches this by observing the run, not by trusting a label. Wrap the work in `observe()` and the grounding verdict is computed from what the code actually did:
 
 ```python
+import mareforma
 from mareforma.observe import observe
 
 with observe(cites="dataset_alpha") as obs:
-    result = analyze("dataset_alpha")   # the step that reads the data
+    result = analyze("dataset_alpha")   # your pipeline: the step that reads the data
 
+graph = mareforma.open()
 graph.assert_claim(
-    finding_text,
+    f"treatment effect is {result}",
     generated_by="agent/lab-a",
     source_name="dataset_alpha",
     observed_grounding=obs.verdict.to_signed_dict(),  # GROUNDED, UNGROUNDED, or OPAQUE: computed, not declared
@@ -62,7 +64,7 @@ mareforma bootstrap   # optional: sign your claims and enable the public log
 | What you get | What it does |
 |---|---|
 | **Signed claims** | Each claim shows who stands behind it and cannot be altered unnoticed. |
-| **Grounding check** | Computes whether a finding actually rests on data it read, or on the model's memory, by observing the run. |
+| **Grounding check** | Computes whether a finding's step actually accessed the data it cites, or leaned on the model's memory, by observing the run. |
 | **Trust map** | `mareforma map <claim>` shows every trust property (grounding, independence, contestation, witnessing) with how far it can be trusted, and says plainly what it cannot check. |
 | **Verify** | `mareforma verify <claim>` re-checks the signatures, that the grounding verdict matches the data the finding cites, and the support level, with stable exit codes for CI (0 verified, 1 tampered, 2 unverifiable). |
 | **Diagnose a run** | `mareforma diagnose -- python run.py` runs a target under the observer and reports what data actually flowed, and where a silent fallback hid. |
