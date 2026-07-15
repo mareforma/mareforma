@@ -1116,6 +1116,21 @@ def _request_json_body(kwargs):
     return None
 
 
+# The recognized model providers, keyed by their registered domains. Genuine
+# inference providers only: a router/aggregator (openrouter.ai) is deliberately
+# absent, because its host does not pin which upstream actually served the
+# weights, so a router call cannot certify a model identity.
+_PROVIDER_DOMAINS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("anthropic", ("anthropic.com",)),
+    ("openai", ("openai.com",)),
+    ("groq", ("groq.com",)),
+    ("together", ("together.xyz", "together.ai")),
+    ("fireworks", ("fireworks.ai",)),
+    ("mistral", ("mistral.ai",)),
+    ("deepseek", ("deepseek.com",)),
+)
+
+
 def _provider_of(url) -> "str | None":
     """The recognized model provider for a request URL, matched on the HOST.
 
@@ -1124,8 +1139,8 @@ def _provider_of(url) -> "str | None":
     ``https://evil.com/anthropic`` or ``api.anthropic.com.attacker.net`` must NOT
     read as a provider, or a producer could mint a COMPUTED distinct model by
     naming a provider anywhere in a URL they control. The suffix match accepts
-    only genuine sub-domains of the provider's own registered domain, which an
-    attacker cannot forge.
+    only the provider's own registered domain and genuine sub-domains of it,
+    which an attacker cannot forge.
     """
     from urllib.parse import urlsplit
 
@@ -1133,10 +1148,10 @@ def _provider_of(url) -> "str | None":
         host = (urlsplit(url or "").hostname or "").lower()
     except (ValueError, TypeError):
         return None
-    if host == "api.anthropic.com" or host.endswith(".anthropic.com"):
-        return "anthropic"
-    if host == "api.openai.com" or host.endswith(".openai.com"):
-        return "openai"
+    for provider, domains in _PROVIDER_DOMAINS:
+        for domain in domains:
+            if host == domain or host.endswith("." + domain):
+                return provider
     return None
 
 

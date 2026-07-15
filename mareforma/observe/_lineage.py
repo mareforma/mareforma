@@ -34,7 +34,8 @@ from enum import Enum
 # Model families whose base is declarable from the model string. A name outside
 # this set (a wrapper, an internal router, an unknown provider) cannot be rooted
 # to a declarable base, so it is UNVERIFIABLE rather than a fabricated distinct
-# model.
+# model. These are the closed provider families, whose strings are stable; the
+# open-weight families root through ``_open_family_root`` below instead.
 _KNOWN_FAMILY_PREFIXES: tuple[str, ...] = (
     "claude-",
     "gpt-",
@@ -48,6 +49,55 @@ _KNOWN_FAMILY_PREFIXES: tuple[str, ...] = (
 # ISO OpenAI date (``2024-08-06``). Stripped to yield the family root so two
 # date-distinct strings of one base collapse to the same root.
 _VERSION_SUFFIX = re.compile(r"^(?P<root>.+?)-(?P<ver>\d{8}|\d{4}-\d{2}-\d{2})$")
+
+# A family release number: digits with an optional minor, and never a
+# parameter-count size (the lookahead refuses ``70b``/``0.6b``), so
+# ``llama-3.1-70b`` roots on the 3.1, not the 70.
+_OPEN_VER = r"(\d+(?:\.\d+)?)(?![\d.]*b)"
+
+# Open-weight (and open-string) families, rooted to family + release. One open
+# release is served under provider-specific names (``llama-3.1-70b-versatile``,
+# ``meta-llama/Llama-3.1-70B-Instruct``, ``llama-v3p1-70b-instruct``), so the
+# root is deliberately COARSE: variants of one release collapse to one model on
+# the independence axis. The rounding direction is safety, naming variance can
+# under-claim distinctness (two sizes of one release read as one model), never
+# mint a fake distinct model; a string no pattern parses stays UNVERIFIABLE.
+_OPEN_FAMILY_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(
+    (family, re.compile(pattern))
+    for family, pattern in (
+        ("llama", rf"^(?:meta-)?llama-?v?{_OPEN_VER}(?=$|[-:.])"),
+        ("qwen", rf"^qwen-?{_OPEN_VER}(?=$|[-:.])"),
+        ("mixtral", r"^mixtral(?:-(\d+x\d+b))?(?=$|[-:.])"),
+        ("mistral", r"^mistral(?=$|[-:.])"),
+        ("gemma", rf"^gemma-?{_OPEN_VER}(?=$|[-:.])"),
+        ("deepseek", r"^deepseek(?:-(v\d+(?:\.\d+)?|r\d+))?(?=$|[-:.])"),
+        ("phi", rf"^phi-?{_OPEN_VER}(?=$|[-:.])"),
+        ("gemini", rf"^gemini-{_OPEN_VER}(?=$|[-:.])"),
+        ("grok", rf"^grok-?{_OPEN_VER}(?=$|[-:.])"),
+        ("glm", rf"^glm-?{_OPEN_VER}(?=$|[-:.])"),
+        ("kimi", r"^kimi(?:-?(k\d+))?(?=$|[-:.])"),
+    )
+)
+
+# Fireworks release notation: ``v3p1`` means v3.1.
+_P_NOTATION = re.compile(r"v(\d+)p(\d+)")
+
+
+def _open_family_root(lower: str) -> "str | None":
+    """The family-release root of an open-model string, or None.
+
+    Works on the last path segment (hosted ids are namespaced,
+    ``meta-llama/...``, ``accounts/fireworks/models/...``), with provider
+    release notation normalized first.
+    """
+    seg = lower.rsplit("/", 1)[-1]
+    seg = _P_NOTATION.sub(r"v\1.\2", seg)
+    for family, pattern in _OPEN_FAMILY_PATTERNS:
+        mo = pattern.match(seg)
+        if mo is not None:
+            ver = next((g for g in mo.groups() if g), None)
+            return f"{family}-{ver}" if ver else family
+    return None
 
 
 class ModelLineageTier(str, Enum):
@@ -125,8 +175,9 @@ def _family_root(model_id: str) -> tuple[str | None, str | None, bool]:
 
     ``declarable`` is False for a hosted fine-tune (base weights not declarable),
     a moving alias (``-latest``), or a name outside the known families (a
-    wrapper). A declarable string roots to its base with any trailing release
-    date stripped.
+    wrapper). A closed-family string roots to its base with any trailing release
+    date stripped; an open-family string roots to its family release via
+    :func:`_open_family_root`.
     """
     m = (model_id or "").strip()
     if not m:
@@ -138,14 +189,17 @@ def _family_root(model_id: str) -> tuple[str | None, str | None, bool]:
     # A moving alias: the concrete weights it points at are not declarable.
     if lower.endswith("-latest") or lower == "latest":
         return (None, None, False)
-    # A name outside the known families (a wrapper / unknown provider) cannot be
-    # rooted to a declarable base.
-    if not lower.startswith(_KNOWN_FAMILY_PREFIXES):
-        return (None, None, False)
-    mo = _VERSION_SUFFIX.match(m)
-    if mo:
-        return (mo.group("root"), mo.group("ver"), True)
-    return (m, None, True)
+    if lower.startswith(_KNOWN_FAMILY_PREFIXES):
+        mo = _VERSION_SUFFIX.match(m)
+        if mo:
+            return (mo.group("root"), mo.group("ver"), True)
+        return (m, None, True)
+    # Not a closed family: try the open-weight family release patterns. A name
+    # neither set can root (a wrapper / unknown provider) is not declarable.
+    open_root = _open_family_root(lower)
+    if open_root is not None:
+        return (open_root, None, True)
+    return (None, None, False)
 
 
 def resolve_lineage(
