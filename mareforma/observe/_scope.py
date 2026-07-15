@@ -93,6 +93,11 @@ class Scope:
         self.reads: list[ReadRecord] = []
         self.seams: list[SeamEvent] = []
         self.opens: list[str] = []
+        # (identifier, exception type name) for each wrapped read-mode open
+        # that raised. A failed open delivered no data; classify() uses these
+        # to name the failure when they account for every unexplained open of
+        # a cited path.
+        self.failed_opens: list[tuple[str, str]] = []
         # Model/method lineage records captured in this span (a wrapped httpx
         # POST body-parse, or a producer declaration). Empty when no model call
         # authored the finding — the lineage is then absent, never fabricated.
@@ -127,6 +132,10 @@ class Scope:
     def record_open(self, path) -> None:
         if isinstance(path, str) and path:
             self.opens.append(path)
+
+    def record_failed_open(self, path, exc_type: str) -> None:
+        if isinstance(path, str) and path:
+            self.failed_opens.append((path, exc_type))
 
     def mark_error(self, reason: str) -> None:
         """Latch the first observer-internal error. Forces OPAQUE at classify.
@@ -255,16 +264,42 @@ class Scope:
         # to attempt. Each becomes a coverage-gap seam, which the relevance
         # matrix below treats as blocking every citation kind (fail-closed).
         read_idents = {norm for norm, _ in norm_reads}
+        unexplained: dict[str, int] = {}
         for op in self.opens:
             n = normalize_identifier(op)
             if n in cited and n not in read_idents:
+                unexplained[n] = unexplained.get(n, 0) + 1
+        if unexplained:
+            # A wrapped open that raised delivered no data. When such failures
+            # account for EVERY unexplained open of the cited paths (count-
+            # aware, per identifier), the honest narrative is that the open
+            # failed. One open more than the observed failures means a reader
+            # the wrapper never saw, so the hidden-reader message stays: a
+            # failed open must never lend its story to an open that could
+            # have read the data.
+            failed: dict[str, int] = {}
+            failed_types: set[str] = set()
+            for path, exc_type in self.failed_opens:
+                fn = normalize_identifier(path)
+                if fn in unexplained:
+                    failed[fn] = failed.get(fn, 0) + 1
+                    failed_types.add(exc_type)
+            if all(failed.get(n, 0) >= count for n, count in unexplained.items()):
+                types = ", ".join(sorted(failed_types))
+                seams.append(
+                    SeamEvent(
+                        "coverage-gap",
+                        f"the observed open of the cited source failed "
+                        f"({types}); no data flowed through the failed open",
+                    )
+                )
+            else:
                 seams.append(
                     SeamEvent(
                         "coverage-gap",
                         "cited source opened through an uninstrumented reader",
                     )
                 )
-                break
         for c in cited:
             if c in read_idents:
                 continue
@@ -356,6 +391,7 @@ class Scope:
         other.reads = list(self.reads)
         other.seams = list(self.seams)
         other.opens = list(self.opens)
+        other.failed_opens = list(self.failed_opens)
         other.models = list(self.models)
         other._error = self._error
         # The reads are identical across findings, so the normalized form is too:

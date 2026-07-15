@@ -142,7 +142,28 @@ def _make_observed_open(real_open):
     """
 
     def observed_open(file, mode="r", *args, **kwargs):
-        result = real_open(file, mode, *args, **kwargs)  # host errors propagate
+        try:
+            result = real_open(file, mode, *args, **kwargs)
+        except BaseException as exc:
+            # The host error propagates untouched, but the failure itself is
+            # evidence: a read-mode open of a cited path that raised cannot
+            # have delivered data, and classify() uses that to name the
+            # failure instead of blaming an uninstrumented reader. Only the
+            # exception TYPE is recorded (the message can carry a path).
+            scope = _scope.current_scope()
+            if scope is not None:
+                try:
+                    if _is_read_mode(mode):
+                        identifier = _path_str(file)
+                        if identifier:
+                            scope.record_failed_open(
+                                identifier, type(exc).__name__
+                            )
+                except BaseException as inner:  # noqa: BLE001
+                    scope.mark_error(
+                        f"open wrapper failed: {type(inner).__name__}"
+                    )
+            raise
         scope = _scope.current_scope()
         if scope is None:
             return result

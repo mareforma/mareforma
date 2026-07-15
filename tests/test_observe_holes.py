@@ -572,3 +572,86 @@ def test_http_wrapper_error_is_opaque_host_unaffected(monkeypatch):
             r = requests.get(url)
     assert r.text == "col\n1\n"  # host result intact
     assert h.verdict.grounding is OG.OPAQUE
+
+
+# -- failed opens of a cited source are named, not blamed on a reader --------
+
+def test_failed_open_names_the_failure_not_a_reader(tmp_path):
+    # A read-mode open of the cited source that raises leaves an audit `open`
+    # event behind but no read. The seam must say the open failed and name the
+    # exception type; blaming an uninstrumented reader misdescribes a failure
+    # the observer saw in full. Verdict stays OPAQUE (fail-closed): a failed
+    # wrapped open does not rule out a hidden successful one elsewhere.
+    missing = str(tmp_path / "missing.csv")
+    with obs.observe(cites=missing) as h:
+        try:
+            open(missing)
+        except FileNotFoundError:
+            pass
+    assert h.verdict.grounding is OG.OPAQUE
+    gaps = [s for s in h.verdict.seams if s.kind == "coverage-gap"]
+    assert gaps, "a failed cited open must still record a coverage-gap seam"
+    assert any("failed (FileNotFoundError)" in s.detail for s in gaps)
+    assert all("uninstrumented" not in s.detail for s in gaps)
+    # Exception TYPE only: the detail is signed and publishable, so it must
+    # never carry the path the exception message would leak.
+    assert all(missing not in s.detail for s in gaps)
+
+
+def test_pandas_failed_read_names_the_failure(tmp_path):
+    # The try/except-fallback shape real pipelines have: the data load fails,
+    # the code falls back silently, the finding still prints. The narrative
+    # must name the failed open, not an uninstrumented reader.
+    pd = pytest.importorskip("pandas")
+    missing = str(tmp_path / "gone.csv")
+    with obs.observe(cites=missing) as h:
+        try:
+            pd.read_csv(missing)
+        except (FileNotFoundError, OSError):
+            _ = 0.83  # cached fallback
+    assert h.verdict.grounding is OG.OPAQUE
+    assert any(
+        s.kind == "coverage-gap" and "failed (FileNotFoundError)" in s.detail
+        for s in h.verdict.seams
+    )
+
+
+def test_os_open_keeps_the_uninstrumented_reader_message(tmp_path):
+    # A successful os.open bypasses the wrapper: only the audit event fires.
+    # That is exactly the hidden-reader case, so the generic message must stay.
+    import os
+
+    p = tmp_path / "trial.csv"
+    p.write_text("arm,value\nA,1\n")
+    with obs.observe(cites=str(p)) as h:
+        fd = os.open(str(p), os.O_RDONLY)
+        os.close(fd)
+    assert h.verdict.grounding is OG.OPAQUE
+    assert any(
+        s.kind == "coverage-gap" and "uninstrumented reader" in s.detail
+        for s in h.verdict.seams
+    )
+
+
+def test_failed_open_beside_hidden_open_stays_generic(tmp_path):
+    # One wrapped open of the cited path fails, but a second open of the SAME
+    # path happens through os.open (hidden from the wrapper). The failure
+    # explains only one of the two opens, so the seam must NOT claim the open
+    # failed: the hidden one could have read the data.
+    import os
+
+    p = tmp_path / "trial.csv"
+    p.write_text("arm,value\nA,1\n")
+    with obs.observe(cites=str(p)) as h:
+        fd = os.open(str(p), os.O_RDONLY)  # hidden successful open
+        os.close(fd)
+        try:
+            open(str(p), encoding="no-such-codec")  # wrapped open, fails
+        except LookupError:
+            pass
+    assert h.verdict.grounding is OG.OPAQUE
+    assert any(
+        s.kind == "coverage-gap" and "uninstrumented reader" in s.detail
+        for s in h.verdict.seams
+    )
+    assert all("failed (" not in s.detail for s in h.verdict.seams)
