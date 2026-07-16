@@ -20,12 +20,14 @@ from mareforma.trust_map import (
     _assemble,
 )
 from mareforma.trust_map_html import render_html
+from tests._helpers import _claim
 
-# The ten properties the map must always place, in order.
+# The eleven properties the map must always place, in order.
 _EXPECTED_PROPERTIES = (
     "attributability",
     "provenance",
     "grounding",
+    "faithfulness",
     "methodological_validity",
     "leakage",
     "independence",
@@ -35,30 +37,26 @@ _EXPECTED_PROPERTIES = (
     "witnessing",
 )
 
-
-def _claim(**overrides) -> dict:
-    """A minimal claim row dict for _assemble, with sane defaults."""
-    base = {
-        "claim_id": "11111111-2222-3333-4444-555555555555",
-        "text": "a finding",
-        "classification": "ANALYTICAL",
-        "support_level": "PRELIMINARY",
-        "status": "open",
-        "supports_json": "[]",
-        "contradicts_json": "[]",
-        "asserter_keyid": "abcdef0123456789",
-        "signature_bundle": "{}",
-        "transparency_logged": 1,
-        "verified": True,
-        "observed_grounding": None,
-        "t_invalid": None,
-    }
-    base.update(overrides)
-    return base
+# The map shape pinned per trust-map version: the ordered property-name set plus
+# whether the independence axis emits a per-finding numeric value. Changing the
+# emitted property set or the independence value semantics requires a new key
+# here, which forces a deliberate TRUST_MAP_VERSION bump. The guards below assert
+# the live version stamp names a pinned shape and the emitted map matches it, so
+# a shape change under a stale stamp fails loudly instead of two releases sharing
+# one version string.
+_SHAPE_BY_VERSION = {
+    "v0.3.10": {
+        "properties": _EXPECTED_PROPERTIES,
+        # v0.3.10 independence reports a per-finding numeric count of pairwise
+        # distinct (model, data, signer) checks; v0.3.9 emitted only the closed
+        # word set {UNVERIFIABLE, MULTI_ROOT}.
+        "independence_numeric": True,
+    },
+}
 
 
 class TestEveryPropertyPresent:
-    def test_all_ten_properties_present_with_tier_and_residual(self) -> None:
+    def test_all_properties_present_with_tier_and_residual(self) -> None:
         tmap = _assemble(_claim(), n_roots=1, has_inclusion=False)
         names = tuple(p.name for p in tmap.properties)
         assert names == _EXPECTED_PROPERTIES
@@ -72,6 +70,41 @@ class TestEveryPropertyPresent:
         assert tmap.version == TRUST_MAP_VERSION
         assert tmap.subject_kind == "claim"
         assert tmap.subject_id == "cid-9"
+
+
+class TestVersionShapeIsPinned:
+    """Guard the version stamp against a silent map-shape change.
+
+    A version-keyed golden of the emitted property set and the independence value
+    shape. Replaces the tautological ``version == TRUST_MAP_VERSION`` check, which
+    compared the constant to itself and could not catch a shape change that left
+    the constant untouched.
+    """
+
+    def test_live_version_names_a_pinned_shape(self) -> None:
+        assert TRUST_MAP_VERSION in _SHAPE_BY_VERSION, (
+            f"{TRUST_MAP_VERSION} has no pinned map shape; a shape change must "
+            "add a _SHAPE_BY_VERSION entry and bump TRUST_MAP_VERSION deliberately"
+        )
+
+    def test_emitted_property_set_matches_the_pin(self) -> None:
+        shape = _SHAPE_BY_VERSION.get(TRUST_MAP_VERSION)
+        assert shape is not None, f"no pinned shape for {TRUST_MAP_VERSION}"
+        tmap = _assemble(_claim(), n_roots=1, has_inclusion=False)
+        names = tuple(p.name for p in tmap.properties)
+        assert names == shape["properties"]
+
+    def test_independence_value_shape_matches_the_pin(self) -> None:
+        shape = _SHAPE_BY_VERSION.get(TRUST_MAP_VERSION)
+        assert shape is not None, f"no pinned shape for {TRUST_MAP_VERSION}"
+        # A finding with an effective-independence record exercises the per-finding
+        # numeric value that v0.3.10 introduced onto this axis.
+        tmap = _assemble(
+            _claim(), n_roots=2, has_inclusion=False,
+            effective_independence={"number": 2, "soft": False},
+        )
+        value = tmap.get("independence").value
+        assert value.isdigit() is shape["independence_numeric"]
 
 
 class TestGroundingRow:
@@ -125,6 +158,51 @@ class TestGroundingRow:
         assert g.tier is Tier.COMPUTED
 
 
+class TestFaithfulnessRow:
+    def test_no_record_renders_not_present(self) -> None:
+        # Faithfulness is not stored on the claim; with no re-execution supplied
+        # the axis reads "not present", never inferred.
+        tmap = _assemble(_claim(), n_roots=1, has_inclusion=False)
+        f = tmap.get("faithfulness")
+        assert f.value == NOT_PRESENT
+        assert f.tier is Tier.COMPUTED
+        assert "not checked" in f.residual
+
+    def test_reexec_map_is_proxy_named(self) -> None:
+        # A supplied REPRODUCED verdict places at the PROXY tier with the residual
+        # naming what reproducibility does NOT cover: not correctness, not
+        # independence. It must never read as truth or independence.
+        record = {"version": "v0.3.10", "verdict": "REPRODUCED",
+                  "residual": "same-arm re-run matched"}
+        tmap = _assemble(_claim(), n_roots=1, has_inclusion=False,
+                         reexec_record=record)
+        f = tmap.get("faithfulness")
+        assert f.value == "REPRODUCED"
+        assert f.tier is Tier.PROXIED
+        assert "not correct" in f.residual
+        assert "not an independent" in f.residual
+
+    def test_diverged_and_could_not_are_placed(self) -> None:
+        for verdict in ("DIVERGED", "COULD_NOT_REEXECUTE"):
+            tmap = _assemble(_claim(), n_roots=1, has_inclusion=False,
+                             reexec_record={"verdict": verdict, "residual": "r"})
+            f = tmap.get("faithfulness")
+            assert f.value == verdict
+            assert f.tier is Tier.PROXIED
+
+    def test_unrecognised_verdict_is_not_present(self) -> None:
+        # A hand-edited or future-shaped record must not overclaim a verdict the
+        # map does not understand.
+        tmap = _assemble(_claim(), n_roots=1, has_inclusion=False,
+                         reexec_record={"verdict": "TOTALLY_FINE"})
+        assert tmap.get("faithfulness").value == NOT_PRESENT
+
+    def test_malformed_record_is_not_present(self) -> None:
+        tmap = _assemble(_claim(), n_roots=1, has_inclusion=False,
+                         reexec_record="not a record")
+        assert tmap.get("faithfulness").value == NOT_PRESENT
+
+
 class TestIndependenceAxis:
     def test_single_trust_domain_is_unverifiable(self) -> None:
         tmap = _assemble(_claim(), n_roots=1, has_inclusion=False)
@@ -169,7 +247,7 @@ class TestAttributability:
     def test_non_enrolled_asserter_is_not_claimed_reverified(self) -> None:
         # verify_claim_signatures passes a non-enrolled asserter on the
         # claim-binding alone (no pubkey to check the signature against), so the
-        # map must NOT render "re-verified" — that would overclaim a check that
+        # map must NOT render "re-verified", that would overclaim a check that
         # never happened. asserter_enrolled=False is the honest signal.
         tmap = _assemble(_claim(), n_roots=1, has_inclusion=False,
                          sig_verified=True, asserter_enrolled=False)
@@ -279,14 +357,14 @@ class TestHtmlRender:
     def test_render_golden(self) -> None:
         html = render_html(self._fixed_map())
         # Structural anchors an auditor / paper figure relies on.
-        assert "<title>trust map — claim fixed-claim-id</title>" in html
+        assert "<title>trust map, claim fixed-claim-id</title>" in html
         assert "map v0.3.9" in html
         assert ">grounding<" in html
         assert ">GROUNDED<" in html
         assert ">DEFERRED<" in html
         # A None value renders as an em-dash placeholder, never "None".
         assert ">None<" not in html
-        assert "—" in html
+        assert ", " in html
 
     def test_html_escapes_dynamic_text(self) -> None:
         tmap = TrustMap("v1", "claim", "<script>x</script>",

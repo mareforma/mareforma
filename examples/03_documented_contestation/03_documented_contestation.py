@@ -1,5 +1,5 @@
 """
-examples/03_documented_contestation.py — Documented contestation.
+examples/03_documented_contestation.py, Documented contestation.
 
 Run:
     pip install langchain-core
@@ -9,30 +9,30 @@ No API key required.
 
 Story
 -----
-An ESTABLISHED finding sits in the graph — two independent agents converged
-on it and a human validated it.
+A well-supported finding sits in the graph: two lab agents converged on it and a
+human validated it. What a reader trusts is its effective independence, the count
+of pairwise-distinct (model, data, signer) checks behind it, not a support label.
 
-A new agent runs a larger analysis on a different cohort and gets a result
-in tension with the established consensus. The agent does not discard its
-finding. It asserts it explicitly, naming the tension with contradicts=.
+A new agent runs a larger analysis on a different cohort and gets a result in
+tension with the prior. The agent does not discard its finding. It asserts it
+explicitly, naming the tension with contradicts=.
 
 Both claims coexist in the graph:
-  - the ESTABLISHED consensus
+  - the prior, well-supported consensus
   - the new ANALYTICAL challenge, with its own provenance
 
-This is how science actually works. The graph captures the debate,
-not just the winning side. A documented contradiction is more valuable
-than silence.
+This is how science actually works. The graph captures the debate, not just the
+winning side. A documented contradiction is more valuable than silence.
 
 LangChain integration
 ---------------------
 graph.get_tools(generated_by="...") returns [query_graph, record_claim] as plain
-callables. Wrap with @tool for LangChain. generated_by is baked into the closure
-as a display label. It does not drive REPLICATED: the signing key
-(asserter_keyid) is the independence unit. The two converging consensus claims
-below are therefore asserted with graph.assert_claim(signer=...) under two
-distinct lab keys, not through the langchain tools, which sign with the one
-loaded key.
+callables. Wrap with @tool for LangChain. generated_by is a display label; it does
+not drive the trust axes. Effective independence counts distinct model and method,
+so two checks on one model do not both count; the signing key separates asserters
+but distinct signers alone do not raise it. The two converging consensus claims
+below are asserted with graph.assert_claim(signer=...) under two distinct lab keys,
+not through the langchain tools, which sign with the one loaded key.
 
     from langchain_openai import ChatOpenAI
     from langgraph.prebuilt import create_react_agent
@@ -90,7 +90,7 @@ graph.enroll_validator(reviewer_pem, identity="reviewer@lab.org")
 
 
 # ---------------------------------------------------------------------------
-# Mareforma tools via get_tools() — one set per agent, generated_by baked in
+# Mareforma tools via get_tools(), one set per agent, generated_by baked in
 # as a display label. query_graph and the challenge agent's assert_finding_c
 # go through langchain tools. The two converging consensus claims do NOT:
 # they must sign with distinct keys to reach REPLICATED, and the tools sign
@@ -109,15 +109,15 @@ _, assert_finding_c = [tool(fn) for fn in graph.get_tools(
 
 
 # ---------------------------------------------------------------------------
-# Setup — establish the prior consensus
+# Setup, establish the prior consensus
 # Two independent agents converge, human validates → ESTABLISHED
 # ---------------------------------------------------------------------------
 
-sep("Setup — prior consensus (ESTABLISHED)")
+sep("Setup, prior consensus (ESTABLISHED)")
 
 # Bootstrap an ESTABLISHED upstream the two lab agents can converge on.
 # Under the ESTABLISHED-upstream rule, REPLICATED requires at least one
-# upstream claim with support_level='ESTABLISHED' in supports[] —
+# upstream claim with support_level='ESTABLISHED' in supports[] , 
 # matches Cochrane/GRADE evidence chains. seed=True asserts directly
 # at ESTABLISHED with a signed seed envelope; only the loaded key
 # (auto-enrolled as root above) can produce one.
@@ -129,8 +129,9 @@ upstream_ref = graph.assert_claim(
 )
 
 # Two converging claims on the same ESTABLISHED upstream, signed by DISTINCT
-# keys. The signing key (asserter_keyid) is the independence unit, so REPLICATED
-# fires here; generated_by is a display label only. Asserted via
+# keys, so the REPLICATED support level fires. Distinct signers are the legacy
+# independence signal; effective independence counts distinct model. generated_by
+# is a display label only. Asserted via
 # graph.assert_claim(signer=...) because the langchain tools sign with the one
 # loaded key and could not converge.
 consensus_a = graph.assert_claim(
@@ -152,7 +153,7 @@ consensus_b = graph.assert_claim(
 )
 
 c_a = graph.get_claim(consensus_a)
-show("consensus_a support_level", c_a["support_level"] if c_a else "—")
+show("consensus_a support_level", c_a["support_level"] if c_a else "n/a")
 
 # Close and re-open under the reviewer key so the validator's signing identity
 # differs from the agent that signed consensus_a. mareforma refuses
@@ -178,16 +179,16 @@ _, assert_finding_c = [tool(fn) for fn in graph.get_tools(
     generated_by="agent_lab_c/model-c"
 )]
 established = graph.get_claim(consensus_a)
-show("after validate()", established["support_level"] if established else "—")
+show("after validate()", established["support_level"] if established else "n/a")
 
 
 # ---------------------------------------------------------------------------
-# New agent — larger analysis, different result
+# New agent, larger analysis, different result
 # ---------------------------------------------------------------------------
 
-sep("New agent — larger analysis, different result")
+sep("New agent, larger analysis, different result")
 
-# Step 1: query the graph — what is already established on this topic?
+# Step 1: query the graph, what is already established on this topic?
 prior = json.loads(query_graph.invoke({"topic": "Treatment X", "min_support": "ESTABLISHED"}))
 print(f"  query_graph('Treatment X', min_support='ESTABLISHED') → {len(prior)} claims")
 for c in prior:
@@ -199,12 +200,12 @@ print()
 print("  Prior consensus found. Running analysis on new cohort (n=1,240)…")
 print()
 
-# Step 2: analysis returns a different result — no significant effect.
+# Step 2: analysis returns a different result, no significant effect.
 # The agent does not discard this. It asserts it with contradicts= pointing
 # to the established consensus, and documents the methodological difference.
 challenge = assert_finding_c.invoke({
     "text": "Treatment X shows no significant effect on outcome Y in population P"
-            " (cohort_3, n=1240, p=0.21) — larger and more diverse cohort than prior studies",
+            " (cohort_3, n=1240, p=0.21), larger and more diverse cohort than prior studies",
     "classification": "ANALYTICAL",
     "supports": ["upstream_ref_B"],
     "contradicts": established_ids,
@@ -213,18 +214,18 @@ challenge = assert_finding_c.invoke({
 
 c_challenge = graph.get_claim(challenge)
 show("challenge claim_id", challenge[:8] + "…")
-show("challenge support_level", c_challenge["support_level"] if c_challenge else "—")
-show("challenge classification", c_challenge["classification"] if c_challenge else "—")
+show("challenge support_level", c_challenge["support_level"] if c_challenge else "n/a")
+show("challenge classification", c_challenge["classification"] if c_challenge else "n/a")
 
 contradicts_list = json.loads(c_challenge["contradicts_json"] if c_challenge else "[]")
 show("contradicts", f"{len(contradicts_list)} established claim(s)")
 
 
 # ---------------------------------------------------------------------------
-# Graph state — both claims coexist
+# Graph state, both claims coexist
 # ---------------------------------------------------------------------------
 
-sep("Graph state — consensus and challenge coexist")
+sep("Graph state, consensus and challenge coexist")
 
 all_claims = graph.query()
 print(f"  Total claims in graph: {len(all_claims)}\n")
@@ -243,9 +244,9 @@ print("  The challenge is not discarded.")
 print("  Both are in the graph with full provenance.")
 print()
 print("  A human reviewer can now:")
-print("    query_graph('Treatment X')                            — see both sides")
-print("    query_graph('Treatment X', min_support='ESTABLISHED') — see only validated consensus")
-print("    graph.get_claim(challenge_id)['contradicts_json']     — trace the stated tension")
+print("    query_graph('Treatment X')                           , see both sides")
+print("    query_graph('Treatment X', min_support='ESTABLISHED'), see only validated consensus")
+print("    graph.get_claim(challenge_id)['contradicts_json']    , trace the stated tension")
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +267,7 @@ print("""
 
   ✗  Discarding the finding because the consensus is ESTABLISHED
 
-     ESTABLISHED means human-validated evidence — not settled truth.
+     ESTABLISHED means human-validated evidence, not settled truth.
      A larger, better-powered study is legitimate scientific progress.
      Silence is not.
 

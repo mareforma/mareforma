@@ -44,11 +44,11 @@ CREATE TABLE IF NOT EXISTS claims (
     asserter_keyid  TEXT,
     artifact_hash   TEXT,
     prev_hash       TEXT,
-    -- GRADE 5-domain EvidenceVector. Stored inside the signed Statement
-    -- v1 predicate; denormalised here for queryable filters
-    -- ("WHERE ev_risk_of_bias <= -1"). Bounded [-2, 0] matches the GRADE
-    -- downgrade scale. Default 0 = unflagged. CHECK rejects tamper
-    -- attempts that set out-of-range values directly via SQL.
+    -- Evidence vector, 5 downgrade domains. Stored inside the signed
+    -- Statement v1 predicate; denormalised here for queryable filters
+    -- ("WHERE ev_risk_of_bias <= -1"). Bounded [-2, 0]. Default 0 =
+    -- unflagged. CHECK rejects tamper attempts that set out-of-range
+    -- values directly via SQL.
     ev_risk_of_bias     INTEGER NOT NULL DEFAULT 0
                             CHECK (ev_risk_of_bias    BETWEEN -2 AND 0),
     ev_inconsistency    INTEGER NOT NULL DEFAULT 0
@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS claims (
                             CHECK (ev_imprecision     BETWEEN -2 AND 0),
     ev_pub_bias         INTEGER NOT NULL DEFAULT 0
                             CHECK (ev_pub_bias        BETWEEN -2 AND 0),
-    -- Full EvidenceVector serialised as JSON. The denormalised ev_*
+    -- Full evidence vector serialised as JSON. The denormalised ev_*
     -- columns above carry the queryable subset; rationale, upgrade
     -- flags, and reporting_compliance live in this JSON blob. The
     -- envelope's signed predicate is the authoritative copy.
@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS claims (
     -- contradiction_invalidates_older trigger when a signed
     -- contradiction_verdicts row references this claim. NULL for
     -- non-invalidated claims. The column is intentionally OUTSIDE
-    -- the claims_signed_fields_no_laundering watch list — invalidation
+    -- the claims_signed_fields_no_laundering watch list, invalidation
     -- IS a legitimate mutation, gated by the trigger that only fires
     -- on a signed verdict INSERT from an enrolled validator.
     t_invalid       INTEGER,
@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS claims (
     -- unless someone retries. EpistemicGraph.refresh_convergence()
     -- walks every flagged row, re-runs detection, and clears the flag
     -- on success. Like ``unresolved``, this column is OUTSIDE the
-    -- claims_signed_fields_no_laundering watch list — flipping it is
+    -- claims_signed_fields_no_laundering watch list, flipping it is
     -- a legitimate operational mutation, not predicate tampering.
     convergence_retry_needed INTEGER NOT NULL DEFAULT 0
                             CHECK (convergence_retry_needed IN (0, 1)),
@@ -101,7 +101,7 @@ CREATE TABLE IF NOT EXISTS claims (
     -- of truth. Adapters that need cryptographic integrity of the
     -- predicate body must encode it inside the claim text JSON.
     -- Idempotency reconciliation does NOT compare this field for the
-    -- same reason — federation exports that drop the column would
+    -- same reason, federation exports that drop the column would
     -- otherwise round-trip differently than direct asserts.
     predicate_payload TEXT NOT NULL DEFAULT '',
     -- Federation-import preservation. When a claim is re-asserted on
@@ -154,7 +154,7 @@ CREATE INDEX IF NOT EXISTS idx_claims_transparency_logged
     ON claims(transparency_logged);
 CREATE INDEX IF NOT EXISTS idx_claims_artifact_hash
     ON claims(artifact_hash) WHERE artifact_hash IS NOT NULL;
--- Partial index on flagged retries only — refresh_convergence iterates
+-- Partial index on flagged retries only, refresh_convergence iterates
 -- this set; the index keeps the walk O(retry-pending) rather than O(N).
 CREATE INDEX IF NOT EXISTS idx_claims_convergence_retry
     ON claims(claim_id) WHERE convergence_retry_needed = 1;
@@ -238,10 +238,10 @@ BEGIN
 END;
 
 -- Append-only over the signed predicate. The Statement v1 envelope
--- + signature binds every SIGNED_FIELDS value plus the GRADE
--- EvidenceVector + the statement_cid anchor. Without this trigger,
+-- + signature binds every SIGNED_FIELDS value plus the evidence
+-- vector + the statement_cid anchor. Without this trigger,
 -- a direct `UPDATE claims SET ev_risk_of_bias = 0 WHERE …` would
--- silently retroactively upgrade a claim's evidence quality —
+-- silently retroactively upgrade a claim's evidence quality , 
 -- signature verification on the unchanged envelope would still
 -- pass, but the row no longer matches what was signed. Refuse the
 -- mutation at the SQL layer; the envelope is the canonical source.
@@ -298,7 +298,7 @@ END;
 -- context that points to it). The whole "append-only over the signed
 -- predicate" framing requires this trigger as the twin of
 -- claims_signed_fields_no_laundering. Unsigned claims (legacy / no-key
--- mode) remain deletable — they carry no cryptographic commitment.
+-- mode) remain deletable, they carry no cryptographic commitment.
 CREATE TRIGGER IF NOT EXISTS claims_signed_no_delete
 BEFORE DELETE ON claims
 WHEN OLD.signature_bundle IS NOT NULL
@@ -412,7 +412,7 @@ BEGIN
 END;
 
 -- Append-only verdicts. Any UPDATE on the immutable columns of an
--- existing row is refused — the envelope is the source of truth,
+-- existing row is refused, the envelope is the source of truth,
 -- and a forged UPDATE would put the row out of sync with what was
 -- signed. The only mutation on these tables is INSERT.
 CREATE TRIGGER IF NOT EXISTS replication_verdicts_append_only
@@ -453,7 +453,7 @@ END;
 -- contradiction on an already-invalidated claim is a no-op rather
 -- than overwriting the earlier invalidation timestamp.
 --
--- DESIGN RULE — DO NOT PROPAGATE DOWNSTREAM. The trigger marks only the
+-- DESIGN RULE, DO NOT PROPAGATE DOWNSTREAM. The trigger marks only the
 -- directly-contradicted claim. Claims that cited the now-invalidated one
 -- via ``supports[]`` are unaffected. This is a deliberate boundary, not
 -- an oversight: transitive falsification is a different model with
@@ -483,24 +483,10 @@ BEGIN
       AND t_invalid IS NULL;
 END;
 
-CREATE TABLE IF NOT EXISTS doi_cache (
-    doi              TEXT PRIMARY KEY,
-    resolved         INTEGER NOT NULL CHECK (resolved IN (0, 1)),
-    registry         TEXT,
-    last_checked_at  TEXT NOT NULL,
-    -- SHA-256 hex of canonicalised metadata fetched from the registry
-    -- (title + year + container-title + author family names). NULL
-    -- when the cache row only carries a HEAD-check result with no
-    -- metadata body. find_drifted_dois compares a fresh fetch against
-    -- this column to detect post-publication corrections or
-    -- retractions.
-    content_digest   TEXT
-);
-
 -- Full-text search over claim text. Independent FTS5 virtual table
 -- (not content=claims) so the storage cost is the only price of the
 -- search feature and the sync triggers below stay readable.
--- ``claim_id`` is UNINDEXED — stored for join-back but not tokenized.
+-- ``claim_id`` is UNINDEXED, stored for join-back but not tokenized.
 -- The unicode61 tokenizer is locale-agnostic; remove_diacritics=2 folds
 -- accented characters so "gene" matches "géné".
 CREATE VIRTUAL TABLE IF NOT EXISTS claims_fts USING fts5(
@@ -544,9 +530,9 @@ CREATE TABLE IF NOT EXISTS validators (
 # Additive tables created on every open_db() call (both fresh and
 # already-initialised dbs). All CREATE statements are IF NOT EXISTS so
 # the script is idempotent. Lives outside _SCHEMA_SQL because it must
-# also run on the v1 path: existing v0.3.2 graph.db files have
-# user_version=1 and skip _SCHEMA_SQL entirely, so literature_claims
-# and agent_activities would otherwise be missing on every upgrade.
+# also run on the v1 path: existing graph.db files have user_version=1
+# and skip _SCHEMA_SQL entirely, so the trust-layer tables would
+# otherwise be missing on every upgrade.
 _ADDITIVE_TABLES_SQL = """
 -- project_policy: a root-signed, single-row declaration of project-wide
 -- trust policy. Today it carries rekor_required: once set, the project's
@@ -560,68 +546,6 @@ CREATE TABLE IF NOT EXISTS project_policy (
     signer_keyid   TEXT NOT NULL,
     envelope       TEXT NOT NULL,
     created_at     TEXT NOT NULL
-);
-
--- literature_claims: paper-ingested claim drafts.
--- Populated by `mareforma ingest`. Separate from the signed `claims`
--- table because ingest-extracted assertions are drafts pending review,
--- and most never get promoted into the signed graph.
-CREATE TABLE IF NOT EXISTS literature_claims (
-    claim_id      TEXT PRIMARY KEY,
-    source_doc_id TEXT NOT NULL,
-    doi           TEXT,
-    title         TEXT,
-    claim_text    TEXT NOT NULL,
-    confidence    REAL NOT NULL DEFAULT 0.5,
-    extracted_by  TEXT NOT NULL DEFAULT 'ingest:mock',
-    ingested_at   TEXT NOT NULL,
-    contradicts   TEXT
-);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS literature_claims_fts USING fts5(
-    claim_text,
-    content='literature_claims',
-    content_rowid='rowid'
-);
-
-CREATE TRIGGER IF NOT EXISTS literature_claims_ai
-AFTER INSERT ON literature_claims BEGIN
-    INSERT INTO literature_claims_fts(rowid, claim_text)
-    VALUES (new.rowid, new.claim_text);
-END;
-
-CREATE TRIGGER IF NOT EXISTS literature_claims_ad
-AFTER DELETE ON literature_claims BEGIN
-    INSERT INTO literature_claims_fts(literature_claims_fts, rowid, claim_text)
-    VALUES ('delete', old.rowid, old.claim_text);
-END;
-
--- AFTER UPDATE OF claim_text keeps the FTS index in sync when a caller
--- runs UPDATE literature_claims SET claim_text=? instead of the
--- INSERT-OR-REPLACE path. Without this trigger, ask returns hits from
--- stale text while the JOIN renders the current text — silently
--- misleading results with no error.
-CREATE TRIGGER IF NOT EXISTS literature_claims_au
-AFTER UPDATE OF claim_text ON literature_claims BEGIN
-    INSERT INTO literature_claims_fts(literature_claims_fts, rowid, claim_text)
-    VALUES ('delete', old.rowid, old.claim_text);
-    INSERT INTO literature_claims_fts(rowid, claim_text)
-    VALUES (new.rowid, new.claim_text);
-END;
-
--- agent_activities: PROV-O Activity rows for ambient Claude Code tool
--- calls (mareforma.hooks.agent_hook). High-volume, low-semantic-density
--- data — most rows never escalate into signed claims so they live
--- outside the signed envelope chain. Created here (instead of from the
--- hook on demand) so the table is part of the canonical schema and
--- mareforma.db.open_db is the only path that opens this DB.
-CREATE TABLE IF NOT EXISTS agent_activities (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id  TEXT,
-    tool_name   TEXT NOT NULL,
-    tool_input  TEXT NOT NULL,
-    started_at  TEXT NOT NULL,
-    prov_type   TEXT NOT NULL DEFAULT 'prov:Activity'
 );
 
 -- Trust layer: the structured meaning above the signed claim graph. A finding
@@ -706,6 +630,7 @@ CREATE TABLE IF NOT EXISTS findings (
     created_at        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_find_content ON findings(content_id);
+CREATE INDEX IF NOT EXISTS idx_find_claim   ON findings(claim_id);
 
 -- One independent line of evidence. data_id is the distinct-artifact key the
 -- independence heuristic counts over: two lines are independent iff their
@@ -717,6 +642,19 @@ CREATE TABLE IF NOT EXISTS evidence_lines (
     provenance_id  TEXT,
     design_type    TEXT,
     data_id        TEXT NOT NULL,
+    -- Model/method lineage observed at the call boundary, as a JSON record
+    -- {tier, model_id, family_root, provider, version, method, decoding,
+    -- attestor, digest}. attestor names how the identity was established
+    -- (provider-host, weights-digest for a local model, or declared); digest is
+    -- the served weights' sha256 for a weights-digest lineage and its
+    -- distinctness key. The tier mirrors the data_id axis: COMPUTED (body-parse
+    -- at the socket seam, or a local weights digest),
+    -- PROXY (producer-declared), UNVERIFIABLE (a fine-tune / alias / wrapper
+    -- whose base is not declarable). Identity only, it records which model and
+    -- method authored the line, never a claim about training-time contamination.
+    -- NULL on every line authored without an observed model call (including
+    -- every row that predates this column).
+    model_lineage  TEXT,
     created_at     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_line_finding ON evidence_lines(finding_id);
@@ -756,7 +694,7 @@ CREATE INDEX IF NOT EXISTS idx_estimate_contrast ON effect_estimates(contrast_id
 """
 
 
-# Explicit column list — avoids SELECT * coupling to schema changes.
+# Explicit column list, avoids SELECT * coupling to schema changes.
 # Source of truth for the column-presence check in open_db().
 _CLAIM_COLUMNS = (
     "claim_id", "text", "classification", "support_level",
@@ -772,7 +710,7 @@ _CLAIM_COLUMNS = (
     "asserter_keyid",
     "artifact_hash",
     "prev_hash",
-    # GRADE EvidenceVector denormalised columns + full JSON.
+    # Evidence-vector denormalised columns + full JSON.
     "ev_risk_of_bias", "ev_inconsistency", "ev_indirectness",
     "ev_imprecision", "ev_pub_bias",
     "evidence_json",

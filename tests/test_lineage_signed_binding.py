@@ -1,0 +1,199 @@
+"""Model lineage is bound into the signed finding and re-authenticated on read.
+
+The model-distinct axis reads ``evidence_lines.model_lineage``, a denormalised,
+unsigned column. Binding the lineage into the signed observed record (the same
+carrier as the grounding verdict) and rerouting the independence read to that
+signed copy closes the forge: a column edited out of band no longer moves the
+count. This mirrors the WHO-axis re-authentication ``_authentic_signer_keyid``
+already applies to the signer column.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import mareforma
+from mareforma.trust._store import effective_independence
+from tests._helpers import (
+    _bootstrap_key, _enroll_key, _est, _pred, _prop, _verdict,
+)
+
+_CLAUDE = "claude-3-5-sonnet-20241022"   # COMPUTED root: claude-3-5-sonnet
+_GPT = "gpt-4o-2024-08-06"               # COMPUTED root: gpt-4o
+
+_FORGED_COMPUTED = (
+    '{"tier":"COMPUTED","model_id":"gpt-4o-2024-08-06",'
+    '"family_root":"gpt-4o","provider":"openai","version":"2024-08-06",'
+    '"method":"m","decoding":{},"attestor":"provider-host","digest":null}'
+)
+
+
+def _tamper_one_line(conn, root: str) -> None:
+    """Rewrite exactly one evidence line's unsigned model_lineage column."""
+    line_id = conn.execute("SELECT line_id FROM evidence_lines LIMIT 1").fetchone()[0]
+    conn.execute(
+        "UPDATE evidence_lines SET model_lineage = ? WHERE line_id = ?",
+        (root, line_id),
+    )
+    conn.commit()
+
+
+def _forge_bundle_nonenrolled(conn, data_id: str, lineage_json: str) -> None:
+    """Re-point one finding's SIGNED lineage to a distinct model under a
+    non-enrolled, unverifiable signature.
+
+    The strongest producer forge: rewrite the bundle payload's
+    ``model_lineage``, stamp a non-enrolled keyid, and leave the signature
+    stale. The read must treat an unverifiable bundle as soft, never trust it.
+    Also updates the denormalized column so the two agree.
+    """
+    import base64 as _b64
+    row = conn.execute(
+        "SELECT f.claim_id, f.finding_id, c.signature_bundle "
+        "FROM findings f JOIN claims c ON c.claim_id = f.claim_id "
+        "JOIN evidence_lines el ON el.finding_id = f.finding_id "
+        "WHERE el.data_id = ? AND c.signature_bundle IS NOT NULL LIMIT 1",
+        (data_id,),
+    ).fetchone()
+    env = json.loads(row["signature_bundle"])
+    payload = json.loads(_b64.standard_b64decode(env["payload"]))
+    payload["predicate"]["observed_grounding"]["model_lineage"] = json.loads(
+        lineage_json)
+    env["payload"] = _b64.standard_b64encode(
+        json.dumps(payload).encode()).decode()
+    env["signatures"][0]["keyid"] = "deadbeef-not-enrolled-fabricated"
+    conn.execute("UPDATE claims SET signature_bundle = ? WHERE claim_id = ?",
+                 (json.dumps(env), row["claim_id"]))
+    conn.execute("UPDATE evidence_lines SET model_lineage = ? WHERE finding_id = ?",
+                 (lineage_json, row["finding_id"]))
+    conn.commit()
+
+
+class TestSignedLineageBinding:
+    def test_forged_column_does_not_break_same_model_collapse(
+        self, tmp_path: Path,
+    ) -> None:
+        """Two same-model checks whose one line's model_lineage column is forged
+        to a distinct COMPUTED root still collapse to a single independent line:
+        the read authenticates the column against the SIGNED lineage, so the
+        unsigned column cannot inflate independence."""
+        ka = _bootstrap_key(tmp_path, "ka.key")
+        kb = _bootstrap_key(tmp_path, "kb.key")
+        prop, pred = _prop(), _pred()
+        cid = prop.content_id()
+        with mareforma.open(tmp_path, key_path=ka) as g:
+            g.assert_finding(
+                prop, pred, _est(), data_id="ds1", generated_by="run1",
+                grounding=_verdict(_CLAUDE),
+            )
+        with mareforma.open(tmp_path, key_path=kb) as g:
+            g.assert_finding(
+                prop, pred, _est(), data_id="ds2", generated_by="run2",
+                grounding=_verdict(_CLAUDE),
+            )
+            # Forge one line's unsigned column to a distinct COMPUTED model.
+            _tamper_one_line(g._conn, _FORGED_COMPUTED)
+            eff = effective_independence(g._conn, cid)
+        # The signed copy still roots both lines to claude, so the collapse holds.
+        assert eff["number"] == 1
+
+    def test_genuine_distinct_models_still_corroborate(self, tmp_path: Path) -> None:
+        """The binding does not suppress a genuine cross-model pair: two distinct
+        COMPUTED models each signed by an ENROLLED validator still read as
+        effective 2. The second signer is enrolled so its bundle verifies; only
+        an authenticated distinct model counts (see the fail-closed forge test)."""
+        ka = _bootstrap_key(tmp_path, "ka.key")
+        kb = _bootstrap_key(tmp_path, "kb.key")
+        _enroll_key(tmp_path, ka, kb)
+        prop, pred = _prop(), _pred()
+        cid = prop.content_id()
+        with mareforma.open(tmp_path, key_path=ka) as g:
+            g.assert_finding(
+                prop, pred, _est(), data_id="ds1", generated_by="run1",
+                grounding=_verdict(_CLAUDE),
+            )
+        with mareforma.open(tmp_path, key_path=kb) as g:
+            g.assert_finding(
+                prop, pred, _est(), data_id="ds2", generated_by="run2",
+                grounding=_verdict(_GPT),
+            )
+            eff = effective_independence(g._conn, cid)
+        assert eff["number"] == 2
+        assert eff["soft"] is False
+
+    def test_nonenrolled_signed_forge_does_not_count(self, tmp_path: Path) -> None:
+        """The strongest producer forge is blocked: re-pointing a finding's
+        SIGNED lineage to a distinct model under a non-enrolled, unverifiable
+        signature must NOT inflate the count. An unverifiable bundle reads soft
+        (fail closed), never a trusted distinct model, so two same-model
+        findings stay collapsed even when one bundle is forged."""
+        ka = _bootstrap_key(tmp_path, "ka.key")
+        kb = _bootstrap_key(tmp_path, "kb.key")
+        prop, pred = _prop(), _pred()
+        cid = prop.content_id()
+        with mareforma.open(tmp_path, key_path=ka) as g:
+            g.assert_finding(
+                prop, pred, _est(), data_id="ds1", generated_by="run1",
+                grounding=_verdict(_CLAUDE),
+            )
+        with mareforma.open(tmp_path, key_path=kb) as g:
+            g.assert_finding(
+                prop, pred, _est(), data_id="ds2", generated_by="run2",
+                grounding=_verdict(_CLAUDE),
+            )
+            _forge_bundle_nonenrolled(g._conn, "ds2", _FORGED_COMPUTED)
+            eff = effective_independence(g._conn, cid)
+        # The forged bundle does not verify (non-enrolled signer), so its
+        # lineage reads soft and cannot mint a distinct model. Count stays 1.
+        assert eff["number"] == 1
+        assert eff["soft"] is True
+
+
+class TestV1DowngradeGuard:
+    def test_v1_finding_column_is_soft_not_a_counted_model(
+        self, tmp_path: Path,
+    ) -> None:
+        """A finding whose SIGNED record carries no model lineage (a legacy v1
+        mint) cannot forge a counted distinct model by setting the unsigned
+        column: the line reads soft, so two such forged columns do not inflate
+        independence to 2. Downgrading to the v1 path gains the adversary
+        nothing."""
+        ka = _bootstrap_key(tmp_path, "ka.key")
+        kb = _bootstrap_key(tmp_path, "kb.key")
+        prop, pred = _prop(), _pred()
+        cid = prop.content_id()
+        # Both findings are minted with a grounding verdict that carries NO model
+        # lineage (model_lineage=None), so their signed record is v1-shaped.
+        from mareforma.observe import GroundingVerdict, ObservedGrounding
+
+        v1 = GroundingVerdict(grounding=ObservedGrounding.OPAQUE, reason="v1")
+        with mareforma.open(tmp_path, key_path=ka) as g:
+            g.assert_finding(
+                prop, pred, _est(), data_id="ds1", generated_by="run1",
+                grounding=v1,
+            )
+            # Forge this line's unsigned column to a distinct COMPUTED model.
+            _tamper_one_line(g._conn, _FORGED_COMPUTED)
+        forged_claude = _FORGED_COMPUTED.replace("gpt-4o-2024-08-06", _CLAUDE)
+        forged_claude = forged_claude.replace('"gpt-4o"', '"claude-3-5-sonnet"')
+        with mareforma.open(tmp_path, key_path=kb) as g:
+            g.assert_finding(
+                prop, pred, _est(), data_id="ds2", generated_by="run2",
+                grounding=v1,
+            )
+            line_id = g._conn.execute(
+                "SELECT el.line_id FROM evidence_lines el "
+                "JOIN findings f ON f.finding_id = el.finding_id "
+                "JOIN evidence_lines el2 ON el2.finding_id = f.finding_id "
+                "WHERE el.data_id = 'ds2' LIMIT 1"
+            ).fetchone()[0]
+            g._conn.execute(
+                "UPDATE evidence_lines SET model_lineage = ? WHERE line_id = ?",
+                (forged_claude, line_id),
+            )
+            g._conn.commit()
+            eff = effective_independence(g._conn, cid)
+        # Neither forged column authenticates against a signed lineage, so both
+        # lines are soft: the count rests at the single-line floor, never 2.
+        assert eff["number"] == 1
+        assert eff["soft"] is True

@@ -18,10 +18,11 @@ No API key required.
 
 ## Setup: distinct keys per lab, plus a provenance-trace tool
 
-The signing key is the independence unit. REPLICATED fires when two claims share
-an ESTABLISHED upstream and are signed by **distinct keys**. `generated_by` is a
-display label, not what drives REPLICATED. Each lab signs with its own key,
-passed per-call via `signer=`.
+Distinct signing keys are the legacy independence signal, used when no model
+lineage is observed; effective independence counts distinct model and method. Two
+claims that share an ESTABLISHED upstream, signed by **distinct keys**, reach the
+REPLICATED support level. `generated_by` is a display label, not what drives it.
+Each lab signs with its own key, passed per-call via `signer=`.
 
 ```python
 # get_tools() gives the read tool; the write tool binds the graph's default key,
@@ -38,7 +39,7 @@ graph.enroll_validator(
 
 @tool
 def get_provenance_trace(claim_id: str) -> dict:
-    """Return a claim's full lineage — sources, upstream, classification,
+    """Return a claim's full lineage, sources, upstream, classification,
     support level. This is what Lab B reads: the trace, not the raw data."""
     claim = graph.get_claim(claim_id)
     return {} if claim is None else {
@@ -80,19 +81,19 @@ step_2 = graph.assert_claim(
   step_2 id: 99c0ccd6…
 
   Raw data stays at Lab A.
-  The trace — sources, steps, upstream evidence — is in the shared graph.
+  The trace, sources, steps, upstream evidence, is in the shared graph.
 ```
 
 ## Lab B: reads the trace, replicates independently
 
 ```python
-# Lab B reads Lab A's trace from the shared graph — the experimental logic,
-# not the data — then runs the same hypothesis on its own private dataset.
+# Lab B reads Lab A's trace from the shared graph, the experimental logic,
+# not the data, then runs the same hypothesis on its own private dataset.
 lab_a_findings = json.loads(query_graph.invoke(
     {"topic": "Target T", "min_support": "PRELIMINARY"}))
 for f in lab_a_findings:
     trace = get_provenance_trace.invoke({"claim_id": f["claim_id"]})
-    # trace['source_name'] names Lab A's data — which Lab B cannot access.
+    # trace['source_name'] names Lab A's data, which Lab B cannot access.
 
 rep_1 = graph.assert_claim(
     "Candidate target T shows elevated activity in condition C"
@@ -162,7 +163,10 @@ for c in graph.query("Target T"):
   Target T activity in condition C is specific … PRELIMINARY
 
   ✓ REPLICATED: distinct signing keys, shared upstream, independent data paths.
-    The finding holds across datasets. Genuine replication.
+    The labs replicated across datasets. REPLICATED is a support label,
+    though: read effective independence to know a distinct model checked
+    the finding, not two runs of one. The spurious contrast below shows
+    REPLICATED firing on nothing.
 ```
 
 ## Q3: Provenance distance, and the spurious-replication trap
@@ -190,7 +194,7 @@ spurious_b = graph.assert_claim(
   spurious_b support_level       REPLICATED
   spurious_a classification      INFERRED
 
-  REPLICATED fired — but classification=INFERRED and source_name=''.
+  REPLICATED fired, but classification=INFERRED and source_name=''.
   Two distinct keys repeated the same LLM prior. No data behind either finding.
 ```
 

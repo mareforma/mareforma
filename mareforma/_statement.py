@@ -10,7 +10,7 @@ Sigstore and SLSA). The envelope shape is::
       "subject":       [{"name": "mareforma:claim:<id>",
                          "digest": {"sha256": "<text_sha256>"}}],
       "predicateType": "urn:mareforma:predicate:claim:v1",
-      "predicate":     { <claim fields + EvidenceVector> }
+      "predicate":     { <claim fields + evidence vector> }
     }
 
 The Statement dict is canonicalized (sorted keys, NFC text, no whitespace)
@@ -103,7 +103,7 @@ def build_statement(
     created_at
         ISO 8601 UTC, microsecond precision (existing mareforma convention).
     evidence
-        GRADE EvidenceVector serialized via :meth:`EvidenceVector.to_dict`.
+        Evidence-vector dict bound into the signed predicate.
     observed_grounding
         Optional computed-grounding record (the observed axis: a verdict of
         GROUNDED / UNGROUNDED / OPAQUE plus its reason, receipt digest, and
@@ -111,7 +111,7 @@ def build_statement(
         the signed predicate ONLY when present, so a claim asserted without the
         observer produces byte-identical bytes to a pre-observer claim. Its
         absence in an envelope is read as "no observed verdict was recorded,"
-        never as tampering — a claim signed before this field existed still
+        never as tampering, a claim signed before this field existed still
         verifies. The declared ``classification`` above is untouched: the
         observed axis is additive and lives in a separate value space.
     """

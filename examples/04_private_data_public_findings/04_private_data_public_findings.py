@@ -1,5 +1,5 @@
 """
-examples/04_private_data_public_findings.py — Private data, public findings.
+examples/04_private_data_public_findings.py, Private data, public findings.
 
 Run:
     pip install langchain-core
@@ -9,7 +9,7 @@ No API key required.
 
 Story
 -----
-Two autonomous AI scientists — Lab A and Lab B — work on the same hypothesis
+Two autonomous AI scientists, Lab A and Lab B, work on the same hypothesis
 using different private datasets. Neither has access to the other's raw data.
 Both connect to a shared Mareforma epistemic graph.
 
@@ -19,7 +19,7 @@ Both connect to a shared Mareforma epistemic graph.
   made at each stage, and which upstream evidence was cited.
   The raw data never leaves Lab A.
 
-  Lab B receives only the provenance trace — not the data, not the model,
+  Lab B receives only the provenance trace, not the data, not the model,
   not the code. From the trace, Lab B reconstructs the experimental logic,
   runs an independent replication on its own private dataset, and publishes
   its own trace back to the shared graph.
@@ -87,11 +87,14 @@ key_path = tmp / "_example_key"
 _signing.bootstrap_key(key_path)
 graph = mareforma.open(tmp, key_path=key_path)
 
-# Each lab signs with its own key. The signing key is the independence unit:
-# REPLICATED fires when two claims share an ESTABLISHED upstream and are signed
-# by DISTINCT keys. generated_by is a display label, not what drives REPLICATED.
-# In real use each lab runs its own `mareforma bootstrap`; here we mint both keys
-# inline and pass them per-call via signer=.
+# Each lab signs with its own key. Distinct signing keys drive the REPLICATED
+# support level (two claims that share an ESTABLISHED upstream, signed by DISTINCT
+# keys). Distinct signers are not effective independence, though: that counts
+# distinct MODELS, so two labs on one model stay at effective independence 1, and
+# the spurious case below shows REPLICATED firing on nothing. generated_by is a
+# display label, not what drives either. In real use each lab runs its own
+# `mareforma bootstrap`; here we mint both keys inline and pass them per-call via
+# signer=.
 lab_a_key_path = tmp / "_lab_a_key"
 lab_b_key_path = tmp / "_lab_b_key"
 _signing.bootstrap_key(lab_a_key_path)
@@ -128,7 +131,7 @@ def get_provenance_trace(claim_id: str) -> dict:
 
     Returns the claim with its complete epistemic lineage:
     sources queried, upstream evidence cited, classification, support level.
-    This is what Lab B reads from Lab A's published finding —
+    This is what Lab B reads from Lab A's published finding , 
     the trace, not the raw data.
     """
     claim = graph.get_claim(claim_id)
@@ -147,13 +150,13 @@ def get_provenance_trace(claim_id: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Lab A — discovers the finding, publishes the trace
+# Lab A, discovers the finding, publishes the trace
 # ---------------------------------------------------------------------------
 
-sep("Lab A — discovery and trace publication")
+sep("Lab A, discovery and trace publication")
 
 # Bootstrap an ESTABLISHED upstream both labs cite. Under the ESTABLISHED-upstream
-# rule, REPLICATED requires at least one ESTABLISHED claim in supports[] — matches
+# rule, REPLICATED requires at least one ESTABLISHED claim in supports[], matches
 # Cochrane/GRADE evidence-chain methodology. seed=True asserts directly at
 # ESTABLISHED via a signed seed envelope (enrolled validators only).
 upstream_ref = graph.assert_claim(
@@ -192,17 +195,17 @@ print(f"  step_1 id: {step_1[:8]}…")
 print(f"  step_2 id: {step_2[:8]}…")
 print()
 print("  Raw data stays at Lab A.")
-print("  The trace — sources, steps, upstream evidence — is in the shared graph.")
+print("  The trace, sources, steps, upstream evidence, is in the shared graph.")
 
 
 # ---------------------------------------------------------------------------
-# Lab B — reads the trace, replicates independently
+# Lab B, reads the trace, replicates independently
 # ---------------------------------------------------------------------------
 
-sep("Lab B — reads trace, runs independent replication")
+sep("Lab B, reads trace, runs independent replication")
 
 # Step 1: Lab B reads Lab A's provenance trace from the shared graph.
-# It sees the experimental logic — not the data.
+# It sees the experimental logic, not the data.
 lab_a_findings = json.loads(query_graph.invoke({"topic": "Target T", "min_support": "PRELIMINARY"}))
 print(f"  query_graph('Target T') → {len(lab_a_findings)} claims from Lab A\n")
 
@@ -244,10 +247,10 @@ print(f"  rep_2 id: {rep_2[:8]}…")
 
 
 # ---------------------------------------------------------------------------
-# Q1 — Independent data paths?
+# Q1, Independent data paths?
 # ---------------------------------------------------------------------------
 
-sep("Q1 — Independent data paths?")
+sep("Q1, Independent data paths?")
 
 all_claims = graph.query("Target T")
 sources = {c.get("source_name") for c in all_claims if c.get("source_name")}
@@ -265,10 +268,10 @@ else:
 
 
 # ---------------------------------------------------------------------------
-# Q2 — Genuinely reproducible?
+# Q2, Genuinely reproducible?
 # ---------------------------------------------------------------------------
 
-sep("Q2 — Genuinely reproducible?")
+sep("Q2, Genuinely reproducible?")
 
 for c in graph.query("Target T"):
     show(c["text"][:45] + "…", c["support_level"])
@@ -276,21 +279,24 @@ for c in graph.query("Target T"):
 print()
 c_rep1 = graph.get_claim(rep_1)
 c_rep2 = graph.get_claim(rep_2)
-support_1 = c_rep1["support_level"] if c_rep1 else "—"
-support_2 = c_rep2["support_level"] if c_rep2 else "—"
+support_1 = c_rep1["support_level"] if c_rep1 else "n/a"
+support_2 = c_rep2["support_level"] if c_rep2 else "n/a"
 
 if support_1 == "REPLICATED" or support_2 == "REPLICATED":
     print("  ✓ REPLICATED: distinct signing keys, shared upstream, independent data paths.")
-    print("    The finding holds across datasets. Genuine replication.")
+    print("    The labs replicated across datasets. REPLICATED is a support label,")
+    print("    though: read effective independence to know a distinct model checked")
+    print("    the finding, not two runs of one. The spurious contrast below shows")
+    print("    REPLICATED firing on nothing.")
 else:
-    print("  Claims are PRELIMINARY — replication pending.")
+    print("  Claims are PRELIMINARY: replication pending.")
 
 
 # ---------------------------------------------------------------------------
-# Q3 — Provenance distance?
+# Q3, Provenance distance?
 # ---------------------------------------------------------------------------
 
-sep("Q3 — Provenance distance?")
+sep("Q3, Provenance distance?")
 
 print("""
   Provenance distance measures how far a conclusion is from raw data.
@@ -301,7 +307,7 @@ print("""
   Lab B's chain:  upstream_ref_A → ANALYTICAL (rep_1)  → ANALYTICAL (rep_2)
 
   Both chains are anchored in ANALYTICAL findings from independent sources.
-  The shared node (upstream_ref_A) is the prior literature — not a model prior.
+  The shared node (upstream_ref_A) is the prior literature, not a model prior.
 
   Compare with spurious replication (see below): both chains INFERRED,
   no data behind either. REPLICATED fires but the signal is worthless.
@@ -309,10 +315,10 @@ print("""
 
 
 # ---------------------------------------------------------------------------
-# Contrast — spurious replication
+# Contrast, spurious replication
 # ---------------------------------------------------------------------------
 
-sep("Contrast — spurious replication (what to watch for)")
+sep("Contrast, spurious replication (what to watch for)")
 
 # Both labs assert INFERRED with no source_name and no real data.
 # REPLICATED still fires: distinct signing keys, shared ESTABLISHED upstream.
@@ -336,12 +342,12 @@ spurious_b = graph.assert_claim(
 
 c_sp_a = graph.get_claim(spurious_a)
 c_sp_b = graph.get_claim(spurious_b)
-show("spurious_a support_level", c_sp_a["support_level"] if c_sp_a else "—")
-show("spurious_b support_level", c_sp_b["support_level"] if c_sp_b else "—")
-show("spurious_a classification", c_sp_a["classification"] if c_sp_a else "—")
+show("spurious_a support_level", c_sp_a["support_level"] if c_sp_a else "n/a")
+show("spurious_b support_level", c_sp_b["support_level"] if c_sp_b else "n/a")
+show("spurious_a classification", c_sp_a["classification"] if c_sp_a else "n/a")
 
 print()
-print("  REPLICATED fired — but classification=INFERRED and source_name=''.")
+print("  REPLICATED fired, but classification=INFERRED and source_name=''.")
 print("  Two distinct keys repeated the same LLM prior. No data behind either finding.")
 print()
 print("  The graph makes this detectable:")

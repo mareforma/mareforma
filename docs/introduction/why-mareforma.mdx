@@ -55,11 +55,16 @@ page.
   model fill the gap from its prior? `observe()` watches the run and returns
   GROUNDED, UNGROUNDED, or OPAQUE when the read happened somewhere it could not
   see.
-- **Convergence, weighed honestly.** Two independent keys asserting the same
-  finding raise it to REPLICATED. But a second key minted from the same model
-  shares the same blind spots, so REPLICATED is a prior, not a proof. A human
-  validator, one of the more dependable sources of independent error, raises a
-  finding to ESTABLISHED.
+- **Effective independence.** The lead signal is a computed count: the number of
+  pairwise-distinct (model, data, signer) checks behind a finding. A second key
+  minted from the same model shares the same blind spots, so it does not raise
+  the count when the model each check used is observed. A genuinely different
+  model, or a human check (one of the more dependable sources of independent
+  error), does. A check whose model was not observed cannot certify a distinct
+  model, so it counts on the older signer axis and the trust map marks the
+  difference, rather than silently reading as independent. The older `REPLICATED` and
+  `ESTABLISHED` labels still resolve this release as deprecated aliases, but the
+  number is what to read.
 - **The residual.** Where independence cannot be checked, Mareforma says so. The
   trust map reports each property it computed, each it could only proxy, and each
   it does not evaluate, instead of rounding up to a verdict.

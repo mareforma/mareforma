@@ -1,5 +1,5 @@
 """
-tests/test_graph.py — EpistemicGraph: mareforma.open(), assert_claim(),
+tests/test_graph.py, EpistemicGraph: mareforma.open(), assert_claim(),
 query(), get_claim(), validate(), and mareforma.schema().
 
 Coverage
@@ -68,7 +68,6 @@ def test_open_context_manager_closes_connection(tmp_path):
         ("validate", lambda: graph.validate(claim_id)),
         ("enroll_validator", lambda: graph.enroll_validator(b"pem", identity="x")),
         ("list_validators", lambda: graph.list_validators()),
-        ("refresh_unresolved", lambda: graph.refresh_unresolved()),
         ("refresh_unsigned", lambda: graph.refresh_unsigned()),
         ("get_tools", lambda: graph.get_tools()),
     ]
@@ -84,7 +83,7 @@ def test_open_default_path_uses_cwd(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# assert_claim() — classification
+# assert_claim(), classification
 # ---------------------------------------------------------------------------
 
 def test_assert_claim_default_classification_is_inferred(tmp_path):
@@ -118,14 +117,14 @@ def test_assert_claim_invalid_classification_raises(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# assert_claim() — idempotency
+# assert_claim(), idempotency
 # ---------------------------------------------------------------------------
 
 def test_assert_claim_idempotency_key_no_duplicate(tmp_path):
     with mareforma.open(tmp_path) as graph:
         id1 = graph.assert_claim("finding A", idempotency_key="run1_claim0")
         id2 = graph.assert_claim("finding A", idempotency_key="run1_claim0")
-        # Unsigned mode — no validators table; opt out of the default
+        # Unsigned mode, no validators table; opt out of the default
         # enrolled-identity filter so the rows surface.
         all_claims = graph.query(include_unverified=True)
     assert id1 == id2
@@ -141,7 +140,7 @@ def test_assert_claim_different_keys_creates_two(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# assert_claim() — REPLICATED trigger
+# assert_claim(), REPLICATED trigger
 # ---------------------------------------------------------------------------
 
 def test_assert_claim_replicated_triggers_on_independent_agents(tmp_path):
@@ -394,7 +393,7 @@ def test_schema_is_stable_across_calls():
 def test_schema_replicated_rule_is_the_distinct_signer_model():
     """schema() is a machine contract agents follow. It must describe the
     distinct-signer convergence rule, not the retired single-key generated_by
-    rule — an agent following the old text signs both claims with one key and
+    rule, an agent following the old text signs both claims with one key and
     never promotes."""
     s = mareforma.schema()
     rep = next(
@@ -418,7 +417,7 @@ def test_get_tools_returns_two_callables(tmp_path):
     """The agent-tool callables must be live when the graph is open AND
     must refuse to operate after the context manager closes the
     connection. ``callable()`` alone is True for any function and proves
-    nothing about post-close behavior — exercise both states explicitly.
+    nothing about post-close behavior, exercise both states explicitly.
     """
     import json
     key_path = _bootstrap_key(tmp_path)
@@ -451,7 +450,7 @@ def test_get_tools_returns_two_callables(tmp_path):
 def test_get_tools_query_returns_valid_json(tmp_path):
     import json
     # Bootstrap a key so the root auto-enrolls and the claim's signing
-    # keyid is in the validators table — the default LLM-tool query
+    # keyid is in the validators table, the default LLM-tool query
     # filter (include_unverified=False) excludes unverified PRELIMINARY.
     key_path = _bootstrap_key(tmp_path)
     with mareforma.open(tmp_path, key_path=key_path) as graph:
@@ -460,7 +459,7 @@ def test_get_tools_query_returns_valid_json(tmp_path):
         result = query_graph("Target T")
     data = json.loads(result)
     assert len(data) == 1
-    # query_graph routes through query_for_llm — text is wrapped in
+    # query_graph routes through query_for_llm, text is wrapped in
     # <untrusted_data> so the consuming LLM treats it as data, not
     # instructions. The substring is still present.
     assert "Target T is elevated" in data[0]["text"]
@@ -476,7 +475,7 @@ def test_get_tools_query_neutralises_forged_delimiter(tmp_path):
     A claim text containing a forged `</untrusted_data>` close tag must
     not break out of the wrapper when delivered through the tool path.
     Before the Finding 1 fix, query_graph used the raw query() and
-    returned the forged tag verbatim — this test pins the safe path so
+    returned the forged tag verbatim, this test pins the safe path so
     a future refactor reopening the bypass is caught."""
     import json
     key_path = _bootstrap_key(tmp_path)
@@ -534,303 +533,12 @@ def test_get_tools_supports_none_is_valid(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# DOI resolution
-# ---------------------------------------------------------------------------
-
-_CROSSREF = "https://api.crossref.org/works/{doi}"
-_DATACITE = "https://api.datacite.org/dois/{doi}"
-
-
-class TestDoiResolution:
-    def test_assert_with_resolved_doi_is_not_unresolved(self, tmp_path, httpx_mock):
-        httpx_mock.add_response(
-            method="HEAD",
-            url=_CROSSREF.format(doi="10.1038/real"),
-            status_code=200,
-        )
-        with mareforma.open(tmp_path) as graph:
-            claim_id = graph.assert_claim(
-                "Finding cites a real paper",
-                supports=["10.1038/real"],
-                generated_by="agent/a",
-            )
-            claim = graph.get_claim(claim_id)
-        assert claim["unresolved"] == 0
-
-    def test_assert_with_unresolved_doi_is_marked_unresolved(self, tmp_path, httpx_mock):
-        httpx_mock.add_response(
-            method="HEAD",
-            url=_CROSSREF.format(doi="10.9999/fake"),
-            status_code=404,
-        )
-        httpx_mock.add_response(
-            method="HEAD",
-            url=_DATACITE.format(doi="10.9999/fake"),
-            status_code=404,
-        )
-        with mareforma.open(tmp_path) as graph:
-            claim_id = graph.assert_claim(
-                "Finding cites a fake DOI",
-                supports=["10.9999/fake"],
-                generated_by="agent/a",
-            )
-            claim = graph.get_claim(claim_id)
-        assert claim["unresolved"] == 1
-
-    def test_unresolved_claim_does_not_trigger_replicated(self, tmp_path, httpx_mock):
-        # Both fork attempts cite a DOI that doesn't resolve.
-        httpx_mock.add_response(
-            method="HEAD",
-            url=_CROSSREF.format(doi="10.9999/missing"),
-            status_code=404,
-        )
-        httpx_mock.add_response(
-            method="HEAD",
-            url=_DATACITE.format(doi="10.9999/missing"),
-            status_code=404,
-        )
-        with mareforma.open(tmp_path) as graph:
-            id_a = graph.assert_claim(
-                "finding A",
-                supports=["10.9999/missing"],
-                generated_by="agent/a",
-            )
-            id_b = graph.assert_claim(
-                "finding B",
-                supports=["10.9999/missing"],
-                generated_by="agent/b",
-            )
-            claim_a = graph.get_claim(id_a)
-            claim_b = graph.get_claim(id_b)
-        # Both stay PRELIMINARY because unresolved=1 makes them ineligible.
-        assert claim_a["support_level"] == "PRELIMINARY"
-        assert claim_b["support_level"] == "PRELIMINARY"
-
-    def test_claim_id_supports_pass_through_no_network(self, tmp_path, httpx_mock):
-        # Bare claim_ids in supports[] should not trigger any DOI resolution
-        # (no httpx mocks registered — pytest-httpx fails if any HTTP call is made).
-        with mareforma.open(tmp_path) as graph:
-            prior = graph.assert_claim("upstream", generated_by="seed")
-            child = graph.assert_claim(
-                "downstream finding",
-                supports=[prior],
-                generated_by="agent/a",
-            )
-            claim = graph.get_claim(child)
-        assert claim["unresolved"] == 0
-
-    def test_refresh_unresolved_promotes_when_doi_now_resolves(self, tmp_path, httpx_mock):
-        # First attempt: DOI fails to resolve.
-        httpx_mock.add_response(
-            method="HEAD",
-            url=_CROSSREF.format(doi="10.1038/temp"),
-            status_code=503,
-        )
-        httpx_mock.add_response(
-            method="HEAD",
-            url=_DATACITE.format(doi="10.1038/temp"),
-            status_code=503,
-        )
-
-        with mareforma.open(tmp_path) as graph:
-            claim_id = graph.assert_claim(
-                "finding pending DOI",
-                supports=["10.1038/temp"],
-                generated_by="agent/a",
-            )
-            claim = graph.get_claim(claim_id)
-            assert claim["unresolved"] == 1
-
-            # Refresh: now Crossref returns 200.
-            httpx_mock.add_response(
-                method="HEAD",
-                url=_CROSSREF.format(doi="10.1038/temp"),
-                status_code=200,
-            )
-            result = graph.refresh_unresolved()
-            assert result == {"checked": 1, "resolved": 1, "still_unresolved": 0}
-
-            claim = graph.get_claim(claim_id)
-            assert claim["unresolved"] == 0
-
-    def test_update_claim_re_resolves_dois(self, tmp_path, httpx_mock):
-        """update_claim must re-resolve DOIs when supports/contradicts change.
-
-        Otherwise a stale unresolved=0 flag could let a claim with a newly-added
-        fake DOI reach REPLICATED, or a claim could be pinned unresolved=1 after
-        its bad DOI is removed.
-        """
-        from mareforma.db import open_db, add_claim, update_claim, get_claim
-
-        # Resolved DOI on initial assert.
-        httpx_mock.add_response(
-            method="HEAD",
-            url=_CROSSREF.format(doi="10.1038/good"),
-            status_code=200,
-        )
-        # Fake DOI fails on both registries after update.
-        httpx_mock.add_response(
-            method="HEAD",
-            url=_CROSSREF.format(doi="10.9999/fake"),
-            status_code=404,
-        )
-        httpx_mock.add_response(
-            method="HEAD",
-            url=_DATACITE.format(doi="10.9999/fake"),
-            status_code=404,
-        )
-
-        conn = open_db(tmp_path)
-        try:
-            claim_id = add_claim(
-                conn, tmp_path, "initial finding",
-                supports=["10.1038/good"],
-            )
-            # _graph.py would mark unresolved correctly; here we resolve manually
-            # via update_claim to exercise that path.
-            from mareforma import doi_resolver as _doi
-            _doi.resolve_dois_with_cache(conn, ["10.1038/good"])
-            update_claim(conn, tmp_path, claim_id, supports=["10.1038/good"])
-            assert get_claim(conn, claim_id)["unresolved"] == 0
-
-            # Update to add a fake DOI → unresolved should flip to 1.
-            update_claim(conn, tmp_path, claim_id, supports=["10.1038/good", "10.9999/fake"])
-            assert get_claim(conn, claim_id)["unresolved"] == 1
-
-            # Remove the fake DOI → unresolved should clear back to 0.
-            update_claim(conn, tmp_path, claim_id, supports=["10.1038/good"])
-            assert get_claim(conn, claim_id)["unresolved"] == 0
-        finally:
-            conn.close()
-
-    def test_update_claim_curing_unresolved_triggers_replicated(
-        self, tmp_path, httpx_mock,
-    ):
-        """Curing a stale-unresolved claim must trigger REPLICATED.
-
-        Two agents both cite the same upstream claim_id, but one starts with a
-        DOI that does not yet resolve (unresolved=1). When that claim's
-        unresolved flag clears (the DOI now resolves), the resulting
-        unresolved 1→0 transition must re-run the REPLICATED convergence
-        check — otherwise both claims stay PRELIMINARY forever, defeating the
-        convergence guarantee.
-
-        Under the v0.3.7 signed-asserter model the two converging peers must
-        carry distinct, non-NULL asserter_keyid (so each is signed). Signed
-        claims are append-only across their signed surface, so the cure runs
-        through ``mark_claim_resolved`` (the production same-DOI-now-resolves
-        path that clears the flag without mutating signed supports), not a
-        supports-swap via ``update_claim`` which is refused on signed rows.
-        """
-        from mareforma.db import (
-            open_db, add_claim, mark_claim_resolved, get_claim,
-        )
-        from mareforma import doi_resolver as _doi
-
-        # Agent B's DOI initially fails to resolve on both registries.
-        httpx_mock.add_response(
-            method="HEAD",
-            url=_CROSSREF.format(doi="10.9999/bad"),
-            status_code=404,
-        )
-        httpx_mock.add_response(
-            method="HEAD",
-            url=_DATACITE.format(doi="10.9999/bad"),
-            status_code=404,
-        )
-
-        # REPLICATED requires an ESTABLISHED upstream. Bootstrap a key
-        # and seed the upstream via the graph API, then drop down to the
-        # db API for the DOI-curing flow this test actually exercises.
-        key_path = _bootstrap_key(tmp_path)
-        sa, sb = _two_signers(tmp_path)
-        with mareforma.open(tmp_path, key_path=key_path) as g:
-            upstream = g.assert_claim(
-                "upstream observation", generated_by="seed", seed=True,
-            )
-
-        conn = open_db(tmp_path)
-        try:
-            # Agent A cites upstream cleanly → PRELIMINARY (no peer yet).
-            id_a = add_claim(
-                conn, tmp_path, "agent A finding",
-                supports=[upstream],
-                generated_by="agent/a",
-                signer=sa,
-            )
-            assert get_claim(conn, id_a)["support_level"] == "PRELIMINARY"
-
-            # Agent B cites upstream plus an unresolved DOI; unresolved=1
-            # blocks REPLICATED.
-            _doi.resolve_dois_with_cache(conn, ["10.9999/bad"])
-            id_b = add_claim(
-                conn, tmp_path, "agent B finding",
-                supports=[upstream, "10.9999/bad"],
-                generated_by="agent/b",
-                unresolved=True,
-                signer=sb,
-            )
-            assert get_claim(conn, id_b)["unresolved"] == 1
-            assert get_claim(conn, id_b)["support_level"] == "PRELIMINARY"
-            assert get_claim(conn, id_a)["support_level"] == "PRELIMINARY"
-
-            # Agent B's DOI now resolves; clearing the unresolved flag must
-            # flip unresolved 1→0 AND re-fire REPLICATED on both claims.
-            mark_claim_resolved(conn, tmp_path, id_b)
-            assert get_claim(conn, id_b)["unresolved"] == 0
-            assert get_claim(conn, id_b)["support_level"] == "REPLICATED"
-            assert get_claim(conn, id_a)["support_level"] == "REPLICATED"
-        finally:
-            conn.close()
-
-    def test_refresh_unresolved_quarantines_corrupt_json(self, tmp_path):
-        """A claim with corrupt supports_json must NOT abort the whole refresh.
-
-        Other unresolved claims in the same call must still be processed,
-        and the corrupt one must be reported as still_unresolved.
-        """
-        from mareforma.db import open_db, add_claim
-
-        conn = open_db(tmp_path)
-        try:
-            # Manually insert a claim with corrupt supports_json.
-            import uuid as _uuid
-            from datetime import datetime, timezone
-            now = datetime.now(timezone.utc).isoformat()
-            bad_id = str(_uuid.uuid4())
-            conn.execute(
-                "INSERT INTO claims (claim_id, text, classification, "
-                "support_level, status, generated_by, supports_json, "
-                "contradicts_json, unresolved, created_at, updated_at) "
-                "VALUES (?, ?, 'INFERRED', 'PRELIMINARY', 'open', 'seed', "
-                "'{not valid json', '[]', 1, ?, ?)",
-                (bad_id, "corrupt claim", now, now),
-            )
-            # Insert a healthy unresolved claim with no DOIs (should clear).
-            add_claim(
-                conn, tmp_path, "healthy claim", generated_by="seed", unresolved=True,
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-        import mareforma
-        with mareforma.open(tmp_path) as graph:
-            result = graph.refresh_unresolved()
-
-        # Both claims processed; corrupt one stays unresolved, healthy one cleared.
-        assert result["checked"] == 2
-        assert result["resolved"] == 1
-        assert result["still_unresolved"] == 1
-
-
-# ---------------------------------------------------------------------------
 # Strict UUIDv4 in _CLAIM_ID_RE
 # ---------------------------------------------------------------------------
 
 
 class TestClaimIdRegexStrictV4:
-    """The graph's claim_id pattern is strict UUIDv4 — version=4 in
+    """The graph's claim_id pattern is strict UUIDv4, version=4 in
     the third group, variant in {8,9,a,b} in the fourth. Non-v4 UUIDs
     in ``supports[]`` are treated as external references (like DOIs),
     not as graph-node candidates."""
@@ -856,16 +564,16 @@ class TestClaimIdRegexStrictV4:
         assert not _is_claim_id("12345678-1234-5234-8234-123456789012")
 
     def test_zero_uuid_rejected(self):
-        """The all-zeros nil UUID is rejected — version nibble is 0."""
+        """The all-zeros nil UUID is rejected, version nibble is 0."""
         from mareforma.db import _is_claim_id
         assert not _is_claim_id("00000000-0000-0000-0000-000000000000")
 
     def test_invalid_variant_rejected(self):
         """Variant nibble must be in {8, 9, a, b} (binary 10xx)."""
         from mareforma.db import _is_claim_id
-        # Variant 0 (binary 0xxx) — RFC 4122 says NCS reserved, not v4.
+        # Variant 0 (binary 0xxx), RFC 4122 says NCS reserved, not v4.
         assert not _is_claim_id("12345678-1234-4234-0234-123456789012")
-        # Variant c (binary 110x) — Microsoft GUID reserved.
+        # Variant c (binary 110x), Microsoft GUID reserved.
         assert not _is_claim_id("12345678-1234-4234-c234-123456789012")
 
     def test_substrate_generated_ids_match(self, tmp_path):
@@ -878,7 +586,7 @@ class TestClaimIdRegexStrictV4:
 
     def test_non_v4_in_supports_not_flagged_as_dangling(self, tmp_path):
         """A non-v4 UUID-shape in supports[] is treated as external, not
-        dangling — find_dangling_supports skips it."""
+        dangling, find_dangling_supports skips it."""
         non_v4 = "12345678-1234-1234-1234-123456789012"  # version=1
         with mareforma.open(tmp_path) as graph:
             graph.assert_claim(
@@ -931,7 +639,7 @@ class TestClassifySupports:
             ]
 
     def test_non_v4_uuid_classified_as_external(self, tmp_path):
-        """Non-v4 UUIDs are not graph nodes — they fall to external."""
+        """Non-v4 UUIDs are not graph nodes, they fall to external."""
         non_v4 = "12345678-1234-1234-1234-123456789012"  # version=1
         with mareforma.open(tmp_path) as graph:
             result = graph.classify_supports([non_v4])
@@ -1056,15 +764,8 @@ class TestFindDanglingSupports:
             result = graph.find_dangling_supports()
             assert result == [{"claim_id": cid, "dangling_ref": phantom}]
 
-    def test_dois_are_not_flagged(self, tmp_path, monkeypatch):
+    def test_dois_are_not_flagged(self, tmp_path):
         """DOIs in supports[] are external references and never dangling."""
-        # Force DOI resolution to succeed without network.
-        from mareforma import doi_resolver
-        monkeypatch.setattr(
-            doi_resolver, "resolve_dois_with_cache",
-            lambda conn, dois: {d: True for d in dois},
-        )
-
         with mareforma.open(tmp_path) as graph:
             graph.assert_claim(
                 "doi-citer",
@@ -1154,7 +855,7 @@ class TestConvergenceErrorCounter:
             assert graph.convergence_errors >= 1
 
     def test_counter_is_read_only(self, tmp_path):
-        """`convergence_errors` is exposed as a property — direct writes
+        """`convergence_errors` is exposed as a property, direct writes
         raise AttributeError so callers cannot manufacture a clean signal."""
         key_path = _bootstrap_key(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as graph:
@@ -1232,7 +933,7 @@ class TestConvergenceRetryQueue:
             )
             assert graph.health()["convergence_retry_pending"] == 1
 
-            # Phase two: restore the real detection, retry — flag clears.
+            # Phase two: restore the real detection, retry, flag clears.
             monkeypatch.setattr(_db_core, "_maybe_update_replicated_unlocked", original)
             result = graph.refresh_convergence()
             assert result["checked"] == 1
@@ -1277,80 +978,6 @@ class TestConvergenceRetryQueue:
                 "promoted": 0,
                 "still_pending": 0,
             }
-
-
-# ---------------------------------------------------------------------------
-# refresh_all_dois()
-# ---------------------------------------------------------------------------
-
-
-class TestRefreshAllDois:
-    """`EpistemicGraph.refresh_all_dois()` force-re-resolves every DOI,
-    bypassing the positive cache so retraction drift is observable."""
-
-    def test_empty_graph_reports_zero(self, tmp_path):
-        with mareforma.open(tmp_path) as graph:
-            assert graph.refresh_all_dois() == {
-                "checked": 0,
-                "still_resolved": 0,
-                "now_unresolved": 0,
-                "newly_failed": 0,
-            }
-
-    def test_graph_with_no_dois_reports_zero(self, tmp_path):
-        """Claims with only UUID supports[] entries → no DOIs to refresh."""
-        with mareforma.open(tmp_path) as graph:
-            anchor = graph.assert_claim("anchor", generated_by="agent")
-            graph.assert_claim(
-                "child", generated_by="agent", supports=[anchor],
-            )
-            assert graph.refresh_all_dois()["checked"] == 0
-
-    def test_newly_failed_detects_retraction(self, tmp_path, monkeypatch):
-        """A DOI that resolved at assert time but fails now is in newly_failed."""
-        from mareforma import doi_resolver
-
-        # First call (during assert_claim): DOI resolves cleanly.
-        # Second call (during refresh_all_dois force=True): DOI fails.
-        call_state = {"count": 0}
-
-        def _flaky_resolve(_doi_str, timeout=None):
-            call_state["count"] += 1
-            if call_state["count"] == 1:
-                return (True, "crossref", False)
-            return (False, None, False)
-
-        monkeypatch.setattr(doi_resolver, "resolve_doi", _flaky_resolve)
-
-        with mareforma.open(tmp_path) as graph:
-            graph.assert_claim(
-                "cites-doi",
-                generated_by="agent",
-                supports=["10.1234/will-be-retracted"],
-            )
-            result = graph.refresh_all_dois()
-            assert result["checked"] == 1
-            assert result["now_unresolved"] == 1
-            assert result["newly_failed"] == 1
-            assert result["still_resolved"] == 0
-
-    def test_still_resolved_when_doi_remains_valid(self, tmp_path, monkeypatch):
-        """A DOI that resolves both times → still_resolved=1, newly_failed=0."""
-        from mareforma import doi_resolver
-        monkeypatch.setattr(
-            doi_resolver, "resolve_doi",
-            lambda *_a, **_k: (True, "crossref", False),
-        )
-
-        with mareforma.open(tmp_path) as graph:
-            graph.assert_claim(
-                "cites-doi",
-                generated_by="agent",
-                supports=["10.1234/still-good"],
-            )
-            result = graph.refresh_all_dois()
-            assert result["still_resolved"] == 1
-            assert result["newly_failed"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1545,7 +1172,7 @@ class TestRekorSagaAtomicity:
             # match what Rekor witnessed.
             assert get_rekor_inclusion(graph._conn, cid_a) is not None
 
-            # Re-do submit_to_rekor as failing — confirm refresh_unsigned
+            # Re-do submit_to_rekor as failing, confirm refresh_unsigned
             # takes neither path (replay nor submit) on the drifted row.
             def _fail(*_a, **_k):
                 return False, None
@@ -1623,7 +1250,7 @@ class TestRekorSagaAtomicity:
             original = get_rekor_inclusion(graph._conn, cid)
             assert original is not None
 
-            # Retry the sidecar write with a DIFFERENT entry — should
+            # Retry the sidecar write with a DIFFERENT entry, should
             # be a silent no-op, preserving the original.
             forged_entry = {
                 "uuid": "forged" * 6,
@@ -1645,7 +1272,7 @@ class TestRekorSagaAtomicity:
 class TestEvidenceSeenBinding:
     """`graph.validate()` accepts an optional ``evidence_seen`` list
     that names the claim_ids the validator reviewed. The list is bound
-    into the signed validation envelope — empty list is a positive
+    into the signed validation envelope, empty list is a positive
     'reviewed nothing' admission, not an absent field."""
 
     def _setup_replicated(self, graph, root_key):
@@ -1898,6 +1525,53 @@ class TestValidationEnvelopeKwargAgreement:
             assert g.get_claim(cid_b)["support_level"] == "ESTABLISHED"
 
 
+class TestValidateClaimRequiresSignedEnvelope:
+    """Promotion to ESTABLISHED is gated on a signed validation envelope.
+    There is no unsigned promotion path: the storage guards refuse an
+    ESTABLISHED row with a NULL signature, so an unsigned call must fail
+    up front with a clear ValueError that names the real requirement,
+    not an IllegalStateTransitionError that reads like row corruption."""
+
+    def _setup_replicated(self, graph):
+        sa, sb = _two_signers(graph._root)
+        seed = graph.assert_claim("anchor", generated_by="seed", seed=True)
+        graph.assert_claim("a", generated_by="lab_a", supports=[seed], signer=sa)
+        cid_b = graph.assert_claim("b", generated_by="lab_b", supports=[seed], signer=sb)
+        return seed, cid_b
+
+    def test_unsigned_call_raises_valueerror(self, tmp_path):
+        from mareforma import db as _db
+        from mareforma.db import IllegalStateTransitionError
+        root_key = _bootstrap_key(tmp_path, "root.key")
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            _, cid_b = self._setup_replicated(g)
+            with pytest.raises(ValueError, match="signed validation envelope"):
+                _db.validate_claim(
+                    g._conn, g._root, cid_b, validated_by="human-alice",
+                )
+            # The error is not the storage-guard transition error.
+            with pytest.raises(ValueError) as excinfo:
+                _db.validate_claim(
+                    g._conn, g._root, cid_b, validated_by="human-alice",
+                )
+            assert not isinstance(excinfo.value, IllegalStateTransitionError)
+            # The claim was not promoted.
+            assert g.get_claim(cid_b)["support_level"] == "REPLICATED"
+
+    def test_signed_call_still_promotes(self, tmp_path):
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        other_key = _bootstrap_key(tmp_path, "validator.key")
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            _, cid_b = self._setup_replicated(g)
+            g.enroll_validator(_pem_of(other_key), identity="reviewer")
+
+        with mareforma.open(tmp_path, key_path=other_key) as g:
+            g.validate(cid_b)
+            assert g.get_claim(cid_b)["support_level"] == "ESTABLISHED"
+
+
 # ---------------------------------------------------------------------------
 # Validation envelope cryptographic verification
 # ---------------------------------------------------------------------------
@@ -2065,14 +1739,14 @@ class TestValidationEnvelopeCryptographicVerification:
     def test_wrong_payload_type_envelope_is_refused(self, tmp_path):
         """Passing a CLAIM envelope (in-toto Statement v1) where a
         VALIDATION envelope is expected is refused with a payloadType
-        message — cross-type acceptance is exactly what attackers exploit."""
+        message, cross-type acceptance is exactly what attackers exploit."""
         from mareforma import db as _db
         from mareforma.db import InvalidValidationEnvelopeError
         root_key = _bootstrap_key(tmp_path, "root.key")
 
         with mareforma.open(tmp_path, key_path=root_key) as g:
             seed, cid_b = self._setup_replicated(g)
-            # Steal cid_b's own signature_bundle — a claim envelope.
+            # Steal cid_b's own signature_bundle, a claim envelope.
             claim_bundle = g.get_claim(cid_b)["signature_bundle"]
 
         with mareforma.open(tmp_path, key_path=root_key) as g:
@@ -2261,7 +1935,7 @@ class TestHealth:
             assert len(graph.find_dangling_supports()) == 1
 
     def test_health_is_read_only(self, tmp_path):
-        """Two consecutive calls produce identical results — no side effects."""
+        """Two consecutive calls produce identical results, no side effects."""
         with mareforma.open(tmp_path) as graph:
             graph.assert_claim("c", generated_by="agent")
             h1 = graph.health()
@@ -2273,3 +1947,80 @@ class TestHealth:
         graph.close()
         with pytest.raises(RuntimeError, match="EpistemicGraph is closed"):
             graph.health()
+
+
+class TestUnsignedOpenFallbackDoesNotExist:
+    """The old NOTE in _graph.py claimed the lazy signing import let
+    unsigned-only users open the graph even with a broken cryptography
+    extension. `import mareforma` re-exports from mareforma.signing (and
+    thus imports cryptography) eagerly, so that fallback cannot exist."""
+
+    def test_import_mareforma_fails_without_cryptography(self):
+        import subprocess
+        import sys
+        import textwrap
+
+        script = textwrap.dedent(
+            """
+            import sys
+            import importlib.abc
+
+            class _Blocker(importlib.abc.MetaPathFinder):
+                def find_spec(self, name, path, target=None):
+                    if name == "cryptography" or name.startswith("cryptography."):
+                        raise ImportError("cryptography extension unavailable")
+                    return None
+
+            for mod in list(sys.modules):
+                if mod == "cryptography" or mod.startswith("cryptography."):
+                    del sys.modules[mod]
+            sys.meta_path.insert(0, _Blocker())
+
+            try:
+                import mareforma  # noqa: F401
+            except ImportError:
+                print("BLOCKED")
+            else:
+                print("IMPORTED")
+            """
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True,
+        )
+        # import mareforma hard-fails: no unsigned-only open path survives.
+        assert "BLOCKED" in result.stdout, result.stdout + result.stderr
+
+    def test_note_does_not_promise_unsigned_open_fallback(self):
+        import inspect
+
+        from mareforma import _graph
+
+        src = inspect.getsource(_graph)
+        # The dead promise was that unsigned-only users "can still open the
+        # graph" with a broken cryptography extension. The comment must not
+        # claim a property the package does not have.
+        assert "still open the graph" not in src
+
+
+class TestQueryDocstringRefutationExample:
+    """`query`'s docstring documents ``refutation_filter``, a query-only
+    feature. Its composition examples must not call ``search`` with that
+    kwarg: ``search`` does not accept it, so the documented snippet would
+    raise ``TypeError`` if a reader copied it."""
+
+    def test_query_docstring_has_no_search_refutation_example(self):
+        doc = mareforma.EpistemicGraph.query.__doc__
+        # The broken example called graph.search(..., refutation_filter=...).
+        # After the fix the composition block routes refutation_filter only
+        # through query, so no search() call should appear here.
+        assert "graph.search(" not in doc
+
+    def test_search_rejects_refutation_filter_but_query_accepts(self, tmp_path):
+        with mareforma.open(tmp_path) as g:
+            g.assert_claim("gene therapy result", generated_by="lab")
+            with pytest.raises(TypeError):
+                g.search("gene", refutation_filter="clean")
+            rows = g.query(
+                "gene", refutation_filter="clean", include_unverified=True,
+            )
+            assert isinstance(rows, list)

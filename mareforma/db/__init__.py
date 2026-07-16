@@ -66,7 +66,7 @@ from .core import (
     open_db_from_db_path,
     _db_path,
     _ensure_claims_columns_for_upgrade,
-    _ensure_doi_cache_columns,
+    _ensure_evidence_lines_columns,
     _attach_supports_cache,
     # Serialization.
     _serialize_predicate_payload,
@@ -75,8 +75,14 @@ from .core import (
     # Chain hash.
     _chain_input_for_claim,
     _compute_prev_hash,
+    # Evidence-vector normalization.
+    _EVIDENCE_DOWNGRADE_DOMAINS,
+    _EVIDENCE_UPGRADE_FLAGS,
+    _normalize_evidence,
     # Support classification + cycle detection.
     _is_claim_id,
+    _validate_claim_text,
+    _refuse_supports_contradicts_overlap,
     classify_support,
     classify_supports,
     _check_no_cycle,
@@ -95,6 +101,7 @@ from .core import (
     list_claims,
     delete_claims_by_generated_by,
     # Convergence detection.
+    _claim_model_lineage,
     _maybe_update_replicated_unlocked,
     _maybe_update_replicated,
     _maybe_update_replicated_best_effort,
@@ -153,6 +160,8 @@ from .core import (
     get_validator_reputation,
     # Internal helpers.
     _now,
+    _TRUST_TABLE_BACKUP,
+    _backup_trust_tables,
     _backup_claims_toml,
     _backup_suspended,
     suspend_backup,
@@ -169,6 +178,8 @@ from .restore import (
     _parse_observed_grounding,
     _verify_grounding_binding_on_read,
     _verify_replicated_corroboration,
+    _validate_section_shape,
+    _restore_trust_tables,
     _verify_and_insert_replication_verdict,
     _verify_and_insert_contradiction_verdict,
     _verify_and_insert_project_policy,

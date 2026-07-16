@@ -1,4 +1,4 @@
-"""tests/test_established_upstream.py — ESTABLISHED-upstream gate + seed.
+"""tests/test_established_upstream.py, ESTABLISHED-upstream gate + seed.
 
 Covers:
   - REPLICATED requires an ESTABLISHED upstream (strict by default)
@@ -12,6 +12,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -28,7 +29,7 @@ def _key(tmp_path: Path) -> Path:
 
 
 def _validator_key(tmp_path: Path) -> Path:
-    """A second key for validation — the graph refuses self-validation,
+    """A second key for validation, the graph refuses self-validation,
     so promotion tests need a key distinct from the one signing claims."""
     key_path = tmp_path / "_validator_key"
     if not key_path.exists():
@@ -164,17 +165,72 @@ class TestBootstrapIntegration:
             assert g.get_claim(a)["support_level"] == "REPLICATED"
             g.enroll_validator(_validator_pem(tmp_path), identity="v")
 
-        # Promote A to ESTABLISHED via validate() — under the validator key
+        # Promote A to ESTABLISHED via validate(), under the validator key
         # (the graph refuses self-validation).
         with mareforma.open(tmp_path, key_path=_validator_key(tmp_path)) as g:
             g.validate(a)
             assert g.get_claim(a)["support_level"] == "ESTABLISHED"
 
         # The validated claim is itself an ESTABLISHED upstream for
-        # downstream peers — REPLICATED chain continues from it. New
+        # downstream peers, REPLICATED chain continues from it. New
         # claims are asserted by the root key again.
         with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
             d = g.assert_claim("downstream", supports=[a], generated_by="D", signer=sa)
             e = g.assert_claim("downstream", supports=[a], generated_by="E", signer=sb)
             assert g.get_claim(d)["support_level"] == "REPLICATED"
             assert g.get_claim(e)["support_level"] == "REPLICATED"
+
+
+class TestValidateConcurrentInvalidation:
+    """validate_claim must not promote past a contradiction that lands in the
+    check-to-write window: the early t_invalid gate runs in an autocommit
+    SELECT, then a long stretch of crypto + evidence checks runs with no
+    transaction open. A second writer setting t_invalid in that window must
+    not be rideable into ESTABLISHED."""
+
+    def test_contradiction_in_check_to_write_window_refused(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        from tests._helpers import _two_signers
+        import mareforma.db.core as _core
+
+        sa, sb = _two_signers(tmp_path)
+        with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
+            root = g.assert_claim("root of trust", generated_by="seed", seed=True)
+            a = g.assert_claim("finding", supports=[root], generated_by="A", signer=sa)
+            g.assert_claim("finding", supports=[root], generated_by="B", signer=sb)
+            assert g.get_claim(a)["support_level"] == "REPLICATED"
+            g.enroll_validator(_validator_pem(tmp_path), identity="v")
+
+        db_path = tmp_path / ".mareforma" / "graph.db"
+        original = _core._verify_evidence_seen
+
+        def _interleave(conn, claim_id, evidence, now):
+            # A signed contradiction verdict lands after validate_claim's early
+            # gate passed: a second connection sets t_invalid before the
+            # promotion UPDATE fires. Mirrors a concurrent contradiction worker.
+            side = sqlite3.connect(db_path, timeout=30)
+            try:
+                side.execute("BEGIN IMMEDIATE")
+                side.execute(
+                    "UPDATE claims SET t_invalid = ? WHERE claim_id = ?",
+                    (_core._now(), claim_id),
+                )
+                side.commit()
+            finally:
+                side.close()
+            return original(conn, claim_id, evidence, now)
+
+        monkeypatch.setattr(_core, "_verify_evidence_seen", _interleave)
+
+        with mareforma.open(tmp_path, key_path=_validator_key(tmp_path)) as g:
+            with pytest.raises(ValueError, match="invalidated"):
+                g.validate(a)
+            row = g._conn.execute(
+                "SELECT support_level, t_invalid FROM claims WHERE claim_id = ?",
+                (a,),
+            ).fetchone()
+        # The claim stayed at REPLICATED and kept its t_invalid marker, rather
+        # than climbing to ESTABLISHED over an already-refuted verdict.
+        assert row["support_level"] == "REPLICATED"
+        assert row["t_invalid"] is not None

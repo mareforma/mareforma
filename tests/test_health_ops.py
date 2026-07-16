@@ -93,7 +93,7 @@ class TestHealthEventLog:
         _health.append_health_event(tmp_path, "grounding_verdict", score=0.4)
         _health.append_health_event(tmp_path, "grounding_verdict", score=0.8)
         _health.append_health_event(tmp_path, "provenance_query", depth=4)
-        _health.append_health_event(tmp_path, "doi_drift_scan", drifted=2)
+        _health.append_health_event(tmp_path, "refresh_unsigned", succeeded=2)
         stats = _health.compute_rolling_stats(tmp_path)
         assert stats["events_total"] == 5
         gv = stats["ops"]["grounding_verdict"]
@@ -101,7 +101,7 @@ class TestHealthEventLog:
         assert gv["avg_score"] == round((0.9 + 0.4 + 0.8) / 3, 3)
         assert gv["pass_rate"] == round(2 / 3, 3)
         assert stats["ops"]["provenance_query"]["avg_depth"] == 4.0
-        assert stats["ops"]["doi_drift_scan"]["avg_drifted"] == 2.0
+        assert stats["ops"]["refresh_unsigned"]["avg_succeeded"] == 2.0
 
     def test_compute_rolling_stats_last_n(self, tmp_path: Path) -> None:
         for i in range(10):
@@ -125,6 +125,26 @@ class TestHealthEventLog:
         # operator's stats CLI surfaces drift instead of swallowing
         # it silently.
         assert stats["malformed_lines"] == 1
+
+    def test_valid_json_non_object_line_counted_malformed(
+        self, tmp_path: Path,
+    ) -> None:
+        # A line that parses as valid JSON but is not an object (a
+        # scalar or list from a hand edit, a torn append, or a foreign
+        # writer) must be counted as malformed, not crash the stats
+        # aggregation with an AttributeError on ``ev.get``.
+        path = tmp_path / ".mareforma" / "health.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            '{"op":"good","outcome":"ok"}\n'
+            "42\n"
+            '"stray"\n'
+            "[1, 2]\n"
+            '{"op":"alsogood","outcome":"ok"}\n'
+        )
+        stats = _health.compute_rolling_stats(tmp_path)
+        assert stats["events_total"] == 2
+        assert stats["malformed_lines"] == 3
 
     def test_write_failure_does_not_raise(
         self, tmp_path: Path, monkeypatch,
@@ -205,36 +225,6 @@ class TestStatsCliReadError:
         runner = CliRunner()
         result = runner.invoke(_cli, ["stats"])
         assert result.exit_code == 1
-
-
-class TestDoiDriftEmitsTotalInspected:
-    def test_emission_carries_total_inspected_counter(
-        self, tmp_path: Path, monkeypatch,
-    ) -> None:
-        from mareforma import doi_resolver as _doi
-        with mareforma.open(tmp_path) as graph:
-            conn = graph._conn
-            for i in range(3):
-                conn.execute(
-                    "INSERT INTO doi_cache (doi, resolved, registry, "
-                    "last_checked_at, content_digest) VALUES "
-                    "(?, 1, 'crossref', ?, ?)",
-                    (f"10.1234/em-{i}", "2026-01-01T00:00:00+00:00", "old"),
-                )
-            conn.commit()
-            monkeypatch.setattr(
-                _doi, "fetch_doi_metadata",
-                lambda doi, timeout=5.0, registry=None: (
-                    {"title": ["X"]}, "crossref", False,
-                ),
-            )
-            graph.find_drifted_dois()
-        stats = _health.compute_rolling_stats(tmp_path)
-        drift = stats["ops"]["doi_drift_scan"]
-        assert drift["count"] == 1
-        # total_inspected is now a real aggregated stat, not just
-        # documented.
-        assert drift["total_inspected"] == 3
 
 
 class TestPredicateRegistryBackwardsCompat:
@@ -319,10 +309,10 @@ class TestGraphEmitsHealthEvents:
 
 
 class TestActivityCommand:
-    def test_activity_empty_project(self, tmp_path: Path) -> None:
-        runner = CliRunner()
-        with runner.isolated_filesystem(temp_dir=tmp_path):
-            result = runner.invoke(_cli, ["activity"])
+    def test_activity_empty_project(self, tmp_path: Path, monkeypatch) -> None:
+        mareforma.open(tmp_path).close()  # project with no operational events
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(_cli, ["activity"])
         assert result.exit_code == 0
         assert "Events scanned: 0" in result.output
 
@@ -352,6 +342,30 @@ class TestActivityCommand:
         parsed = json.loads(result.output)
         assert parsed["events_total"] >= 1
         assert "provenance_query" in parsed["ops"]
+
+    def test_activity_finds_the_project_from_a_subdirectory(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        # activity must walk up to the enclosing project like status does,
+        # not read the empty cwd and report zero events.
+        with mareforma.open(tmp_path) as graph:
+            a = graph.assert_claim("a")
+            graph.query_provenance(a)
+        sub = tmp_path / "sub" / "deeper"
+        sub.mkdir(parents=True)
+        monkeypatch.chdir(sub)
+        result = CliRunner().invoke(_cli, ["activity"])
+        assert result.exit_code == 0, result.output
+        assert "provenance_query" in result.output
+        assert "No operational events recorded yet." not in result.output
+
+    def test_activity_without_a_project_exits_nonzero(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(_cli, ["activity"])
+        assert result.exit_code == 1
+        assert "No mareforma project" in result.output
 
 
 class TestStatsDeprecationAlias:

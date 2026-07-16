@@ -1,7 +1,8 @@
-"""tests/test_cli.py — smoke tests for the mareforma CLI (agent-native commands)."""
+"""tests/test_cli.py, smoke tests for the mareforma CLI (agent-native commands)."""
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 from pathlib import Path
@@ -82,6 +83,16 @@ class TestClaimList:
             assert result.exit_code == 1
             assert "No mareforma project" in result.output
             assert not (Path(fs) / ".mareforma" / "graph.db").exists()
+
+    def test_no_project_hint_names_a_real_command(self, tmp_path: Path) -> None:
+        """The no-project hint must point at `claim add`, the registered
+        subcommand, not the nonexistent `claim assert`."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            result = runner.invoke(cli, ["status"], catch_exceptions=False)
+        assert result.exit_code == 1
+        assert "claim add" in result.output
+        assert "claim assert" not in result.output
 
     def test_list_shows_added_claim(self, tmp_path: Path) -> None:
         runner = CliRunner()
@@ -217,6 +228,8 @@ class TestExport:
     def test_export_json_flag_emits_valid_json(self, tmp_path: Path) -> None:
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
+            import mareforma
+            mareforma.open(".").close()  # empty project
             result = runner.invoke(cli, ["export", "--json"], catch_exceptions=False)
         data = json.loads(result.output)
         assert "@context" in data
@@ -236,10 +249,73 @@ class TestExport:
     def test_export_creates_file(self, tmp_path: Path) -> None:
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
+            import mareforma
+            mareforma.open(".").close()  # empty project
             result = runner.invoke(cli, ["export"], catch_exceptions=False)
             written = Path(os.getcwd()) / "ontology.jsonld"
         assert result.exit_code == 0
         assert written.exists()
+
+    def test_export_from_bare_directory_exits_1(self, tmp_path: Path) -> None:
+        """export must not mint a phantom empty graph.db under a success
+        banner; with no project at or above cwd it reports and exits 1."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            result = runner.invoke(cli, ["export"], catch_exceptions=False)
+            assert result.exit_code == 1
+            assert "No mareforma project" in result.output
+            assert not (Path(fs) / ".mareforma" / "graph.db").exists()
+
+    def test_export_from_subdirectory_exports_parent_claims(
+        self, tmp_path: Path,
+    ) -> None:
+        """Run from a subdirectory of a real project, export must walk up and
+        export the parent's claims, not a shadow empty graph in the subdir."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            runner.invoke(cli, ["claim", "add", "Parent claim DEF"],
+                          catch_exceptions=False)
+            sub = Path(fs) / "sub" / "deeper"
+            sub.mkdir(parents=True)
+            os.chdir(sub)
+            result = runner.invoke(cli, ["export", "--json"],
+                                   catch_exceptions=False)
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            claims = [n for n in data["@graph"] if n.get("@type") == "mare:Claim"]
+            assert len(claims) == 1
+            assert "Parent claim DEF" in claims[0]["claimText"]
+            assert not (sub / ".mareforma" / "graph.db").exists()
+
+    def test_export_bundle_from_subdirectory_finds_parent(
+        self, tmp_path: Path,
+    ) -> None:
+        """--bundle from a subdirectory must package the parent project, not
+        emit an empty bundle from a phantom graph in the subdir."""
+        import mareforma
+        from mareforma import signing as _signing
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            key_path = _signing.default_key_path()
+            if not key_path.exists():
+                _signing.bootstrap_key(key_path)
+            with mareforma.open(".") as g:
+                g.assert_claim("seeded", generated_by="seed", seed=True)
+            sub = Path(fs) / "sub"
+            sub.mkdir()
+            os.chdir(sub)
+            result = runner.invoke(cli, ["export", "--bundle"],
+                                   catch_exceptions=False)
+            assert result.exit_code == 0, result.output
+            assert not (sub / ".mareforma" / "graph.db").exists()
+            bundle = Path(fs) / "mareforma-bundle.json"
+            assert bundle.exists()
+            subjects = json.loads(
+                base64.standard_b64decode(
+                    json.loads(bundle.read_text())["payload"]
+                )
+            )["subject"]
+            assert len(subjects) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -379,7 +455,7 @@ class TestKeyShow:
             result = runner.invoke(cli, ["key", "show", "--pem"],
                                    catch_exceptions=False)
         assert result.exit_code == 0
-        # First non-empty line must be the PEM header — pipe-able to a file.
+        # First non-empty line must be the PEM header, pipe-able to a file.
         first_nonempty = next(
             line for line in result.output.splitlines() if line.strip()
         )
@@ -444,7 +520,7 @@ class TestKeyShow:
 
 
 # ---------------------------------------------------------------------------
-# bootstrap output — next-step hint
+# bootstrap output, next-step hint
 # ---------------------------------------------------------------------------
 
 class TestBootstrapHint:
@@ -465,7 +541,7 @@ class TestBootstrapHint:
 
 
 # ---------------------------------------------------------------------------
-# claim validate — error-translation paths
+# claim validate, error-translation paths
 # ---------------------------------------------------------------------------
 
 class TestClaimValidateErrors:
@@ -484,7 +560,7 @@ class TestClaimValidateErrors:
             _signing.bootstrap_key(_signing.default_key_path())
             # Build a REPLICATED claim where one converging peer is signed
             # by the XDG key (the same key the CLI loads for `claim
-            # validate`) and the other by a distinct key — so the pair has
+            # validate`) and the other by a distinct key, so the pair has
             # two distinct asserter_keyid (reaches REPLICATED) AND the
             # validating XDG key is itself an asserter (triggers the
             # self-validation refusal on validate).
@@ -516,7 +592,7 @@ class TestClaimValidateErrors:
 
 
 # ---------------------------------------------------------------------------
-# CLI claim add/update — signing path consistency with the Python API
+# CLI claim add/update, signing path consistency with the Python API
 # ---------------------------------------------------------------------------
 
 class TestClaimCLISigningParity:
@@ -539,7 +615,7 @@ class TestClaimCLISigningParity:
         self, tmp_path: Path,
     ) -> None:
         """After ``mareforma bootstrap``, ``mareforma claim add`` must
-        produce a row whose ``signature_bundle`` is non-NULL — same as
+        produce a row whose ``signature_bundle`` is non-NULL, same as
         what ``mareforma.open().assert_claim()`` does."""
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
@@ -557,7 +633,7 @@ class TestClaimCLISigningParity:
             data = json.loads(show.output)
         assert data["signature_bundle"] is not None, (
             "CLI claim add MUST sign when an XDG key is present. "
-            "Got NULL signature_bundle — the CLI is bypassing signing again."
+            "Got NULL signature_bundle, the CLI is bypassing signing again."
         )
 
     def test_claim_add_via_cli_unsigned_when_no_key(
@@ -568,7 +644,7 @@ class TestClaimCLISigningParity:
         does not force signing."""
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
-            # No _ensure_xdg_key — default path does not exist.
+            # No _ensure_xdg_key, default path does not exist.
             result = runner.invoke(
                 cli, ["claim", "add", "unsigned via CLI"],
                 catch_exceptions=False,
@@ -586,7 +662,7 @@ class TestClaimCLISigningParity:
         self, tmp_path: Path,
     ) -> None:
         """``mareforma claim update --status`` on a signed row must
-        succeed — status is not in the locked signed-field set."""
+        succeed, status is not in the locked signed-field set."""
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
             self._ensure_xdg_key()
@@ -631,3 +707,42 @@ class TestClaimCLISigningParity:
         # trigger, with a precise field-list message.
         assert "is signed" in result.output
         assert "refused to mutate" in result.output
+
+
+class TestCliRobustness:
+    """Bad input reaches a clean error and a stable exit code, never a raw
+    traceback. The exit-code contract is what CI gates read."""
+
+    def test_measure_non_dict_receipt_is_clean_error(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("m.json").write_text("[1, 2, 3]", encoding="utf-8")
+            result = runner.invoke(cli, ["measure", "m.json"])
+        assert result.exit_code == 1
+        assert "Could not read receipts" in result.output
+        assert "Traceback" not in result.output
+
+    def test_bootstrap_refusal_names_the_overwrite_flag(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            first = runner.invoke(cli, ["bootstrap", "--key-path", "k.key"])
+            assert first.exit_code == 0
+            second = runner.invoke(cli, ["bootstrap", "--key-path", "k.key"])
+        assert second.exit_code == 1
+        # The hint names the real CLI flag, not the Python kwarg.
+        assert "--overwrite" in second.output
+        assert "overwrite=True" not in second.output
+
+    def test_status_on_corrupt_db_is_clean_error(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            add = runner.invoke(cli, ["claim", "add", "a finding"],
+                                catch_exceptions=False)
+            assert add.exit_code == 0
+            dbs = list(Path(".").rglob("graph.db"))
+            assert dbs, "claim add should create graph.db"
+            dbs[0].write_bytes(os.urandom(4096))
+            result = runner.invoke(cli, ["status"])
+        assert result.exit_code == 1
+        assert "graph.db" in result.output
+        assert "Traceback" not in result.output

@@ -3,7 +3,7 @@
 These cover the model change directly (not migrated from older expectations):
 
   * REPLICATED keys on two distinct, non-NULL ``asserter_keyid`` values sharing
-    an ESTABLISHED+open anchor — not on distinct ``generated_by``.
+    an ESTABLISHED+open anchor, not on distinct ``generated_by``.
   * artifact_hash is an EQUAL-data COLLAPSE, not a convergence reward.
   * data_id content-addressing collapses byte-identical reruns.
   * the ESTABLISHED boundary refuses a validator that asserted any claim in
@@ -75,7 +75,7 @@ class TestReplicatedKeysOnSigner:
         not promote: one of the two asserters is NULL."""
         sa, _ = _two_signers(tmp_path)
         # Open with NO loaded key so the second claim is unsigned (NULL keyid),
-        # but seed needs a key — so build the seed in a signed handle first.
+        # but seed needs a key, so build the seed in a signed handle first.
         key_path = _bootstrap_key(tmp_path, "root.key")
         with mareforma.open(tmp_path, key_path=key_path) as g:
             up = g.assert_claim("anchor", generated_by="seed", seed=True)
@@ -87,7 +87,7 @@ class TestReplicatedKeysOnSigner:
             assert g.get_claim(a)["support_level"] == "PRELIMINARY"
 
     def test_two_null_peers_are_not_distinct_signers(self, tmp_path: Path) -> None:
-        """Two unsigned (NULL keyid) peers are NOT two distinct signers — the
+        """Two unsigned (NULL keyid) peers are NOT two distinct signers, the
         legacy guard: NULL != NULL for convergence purposes."""
         # Seed must be ESTABLISHED, which needs a signed seed. Build it signed,
         # then write both converging peers unsigned.
@@ -110,7 +110,7 @@ class TestReplicatedKeysOnSigner:
 class TestArtifactHashCollapse:
     def test_equal_hash_collapses_no_promote(self, tmp_path: Path) -> None:
         """Two distinct-signer peers that BOTH supply an EQUAL non-NULL
-        artifact_hash are the same output and collapse — they do NOT promote."""
+        artifact_hash are the same output and collapse, they do NOT promote."""
         sa, sb = _two_signers(tmp_path)
         h = hashlib.sha256(b"same-artifact").hexdigest()
         g, _ = _open_root_graph(tmp_path)
@@ -155,7 +155,7 @@ class TestArtifactHashCollapse:
     def test_double_null_hash_promotes_only_via_distinct_signer(
         self, tmp_path: Path,
     ) -> None:
-        """Two absent (NULL) artifact hashes do not promote "on hash alone" —
+        """Two absent (NULL) artifact hashes do not promote "on hash alone" , 
         promotion only ever fires via two distinct signers. Same signer +
         absent hashes -> no promote."""
         sa, _ = _two_signers(tmp_path)
@@ -190,7 +190,7 @@ class TestEstablishedBoundary:
             g.assert_claim("B", supports=[up], generated_by="lab_b", signer=sb)
             assert g.get_claim(rep)["support_level"] == "REPLICATED"
 
-        # sb asserted a peer in the converging set behind `rep` — it cannot
+        # sb asserted a peer in the converging set behind `rep`, it cannot
         # witness its own convergence into ESTABLISHED.
         sb_key = tmp_path / "_signer_b.key"
         with mareforma.open(tmp_path, key_path=sb_key) as g:
@@ -241,7 +241,7 @@ def _est():
 class TestTrustCounting:
     def test_same_signer_findings_count_as_one(self, tmp_path: Path) -> None:
         """Two findings written through ONE graph handle share one signer and
-        count as a single independent support (not CORROBORATED)."""
+        count as a single independent support (not CONVERGENT)."""
         root_key = _bootstrap_key(tmp_path, "root.key")
         prop, pred = _prop(), _pred()
         with mareforma.open(tmp_path, key_path=root_key) as g:
@@ -250,7 +250,7 @@ class TestTrustCounting:
             status = g.proposition_status(prop.content_id())
         # One distinct signer -> at most one independent support.
         assert status["independent_support"] == 1
-        assert status["status_policy"] == "status_policy@v3"
+        assert status["status_policy"] == "status_policy@v4"
 
     def test_distinct_signer_findings_corroborate(self, tmp_path: Path) -> None:
         """Each finding written through a graph handle opened with a DISTINCT
@@ -264,21 +264,21 @@ class TestTrustCounting:
             g.assert_finding(prop, pred, _est(), data_id="ds2", generated_by="run2")
             status = g.proposition_status(prop.content_id())
         assert status["independent_support"] == 2
-        assert status["status"] == "CORROBORATED"
+        assert status["status"] == "CONVERGENT"
 
     def test_legacy_null_keyid_findings_count_under_generated_by(
         self, tmp_path: Path,
     ) -> None:
         """Unsigned findings (NULL asserter_keyid) fall back to the generated_by
         axis: two with distinct generated_by + distinct data_id still
-        corroborate — no silent CORROBORATED downgrade."""
+        corroborate, no silent CONVERGENT downgrade."""
         prop, pred = _prop(), _pred()
         with mareforma.open(tmp_path) as g:  # no key -> unsigned findings
             g.assert_finding(prop, pred, _est(), data_id="ds1", generated_by="run1")
             g.assert_finding(prop, pred, _est(), data_id="ds2", generated_by="run2")
             status = g.proposition_status(prop.content_id())
         assert status["independent_support"] == 2
-        assert status["status"] == "CORROBORATED"
+        assert status["status"] == "CONVERGENT"
 
 
 # ===========================================================================

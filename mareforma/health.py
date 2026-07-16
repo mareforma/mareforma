@@ -91,7 +91,7 @@ def _compute_traffic_light(report: HealthReport) -> tuple[str, str]:
     established = report.support_level_breakdown.get("ESTABLISHED", 0)
     replicated = report.support_level_breakdown.get("REPLICATED", 0)
     if established + replicated == 0:
-        return "yellow", "All claims are PRELIMINARY — no independent replication yet."
+        return "yellow", "All claims are PRELIMINARY, no independent replication yet."
 
     return "green", "At least one independently replicated or validated claim."
 
@@ -104,7 +104,7 @@ def _compute_traffic_light(report: HealthReport) -> tuple[str, str]:
 # append-only JSONL trail of operational signals (provenance queries,
 # grounding verdicts, DOI drift scans, refresh retries). Operators
 # read rolling rates off the trail via :func:`compute_rolling_stats`
-# and the ``mareforma activity`` CLI. Best-effort write — a failure to
+# and the ``mareforma activity`` CLI. Best-effort write, a failure to
 # append is logged via a RuntimeWarning and the underlying operation
 # still completes.
 
@@ -134,7 +134,6 @@ def append_health_event(
 
     ``op`` is a short identifier of the operation
     (``"provenance_query"``, ``"grounding_verdict"``,
-    ``"doi_drift_scan"``, ``"refresh_unresolved"``,
     ``"refresh_unsigned"``). ``outcome`` is ``"ok"`` / ``"fail"`` /
     ``"partial"``. Extra ``counters`` are merged into the JSON line
     verbatim: keep them small and JSON-encodable.
@@ -195,8 +194,7 @@ def compute_rolling_stats(
 
     * ``provenance_query`` → ``avg_depth``
     * ``grounding_verdict`` → ``avg_score`` + ``pass_rate`` (score > 0.5)
-    * ``doi_drift_scan`` → ``avg_drifted`` + ``total_inspected``
-    * ``refresh_unresolved`` / ``refresh_unsigned`` → ``avg_succeeded``
+    * ``refresh_unsigned`` → ``avg_succeeded``
 
     Missing or malformed lines are skipped without raising; the log
     is operator-visible diagnostics, not a mareforma-trust surface.
@@ -220,10 +218,16 @@ def compute_rolling_stats(
                 if not line:
                     continue
                 try:
-                    buffer.append(json.loads(line))
+                    obj = json.loads(line)
                 except (json.JSONDecodeError, TypeError, ValueError):
                     malformed_lines += 1
                     continue
+                # Valid JSON that is not an object (a scalar or list) is
+                # malformed for aggregation: the loop below reads ``ev.get``.
+                if not isinstance(obj, dict):
+                    malformed_lines += 1
+                    continue
+                buffer.append(obj)
     except OSError:
         return {"events_total": 0, "ops": {}, "read_error": True}
     events = list(buffer)
@@ -259,18 +263,7 @@ def compute_rolling_stats(
                 agg["score_n"] += 1
                 if score > 0.5:
                     agg["pass_n"] += 1
-        elif op == "doi_drift_scan":
-            drifted = ev.get("drifted")
-            total = ev.get("total_inspected")
-            if isinstance(drifted, int):
-                agg.setdefault("drifted_sum", 0)
-                agg.setdefault("drifted_n", 0)
-                agg["drifted_sum"] += drifted
-                agg["drifted_n"] += 1
-            if isinstance(total, int):
-                agg.setdefault("inspected_sum", 0)
-                agg["inspected_sum"] += total
-        elif op in ("refresh_unresolved", "refresh_unsigned"):
+        elif op == "refresh_unsigned":
             succeeded = ev.get("succeeded")
             if isinstance(succeeded, int):
                 agg.setdefault("succeeded_sum", 0)
@@ -291,14 +284,7 @@ def compute_rolling_stats(
             bucket["pass_rate"] = round(
                 agg["pass_n"] / agg["score_n"], 3,
             )
-        if op == "doi_drift_scan":
-            if agg.get("drifted_n"):
-                bucket["avg_drifted"] = round(
-                    agg["drifted_sum"] / agg["drifted_n"], 3,
-                )
-            if "inspected_sum" in agg:
-                bucket["total_inspected"] = agg["inspected_sum"]
-        if op in ("refresh_unresolved", "refresh_unsigned"):
+        if op == "refresh_unsigned":
             if agg.get("succeeded_n"):
                 bucket["avg_succeeded"] = round(
                     agg["succeeded_sum"] / agg["succeeded_n"], 3,

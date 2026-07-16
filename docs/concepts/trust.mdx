@@ -10,7 +10,25 @@ There is no confidence score. An agent that is wrong is still confident.
 The graph does not ask the agent how sure it is; it tracks what the agent
 can demonstrate.
 
+## Independence is the signal
+
+The property Mareforma leads with is **effective independence**: the number of
+pairwise-distinct (model, data, signer) checks behind a finding. Two checks on
+the same model are one line of evidence, not two, so the count holds until a
+genuinely different model, or a human check, raises it. `mareforma map <claim>`
+reports the number and marks it `UNVERIFIABLE` when the model lineage is too soft
+to tell distinct checks apart, or when every validator traces to a single trust
+root. Read the number, not the label: `REPLICATED` and `ESTABLISHED` resolve
+this release as deprecated one-release aliases.
+
 ## Support levels
+
+<Note>
+  `REPLICATED` / `ESTABLISHED` are deprecated public labels this release, kept
+  working as a one-release alias; `PRELIMINARY` stays a stored `support_level`.
+  All three still fire and gate as described below, but the effective-independence
+  number above is the signal to read.
+</Note>
 
 <AccordionGroup>
   <Accordion title="PRELIMINARY">
@@ -36,9 +54,9 @@ can demonstrate.
     [The independence axis](#the-independence-axis) below), which is honest about
     what it cannot verify.
 
-    The ESTABLISHED-upstream rule matches Cochrane / GRADE evidence-chain
-    methodology: replication-of-noise is not replication. A fresh project
-    bootstraps the chain via a *seed claim* (see below).
+    The ESTABLISHED-upstream rule enforces that replication-of-noise is not
+    replication. A fresh project bootstraps the chain via a *seed claim* (see
+    below).
 
     Promotion is also gated on the claim being witnessed (marked in the
     transparency log). A project that requires witnessing
@@ -126,12 +144,19 @@ requirement. It never loosens the default signer-axis rule.
 
 ## The independence axis
 
-Independence is reported as its own axis, separate from the support ladder,
-because the ladder's distinct-key rule proves cryptographic separation, not
-independent lines of evidence. When every enrolled validator traces to a single
-trust root (the solo-operator default), the same operator could have minted
-every key, so independence is `UNVERIFIABLE`. Mareforma states that plainly
-rather than letting "two distinct signatures" read as "two independent labs."
+Independence is reported as its own axis, separate from the support labels,
+because a distinct-key rule proves cryptographic separation, not independent
+lines of evidence. Mareforma counts the **effective independence** of a finding:
+the number of pairwise-distinct (model, data, signer) checks behind it, read from
+the model lineage that `observe()` captures at the call boundary. A remote call is
+identified by its recognized provider host; a local model by the served weights'
+digest, so two local models are told apart by their weights, not a self-chosen
+name. Two checks on the same model do not both count; a genuinely different model,
+or a human check, raises the number. Where the model lineage is too soft to tell distinct checks
+apart, or every enrolled validator traces to a single trust root (the
+solo-operator default, where the same operator could have minted every key), the
+axis is `UNVERIFIABLE`. Mareforma states that plainly rather than letting "two
+distinct signatures" read as "two independent labs."
 
 `mareforma map <claim>` renders the axis, and it never translates a convergence
 marker into the word "independent."
@@ -142,9 +167,10 @@ A claim carries many trust properties, and they are not equal. Some Mareforma
 computes from evidence (`COMPUTED`); some through a proxy whose bound it names
 (`PROXIED`); some it does not evaluate at all and says so (`DEFERRED`).
 `mareforma map <claim>` places each property
-(attributability, provenance, grounding, methodological validity, leakage,
-independence, contestation, standing, trust-root, witnessing) at its tier with
-the residual named, so trust reads as a structured ledger instead of one word.
+(attributability, provenance, grounding, faithfulness, methodological validity,
+leakage, independence, contestation, standing, trust-root, witnessing) at its
+tier with the residual named, so trust reads as a structured ledger instead of
+one word.
 
 ```bash
 mareforma map <claim-id>              # human-readable ledger
@@ -155,6 +181,25 @@ mareforma map <claim-id> --html       # one self-contained page
 A property Mareforma cannot observe is stated (`DEFERRED`, `not present`, or
 `UNVERIFIABLE`), never inferred to a confident answer. The map is a read-side
 artifact: it adds no signed field and changes no verdict.
+
+## Faithfulness: re-execution as a proxy
+
+Faithfulness answers a narrow question: re-run the recorded pipeline in a clean
+scope, does the reported number come back? `mareforma reexec <run>` takes a
+recorded run, re-executes it, and returns a three-valued verdict: `REPRODUCED`,
+`DIVERGED`, or `COULD_NOT_REEXECUTE`.
+
+The third value is the honest one. A run that rests on world contact, private
+data, or expensive compute, or whose entry point will not resolve, raises, or
+returns a non-number, is `COULD_NOT_REEXECUTE`, never a false `REPRODUCED` and
+never a spurious `DIVERGED`. A re-run that could not run is not evidence that
+the number changed.
+
+Faithfulness is a `PROXIED` axis, and the residual names its bound: reproducible
+is not correct, and re-running the same pipeline on the same inputs is not an
+independent line of evidence. `mareforma reexec <run> --map <claim>` places the
+verdict on that claim's trust map as a read-side overlay, so it reads next to
+every other property without being confused for truth or independence.
 
 ## Verify
 

@@ -11,7 +11,7 @@ into the signed Statement v1 predicate, and immutable thereafter. A
 future re-run of the same or a different verifier may produce a
 different score; that recomputed verdict is NOT persisted on the
 claim. The signed score is the asserter's verdict at the moment they
-made the claim: same posture as the GRADE EvidenceVector.
+made the claim: same posture as the signed evidence vector.
 
 Mareforma does not bundle any model dependencies. Callers wire
 their own concrete verifiers; :class:`MockNLIVerifier` is provided as

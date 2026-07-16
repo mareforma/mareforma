@@ -1,5 +1,5 @@
 """
-tests/test_rekor.py — Rekor transparency-log integration.
+tests/test_rekor.py, Rekor transparency-log integration.
 
 Covers:
   - submit_to_rekor happy path (hashedrekord POST → 201 with uuid/logIndex)
@@ -45,7 +45,7 @@ def _rekor_response_for(
     """Build a realistic Rekor 201 body whose `body` field actually
     records the submitted hash + signature.
 
-    submit_to_rekor now verifies the response — a generic mock without a
+    submit_to_rekor now verifies the response, a generic mock without a
     matching body fails the equality check.
     """
     record = {
@@ -129,7 +129,7 @@ def _mirror_rekor(httpx_mock, *, uuid_prefix: str = "m") -> None:
 
 
 # ---------------------------------------------------------------------------
-# submit_to_rekor — direct
+# submit_to_rekor, direct
 # ---------------------------------------------------------------------------
 
 class TestSubmitToRekor:
@@ -216,7 +216,7 @@ class TestSubmitToRekorStreaming:
     def test_oversized_chunked_body_aborts_during_read(self, httpx_mock):
         """No Content-Length, 256 KB of garbage past the 64 KB cap.
         submit_to_rekor must reject without buffering the whole body
-        — the streaming accumulator is the only line of defense."""
+       , the streaming accumulator is the only line of defense."""
         key = _signing.generate_keypair()
         envelope = _signing.sign_claim(
             {"claim_id": "c", "text": "x", "classification": "INFERRED",
@@ -260,7 +260,7 @@ class TestRekorResponseSizeCap:
         assert logged is False
 
     def test_oversized_actual_body_rejected(self, httpx_mock):
-        """No Content-Length header — the streaming accumulator must abort
+        """No Content-Length header, the streaming accumulator must abort
         once it has read past the cap, before the body fully lands."""
         key = _signing.generate_keypair()
         envelope = _signing.sign_claim(
@@ -269,7 +269,7 @@ class TestRekorResponseSizeCap:
              "source_name": None, "created_at": "2026-05-12T00:00:00+00:00"},
             key,
         )
-        # 256 KB filler — well past the 64 KB cap.
+        # 256 KB filler, well past the 64 KB cap.
         huge = b"X" * (256 * 1024)
         httpx_mock.add_response(
             method="POST", url=_TEST_REKOR_URL, status_code=201,
@@ -660,7 +660,7 @@ class TestOnePeerLoggedOneNot:
     def test_neither_replicates_until_both_logged(self, tmp_path, httpx_mock):
         """Agent A succeeds at Rekor; agent B never does. Agent A is
         transparency_logged=1 alone, but REPLICATED requires the NEW
-        claim's transparency_logged=1 as well — agent B's continued
+        claim's transparency_logged=1 as well, agent B's continued
         unlogged state keeps both at PRELIMINARY."""
         import base64
         from tests._helpers import _bootstrap_key as _bk
@@ -741,6 +741,42 @@ class TestRefreshUnsigned:
             result = graph.refresh_unsigned()
         assert result == {"checked": 0, "logged": 0, "still_unlogged": 0}
 
+    def test_refresh_unsigned_logs_a_clean_grounded_claim(
+        self, tmp_path: Path, httpx_mock,
+    ) -> None:
+        """A grounded claim whose initial submit failed re-logs cleanly.
+
+        The live-payload re-derivation must include observed_grounding, which the
+        signing path binds into the envelope. Omitting it makes the drift guard
+        fire on an untampered grounded row and refuse it forever."""
+        import warnings
+
+        httpx_mock.add_response(method="POST", url=_TEST_REKOR_URL, status_code=503)
+        record = {
+            "version": "v0.3.9", "grounding": "GROUNDED",
+            "reason": "a read matching the cited source returned non-empty data",
+            "cited_sources": ["/data/set.csv"],
+            "receipt_digest": "sha256:deadbeef",
+        }
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(
+            tmp_path, key_path=key_path, rekor_url=_TEST_REKOR_URL,
+        ) as graph:
+            claim_id = graph.assert_claim(
+                "grounded finding", observed_grounding=record,
+            )
+            assert graph.get_claim(claim_id)["transparency_logged"] == 0
+
+            _mirror_rekor(httpx_mock)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                result = graph.refresh_unsigned()
+            assert graph.get_claim(claim_id)["transparency_logged"] == 1
+
+        drift = [w for w in caught if "drifted" in str(w.message)]
+        assert not drift, "a clean grounded row was falsely flagged as drifted"
+        assert result == {"checked": 1, "logged": 1, "still_unlogged": 0}
+
     def test_refresh_unsigned_clears_pending_claims(
         self, tmp_path: Path, httpx_mock,
     ) -> None:
@@ -756,7 +792,7 @@ class TestRefreshUnsigned:
             assert graph.get_claim(id_1)["transparency_logged"] == 0
             assert graph.get_claim(id_2)["transparency_logged"] == 0
 
-            # Rekor recovers — register a reusable mirror callback.
+            # Rekor recovers, register a reusable mirror callback.
             _mirror_rekor(httpx_mock)
             result = graph.refresh_unsigned()
 
@@ -778,7 +814,7 @@ class TestRefreshUnsigned:
         signed by the graph's own key (``key_path``); peer B is signed by a
         distinct key (``sb``) so the asserters differ and REPLICATED is
         reachable. Re-logging therefore happens in two passes, one per loaded
-        key — exactly how an operator with two asserter keys would recover."""
+        key, exactly how an operator with two asserter keys would recover."""
         # First three asserts: Rekor down.
         from tests._helpers import _bootstrap_key as _bk
         for _ in range(3):
@@ -827,7 +863,7 @@ class TestRefreshUnsigned:
 class TestRefreshUnsignedDrift:
     def test_drifted_row_is_not_submitted_to_rekor(self, tmp_path, httpx_mock):
         """A row whose text was tampered after assert_claim must not be
-        logged to Rekor by refresh_unsigned — the public log would otherwise
+        logged to Rekor by refresh_unsigned, the public log would otherwise
         cement a stale signature."""
         httpx_mock.add_response(method="POST", url=_TEST_REKOR_URL, status_code=503)
 
@@ -839,7 +875,7 @@ class TestRefreshUnsignedDrift:
             assert graph.get_claim(claim_id)["transparency_logged"] == 0
 
         # Direct-SQL tamper on a signed claim's text is refused by the
-        # claims_signed_fields_no_laundering trigger — the database
+        # claims_signed_fields_no_laundering trigger, the database
         # gate is the primary defense. The Python-side drift check
         # in refresh_unsigned is a defense-in-depth backstop for
         # cases the trigger somehow doesn't catch (e.g. an attacker
@@ -865,12 +901,12 @@ class TestRefreshUnsignedDrift:
     def test_refresh_unsigned_skips_a_drifted_row(self, tmp_path, httpx_mock):
         """Exercise the Python-side drift guard directly by calling
         refresh_unsigned on a row whose text was tampered *after* the
-        laundering trigger was dropped — the case the DB gate can't catch.
+        laundering trigger was dropped, the case the DB gate can't catch.
 
         The guard must warn and refuse to submit the stale row. If it were
         deleted, refresh_unsigned would make a *second* Rekor POST for the
         drifted claim and emit no drift warning, so both assertions below
-        fail — deleting the guard is the acceptance bar #52 asks for."""
+        fail; deleting the guard is the acceptance bar this test sets."""
         import sqlite3
 
         httpx_mock.add_response(method="POST", url=_TEST_REKOR_URL, status_code=503)
@@ -883,7 +919,7 @@ class TestRefreshUnsignedDrift:
             assert graph.get_claim(claim_id)["transparency_logged"] == 0
 
         # Drop the DB gate, then drift the row's text out from under its
-        # signature — simulating an attacker who bypassed the trigger.
+        # signature, simulating an attacker who bypassed the trigger.
         conn = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
         conn.execute("DROP TRIGGER IF EXISTS claims_signed_fields_no_laundering")
         conn.execute(
@@ -900,7 +936,7 @@ class TestRefreshUnsignedDrift:
                 result = graph.refresh_unsigned()
 
         assert result == {"checked": 1, "logged": 0, "still_unlogged": 1}
-        # The drift guard short-circuited before any Rekor submission — the
+        # The drift guard short-circuited before any Rekor submission, the
         # only POST is the failed one from assert_claim, not a resubmission.
         assert len([r for r in httpx_mock.get_requests() if r.method == "POST"]) == 1
 
@@ -1001,7 +1037,7 @@ class TestMarkClaimLoggedVerification:
     def test_unsigned_claim_refuses_rekor_attachment(self, tmp_path):
         """Rekor inclusion attaches to an already-signed envelope. An
         unsigned claim (signature_bundle IS NULL) cannot be retroactively
-        log-stamped via mark_claim_logged — the call refuses up-front
+        log-stamped via mark_claim_logged, the call refuses up-front
         rather than silently writing a bundle onto an unsigned row.
         """
         from mareforma.db import (
@@ -1019,7 +1055,7 @@ class TestMarkClaimLoggedVerification:
         """A bundle whose payload/payloadType/signatures match but which
         adds unexpected top-level keys (e.g. an opaque 'metadata' blob)
         is refused. Only payload/payloadType/signatures/rekor are
-        whitelisted — substantive substitution beyond the Rekor block
+        whitelisted, substantive substitution beyond the Rekor block
         is not allowed, even if the new content is structurally inert."""
         from mareforma.db import DatabaseError, mark_claim_logged, open_db
         key_path = _bootstrap_key(tmp_path)
@@ -1040,7 +1076,7 @@ class TestMarkClaimLoggedVerification:
 
     def test_substitute_bundle_with_different_signer_is_rejected(self, tmp_path):
         """A bundle whose predicate.claim_id matches but whose payload +
-        signatures differ from the row's existing bundle is refused —
+        signatures differ from the row's existing bundle is refused , 
         mark_claim_logged is for Rekor attachment, not envelope swap.
         """
         from mareforma.db import DatabaseError, mark_claim_logged, open_db
@@ -1102,7 +1138,7 @@ class TestRekorUrlValidation:
             mareforma.open(tmp_path, rekor_url=url)
 
     def test_https_dns_hostname_accepted(self, tmp_path):
-        # DNS hostnames are allowed — TLS to the resolved host is the
+        # DNS hostnames are allowed, TLS to the resolved host is the
         # actual authentication.
         with mareforma.open(
             tmp_path, rekor_url="https://rekor.sigstore.dev/api/v1/log/entries",

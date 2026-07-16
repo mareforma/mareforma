@@ -61,7 +61,7 @@ class TestMapCommand:
             assert res.exit_code == 0
             doc = json.loads(res.output)
             assert doc["subject_id"] == cid
-            assert len(doc["properties"]) == 10
+            assert len(doc["properties"]) == 11
 
     def test_map_html_written_to_file(self, tmp_path: Path) -> None:
         r = CliRunner()
@@ -95,7 +95,7 @@ class TestMapCommand:
 
 
 # ---------------------------------------------------------------------------
-# verify — exit-code contract
+# verify, exit-code contract
 # ---------------------------------------------------------------------------
 
 class TestVerifyExitCodes:
@@ -290,7 +290,7 @@ class TestDiagnose:
 
 
 # ---------------------------------------------------------------------------
-# verify — grounding→citation binding re-check (the read-side gate)
+# verify, grounding→citation binding re-check (the read-side gate)
 # ---------------------------------------------------------------------------
 
 _REAL = "/data/real.csv"
@@ -320,7 +320,7 @@ class TestVerifyGroundingBinding:
 
     def test_matched_binding_verifies_exit_0(self, tmp_path: Path) -> None:
         # A GROUNDED verdict whose grounded set matches the finding's citation
-        # verifies clean — proves the binding check is WIRED, not skipped.
+        # verifies clean, proves the binding check is WIRED, not skipped.
         r = CliRunner()
         with r.isolated_filesystem(temp_dir=tmp_path):
             _bootstrap_default_key()
@@ -337,7 +337,7 @@ class TestVerifyGroundingBinding:
         # Tamper the UNSIGNED observed_grounding column to a GROUNDED verdict whose
         # grounded set is disjoint from the finding's signed data_sources. The
         # signature still verifies (observed_grounding is not signed), so the
-        # binding re-check is the only thing that can catch it — and it must.
+        # binding re-check is the only thing that can catch it, and it must.
         r = CliRunner()
         with r.isolated_filesystem(temp_dir=tmp_path):
             _bootstrap_default_key()

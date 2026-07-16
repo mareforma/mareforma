@@ -1,4 +1,4 @@
-"""#32: independence_counts must not full-scan effect_estimates.
+"""independence_counts must not full-scan effect_estimates.
 
 The read joins evidence_lines → contrasts (on line_id) → effect_estimates
 (on contrast_id). Without an index on contrasts(line_id) the planner had no

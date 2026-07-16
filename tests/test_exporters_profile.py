@@ -1,17 +1,17 @@
 """Exporter profile conformance: RO-Crate root entity and PROV-O labels.
 
-- #29  the RO-Crate root data entity must carry a ``license`` and a
+- the RO-Crate root data entity must carry a ``license`` and a
        non-null ``datePublished``, and it must separate data entities
        (``hasPart``) from provenance actions (``mentions``) per the
        Process Run Crate profile.
-- #48  PROV-O labels must use ``rdfs:label`` (with an ``rdfs`` context
+- PROV-O labels must use ``rdfs:label`` (with an ``rdfs`` context
        mapping), not the non-existent ``prov:label`` a strict consumer
        rejects.
 
 Both fail on the pre-fix tree.
 
 Scope note: these check the SHAPE of the exported entities (key presence,
-in-graph @id resolution, label vocabulary) — not full profile conformance.
+in-graph @id resolution, label vocabulary), not full profile conformance.
 They do not run an RO-Crate validator, a JSON-LD processor, or SHACL/OWL over
 PROV-O, so a genuine profile violation (e.g. a ``hasPart`` member that is a
 contextual entity rather than a data entity) would not be caught here. Treat
@@ -47,7 +47,7 @@ def _root(crate: dict) -> dict:
 
 
 def test_ro_crate_root_has_license_resolving_to_entity(tmp_path: Path) -> None:
-    """#29: root license references a contextual entity in the graph."""
+    """root license references a contextual entity in the graph."""
     _seed(tmp_path)
     crate = build_crate(tmp_path)
     root = _root(crate)
@@ -61,7 +61,7 @@ def test_ro_crate_root_has_license_resolving_to_entity(tmp_path: Path) -> None:
 
 def test_ro_crate_license_override_propagates(tmp_path: Path) -> None:
     """The build_crate(license_id=, license_name=) override reaches the root
-    entity and its contextual license entity — a producer who knows their data's
+    entity and its contextual license entity, a producer who knows their data's
     license can pin it instead of the CC-BY-4.0 default."""
     _seed(tmp_path)
     custom_id = "https://opensource.org/licenses/MIT"
@@ -89,15 +89,15 @@ def test_ro_crate_rejects_empty_license_override(tmp_path: Path) -> None:
 
 
 def test_ro_crate_date_published_never_null(tmp_path: Path) -> None:
-    """#29: datePublished is present even for an empty graph."""
+    """datePublished is present even for an empty graph."""
     with mareforma.open(tmp_path):
-        pass  # bootstrap only — zero claims
+        pass  # bootstrap only, zero claims
     crate = build_crate(tmp_path)
     assert _root(crate).get("datePublished"), "datePublished must be non-null"
 
 
 def test_ro_crate_mentions_actions_haspart_data(tmp_path: Path) -> None:
-    """#29: CreateActions ride under mentions; data entities under hasPart."""
+    """CreateActions ride under mentions; data entities under hasPart."""
     a, b = _seed(tmp_path)
     crate = build_crate(tmp_path)
     root = _root(crate)
@@ -112,7 +112,7 @@ def test_ro_crate_mentions_actions_haspart_data(tmp_path: Path) -> None:
 
 
 def test_prov_o_uses_rdfs_label(tmp_path: Path) -> None:
-    """#48: rdfs:label with an rdfs context, never prov:label."""
+    """rdfs:label with an rdfs context, never prov:label."""
     _seed(tmp_path)
     doc = build_prov_o(tmp_path)
     assert "rdfs" in doc["@context"], "@context must map the rdfs prefix"
@@ -125,5 +125,5 @@ def test_prov_o_uses_rdfs_label(tmp_path: Path) -> None:
 
 
 def test_prov_context_declares_rdfs() -> None:
-    """#48: the module-level context constant carries the rdfs mapping."""
+    """the module-level context constant carries the rdfs mapping."""
     assert PROV_CONTEXT.get("rdfs") == "http://www.w3.org/2000/01/rdf-schema#"

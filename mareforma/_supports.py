@@ -69,7 +69,7 @@ __all__ = [
 
 CACHE_FILENAME = "claim_supports_cache.db"
 
-# Strict UUIDv4 — version nibble == 4, variant nibble in {8,9,a,b}.
+# Strict UUIDv4, version nibble == 4, variant nibble in {8,9,a,b}.
 # Matches mareforma.db._is_claim_id; duplicated here to keep this
 # module a leaf with no circular import on db.
 _UUID_RE = re.compile(
@@ -80,7 +80,7 @@ _UUID_RE = re.compile(
 # WAL on both DBs so a writer holding the graph.db lock isn't blocked by
 # cache readers, and so the cache journal mode matches the main graph
 # (SQLite restricts atomic cross-database commits when journal modes
-# differ — running both in WAL keeps the mode consistent).
+# differ, running both in WAL keeps the mode consistent).
 _CACHE_SCHEMA = """
 PRAGMA supports_cache.journal_mode=WAL;
 
@@ -258,7 +258,7 @@ def record_supports_edges(
     triggers a full rebuild via :func:`is_cache_stale`.
     """
     if not supports:
-        # Still bump the count — every claim INSERT changes the source
+        # Still bump the count, every claim INSERT changes the source
         # claim count, regardless of whether it has UUID-shaped refs.
         _bump_source_count(conn, delta=1)
         return
@@ -271,6 +271,59 @@ def record_supports_edges(
                 (claim_id, ref, position),
             )
     _bump_source_count(conn, delta=1)
+
+
+def replace_supports_edges(
+    conn: sqlite3.Connection,
+    claim_id: str,
+    supports: list[str] | None,
+) -> None:
+    """Re-derive a claim's edges after its ``supports_json`` was edited.
+
+    Called by :func:`mareforma.db.update_claim` *inside* its transaction when
+    an unsigned claim's supports change. Drops the claim's existing edges and
+    re-inserts from the new list, filtering non-UUID refs like
+    :func:`record_supports_edges`. Does NOT touch
+    ``cache_meta.source_claim_count``: an in-place edit changes no claim count,
+    and the count-only staleness heuristic must not be nudged out of step.
+    """
+    conn.execute(
+        "DELETE FROM supports_cache.claim_supports WHERE claim_id = ?",
+        (claim_id,),
+    )
+    if not supports:
+        return
+    for position, ref in enumerate(supports):
+        if isinstance(ref, str) and _UUID_RE.match(ref):
+            conn.execute(
+                "INSERT OR IGNORE INTO supports_cache.claim_supports "
+                "(claim_id, supports_claim_id, position) "
+                "VALUES (?, ?, ?)",
+                (claim_id, ref, position),
+            )
+
+
+def remove_claim_edges(
+    conn: sqlite3.Connection,
+    claim_id: str,
+    *,
+    count_delta: int = -1,
+) -> None:
+    """Drop a deleted claim's edges in both directions.
+
+    Called by :func:`mareforma.db.delete_claim` *inside* its transaction. A
+    delete leaves edges pointing to and from the row; remove both so downstream
+    and upstream walks stop surfacing the dangling claim. ``count_delta``
+    decrements ``source_claim_count`` by the number of claims removed so the
+    staleness counter stays in step with the claim count.
+    """
+    conn.execute(
+        "DELETE FROM supports_cache.claim_supports "
+        "WHERE claim_id = ? OR supports_claim_id = ?",
+        (claim_id, claim_id),
+    )
+    if count_delta:
+        _bump_source_count(conn, delta=count_delta)
 
 
 def _bump_source_count(conn: sqlite3.Connection, *, delta: int) -> None:

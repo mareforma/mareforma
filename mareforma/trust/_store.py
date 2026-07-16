@@ -28,14 +28,14 @@ from .status import STATUS_POLICY, FrameStatus, Status, compute_status
 _SUPPORT_RANK = {
     Status.UNTESTED.value: 0,
     Status.PRELIMINARY.value: 1,
-    Status.CORROBORATED.value: 2,
+    Status.CONVERGENT.value: 2,
     Status.REFUTED.value: -1,
     Status.CONTESTED.value: -1,
 }
 
 # The only valid min_status floors are the three support-ladder statuses.
 _VALID_FLOORS = frozenset(
-    {Status.UNTESTED.value, Status.PRELIMINARY.value, Status.CORROBORATED.value}
+    {Status.UNTESTED.value, Status.PRELIMINARY.value, Status.CONVERGENT.value}
 )
 
 
@@ -127,6 +127,43 @@ def plan_exists(conn: sqlite3.Connection, plan_id: str) -> bool:
     return row is not None
 
 
+def plan_registration(
+    conn: sqlite3.Connection, plan_id: str
+) -> Optional[sqlite3.Row]:
+    """The ``registered_at`` + ``preregistered`` of a plan, or None if absent.
+
+    Read by the pre-registration guard: only a plan that claims pre-registration
+    (``preregistered = 1``) is gated on its registration time, so both fields are
+    fetched together.
+    """
+    return conn.execute(
+        "SELECT registered_at, preregistered FROM predictions "
+        "WHERE plan_id = ? LIMIT 1",
+        (plan_id,),
+    ).fetchone()
+
+
+def run_first_execution(
+    conn: sqlite3.Connection, run_token: str
+) -> Optional[str]:
+    """The earliest finding-execution timestamp attributed to *run_token*, or None.
+
+    A finding is a run's observed execution: it records an outcome the run
+    computed. The run's first execution is the earliest ``created_at`` over the
+    findings whose attestation claim carries this ``generated_by`` token. Returns
+    None when the run has authored no finding yet, it has not begun executing,
+    so no later plan can post-date it. ISO-8601 UTC timestamps compare
+    lexicographically, so ``MIN`` is the chronological earliest.
+    """
+    row = conn.execute(
+        "SELECT MIN(f.created_at) AS first_at FROM findings f "
+        "JOIN claims c ON c.claim_id = f.claim_id "
+        "WHERE c.generated_by = ?",
+        (run_token,),
+    ).fetchone()
+    return row["first_at"] if row is not None else None
+
+
 def get_plan_claim_id(conn: sqlite3.Connection, plan_id: str) -> Optional[str]:
     """The claim_id of the plan attestation written by ``register_plan``.
 
@@ -195,6 +232,8 @@ def insert_finding(
     bearings: list[Bearing],
     lines: list[EvidenceLine],
     now: str,
+    *,
+    model_lineage: "str | None" = None,
 ) -> str:
     """Write the finding plus its N-line evidence tree; return finding_id.
 
@@ -206,6 +245,13 @@ def insert_finding(
     authoritative per-line bearings are the gate output over each stored estimate;
     :func:`independence_counts` recomputes them on read so that a multi-line
     finding whose lines disagree is counted per line, not off this cache.
+
+    ``model_lineage`` is the JSON model/method lineage the observer captured for
+    the authoring scope (COMPUTED / PROXY / UNVERIFIABLE), or None when no model
+    call was observed. It is written on every line of the finding: the scope
+    authors the finding as a whole, so its lineage attributes each line, and the
+    per-line column lets a reader key independence on distinct model as well as
+    signer and data.
     """
     if not lines:
         raise ValueError("a finding must carry at least one evidence line")
@@ -222,8 +268,9 @@ def insert_finding(
         line_id = _uuid()
         conn.execute(
             "INSERT INTO evidence_lines "
-            "(line_id, finding_id, modality, provenance_id, design_type, data_id, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(line_id, finding_id, modality, provenance_id, design_type, data_id, "
+            " model_lineage, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 line_id,
                 finding_id,
@@ -231,6 +278,7 @@ def insert_finding(
                 line.provenance_id,
                 line.design_type,
                 line.data_id,
+                model_lineage,
                 now,
             ),
         )
@@ -295,29 +343,110 @@ def finding_data_ids(conn: sqlite3.Connection, finding_id: str) -> set[str]:
     return {r["data_id"] for r in rows}
 
 
-def _count_run_distinct(pairs: list[tuple[str, str]]) -> int:
-    """Independent count over (run, dataset) pairs, run-distinct policy.
+def finding_model_lineage(
+    conn: sqlite3.Connection, finding_id: str
+) -> Optional[dict]:
+    """The model/method lineage recorded on a finding's evidence lines, or None.
 
-    A unit of independent evidence requires BOTH a fresh run (``generated_by``)
-    AND a fresh dataset (``data_id``): one run contributes at most one unit (so a
-    single run cannot self-certify), and the same dataset counts once even if it
-    re-appears (the ``data_id`` guard).
-
-    The count is order-free. Each dataset is attributed to exactly one run (the
-    smallest token, a deterministic tie-break), then the answer is the number of
-    distinct runs that own at least one dataset. Under the write-time invariant
-    (``submit_finding``'s fork-guard makes every ``data_id`` belong to exactly one
-    finding, hence one run) this is exactly "distinct runs among the lines"; the
-    per-dataset attribution only matters as defence-in-depth if a future path
-    (e.g. federation import) ever lets one dataset appear under two runs, in which
-    case it stays deterministic and conservative rather than order-dependent.
+    The lineage is written identically on every line of a finding, so the first
+    non-NULL value represents the finding. Returns the parsed dict, or None when
+    the finding was authored without an observed model call.
     """
-    run_of_dataset: dict[str, str] = {}
-    for run, data_id in pairs:
-        prior = run_of_dataset.get(data_id)
-        if prior is None or run < prior:
-            run_of_dataset[data_id] = run
-    return len(set(run_of_dataset.values()))
+    row = conn.execute(
+        "SELECT model_lineage FROM evidence_lines "
+        "WHERE finding_id = ? AND model_lineage IS NOT NULL LIMIT 1",
+        (finding_id,),
+    ).fetchone()
+    if row is None or row["model_lineage"] is None:
+        return None
+    try:
+        return json.loads(row["model_lineage"])
+    except (ValueError, TypeError):
+        return None
+
+
+def _collapse_run_model(keys: list[tuple]) -> tuple:
+    """The single model state a run authored across its surviving datasets.
+
+    A human line wins outright: a check a human authored is the strongest
+    independent axis and is never demoted by a model-lineage sibling under the
+    same signer (a run contributes at most one unit, so the highest-value key
+    stands). Otherwise: any soft line makes the whole run soft (its independence
+    cannot be certified); two distinct COMPUTED roots under one run also collapse
+    to soft (a run that authored under more than one model cannot be pinned to a
+    single distinct one); a single COMPUTED root is that ``("model", root)``;
+    otherwise the run made no model claim (``("absent",)``).
+    """
+    if any(k[0] == "human" for k in keys):
+        return ("human",)
+    if any(k[0] == "soft" for k in keys):
+        return ("soft",)
+    roots = {k[1] for k in keys if k[0] == "model"}
+    if len(roots) > 1:
+        return ("soft",)
+    if roots:
+        return ("model", next(iter(roots)))
+    return ("absent",)
+
+
+def _count_run_distinct(units: list[tuple[str, str, tuple]]) -> int:
+    """Independent count over (run, dataset, model) units, model-distinct policy.
+
+    A unit of independent evidence requires a fresh run (``generated_by`` /
+    signer), a fresh dataset (``data_id``), AND a distinct model/method. Two
+    same-model checks, distinct signer and distinct dataset but the same
+    COMPUTED model, are one line of evidence, not two, so they no longer promote
+    on the signer + data axes alone.
+
+    A human check is the exception and the highest-value source: it needs no
+    distinct model (a human is not a model), so a human run counts per signer and
+    is never folded into a model root, a human check plus a model check reads as
+    two, where two same-model checks read as one.
+
+    The count is order-free. Each dataset is first attributed to exactly one run
+    (the smallest token, a deterministic tie-break), carrying that line's model
+    key, so a re-appearing dataset counts once. The surviving datasets are then
+    grouped by run, this preserves the "one signer contributes at most one
+    unit" cap, and each run's model state is resolved
+    (see :func:`_collapse_run_model`). The answer folds the two axes:
+
+    - COMPUTED runs collapse by family root, so two distinct signers on the same
+      model count once;
+    - absent runs (no observed model call) keep the legacy signer axis, so every
+      pre-observer finding is unchanged;
+    - soft runs (PROXY / UNVERIFIABLE) are UNVERIFIABLE for independence and add
+      no unit, so a soft pair cannot silently corroborate, never a silent pass.
+
+    A body of only-soft or single lines still stands at one supporting line
+    (PRELIMINARY), never zero: soft lineage weakens independence, it does not
+    erase the evidence.
+    """
+    best: dict[str, tuple[str, tuple]] = {}
+    for run, data_id, model_key in units:
+        cur = best.get(data_id)
+        if cur is None or run < cur[0]:
+            best[data_id] = (run, model_key)
+
+    run_models: dict[str, list[tuple]] = {}
+    for run, model_key in best.values():
+        run_models.setdefault(run, []).append(model_key)
+
+    human_runs: set[str] = set()
+    computed_roots: set[str] = set()
+    absent_runs: set[str] = set()
+    for run, keys in run_models.items():
+        state = _collapse_run_model(keys)
+        if state[0] == "human":
+            human_runs.add(run)
+        elif state[0] == "model":
+            computed_roots.add(state[1])
+        elif state[0] == "absent":
+            absent_runs.add(run)
+        # soft: contributes no independent unit
+    hard = len(human_runs) + len(computed_roots) + len(absent_runs)
+    if hard:
+        return hard
+    return 1 if run_models else 0
 
 
 def _authentic_signer_keyid(
@@ -362,12 +491,38 @@ def _authentic_signer_keyid(
         return None
 
 
+def _is_human_signer(conn: sqlite3.Connection, keyid: str) -> bool:
+    """True iff *keyid* is an enrolled validator whose type is ``human``.
+
+    The human-independence signal keys off the validator schema rather than a
+    new column: a check whose signer is an enrolled human validator is a human
+    check. ``is_enrolled`` walks the chain back to a self-signed root and
+    verifies each enrollment envelope, and the envelope binds ``validator_type``
+    (see :func:`mareforma.validators.verify_enrollment`), so a row whose type was
+    flipped by a direct SQL UPDATE fails the chain and is not treated as human.
+    Only an authenticated signer keyid (see :func:`_authentic_signer_keyid`) ever
+    reaches here, so an unbacked keyid cannot claim the human axis. Any structural
+    failure returns False: one un-resolvable signer must not deny the whole
+    proposition's count.
+    """
+    try:
+        from .. import validators as _validators
+
+        if not _validators.is_enrolled(conn, keyid):
+            return False
+        row = _validators.get_validator(conn, keyid)
+        return bool(row and row.get("validator_type") == "human")
+    except Exception:
+        return False
+
+
 # The read query behind independence_counts. Kept as a module constant so a
 # regression test can pin its EXPLAIN QUERY PLAN (no full scan of
-# effect_estimates — the join stays keyed through idx_contrast_line and
+# effect_estimates, the join stays keyed through idx_contrast_line and
 # idx_estimate_contrast).
 INDEPENDENCE_COUNTS_SQL = (
-    "SELECT el.data_id AS data_id, cl.generated_by AS generated_by, "
+    "SELECT el.data_id AS data_id, el.model_lineage AS model_lineage, "
+    " cl.generated_by AS generated_by, "
     " cl.asserter_keyid AS asserter_keyid, cl.claim_id AS claim_id, "
     " cl.signature_bundle AS signature_bundle, "
     " est.estimate_value, est.effect_type, est.scale, est.p_value, "
@@ -384,31 +539,154 @@ INDEPENDENCE_COUNTS_SQL = (
 )
 
 
-def independence_counts(conn: sqlite3.Connection, content_id: str) -> tuple[int, int]:
-    """(independent_support, independent_refute) by distinct signer, data_id guard.
+def _line_model_key(raw: "str | None") -> tuple:
+    """The independence model key for a stored ``model_lineage`` column value.
 
-    Per-line bearing is recomputed on read: each evidence line's stored estimate
-    is gated against its finding's stored prediction (the gate inputs are
-    persisted precisely so a reader can recompute and catch drift), so a
-    multi-line finding whose lines disagree is counted line by line, never off
-    the finding's denormalised ``bearing_direction`` cache.
-
-    Independence is then counted by distinct **signer** (the claim's
-    ``asserter_keyid``) with a ``data_id`` guard (see
-    :func:`_count_run_distinct`): one signer yields at most one independent
-    support and one independent refute. This is the same WHO axis the
-    REPLICATED promotion query keys on, read from the same denormalised claim
-    column, so promotion and trust counting can never disagree. Legacy
-    evidence lines whose claim predates the keyid column (NULL
-    ``asserter_keyid``) fall back to the retired ``generated_by`` run axis so
-    they keep their count instead of silently collapsing two NULL signers to
-    one (status_policy@v3). The two axes are namespaced (``k:`` vs ``g:``) so a
-    keyid can never alias a run label.
+    ``raw`` is the JSON string persisted on the evidence line, or ``None`` when
+    the finding was authored without an observed model call. A column that no
+    longer parses is treated as soft (never a fabricated distinct model).
     """
-    rows = conn.execute(INDEPENDENCE_COUNTS_SQL, (content_id,)).fetchall()
+    # Lazy import: ``mareforma.observe`` imports ``trust._store`` (for
+    # ``is_content_addressed``), so importing the lineage helper at module top
+    # would close a cycle. By call time both modules are fully loaded.
+    from mareforma.observe._lineage import independence_model_key
 
-    supports: list[tuple[str, str]] = []
-    refutes: list[tuple[str, str]] = []
+    if raw is None:
+        return ("absent",)
+    try:
+        lineage = json.loads(raw)
+    except (ValueError, TypeError):
+        lineage = None
+    if not isinstance(lineage, dict):
+        return ("soft",)
+    return independence_model_key(lineage)
+
+
+def _signed_model_lineage(
+    conn: sqlite3.Connection,
+    claim_id: str,
+    bundle_json: "str | None",
+) -> "dict | None":
+    """The model lineage the claim's SIGNED envelope binds, or None.
+
+    A finding binds its model lineage into the signed observed record
+    (``finding/v2``), so the read path can re-authenticate the denormalized
+    ``evidence_lines.model_lineage`` column against material the signer covered.
+    Returns the signed lineage dict only when the bundle (a) is a claim envelope
+    that (b) binds to this ``claim_id``, (c) carries a model lineage on its
+    observed record, and (d) is signed by an enrolled validator whose signature
+    verifies. A non-enrolled signer (whose bundle cannot be verified), a bad
+    signature, a v1 finding (no signed lineage), an unsigned claim, or any
+    structural failure returns None, the caller then treats the line as soft,
+    never a fabricated distinct model. Never raises: one un-authenticatable line
+    must not deny the whole proposition's count.
+    """
+    if not bundle_json:
+        return None
+    try:
+        from .. import signing as _signing
+        from .. import validators as _validators
+
+        env = json.loads(bundle_json)
+        pred = _signing.claim_predicate_from_envelope(env)
+        if pred.get("claim_id") != claim_id:
+            return None
+        grounding = pred.get("observed_grounding")
+        if not isinstance(grounding, dict):
+            return None
+        lineage = grounding.get("model_lineage")
+        if not isinstance(lineage, dict):
+            return None
+        keyid = env["signatures"][0]["keyid"]
+        signer_row = _validators.get_validator(conn, keyid)
+        if signer_row is None:
+            # Fail closed: a non-enrolled signer's bundle cannot be verified, so
+            # its lineage is unauthenticated. Trusting it lets a producer sign a
+            # fabricated distinct model with a throwaway key and inflate the
+            # count (the read-side parallel of the forged-column defence). An
+            # unauthenticatable line reads soft, never a counted model.
+            return None
+        pem = base64.standard_b64decode(signer_row["pubkey_pem"])
+        pub = _signing.public_key_from_pem(pem)
+        if not _signing.verify_envelope(env, pub):
+            return None
+        return lineage
+    except Exception:
+        return None
+
+
+def _authentic_model_key(
+    conn: sqlite3.Connection,
+    claim_id: str,
+    raw_column: "str | None",
+    bundle_json: "str | None",
+) -> tuple:
+    """The independence model key for a line, read from SIGNED material.
+
+    The ``evidence_lines.model_lineage`` column is denormalized and unsigned, so
+    a direct/foreign writer can rewrite it to a fabricated distinct COMPUTED root
+    to inflate independence. We therefore key on the SIGNED lineage the claim's
+    envelope binds, never the raw column:
+
+    - a NULL column made no model claim → ``("absent",)`` (the legacy signer axis
+      still applies; a human line is re-keyed upstream);
+    - a present column whose claim carries an authenticated signed lineage keys on
+      that signed copy, so a forged column cannot move the count;
+    - a present column with no authenticatable signed lineage (a v1 finding, an
+      unsigned claim, or a bundle that does not verify) reads ``("soft",)``, a
+      distinct model that cannot be certified, never counted.
+
+    This is the model-axis parallel of :func:`_authentic_signer_keyid`.
+    """
+    from mareforma.observe._lineage import independence_model_key
+
+    if raw_column is None:
+        return ("absent",)
+    signed = _signed_model_lineage(conn, claim_id, bundle_json)
+    if signed is None:
+        return ("soft",)
+    return independence_model_key(signed)
+
+
+def _independence_units(
+    conn: sqlite3.Connection, content_id: str, *, memo: "dict | None" = None
+):
+    """Yield ``(direction, run_token, data_id, model_key)`` per gateable line.
+
+    The shared read path behind :func:`independence_counts` and
+    :func:`effective_independence`. Per-line bearing is recomputed on read: each
+    evidence line's stored estimate is gated against its finding's stored
+    prediction (the gate inputs are persisted precisely so a reader can recompute
+    and catch drift), so a multi-line finding whose lines disagree is counted
+    line by line, never off the finding's denormalised ``bearing_direction``
+    cache.
+
+    The run token is the distinct **signer** (the claim's ``asserter_keyid``),
+    the same WHO the REPLICATED promotion keys on. The denormalized column is not
+    itself signed, so it is trusted only when the claim's bundle authenticates it
+    (embeds the same keyid, binds to this claim, and verifies when the signer is
+    enrolled); a forged or unbacked keyid falls back to the retired
+    ``generated_by`` run axis so it cannot inflate the count beyond the soft
+    string axis. The ``k:`` / ``g:`` namespace stops a keyid aliasing a run
+    label. The model key carries the distinct-model/method axis, read from the
+    SIGNED lineage rather than the unsigned column so a forged column cannot
+    inflate the count (see :func:`_authentic_model_key`); a line with no observed
+    model call whose signer
+    is an enrolled human validator is re-keyed ``("human",)``, the human axis,
+    the highest-value independent source (see :func:`_is_human_signer`).
+
+    ``memo`` is an optional per-read-call cache. The signer/model axis of a line
+    (``run_token`` and ``model_key``) is constant per claim, the authenticating
+    columns are written identically on every line of a finding, so it is
+    computed once per ``claim_id`` and reused, sparing the repeated Ed25519
+    verify a multi-line finding, and a frame read that walks the same claim as a
+    contrary, would otherwise pay. Only ``direction`` and ``data_id`` vary per
+    line. A claim belongs to exactly one proposition, so the cache never
+    collides across content_ids sharing a memo. Absent ``memo``, a fresh local
+    cache still dedups within the single call.
+    """
+    per_claim = memo.setdefault("signer", {}) if memo is not None else {}
+    rows = conn.execute(INDEPENDENCE_COUNTS_SQL, (content_id,)).fetchall()
     for r in rows:
         # Recompute the per-line bearing from stored inputs. Every row written by
         # submit_finding was gated at write, so this is total for normal data. A
@@ -443,24 +721,161 @@ def independence_counts(conn: sqlite3.Connection, content_id: str) -> tuple[int,
             direction = compute_bearing(estimate, prediction).direction
         except Exception:
             continue
-        # Independence axis = distinct signer (asserter_keyid), the same WHO
-        # the REPLICATED promotion keys on. The denormalized column is not
-        # itself signed, so trust it only when the claim's bundle authenticates
-        # it (embeds the same keyid, binds to this claim, and verifies when the
-        # signer is enrolled). A forged or unbacked keyid falls back to the
-        # retired generated_by run axis so it cannot inflate the count beyond
-        # the soft string axis. The k:/g: namespace stops a keyid aliasing a run
-        # label.
-        keyid = _authentic_signer_keyid(
-            conn, r["claim_id"], r["asserter_keyid"], r["signature_bundle"],
-        )
-        run_token = f"k:{keyid}" if keyid is not None else f"g:{r['generated_by']}"
-        pair = (run_token, r["data_id"])
+        claim_id = r["claim_id"]
+        cached = per_claim.get(claim_id)
+        if cached is None:
+            keyid = _authentic_signer_keyid(
+                conn, claim_id, r["asserter_keyid"], r["signature_bundle"],
+            )
+            run_token = (
+                f"k:{keyid}" if keyid is not None else f"g:{r['generated_by']}"
+            )
+            model_key = _authentic_model_key(
+                conn, claim_id, r["model_lineage"], r["signature_bundle"],
+            )
+            # A line with no observed model call, signed by an enrolled human
+            # validator, is a human check: the highest-value independent axis,
+            # which needs no distinct model. A line that DID observe a model call
+            # keeps its model key even under a human signer, the check was the
+            # model's, and the human only signed it, so the model-distinct axis
+            # still governs.
+            if model_key[0] == "absent" and keyid is not None and _is_human_signer(
+                conn, keyid
+            ):
+                model_key = ("human",)
+            cached = (run_token, model_key)
+            per_claim[claim_id] = cached
+        run_token, model_key = cached
+        yield direction, run_token, r["data_id"], model_key
+
+
+def independence_counts(
+    conn: sqlite3.Connection, content_id: str, *, memo: "dict | None" = None
+) -> tuple[int, int]:
+    """(independent_support, independent_refute) by distinct signer + model, data guard.
+
+    Counted by distinct **signer** (the claim's ``asserter_keyid``) AND distinct
+    **model/method**, with a ``data_id`` guard (see :func:`_count_run_distinct`):
+    one signer yields at most one independent support and one independent refute,
+    and two same-model checks no longer read as two independent lines. This is
+    the same WHO axis the REPLICATED promotion query keys on, read from the same
+    denormalised claim column, and the same model axis the promotion gate now
+    reads off the evidence line, so promotion and trust counting can never
+    disagree. Legacy evidence lines whose claim predates the keyid column (NULL
+    ``asserter_keyid``) fall back to the retired ``generated_by`` run axis, and a
+    finding with no observed model call carries no model constraint, so both keep
+    their count instead of collapsing (status_policy@v4). A no-model-call line
+    signed by an enrolled human validator counts on the human axis, the
+    highest-value independent source, never folded into a model root. The two run
+    axes are namespaced (``k:`` vs ``g:``) so a keyid can never alias a run label.
+
+    ``memo`` is an optional per-read-call cache. A proposition's counts are
+    constant within one read call, so a ``query_frame`` pass that counts a
+    proposition once for itself and again for every sibling walking it as a
+    contrary computes it once and reuses the result, sharing the same cache with
+    :func:`_independence_units` so a claim's signature verifies once per call.
+    """
+    if memo is not None:
+        counts_cache = memo.setdefault("counts", {})
+        if content_id in counts_cache:
+            return counts_cache[content_id]
+    supports: list[tuple[str, str, tuple]] = []
+    refutes: list[tuple[str, str, tuple]] = []
+    for direction, run_token, data_id, model_key in _independence_units(
+        conn, content_id, memo=memo
+    ):
+        unit = (run_token, data_id, model_key)
         if direction is BearingDirection.SUPPORTS:
-            supports.append(pair)
+            supports.append(unit)
         elif direction is BearingDirection.REFUTES:
-            refutes.append(pair)
-    return _count_run_distinct(supports), _count_run_distinct(refutes)
+            refutes.append(unit)
+    result = (_count_run_distinct(supports), _count_run_distinct(refutes))
+    if memo is not None:
+        memo["counts"][content_id] = result
+    return result
+
+
+def effective_independence(conn: sqlite3.Connection, content_id: str) -> dict:
+    """The effective-independence number for a proposition, with a soft flag.
+
+    ``number`` is the count of pairwise-distinct (model, data, signer) SUPPORTING
+    checks, the same model-aware axis :func:`independence_counts` promotes on, so
+    the two never disagree. A supporting check a human authored (no observed model
+    call, signed by an enrolled human validator) counts as the highest-value
+    independent source: it needs no distinct model, so a human check plus a model
+    check reads as two where two same-model checks read as one. ``soft`` is True
+    when a supporting line carries PROXY / UNVERIFIABLE model lineage or no
+    observed model call at all: the count then rests on lineage that cannot
+    certify a distinct model, which the trust map surfaces as UNVERIFIABLE rather
+    than a confident number.
+
+    Coarse by design: distinct-model is binary this release. The graded
+    cross-model residual (how *far apart* two distinct models are) is DEFERRED , 
+    named here, not computed.
+    """
+    supports, soft = _supporting_units(conn, content_id)
+    return {"number": _count_run_distinct(supports), "soft": soft}
+
+
+def _supporting_units(
+    conn: sqlite3.Connection, content_id: str
+) -> tuple[list[tuple[str, str, tuple]], bool]:
+    """The SUPPORTING ``(run, data, model)`` units for a proposition, plus soft.
+
+    The shared collection behind :func:`effective_independence` and
+    :func:`effective_independence_receipt`. ``soft`` is True when any supporting
+    line carried PROXY / UNVERIFIABLE model lineage, or no observed model call at
+    all (absent): the per-finding disclosure certifies a distinct model only for
+    observed calls, so an unobserved model cannot be told apart and is soft here.
+    Absent is re-keyed to soft so it adds no confident hard unit, dropping the
+    count to the single-line floor rather than reverting to the pre-v0.3.10 signer
+    axis. This narrows only the map's per-finding certification; the legacy status
+    ladder (:func:`independence_counts`) still counts distinct signers. A human
+    check is re-keyed ``("human",)`` upstream, so it is never absent here and
+    keeps its axis.
+    """
+    supports: list[tuple[str, str, tuple]] = []
+    soft = False
+    for direction, run_token, data_id, model_key in _independence_units(
+        conn, content_id
+    ):
+        if direction is BearingDirection.SUPPORTS:
+            if model_key[0] == "absent":
+                model_key = ("soft",)
+            supports.append((run_token, data_id, model_key))
+            if model_key[0] == "soft":
+                soft = True
+    return supports, soft
+
+
+def effective_independence_receipt(
+    conn: sqlite3.Connection, content_id: str
+) -> dict:
+    """The per-finding independence record a measurement receipt carries.
+
+    Extends :func:`effective_independence` with ``naive``: the supporting count a
+    signer-axis counter would report BEFORE the model-distinct collapse, taken
+    over HARD (non-soft) lineage only. ``naive - number`` isolates the same-model
+    (COMPUTED) collapse, two distinct signers on one model that a naive counter
+    would read as two independent lines, while excluding soft-lineage weakening,
+    which ``soft`` reports separately. A measurement aggregates these records into
+    the independence arm of the report (see
+    :func:`mareforma.observe.measure.summarize_independence`).
+
+    ``naive`` counts distinct-signer supporting lines by re-keying every hard unit
+    to the model-absent axis (so no two lines collapse on their model root), then
+    reusing :func:`_count_run_distinct`. So a same-model pair reads ``naive=2,
+    number=1`` (collapse of 1); a distinct-model pair reads ``naive=2, number=2``
+    (no collapse); a soft-only body reads ``naive=0, number=1, soft=True``, not a
+    collapse, an unverifiable count.
+    """
+    supports, soft = _supporting_units(conn, content_id)
+    number = _count_run_distinct(supports)
+    hard = [(run, data_id, mk) for run, data_id, mk in supports if mk[0] != "soft"]
+    naive = _count_run_distinct(
+        [(run, data_id, ("absent",)) for run, data_id, _mk in hard]
+    )
+    return {"number": number, "naive": naive, "soft": soft}
 
 
 def get_proposition_row(
@@ -472,11 +887,13 @@ def get_proposition_row(
 
 
 def _frame_status(
-    conn: sqlite3.Connection, frame_id: str, direction: Direction
+    conn: sqlite3.Connection, frame_id: str, direction: Direction,
+    *, memo: "dict | None" = None,
 ) -> FrameStatus:
     """CONTESTED iff some contrary proposition in the same frame has >=1
     independent supporting line; CONSISTENT otherwise. Stops at the first such
-    contrary.
+    contrary. ``memo`` shares the per-call independence cache (see
+    :func:`independence_counts`).
     """
     contraries = [d.value for d in direction.contrary_set if d != direction]
     if not contraries:
@@ -488,26 +905,37 @@ def _frame_status(
         (frame_id, *contraries),
     ).fetchall()
     for r in rows:
-        support, _ = independence_counts(conn, r["content_id"])
+        support, _ = independence_counts(conn, r["content_id"], memo=memo)
         if support >= 1:
             return FrameStatus.CONTESTED
     return FrameStatus.CONSISTENT
 
 
-def proposition_status(conn: sqlite3.Connection, content_id: str) -> Optional[dict]:
+def proposition_status(
+    conn: sqlite3.Connection, content_id: str, *, memo: "dict | None" = None
+) -> Optional[dict]:
     """The retrieval view: derived Status + counts + frame contest, or None.
 
     ``status`` is the same-proposition state (support vs refute lines on this
     content_id). ``frame_status`` is the separate frame-level contest (a contrary
     proposition in the same frame has independent support). They are two
     different signals and never the same number.
+
+    ``memo`` is an optional per-read-call cache shared between the own-status
+    count and the frame-contest count so each proposition's counts (and each
+    claim's signature verify) are computed once per call. Defaults to a fresh
+    cache, so a standalone call still shares work between its two passes.
     """
+    if memo is None:
+        memo = {}
     row = get_proposition_row(conn, content_id)
     if row is None:
         return None
-    support, refute = independence_counts(conn, content_id)
+    support, refute = independence_counts(conn, content_id, memo=memo)
     status = compute_status(support, refute)
-    frame_status = _frame_status(conn, row["frame_id"], Direction(row["direction"]))
+    frame_status = _frame_status(
+        conn, row["frame_id"], Direction(row["direction"]), memo=memo
+    )
     return {
         "content_id": content_id,
         "frame_id": row["frame_id"],
@@ -526,7 +954,7 @@ def query_frame(
     """Everything known about a question (frame_id), each with its derived view.
 
     ``min_status`` filters to propositions at or above a floor on the
-    UNTESTED < PRELIMINARY < CORROBORATED support ladder. Only those three are
+    UNTESTED < PRELIMINARY < CONVERGENT support ladder. Only those three are
     valid floors; REFUTED and CONTESTED are off the ladder and are excluded by
     any floor.
     """
@@ -541,9 +969,14 @@ def query_frame(
     rows = conn.execute(
         "SELECT content_id FROM propositions WHERE frame_id = ?", (frame_id,)
     ).fetchall()
+    # One memo for the whole frame read: proposition_status counts each
+    # proposition for itself and again as a contrary of its siblings, so sharing
+    # the cache across the frame collapses those repeats to one compute (and one
+    # signature verify) per proposition.
+    memo: dict = {}
     out: list[dict] = []
     for r in rows:
-        view = proposition_status(conn, r["content_id"])
+        view = proposition_status(conn, r["content_id"], memo=memo)
         if view is None:
             continue
         if floor is not None and _SUPPORT_RANK[view["status"]] < floor:

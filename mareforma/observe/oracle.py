@@ -8,7 +8,7 @@ same with different data, which is the signature of a silent fallback.
 
 The oracle is the observer's validation because it is independent: it never
 reads the observer's log, so a detector that agreed with itself cannot look
-correct here. It also handles the honest hard case — a stochastic pipeline
+correct here. It also handles the honest hard case, a stochastic pipeline
 (an LLM at nonzero temperature) moves run to run even with fixed input, so a
 naive "did it change" test would call everything influenced. The oracle measures
 that run-to-run noise first and only calls INFLUENCED when the perturbation moves
@@ -22,12 +22,21 @@ detector error.
 """
 from __future__ import annotations
 
+import math
+import re
 import statistics
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Sequence
 
 from ._verdict import ObservedGrounding
+
+# Below this many repeats the base-run spread is a THIN estimate of the
+# pipeline's noise: pstdev over 2-4 samples routinely understates the population
+# sigma, so an INFLUENCED verdict resting on that floor is over-confident. The
+# guard (opt-in) widens the noise margin by a small-sample factor; the informational
+# ``noise_is_thin`` flag is always recorded so a reader sees the caveat.
+_THIN_REPEATS = 5
 
 
 class OracleInfluence(str, Enum):
@@ -44,8 +53,8 @@ class MetricReducer:
 
     The oracle needs one number per finding. For a numeric finding that is
     ``float(finding)``. For a PROSE finding (the text output of a RAG or
-    agent pipeline) the caller must supply a reduction — a named extraction to a
-    scalar — and DECLARE what it is, because the choice of reducer is a
+    agent pipeline) the caller must supply a reduction, a named extraction to a
+    scalar, and DECLARE what it is, because the choice of reducer is a
     measurement decision a reviewer must be able to audit. In particular an
     embedding-distance or LLM-judge reducer re-inserts a model into the ground
     truth the oracle is supposed to provide independently; that is sometimes the
@@ -104,6 +113,56 @@ def declared_reducer(
     )
 
 
+# A number in a prose answer: an optional sign, digits with an optional decimal
+# point, and an optional exponent. Finds "0.42", "-3", "1.2e-3".
+_NUMBER_RE = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
+
+
+def numeric_extraction_reducer(
+    name: str = "numeric_extraction",
+    *,
+    index: int = 0,
+    description: str = "",
+) -> MetricReducer:
+    """A model-FREE prose reducer: pull the reported number out of an answer string.
+
+    The paper's target pipelines emit prose ("the effect was 0.42"), so the oracle
+    needs a reduction to a scalar. This is the honest DEFAULT for prose that states
+    a number: a regex extraction, no model, so ``reinserts_model=False`` and the
+    oracle stays a model-independent ground truth. Prefer it to an embedding /
+    LLM-judge reducer whenever the finding actually reports a number; reach for a
+    ``declared_reducer(..., reinserts_model=True)`` only when the reduction genuinely
+    needs a model, and then the measurement declares it.
+
+    ``index`` selects which number when the answer carries several (default the
+    first). A number-free answer raises, so a silent zero is never invented.
+    """
+    def reduce(finding: Any) -> float:
+        if isinstance(finding, bool):  # bool is an int subclass; never a metric
+            raise TypeError("a boolean is not a numeric finding")
+        if isinstance(finding, (int, float)):
+            return float(finding)
+        text = finding if isinstance(finding, str) else str(finding)
+        matches = _NUMBER_RE.findall(text)
+        if not matches:
+            raise ValueError(
+                f"no number found in prose finding to reduce: {text[:60]!r}"
+            )
+        try:
+            return float(matches[index])
+        except IndexError as exc:
+            raise ValueError(
+                f"prose finding has {len(matches)} numbers, none at index {index}: "
+                f"{text[:60]!r}"
+            ) from exc
+
+    return declared_reducer(
+        name, reduce, reinserts_model=False,
+        description=description
+        or "extract the reported number from an answer string (model-free)",
+    )
+
+
 @dataclass
 class OracleResult:
     """The oracle's measurement, with the numbers behind the verdict."""
@@ -118,6 +177,25 @@ class OracleResult:
     # The declared reducer used to reduce each finding to a scalar, so the
     # measurement artifact is auditable about how prose became a number.
     reducer: "MetricReducer | None" = None
+    # The multiplicity the decision threshold was widened for (1 = a single
+    # finding, no correction), and whether the noise floor rests on too few
+    # repeats to be trusted. Both are recorded so the verdict is auditable.
+    multiplicity: int = 1
+    noise_is_thin: bool = False
+
+    @property
+    def reinserts_model(self) -> bool:
+        """Whether the declared reducer ran a model to reduce the finding.
+
+        True means the ground truth is no longer model-independent, the oracle's
+        one guarantee, so the measurement must surface it. Read it off the result
+        rather than re-inspecting the reducer.
+        """
+        return bool(self.reducer and self.reducer.reinserts_model)
+
+    def declaration(self) -> "dict | None":
+        """The reducer's audit record, or None when no reducer was declared."""
+        return self.reducer.declaration() if self.reducer else None
 
 
 def _coerce_scalar(finding: Any) -> float:
@@ -144,6 +222,8 @@ def perturbation_oracle(
     metric: "Callable[[Any], float] | None" = None,
     effect_threshold: float = 0.0,
     noise_multiplier: float = 3.0,
+    multiplicity: int = 1,
+    thin_sigma_guard: bool = False,
 ) -> OracleResult:
     """Measure whether the cited data causally influences the finding.
 
@@ -172,7 +252,23 @@ def perturbation_oracle(
     noise_multiplier:
         How many noise standard deviations the effect must exceed to count as
         influence. The decision threshold is ``max(effect_threshold,
-        noise_multiplier * noise_std)``.
+        sigma_multiplier * noise_std)``, where ``sigma_multiplier`` starts at
+        ``noise_multiplier`` and is widened by the multiplicity and thin-sigma
+        controls below.
+    multiplicity:
+        The number of findings this call is one of. When influence is computed
+        across many findings, a fixed ``noise_multiplier`` lets the noisiest
+        finding cross the bar by chance, so the family produces false INFLUENCED
+        calls at a rate that grows with the count. Passing the family size adds
+        ``sqrt(2 * ln(multiplicity))`` sigmas to the multiplier, the scale of the
+        largest spurious deviation expected across ``multiplicity`` standard
+        draws, so the control is applied BEFORE any influence number is computed.
+        ``1`` (the default) adds nothing: a single finding needs no correction.
+    thin_sigma_guard:
+        When True, widen the noise margin by a small-sample factor whenever the
+        noise floor rests on fewer than ``_THIN_REPEATS`` repeats (a thin pstdev
+        understates the real sigma). Off by default, so the scalar path is
+        unchanged; ``noise_is_thin`` is recorded either way.
 
     Returns
     -------
@@ -183,6 +279,8 @@ def perturbation_oracle(
     """
     if repeats < 1:
         raise ValueError("repeats must be >= 1")
+    if multiplicity < 1:
+        raise ValueError("multiplicity must be >= 1")
     # Resolve the metric to a declared reducer so the result records which one ran.
     # A bare callable is wrapped as an unnamed reducer; None uses scalar_reducer.
     if metric is None:
@@ -208,7 +306,20 @@ def perturbation_oracle(
     # single deterministic run there is no measurable noise, so the floor is 0
     # and effect_threshold alone decides.
     noise_std = statistics.pstdev(base_values) if len(base_values) > 1 else 0.0
-    noise_margin = noise_multiplier * noise_std
+
+    # A noise floor estimated from too few repeats is thin (pstdev understates
+    # the population sigma). Always record it; widen the margin only when the
+    # guard is on, so the default scalar path is unchanged.
+    noise_is_thin = 1 < repeats < _THIN_REPEATS
+    sigma_multiplier = noise_multiplier
+    if multiplicity > 1:
+        # The extreme-value scale of the max of ``multiplicity`` standard draws:
+        # the extra sigmas a family of that size needs to hold its false-influence
+        # rate. Applied before the influence call, per finding.
+        sigma_multiplier += math.sqrt(2.0 * math.log(multiplicity))
+    if thin_sigma_guard and noise_is_thin:
+        sigma_multiplier *= math.sqrt(_THIN_REPEATS / repeats)
+    noise_margin = sigma_multiplier * noise_std
     decision_threshold = max(effect_threshold, noise_margin)
 
     # UNDECIDABLE is a NOISE verdict: it applies only when noise, not the domain
@@ -246,6 +357,8 @@ def perturbation_oracle(
         base_values=base_values,
         perturbed_values=perturbed_values,
         reducer=reducer,
+        multiplicity=multiplicity,
+        noise_is_thin=noise_is_thin,
     )
 
 
@@ -289,7 +402,7 @@ def reconcile(
       nothing to reconcile against the oracle.
     - UNGROUNDED + INFLUENCED → TENSION: the data demonstrably influences the
       finding, yet the observer saw no cited read. This is the one combination
-      worth investigating — the observer likely missed a read (a coverage gap).
+      worth investigating, the observer likely missed a read (a coverage gap).
     - anything + UNDECIDABLE → INCONCLUSIVE: the oracle could not decide.
     """
     if oracle is OracleInfluence.UNDECIDABLE:

@@ -1,10 +1,10 @@
 """
-examples/01_api_walkthrough.py — Full EpistemicGraph API walkthrough.
+examples/01_api_walkthrough.py, Full EpistemicGraph API walkthrough.
 
 Run:
     python examples/01_api_walkthrough.py
 
-No external dependencies. Uses a temporary directory — safe to run anywhere.
+No external dependencies. Uses a temporary directory, safe to run anywhere.
 
 Sections
 --------
@@ -13,7 +13,7 @@ Sections
   3. Query          text, min_support, classification, limit
   4. Idempotency    retry-safe writes and convergence convention
   5. REPLICATED     automatic when two independent agents converge
-  6. ESTABLISHED    human validation — requires REPLICATED first
+  6. ESTABLISHED    human validation, requires REPLICATED first
   7. Anti-patterns  what breaks the epistemic model silently
 """
 
@@ -71,17 +71,17 @@ show("db", tmp / ".mareforma" / "graph.db")
 
 
 # ---------------------------------------------------------------------------
-# 2. Assert — three classification labels
+# 2. Assert, three classification labels
 # ---------------------------------------------------------------------------
 sep("2. Assert claims")
 
-# INFERRED — default. LLM reasoning without explicit grounding.
+# INFERRED, default. LLM reasoning without explicit grounding.
 c_inferred = graph.assert_claim(
     "Cell type A receives more inhibitory input than cell type B",
 )
 show("INFERRED id", c_inferred[:8] + "…")
 
-# ANALYTICAL — deterministic analysis against source data. Agent-declared.
+# ANALYTICAL, deterministic analysis against source data. Agent-declared.
 # Only use this when the data pipeline actually ran and produced output.
 c_analytical = graph.assert_claim(
     "Cell type A receives more inhibitory input than cell type B (n=1,204, p<0.001)",
@@ -92,7 +92,7 @@ c_analytical = graph.assert_claim(
 )
 show("ANALYTICAL id", c_analytical[:8] + "…")
 
-# DERIVED — explicitly built on claims already in the graph.
+# DERIVED, explicitly built on claims already in the graph.
 # Incentivises agents to query before asserting.
 c_derived = graph.assert_claim(
     "Inhibitory specialisation of cell type A is a conserved motif",
@@ -116,7 +116,7 @@ show("text='cell type A'", f"{len(r)} claims")
 r = graph.query(classification="ANALYTICAL")
 show("classification=ANALYTICAL", f"{len(r)} claim")
 
-# Minimum support — nothing is REPLICATED yet
+# Minimum support, nothing is REPLICATED yet
 r = graph.query(min_support="REPLICATED")
 show("min_support=REPLICATED", f"{len(r)} claims  ← expected 0")
 
@@ -124,7 +124,7 @@ show("min_support=REPLICATED", f"{len(r)} claims  ← expected 0")
 r = graph.query(limit=2)
 show("limit=2", f"{len(r)} claims")
 
-# get_claim — single record by id
+# get_claim, single record by id
 claim = graph.get_claim(c_analytical)
 if claim:
     show("get_claim support_level", claim["support_level"])
@@ -161,15 +161,16 @@ show("same id?", id_a == id_b)
 
 
 # ---------------------------------------------------------------------------
-# 5. REPLICATED — automatic convergence
+# 5. REPLICATED, automatic convergence
 # ---------------------------------------------------------------------------
 sep("5. REPLICATED (automatic)")
 
 # REPLICATED fires when >=2 claims share the same upstream in supports[],
 # are signed by DISTINCT keys, and the shared upstream is itself
-# ESTABLISHED. The signing key is the independence unit; generated_by is a
-# display label and does not drive promotion. The ESTABLISHED-upstream
-# condition (Cochrane / GRADE methodology: replication-of-noise is not
+# ESTABLISHED. Distinct signing keys are the legacy independence signal, used
+# when no model lineage is observed; effective independence counts distinct
+# model and method. generated_by is a display label and does not drive
+# promotion. The ESTABLISHED-upstream condition (replication-of-noise is not
 # replication) is satisfied here by asserting the upstream as a seed claim,
 # inserted directly at ESTABLISHED with a signed seed envelope.
 
@@ -203,13 +204,13 @@ rep_b = graph.assert_claim(
 
 c_rep_a = graph.get_claim(rep_a)
 c_rep_b = graph.get_claim(rep_b)
-show("lab_a support_level", c_rep_a["support_level"] if c_rep_a else "—")
-show("lab_b support_level", c_rep_b["support_level"] if c_rep_b else "—")
+show("lab_a support_level", c_rep_a["support_level"] if c_rep_a else "n/a")
+show("lab_b support_level", c_rep_b["support_level"] if c_rep_b else "n/a")
 show("REPLICATED count", len(graph.query(min_support="REPLICATED")))
 
 
 # ---------------------------------------------------------------------------
-# 6. ESTABLISHED — human validation only
+# 6. ESTABLISHED, human validation only
 # ---------------------------------------------------------------------------
 sep("6. ESTABLISHED (human only)")
 
@@ -217,7 +218,7 @@ sep("6. ESTABLISHED (human only)")
 # No automated path. No agent can self-promote to ESTABLISHED.
 
 try:
-    graph.validate(c_inferred)          # PRELIMINARY — raises
+    graph.validate(c_inferred)          # PRELIMINARY, raises
 except ValueError as exc:
     show("validate(PRELIMINARY)", f"ValueError: {exc}")
 
@@ -244,11 +245,11 @@ if established:
 
 
 # ---------------------------------------------------------------------------
-# 7. Operational surfaces — inspect the graph and audit its integrity
+# 7. Operational surfaces, inspect the graph and audit its integrity
 # ---------------------------------------------------------------------------
 sep("7. Operational surfaces")
 
-# graph.health() — single-call audit summary. Operators inspect this
+# graph.health(), single-call audit summary. Operators inspect this
 # instead of writing N separate queries. Non-zero values flag work to
 # do; mareforma doesn't decide if anything is wrong, it just
 # reports the counters.
@@ -261,18 +262,18 @@ show("dangling_supports", h["dangling_supports"])
 show("convergence_errors", h["convergence_errors"])
 show("convergence_retry_pending", h["convergence_retry_pending"])
 
-# graph.classify_supports() — see how the graph routes each entry
+# graph.classify_supports(), see how the graph routes each entry
 # in a supports[] / contradicts[] list. Three buckets: claim (strict
-# v4 UUID — a graph-node candidate), doi (Crossref/DataCite syntax —
+# v4 UUID, a graph-node candidate), doi (Crossref/DataCite syntax , 
 # external citation, resolved at assert time), external (anything
-# else — stored verbatim, not walked).
+# else, stored verbatim, not walked).
 mixed = [upstream, "10.1038/cure", "https://example.org/preprint"]
 for entry in graph.classify_supports(mixed):
     show(f"  {entry['value'][:32]:<32}", entry["type"])
 
 
 # ---------------------------------------------------------------------------
-# 8. Anti-patterns — the failure modes mareforma cannot catch for you
+# 8. Anti-patterns, the failure modes mareforma cannot catch for you
 # ---------------------------------------------------------------------------
 sep("8. Anti-patterns")
 
@@ -287,14 +288,14 @@ cid = graph.assert_claim(
     generated_by="agent_example/model-a",
 )
 c_cid = graph.get_claim(cid)
-show("null data → classification", c_cid["classification"] if c_cid else "—")
+show("null data → classification", c_cid["classification"] if c_cid else "n/a")
 
 print()
 
 # ✗  Correlated agents do not produce genuine REPLICATED
 #    Two runs of the same model on the same data are not independent.
 #    REPLICATED requires two claims signed by DIFFERENT keys (distinct
-#    asserter_keyid) on the same ESTABLISHED upstream — a single key cannot
+#    asserter_keyid) on the same ESTABLISHED upstream, a single key cannot
 #    self-replicate. generated_by is a display label, not the independence
 #    axis; encode model + version + lab context in it for auditability:
 #      "gpt-4o-2024-11/lab_a"   ← meaningful label

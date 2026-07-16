@@ -1,4 +1,5 @@
-"""Regressions for the pre-ship hardening pass.
+"""Regressions across the paths a finding travels: read, convergence, backup,
+restore, and the export bundle.
 
 Locked-in invariants:
 
@@ -6,7 +7,7 @@ Locked-in invariants:
   claim (logically incoherent shape).
 - query(text=...) treats SQLite LIKE wildcards (%, _) and the
   ESCAPE sentinel (\\) as literal characters in the substring
-  filter — the README documents this as "case-insensitive
+  filter, the README documents this as "case-insensitive
   substring filter" and the implementation must back that contract.
 """
 from __future__ import annotations
@@ -27,7 +28,7 @@ class TestSupportsContradictsIntersectionRefused:
             )
             with pytest.raises(ValueError, match="same upstream"):
                 graph.assert_claim(
-                    "logically incoherent — supports + contradicts u",
+                    "logically incoherent, supports + contradicts u",
                     classification="DERIVED",
                     generated_by="X",
                     supports=[upstream],
@@ -41,7 +42,7 @@ class TestSupportsContradictsIntersectionRefused:
             b = graph.assert_claim("b", classification="DERIVED",
                                    generated_by="seed")
             cid = graph.assert_claim(
-                "supports a, contradicts b — legitimate",
+                "supports a, contradicts b, legitimate",
                 classification="DERIVED",
                 generated_by="X",
                 supports=[a],

@@ -3,7 +3,7 @@
 One file, no external requests: all CSS is inline, there are no scripts, no
 web fonts, no remote images. A reviewer can open the file offline, mail it, or
 drop it into a paper figure, and it renders identically. The output is
-deterministic — no timestamps, no randomness — so a golden-file test pins it
+deterministic, no timestamps, no randomness, so a golden-file test pins it
 byte for byte.
 """
 from __future__ import annotations
@@ -48,7 +48,7 @@ def render_html(trust_map: TrustMap) -> str:
     rows = []
     for p in trust_map.properties:
         accent = _TIER_ACCENT.get(p.tier.value, "#6b6b6b")
-        value = "—" if p.value is None else p.value
+        value = "n/a" if p.value is None else p.value
         rows.append(
             "      <tr>\n"
             f"        <td class=\"prop\">{escape(p.name)}</td>\n"
@@ -68,7 +68,7 @@ def render_html(trust_map: TrustMap) -> str:
         "<head>\n"
         "  <meta charset=\"utf-8\">\n"
         "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-        f"  <title>trust map — {kind} {subject}</title>\n"
+        f"  <title>trust map, {kind} {subject}</title>\n"
         f"  <style>{_STYLE}</style>\n"
         "</head>\n"
         "<body>\n"

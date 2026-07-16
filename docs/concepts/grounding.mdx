@@ -26,10 +26,12 @@ admitting the blind spot.
 ## Observing a scope
 
 Wrap the span that authors a finding in `observe(...)`. Inside it, wrapped loaders
-(`builtins.open`, `sqlite3`, and `pandas` / `httpx` / `requests` when you already
-import them) record what data flowed, and a PEP-578 audit hook records the reads
-and boundaries the loaders cannot see. On exit the observer computes the verdict
-from what it captured.
+record what data flowed: `builtins.open` and `io.open` (which reaches
+`pathlib.Path.open` / `read_text` / `read_bytes`), `sqlite3`, and, once you import
+them, `pandas`, `polars`, `httpx`, `requests`, and the scientific readers
+`h5py` / `pyarrow` / `netCDF4`. A PEP-578 audit hook records the reads and
+boundaries the loaders cannot see. On exit the observer computes the verdict from
+what it captured.
 
 ```python
 import mareforma
@@ -78,9 +80,10 @@ records a **seam** and, when the seam is relevant to the citation, returns
 - a thread start (`threading.Thread.start`, `_thread.start_new_thread`),
 - a subprocess or new process (`subprocess`, `os.exec`, `os.fork`, ...),
 - a raw socket connection,
-- a cited path opened through an uninstrumented reader (`os.open`), or a cited
-  C-runtime file (HDF5, netCDF, Arrow) whose bytes emit no PEP-578 event and were
-  not read through a wrapped reader.
+- a cited path opened through an uninstrumented reader (`os.open`), a `duckdb`
+  query whose read path lives inside the SQL string, or a cited C-runtime file
+  (HDF5, netCDF, Arrow) whose bytes emit no PEP-578 event and were not read
+  through a wrapped reader.
 
 Seam relevance keeps a seam from hiding a tell it could not have caused. A socket
 connection cannot deliver a **local file** read, so a socket seam does not force
@@ -131,6 +134,17 @@ noise first and calls `INFLUENCED` only when the perturbation moves the finding
 past the noise floor. When the effect sits inside the noise band the answer is
 `UNDECIDABLE`, never a silent `INFLUENCED`.
 
+A prose finding needs a reduction to a scalar the oracle can compare.
+`numeric_extraction_reducer` pulls the reported number out of an answer string
+with no model, so the oracle stays a model-independent ground truth; a reducer
+that runs a model (an embedding distance, an LLM judge) sets `reinserts_model=True`
+and the result records it, so a measurement declares when its ground truth is no
+longer model-free. Two controls tighten the noise call before it is made:
+`multiplicity=n` widens the threshold when a finding is one of `n` (so the
+noisiest of a family cannot cross the bar by chance), and `thin_sigma_guard`
+widens it when the noise floor rests on too few repeats to trust. Both default
+off, so a single scalar finding is scored exactly as before.
+
 Flow and influence are different constructs, so `reconcile` reads a mismatch as a
 construct difference, not a detector error. A finding can read the cited data
 (flow) and then ignore it (no influence). The one combination worth investigating
@@ -155,6 +169,25 @@ report.opaque_dominates()   # True → attach deeper before trusting the split
 When `OPAQUE` dominates, the observer cannot see enough of the pipeline for the
 other numbers to mean anything, so the honest response is to instrument deeper
 before publishing a measurement.
+
+When a run also records a per-finding effective-independence number,
+`summarize_independence` reports the independence arm next to the split: what
+fraction of findings rest on a single supporting line versus corroboration at two
+or more, the fraction `UNVERIFIABLE` where the model lineage is soft, and the
+same-model-collapse rate (corroborations a signer-only counter would call
+independent that were one computed model counted twice). `summarize_pilot` folds
+both arms into a slim natural-prevalence pilot and states the `OPAQUE`-coverage
+bound: when the observer is mostly blind, the grounded prevalence is reported as
+a lower bound, not a trustworthy number.
+
+```python
+from mareforma.observe import summarize_pilot
+
+pilot = summarize_pilot(load_receipts("run-receipts.jsonl"))
+pilot.grounding.fractions()             # the GROUNDED / UNGROUNDED / OPAQUE split
+pilot.independence.same_model_collapse_rate   # one model counted twice, as a rate
+pilot.coverage_bound()                  # the honest OPAQUE-coverage caveat
+```
 
 Two commands make this inspectable from the shell. `mareforma observe --doctor`
 reports what the observer covers in the current environment: which loaders are

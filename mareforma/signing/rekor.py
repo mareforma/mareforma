@@ -26,13 +26,14 @@ Two independent guarantees
 SSRF defense
 ------------
 :func:`validate_rekor_url` enforces HTTPS and rejects loopback /
-private / link-local / multicast / unspecified IP literals, plus DNS
-shortcuts that resolve to loopback at connect time (``localhost``
-and friends, numeric-only hostnames like ``127.1`` /
-``2130706433``). :func:`fetch_inclusion_proof` and
-:func:`fetch_log_pubkey` both re-validate the URL at function entry
-so direct callers (tests, scripts) cannot bypass the defense by
-skipping :func:`mareforma.open`.
+private / link-local / multicast / unspecified addresses, including
+the IPv4 embedded in an IPv6 form (IPv4-mapped / NAT64), numeric IP
+shortcuts in any radix (``127.1``, ``2130706433``, ``0177.0.0.1``,
+``0x7f000001``), Unicode-digit host forms, and the ``localhost``
+aliases. :func:`submit_to_rekor`, :func:`fetch_inclusion_proof`, and
+:func:`fetch_log_pubkey` all re-validate the URL at function entry so
+direct callers (tests, scripts) cannot bypass the defense by skipping
+:func:`mareforma.open`.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ import hashlib
 import ipaddress
 import json
 import re
+import unicodedata
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -108,12 +110,18 @@ def validate_rekor_url(url: str, *, allow_insecure: bool = False) -> None:
     Enforces ``https://`` and rejects:
 
     - Loopback / private / link-local / multicast / unspecified (``0.0.0.0``,
-      ``::``) IP literals.
-    - DNS shortcuts that resolve to loopback at connect time:
-      ``localhost`` and friends, plus numeric-only hostnames like
-      ``127.1`` and ``2130706433`` (decimal IPv4 form). These bypass
+      ``::``) IP literals, INCLUDING the IPv4 embedded in an IPv6 form
+      (IPv4-mapped ``::ffff:a.b.c.d``, 6to4, and the NAT64 well-known
+      prefix ``64:ff9b::/96``), which the outer-address flags miss.
+    - Numeric IP shortcuts in any radix that resolve to an internal
+      address: ``127.1`` and ``2130706433`` (decimal), ``0177.0.0.1``
+      (octal), ``0x7f000001`` and ``0x7f.0.0.1`` (hex). These bypass
       :func:`ipaddress.ip_address` because Python rejects the shortcut
-      form, but ``socket.getaddrinfo`` happily resolves them to loopback.
+      form, but ``socket.getaddrinfo`` resolves them to the internal
+      address on most kernels.
+    - Hostnames carrying non-ASCII Unicode digits (``①②⑧.0.0.1``), which
+      a C resolver may read as a numeric address.
+    - ``localhost`` and its ``/etc/hosts`` aliases.
 
     DNS hostnames that don't look like loopback shortcuts are accepted;
     defending against a DNS rebind at connect-time would need ahead-of-time
@@ -131,6 +139,100 @@ def validate_rekor_url(url: str, *, allow_insecure: bool = False) -> None:
     """
     if allow_insecure:
         return
+
+    ascii_digits = "0123456789"
+
+    def is_blocked_ip(
+        ip: "ipaddress.IPv4Address | ipaddress.IPv6Address",
+    ) -> bool:
+        # The address classes a public Rekor must never be.
+        return bool(
+            ip.is_loopback or ip.is_private or ip.is_link_local
+            or ip.is_multicast or ip.is_unspecified
+        )
+
+    def embedded_ipv4(
+        ip: "ipaddress.IPv4Address | ipaddress.IPv6Address",
+    ) -> Optional[ipaddress.IPv4Address]:
+        # IPv4-mapped (::ffff:0:0/96), 6to4 (2002::/16), and NAT64
+        # (64:ff9b::/96) each wrap a routable IPv4 the outer-address
+        # flags (is_link_local etc.) do not see.
+        if not isinstance(ip, ipaddress.IPv6Address):
+            return None
+        if ip.ipv4_mapped is not None:
+            return ip.ipv4_mapped
+        if ip.sixtofour is not None:
+            return ip.sixtofour
+        if ip in ipaddress.ip_network("64:ff9b::/96"):
+            return ipaddress.IPv4Address(ip.packed[-4:])
+        return None
+
+    def parse_c_uint(part: str) -> Optional[int]:
+        # One host part the way C strtoul (base 0) reads it: 0x -> hex,
+        # leading 0 -> octal, else decimal. ASCII digits only (Python's
+        # int otherwise accepts Unicode digits). None if not a number.
+        if not part:
+            return None
+        low = part.lower()
+        if low.startswith("0x"):
+            body = low[2:]
+            if body and all(c in "0123456789abcdef" for c in body):
+                return int(body, 16)
+            return None
+        if part.startswith("0") and len(part) > 1:
+            if all(c in "01234567" for c in part):
+                return int(part, 8)
+            return None
+        if all(c in ascii_digits for c in part):
+            return int(part, 10)
+        return None
+
+    def numeric_shortcut_ipv4(host: str) -> Optional[ipaddress.IPv4Address]:
+        # Resolve an inet_aton-style numeric host (1-4 dot-separated
+        # parts, any radix) that ipaddress rejects but getaddrinfo
+        # honors: 0x7f000001, 2130706433, 127.1, 0177.0.0.1 -> loopback.
+        parts = host.split(".")
+        if not 1 <= len(parts) <= 4:
+            return None
+        values: list[int] = []
+        for part in parts:
+            value = parse_c_uint(part)
+            if value is None:
+                return None
+            values.append(value)
+        n = len(values)
+        if n == 1:
+            packed = values[0]
+        elif n == 2:
+            a, b = values
+            if a > 0xFF or b > 0xFFFFFF:
+                return None
+            packed = (a << 24) | b
+        elif n == 3:
+            a, b, c = values
+            if a > 0xFF or b > 0xFF or c > 0xFFFF:
+                return None
+            packed = (a << 24) | (b << 16) | c
+        else:  # n == 4
+            if any(v > 0xFF for v in values):
+                return None
+            packed = (
+                (values[0] << 24) | (values[1] << 16)
+                | (values[2] << 8) | values[3]
+            )
+        if not 0 <= packed <= 0xFFFFFFFF:
+            return None
+        return ipaddress.IPv4Address(packed)
+
+    def has_non_ascii_digit(host: str) -> bool:
+        # Fullwidth / circled / other decimal-digit forms (e.g. U+2460
+        # ①) are read as numbers by some C resolvers, so ①②⑧.0.0.1 can
+        # reach an internal address; no public DNS name uses them.
+        return any(
+            ch not in ascii_digits and unicodedata.digit(ch, None) is not None
+            for ch in host
+        )
+
     parsed = urlparse(url)
     if parsed.scheme != "https":
         raise SigningError(
@@ -143,7 +245,7 @@ def validate_rekor_url(url: str, *, allow_insecure: bool = False) -> None:
     try:
         ip = ipaddress.ip_address(hostname)
     except ValueError:
-        # Not a strict IP literal — apply the DNS-shortcut bypass guards.
+        # Not a strict IP literal, apply the DNS-shortcut bypass guards.
         hl = hostname.lower()
         if (
             hl in _LOOPBACK_DNS_NAMES
@@ -154,24 +256,38 @@ def validate_rekor_url(url: str, *, allow_insecure: bool = False) -> None:
                 f"rekor_url hostname {hostname!r} resolves to loopback. "
                 "Pass trust_insecure_rekor=True if this is intentional."
             )
-        if _NUMERIC_HOSTNAME_RE.fullmatch(hostname):
-            # 127.1, 2130706433, 0177.0.0.1 etc. — ipaddress rejects these
-            # but socket.getaddrinfo resolves them to private addresses on
-            # most kernels. Numeric-only labels are not valid public DNS.
+        if has_non_ascii_digit(hostname):
+            # ①②⑧.0.0.1 and friends: a resolver may read the Unicode
+            # digits as a numeric address; no public DNS name uses them.
             raise SigningError(
-                f"rekor_url hostname {hostname!r} is a numeric IP shortcut. "
+                f"rekor_url hostname {hostname!r} contains non-ASCII digit "
+                "characters that a resolver may read as a numeric IP "
+                "shortcut. Pass trust_insecure_rekor=True if intentional."
+            )
+        shortcut_ip = numeric_shortcut_ipv4(hostname)
+        if shortcut_ip is not None and is_blocked_ip(shortcut_ip):
+            # 127.1, 2130706433, 0x7f000001, 0177.0.0.1 etc., ipaddress
+            # rejects these but socket.getaddrinfo (any radix) resolves
+            # them to the internal address below.
+            raise SigningError(
+                f"rekor_url hostname {hostname!r} is a numeric IP shortcut "
+                f"for {shortcut_ip}, a non-public address. "
                 "Pass trust_insecure_rekor=True if this is intentional."
             )
         return
-    if (
-        ip.is_loopback or ip.is_private or ip.is_link_local
-        or ip.is_multicast or ip.is_unspecified
-    ):
-        raise SigningError(
-            f"rekor_url resolves to a non-public address ({ip}). "
-            "Pass trust_insecure_rekor=True if this is intentional "
-            "(e.g. a private Rekor instance on an internal network)."
-        )
+    # IP literal path, classify the literal AND any IPv4 embedded in an
+    # IPv6 form (IPv4-mapped, 6to4, NAT64), which the outer flags miss.
+    candidates: list["ipaddress.IPv4Address | ipaddress.IPv6Address"] = [ip]
+    embedded = embedded_ipv4(ip)
+    if embedded is not None:
+        candidates.append(embedded)
+    for candidate in candidates:
+        if is_blocked_ip(candidate):
+            raise SigningError(
+                f"rekor_url resolves to a non-public address ({candidate}). "
+                "Pass trust_insecure_rekor=True if this is intentional "
+                "(e.g. a private Rekor instance on an internal network)."
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +300,7 @@ def submit_to_rekor(
     *,
     rekor_url: str,
     timeout: float = _REKOR_TIMEOUT,
+    allow_insecure: bool = False,
 ) -> tuple[bool, Optional[dict[str, Any]]]:
     """Submit a signed envelope to a Rekor transparency log.
 
@@ -209,11 +326,26 @@ def submit_to_rekor(
 
     Failure modes
     -------------
-    Network errors, timeouts, non-2xx, oversized responses, and Rekor
-    responses that fail body-matches-submission verification all return
-    ``(False, None)``, never raise. Caller persists the claim with
+    A ``rekor_url`` that fails the SSRF / scheme check, network errors,
+    timeouts, non-2xx, oversized responses, and Rekor responses that
+    fail body-matches-submission verification all return ``(False,
+    None)``, never raise. Caller persists the claim with
     ``transparency_logged=0`` and retries later via ``refresh_unsigned()``.
+    Pass ``allow_insecure=True`` to reach a private Rekor on a
+    non-public address (the ``trust_insecure_rekor`` session opt-in).
     """
+    # Re-validate the rekor_url at entry so the SSRF / scheme defense is a
+    # property of this function, not the call graph. mareforma.open()
+    # validates once at session start; direct callers (tests, ad-hoc
+    # scripts) would otherwise POST to an unvalidated URL, unlike the
+    # fetch paths which already re-validate. This function never raises,
+    # so a validation failure maps to the same (False, None) contract as
+    # a network error. Pass allow_insecure=True to reach a private Rekor
+    # on a non-public address (the trust_insecure_rekor session opt-in).
+    try:
+        validate_rekor_url(rekor_url, allow_insecure=allow_insecure)
+    except SigningError:
+        return (False, None)
     try:
         payload_bytes = base64.standard_b64decode(envelope["payload"])
         sig_b64 = envelope["signatures"][0]["sig"]
@@ -357,26 +489,26 @@ def attach_rekor_entry(
 #
 # A Rekor entry includes a ``verification.inclusionProof`` block carrying:
 #
-#   - ``logIndex``     — 0-indexed position of the entry's leaf in the tree
-#   - ``treeSize``     — total number of leaves in the tree at proof time
-#   - ``hashes``       — list of hex-encoded sibling hashes from the leaf
+#   - ``logIndex``    , 0-indexed position of the entry's leaf in the tree
+#   - ``treeSize``    , total number of leaves in the tree at proof time
+#   - ``hashes``      , list of hex-encoded sibling hashes from the leaf
 #                        up to the root, in audit-path order
-#   - ``rootHash``     — hex of the tree's Merkle root at proof time
-#   - ``checkpoint``   — a signed-note text whose third line is the same
+#   - ``rootHash``    , hex of the tree's Merkle root at proof time
+#   - ``checkpoint``  , a signed-note text whose third line is the same
 #                        rootHash (base64), bound to the log's public key
 #                        via the signature on the note
 #
 # Verification has two independent parts:
 #
-#   1. **Merkle inclusion** — recompute the leaf hash from the entry body,
+#   1. **Merkle inclusion**, recompute the leaf hash from the entry body,
 #      walk the audit path applying the RFC 6962 rule at each step, and
 #      compare against ``rootHash``. This catches "the log returned a
 #      tampered or fabricated entry".
 #
-#   2. **Checkpoint signature** — verify the signed-note over the
+#   2. **Checkpoint signature**, verify the signed-note over the
 #      checkpoint text against the log's known public key. This catches
 #      "the log unilaterally chose a root hash to cover for tampering".
-#      Without this step, Merkle inclusion alone proves nothing — the
+#      Without this step, Merkle inclusion alone proves nothing, the
 #      log operator could supply any root that hashes its forgery.
 #
 # Both parts are necessary; mareforma refuses inclusions that fail
@@ -470,7 +602,7 @@ def verify_merkle_inclusion_proof(
         if not isinstance(sibling, (bytes, bytearray)) or len(sibling) != 32:
             return False
         if sn == 0:
-            # Past the right edge of the tree — proof has more hashes
+            # Past the right edge of the tree, proof has more hashes
             # than the audit path actually needs. Reject as malformed
             # rather than silently accept.
             return False
@@ -494,7 +626,7 @@ def verify_merkle_inclusion_proof(
 
     # All audit-path hashes consumed and we should be at the root.
     if sn != 0:
-        # We stopped before reaching the root — proof was too short.
+        # We stopped before reaching the root, proof was too short.
         return False
     return r == bytes(root_hash)
 
@@ -578,7 +710,7 @@ def parse_rekor_checkpoint(checkpoint_text: str) -> dict[str, Any]:
     # Reject CR characters in the body section. A proxy that rewrote
     # LF→CRLF would corrupt the bytes the log operator signed, and
     # signature verification would then fail-closed with
-    # ``checkpoint_bad_sig`` — accurate-but-misleading: the bytes
+    # ``checkpoint_bad_sig``, accurate-but-misleading: the bytes
     # never were what the operator signed, they were mangled in
     # transit. Surface that distinction up-front with a clearer
     # ``checkpoint_malformed`` reason.
@@ -622,7 +754,7 @@ def parse_rekor_checkpoint(checkpoint_text: str) -> dict[str, Any]:
         line = raw_line.rstrip("\r")
         if not line:
             continue
-        # Each line: "— <name> <base64-encoded-sig-with-prefix>"
+        # Each line: ",  <name> <base64-encoded-sig-with-prefix>"
         prefix = _SIGNED_NOTE_DASH + " "
         if not line.startswith(prefix):
             raise RekorInclusionError(
@@ -749,7 +881,7 @@ def verify_rekor_checkpoint(
     if isinstance(public_key, Ed25519PublicKey):
         pass
     elif isinstance(public_key, _ec.EllipticCurvePublicKey):
-        # P-256 only — Sigstore Rekor v1 uses secp256r1. Reject other
+        # P-256 only, Sigstore Rekor v1 uses secp256r1. Reject other
         # curves at type-check time with a precise reason instead of
         # letting them fall through to a generic ``checkpoint_bad_sig``.
         if not isinstance(public_key.curve, _ec.SECP256R1):
@@ -770,7 +902,7 @@ def verify_rekor_checkpoint(
     if expected_root_hash is not None and parsed["root_hash"] != expected_root_hash:
         raise RekorInclusionError(
             "checkpoint's root hash does not match the inclusion proof's "
-            "root — possible signature-vs-proof splicing attack",
+            "root, possible signature-vs-proof splicing attack",
             reason="checkpoint_root_mismatch",
         )
     if expected_tree_size is not None and parsed["tree_size"] != expected_tree_size:
@@ -858,7 +990,7 @@ def verify_rekor_inclusion(
     # and ``int(True)`` is 1. A hostile Rekor returning ``42.5`` would
     # otherwise surface as ``merkle_root_mismatch`` rather than the
     # accurate ``malformed_proof``. ``bool`` is a subclass of ``int``,
-    # so the order of checks matters — bool first.
+    # so the order of checks matters, bool first.
     for name, raw in (("logIndex", raw_log_index), ("treeSize", raw_tree_size)):
         if isinstance(raw, bool) or not isinstance(raw, int):
             raise RekorInclusionError(
@@ -923,7 +1055,7 @@ def verify_rekor_inclusion(
             # Fallback: some Rekor versions return the checkpoint
             # itself base64-encoded. Decode and retry. If the decode
             # ALSO fails, re-raise the ORIGINAL ``checkpoint_malformed``
-            # — not the raw ValueError/binascii.Error — so callers
+            #, not the raw ValueError/binascii.Error, so callers
             # relying on the documented RekorInclusionError-only
             # contract never see a leaked decode exception.
             try:
@@ -976,7 +1108,7 @@ def fetch_inclusion_proof(
     # uuid validation. Rekor entry uuids are hex-encoded SHA-256
     # digests, optionally prefixed with a tree-id (also hex). A uuid
     # containing ``?``, ``#``, ``/``, or path-traversal segments
-    # would shift the GET URL — even with a constant host, that's a
+    # would shift the GET URL, even with a constant host, that's a
     # query-string smuggling primitive a hostile Rekor could exploit
     # by returning a crafted uuid in the submit response. Validate
     # before substitution.
@@ -1155,7 +1287,7 @@ def fetch_log_pubkey(
             f"Rekor GET {pubkey_url} failed: {exc}"
         ) from exc
 
-    # PEM check — must contain a BEGIN/END public-key block. Wider
+    # PEM check, must contain a BEGIN/END public-key block. Wider
     # check than load_pem_public_key alone so the operator sees a
     # clear error when the log served HTML / JSON / nothing useful.
     if b"-----BEGIN PUBLIC KEY-----" not in body:

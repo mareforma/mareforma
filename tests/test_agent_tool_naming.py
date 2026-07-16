@@ -1,6 +1,6 @@
-"""#51: the claim-recording agent tool is renamed off the shadowed name.
+"""the claim-recording agent tool is renamed off the shadowed name.
 
-``get_tools`` returned an inner closure named ``assert_finding`` — the same
+``get_tools`` returned an inner closure named ``assert_finding``, the same
 name as :meth:`EpistemicGraph.assert_finding`, a different one-shot finding
 path. The LLM-facing tool is now ``record_claim``; ``assert_finding`` stays
 one release as a deprecated alias that warns on use.

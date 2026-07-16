@@ -524,10 +524,9 @@ def auto_enroll_root(
 
     import warnings
     _notice = (
-        f"Enrolled key {keyid[:12]}… ({identity!r}) as root validator on "
-        f"this project. This is silent and irrevocable currently — if you "
-        "opened the graph with the wrong key, fix it before any further "
-        "validate() calls."
+        f"Enrolled key {keyid[:12]}… ({identity!r}) as the root validator on "
+        f"this project. This is silent and cannot be undone. If you opened the "
+        "graph with the wrong key, fix it before any further validate() calls."
     )
     # stacklevel=4 points at the user's mareforma.open(...) call site.
     # Chain: warn → auto_enroll_root → EpistemicGraph.__init__ →

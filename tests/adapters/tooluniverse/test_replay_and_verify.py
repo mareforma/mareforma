@@ -1,4 +1,4 @@
-"""#37: behavioral coverage for the "did this tool call really happen" surface.
+"""behavioral coverage for the "did this tool call really happen" surface.
 
 replay_from_claim, verify_tool_call_envelope, and decode_predicate_from_text
 carried the tool-call replay/verify guarantee but sat at 0% test coverage.

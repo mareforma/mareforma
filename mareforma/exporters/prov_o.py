@@ -25,7 +25,7 @@ consumer; mareforma does not redact for you.
 
 The exporter is *one-way*. Re-importing PROV-O back into mareforma is
 out of scope: the PROV model carries less than the signed graph
-(no DSSE envelopes, no GRADE evidence vector, no hash chain), so a
+(no DSSE envelopes, no evidence vector, no hash chain), so a
 round-trip through PROV-O would drop integrity surface.
 
 The four-invariant validator :func:`validate_prov_o` runs over the
@@ -335,7 +335,7 @@ def validate_prov_o(doc: dict[str, Any]) -> None:
                 target = link.get("@id")
                 referenced = by_id.get(target) if target else None
                 # External references (no @id in our graph) are allowed
-                # — PROV-O does not require the target be in-document.
+                #, PROV-O does not require the target be in-document.
                 if referenced is not None and referenced.get(
                     "@type"
                 ) != "prov:Entity":

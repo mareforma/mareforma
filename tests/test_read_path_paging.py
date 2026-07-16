@@ -35,3 +35,51 @@ def test_query_sorts_the_table_once_not_per_batch(tmp_path):
     assert len(orderings) == 1, (
         f"expected one scan-and-sort over the claims table, got {len(orderings)}"
     )
+
+
+def _count_materialised_rows(g, call):
+    """Run *call* and return how many rows the connection materialised.
+
+    Wraps the row_factory so every row pulled into Python is counted. The
+    counter is reset immediately before *call* so only that call's fetches are
+    measured (the helper queries a read runs are few and constant)."""
+    count = {"n": 0}
+    base = g._conn.row_factory
+
+    def counting(cursor, row):
+        count["n"] += 1
+        return base(cursor, row)
+
+    g._conn.row_factory = counting
+    try:
+        call()
+    finally:
+        g._conn.row_factory = base
+    return count["n"]
+
+
+def test_common_path_does_not_materialise_the_whole_ceiling(tmp_path):
+    """When the first `limit` rows all survive projection, the read must stop
+    fetching there, not pull the whole scan ceiling into Python."""
+    root_key = _bootstrap_key(tmp_path, "root.key")
+    n_rows = 300
+    with mareforma.open(tmp_path, key_path=root_key) as g:
+        # Root-signed claims: the generator is the enrolled root, so every row
+        # survives the default read filter and the first `limit` all survive.
+        for i in range(n_rows):
+            g.assert_claim(f"surviving claim number {i}", generated_by="x")
+
+    with mareforma.open(tmp_path, key_path=root_key) as g:
+        # Warm the query once so the row_factory count reflects only the fetch,
+        # not one-time setup, then measure.
+        assert len(g.query(limit=5)) == 5
+        fetched = _count_materialised_rows(g, lambda: g.query(limit=5))
+
+    # The old eager `.fetchall()` pulled every row up to the ceiling (all 300
+    # here); the lazy cursor stops at the handful it needs. A small constant of
+    # helper-query rows is expected on top of the ~5 survivors.
+    assert fetched < 50, (
+        f"read materialised {fetched} rows for limit=5 over {n_rows} claims; "
+        "the whole scan ceiling was pulled instead of stopping at the survivors"
+    )
+

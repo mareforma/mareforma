@@ -34,12 +34,12 @@ from ._canonical import canonicalize
 # Version of the trust-map shape. Bound into the rendered record so a consumer
 # knows which property set + tier semantics produced it, and a future revision
 # is distinguishable rather than silently reinterpreted.
-TRUST_MAP_VERSION = "v0.3.9"
+TRUST_MAP_VERSION = "v0.3.10"
 
 # Observed-grounding axis versions KNOWN to carry the verdict↔citation binding.
 # An ALLOWLIST, not a denylist: only a GROUNDED verdict stamped with one of these
-# is presented as a bound GROUNDED. Anything else — a missing/absent version, a
-# hand-edited record, an older axis, or a future axis that drops binding — reads
+# is presented as a bound GROUNDED. Anything else, a missing/absent version, a
+# hand-edited record, an older axis, or a future axis that drops binding, reads
 # as pre-binding ("citation binding not checkable"), which is the honest, fail-
 # safe default. A denylist would let an unknown/absent version overclaim as bound.
 _BINDING_AXIS_VERSIONS = frozenset({"v0.3.9"})
@@ -53,14 +53,27 @@ PRE_BINDING_GROUNDED_LABEL = "GROUNDED (pre-binding axis; citation binding not c
 # inferred to a confident answer.
 NOT_PRESENT = "not present"
 
+# The faithfulness verdicts the map will place. An ALLOWLIST: only these three
+# render as a faithfulness signal; any other value in a supplied record reads as
+# "not present", the honest fail-safe (a hand-edited or future-shaped record does
+# not overclaim a verdict the map does not understand).
+_FAITHFULNESS_VERDICTS = frozenset({"REPRODUCED", "DIVERGED", "COULD_NOT_REEXECUTE"})
+
+# Prepended to a faithfulness residual so the PROXY signal can never be read as
+# truth or as independence, whatever the verdict.
+_FAITHFULNESS_PROXY_NOTE = (
+    "re-execution proxy: reproducible is not correct, and a same-arm re-run is "
+    "not an independent line of evidence"
+)
+
 
 class Tier(str, Enum):
-    """Where a property's answer comes from — the honesty of the signal.
+    """Where a property's answer comes from, the honesty of the signal.
 
-    - ``COMPUTED``  — derived directly from stored evidence this release.
-    - ``PROXIED``   — computed through a proxy signal whose bound is named
+    - ``COMPUTED`` , derived directly from stored evidence this release.
+    - ``PROXIED``  , computed through a proxy signal whose bound is named
                       (e.g. a file read observed by stat, not by byte).
-    - ``DEFERRED``  — not evaluated this release; the residual is named so the
+    - ``DEFERRED`` , not evaluated this release; the residual is named so the
                       gap is explicit rather than silent.
     """
 
@@ -74,7 +87,7 @@ class TrustProperty:
     """One property of a claim's trust, placed at its tier with the residual.
 
     ``name`` is the property (``grounding``, ``independence``, …). ``tier`` is
-    where the answer comes from. ``value`` is the property's state — a verdict, a
+    where the answer comes from. ``value`` is the property's state, a verdict, a
     count, a level, or ``None`` / :data:`NOT_PRESENT` when there is nothing to
     show. ``residual`` names what the answer does NOT cover: the honest bound on
     a computed value, or the reason a deferred property is deferred.
@@ -148,14 +161,14 @@ def parse_grounding_record(value) -> "dict | None":
 def _short(keyid: str | None) -> str:
     """First 12 hex chars of a keyid for display, or a placeholder."""
     if not keyid:
-        return "—"
+        return "n/a"
     return f"{keyid[:12]}…"
 
 
 def _grounding_property(claim: dict) -> TrustProperty:
     """Place the observed-grounding axis, carrying the verdict reason + cited set.
 
-    A pre-observer claim (no stored verdict) renders ``not present`` — never
+    A pre-observer claim (no stored verdict) renders ``not present``, never
     inferred. A GROUNDED verdict on a pre-binding axis renders with the
     pre-binding label so an auditor sees the citation binding was not checkable
     when it was computed.
@@ -207,21 +220,118 @@ def _grounding_property(claim: dict) -> TrustProperty:
     return TrustProperty(name="grounding", tier=tier, value=value, residual=residual)
 
 
-def _independence_property(claim: dict, n_roots: int) -> TrustProperty:
+def _faithfulness_property(reexec_record: "dict | None") -> TrustProperty:
+    """Place the re-execution faithfulness axis (a PROXY-tier signal).
+
+    Faithfulness is not stored on the claim; it is supplied by a re-execution
+    run (see :mod:`mareforma.reexec`). When no run is supplied the axis renders
+    ``not present`` (never inferred): faithfulness was not checked. When a run is
+    supplied the verdict, REPRODUCED / DIVERGED / COULD_NOT_REEXECUTE, is placed
+    at the PROXY tier with the residual naming what reproducibility does NOT
+    cover, so it cannot be read as truth or as independence. A malformed or
+    unrecognised record reads as ``not present``, the fail-safe default.
+    """
+    record = parse_grounding_record(reexec_record)
+    verdict = record.get("verdict") if isinstance(record, dict) else None
+    if verdict not in _FAITHFULNESS_VERDICTS:
+        return TrustProperty(
+            name="faithfulness",
+            tier=Tier.COMPUTED,
+            value=NOT_PRESENT,
+            residual=(
+                "no re-execution recorded for this claim; whether the recorded "
+                "pipeline reproduces its number was not checked (a reproducibility "
+                "proxy, not correctness or independence)"
+            ),
+        )
+    reason = record.get("residual") or ""
+    residual = f"{_FAITHFULNESS_PROXY_NOTE}; {reason}" if reason else _FAITHFULNESS_PROXY_NOTE
+    return TrustProperty(
+        name="faithfulness",
+        tier=Tier.PROXIED,
+        value=verdict,
+        residual=residual,
+    )
+
+
+def _independence_property(
+    claim: dict, n_roots: int, effective: "dict | None" = None,
+) -> TrustProperty:
     """Place the INDEPENDENCE axis, distinct from the support ladder.
 
-    Distinctness that rests on operator-mintable keys alone is UNVERIFIABLE: one
-    operator can mint any number of keys, so "two distinct signers" proves
-    nothing about independent lines of evidence when they all trace to one trust
-    root. Fewer than two enrolled roots (zero or one) is that unverifiable case:
-    zero roots is the most conservative reading, not a multi-root convergence.
-    Only two or more roots is the weak-convergence-prior case, and even then the
-    map does not translate a convergence marker into the word "independent".
+    For a finding (``effective`` supplied, the effective-independence record
+    from :func:`mareforma.trust._store.effective_independence`), the axis reports
+    the per-finding effective number of pairwise-distinct (model, data, signer)
+    supporting checks. Where a supporting line's model lineage is soft (PROXY /
+    UNVERIFIABLE) and no clean pair corroborates, the axis reads UNVERIFIABLE
+    rather than a confident number, a distinct model cannot be certified.
+    Coarse by design: distinct-model is binary this release; the graded
+    cross-model residual is DEFERRED, not computed. When the number stands but
+    every signer traces to a single trust root (``n_roots < 2``), the residual
+    names that operator-Sybil topology: the operator owns every enrolled key, so
+    every axis is operator-assertable (the signer keys are mintable and the model
+    lineage is signed by the operator's own key, so a distinct model is not
+    cross-checked by an independent party). The number is producer-assertable
+    within one trust domain, not certified independence across operators.
 
-    This axis is a GRAPH-LEVEL disclosure of validator-root topology, not a
-    per-claim measurement: the residual says so, so a lone-signer claim is not
-    read as carrying a convergence prior it does not have.
+    For a non-finding claim (``effective`` is ``None``), the axis falls back to
+    the graph-level validator-root topology disclosure. Distinctness that rests
+    on operator-mintable keys alone is UNVERIFIABLE: one operator can mint any
+    number of keys, so "two distinct signers" proves nothing about independent
+    lines of evidence when they all trace to one trust root. Fewer than two
+    enrolled roots (zero or one) is that unverifiable case; only two or more is
+    the weak-convergence-prior case, and even then the map does not translate a
+    convergence marker into the word "independent". The residual says it is a
+    topology disclosure, not a per-claim measurement.
     """
+    if effective is not None:
+        number = int(effective.get("number", 0))
+        if effective.get("soft") and number < 2:
+            return TrustProperty(
+                name="independence",
+                tier=Tier.COMPUTED,
+                value="UNVERIFIABLE",
+                residual=(
+                    "a supporting line's model lineage is PROXY/UNVERIFIABLE, so "
+                    "a distinct model cannot be certified; independent "
+                    "corroboration is unverifiable (per-finding model/data/signer "
+                    "axis)"
+                ),
+            )
+        residual = (
+            f"{number} pairwise-distinct (model, data, signer) supporting "
+            "check(s); coarse by design: distinct-model is binary this "
+            "release, the graded cross-model residual is DEFERRED, not "
+            "computed"
+        )
+        # Operator-Sybil disclosure: under a single trust root the operator owns
+        # every enrolled key, so every axis of distinctness is operator-assertable,
+        # not just the signer. The signer keys are operator-mintable, and the
+        # model lineage each finding binds is signed by the operator's own
+        # enrolled key, so a distinct model is not cross-checked by an independent
+        # party: the operator can re-sign a fabricated lineage under a key it
+        # controls. The number is producer-assertable within one trust domain,
+        # not certified cross-model independence, so the residual names it; a
+        # certified number needs distinct trust roots.
+        if n_roots < 2:
+            detail = (
+                "no trust root is enrolled" if n_roots == 0
+                else "all validators trace to a single trust root"
+            )
+            residual += (
+                f"; {detail}, so every axis of distinctness is "
+                "operator-assertable: the signer keys are operator-mintable and "
+                "the model lineage is signed by the operator's own key, so a "
+                "distinct model is not cross-checked by an independent party. "
+                "The count is producer-assertable within one trust domain, not "
+                "certified independence across operators"
+            )
+        return TrustProperty(
+            name="independence",
+            tier=Tier.COMPUTED,
+            value=str(number),
+            residual=residual,
+        )
     if n_roots < 2:
         detail = (
             "no trust root is enrolled" if n_roots == 0
@@ -315,12 +425,21 @@ def _witnessing_property(claim: dict, has_inclusion: bool) -> TrustProperty:
     )
 
 
-def build_trust_map(conn, claim_id: str, *, single_domain: "bool | None" = None) -> "TrustMap | None":
+def build_trust_map(
+    conn,
+    claim_id: str,
+    *,
+    single_domain: "bool | None" = None,
+    reexec_record: "dict | None" = None,
+) -> "TrustMap | None":
     """Build the trust map for a stored claim, or ``None`` if it does not exist.
 
     ``conn`` is an open graph connection. ``single_domain`` may be passed to
     avoid a redundant validator-topology read when the caller already has it;
-    when ``None`` it is read from the graph.
+    when ``None`` it is read from the graph. ``reexec_record`` optionally carries
+    a re-execution faithfulness verdict (from :meth:`mareforma.reexec.ReexecResult.to_map_record`)
+    to place on the map's PROXY-tier faithfulness axis; when omitted the axis
+    reads ``not present``.
     """
     from mareforma.db import get_claim
 
@@ -333,7 +452,7 @@ def build_trust_map(conn, claim_id: str, *, single_domain: "bool | None" = None)
         n_roots = len(_validators.enrollment_roots(conn))
     else:
         # Explicit override (a caller that already knows the topology): the bool
-        # maps to a representative count — a single domain is one root, "not
+        # maps to a representative count, a single domain is one root, "not
         # single" is two. A zero-root graph is only reached via the graph read
         # above, where its distinct three-way handling matters.
         n_roots = 1 if single_domain else 2
@@ -356,10 +475,38 @@ def build_trust_map(conn, claim_id: str, *, single_domain: "bool | None" = None)
         # pubkey (the lean model has no key to check it against). Tell the two
         # apart so the map does not claim "re-verified" for a binding-only pass.
         asserter_enrolled = is_enrolled(conn, claim["asserter_keyid"])
+    effective = _effective_independence(conn, claim_id)
     return _assemble(
         claim, n_roots, has_inclusion,
         sig_verified=sig_verified, asserter_enrolled=asserter_enrolled,
+        reexec_record=reexec_record,
+        effective_independence=effective,
     )
+
+
+def _effective_independence(conn, claim_id: str) -> "dict | None":
+    """The effective-independence record for a finding claim, or None.
+
+    A claim is a finding when a ``findings`` row binds it to a proposition; the
+    independence axis then reports the per-finding effective number over that
+    proposition's evidence lines. A plain claim (no finding row, or a graph whose
+    schema predates the evidence tree) has no such number, so the axis falls back
+    to the validator-topology disclosure.
+    """
+    import sqlite3
+
+    try:
+        row = conn.execute(
+            "SELECT content_id FROM findings WHERE claim_id = ? LIMIT 1",
+            (claim_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if row is None:
+        return None
+    from mareforma.trust._store import effective_independence
+
+    return effective_independence(conn, row["content_id"])
 
 
 def _has_rekor_inclusion(conn, claim_id: str) -> bool:
@@ -379,7 +526,8 @@ def _has_rekor_inclusion(conn, claim_id: str) -> bool:
 
 def _assemble(
     claim: dict, n_roots: int, has_inclusion: bool, *, sig_verified: "bool | None" = None,
-    asserter_enrolled: "bool | None" = None,
+    asserter_enrolled: "bool | None" = None, reexec_record: "dict | None" = None,
+    effective_independence: "dict | None" = None,
 ) -> TrustMap:
     """Assemble a TrustMap from an already-fetched claim dict (pure).
 
@@ -435,6 +583,8 @@ def _assemble(
 
     grounding = _grounding_property(claim)
 
+    faithfulness = _faithfulness_property(reexec_record)
+
     methodological = TrustProperty(
         name="methodological_validity",
         tier=Tier.COMPUTED,
@@ -456,7 +606,7 @@ def _assemble(
         ),
     )
 
-    independence = _independence_property(claim, n_roots)
+    independence = _independence_property(claim, n_roots, effective_independence)
 
     ref = refutation_status(claim)
     contestation = TrustProperty(
@@ -488,6 +638,7 @@ def _assemble(
         attributability,
         provenance,
         grounding,
+        faithfulness,
         methodological,
         leakage,
         independence,

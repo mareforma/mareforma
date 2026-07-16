@@ -20,26 +20,90 @@ the state machine reads are ``independent_support`` and ``independent_refute``,
 both computed signer-distinct (see
 :func:`mareforma.trust._store.independence_counts`).
 
+CONVERGENT is a convergence marker, not a corroboration or independence verdict:
+two or more independent-lineage supporting lines converge. It states the
+structural fact and no more. Cross-model error correlation is unmodeled and is
+the named residual: distinct-model is necessary, not sufficient, for
+independence (a kill-switch measured distinct-provider model pairs as
+error-correlated as any pair), so the map does not translate a convergence
+marker into the word "independent".
+
 REFUTED / CONTESTED are derived labels, not auto-refutation: a REFUTED status
 means "no surviving independent support," not "this proposition is false."
 """
 from __future__ import annotations
 
-from enum import Enum
+from enum import Enum, EnumMeta
 
 # The status-policy version, independent of the package version. It bumps only
 # when the status computation itself changes, not on every release. A finding's
 # Status carries the policy that computed it, so a later policy change stays
-# identifiable on old rows.
-STATUS_POLICY = "status_policy@v3"
+# identifiable on old rows. Status is recomputed on read and never stored in the
+# schema, so a vocabulary change is a new policy over the same counts, not a
+# migration. v4 renamed the top label CORROBORATED to the convergence marker
+# CONVERGENT; the counting rule is unchanged.
+STATUS_POLICY = "status_policy@v4"
+
+# Retired status label -> its live replacement. CORROBORATED named a
+# corroboration/independence verdict, but distinct-model is necessary, not
+# sufficient, for independence, so the word over-claimed. The old name keeps
+# resolving for one release (by value and by attribute) and warns; a future
+# release removes it.
+_RETIRED_STATUS_ALIASES = {"CORROBORATED": "CONVERGENT"}
 
 
-class Status(str, Enum):
+def _warn_retired_status(old: str, new: str) -> None:
+    import warnings as _warnings
+
+    _warnings.warn(
+        f"Status.{old} is retired: it named a corroboration/independence "
+        f"verdict, but distinct-model is necessary, not sufficient, for "
+        f"independence. Use Status.{new}, a convergence marker for two or more "
+        f"lineage-distinct supporting lines converging. This alias resolves "
+        f"this release and is removed in a future release.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
+
+class _StatusMeta(EnumMeta):
+    """Resolve a retired status member name (attribute access) with a warning.
+
+    ``Status.CORROBORATED`` returns :attr:`Status.CONVERGENT` and warns; every
+    other missing attribute stays an ``AttributeError`` so a typo is not
+    swallowed. Value lookup (``Status("CORROBORATED")``) is handled by
+    :meth:`Status._missing_`.
+    """
+
+    def __getattr__(cls, name: str):
+        new = _RETIRED_STATUS_ALIASES.get(name)
+        if new is not None:
+            _warn_retired_status(name, new)
+            return cls[new]
+        return super().__getattr__(name)
+
+
+class Status(str, Enum, metaclass=_StatusMeta):
     UNTESTED = "UNTESTED"
     PRELIMINARY = "PRELIMINARY"
-    CORROBORATED = "CORROBORATED"
+    CONVERGENT = "CONVERGENT"
     REFUTED = "REFUTED"
     CONTESTED = "CONTESTED"
+
+    @classmethod
+    def _missing_(cls, value: object) -> "Status | None":
+        """Resolve a retired status value string with a deprecation warning.
+
+        Keeps ``Status("CORROBORATED")`` working for one release, mapping it to
+        :attr:`Status.CONVERGENT`; anything else stays an unresolved value
+        (``ValueError``).
+        """
+        if isinstance(value, str):
+            new = _RETIRED_STATUS_ALIASES.get(value)
+            if new is not None:
+                _warn_retired_status(value, new)
+                return cls[new]
+        return None
 
 
 class FrameStatus(str, Enum):
@@ -54,7 +118,10 @@ def compute_status(independent_support: int, independent_refute: int) -> Status:
     - CONTESTED:    independent support AND independent refute on the same
                     proposition.
     - REFUTED:      >= 1 independent refute, 0 independent support.
-    - CORROBORATED: >= 2 independent support, 0 independent refute.
+    - CONVERGENT:   >= 2 independent-lineage supporting lines converge, 0
+                    independent refute. A convergence marker, not a
+                    corroboration or independence verdict: cross-model error
+                    correlation is unmodeled and is the named residual.
     - PRELIMINARY:  exactly 1 independent support, 0 independent refute.
     """
     if independent_support < 0 or independent_refute < 0:
@@ -67,7 +134,7 @@ def compute_status(independent_support: int, independent_refute: int) -> Status:
     if independent_refute >= 1:  # and independent_support == 0
         return Status.REFUTED
     if independent_support >= 2:  # and independent_refute == 0
-        return Status.CORROBORATED
+        return Status.CONVERGENT
     return Status.PRELIMINARY  # exactly 1 support, 0 refute
 
 

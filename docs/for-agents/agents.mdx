@@ -11,13 +11,15 @@ description: "The full execution contract for AI agents using Mareforma."
 </Info>
 
 Mareforma is a local verification layer for AI-assisted research. It gives
-agents a graph for asserting claims with provenance, detecting convergence
-when cryptographically distinct signers reach the same conclusion on a shared
-anchor, and querying what has already been established before making new
-assertions. Convergence is a verifiable signal, not a proof of truth: it shows
-that distinct keys agreed, re-checked end to end on every read; the real trust
-anchor is the human-validated ESTABLISHED tier. Independence is the signing
-key, and REPLICATED requires the two claims to share an ESTABLISHED anchor.
+agents a graph for asserting claims with provenance, observing whether a finding
+actually rested on the data it cites, counting how independent the checks behind
+it are, and querying what is already known before making new assertions. The two
+lead signals are computed, not declared: **grounding** (did the cited data reach
+the finding, or did the model fill the gap from memory) and **effective
+independence** (the number of pairwise-distinct (model, data, signer) checks
+behind a finding). The older `REPLICATED` / `ESTABLISHED` support labels still
+resolve this release as deprecated one-release aliases; read the
+effective-independence number instead.
 
 Trust in a claim is derived from the graph, not from the agent that made it.
 No confidence score. No self-reporting. The structure of the provenance graph
@@ -125,10 +127,11 @@ Assert a claim. Returns `claim_id` (UUID).
 
 **Side effect:** if ≥2 claims now share the same upstream in `supports[]`
 signed by distinct keys, all are promoted to `REPLICATED`, provided
-at least one upstream is itself `ESTABLISHED` (Cochrane / GRADE evidence
-chain). When both peers supply `artifact_hash`, equal data collapses the
-pair to one line and does not promote on data alone; distinct data counts
-as independent; absent data never blocks.
+at least one upstream is itself `ESTABLISHED` (the ESTABLISHED-upstream
+rule, so replication-of-noise is not replication). When both peers supply
+`artifact_hash`, equal data collapses the pair to one line and does not
+promote on data alone; distinct data counts as independent; absent data
+never blocks.
 
 ---
 
@@ -140,7 +143,6 @@ as independent; absent data never blocks.
 | `graph.query_for_llm(...)` | Same shape as `query()` with free-text fields sanitized and wrapped in `<untrusted_data>...</untrusted_data>`. Use whenever results will be spliced into an LLM prompt. |
 | `graph.get_claim(claim_id)` | Single claim dict or `None`. |
 | `graph.validate(claim_id, *, validated_by=None)` | Promote `REPLICATED` → `ESTABLISHED`. Identity-gated. |
-| `graph.refresh_unresolved()` | Retry DOI verification for unresolved claims. |
 | `graph.refresh_unsigned()` | Retry Rekor submission for signed-but-unlogged claims. |
 | `graph.enroll_validator(pubkey_pem, *, identity)` | Add a validator (parent must already be enrolled). |
 | `graph.list_validators()` | List the project's validators. |
@@ -208,6 +210,15 @@ for the full model.
 
 ## Support levels
 
+<Warning>
+  `REPLICATED` / `ESTABLISHED` are deprecated public labels this release, kept
+  working as a one-release alias; `PRELIMINARY` stays a stored `support_level`.
+  All three still fire and gate as described below, but the lead independence
+  signal is the effective-independence number on `mareforma map`: the count of
+  pairwise-distinct (model, data, signer) checks behind a finding. Read the
+  number, not the label.
+</Warning>
+
 | Level | Meaning | How reached |
 |---|---|---|
 | `PRELIMINARY` | One agent claimed it | Automatic on first assertion |
@@ -222,9 +233,9 @@ self-promote to `ESTABLISHED`.
 ### ESTABLISHED-upstream rule
 
 REPLICATED requires an ESTABLISHED claim in the converging `supports[]`.
-Matches Cochrane / GRADE evidence chains: replication-of-noise is not
-replication. Strict by default. To bootstrap a fresh graph, an enrolled
-validator asserts a *seed claim*:
+This enforces that replication-of-noise is not replication. Strict by
+default. To bootstrap a fresh graph, an enrolled validator asserts a
+*seed claim*:
 
 ```python
 # Bootstrap the trust chain on a fresh project. Only enrolled
@@ -400,18 +411,14 @@ with a fabricated parent does not pass. Singleton-root invariant +
 
 ---
 
-## DOI verification
+## DOIs in supports and contradicts
 
-DOIs anywhere in `supports[]` or `contradicts[]` are HEAD-checked against
-Crossref then DataCite at `assert_claim` time. Failure persists the claim
-with `unresolved=True` and blocks `REPLICATED` promotion until
-`graph.refresh_unresolved()` confirms the DOIs. Strings in `supports[]`
-that don't match the DOI format (`10.<registrant>/<suffix>`) are treated
-as claim_id references and pass through without a network call.
-
-Results are cached in the `doi_cache` table (30-day TTL for resolved
-entries, 24-hour TTL for unresolved) so repeated assertions of the same
-DOI don't hit the registries.
+DOIs anywhere in `supports[]` or `contradicts[]` are recognised (the
+`10.<registrant>/<suffix>` form) and stored as external references. They
+are not graph nodes, so cycle detection and dangling-reference audits skip
+them. Strings that don't match the DOI form are treated as claim_id
+references. Mareforma makes no network call at `assert_claim` time: it does
+not resolve, HEAD-check, or cache DOIs.
 
 ---
 
@@ -753,34 +760,4 @@ Two adjacent primitives ship in core for adapter authors:
 Plus the public canonicalize registry and predicate-URI constants:
 
 - **`mareforma.canonicalize`**: `canonicalize(value, form=...)` with registered forms `json-c14n-v1` (default), `dsse-jcs-nfc-v1` (same bytes the envelope layer signs), plus specialty SMILES / FASTA / PDB canonicalizers registered on import.
-- **Capability URI constants** at `mareforma.predicate_types` (also re-exported at the top level): `TOOL_CALL_V1`, `CONTAINER_EXEC_V1`, `WORKSHOP_EVENT_V1`, `CODE_VARIATION_V1`, `HYPOTHESIS_V1`, `LITERATURE_INSIGHT_V1`, `SCIENCE_SKILL_V1`, `META_CLAIM_V1`, plus the core + wet-lab assay families. Use the constants instead of string literals so a typo fails at import.
-
-## Claude Code hook (`mareforma.hooks`)
-
-`python -m mareforma.hooks` is a Claude Code `PreToolUse` handler that records every tool invocation as a `prov:Activity` row in the project's `.mareforma/graph.db`. The `agent_activities` table is part of the canonical schema; the hook routes through `mareforma.db.open_db` so it inherits foreign-keys PRAGMA + schema validation. Opt in via `.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [{
-      "matcher": "",
-      "hooks": [{"type": "command", "command": "python -m mareforma.hooks"}]
-    }]
-  }
-}
-```
-
-Hook exit is always 0; failures log to stderr but never propagate so a hook glitch can never interrupt a Claude Code tool call.
-
-## Literature ingest CLI
-
-Paper claim drafts live in their own `literature_claims` table (separate from the signed `claims` table) so most ingested assertions stay drafts pending review.
-
-```bash
-mareforma ingest paper.md        # parse TITLE / DOI / CLAIMS, write drafts
-mareforma ingest paper.md --llm  # use Claude API (needs `pip install anthropic`)
-mareforma ask "BRCA1 mutations"  # FTS5 BM25 search over draft text
-mareforma narrative -o out.md    # Markdown summary, ⚠ contradiction flags
-```
-
-The `--db` flag accepts the full path to the `graph.db` file (`mareforma.db.open_db_from_db_path` honours the supplied filename instead of re-deriving `.mareforma/graph.db`). Existing graphs auto-create the new tables on next `open_db()` without a schema bump.
+- **Capability URI constants** at `mareforma.predicate_types` (also re-exported at the top level): `TOOL_CALL_V1`, `CONTAINER_EXEC_V1`, `WORKSHOP_EVENT_V1`, `CODE_VARIATION_V1`, `HYPOTHESIS_V1`, `SCIENCE_SKILL_V1`, `META_CLAIM_V1`, plus the core + wet-lab assay families. Use the constants instead of string literals so a typo fails at import.

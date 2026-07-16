@@ -35,7 +35,7 @@ from typing import Any
 from mareforma import __version__
 
 
-# Media type for the exported graph. Distinct from PROV-O — see module
+# Media type for the exported graph. Distinct from PROV-O, see module
 # docstring for the scoping rationale.
 EXPORT_MEDIA_TYPE = "application/x-mareforma-graph+json"
 
@@ -53,8 +53,8 @@ _CONTEXT = {
     "sourceName":      "mare:sourceName",
     "generatedBy":     "mare:generatedBy",
     # Flat list of strings (back-compat): exactly what's stored in
-    # supports_json / contradicts_json. Mixed types — claim_ids, DOIs,
-    # external refs — appear in arbitrary order.
+    # supports_json / contradicts_json. Mixed types, claim_ids, DOIs,
+    # external refs, appear in arbitrary order.
     "supports":        "mare:supports",
     "contradicts":     "mare:contradicts",
     # Typed buckets: every entry from supports/contradicts also appears
@@ -130,8 +130,8 @@ class JSONLDExporter:
     # ------------------------------------------------------------------
 
     def _claim_node(self, claim: dict) -> dict:
-        # Always include every SIGNED_FIELDS member + the GRADE
-        # EvidenceVector so a downstream consumer (e.g. SCITT bundle
+        # Always include every SIGNED_FIELDS member + the evidence
+        # vector so a downstream consumer (e.g. SCITT bundle
         # verification) can re-derive the canonical Statement v1 bytes
         # from the node alone. Optional fields use null/[] defaults to
         # match canonical_statement's expected shape.

@@ -1,4 +1,4 @@
-"""#33: the cycle check is one recursive CTE, not a query per node.
+"""the cycle check is one recursive CTE, not a query per node.
 
 ``_check_no_cycle`` walked ``supports[]`` with a Python DFS that ran one
 ``SELECT`` per visited claim, so its cost scaled with the depth of the
@@ -38,7 +38,7 @@ def test_cycle_check_is_single_query_regardless_of_depth(tmp_path: Path) -> None
             _check_no_cycle(conn, str(uuid.uuid4()), [ids[-1]])
         finally:
             conn.set_trace_callback(None)
-    # One recursive CTE — not one SELECT per visited claim.
+    # One recursive CTE, not one SELECT per visited claim.
     selects = [s for s in statements if "claims" in s.lower() or "recursive" in s.lower()]
     assert len(selects) == 1, f"expected a single walk query, ran: {statements}"
 
@@ -71,7 +71,7 @@ def test_diamond_reconvergence_is_not_a_false_cycle(tmp_path: Path) -> None:
         right = graph.assert_claim("right arm", supports=[root])
         apex = graph.assert_claim("apex", supports=[left, right])
         conn = graph._conn
-        # A new claim citing the apex reaches left, right, and root (twice) —
+        # A new claim citing the apex reaches left, right, and root (twice) , 
         # acyclic, so it must be allowed.
         _check_no_cycle(conn, str(uuid.uuid4()), [apex])  # no raise
         # A genuine cycle through the diamond is still caught: adding `root` with

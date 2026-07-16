@@ -20,12 +20,11 @@ description: "The Mareforma command-line interface: identity setup, claim manage
 | `mareforma verify` | Verify a claim, signed bundle, or export dir |
 | `mareforma map` | Show a claim's per-finding trust map |
 | `mareforma diagnose` | Run a Python target under the observer, report data flow |
+| `mareforma audit` | Audit a third-party pipeline: one signed grounding receipt per finding |
 | `mareforma observe --doctor` | Report observer coverage for this environment |
 | `mareforma measure` | Aggregate grounding verdicts into the reported split |
+| `mareforma reexec` | Re-run a recorded pipeline and check the reported number reproduces |
 | `mareforma restore` | Rebuild graph.db from claims.toml |
-| `mareforma ingest` | Extract claim drafts from a paper abstract |
-| `mareforma ask` | BM25 search over ingested literature claims |
-| `mareforma narrative` | Export literature claims as a Markdown narrative |
 
 ## Overview
 
@@ -33,7 +32,7 @@ description: "The Mareforma command-line interface: identity setup, claim manage
 mareforma [COMMAND] [OPTIONS]
 ```
 
-Available commands: `bootstrap`, `key`, `validator`, `claim`, `status`, `activity`, `export`, `verify`, `map`, `diagnose`, `observe`, `measure`, `restore`, `ingest`, `ask`, `narrative`.
+Available commands: `bootstrap`, `key`, `validator`, `claim`, `status`, `activity`, `export`, `verify`, `map`, `diagnose`, `audit`, `observe`, `measure`, `reexec`, `restore`.
 
 ---
 
@@ -378,6 +377,83 @@ mareforma verify ./export-dir
 
 ---
 
+## audit
+
+Audit a third-party pipeline: one signed grounding receipt per finding. Runs `COMMAND` in-process under the grounding observer, exactly like `diagnose`; the target never imports mareforma. The findings mapping names what each finding claims to cite, the observer alone supplies what happened, and nothing the target prints or writes enters a verdict. Each finding gets a verdict receipt (`receipts.jsonl` feeds `mareforma measure`) plus a signed envelope `mareforma verify` checks from public material alone. `audit` exits with the target's own exit code; a crashing target still emits its partial receipts.
+
+The target shares the auditor's interpreter (in-process observation is what makes its reads visible), so the receipts grade a pipeline that does not attack its auditor: a target written to defeat the audit could fabricate what the observer records. The signature attests the auditor's observation, not the target's honesty.
+
+With `--corpus`, `audit` iterates run specs instead: one fresh interpreter per run, resumable (a run whose signed record verifies as complete is skipped on re-invocation).
+
+```bash
+mareforma audit [OPTIONS] [COMMAND]...
+```
+
+**Options**
+
+| Option | Default | Description |
+|---|---|---|
+| `--findings FILE` | none | JSON object mapping `finding_id` to its cited source(s). Required unless `--corpus` is given |
+| `--corpus DIR` | none | Directory of run specs (`*.json`, each carrying `command` and `findings`). Resumable; one fresh interpreter per run |
+| `--out DIR` | `mareforma-audit` | Output directory for the run record, receipts, and signed envelopes |
+| `--key FILE` | bootstrap key | Auditor signing key |
+| `--json` | `False` | Emit the run record as JSON |
+| `--redact-home` | `False` | Rewrite `$HOME` to `~` in the printed report (never applied to signed receipts) |
+
+**Examples**
+
+```bash
+mareforma audit --findings findings.json -- python analysis.py
+mareforma audit --findings findings.json --out audit/ -- -m mypkg.run
+mareforma audit --corpus runs/ --out audit/
+```
+
+---
+
+## reexec
+
+Re-run a recorded pipeline and check the reported number reproduces. `RUN_PATH` is a JSON run record: the recorded `reported_value`, a pipeline naming a `module:attr` entry point (plus optional args), a declared `tolerance` and `rel_tolerance`, and, when the run cannot be re-run faithfully, `"reexecutable": false` with a `not_reexecutable_reason` (`world_contact`, `private_data`, or `expensive_compute`).
+
+The verdict is three-valued and honest: REPRODUCED (re-ran and matched), DIVERGED (re-ran and differed), or COULD_NOT_REEXECUTE (could not run, so faithfulness is unknown, never a false REPRODUCED). It attests reproducibility, not correctness, and a same-arm re-run is not independence.
+
+With `--map CLAIM_ID` it re-renders that claim's trust map with the verdict placed on the faithfulness axis, so the proxy is read next to every other trust property. The verdict is not stored; it is a read-side overlay.
+
+```bash
+mareforma reexec RUN_PATH [OPTIONS]
+```
+
+**Arguments**
+
+| Argument | Description |
+|---|---|
+| `RUN_PATH` | JSON run record naming the recorded value, the `module:attr` entry point, and the declared tolerance |
+
+**Options**
+
+| Option | Description |
+|---|---|
+| `--json` | Emit the verdict as JSON |
+| `--map CLAIM_ID` | Also render `CLAIM_ID`'s trust map with the faithfulness verdict placed on its PROXY-tier axis |
+
+**Exit codes** (stable, for CI gates). The verdict carries in the exit code, with malformed input distinct from an honest inconclusive re-run.
+
+| Code | Meaning |
+|---|---|
+| `0` | REPRODUCED |
+| `1` | DIVERGED |
+| `2` | COULD_NOT_REEXECUTE (faithfulness unknown, not a NO) |
+| `3` | malformed run record (usage error) |
+
+**Examples**
+
+```bash
+mareforma reexec run.json
+mareforma reexec run.json --json
+mareforma reexec run.json --map <claim-id>
+```
+
+---
+
 ## restore
 
 Rebuild `graph.db` from `claims.toml` for catastrophic-loss recovery. Refuses to run if the project's `graph.db` already contains claims: fresh-only, not merge. Every signature is verified before any row is inserted; fail-all-or-nothing.
@@ -405,97 +481,3 @@ mareforma restore backups/state.toml
 The output reports `validators_restored` and `claims_restored` counts. Failure exits `1` with a `RestoreError` message naming the failure mode: `graph_not_empty`, `toml_not_found`, `toml_malformed`, `enrollment_unverified`, `claim_unverified`, `mode_inconsistent`, `orphan_signer`, or `rekor_inclusion_invalid`. Three further modes (`policy_unverified`, `policy_absent`, `policy_unverifiable`) exist but fire only under `enforce_rekor_policy`, which the CLI `restore` does not expose; see the `mareforma.restore()` API table for those.
 
 `claims.toml` includes a `[rekor_inclusions]` section. Older files written without it restore successfully with a `RekorSidecarSectionAbsentWarning`. Run `refresh_unsigned()` afterward to re-fetch inclusion proofs.
-
----
-
-## ingest
-
-Read a paper abstract from disk, extract claim drafts, and write them to the project's `literature_claims` table (separate from the signed `claims` table, since most drafts stay drafts pending review).
-
-```bash
-mareforma ingest <FILE> [--db PATH] [--llm] [--model MODEL]
-```
-
-**Arguments**
-
-| Argument | Description |
-|---|---|
-| `FILE` | Path to a structured abstract file (TITLE: / DOI: / CLAIMS: sections). |
-
-**Options**
-
-| Option | Default | Description |
-|---|---|---|
-| `--db PATH` | `.mareforma/graph.db` | Path to the graph DB. Honours the literal filename; non-conventional paths are NOT silently rewritten under `.mareforma/`. |
-| `--llm` | off | Use the Anthropic Claude API to extract claims from arbitrary text. Requires `pip install anthropic`. |
-| `--model MODEL` | `claude-opus-4-8` | Anthropic model name when `--llm` is set. |
-
-**Default (structured) mode** parses files with explicit `TITLE:` / `DOI:` / `CLAIMS:` sections; each `CLAIMS:` line becomes one draft with an optional `(confidence: 0.NN)` marker. Zero external dependencies.
-
-**Example**
-
-```bash
-mareforma ingest paper.md
-# Ingested 3 claim(s) → written to .mareforma/graph.db
-
-mareforma ingest preprint.txt --llm --model claude-opus-4-8
-# Extracts claims from arbitrary text via Claude.
-```
-
----
-
-## ask
-
-FTS5 BM25 search over ingested literature claims. Input is sanitized so hyphens, parens, and asterisks are treated as literals; embedded double quotes are escaped per the FTS5 spec.
-
-```bash
-mareforma ask "<QUESTION>" [--db PATH] [--limit N] [--json]
-```
-
-**Arguments**
-
-| Argument | Description |
-|---|---|
-| `QUESTION` | Free-form search query. |
-
-**Options**
-
-| Option | Default | Description |
-|---|---|---|
-| `--db PATH` | `.mareforma/graph.db` | Path to the graph DB. |
-| `--limit N` | `5` | Maximum results. |
-| `--json` | off | Output raw JSON instead of the rendered table. |
-
-**Example**
-
-```bash
-mareforma ask "BRCA1 mutations"
-# Returns top-5 ranked literature_claims hits.
-
-mareforma ask 'mutations of "BRCA1"' --json
-# Embedded quotes are escaped; FTS5 syntax errors do not surface.
-```
-
----
-
-## narrative
-
-Export all ingested literature claims as a Markdown narrative grouped by source document, with structural and polarity-heuristic contradictions flagged inline.
-
-```bash
-mareforma narrative [--db PATH] [--output FILE]
-```
-
-**Options**
-
-| Option | Default | Description |
-|---|---|---|
-| `--db PATH` | `.mareforma/graph.db` | Path to the graph DB. |
-| `--output, -o FILE` | stdout | Write to file instead of stdout. |
-
-**Example**
-
-```bash
-mareforma narrative -o report.md
-# Writes # Literature Summary + per-source sections; ⚠ contradiction flags inline.
-```

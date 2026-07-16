@@ -2,11 +2,13 @@
 
 Mareforma is a local verification layer for AI-assisted research. It gives
 agents a graph for asserting claims with provenance, detecting convergence
-when cryptographically distinct signers reach the same conclusion on a shared
-anchor, and querying what has already been established before making new
+when a distinct model, dataset, and signer reach the same conclusion on a
+shared anchor, and querying what has already been established before making new
 assertions. Convergence is a verifiable signal, not a proof of truth: it shows
-that distinct keys agreed, re-checked end to end on every read; the real trust
-anchor is the human-validated ESTABLISHED tier.
+that genuinely different checks agreed, re-checked end to end on every read.
+The signal to read is a finding's effective-independence number: the count of
+pairwise-distinct model, data, and signer supporting checks, with a human check
+the highest-value source of all.
 
 Trust in a claim is derived from the graph, not from the agent that made it.
 No confidence score. No self-reporting. The structure of the provenance graph
@@ -208,9 +210,13 @@ exist. A read-side artifact: it places every trust property (attributability,
 provenance, grounding, methodological validity, leakage, independence,
 contestation, standing, trust-root, witnessing) at a tier
 (`COMPUTED` / `PROXIED` / `DEFERRED`) with the residual named, and infers
-nothing it cannot compute. Adds no signed field. `TrustMap.to_dict()` is
-canonicalizable and `TrustMap.canonical_digest()` commits to it. The
-`mareforma map` CLI renders it as text, JSON, or one self-contained HTML file.
+nothing it cannot compute. The independence axis leads: it reports the
+effective-independence number (pairwise-distinct model, data, and signer
+supporting checks) and reads `UNVERIFIABLE` where a supporting line's model
+lineage is too soft to certify a distinct model. Adds no signed field.
+`TrustMap.to_dict()` is canonicalizable and `TrustMap.canonical_digest()`
+commits to it. The `mareforma map` CLI renders it as text, JSON, or one
+self-contained HTML file.
 
 ---
 
@@ -288,33 +294,6 @@ A "healthy" graph has zeros across the five drift counters
 `convergence_errors`, `convergence_retry_pending`). Non-zero values
 do not by themselves indicate a defect. They indicate something
 the operator should look at.
-
----
-
-### `graph.refresh_unresolved() → dict`
-
-Retry external DOI verification for every claim currently flagged
-`unresolved=1`. Returns `{"checked": N, "resolved": M, "still_unresolved": K}`.
-
-DOIs in `supports[]`/`contradicts[]` are HEAD-checked against Crossref and
-DataCite at `assert_claim` time. If the registries are unreachable, the
-claim is persisted with `unresolved=True` and is ineligible for
-`REPLICATED` promotion until the next `refresh_unresolved()` confirms the
-DOIs.
-
----
-
-### `graph.refresh_all_dois() → dict`
-
-Force-re-resolve every DOI referenced anywhere in the graph,
-bypassing the 30-day positive cache. Returns
-`{"checked", "still_resolved", "now_unresolved", "newly_failed"}`.
-
-Use when you suspect a referenced DOI has been retracted or its
-registry state has changed since assertion. `newly_failed` counts
-DOIs whose cache state flipped from resolved to unresolved: the
-drift signal operators usually want. Does NOT mutate
-`support_level` or per-claim `unresolved` flags.
 
 ---
 
@@ -458,26 +437,72 @@ to see what the observer covers in your environment.
 Author inside the scope and sign after it closes: asserting a claim while its
 grounding scope is still open is refused.
 
+A pipeline that never imports mareforma can still be graded post hoc:
+`mareforma audit --findings findings.json -- python run.py` runs it under the
+same observer and emits one signed grounding receipt per finding, computed
+against each finding's cited sources with the binding semantics above. The
+target shares the auditor's interpreter, so the receipts grade a pipeline that
+does not attack its auditor; the signature attests the auditor's observation,
+not the target's honesty.
+
+**Model/method lineage.** Inside an `observe()` scope, mareforma also captures
+WHICH model authored the finding, computed from the request the producer
+actually sent rather than from a self-declaration. It parses the model at the
+`httpx` `post` and `send` seams and the `aiohttp` request seam, the paths the
+provider SDKs and litellm take, and gates the capture on a 2xx response so a
+failed call never mints a model. The lineage is tiered like `data_id`:
+`COMPUTED` for a body-parse at the seam (the producer does not control this
+path), `PROXY` for a cooperating producer's out-of-band `declare_model`, and
+`UNVERIFIABLE` for soft lineage (a hosted fine-tune, a moving alias, or a wrapper
+whose base is not declarable). A recognized provider host is COMPUTED by its
+request; a local inference server is COMPUTED by the served weights' digest,
+recorded through a `weights-digest` attestor so two local models are told apart
+by their weights, not a self-chosen name. The probe accepts only a
+content-addressed digest: an Ollama-compatible surface that answers with a
+constant sentinel or a hash of the model name yields no digest, and the call
+stays `UNVERIFIABLE`. A distinct model STRING is not, by itself, a distinct
+model: it family-roots to its declarable base, and an open-weight name to its
+family release (`llama-3.1`, `deepseek-v3`), so one release served under two
+provider names is one model; a name that roots to neither reads
+`UNVERIFIABLE`, never a fabricated distinct model. The lineage rides on the
+finding's evidence line and feeds the effective-independence count (see Support
+levels and the Trust layer below). It records model and method identity only,
+never a claim about training-time contamination.
+
 ---
 
 ## Support levels
 
+> **`REPLICATED` and `ESTABLISHED` are deprecated public labels.** A single
+> support word never carried the independence a reader needs, so the public
+> surface now leads with the effective-independence number the trust map
+> reports. `mareforma.REPLICATED` and `mareforma.ESTABLISHED` still resolve for
+> one release as string aliases and emit a `DeprecationWarning`; a later release
+> removes them. The stored `support_level` strings and the promotion machinery
+> below are unchanged. Read the independence axis of `graph.trust_map` instead.
+
 | Level | Meaning | How reached |
 |---|---|---|
 | `PRELIMINARY` | One agent claimed it | Automatic on first assertion |
-| `REPLICATED` | ≥2 distinct signers converged on the same upstream | Automatic at INSERT |
+| `REPLICATED` | ≥2 distinct-signer checks converged on the same ESTABLISHED upstream | Automatic at INSERT |
 | `ESTABLISHED` | Human-validated | `graph.validate()` only, requires REPLICATED first |
 
 `REPLICATED` fires automatically when ≥2 claims share the same upstream
 claim_id in `supports[]`, carry **distinct, non-NULL `asserter_keyid`** values
 (the signer keyid from each claim's signature), **AND** at least one of those
-upstreams is itself `ESTABLISHED`. Claims signed by the same key, and unsigned
+upstreams is itself `ESTABLISHED`. Promotion keys on the signer axis. The
+load-bearing model-independence signal is the read-side effective-independence
+number `graph.trust_map` reports (`effective_independence`), not this promotion.
+The promotion path does run a `model_distinct_pair` filter, but it is a
+defensive gate that stays inert on the primary path: a claim's finding model
+lineage is written after promotion runs, so both sides read absent and the
+filter passes everything through. Read the independence axis to tell a distinct
+model from a same-model rerun. Claims signed by the same key, and unsigned
 claims, do not converge; equal `artifact_hash` collapses two peers to one line.
 Distinct keys are a cryptographic distinctness signal, not a proof of apparatus
 independence. REPLICATED is a convergence signal, not a truth claim, and the
-real anchor is human-validated `ESTABLISHED`. No agent can self-promote to
-`ESTABLISHED`, and a validator that signed any claim in the converging set is
-refused.
+real anchor is human validation. No agent can self-promote to `ESTABLISHED`, and
+a validator that signed any claim in the converging set is refused.
 
 **ESTABLISHED-upstream rule.** REPLICATED requires an ESTABLISHED claim
 in the converging supports[]. Matches Cochrane / GRADE evidence chains.
@@ -562,7 +587,8 @@ result = graph.assert_finding(prop, plan, est, data_id="dataset_alpha",
 result["bearing"]["direction"]   # "supports", computed by the gate
 result["status"]                  # "PRELIMINARY" (one independent line)
 
-# A second independent dataset on the same proposition lifts it to CORROBORATED.
+# A second check on a DISTINCT model (and dataset, and signer) lifts it to
+# CONVERGENT. A same-model rerun stays one line and does not.
 graph.proposition_status(prop)["status"]
 ```
 
@@ -577,7 +603,12 @@ into its two earned steps: `register_plan` pre-registers the decision rule
 (writing its own signed plan attestation) before the numbers are seen, then
 `submit_finding` binds the outcome to that plan and signs the plan → finding
 edge into the finding claim's `supports[]`. `assert_finding` is the one-shot
-that composes both. Full reference:
+that composes both. Pre-registration only counts when the rule is bound before
+the run produces outcomes, so `submit_finding` raises `PostHocPlanError` when a
+pre-registered plan's `registered_at` post-dates the run's first observed
+execution (its earliest prior finding under the same `generated_by` run token);
+a one-shot `assert_finding` claims no pre-registration and never raises it. Full
+reference:
 [docs.mareforma.com](https://docs.mareforma.com/reference/api) and the
 [Findings](https://docs.mareforma.com/concepts/findings) concept page.
 
@@ -620,7 +651,7 @@ payload is an in-toto Statement v1
 (`predicateType=urn:mareforma:predicate:claim:v1`). The signed predicate
 binds `claim_id`, `text`, `classification`, `generated_by`, `supports`,
 `contradicts`, `source_name`, `artifact_hash`, `created_at`, and the
-GRADE `evidence` vector (see below). The subject digest is
+opaque `evidence` dict (see below). The subject digest is
 `sha256(NFC(text))`; the subject name is `mareforma:claim:<claim_id>`.
 Any tamper on the row breaks verification.
 
@@ -632,18 +663,16 @@ the bytes are otherwise identical. Standards-aligned; `cosign`, GUAC,
 and any in-toto-aware tool can introspect a mareforma envelope without
 a mareforma-specific verifier.
 
-**GRADE EvidenceVector** travels inside the signed predicate as the
-`evidence` dict. Five downgrade domains in `[-2, 0]` (`risk_of_bias`,
-`inconsistency`, `indirectness`, `imprecision`, `publication_bias`),
-three upgrade flags (`large_effect`, `dose_response`,
-`opposing_confounding`), a `rationale` dict (required for any nonzero
-domain), and a `reporting_compliance` list. Defaults to all-zeros (no
-quality concerns flagged by the asserter). Denormalized into `ev_*`
-columns on the claim row for queryable filters; the signed predicate
-is the authoritative copy. Cannot be retroactively edited. A
-`UPDATE claims SET ev_risk_of_bias = 0 …` direct-SQL tamper is refused
-by the `claims_signed_fields_no_laundering` BEFORE UPDATE trigger when
-the new value differs from the signed one.
+**The `evidence` dict** travels inside the signed predicate. It is opaque
+storage, not an evaluated quality score: mareforma binds and round-trips it
+byte-for-byte but ships no public evidence-vector class and validates none of
+its contents. The shape is retained for compatibility (downgrade domains in
+`[-2, 0]`, upgrade flags, a `rationale` dict, a `reporting_compliance` list),
+and defaults to all-zeros. It is denormalized into `ev_*` columns on the claim
+row for queryable filters; the signed predicate is the authoritative copy.
+Cannot be retroactively edited. A `UPDATE claims SET ev_risk_of_bias = 0 …`
+direct-SQL tamper is refused by the `claims_signed_fields_no_laundering` BEFORE
+UPDATE trigger when the new value differs from the signed one.
 
 **Append-only invariant.** Signed claims refuse mutation of any
 signed-surface field. `update_claim(text=...)` /
@@ -961,18 +990,14 @@ graph.contradiction_verdicts(claim_id=cid, include_invalidated=True)
 
 ---
 
-## DOI verification
+## DOI strings in supports
 
-DOIs anywhere in `supports[]` or `contradicts[]` are HEAD-checked against
-Crossref then DataCite at `assert_claim` time. Failure persists the claim
-with `unresolved=True` and blocks `REPLICATED` promotion until
-`graph.refresh_unresolved()` confirms the DOIs. Strings in `supports[]`
-that don't match the DOI format (`10.<registrant>/<suffix>`) are treated
-as claim_id references and pass through without a network call.
-
-Results are cached in the `doi_cache` table (30-day TTL for resolved
-entries, 24-hour TTL for unresolved) so repeated assertions of the same
-DOI don't hit the registries.
+Mareforma recognises DOI-format strings (`10.<registrant>/<suffix>`)
+anywhere in `supports[]` or `contradicts[]` and treats them as external
+references, not graph nodes: they are skipped by cycle detection and by
+`find_dangling_supports`, and pass through without a network call.
+Mareforma does not resolve, HEAD-check, or cache DOIs; a DOI records
+what a claim cites, and its content is not verified.
 
 ---
 
@@ -986,7 +1011,7 @@ verification.
 mareforma-native vocabulary (`@type=mare:Graph`, media type
 `application/x-mareforma-graph+json`). The export is NOT
 PROV-O-conformant. Each claim node carries every `SIGNED_FIELDS`
-member plus the GRADE `evidence` vector so the bundle verifier
+member plus the opaque `evidence` dict so the bundle verifier
 (below) can re-derive `canonical_statement` bytes from a node alone.
 
 **SCITT-style signed bundle.** `mareforma export --bundle` wraps the
@@ -1486,50 +1511,6 @@ Plus the public canonicalize registry and predicate-URI constants:
   `LITERATURE_INSIGHT_V1`, `SCIENCE_SKILL_V1`, `META_CLAIM_V1`,
   `CONTAINER_EXEC_V1`, plus the wet-lab assay family. Use the
   constants instead of string literals so a typo fails at import.
-
-## Claude Code hook (`mareforma.hooks`)
-
-`python -m mareforma.hooks` is a Claude Code `PreToolUse` handler
-that records every tool invocation as a `prov:Activity` row in the
-project's `.mareforma/graph.db`. The `agent_activities` table is
-part of the canonical schema; the hook routes through
-`mareforma.db.open_db` so it inherits foreign-keys PRAGMA + schema
-validation. Opt in via `.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [{
-      "matcher": "",
-      "hooks": [{"type": "command", "command": "python -m mareforma.hooks"}]
-    }]
-  }
-}
-```
-
-Hook exit is always 0; failures log to stderr but never propagate
-so a hook glitch can never interrupt a Claude Code tool call.
-
-## Literature ingest CLI
-
-Paper claim drafts live in their own `literature_claims` table
-(separate from the signed `claims` table) so most ingested
-assertions stay drafts pending review. Three subcommands:
-
-```bash
-mareforma ingest paper.md        # parse TITLE / DOI / CLAIMS, write drafts
-mareforma ingest paper.md --llm  # use Claude API (needs `pip install anthropic`)
-mareforma ask "BRCA1 mutations"  # FTS5 BM25 search over draft text
-mareforma narrative -o out.md    # Markdown summary, ⚠ contradiction flags
-```
-
-The `--db` flag accepts the full path to the `graph.db` file
-(`mareforma.db.open_db_from_db_path` honours the supplied filename
-instead of re-deriving `.mareforma/graph.db`). Existing graphs
-auto-create any missing additive tables on next `open_db()` without a
-schema bump.
-
----
 
 ## For more
 

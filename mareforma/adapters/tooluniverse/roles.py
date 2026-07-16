@@ -154,7 +154,12 @@ def verify_role_attestation(attestation: dict[str, Any], public_key: Any) -> dic
         raise InvalidRoleAttestationError(
             "role attestation signature did not verify"
         ) from exc
-    body = json.loads(payload_bytes.decode("utf-8"))
+    try:
+        body = json.loads(payload_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise InvalidRoleAttestationError(
+            f"role attestation payload is not a JSON object: {exc}"
+        ) from exc
     if not isinstance(body, dict) or "payload" not in body:
         raise InvalidRoleAttestationError(
             "role attestation payload must decode to {role, payload} object"

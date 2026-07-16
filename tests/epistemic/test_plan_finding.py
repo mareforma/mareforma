@@ -13,6 +13,7 @@ composes the two internally (and flags its synthesised plan ``preregistered=0``)
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -26,11 +27,32 @@ from mareforma.trust import (
     FindingPlanForkError,
     NoRegisteredPlanError,
     NonFalsifiablePropositionError,
+    PostHocPlanError,
     Status,
 )
 from mareforma.trust import _store
 
 from tests.epistemic._builders import _prop, _smd, _superiority, open_graph
+
+
+class _MonotonicClock:
+    """A deterministic UTC ISO-8601 clock that advances one second per call.
+
+    Both ``register_plan`` and ``submit_finding`` read ``mareforma.db.core._now``
+    at call time, so patching it with this makes registration/execution ordering
+    exact instead of racing the wall clock: a later call is always a later,
+    fixed-width ``+00:00`` timestamp, so the guard's lexicographic comparison is
+    reproducible.
+    """
+
+    def __init__(self) -> None:
+        self._t = 0
+
+    def __call__(self) -> str:
+        self._t += 1
+        return (
+            datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=self._t)
+        ).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +218,7 @@ class TestSubmitFinding:
             graph.submit_finding(h, pred, _smd(-2.4, p=0.01), data_id="dataB", generated_by="lab_b")
             status = graph.proposition_status(h)
         assert status["independent_support"] == 2
-        assert status["status"] == Status.CORROBORATED.value
+        assert status["status"] == Status.CONVERGENT.value
 
     def test_dangling_plan_is_untested(self, tmp_path: Path) -> None:
         h = _prop(Direction.DECREASES)
@@ -317,19 +339,21 @@ class TestAssertFindingRegression:
                 data_id="dataA", generated_by="lab_a",
             )
         # Return shape: the prior keys plus the additive per-line "bearings"
-        # and the additive observed "grounding" record (None when no verdict
-        # was supplied). A single-line finding carries one bearing entry.
+        # and the additive observed "grounding" record, plus the additive
+        # "model_lineage" record (both None when no verdict was supplied). A
+        # single-line finding carries one bearing entry.
         assert set(result) == {
             "finding_id", "content_id", "plan_id", "claim_id",
             "bearing", "bearings", "status", "idempotent", "proposition_status",
-            "grounding",
+            "grounding", "model_lineage",
         }
         assert result["bearing"]["direction"] == "supports"
         assert result["bearings"] == [{"direction": "supports", "significant": True}]
         assert result["idempotent"] is False
         assert result["status"] == Status.PRELIMINARY.value
-        # No observer was used, so the additive axis stays absent (None).
+        # No observer was used, so the additive axes stay absent (None).
         assert result["grounding"] is None
+        assert result["model_lineage"] is None
 
     def test_one_shot_synthesised_plan_is_not_preregistered(self, tmp_path: Path) -> None:
         h = _prop(Direction.DECREASES)
@@ -345,7 +369,7 @@ class TestAssertFindingRegression:
         assert row["preregistered"] == 0  # one-shot, not a real pre-registration
 
     def test_one_shot_bad_estimate_leaves_nothing(self, tmp_path: Path) -> None:
-        """A rejected one-shot finding writes no proposition, plan, or claim —
+        """A rejected one-shot finding writes no proposition, plan, or claim , 
         v0.3.4's all-or-nothing behaviour is preserved through the refactor."""
         from mareforma.trust import InconsistentEstimateError
         h = _prop(Direction.DECREASES)
@@ -406,3 +430,84 @@ class TestAssertFindingRegression:
                                             data_id="dataB", generated_by="lab_b")
         assert one_shot["plan_id"] == _store.compute_plan_id(h.content_id(), pred)
         assert two_step["plan_id"] == _store.compute_plan_id(h2.content_id(), pred)
+
+
+# ---------------------------------------------------------------------------
+# Pre-registration before first execution
+# ---------------------------------------------------------------------------
+
+class TestPreregistrationGuard:
+    def test_preregistration_after_execution_refused(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A plan pre-registered AFTER the run's first observed execution is
+        refused: honoring it would launder a post-hoc rule as a pre-registration.
+        The refusal writes no finding and no orphan claim."""
+        monkeypatch.setattr("mareforma.db.core._now", _MonotonicClock())
+        h1 = _prop(Direction.DECREASES)
+        h2 = _prop(Direction.DECREASES, population="OTHER")
+        pred = _superiority()
+        with open_graph(tmp_path) as graph:
+            # Run lab_a begins: it pre-registers a plan and executes a finding.
+            graph.register_plan(h1, pred, generated_by="lab_a")
+            graph.submit_finding(h1, pred, _smd(-2.6, p=0.003),
+                                 data_id="dataA", generated_by="lab_a")
+            # Only NOW, after lab_a has already produced a finding, is a second
+            # plan registered. It cannot be a pre-registration for lab_a's work.
+            graph.register_plan(h2, pred, generated_by="lab_a")
+            n_findings = graph._conn.execute(
+                "SELECT COUNT(*) AS c FROM findings"
+            ).fetchone()["c"]
+            n_claims = graph._conn.execute(
+                "SELECT COUNT(*) AS c FROM claims"
+            ).fetchone()["c"]
+            with pytest.raises(PostHocPlanError):
+                graph.submit_finding(h2, pred, _smd(-2.4, p=0.01),
+                                     data_id="dataB", generated_by="lab_a")
+            # Refused before any write: no new finding, no orphan claim.
+            assert graph._conn.execute(
+                "SELECT COUNT(*) AS c FROM findings"
+            ).fetchone()["c"] == n_findings
+            assert graph._conn.execute(
+                "SELECT COUNT(*) AS c FROM claims"
+            ).fetchone()["c"] == n_claims
+
+    def test_preregistration_before_execution_honored(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The positive control: a plan registered BEFORE the run executes is
+        honored as normal, and a further dataset under that same pre-registered
+        plan (the run continuing legitimate work) is not falsely refused."""
+        monkeypatch.setattr("mareforma.db.core._now", _MonotonicClock())
+        h = _prop(Direction.DECREASES)
+        pred = _superiority()
+        with open_graph(tmp_path) as graph:
+            # Registered before lab_a's first execution: the normal path.
+            graph.register_plan(h, pred, generated_by="lab_a")
+            first = graph.submit_finding(h, pred, _smd(-2.6, p=0.003),
+                                         data_id="dataA", generated_by="lab_a")
+            assert first["idempotent"] is False
+            assert first["bearing"]["direction"] == "supports"
+            assert graph.proposition_status(h)["status"] == Status.PRELIMINARY.value
+            # A second dataset under the SAME pre-registered plan stays honored:
+            # the plan predates the run, so later lines under it are not post-hoc.
+            second = graph.submit_finding(h, pred, _smd(-2.4, p=0.01),
+                                          data_id="dataB", generated_by="lab_a")
+            assert second["idempotent"] is False
+
+    def test_one_shot_run_after_prior_finding_is_exempt(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A one-shot assert_finding synthesises its plan (preregistered=0) and
+        makes no pre-registration claim, so a run authoring successive one-shots
+        is never caught by the guard even though each plan is 'registered' after
+        the run's first execution."""
+        monkeypatch.setattr("mareforma.db.core._now", _MonotonicClock())
+        h1 = _prop(Direction.DECREASES)
+        h2 = _prop(Direction.DECREASES, population="OTHER")
+        with open_graph(tmp_path) as graph:
+            graph.assert_finding(h1, _superiority(), _smd(-2.6, p=0.003),
+                                 data_id="dataA", generated_by="lab_a")
+            second = graph.assert_finding(h2, _superiority(), _smd(-2.4, p=0.01),
+                                          data_id="dataB", generated_by="lab_a")
+            assert second["idempotent"] is False

@@ -1,6 +1,6 @@
 # Security Policy
 
-Mareforma is pre-1.0 software maintained by a single author. The threat model
+Mareforma is pre-1.0 software maintained by the Mareforma team. The threat model
 matters: mareforma builds the local epistemic record AI scientists rely on
 for cross-agent replication, so a defect that lets an attacker forge a
 `REPLICATED` claim, a signed envelope, or a validator enrollment is a
@@ -10,7 +10,7 @@ trust-layer failure, not a cosmetic bug. Reports here get priority.
 
 Only the latest released version receives security fixes. Pre-1.0 means
 the API is still shifting and back-porting to older minors is not
-sustainable for a single maintainer. If you are pinned to an older
+sustainable for the team at this stage. If you are pinned to an older
 version, the fix is "upgrade."
 
 | Version | Supported          |
@@ -27,7 +27,7 @@ Reporting:
 
 If the form is unavailable (PVR not yet enabled, GitHub outage, etc.),
 the fallback is to open an empty public issue titled "Security contact
-needed", the maintainer will respond with a private channel within 72
+needed", the team will respond with a private channel within 72
 hours. Do not include exploit details in the public issue.
 
 ### What to include
@@ -40,7 +40,7 @@ hours. Do not include exploit details in the public issue.
 
 ### Response targets
 
-These are best-effort for a single-maintainer pre-1.0 project, not
+These are best-effort for a small team on a pre-1.0 project, not
 contractual SLAs:
 
 - Acknowledgement: target **3 business days**.
@@ -122,8 +122,13 @@ trust boundaries:
 - Sigstore-Rekor inclusion is opt-in (`rekor_url=` parameter on
   `mareforma.open`). Without it, claims are signed but not
   transparency-logged.
-- DOI resolution hits Crossref and DataCite. URLs are validated
-  against SSRF probes (private IPs, DNS shortcuts to loopback).
+- A local model's lineage is the served weights' digest, resolved from
+  the producer's own inference server through a scope-detached probe
+  that never follows a redirect off the loopback host and accepts only
+  a content-addressed digest (a compatible surface answering with a
+  sentinel or a name hash yields none). It is content-addressed for an
+  honest producer but self-attested against an operator who controls
+  that server, the same residual as the signing key above.
 
 Defects in any of these are P0 by definition. Report them.
 

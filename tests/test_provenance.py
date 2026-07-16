@@ -8,7 +8,7 @@ Coverage:
 - self-validation gate walks every signature on the envelope
 - self-verdict gate walks every signature on both referenced claims
 - legacy single-signature envelopes still verify under the verifier
-  (regression — multi-sig must not break single-sig)
+  (regression, multi-sig must not break single-sig)
 - PROV-O JSON-LD exporter + four-invariant validator
 """
 from __future__ import annotations
@@ -81,7 +81,7 @@ class TestSupportsCache:
 
     def test_cache_rebuild_after_corruption(self, tmp_path: Path) -> None:
         # Corrupting the cache file (NOT deleting it) must trigger
-        # auto-rebuild on next open — operators shouldn't have to
+        # auto-rebuild on next open, operators shouldn't have to
         # diagnose SQLite "file is not a database" errors for a
         # non-signed cache.
         with mareforma.open(tmp_path) as graph:
@@ -191,6 +191,51 @@ class TestQueryProvenance:
         assert lineage["upstream"] == []
         assert lineage["downstream"] == []
 
+    def test_update_claim_supports_refreshes_provenance(
+        self, tmp_path: Path,
+    ) -> None:
+        # editing an unsigned claim's supports must maintain the supports
+        # cache in the same transaction, so query_provenance stops serving the
+        # pre-edit lineage. The COUNT(*)-only staleness heuristic never trips
+        # on an in-place UPDATE, so the edges must be maintained directly.
+        with mareforma.open(tmp_path) as graph:
+            a = graph.assert_claim("a")
+            c = graph.assert_claim("c")
+            b = graph.assert_claim("b", supports=[a])
+            before = {e["claim_id"]
+                      for e in graph.query_provenance(a)["downstream"]}
+            assert b in before
+            graph.update_claim(b, supports=[c])  # repoint b from a to c
+            a_down = {e["claim_id"]
+                      for e in graph.query_provenance(a)["downstream"]}
+            c_down = {e["claim_id"]
+                      for e in graph.query_provenance(c)["downstream"]}
+        assert b not in a_down, "stale edge: b still shows as downstream of a"
+        assert b in c_down, "new edge missing: b should be downstream of c"
+
+    def test_delete_claim_drops_its_cache_edges(
+        self, tmp_path: Path,
+    ) -> None:
+        # deleting an unsigned claim must remove its cache edges in the
+        # same transaction. A reopen rebuilds the cache (delete changes the
+        # claim count, so is_cache_stale trips), which would mask this, so the
+        # assertion is on the same connection: the edge must be gone now, not
+        # left dangling until the next open.
+        with mareforma.open(tmp_path) as graph:
+            a = graph.assert_claim("a")
+            b = graph.assert_claim("b", supports=[a])
+        conn = _db.open_db(tmp_path)
+        try:
+            _db.delete_claim(conn, tmp_path, b)
+            dangling = conn.execute(
+                "SELECT 1 FROM supports_cache.claim_supports "
+                "WHERE claim_id = ? OR supports_claim_id = ?",
+                (b, b),
+            ).fetchall()
+        finally:
+            conn.close()
+        assert dangling == [], "deleted claim left dangling supports-cache edges"
+
 
 # ----------------------------------------------------------------------------
 # Multi-signature DSSE for claim-with-roles:v1
@@ -289,7 +334,7 @@ class TestMultiSigDSSE:
 
     def test_verify_envelope_multi_rejects_role_less_signature(self) -> None:
         # A legacy single-sig envelope (no role field) does NOT verify
-        # under the multi-sig verifier — callers must use verify_envelope.
+        # under the multi-sig verifier, callers must use verify_envelope.
         key = _signing.generate_keypair()
         envelope = _signing.sign_claim(self._statement_fields(), key)
         # Forge a "claim-with-roles"-shaped call expecting role tags.
@@ -548,12 +593,12 @@ class TestProvOExport:
 
 
 # ----------------------------------------------------------------------------
-# Hardening regressions surfaced by adversarial review
+# Provenance hardening regressions
 # ----------------------------------------------------------------------------
 
 
 class TestSupportsCacheWalMode:
-    """The cache db must run in WAL — same journal mode as graph.db —
+    """The cache db must run in WAL, same journal mode as graph.db , 
     so cross-DB transaction semantics are consistent and any future
     code that relies on atomic-together commits has a hope of it."""
 
@@ -584,7 +629,7 @@ class TestRestoreVerifiesEverySignatureInMultiSigEnvelope:
     ) -> None:
         # The HARD case: the extra signature carries an ENROLLED
         # keyid (so the orphan-signer gate passes) but the sig bytes
-        # are forged — this exercises the cryptographic verify path,
+        # are forged, this exercises the cryptographic verify path,
         # not just the keyid lookup.
         import base64 as _b64
         from mareforma.db import RestoreError
@@ -626,7 +671,7 @@ class TestRestoreVerifiesEverySignatureInMultiSigEnvelope:
         )
         with pytest.raises(RestoreError) as ei:
             mareforma.restore(tmp_path)
-        # The cryptographic verify path catches this — kind is
+        # The cryptographic verify path catches this, kind is
         # claim_unverified, not orphan_signer.
         assert ei.value.kind == "claim_unverified"
 
@@ -746,7 +791,7 @@ class TestSelfValidationRejectsEmptySignatures:
 
 class TestQueryProvenanceShowsInvalidatingVerdict:
     """When a claim is contradicted by a signed verdict, the verdict
-    that invalidated it MUST appear in query_provenance — without
+    that invalidated it MUST appear in query_provenance, without
     that, the audit surface silently hides the verdict the operator
     is investigating."""
 

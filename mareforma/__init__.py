@@ -1,7 +1,7 @@
 """Mareforma: local verification layer for AI-assisted research."""
 
 __description__ = "Mareforma: local verification layer for AI-assisted research."
-__version__ = "0.3.9"
+__version__ = "0.3.10"
 
 from pathlib import Path
 
@@ -101,7 +101,7 @@ def open(  # noqa: A001
         from a prior open(), it is loaded automatically.
     strict_promotion:
         When True, REPLICATED promotion additionally requires non-NULL
-        ``artifact_hash`` on BOTH sides of a converging pair — an operator
+        ``artifact_hash`` on BOTH sides of a converging pair, an operator
         who wants data-distinctness as a hard gate, not just distinct
         signers. Off by default (the default rule promotes on the
         distinct-signer axis alone; absent data never blocks). Opt-in and
@@ -164,14 +164,14 @@ def open(  # noqa: A001
     # Rekor log-operator pubkey resolution with TOFU pin. The pinned PEM
     # lives at <root>/.mareforma/rekor_log_pubkey.pem after first use.
     # Resolution precedence:
-    #   1. rekor_log_pubkey_pem (explicit bytes)        — highest
+    #   1. rekor_log_pubkey_pem (explicit bytes)       , highest
     #   2. rekor_log_pubkey_path (explicit filesystem)
-    #   3. pinned file from prior open()                — TOFU continuation
-    #   4. None                                          — verification disabled
+    #   3. pinned file from prior open()               , TOFU continuation
+    #   4. None                                         , verification disabled
     if rekor_log_pubkey_pem is not None and rekor_log_pubkey_path is not None:
         raise ValueError(
             "Pass either rekor_log_pubkey_pem or rekor_log_pubkey_path, "
-            "not both — the two are mutually exclusive."
+            "not both, the two are mutually exclusive."
         )
     if rekor_log_pubkey_path is not None:
         rekor_log_pubkey_pem = Path(rekor_log_pubkey_path).read_bytes()
@@ -182,7 +182,7 @@ def open(  # noqa: A001
     elif rekor_log_pubkey_pem is not None and _pinned_path.exists():
         # TOFU pin enforcement: refuse silent log-key rotation. Compare
         # the pinned PEM and the supplied PEM by their CANONICAL DER
-        # bytes — line-wrap width (64 vs 76 columns) and trailing
+        # bytes, line-wrap width (64 vs 76 columns) and trailing
         # CR/LF differences make two semantically-identical PEMs
         # byte-unequal, so a literal-bytes ``.strip()`` check would
         # produce spurious mismatch errors and lock the operator out.
@@ -197,7 +197,7 @@ def open(  # noqa: A001
         # First use: persist the pin ATOMICALLY. Two concurrent
         # ``mareforma.open()`` calls with different keys could
         # otherwise both see ``_pinned_path.exists() == False`` and
-        # race to write — the loser would silently overwrite the
+        # race to write, the loser would silently overwrite the
         # winner's pin. ``O_CREAT|O_EXCL`` makes the creation
         # mutually-exclusive: the loser gets ``FileExistsError`` and
         # is routed through the mismatch-check branch instead of
@@ -292,7 +292,7 @@ def schema() -> dict:
                 "trigger": "automatic",
                 "condition": (
                     "≥2 claims signed by different validator keys (distinct "
-                    "asserter keyids — the per-claim signing key, not the agent "
+                    "asserter keyids, the per-claim signing key, not the agent "
                     "label) support the same ESTABLISHED upstream claim_id in "
                     "supports[]; each claim must be transparency-logged, "
                     "grounded, and free of a signed contradiction verdict"
@@ -304,7 +304,7 @@ def schema() -> dict:
                 "trigger": "validator",
                 "condition": (
                     "graph.validate(claim_id) by an enrolled validator whose "
-                    "key signed neither converging claim — no automated path"
+                    "key signed neither converging claim, no automated path"
                 ),
             },
         ],
@@ -381,20 +381,13 @@ def restore(
     )
 
 
-from mareforma._evidence import (
-    EvidenceVector,
-    EvidenceVectorError,
-    VALID_STUDY_DESIGNS,
-)
-
 # Re-export the user-catchable exception surface. AGENTS.md / docstrings
 # document these as raise paths from the public API (assert_claim,
 # validate, update_claim, restore, refresh_unsigned, etc.), and users
 # previously had to import them from submodules (mareforma.db,
-# mareforma.signing, mareforma.validators, mareforma._evidence) — the
-# last of which is underscore-prefixed and therefore confusing. Make
-# the catch surface match the documented contract by exposing
-# everything at the top level.
+# mareforma.signing, mareforma.validators), some of which are
+# underscore-prefixed and therefore confusing. Make the catch surface
+# match the documented contract by exposing everything at the top level.
 from mareforma.db import (
     MareformaError,
     DatabaseError,
@@ -428,6 +421,12 @@ from mareforma.signing import (
     RekorInclusionError,
 )
 from mareforma.validators import ValidatorNotEnrolledError
+from mareforma.reexec import (
+    FaithfulnessVerdict,
+    MalformedRunError,
+    ReexecResult,
+    reexec,
+)
 from mareforma.predicate_types import (
     BUILTIN_URIS,
     PredicateTypeError,
@@ -471,8 +470,6 @@ __all__ = [
     "EpistemicGraph",
     "schema",
     "restore",
-    "EvidenceVector",
-    "VALID_STUDY_DESIGNS",
     "safe_for_llm",
     "sanitize_for_llm",
     "wrap_untrusted",
@@ -520,7 +517,6 @@ __all__ = [
     "GraphTooLargeError",
     "DatabaseError",
     "EvidenceCitationError",
-    "EvidenceVectorError",
     "IdempotencyConflictError",
     "IllegalStateTransitionError",
     "InvalidEnvelopeError",
@@ -543,7 +539,46 @@ __all__ = [
     # Grounding sensor protocol + reference impl.
     "Verifier",
     "MockNLIVerifier",
+    # Re-execution faithfulness proxy.
+    "reexec",
+    "ReexecResult",
+    "FaithfulnessVerdict",
+    "MalformedRunError",
 ]
+
+
+# Retired public support-level labels. REPLICATED and ESTABLISHED were the
+# public names for the top of the support ladder; the trust map now leads with
+# the effective-independence number, not a single support word, so these labels
+# are retired from the public surface. They keep working for one release as
+# string aliases and emit a DeprecationWarning when read via the public module;
+# a future release removes them. This is a public-label retirement ONLY: the
+# stored ``support_level`` strings and the promotion machinery are unchanged
+# (internal callers use the string literals directly, never this module
+# attribute, so the suite does not warn on itself).
+_DEPRECATED_SUPPORT_LABELS = ("REPLICATED", "ESTABLISHED")
+
+
+def __getattr__(name: str) -> str:
+    """PEP 562 hook: resolve a retired public label with a deprecation warning.
+
+    Only the two retired support-level labels are resolved here; every other
+    missing attribute stays an ``AttributeError`` so a typo on the public
+    surface is not silently swallowed.
+    """
+    if name in _DEPRECATED_SUPPORT_LABELS:
+        import warnings as _warnings
+
+        _warnings.warn(
+            f"The public support-level label `mareforma.{name}` is deprecated; "
+            "the trust map now leads with the effective-independence number, "
+            "not a support word. This alias will be removed in v0.4. Read the "
+            "independence axis of the trust map instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return name
+    raise AttributeError(f"module 'mareforma' has no attribute {name!r}")
 
 
 def __dir__() -> list[str]:
@@ -551,6 +586,9 @@ def __dir__() -> list[str]:
 
     ``Path`` and ``TYPE_CHECKING`` are imported at module scope because
     ``open()`` uses them at runtime, but they should not surface in
-    tab-completion or be confused for public mareforma surface.
+    tab-completion or be confused for public mareforma surface. The retired
+    support labels are intentionally omitted: they resolve via
+    :func:`__getattr__` but stay out of tab-completion, matching their
+    deprecated status.
     """
     return sorted(__all__)
