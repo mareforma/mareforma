@@ -227,6 +227,65 @@ class TestVerdictPromotionGates:
             assert g.get_claim(a)["support_level"] == "REPLICATED"
             assert g.get_claim(b)["support_level"] == "REPLICATED"
 
+    def test_strict_policy_blocks_hashless_promotion_by_verdict(
+        self, tmp_path: Path,
+    ) -> None:
+        # The project declared strict promotion, so a claim without an
+        # artifact_hash cannot promote. Convergence refuses the pair; an
+        # enrolled issuer's verdict must refuse it too, or the policy binds
+        # only one of the two write paths that reach the same transition.
+        root_key = _bootstrap(tmp_path, "root.key")
+        second_key = _bootstrap(tmp_path, "second.key")
+        issuer_key = _bootstrap(tmp_path, "issuer.key")
+        with mareforma.open(
+            tmp_path, key_path=root_key, strict_promotion=True,
+        ) as g:
+            _enroll_extra(g, second_key, identity="second")
+            _enroll_extra(g, issuer_key, identity="issuer")
+            anchor = g.assert_claim("anchor", seed=True)
+            a = g.assert_claim("alpha", supports=[anchor])
+        with mareforma.open(tmp_path, key_path=second_key) as g:
+            b = g.assert_claim("beta", supports=[anchor])
+            assert g.get_claim(a)["support_level"] == "PRELIMINARY"
+            assert g.get_claim(b)["support_level"] == "PRELIMINARY"
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            g.record_replication_verdict(
+                verdict_id="rv_strict", cluster_id="cl_strict",
+                member_claim_id=a, other_claim_id=b,
+                method="semantic-cluster", confidence={},
+            )
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            assert g.get_claim(a)["support_level"] == "PRELIMINARY"
+            assert g.get_claim(b)["support_level"] == "PRELIMINARY"
+            # The verdict itself is still recorded, only the promotion is held.
+            assert g.replication_verdicts(member_claim_id=a)
+
+    def test_strict_policy_still_promotes_claims_carrying_data(
+        self, tmp_path: Path,
+    ) -> None:
+        # The strict gate is data-presence, not a blanket refusal: two claims
+        # that carry distinct hashes still promote on a verdict.
+        root_key = _bootstrap(tmp_path, "root.key")
+        second_key = _bootstrap(tmp_path, "second.key")
+        issuer_key = _bootstrap(tmp_path, "issuer.key")
+        with mareforma.open(
+            tmp_path, key_path=root_key, strict_promotion=True,
+        ) as g:
+            _enroll_extra(g, second_key, identity="second")
+            _enroll_extra(g, issuer_key, identity="issuer")
+            a = g.assert_claim("alpha", artifact_hash="a" * 64)
+        with mareforma.open(tmp_path, key_path=second_key) as g:
+            b = g.assert_claim("beta", artifact_hash="b" * 64)
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            g.record_replication_verdict(
+                verdict_id="rv_data", cluster_id="cl_data",
+                member_claim_id=a, other_claim_id=b,
+                method="semantic-cluster", confidence={},
+            )
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            assert g.get_claim(a)["support_level"] == "REPLICATED"
+            assert g.get_claim(b)["support_level"] == "REPLICATED"
+
 
 # ---------------------------------------------------------------------------
 # record_contradiction_verdict + t_invalid trigger
@@ -974,6 +1033,123 @@ class TestVerdictFieldTamperOnRestore:
     def test_tampered_method_rejected(self, tmp_path: Path) -> None:
         from mareforma import db as _db
         self._setup_and_tamper(tmp_path, "method", "cross-method")
+        with pytest.raises(_db.RestoreError) as exc:
+            mareforma.restore(tmp_path)
+        assert exc.value.kind == "claim_unverified"
+
+
+# ---------------------------------------------------------------------------
+# Issuer-identity gates enforced on verdict replay
+# ---------------------------------------------------------------------------
+
+class TestVerdictIssuerGatesOnRestore:
+    """A verdict signature proves who signed it, not that they were allowed to.
+
+    The live paths refuse an issuer who signed a role on either claim under
+    verdict, and refuse an llm-typed issuer on the contradiction side. Both
+    verdicts are replayed from claims.toml, where an operator holding one
+    enrolled key can hand-write a verdict the live path would never accept.
+    Restore applies the same two gates so the replay cannot admit it.
+    """
+
+    @staticmethod
+    def _verdict_signature(record: dict, fields, payload_type: str,
+                           key_path: Path) -> str:
+        """Sign a verdict record the way record_*_verdict does, by hand."""
+        payload = _db._verdict_canonical_payload(fields, record)
+        pae = _signing.dsse_pae(payload_type, payload)
+        signer = _signing.load_private_key(key_path)
+        return base64.b64encode(signer.sign(pae)).decode("ascii")
+
+    @staticmethod
+    def _write_verdict(tmp_path: Path, section: str, verdict_id: str,
+                       entry: dict) -> None:
+        try:
+            import tomllib as tomli  # type: ignore[import-not-found]
+        except ImportError:
+            import tomli  # type: ignore[no-redef]
+        import tomli_w
+        toml_path = tmp_path / "claims.toml"
+        data = tomli.loads(toml_path.read_text(encoding="utf-8"))
+        data.setdefault(section, {})[verdict_id] = entry
+        toml_path.write_bytes(tomli_w.dumps(data).encode("utf-8"))
+        _wipe_db(tmp_path)
+
+    def test_self_issued_replication_verdict_rejected(
+        self, tmp_path: Path,
+    ) -> None:
+        """One key asserts both claims and issues the verdict on them. The
+        live path calls that a self-verdict; the replay must too, or the
+        operator writes their own corroboration into the backup."""
+        root_key = _bootstrap(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            a = g.assert_claim("alpha", generated_by="A")
+            b = g.assert_claim("beta", generated_by="B")
+            with pytest.raises(_db.VerdictIssuerError):
+                g.record_replication_verdict(
+                    verdict_id="rv_self", cluster_id="cl",
+                    member_claim_id=a, other_claim_id=b,
+                    method="hash-match",
+                )
+        record = {
+            "verdict_id": "rv_self", "cluster_id": "cl",
+            "member_claim_id": a, "other_claim_id": b,
+            "method": "hash-match", "confidence": {},
+        }
+        self._write_verdict(tmp_path, "replication_verdicts", "rv_self", {
+            "cluster_id": "cl", "member_claim_id": a, "other_claim_id": b,
+            "method": "hash-match", "confidence_json": "{}",
+            "issuer_keyid": _signing.public_key_id(
+                _signing.load_private_key(root_key).public_key(),
+            ),
+            "signature": self._verdict_signature(
+                record, _db._REPLICATION_VERDICT_FIELDS,
+                "application/vnd.mareforma.replication-verdict+json", root_key,
+            ),
+            "created_at": "2026-01-01T00:00:00Z",
+        })
+        with pytest.raises(_db.RestoreError) as exc:
+            mareforma.restore(tmp_path)
+        assert exc.value.kind == "claim_unverified"
+
+    def test_llm_issued_contradiction_verdict_rejected(
+        self, tmp_path: Path,
+    ) -> None:
+        """A replayed contradiction fires the invalidation trigger, so the
+        llm-issuer ceiling has to hold on restore too; otherwise an enrolled
+        llm key marks down a claim through the backup."""
+        root_key = _bootstrap(tmp_path, "root.key")
+        llm_key = _bootstrap(tmp_path, "llm.key")
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            llm_pem = _signing.public_key_to_pem(
+                _signing.load_private_key(llm_key).public_key(),
+            )
+            g.enroll_validator(llm_pem, identity="bot", validator_type="llm")
+            a = g.assert_claim("alpha", generated_by="A")
+            b = g.assert_claim("beta", generated_by="B")
+        with mareforma.open(tmp_path, key_path=llm_key) as g:
+            with pytest.raises(_db.LLMValidatorPromotionError):
+                g.record_contradiction_verdict(
+                    verdict_id="cv_llm", member_claim_id=a, other_claim_id=b,
+                    confidence={"stance": "refutes"},
+                )
+        record = {
+            "verdict_id": "cv_llm", "member_claim_id": a,
+            "other_claim_id": b, "confidence": {},
+        }
+        self._write_verdict(tmp_path, "contradiction_verdicts", "cv_llm", {
+            "member_claim_id": a, "other_claim_id": b,
+            "confidence_json": "{}",
+            "issuer_keyid": _signing.public_key_id(
+                _signing.load_private_key(llm_key).public_key(),
+            ),
+            "signature": self._verdict_signature(
+                record, _db._CONTRADICTION_VERDICT_FIELDS,
+                "application/vnd.mareforma.contradiction-verdict+json",
+                llm_key,
+            ),
+            "created_at": "2026-01-01T00:00:00Z",
+        })
         with pytest.raises(_db.RestoreError) as exc:
             mareforma.restore(tmp_path)
         assert exc.value.kind == "claim_unverified"

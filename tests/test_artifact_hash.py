@@ -530,6 +530,59 @@ class TestIdempotencyStrictContract:
                 "x", idempotency_key="k1", source_name="dataset_beta",
             )
 
+    def test_same_key_different_observed_grounding_raises(
+        self, open_graph,
+    ) -> None:
+        """The grounding verdict signs into the envelope and the chain hash, so
+        a replay carrying a different one is not a retry."""
+        open_graph.assert_claim(
+            "x", idempotency_key="k1",
+            observed_grounding={
+                "grounding": "UNGROUNDED", "reason": "no data read observed",
+            },
+        )
+        with pytest.raises(_db.IdempotencyConflictError,
+                           match="observed_grounding"):
+            open_graph.assert_claim(
+                "x", idempotency_key="k1",
+                observed_grounding={
+                    "grounding": "GROUNDED", "reason": "data read observed",
+                },
+            )
+
+    def test_same_key_different_evidence_raises(self, open_graph) -> None:
+        """The evidence vector signs in too, and it drives the GRADE
+        downgrade, so a replay that changes it must not pass as a retry."""
+        open_graph.assert_claim(
+            "x", idempotency_key="k1", evidence={"risk_of_bias": -2},
+        )
+        with pytest.raises(_db.IdempotencyConflictError, match="evidence"):
+            open_graph.assert_claim(
+                "x", idempotency_key="k1", evidence={"risk_of_bias": 0},
+            )
+
+    def test_true_retry_survives_reordered_verdict_keys(
+        self, open_graph,
+    ) -> None:
+        """Both columns hold canonical JSON, so the comparison is on the parsed
+        record: a retry that spells the same verdict in a different key order
+        still gets the first claim_id back."""
+        a = open_graph.assert_claim(
+            "x", idempotency_key="k1",
+            observed_grounding={
+                "grounding": "UNGROUNDED", "reason": "no data read observed",
+            },
+            evidence={"risk_of_bias": -1, "imprecision": -1},
+        )
+        b = open_graph.assert_claim(
+            "x", idempotency_key="k1",
+            observed_grounding={
+                "reason": "no data read observed", "grounding": "UNGROUNDED",
+            },
+            evidence={"imprecision": -1, "risk_of_bias": -1},
+        )
+        assert a == b
+
     def test_true_retry_passes_silently(self, open_graph) -> None:
         """Every field identical → true retry. Returns the same claim_id,
         no INSERT."""

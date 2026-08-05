@@ -794,7 +794,8 @@ class _VerifyCommand(click.Command):
     A bad flag or missing argument is neither "verified", "tampered", nor
     "unverifiable", surfacing it as exit 2 would let a CI gate misread a typo as
     "could not verify." Bumping the usage-error exit code keeps the verdict codes
-    unambiguous.
+    unambiguous. ``reexec`` publishes the same 0/1/2/3 contract, where exit 2 is
+    COULD_NOT_REEXECUTE, and uses this class for the same reason.
     """
 
     def parse_args(self, ctx, args):
@@ -1133,7 +1134,7 @@ def _verify_claim(target: str, as_json: bool, redact_home: bool) -> int:
                 and grounding.get("grounded_sources") is not None
             ):
                 verdict_grounded = tuple(grounding.get("grounded_sources") or ())
-                finding_sources = tuple(_claim_bound_sources(claim))
+                finding_sources = _claim_bound_sources(claim)
                 result = check_grounding_binding(verdict_grounded, finding_sources)
                 if result.disjoint:
                     problems.append(f"grounding binding violation: {result.reason}")
@@ -1572,6 +1573,7 @@ def measure_cmd(receipts_path: str, as_json: bool, redact_home: bool) -> None:
         mareforma measure run-receipts.json --json --redact-home
     """
     from mareforma.observe import (
+        GroundingAxisMismatchError,
         independence_records,
         summarize_independence,
         summarize_receipts,
@@ -1584,7 +1586,11 @@ def measure_cmd(receipts_path: str, as_json: bool, redact_home: bool) -> None:
         _err(f"Could not read receipts: {exc}")
         sys.exit(1)
 
-    grounding = summarize_receipts(receipts)
+    try:
+        grounding = summarize_receipts(receipts)
+    except GroundingAxisMismatchError as exc:
+        _err(f"Could not summarize receipts: {exc}")
+        sys.exit(1)
     report = grounding.to_dict()
     closing = grounding.closing_sentence()
     indep = summarize_independence(independence_records(receipts))
@@ -1683,7 +1689,7 @@ def _redact_home(obj):
 # reexec, re-run a recorded pipeline and check the number reproduces
 # ---------------------------------------------------------------------------
 
-@cli.command("reexec")
+@cli.command("reexec", cls=_VerifyCommand)
 @click.argument("run_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--json", "as_json", is_flag=True, help="Emit the verdict as JSON.")
 @click.option("--map", "map_claim", default=None, metavar="CLAIM_ID",
@@ -1905,9 +1911,12 @@ def claim_list(status, source_name, as_json):
     click.echo(click.style(f"CLAIMS  ({len(claims)} total)", bold=True, fg="cyan"))
     click.echo("")
     for c in claims:
+        # A high-trust row whose signature no longer re-verifies still prints,
+        # so an auditor can see it, but never as if its level were sound.
+        mark = "" if c.get("verified", True) else " UNVERIFIED"
         click.echo(
             f"  [{c['status']:10}] [{c.get('support_level', 'PRELIMINARY'):12}] "
-            f"[{c.get('classification', 'INFERRED'):10}] {c['text'][:60]}"
+            f"[{c.get('classification', 'INFERRED'):10}] {c['text'][:60]}{mark}"
         )
         click.echo(f"             id: {c['claim_id']}")
         if c.get("source_name"):

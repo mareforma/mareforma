@@ -156,6 +156,42 @@ def _observed_grounding_promotes(stored: str | None) -> bool:
         return False
 
 
+def _claim_promotes(
+    *,
+    asserter_keyid: str | None,
+    transparency_logged: int | None,
+    observed_grounding: str | None,
+    artifact_hash: str | None,
+    strict_promotion: bool,
+) -> bool:
+    """Whether a claim's durable columns permit PRELIMINARY -> REPLICATED.
+
+    Both writes that reach that transition (convergence on insert, a signed
+    replication verdict) call this, so a gate cannot be added to one path and
+    forgotten on the other. So does the read side, where
+    :class:`_CorroborationIndex` re-derives the rung a stored row sits on: a
+    term added here reaches the live read and restore with it.
+
+    An unsigned / legacy row (NULL ``asserter_keyid``) is not a valid distinct
+    signer. A row whose transparency-log inclusion is still pending is not
+    settled. An execution observed as NOT grounded (UNGROUNDED or OPAQUE) never
+    counts toward promotion, while a claim with no computed verdict is
+    unaffected. Under the project's strict-promotion policy a claim without an
+    ``artifact_hash`` carries no data to distinguish from a peer, so it cannot
+    promote at all.
+
+    The concurrency-sensitive columns (``status``, ``support_level``,
+    ``t_invalid``) are not read here: they belong on the callers' WHERE
+    clauses, where the row lock decides.
+    """
+    return (
+        asserter_keyid is not None
+        and transparency_logged == 1
+        and _observed_grounding_promotes(observed_grounding)
+        and not (strict_promotion and artifact_hash is None)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
@@ -430,10 +466,11 @@ def open_db(root: Path) -> sqlite3.Connection:
         # catch as a bare traceback. Catch the whole sqlite3.Error family so the
         # documented "Raises DatabaseError on SQLite errors" contract holds and
         # the corruption case reaches the claims.toml remediation.
-        raise DatabaseError(
-            f"Could not open database at {path}: {exc}. If graph.db is "
-            "corrupt or truncated, delete .mareforma/graph.db and start "
-            "fresh; claims.toml is a human-readable record of the prior state."
+        raise _open_failure(
+            path, exc,
+            "If graph.db is corrupt or truncated, delete .mareforma/graph.db "
+            "and start fresh; claims.toml is a human-readable record of the "
+            "prior state.",
         ) from exc
 
 
@@ -489,9 +526,10 @@ def open_db_from_db_path(db_path: "str | Path") -> sqlite3.Connection:
         # sqlite3.DatabaseError at the PRAGMA read, which is NOT an
         # OperationalError. Wrap the whole sqlite3.Error family so a literal
         # path never leaks a raw sqlite3 exception.
-        raise DatabaseError(
-            f"Could not open database at {db_file}: {exc}. If the file is "
-            "corrupt or truncated, delete it and restore from claims.toml."
+        raise _open_failure(
+            db_file, exc,
+            "If the file is corrupt or truncated, delete it and restore "
+            "from claims.toml.",
         ) from exc
 
 
@@ -1210,6 +1248,8 @@ def _reconcile_idempotency_row(
     contradicts: list[str] | None,
     source_name: str | None,
     artifact_hash: str | None,
+    evidence_dict: dict,
+    observed_grounding: dict | None,
     predicate_payload: dict | None = None,
     original_signature_bundle: str | None = None,
 ) -> str:
@@ -1249,6 +1289,16 @@ def _reconcile_idempotency_row(
         mismatches.append("source_name")
     if row["artifact_hash"] != artifact_hash:
         mismatches.append("artifact_hash")
+    # The evidence vector and the observed-grounding verdict sign into the
+    # envelope and into the chain hash, so they are semantic identity, not
+    # denormalisation: a retry that carries a different verdict is a different
+    # claim, and returning the first row's id would hand the caller a grounding
+    # it did not compute. Both columns hold canonical JSON, so compare the
+    # parsed records and key ordering cannot fake a mismatch on a true retry.
+    if _json_object(row["evidence_json"], {}) != evidence_dict:
+        mismatches.append("evidence")
+    if _json_object(row["observed_grounding"]) != observed_grounding:
+        mismatches.append("observed_grounding")
     # predicate_payload is intentionally NOT compared. It is a query-
     # side denormalisation that does not enter the signed envelope or
     # the chain hash; treating it as a semantic field for idempotency
@@ -1373,6 +1423,22 @@ def add_claim(
     validate_status(status)
     artifact_hash = normalize_artifact_hash(artifact_hash)
 
+    # Callers can supply a populated evidence-vector dict via the ``evidence``
+    # parameter, the asserter's confidence in the evidence backing this claim.
+    # Default all-zeros means the asserter flagged no quality concerns;
+    # downstream readers should interpret a default-zero vector as "asserter
+    # made no claim about quality," not as "evidence is high-quality."
+    # Normalised here, ahead of the idempotency check, because the normalised
+    # vector is what that check compares and what the INSERT stores.
+    if evidence is not None and not isinstance(evidence, dict):
+        raise TypeError(
+            f"evidence must be a dict or None; got {type(evidence).__name__}"
+        )
+    evidence_dict = _normalize_evidence(evidence)
+    evidence_json = json.dumps(
+        evidence_dict, sort_keys=True, separators=(",", ":"),
+    )
+
     # Idempotency check, return existing claim_id if key already present.
     # Strict contract: same key MUST match on every semantic field. True
     # retries pass silently; anything else raises IdempotencyConflictError.
@@ -1392,6 +1458,7 @@ def add_claim(
             row = conn.execute(
                 "SELECT claim_id, text, classification, generated_by, "
                 "supports_json, contradicts_json, source_name, artifact_hash, "
+                "evidence_json, observed_grounding, "
                 "predicate_payload, original_signature_bundle "
                 "FROM claims WHERE idempotency_key = ?",
                 (idempotency_key,),
@@ -1400,6 +1467,7 @@ def add_claim(
                 existing_id = _reconcile_idempotency_row(
                     row, idempotency_key, text, classification, generated_by,
                     supports, contradicts, source_name, artifact_hash,
+                    evidence_dict, observed_grounding,
                     predicate_payload=predicate_payload,
                     original_signature_bundle=original_signature_bundle,
                 )
@@ -1485,21 +1553,6 @@ def add_claim(
     # in-toto Statement v1 wrapping claim fields + the evidence vector, so
     # any later tamper (text edit, support reattribution, evidence override)
     # breaks verification.
-    #
-    # Callers can supply a populated evidence-vector dict via the
-    # ``evidence`` parameter, the asserter's confidence in the evidence
-    # backing this claim. Default all-zeros means the asserter flagged
-    # no quality concerns; downstream readers should interpret a
-    # default-zero vector as "asserter made no claim about quality,"
-    # not as "evidence is high-quality."
-    if evidence is not None and not isinstance(evidence, dict):
-        raise TypeError(
-            f"evidence must be a dict or None; got {type(evidence).__name__}"
-        )
-    evidence_dict = _normalize_evidence(evidence)
-    evidence_json = json.dumps(
-        evidence_dict, sort_keys=True, separators=(",", ":"),
-    )
     signature_bundle: str | None = None
     envelope: dict | None = None
     statement_cid: str | None = None
@@ -1671,8 +1724,8 @@ def add_claim(
                 row = conn.execute(
                     "SELECT claim_id, text, classification, generated_by, "
                     "supports_json, contradicts_json, source_name, "
-                    "artifact_hash, predicate_payload, "
-                    "original_signature_bundle "
+                    "artifact_hash, evidence_json, observed_grounding, "
+                    "predicate_payload, original_signature_bundle "
                     "FROM claims WHERE idempotency_key = ?",
                     (idempotency_key,),
                 ).fetchone()
@@ -1684,6 +1737,7 @@ def add_claim(
                 return _reconcile_idempotency_row(
                     row, idempotency_key, text, classification, generated_by,
                     supports, contradicts, source_name, artifact_hash,
+                    evidence_dict, observed_grounding,
                     predicate_payload=predicate_payload,
                     original_signature_bundle=original_signature_bundle,
                 )
@@ -1851,27 +1905,21 @@ def _maybe_update_replicated_unlocked(
     # guard closes the TOCTOU window if a peer is invalidated after the SELECT).
     if new_status_row["t_invalid"] is not None:
         return
-    # The new claim must carry a non-NULL asserter_keyid to enter the new
-    # promotion rule. An unsigned / legacy row is not a valid distinct signer,
-    # so it cannot start a convergence and cannot ride a peer's promotion.
+    # Durable per-claim gates, the same set the verdict path applies (see
+    # _claim_promotes). The new claim cannot start a convergence, nor ride a
+    # peer's promotion, without clearing them. add_claim also checks the
+    # transparency log on its own side (it skips this call), but
+    # mark_claim_resolved and refresh_convergence reach promotion without it.
     # (Legacy REPLICATED rows keep their level via the one-time grandfather;
     # they are never re-promoted here.)
     new_asserter_keyid = new_status_row["asserter_keyid"]
-    if new_asserter_keyid is None:
-        return
-    # Observed-grounding gate: a finding that execution shows is NOT grounded
-    # (UNGROUNDED or OPAQUE) never counts toward support-level promotion. A
-    # claim without a computed verdict (NULL, every pre-observer claim) is
-    # unaffected, so this is purely additive. Grounding is necessary, not
-    # sufficient: a GROUNDED verdict still has to clear the signer axis below.
-    if not _observed_grounding_promotes(new_status_row["observed_grounding"]):
-        return
-
-    # Strict-promotion gate (opt-in): the new claim must carry data. Without an
-    # artifact_hash there is no data to distinguish from a peer, so under strict
-    # mode it cannot start or join a convergence. The default rule promotes on
-    # the signer axis alone; this adds the data-presence requirement.
-    if strict_promotion and artifact_hash is None:
+    if not _claim_promotes(
+        asserter_keyid=new_asserter_keyid,
+        transparency_logged=new_status_row["transparency_logged"],
+        observed_grounding=new_status_row["observed_grounding"],
+        artifact_hash=artifact_hash,
+        strict_promotion=strict_promotion,
+    ):
         return
 
     # Shared-anchor rule: the converged-on-same-upstream contract requires
@@ -4318,9 +4366,17 @@ def list_claims(
     source_name: str | None = None,
     generated_by: str | None = None,
 ) -> list[dict]:
-    """Return all claims, optionally filtered.
+    """Return all claims, optionally filtered, each carrying ``verified``.
 
     Uses an explicit column list (not SELECT *) to avoid coupling to schema changes.
+
+    Like :func:`get_claim`, and unlike ``query`` / ``search``, this flags a
+    high-trust row whose signature does not re-verify instead of dropping it: a
+    bulk dump feeds auditors and exports, and a row that vanished would be
+    indistinguishable from one that was never written. Consumers that publish
+    the row must act on the flag; :func:`refuse_unverified_claims` is the shared
+    gate for that. One verify cache per call, so a large graph pays one
+    verification per distinct signature.
     """
     conditions: list[str] = []
     params: list[Any] = []
@@ -4342,7 +4398,44 @@ def list_claims(
         ).fetchall()
     except sqlite3.OperationalError as exc:
         raise DatabaseError(f"Failed to list claims: {exc}") from exc
-    return [dict(row) for row in rows]
+
+    verify_cache: dict = {}
+    claims = []
+    for row in rows:
+        d = dict(row)
+        d["verified"] = _row_verified_on_read(conn, d, verify_cache)
+        claims.append(d)
+    return claims
+
+
+def refuse_unverified_claims(claims: "Iterable[dict]") -> None:
+    """Raise :class:`UnverifiedClaimError` if any claim failed verify-on-read.
+
+    The gate every export shares. A claim dict comes from :func:`list_claims` or
+    :func:`get_claim`, both of which flag rather than drop, so a publishing
+    surface has to refuse the document itself or the forged support level leaves
+    the machine with nothing marking it.
+
+    A row carrying no ``verified`` key is refused too. It never went through
+    verify-on-read, so testing the flag alone would read it as clean: a caller
+    handing over rows from a plain select would pass this gate having checked
+    nothing.
+    """
+    claims = list(claims)
+    unchecked = sorted(c["claim_id"] for c in claims if "verified" not in c)
+    if unchecked:
+        raise UnverifiedClaimError(
+            f"Refusing to export {len(unchecked)} claim(s) that carry no "
+            f"verify-on-read result: {', '.join(unchecked)}. Fetch rows with "
+            "list_claims or get_claim, which flag every row they return."
+        )
+    forged = sorted(c["claim_id"] for c in claims if c["verified"] is False)
+    if forged:
+        raise UnverifiedClaimError(
+            f"Refusing to export {len(forged)} claim(s) whose signature did not "
+            f"re-verify: {', '.join(forged)}. Run `mareforma verify <claim_id>` "
+            "for the detail, then retract or repair the row."
+        )
 
 
 def delete_claims_by_generated_by(
@@ -4585,31 +4678,38 @@ def record_replication_verdict(
         # a later replication verdict must not silently re-promote).
         #
         # The verdict path enforces the SAME computed gates the convergence
-        # path applies to this identical PRELIMINARY → REPLICATED transition:
-        # a claim execution observed as NOT grounded (UNGROUNDED / OPAQUE), an
-        # unsigned / legacy row (NULL asserter_keyid, not a valid distinct
-        # signer), or one whose transparency log is not settled must not ride a
-        # verdict into the trust ladder. Without them an enrolled issuer could
-        # launder an UNGROUNDED or unsigned claim to REPLICATED, and from there
-        # validate() lifts it to ESTABLISHED. These gates are read inside the
-        # same BEGIN IMMEDIATE transaction and applied through the shared
-        # `_observed_grounding_promotes` helper (the convergence path gates its
-        # new claim the same way), so a mixed batch still promotes the
-        # qualifying members and the verdict is recorded either way. The
-        # concurrency-sensitive gates (t_invalid, status) stay on the UPDATE's
-        # WHERE to close the TOCTOU window if a member is invalidated after the
-        # read.
+        # path applies to this identical PRELIMINARY → REPLICATED transition,
+        # through the shared `_claim_promotes` helper: a claim execution
+        # observed as NOT grounded (UNGROUNDED / OPAQUE), an unsigned / legacy
+        # row (NULL asserter_keyid, not a valid distinct signer), one whose
+        # transparency log is not settled, or one without data under the
+        # project's strict-promotion policy must not ride a verdict into the
+        # trust ladder. Without them an enrolled issuer could launder such a
+        # claim to REPLICATED, and from there validate() lifts it to
+        # ESTABLISHED. The policy is read here rather than off the handle for
+        # the reason the convergence path reads it: it is root-signed and
+        # one-way, so the rule is the project's, not the issuer's. These gates
+        # are read inside the same BEGIN IMMEDIATE transaction, so a mixed
+        # batch still promotes the qualifying members and the verdict is
+        # recorded either way. The concurrency-sensitive gates (t_invalid,
+        # status) stay on the UPDATE's WHERE to close the TOCTOU window if a
+        # member is invalidated after the read.
+        strict_promotion = strict_promotion_required(conn)
         gate_rows = conn.execute(
             f"SELECT claim_id, observed_grounding, asserter_keyid, "
-            f"transparency_logged FROM claims "
+            f"transparency_logged, artifact_hash FROM claims "
             f"WHERE claim_id IN ({placeholders})",
             members,
         ).fetchall()
         promotable = [
             r["claim_id"] for r in gate_rows
-            if r["asserter_keyid"] is not None
-            and r["transparency_logged"] == 1
-            and _observed_grounding_promotes(r["observed_grounding"])
+            if _claim_promotes(
+                asserter_keyid=r["asserter_keyid"],
+                transparency_logged=r["transparency_logged"],
+                observed_grounding=r["observed_grounding"],
+                artifact_hash=r["artifact_hash"],
+                strict_promotion=strict_promotion,
+            )
         ]
         if promotable:
             promote_placeholders = ",".join("?" * len(promotable))

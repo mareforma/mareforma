@@ -683,6 +683,12 @@ CREATE INDEX IF NOT EXISTS idx_prop_frame_dir ON propositions(frame_id, directio
 -- registered (see the append-only trigger below). assert_finding registers it
 -- inline today; a later release exposes a register-plan-then-submit split,
 -- which becomes additive because the plan already stands alone here.
+-- The alpha bound the gates need is (0, 0.5) and Prediction enforces it on
+-- every write. The CHECK here stays at the wider (0, 1) on purpose: this file
+-- is all CREATE TABLE IF NOT EXISTS, so an existing graph keeps the bound it
+-- was created with, and restore replays that graph's backup into a fresh
+-- schema. A tighter CHECK here would reject a plan a live graph holds and cost
+-- the operator the whole recovery.
 CREATE TABLE IF NOT EXISTS predictions (
     plan_id               TEXT PRIMARY KEY,
     content_id            TEXT NOT NULL REFERENCES propositions(content_id),

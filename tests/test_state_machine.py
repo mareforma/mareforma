@@ -26,6 +26,8 @@ from mareforma import db as _db
 from mareforma.db import (
     IllegalStateTransitionError,
     SignedClaimImmutableError,
+    _MANAGED_TRIGGERS,
+    _SIGNED_FIELDS_TRIGGER_SQL,
     add_claim,
     open_db,
     update_claim,
@@ -483,6 +485,228 @@ class TestSignedFieldsAppendOnly:
             assert g.get_claim(cid)["status"] == "retracted"
         finally:
             g.close()
+
+    def _trigger_sql(self, conn: sqlite3.Connection) -> "str | None":
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' "
+            "AND name = 'claims_signed_fields_no_laundering'",
+        ).fetchone()
+        return None if row is None else row[0]
+
+    def test_open_on_a_current_graph_leaves_the_trigger_untouched(
+        self, tmp_path: Path,
+    ) -> None:
+        """Dropping and recreating the guard on every open would let any
+        other connection write a signed row while it is absent. On a graph
+        whose trigger already matches, open() must not write at all."""
+        cid, g = self._signed_claim(tmp_path)
+        g.close()
+        observer = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
+        try:
+            before_sql = self._trigger_sql(observer)
+            before_version = observer.execute("PRAGMA data_version").fetchone()[0]
+            open_db(tmp_path).close()
+            assert self._trigger_sql(observer) == before_sql
+            assert (
+                observer.execute("PRAGMA data_version").fetchone()[0]
+                == before_version
+            )
+            with pytest.raises(sqlite3.IntegrityError, match="signed_field_locked"):
+                observer.execute(
+                    "UPDATE claims SET text = ? WHERE claim_id = ?",
+                    ("laundered", cid),
+                )
+        finally:
+            observer.close()
+
+    def test_open_rewrites_a_trigger_whose_definition_drifted(
+        self, tmp_path: Path,
+    ) -> None:
+        """A graph written by an older release carries a narrower watch
+        list. The rewrite path still has to reach it."""
+        cid, g = self._signed_claim(tmp_path)
+        g._conn.executescript(
+            """
+            DROP TRIGGER IF EXISTS claims_signed_fields_no_laundering;
+            CREATE TRIGGER claims_signed_fields_no_laundering
+            BEFORE UPDATE OF text ON claims
+            WHEN OLD.signature_bundle IS NOT NULL AND OLD.text IS NOT NEW.text
+            BEGIN
+                SELECT RAISE(ABORT, 'mareforma:append_only:signed_field_locked');
+            END;
+            """
+        )
+        g.close()
+        with open_db(tmp_path) as conn:
+            assert self._trigger_sql(conn) == _SIGNED_FIELDS_TRIGGER_SQL
+            with pytest.raises(sqlite3.IntegrityError, match="signed_field_locked"):
+                conn.execute(
+                    "UPDATE claims SET asserter_keyid = ? WHERE claim_id = ?",
+                    ("0123456789abcdef", cid),
+                )
+
+
+# ---------------------------------------------------------------------------
+# Promotion of a signed row goes through the promotion paths
+# ---------------------------------------------------------------------------
+
+
+class TestSignedPromotionBacked:
+    """claims_signed_promotion_backed refuses a raw promotion of a signed row.
+
+    ``support_level`` is the trust ladder and it is not a signed field, so
+    without this trigger one ``UPDATE claims SET support_level='REPLICATED'``
+    lifts a lone claim a rung. The transition is legal to the state machine, so
+    the guard is the promotion marker: only the library's promotion paths open
+    it, and a statement from anywhere else is refused.
+    """
+
+    def _signed_claim(self, tmp_path: Path) -> tuple[str, "object"]:
+        from mareforma import signing as _sig
+        key_path = tmp_path / "key"
+        _sig.bootstrap_key(key_path)
+        g = mareforma.open(tmp_path, key_path=key_path)
+        return g.assert_claim("signed anchor"), g
+
+    def test_direct_promotion_of_signed_row_refused(self, tmp_path: Path) -> None:
+        cid, g = self._signed_claim(tmp_path)
+        try:
+            with pytest.raises(sqlite3.IntegrityError, match="promotion_unmarked"):
+                g._conn.execute(
+                    "UPDATE claims SET support_level = 'REPLICATED' "
+                    "WHERE claim_id = ?",
+                    (cid,),
+                )
+            assert g.get_claim(cid)["support_level"] == "PRELIMINARY"
+        finally:
+            g.close()
+
+    def test_direct_promotion_from_a_foreign_connection_refused(
+        self, tmp_path: Path,
+    ) -> None:
+        """A co-resident process opens graph.db with plain sqlite3. It never
+        opens the marker, so the promotion is refused by the trigger's own
+        message rather than by a name the connection cannot resolve."""
+        cid, g = self._signed_claim(tmp_path)
+        g.close()
+        observer = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
+        try:
+            with pytest.raises(sqlite3.IntegrityError, match="promotion_unmarked"):
+                observer.execute(
+                    "UPDATE claims SET support_level = 'REPLICATED' "
+                    "WHERE claim_id = ?",
+                    (cid,),
+                )
+        finally:
+            observer.close()
+        with open_db(tmp_path) as conn:
+            row = conn.execute(
+                "SELECT support_level FROM claims WHERE claim_id = ?", (cid,),
+            ).fetchone()
+            assert row["support_level"] == "PRELIMINARY"
+
+    def test_managed_triggers_compile_on_an_unregistered_connection(
+        self, tmp_path: Path,
+    ) -> None:
+        """Trigger text is durable schema, so every connection that opens the
+        file has to be able to compile it, including an older release of
+        mareforma and any co-resident reader. A name only this release puts on
+        its connections (a per-connection SQL function) breaks that: SQLite
+        resolves it when it compiles the statement, so the whole watched column
+        becomes unwritable rather than the guarded transition being refused.
+
+        ``WHERE 0`` matches no row, so nothing here depends on the trigger
+        firing; the statement still has to compile with the trigger's
+        subprogram attached.
+        """
+        self._signed_claim(tmp_path)[1].close()
+        observer = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
+        try:
+            for _, sql in _MANAGED_TRIGGERS:
+                for column in _watched_columns(sql):
+                    observer.execute(
+                        f"UPDATE claims SET {column} = {column} WHERE 0"
+                    )
+        finally:
+            observer.close()
+
+    def test_non_promoting_level_write_from_a_foreign_connection_passes(
+        self, tmp_path: Path,
+    ) -> None:
+        """The guard covers two transitions, not the column. A write that
+        leaves the level where it is has no rung to steal and must go
+        through, whoever holds the connection."""
+        cid, g = self._signed_claim(tmp_path)
+        g.close()
+        observer = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
+        try:
+            observer.execute(
+                "UPDATE claims SET support_level = 'PRELIMINARY' "
+                "WHERE claim_id = ?",
+                (cid,),
+            )
+            observer.commit()
+        finally:
+            observer.close()
+
+    def test_an_open_window_does_not_reach_another_connection(
+        self, tmp_path: Path,
+    ) -> None:
+        """The marker is what stands between a stray UPDATE and the trust
+        ladder, so it has to be state one connection cannot read off another.
+        A marker kept in the graph itself would hand every co-resident writer
+        the window this one opened."""
+        from mareforma.db import _promotion_window
+        cid, g = self._signed_claim(tmp_path)
+        observer = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
+        try:
+            with _promotion_window(g._conn):
+                with pytest.raises(
+                    sqlite3.IntegrityError, match="promotion_unmarked",
+                ):
+                    observer.execute(
+                        "UPDATE claims SET support_level = 'REPLICATED' "
+                        "WHERE claim_id = ?",
+                        (cid,),
+                    )
+        finally:
+            observer.close()
+            g.close()
+
+    def test_the_window_closes_when_the_block_raises(
+        self, tmp_path: Path,
+    ) -> None:
+        """A window left open by a failed promotion would leave the connection
+        promoting freely for the rest of its life."""
+        from mareforma.db import _promotion_window
+        cid, g = self._signed_claim(tmp_path)
+        try:
+            with pytest.raises(RuntimeError):
+                with _promotion_window(g._conn):
+                    raise RuntimeError("promotion path blew up")
+            with pytest.raises(sqlite3.IntegrityError, match="promotion_unmarked"):
+                g._conn.execute(
+                    "UPDATE claims SET support_level = 'REPLICATED' "
+                    "WHERE claim_id = ?",
+                    (cid,),
+                )
+        finally:
+            g.close()
+
+    def test_unsigned_row_promotion_passes(self, tmp_path: Path) -> None:
+        """The trigger gates on OLD.signature_bundle IS NOT NULL, like the
+        laundering guard: an unsigned row carries no commitment to defend."""
+        conn = open_db(tmp_path)
+        try:
+            cid = add_claim(conn, tmp_path, "draft", generated_by="agent")
+            conn.execute(
+                "UPDATE claims SET support_level = 'REPLICATED' "
+                "WHERE claim_id = ?",
+                (cid,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
 
 # ---------------------------------------------------------------------------

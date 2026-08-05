@@ -17,7 +17,11 @@ import tomli_w
 
 import mareforma
 from mareforma import signing as _signing
-from mareforma.db import RestoreError
+from mareforma.db import (
+    LLMValidatorPromotionError,
+    RestoreError,
+    SelfValidationError,
+)
 from tests._helpers import _bootstrap_key, _pem_of
 
 try:

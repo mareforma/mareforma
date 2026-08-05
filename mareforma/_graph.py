@@ -332,7 +332,8 @@ class EpistemicGraph:
             Stable key for retry-safe writes. Same key returns the same
             ``claim_id`` only when EVERY semantic field also matches
             (text, classification, generated_by, supports, contradicts,
-            source_name, artifact_hash). Any mismatch raises
+            source_name, artifact_hash, evidence, observed_grounding).
+            Any mismatch raises
             :class:`mareforma.db.IdempotencyConflictError`. Silently
             merging two different claims would discard the second
             author's content and break REPLICATED detection. For
@@ -1166,7 +1167,11 @@ class EpistemicGraph:
         the proposition and a synthesised plan (``preregistered=0``, so a real
         :meth:`register_plan` pre-registration stays distinguishable), then
         delegates to :meth:`submit_finding`. The return shape, idempotency,
-        atomicity, and derived Status are all preserved. A one-shot finding does
+        atomicity, and derived Status are all preserved. The synthesised plan is
+        a no-op when a plan for the same proposition and prediction is already on
+        record, so a one-shot landing on a pre-registered plan submits under that
+        plan and can raise :class:`~mareforma.trust.PostHocPlanError` like any
+        other submission. A one-shot finding does
         not separately attest its plan, so its signed ``supports[]`` carries no
         plan edge; use the explicit :meth:`register_plan` / :meth:`submit_finding`
         split when you want the signed plan -> finding edge.

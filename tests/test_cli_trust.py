@@ -504,10 +504,10 @@ class TestVerifyGroundingBinding:
         ca = "sha256:" + "a" * 64
         claim = {"predicate_payload": json.dumps(
             {"data_sources": [_REAL], "data_ids": [ca, "string-token"]})}
-        assert _claim_bound_sources(claim) == [_REAL, ca]
-        assert _claim_bound_sources({"data_source": "/x"}) == []  # dead field ignored
-        assert _claim_bound_sources({}) == []
-        assert _claim_bound_sources({"predicate_payload": "not json"}) == []
+        assert _claim_bound_sources(claim) == (_REAL, ca)
+        assert _claim_bound_sources({"data_source": "/x"}) == ()  # dead field ignored
+        assert _claim_bound_sources({}) == ()
+        assert _claim_bound_sources({"predicate_payload": "not json"}) == ()
 
     def test_matched_binding_verifies_exit_0(self, tmp_path: Path) -> None:
         # A GROUNDED verdict whose grounded set matches the finding's citation

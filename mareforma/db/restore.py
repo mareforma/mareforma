@@ -105,14 +105,13 @@ def _verify_grounding_binding_on_read(claim_id, record, predicate) -> None:
     if grounded_sources is None:  # pre-v0.3.9 axis: binding was not checkable
         return
 
-    from mareforma.observe._binding import BindingState, check_grounding_binding
-    from mareforma.trust._store import is_content_addressed
-
-    data_sources = predicate.get("data_sources") or []
-    data_ids = predicate.get("data_ids") or []
-    finding_sources = tuple(data_sources) + tuple(
-        d for d in data_ids if isinstance(d, str) and is_content_addressed(d)
+    from mareforma.observe._binding import (
+        BindingState,
+        check_grounding_binding,
+        predicate_citation_sources,
     )
+
+    finding_sources = predicate_citation_sources(predicate)
     result = check_grounding_binding(tuple(grounded_sources), finding_sources)
     if result.state is BindingState.DISJOINT:
         raise RestoreError(
@@ -1103,8 +1102,10 @@ def _restore_trust_tables(conn: sqlite3.Connection, data: dict) -> None:
             except sqlite3.IntegrityError as exc:
                 raise RestoreError(
                     f"Trust-layer row {pk_value!r} in [{section}] could not be "
-                    f"restored: {exc}",
-                    kind="claim_unverified",
+                    f"restored: {exc}. The row breaks a schema constraint, not "
+                    f"a signature: correct or remove it in claims.toml and run "
+                    f"restore again.",
+                    kind="trust_row_rejected",
                 ) from exc
 
 
@@ -1282,6 +1283,10 @@ def _verify_and_insert_replication_verdict(
     payloadType ``application/vnd.mareforma.replication-verdict+json``.
     The issuer_keyid is looked up in the restored validators_section;
     forged keyids without a matching enrollment fail verification.
+
+    A verified signature says who signed the verdict, not that they were
+    entitled to issue it, so the self-verdict gate the live path runs is
+    applied here too, in the same order: enrollment, signature, identity.
     """
     from mareforma import signing as _signing
 
@@ -1349,6 +1354,14 @@ def _verify_and_insert_replication_verdict(
             kind="claim_unverified",
         ) from exc
 
+    referenced = ((member_claim_id, "member_claim_id"),)
+    if other_claim_id is not None:
+        referenced += ((other_claim_id, "other_claim_id"),)
+    _gate_replayed_verdict_issuer(
+        conn, issuer_keyid, referenced,
+        verdict_kind="replication", ctx=ctx,
+    )
+
     try:
         conn.execute(
             """
@@ -1378,9 +1391,10 @@ def _verify_and_insert_contradiction_verdict(
 ) -> None:
     """Cryptographically verify + INSERT a contradiction verdict from TOML.
 
-    Same shape as the replication verdict path. The
-    ``contradiction_invalidates_older`` trigger fires on this INSERT
-    and re-derives ``claims.t_invalid`` automatically.
+    Same shape as the replication verdict path, plus the llm-issuer ceiling
+    the live path adds here. The ``contradiction_invalidates_older`` trigger
+    fires on this INSERT and re-derives ``claims.t_invalid`` automatically,
+    so an ungated replay would demote a claim through the backup.
     """
     from mareforma import signing as _signing
 
@@ -1443,6 +1457,13 @@ def _verify_and_insert_contradiction_verdict(
             "signature forged.",
             kind="claim_unverified",
         ) from exc
+
+    _gate_replayed_verdict_issuer(
+        conn, issuer_keyid,
+        ((member_claim_id, "member_claim_id"),
+         (other_claim_id, "other_claim_id")),
+        verdict_kind="contradiction", ctx=ctx, refuse_llm_issuer=True,
+    )
 
     try:
         conn.execute(
@@ -1977,6 +1998,22 @@ def _verify_claim_signatures_on_restore(
                 "validator_keyid than the signing keyid; TOML tampered.",
                 kind="claim_unverified",
             )
+        # The promotion gates the live path runs once the signer is known
+        # authentic. Both read signed material only, the claim's own
+        # signature bundle and the validator's signed enrollment, so a row
+        # that fails them here could not have been promoted there. Seed
+        # envelopes are exempt: a born-ESTABLISHED claim is attested by its
+        # own asserter by design and never climbs the ladder.
+        if declared_type == _signing.PAYLOAD_TYPE_VALIDATION:
+            try:
+                _refuse_llm_validator(conn, val_keyid)
+                _refuse_self_validation(claim_id, sig_bundle_json, val_keyid)
+            except (LLMValidatorPromotionError, SelfValidationError) as exc:
+                raise RestoreError(
+                    f"Claim {claim_id} validation envelope fails a promotion "
+                    f"gate the live path enforces: {exc}",
+                    kind="claim_unverified",
+                ) from exc
         # Validation envelopes bind validated_at; seed envelopes bind
         # seeded_at. Both must match the row's validated_at column , 
         # the seed path writes seeded_at INTO validated_at at INSERT

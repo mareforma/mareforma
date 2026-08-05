@@ -64,11 +64,13 @@ class IdempotencyConflictError(MareformaError):
 class IllegalStateTransitionError(MareformaError):
     """Raised when an SQLite state-machine trigger refuses a transition.
 
-    The trigger raises ``mareforma:state:<from>-><to>`` strings via
-    ``RAISE(ABORT, ...)``. Python catches the resulting
-    ``sqlite3.IntegrityError`` and re-raises this exception with the
-    parsed transition so callers can pattern-match on it instead of
-    parsing opaque ``CHECK CONSTRAINT FAILED`` messages.
+    The trigger raises ``mareforma:state:<suffix>`` strings via
+    ``RAISE(ABORT, ...)``, where the suffix is a static literal such as
+    ``illegal_transition:from_preliminary``: ``RAISE()`` cannot
+    concatenate a column value below SQLite 3.46. Python catches the
+    resulting ``sqlite3.IntegrityError`` and re-raises this exception
+    with the parsed suffix so callers can pattern-match on it instead
+    of parsing opaque ``CHECK CONSTRAINT FAILED`` messages.
     """
 
 
@@ -175,6 +177,7 @@ class RestoreError(MareformaError):
       - ``'toml_malformed'``           : TOML parse error
       - ``'enrollment_unverified'``    : enrollment envelope fails verify
       - ``'claim_unverified'``         : claim signature fails verify
+      - ``'trust_row_rejected'``       : replayed trust-layer row breaks the schema
       - ``'mode_inconsistent'``        : signed-mode graph with unsigned claim
       - ``'orphan_signer'``            : claim signed by an unenrolled keyid
       - ``'policy_absent'``            : enforce_rekor_policy set but no signed policy

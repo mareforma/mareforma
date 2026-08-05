@@ -56,6 +56,87 @@ def test_open_db_from_db_path_wraps_a_corrupt_file(tmp_path: Path) -> None:
     assert not isinstance(exc_info.value, sqlite3.Error)
 
 
+def _seeded_graph(root: Path) -> str:
+    """Create a graph holding one claim and checkpoint the WAL into it."""
+    import sqlite3
+
+    conn = open_db(root)
+    cid = add_claim(conn, root, "read me back")
+    conn.close()
+    checkpoint = sqlite3.connect(str(root / ".mareforma" / "graph.db"))
+    checkpoint.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    checkpoint.close()
+    return cid
+
+
+def test_open_db_succeeds_while_another_writer_holds_the_lock(
+    tmp_path: Path,
+) -> None:
+    """Two agents share one project graph. If open() needs the write lock,
+    every command refuses to start whenever something else is mid-write,
+    including the read-only ones."""
+    import sqlite3
+
+    _seeded_graph(tmp_path)
+    writer = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
+    writer.execute("BEGIN IMMEDIATE")
+    writer.execute("UPDATE claims SET comparison_summary = 'held'")
+    try:
+        conn = open_db(tmp_path)
+        conn.close()
+    finally:
+        writer.rollback()
+        writer.close()
+
+
+def test_open_db_on_a_read_only_graph_still_reads(tmp_path: Path) -> None:
+    """Read-only media, a container image, a reviewer's copy with tight
+    permissions: none of them may lock the operator out of their own graph.
+    An open that changes nothing must not need write access."""
+    import os
+
+    cid = _seeded_graph(tmp_path)
+    db_file = tmp_path / ".mareforma" / "graph.db"
+    os.chmod(db_file, 0o444)
+    try:
+        conn = open_db(tmp_path)
+        try:
+            assert get_claim(conn, cid)["text"] == "read me back"
+        finally:
+            conn.close()
+    finally:
+        os.chmod(db_file, 0o644)
+
+
+def test_read_only_open_failure_does_not_advise_deleting_the_graph(
+    tmp_path: Path,
+) -> None:
+    """A write that a read-only file genuinely refuses is a permission
+    problem, not corruption. Answering it with the corruption remedy tells
+    someone whose graph is intact to delete their only copy."""
+    import os
+    import sqlite3
+
+    _seeded_graph(tmp_path)
+    db_file = tmp_path / ".mareforma" / "graph.db"
+    # Drift the trigger so the next open has real work to do.
+    drift = sqlite3.connect(str(db_file))
+    drift.executescript(
+        "DROP TRIGGER IF EXISTS claims_signed_fields_no_laundering;"
+    )
+    drift.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    drift.close()
+    os.chmod(db_file, 0o444)
+    try:
+        with pytest.raises(DatabaseError) as exc_info:
+            open_db(tmp_path)
+    finally:
+        os.chmod(db_file, 0o644)
+    message = str(exc_info.value)
+    assert "permission" in message.lower()
+    assert "delete" not in message.lower()
+
+
 def test_cross_thread_writes_do_not_merge_and_lose(tmp_path: Path) -> None:
     """A write on one thread must not silently join a transaction open on
     another thread and be erased by that thread's rollback.

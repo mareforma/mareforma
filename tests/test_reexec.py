@@ -361,6 +361,15 @@ class TestCli:
         assert res.exit_code == 3
         assert "Malformed" in res.output
 
+    @pytest.mark.parametrize("args", [["--nosuchflag"], []])
+    def test_click_usage_errors_exit_three(self, args: list[str]) -> None:
+        # A typo'd flag and a missing argument are usage errors, not verdicts.
+        # Click exits 2 by default, the code this command's table sells as
+        # COULD_NOT_REEXECUTE, so a broken command line would read to a CI gate
+        # as an honest inconclusive re-run.
+        res = CliRunner().invoke(cli, ["reexec", *args])
+        assert res.exit_code == 3, res.output
+
     def test_tolerance_shown_in_human_output(self, tmp_path: Path) -> None:
         # The tolerance that enabled a match is visible, so a REPRODUCED reached
         # via a generous tolerance is never displayed as an exact match.

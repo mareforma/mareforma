@@ -231,6 +231,38 @@ class TestEstablishedBoundary:
             with pytest.raises(SelfValidationError):
                 g.validate(rep)
 
+    def test_validator_refused_after_its_own_peer_was_promoted(
+        self, tmp_path: Path,
+    ) -> None:
+        """Membership in the converging set is an edge, not a level.
+
+        A project promotes its lines one after another: an independent key
+        witnesses the first, and the asserter of that first line then reaches
+        for the second. It is still a participant in the same convergence, so
+        its own promotion to ESTABLISHED must not clear the refusal.
+        """
+        from mareforma.db import SelfValidationError
+
+        sa, sb = _two_signers(tmp_path)
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        val_key = _bootstrap_key(tmp_path, "val.key")
+        pem_b = _signing.public_key_to_pem(sb.public_key())
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            g.enroll_validator(_pem_of(val_key), identity="v")
+            g.enroll_validator(pem_b, identity="b")
+            up = g.assert_claim("anchor", generated_by="seed", seed=True)
+            rep = g.assert_claim("A", supports=[up], generated_by="lab_a", signer=sa)
+            peer = g.assert_claim(
+                "B", supports=[up], generated_by="lab_b", signer=sb)
+        with mareforma.open(tmp_path, key_path=val_key) as g:
+            g.validate(peer)
+            assert g.get_claim(peer)["support_level"] == "ESTABLISHED"
+
+        sb_key = tmp_path / "_signer_b.key"
+        with mareforma.open(tmp_path, key_path=sb_key) as g:
+            with pytest.raises(SelfValidationError):
+                g.validate(rep)
+
     def test_independent_validator_promotes(self, tmp_path: Path) -> None:
         sa, sb = _two_signers(tmp_path)
         root_key = _bootstrap_key(tmp_path, "root.key")
@@ -317,29 +349,6 @@ class TestEstablishedBoundary:
 # ===========================================================================
 # Trust-layer counting agrees with promotion on the asserter_keyid axis
 # ===========================================================================
-
-def _prop():
-    from mareforma.trust import Direction, Proposition
-    return Proposition(
-        subject="BRCA1", relation="affects", object="tumour growth",
-        direction=Direction.DECREASES,
-        scope={"population": "TNBC", "condition": "in vitro"},
-    )
-
-
-def _pred():
-    from mareforma.trust import DirectionOfInterest, Prediction, TestType
-    return Prediction(
-        TestType.SUPERIORITY,
-        direction_of_interest=DirectionOfInterest.DECREASE,
-        alpha=0.05,
-    )
-
-
-def _est():
-    from mareforma.trust import EffectEstimate, EffectType
-    return EffectEstimate(-0.8, EffectType.SMD, p_value=0.001)
-
 
 class TestTrustCounting:
     def test_same_signer_findings_count_as_one(self, tmp_path: Path) -> None:
