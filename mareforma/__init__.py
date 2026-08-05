@@ -521,7 +521,23 @@ from mareforma.signing import (
     InvalidEnvelopeError,
     RekorInclusionError,
 )
-from mareforma.validators import ValidatorNotEnrolledError
+from mareforma.validators import (
+    InvalidIdentityError,
+    InvalidValidatorTypeError,
+    ValidatorAlreadyEnrolledError,
+    ValidatorNotEnrolledError,
+)
+from mareforma.export_bundle import BundleVerificationError
+from mareforma.observe import ScopeNotClosedError
+from mareforma.trust import (
+    FindingPlanForkError,
+    InconsistentEstimateError,
+    NoRegisteredPlanError,
+    NonFalsifiablePropositionError,
+    PlanNotRetirableError,
+    PostHocPlanError,
+    TrustError,
+)
 from mareforma.reexec import (
     FaithfulnessVerdict,
     MalformedRunError,
@@ -610,8 +626,12 @@ __all__ = [
     "COMPOUNDING_ATTESTATION_V1",
     "SEMANTIC_GROUNDING_V1",
     "DOI_RESOLUTION_V1",
-    # User-catchable exceptions (alphabetical under MareformaError).
+    # User-catchable exceptions, alphabetical after the base. The db and trust
+    # errors are the MareformaError tree; signing, validator, observer, verifier
+    # and bundle errors sit outside it, so a broad catch on MareformaError does
+    # not cover them.
     "MareformaError",
+    "BundleVerificationError",
     "ChainIntegrityError",
     "ClaimNotFoundError",
     "CycleDetectedError",
@@ -619,19 +639,31 @@ __all__ = [
     "DatabaseError",
     "ScanCeilingReached",
     "EvidenceCitationError",
+    "FindingPlanForkError",
     "IdempotencyConflictError",
     "IllegalStateTransitionError",
+    "InconsistentEstimateError",
     "InvalidEnvelopeError",
+    "InvalidIdentityError",
     "InvalidValidationEnvelopeError",
+    "InvalidValidatorTypeError",
     "KeyNotFoundError",
     "KeyPermissionError",
     "RekorInclusionError",
     "LLMValidatorPromotionError",
+    "NonFalsifiablePropositionError",
+    "NoRegisteredPlanError",
+    "PlanNotRetirableError",
+    "PostHocPlanError",
     "ProjectPolicyError",
     "RestoreError",
+    "ScopeNotClosedError",
     "SelfValidationError",
     "SignedClaimImmutableError",
     "SigningError",
+    "TrustError",
+    "UnverifiedClaimError",
+    "ValidatorAlreadyEnrolledError",
     "ValidatorNotEnrolledError",
     "VerdictIssuerError",
     "VerifierError",

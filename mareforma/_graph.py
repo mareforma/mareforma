@@ -375,6 +375,20 @@ class EpistemicGraph:
             predicate and denormalized into the ``ev_*`` columns for
             queryable filters. Defaults to all-zeros (the asserter
             flagged no quality concerns).
+        grounding_sensor:
+            Optional sensor scoring the claim text against its cited
+            supports. Its result is a declaration: ``grounding_score``
+            and ``grounding_rationale`` are folded into the signed
+            evidence vector, the same posture as the rest of it. The
+            sensor never writes the observed axis, so a self-declared
+            score can never be read as a computed verdict.
+        observed_grounding:
+            Observed-grounding record computed by ``observe()`` or by
+            ``submit_finding``. Bound into the signed statement and the
+            chain hash and stored in the queryable
+            ``observed_grounding`` column. ``UNGROUNDED`` or ``OPAQUE``
+            blocks promotion; absent is read as no verdict recorded and
+            blocks nothing.
 
         Returns
         -------

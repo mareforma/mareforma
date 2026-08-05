@@ -12,17 +12,24 @@ fall behind a future change, not just today's drift.
 
 from __future__ import annotations
 
+import ast
+import builtins
+import dataclasses
+import importlib
 import inspect
+import itertools
 import json
 import pathlib
 import re
 import shutil
+import warnings
 
 import click
 import pytest
 
 import mareforma
 import mareforma.cli as cli_module
+import mareforma.trust
 from mareforma.cli import (
     _VERIFY_FAIL,
     _VERIFY_OK,
@@ -30,6 +37,7 @@ from mareforma.cli import (
     _VERIFY_USAGE,
     cli,
 )
+from mareforma.observe.oracle import perturbation_oracle
 from mareforma.trust import STATUS_POLICY
 from tests._helpers import _bootstrap_key, _est, _pred, _prop, _requires_repo_checkout
 
@@ -39,6 +47,15 @@ DOCS = ROOT / "docs"
 # This module reads docs/ and examples/, trees the sdist does not ship, so it
 # skips as a unit when the shipped suite runs from an unpacked archive.
 pytestmark = _requires_repo_checkout
+
+
+def _prose(text: str) -> str:
+    """Return *text* without fenced blocks.
+
+    Comment lines inside a fence start with ``#``, so ``_section`` reads them
+    as headings and cuts a section short of the prose that follows.
+    """
+    return re.sub(r"```.*?```", "", text, flags=re.DOTALL)
 
 
 def _python_blocks(text: str) -> list[str]:
@@ -539,6 +556,573 @@ def _section(text: str, heading: str) -> str:
     rest = text[start + len(heading):]
     ahead = re.search(rf"^#{{1,{len(level)}}} ", rest, re.MULTILINE)
     return rest[: ahead.start()] if ahead else rest
+
+
+def _documented_signature(text: str, name: str) -> tuple[list[str], dict[str, str]]:
+    """Return the positional names and the keyword defaults a heading spells.
+
+    Headings on the API reference carry the real call signature, so a reader
+    can take one as the whole parameter set. The keyword map holds only the
+    keywords the heading writes a default for; a heading that lists a bare
+    name maps it to ``None``.
+    """
+    match = re.search(rf"^#+ `{re.escape(name)}\((.*?)\)`", text, re.MULTILINE)
+    assert match, f"the reference has no signature heading for {name}"
+    positional: list[str] = []
+    keywords: dict[str, str] = {}
+    seen_star = False
+    for part in (p.strip() for p in match.group(1).split(",")):
+        if part == "*":
+            seen_star = True
+            continue
+        param, _, default = part.partition("=")
+        if seen_star:
+            keywords[param] = default or None
+        else:
+            positional.append(param)
+    return positional, keywords
+
+
+def _same_default(written: str, real) -> bool:
+    """Whether a heading's written default is the value the code defaults to.
+
+    The headings quote strings the way the page does; what has to match is the
+    value, not the quote character.
+    """
+    try:
+        return ast.literal_eval(written) == real
+    except (ValueError, SyntaxError):
+        return written == repr(real)
+
+
+_SIGNATURE_HEADINGS = (
+    ("perturbation_oracle", perturbation_oracle),
+    ("assert_claim", mareforma.EpistemicGraph.assert_claim),
+    ("search", mareforma.EpistemicGraph.search),
+    ("get_tools", mareforma.EpistemicGraph.get_tools),
+)
+
+
+@pytest.mark.parametrize("name, func", _SIGNATURE_HEADINGS)
+def test_api_signature_headings_carry_every_parameter(name, func):
+    """A heading that drops a keyword hides a knob from the one page to check.
+
+    ``perturbation_oracle`` lost ``multiplicity`` and ``thin_sigma_guard``,
+    the two controls that widen the decision threshold before the influence
+    call, and ``assert_claim`` lost the per-call ``signer`` that decides which
+    key a claim is attributed to.
+    """
+    api = (DOCS / "reference" / "api.mdx").read_text(encoding="utf-8")
+    documented_positional, documented_keywords = _documented_signature(api, name)
+    params = [p for p in inspect.signature(func).parameters.values() if p.name != "self"]
+    real_positional = [p.name for p in params if p.kind is not p.KEYWORD_ONLY]
+    real_keywords = {p.name: p.default for p in params if p.kind is p.KEYWORD_ONLY}
+
+    assert documented_positional == real_positional, (
+        f"the {name} heading lists positional parameters "
+        f"{documented_positional}, the code takes {real_positional}"
+    )
+    assert set(documented_keywords) == set(real_keywords), (
+        f"the {name} heading omits keywords "
+        f"{sorted(set(real_keywords) - set(documented_keywords))} and invents "
+        f"{sorted(set(documented_keywords) - set(real_keywords))}"
+    )
+    wrong = {
+        param: (written, repr(real_keywords[param]))
+        for param, written in documented_keywords.items()
+        if written is not None and not _same_default(written, real_keywords[param])
+    }
+    assert not wrong, f"the {name} heading states defaults the code does not: {wrong}"
+
+
+@pytest.mark.parametrize(
+    "page, heading",
+    [
+        (DOCS / "reference" / "api.mdx", "### `assert_claim("),
+        (DOCS / "for-agents" / "agents.mdx", "## `graph.assert_claim("),
+        (ROOT / "AGENTS.md", "### `graph.assert_claim("),
+    ],
+)
+def test_assert_claim_tables_document_every_parameter(page, heading):
+    """The parameter table is where a reader looks up what a keyword does.
+
+    A keyword named in the heading but absent from the table reads as a typo
+    rather than a documented control. AGENTS.md is the contract an agent is
+    pointed at, so a row missing there is a keyword it never learns to pass:
+    without ``artifact_hash`` it cannot write a claim a strict-promotion
+    project will promote.
+    """
+    documented = _table_rows(page.read_text(encoding="utf-8"), heading)
+    params = inspect.signature(mareforma.EpistemicGraph.assert_claim).parameters
+    missing = [
+        name
+        for name in params
+        if name != "self" and name not in documented
+    ]
+    assert not missing, (
+        f"the {page.name} assert_claim table has no row for: {missing}"
+    )
+
+
+def test_api_search_section_spells_its_own_parameter_set():
+    """Describing one read path as "same as the other" hands over the wrong set.
+
+    ``query()`` takes ``refutation_filter`` and ``search()`` refuses it, so a
+    section that borrows ``query()``'s parameter table documents a call that
+    raises ``TypeError``.
+    """
+    api = (DOCS / "reference" / "api.mdx").read_text(encoding="utf-8")
+    section = _section(_prose(api), "### `search(")
+    search_params = set(inspect.signature(mareforma.EpistemicGraph.search).parameters)
+    borrowed = sorted(
+        name
+        for name, param in inspect.signature(mareforma.EpistemicGraph.query).parameters.items()
+        if param.kind is param.KEYWORD_ONLY and name not in search_params
+    )
+    unexplained = [name for name in borrowed if not re.search(rf"`{name}`.*only", section)]
+    assert not unexplained, (
+        "the search() section describes its parameters as query()'s, so it "
+        f"documents kwargs search() rejects: {unexplained}"
+    )
+    undescribed = sorted(
+        name
+        for name in search_params
+        if name not in ("self", "query") and f"`{name}`" not in section
+    )
+    assert not undescribed, (
+        f"the search() section never names its own parameters: {undescribed}"
+    )
+
+
+def _documented_exceptions(api: str) -> dict[str, str]:
+    """Return ``{exception name: submodule}`` for every exception the page names.
+
+    Two places name one: the table under ``## Exceptions`` and the **Raises**
+    block of ``enroll_validator``, which lists validator errors the table
+    leaves out. Builtins are skipped; the page documents those as the stdlib
+    names they are.
+    """
+    section = _section(api, "## Exceptions")
+    documented = dict(
+        re.findall(r"^\| `(\w+)` \| `(mareforma[\w.]*)` \|", section, re.MULTILINE)
+    )
+    raises = _section(_prose(api), "### `enroll_validator(")
+    for name in re.findall(r"^- `(\w+Error)`:", raises, re.MULTILINE):
+        if not hasattr(builtins, name):
+            documented.setdefault(name, "mareforma.validators")
+    return documented
+
+
+def test_api_exceptions_resolve_where_the_page_says_they_do():
+    """The page tells a caller to catch without remembering the submodule.
+
+    A documented exception that only resolves inside its submodule turns that
+    sentence into an ImportError at the top of the caller's file, and a
+    top-level name bound to a different object than the submodule one would
+    make the two import paths disagree at runtime.
+    """
+    api = (DOCS / "reference" / "api.mdx").read_text(encoding="utf-8")
+    documented = _documented_exceptions(api)
+    assert documented, "no exceptions parsed out of reference/api.mdx"
+
+    missing = sorted(name for name in documented if not hasattr(mareforma, name))
+    assert not missing, (
+        "reference/api.mdx promises every documented exception is re-exported "
+        f"at the top level, but `from mareforma import` fails for: {missing}"
+    )
+    unlisted = sorted(name for name in documented if name not in mareforma.__all__)
+    assert not unlisted, f"documented exceptions absent from __all__: {unlisted}"
+    mismatched = {
+        name: module
+        for name, module in documented.items()
+        if getattr(importlib.import_module(module), name, None)
+        is not getattr(mareforma, name)
+    }
+    assert not mismatched, (
+        "top-level name and documented submodule resolve to different objects "
+        f"for: {mismatched}"
+    )
+
+
+def _docstring_raises(func) -> list[str]:
+    """Return the exception names the numpydoc ``Raises`` section of *func* lists."""
+    section = re.search(r"Raises\n-+\n(.*)", inspect.getdoc(func), re.DOTALL)
+    return re.findall(r"^(\w+Error)$", section.group(1), re.MULTILINE)
+
+
+@pytest.mark.parametrize(
+    "page, heading",
+    [
+        (DOCS / "reference" / "api.mdx", "### `validate("),
+        (ROOT / "AGENTS.md", "### `graph.validate("),
+    ],
+)
+def test_docs_list_every_refusal_validate_can_raise(page, heading):
+    """A handler written from a short Raises list misses the promotion gates.
+
+    ``SelfValidationError`` is the default outcome on a single-key project and
+    ``LLMValidatorPromotionError`` fires for any LLM-typed validator. Neither
+    subclasses ``ValueError``, so a caller who caught what the page listed
+    catches neither.
+    """
+    section = _section(_prose(page.read_text(encoding="utf-8")), heading)
+    missing = [
+        name
+        for name in _docstring_raises(mareforma.EpistemicGraph.validate)
+        if f"`{name}`" not in section
+    ]
+    assert not missing, (
+        f"{page.name} documents validate() without the refusals it can raise: "
+        + ", ".join(missing)
+    )
+
+
+def test_api_get_tools_section_names_the_shipped_tools(tmp_path):
+    """Frameworks take a tool's name from ``fn.__name__``.
+
+    An integrator who keys a dispatch table or a system prompt on a name from
+    this page targets a tool the default surface does not expose.
+    """
+    api = (DOCS / "reference" / "api.mdx").read_text(encoding="utf-8")
+    section = _section(_prose(api), "### `get_tools(")
+    documented = set(re.findall(r"^- `(\w+)\(", section, re.MULTILINE))
+    for listed in re.findall(r"`\[([\w, ]+)\]`", section):
+        documented.update(listed.split(", "))
+    assert documented, "no tool names parsed out of the get_tools section"
+
+    with warnings.catch_warnings():
+        # Opening a fresh graph auto-enrolls the root validator and says so.
+        warnings.simplefilter("ignore", UserWarning)
+        with mareforma.open(tmp_path, key_path=_bootstrap_key(tmp_path)) as graph:
+            shipped = {fn.__name__ for fn in graph.get_tools()}
+    assert documented == shipped, (
+        f"the get_tools section documents {sorted(documented - shipped)} and "
+        f"omits {sorted(shipped - documented)}"
+    )
+
+
+def test_api_trust_errors_list_every_exported_trust_error():
+    """The trust section carries one error list, and it reads as the whole set.
+
+    ``PostHocPlanError`` is the pre-registration gate: it refuses a plan
+    registered after the run's first finding. A reader who takes the list as
+    complete never learns the gate exists until it fires.
+    """
+    api = (DOCS / "reference" / "api.mdx").read_text(encoding="utf-8")
+    block = re.search(r"^Errors: (.*?)\n\n", api, re.DOTALL | re.MULTILINE)
+    documented = set(re.findall(r"`(\w+Error)`", block.group(1)))
+    exported = {name for name in mareforma.trust.__all__ if name.endswith("Error")}
+    assert documented == exported, (
+        "the reference trust-error list omits "
+        f"{sorted(exported - documented)} and invents {sorted(documented - exported)}"
+    )
+    section = _section(_prose(api), "#### `submit_finding(")
+    assert "`PostHocPlanError`" in section, (
+        "the submit_finding section documents its other refusals but not the "
+        "pre-registration gate it raises"
+    )
+
+
+def test_api_exception_table_covers_every_exported_exception():
+    """The table is the one index of what a caller can catch.
+
+    An exported exception with no row is invisible to anyone writing error
+    handling from the reference.
+    """
+    api = (DOCS / "reference" / "api.mdx").read_text(encoding="utf-8")
+    documented = _documented_exceptions(api)
+    missing = sorted(
+        name
+        for name in mareforma.__all__
+        if name.endswith("Error") and name not in documented
+    )
+    assert not missing, (
+        "the reference/api.mdx exception table has no row for: " + ", ".join(missing)
+    )
+
+
+def test_api_tables_every_exception_it_names():
+    """A name that reaches only prose is checked by nothing on this page.
+
+    Six trust errors were named in the trust section and in no table, so the
+    re-export guard never saw them and the page kept promising an import that
+    raises ImportError.
+    """
+    api = (DOCS / "reference" / "api.mdx").read_text(encoding="utf-8")
+    named = {
+        name
+        for name in re.findall(r"`(\w+Error)`", api)
+        if not hasattr(builtins, name)
+    }
+    missing = sorted(named - set(_documented_exceptions(api)))
+    assert not missing, (
+        "reference/api.mdx names exceptions no table of its own lists: "
+        + ", ".join(missing)
+    )
+
+
+# The packages whose exceptions sit under ``MareformaError``. The Exceptions
+# prose names them and the table's module column places each name, so both
+# have to agree with the class tree.
+_MAREFORMA_ERROR_PACKAGES = ("mareforma.db", "mareforma.trust")
+
+
+def test_api_exception_table_splits_the_mareforma_error_tree_correctly():
+    """A caller who mis-reads the tree writes a handler that catches nothing.
+
+    The page tells readers which packages ``except MareformaError`` covers. It
+    named ``mareforma.db`` alone while every trust error subclasses
+    ``MareformaError``, so a reader hand-rolled a catch the base already made.
+    """
+    api = (DOCS / "reference" / "api.mdx").read_text(encoding="utf-8")
+    documented = _documented_exceptions(api)
+    wrong = {
+        name: module
+        for name, module in documented.items()
+        if issubclass(getattr(mareforma, name), mareforma.MareformaError)
+        != (module in _MAREFORMA_ERROR_PACKAGES)
+    }
+    named = " and ".join(f"`{package}`" for package in _MAREFORMA_ERROR_PACKAGES)
+    assert not wrong, (
+        f"reference/api.mdx says the {named} exceptions subclass "
+        f"MareformaError; the tree disagrees for: {wrong}"
+    )
+    prose = " ".join(_section(_prose(api), "## Exceptions").split())
+    assert f"the {named} exceptions subclass `MareformaError`" in prose, (
+        "the Exceptions prose does not name the packages under MareformaError"
+    )
+
+
+def test_api_documents_every_public_graph_member():
+    """The site nominates the API reference as the per-method documentation.
+
+    A public ``EpistemicGraph`` member with no heading there leaves a reader
+    who followed that pointer with nowhere to go but the source.
+    """
+    api = (DOCS / "reference" / "api.mdx").read_text(encoding="utf-8")
+    undocumented = [
+        name
+        for name in sorted(vars(mareforma.EpistemicGraph))
+        if not name.startswith("_")
+        and not re.search(rf"^#+ .*`{name}[(`]", api, re.MULTILINE)
+    ]
+    assert not undocumented, (
+        "reference/api.mdx has no heading for EpistemicGraph members: "
+        + ", ".join(undocumented)
+    )
+
+
+def test_api_keeps_the_declared_and_observed_grounding_axes_apart():
+    """The reference must not sell a self-declaration as a computed verdict.
+
+    ``grounding_sensor`` writes the asserter's own score into the signed
+    evidence vector and never touches the ``observed_grounding`` column, the
+    axis that gates promotion. A table row saying the sensor computes the
+    observed verdict collapses the one distinction the product rests on.
+    """
+    api = (DOCS / "reference" / "api.mdx").read_text(encoding="utf-8")
+    section = _section(api, "### `assert_claim(")
+    sensor_row = next(
+        line for line in section.splitlines() if line.startswith("| `grounding_sensor`")
+    )
+    assert "observed-grounding verdict for the claim" not in sensor_row, (
+        "the grounding_sensor row states the sensor computes the observed "
+        "verdict; it writes a declared score into the evidence vector"
+    )
+    assert "grounding_score" in sensor_row and "declar" in sensor_row.lower(), (
+        "the grounding_sensor row must name the declared grounding_score it "
+        "actually writes"
+    )
+    observed_row = next(
+        line for line in section.splitlines() if line.startswith("| `observed_grounding`")
+    )
+    assert "promotion" in observed_row, (
+        "the observed_grounding row must say the record gates promotion, not "
+        "only that it is stored in a queryable column"
+    )
+
+
+def _importable(dotted: str) -> bool:
+    """Whether *dotted* names a real module or an attribute of one."""
+    try:
+        importlib.import_module(dotted)
+        return True
+    except ImportError:
+        pass
+    module, _, attr = dotted.rpartition(".")
+    try:
+        return hasattr(importlib.import_module(module), attr)
+    except ImportError:
+        return False
+
+
+def test_api_headings_name_importable_paths():
+    """A heading is the path a reader copies, so it has to be the real one.
+
+    ``open_db_from_db_path`` was headed as a top-level symbol while it lives
+    only in ``mareforma.db``, and the package ``__getattr__`` turns every
+    unlisted name into an ``AttributeError``.
+    """
+    api = (DOCS / "reference" / "api.mdx").read_text(encoding="utf-8")
+    headings = re.findall(r"^#+ `(mareforma[\w.]*\w)", api, re.MULTILINE)
+    assert headings, "no mareforma headings parsed out of reference/api.mdx"
+    unresolved = [name for name in headings if not _importable(name)]
+    assert not unresolved, (
+        "reference/api.mdx headings name paths that do not import: "
+        + ", ".join(unresolved)
+    )
+
+
+_NUMBER_WORDS = ("no", "one", "two", "three", "four", "five", "six", "seven", "eight")
+
+# The two ``health()`` keys that size the graph rather than count drift.
+_POPULATION_KEYS = {"claim_count", "validator_count"}
+
+
+def test_api_health_counts_its_own_drift_counters(tmp_path):
+    """A miscounted summary sentence leaves an off-by-one a reader cannot settle.
+
+    ``health()`` is the operator's audit summary and this page is what an
+    integrator reads when wiring a green/red gate, so the sentence that says
+    what "healthy" means has to name every counter it covers.
+    """
+    with mareforma.open(tmp_path) as graph:
+        counters = sorted(set(graph.health()) - _POPULATION_KEYS)
+
+    api = (DOCS / "reference" / "api.mdx").read_text(encoding="utf-8")
+    section = _section(_prose(api), "### `health()`")
+    assert f"the {_NUMBER_WORDS[len(counters)]} drift counters" in section, (
+        f"reference/api.mdx must say health() has {len(counters)} drift counters"
+    )
+    missing = [name for name in counters if f"`{name}`" not in section]
+    assert not missing, (
+        "the reference/api.mdx health() section never names the drift counters: "
+        + ", ".join(missing)
+    )
+
+
+def test_api_documents_every_grounding_verdict_field_and_method():
+    """A short field list hides state a caller reads off ``obs.verdict``.
+
+    The enumeration is written as the whole object, so a name missing from it
+    is a name a reader has no way to learn from the reference. ``model_lineage``
+    is the one that costs: it carries the independence axis to the evidence
+    line, and ``from_receipt`` is where it silently goes missing.
+    """
+    from mareforma.observe import GroundingVerdict
+
+    api = (DOCS / "reference" / "api.mdx").read_text(encoding="utf-8")
+    section = _section(_prose(api), "### `GroundingVerdict`")
+    names = [f.name for f in dataclasses.fields(GroundingVerdict)] + [
+        name
+        for name in vars(GroundingVerdict)
+        if not name.startswith("_") and callable(getattr(GroundingVerdict, name))
+    ]
+    missing = [
+        name for name in names if not re.search(rf"`{name}[`(]", section)
+    ]
+    assert not missing, (
+        "the reference/api.mdx GroundingVerdict section never names: "
+        + ", ".join(sorted(missing))
+    )
+
+
+def test_api_reference_names_every_registered_canonicalizer():
+    """The reference is where an adapter author picks a canonical form.
+
+    A form the page omits is one nobody names in ``result_canonical_form``, so
+    digests get recorded against the older form's bytes. Some forms are shown
+    under their constant, so a page naming either spelling counts.
+    """
+    from mareforma.canonicalize import registered_canonicalizers
+
+    api = (DOCS / "reference" / "api.mdx").read_text(encoding="utf-8")
+    registered = sorted(registered_canonicalizers())
+    assert registered, "no canonical forms registered; the guard checks nothing"
+    missing = [
+        name
+        for name in registered
+        if name not in api and name.upper().replace("-", "_") not in api
+    ]
+    assert not missing, (
+        "reference/api.mdx names no canonical form for: " + ", ".join(missing)
+    )
+
+
+def _table_rows(text: str, heading: str) -> set[str]:
+    """Return the first-column names of the first table under *heading*."""
+    lines = text[text.index(heading) + len(heading):].splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("|"))
+    block = itertools.takewhile(lambda line: line.startswith("|"), lines[start:])
+    return {m.group(1) for m in (re.match(r"\| `(\w+)` \|", line) for line in block) if m}
+
+
+def _assert_claim_keywords_used(text: str) -> set[str]:
+    """Return the ``assert_claim`` keywords the samples in *text* pass."""
+    real = set(inspect.signature(mareforma.EpistemicGraph.assert_claim).parameters)
+    used: set[str] = set()
+    for match in re.finditer(r"graph\.assert_claim\(", text):
+        end, depth = match.end(), 1
+        while depth:
+            depth += (text[end] == "(") - (text[end] == ")")
+            end += 1
+        call = text[match.end():end - 1]
+        used |= {
+            name
+            for name in re.findall(r"(?:^|,)\s*([a-z_]+)=", call, re.MULTILINE)
+            if name in real
+        }
+    return used
+
+
+def test_agents_page_defines_the_keywords_it_demonstrates():
+    """The agents page states it mirrors AGENTS.md; the tables must agree.
+
+    Its core sample is built around ``observed_grounding``, and the table
+    below defines neither that nor the rest of what AGENTS.md carries. An
+    agent reading the page it was pointed at has no contract for the keyword
+    the page is organised around.
+    """
+    agents_mdx = (DOCS / "for-agents" / "agents.mdx").read_text(encoding="utf-8")
+    canonical = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    documented = _table_rows(agents_mdx, "## `graph.assert_claim(")
+
+    demonstrated = _assert_claim_keywords_used(agents_mdx) - documented
+    assert not demonstrated, (
+        "agents.mdx passes assert_claim keywords its table never defines: "
+        + ", ".join(sorted(demonstrated))
+    )
+    unmirrored = _table_rows(canonical, "### `graph.assert_claim(") - documented
+    assert not unmirrored, (
+        "agents.mdx claims to mirror AGENTS.md but drops the rows: "
+        + ", ".join(sorted(unmirrored))
+    )
+
+
+@pytest.mark.parametrize(
+    "page, heading",
+    [
+        (DOCS / "reference" / "api.mdx", "## `mareforma.open("),
+        (DOCS / "for-agents" / "agents.mdx", "## `mareforma.open("),
+        (ROOT / "AGENTS.md", "### `mareforma.open("),
+    ],
+)
+def test_open_tables_document_every_keyword(page, heading):
+    """Every page presents the open() table as the whole option set.
+
+    A missing row is a knob a reader generating an ``open()`` call never
+    learns exists, and the omitted ones gate promotion and decide whether
+    the caller's key is enrolled at all.
+    """
+    documented = _table_rows(page.read_text(encoding="utf-8"), heading)
+    missing = [
+        name
+        for name in inspect.signature(mareforma.open).parameters
+        if name not in documented
+    ]
+    assert not missing, (
+        f"{page.name} open() table has no row for: {', '.join(missing)}"
+    )
 
 
 def test_api_compute_status_counts_independence_by_signer():

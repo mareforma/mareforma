@@ -94,11 +94,14 @@ the read covered this claim's data. `assert_finding` binds it.
 | `path` | `str \| Path \| None` | `None` | Project root. Defaults to `cwd()`. Graph stored at `<path>/.mareforma/graph.db`. |
 | `key_path` | `str \| Path \| None` | `None` | Ed25519 private key (PEM). `None` → use the XDG default. If the path does not exist, the graph operates unsigned. |
 | `require_signed` | `bool` | `False` | Raise `KeyNotFoundError` if no key is found. |
+| `load_key` | `bool` | `True` | `False` loads no key even when one exists: nothing is signed and your key is never auto-enrolled as the project's root validator, so an audit pass leaves no trace. Combining it with `require_signed=True` raises `ValueError`. |
 | `rekor_url` | `str \| None` | `None` | Sigstore-Rekor transparency log endpoint. When set, every signed claim is submitted at INSERT time. Use `mareforma.signing.PUBLIC_REKOR_URL` for the public instance. |
 | `require_rekor` | `bool` | `False` | Raise `SigningError` if `rekor_url` is unset or initial submission fails. |
 | `trust_insecure_rekor` | `bool` | `False` | Skip SSRF validation on `rekor_url` (only for private Rekor instances on internal networks). |
 | `rekor_log_pubkey_pem` | `bytes \| None` | `None` | PEM-encoded Rekor log operator public key. Opts into RFC 6962 Merkle inclusion-proof verification on every submit + `refresh_unsigned()`. Persists to `.mareforma/rekor_log_pubkey.pem` as a TOFU pin; silent rotation refused. Mutually exclusive with `rekor_log_pubkey_path`. |
 | `rekor_log_pubkey_path` | `str \| Path \| None` | `None` | Path to a PEM file with the Rekor log operator public key. Equivalent to passing the file bytes via `rekor_log_pubkey_pem`. |
+| `strict_promotion` | `bool` | `False` | Gate REPLICATED on non-NULL data (`artifact_hash`) present on both sides of a converging pair. Off by default (the signer axis alone promotes; absent data never blocks). Opt-in and additive: it only ever adds the requirement. Passing `True` root-signs a one-way project policy, so every later opener including the CLI promotes under the gate; a keyless or non-root caller raises `ProjectPolicyError`. |
+| `validator_type` | `str` | `"human"` | `"human"` or `"llm"`, the self-declared type recorded if this key auto-enrolls as the project's root validator. Ignored once a root exists. Pass `"llm"` when an agent bootstraps its own project: an `llm` validator cannot promote a claim to ESTABLISHED on its signature alone. |
 
 ```python
 graph = mareforma.open()                                              # cwd, unsigned if no key
@@ -126,8 +129,15 @@ Assert a claim. Returns `claim_id` (UUID).
 | `contradicts` | `list[str] \| None` | `None` | Claim_ids this finding is in explicit tension with. |
 | `source_name` | `str \| None` | `None` | Data source name. Required for ANALYTICAL to be meaningful. |
 | `idempotency_key` | `str \| None` | `None` | Retry-safe key. Same key → same claim_id, no INSERT. |
+| `status` | `str` | `"open"` | `open` \| `contested` \| `retracted` |
 | `artifact_hash` | `str \| None` | `None` | SHA-256 hex digest of the output bytes (figure, CSV, model). Secondary collapse check: equal data collapses two peers to one line (a byte-identical rerun is not corroboration), distinct data counts as independent, absent data never blocks. |
+| `evidence` | `dict \| None` | `None` | Optional opaque evidence-vector dict for the claim, denormalised into the `ev_*` columns and stored as `evidence_json`. Carried inside the signed predicate; mareforma does not interpret it. |
 | `seed` | `bool` | `False` | Insert directly at `ESTABLISHED` with a signed seed envelope. Only enrolled validators can produce seeds. |
+| `observed_grounding` | `dict \| None` | `None` | Signed grounding verdict from an `observe()` scope (`obs.verdict.to_signed_dict()`). Bound into the signed statement; a verdict that is not `GROUNDED` never counts toward promotion. |
+| `grounding_sensor` | `object \| None` | `None` | Optional sensor exposing `grounding_score(text, supports) → (float, str)`. Its score and rationale are written into the claim's evidence vector. A sensor that raises is caught and the claim is asserted without a grounding score. |
+| `signer` | `object \| None` | `None` | Per-call override for the graph's loaded key (an Ed25519 private key from `signing.load_private_key`). `None` inherits the key from `mareforma.open(key_path=...)`. Not checked against the `validators` table: anyone can sign, only enrolled keys can `validate()` a claim to ESTABLISHED. Use it on a host holding several keys, one per asserter. |
+| `predicate_payload` | `dict \| None` | `None` | Structured predicate body for typed adapters. Stored in the queryable `predicate_payload` column only, NOT bound into the signed envelope or chain hash. |
+| `original_signature_bundle` | `str \| None` | `None` | Source-side DSSE envelope preserved by federation-import flows. Validated only for JSON well-formedness at write time, never re-verified. |
 
 **Side effect:** if ≥2 claims now share the same upstream in `supports[]`
 signed by distinct keys, all are promoted to `REPLICATED`, provided

@@ -122,8 +122,15 @@ Assert a claim into the graph. Returns `claim_id` (UUID string).
 | `contradicts` | `list[str] \| None` | `None` | Claim_ids this finding is in explicit tension with. |
 | `source_name` | `str \| None` | `None` | Data source name. Required for ANALYTICAL to be meaningful. |
 | `idempotency_key` | `str \| None` | `None` | Retry-safe key. Same key → same claim_id, no INSERT. |
+| `status` | `str` | `"open"` | `open` \| `contested` \| `retracted` |
+| `artifact_hash` | `str \| None` | `None` | SHA-256 hex digest of the output bytes backing the claim. Secondary collapse check: equal data collapses two peers to one line (a byte-identical rerun is not corroboration), distinct data counts as independent, absent data (NULL) never blocks. The column a strict-promotion project reads. |
+| `evidence` | `dict \| None` | `None` | Optional opaque evidence-vector dict for the claim, denormalised into the `ev_*` columns and stored as `evidence_json`. Carried inside the signed predicate; mareforma does not interpret it. |
+| `seed` | `bool` | `False` | Insert directly at `ESTABLISHED` with a signed seed envelope. Only an enrolled validator can produce a seed. Used to bootstrap the ESTABLISHED-upstream chain on a fresh project. |
 | `observed_grounding` | `dict \| None` | `None` | Signed grounding verdict from an `observe()` scope (`obs.verdict.to_signed_dict()`). Bound into the signed statement; a verdict that is not `GROUNDED` never counts toward promotion. |
 | `grounding_sensor` | `object \| None` | `None` | Optional sensor exposing `grounding_score(text, supports) → (float, str)`. Its score and rationale are written into the claim's evidence vector. A sensor that raises is caught and the claim is asserted without a grounding score. |
+| `signer` | `object \| None` | `None` | Per-call override for the graph's loaded key (an Ed25519 private key from `signing.load_private_key`). `None` inherits the key from `mareforma.open(key_path=...)`. Not checked against the `validators` table: anyone can sign, only enrolled keys can `validate()` a claim to ESTABLISHED. Use it on a host holding several keys, one per asserter. |
+| `predicate_payload` | `dict \| None` | `None` | Structured predicate body for typed adapters. Stored in the queryable `predicate_payload` column only, NOT bound into the signed envelope or chain hash. |
+| `original_signature_bundle` | `str \| None` | `None` | Source-side DSSE envelope preserved by federation-import flows. Validated only for JSON well-formedness at write time, never re-verified. |
 
 **Raises:** `ValueError` if `classification` is invalid or `text` is empty.
 
@@ -280,6 +287,15 @@ signer is loaded, or the loaded signer is not an enrolled validator.
 not a strict-v4 UUID, does not point to an existing claim, post-dates
 `validated_at`, or disagrees with the validation envelope's signed
 `evidence_seen` field.
+**Raises:** `LLMValidatorPromotionError` if the loaded signer is
+enrolled with `validator_type='llm'`. LLM-typed validators sign
+validation envelopes but cannot promote past REPLICATED.
+**Raises:** `SelfValidationError` if the loaded signer's keyid is the
+one on the claim's `signature_bundle`. Promotion needs an external
+witness, so on a single-key project this is the expected outcome.
+**Raises:** `InvalidValidationEnvelopeError` if the signed envelope
+fails a structural or cryptographic gate.
+The last three subclass `MareformaError` directly, not `ValueError`.
 
 ---
 
