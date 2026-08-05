@@ -133,7 +133,13 @@ def build_prov_o(root: Path, claim_id: str | None = None) -> dict[str, Any]:
         if claim_id is None:
             claims = list_claims(conn)
         else:
-            focal = get_claim(conn, claim_id)
+            # One cache for the whole walk. The corroboration evidence behind
+            # a promoted row is graph-wide, so a per-hop cache would rebuild it
+            # once per ancestor and make the export cost grow with a graph it
+            # does not read. list_claims shares one across its rows for the
+            # same reason.
+            verify_cache: dict = {}
+            focal = get_claim(conn, claim_id, verify_cache=verify_cache)
             if focal is None:
                 raise ValueError(
                     f"claim_id {claim_id!r} not found in graph"

@@ -97,6 +97,34 @@ class TestStatementShape:
         assert statement["subject"][0]["name"] == f"{SUBJECT_PREFIX}{cid}"
         assert "sha256" in statement["subject"][0]["digest"]
 
+    def test_each_claim_is_verified_once(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """One verified read of the graph, not two. Verify-on-read costs a
+        signature re-verification and a corroboration probe per row, so a
+        statement that fetched the rows must hand them to the exporter rather
+        than let it reopen the database and repeat the pass over every claim."""
+        from mareforma.db import core as _db_core
+
+        key_path, _ = _bootstrap(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as g:
+            for i in range(5):
+                g.assert_claim(f"claim {i}", generated_by="seed", seed=True)
+
+        original = _db_core._row_verified_on_read
+        verified: list[str] = []
+
+        def counting(conn, row, cache):
+            verified.append(row["claim_id"])
+            return original(conn, row, cache)
+
+        monkeypatch.setattr(_db_core, "_row_verified_on_read", counting)
+        statement = build_statement(tmp_path)
+
+        assert len(statement["subject"]) == 5
+        assert len(verified) == 5
+        assert len(set(verified)) == 5
+
 
 # ---------------------------------------------------------------------------
 # DSSE envelope

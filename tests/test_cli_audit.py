@@ -872,6 +872,106 @@ class TestAuditCorpus:
         assert run["exit_code"] == 7
 
 
+class TestAuditHandoffChannel:
+    """What a corpus parent accepts on the handoff pipe: the child's nonce
+    line, then the frame carrying it, wherever on the stream it lands. The
+    audited target shares that descriptor, so everything else on it is the
+    target's, not the observer's.
+    """
+
+    NONCE = "0123456789abcdef"
+
+    def _read(self, stream: str):
+        from mareforma.audit import _read_handoff
+
+        read_fd, write_fd = os.pipe()
+        # Filled from a second thread: a stream longer than the pipe buffer
+        # blocks its writer until the reader drains it, the way the real
+        # channel does.
+        writer = threading.Thread(
+            target=self._fill, args=(write_fd, stream.encode("utf-8")),
+            daemon=True,
+        )
+        writer.start()
+        try:
+            return _read_handoff(read_fd)
+        finally:
+            writer.join(timeout=60)
+
+    @staticmethod
+    def _fill(write_fd: int, payload: bytes) -> None:
+        with os.fdopen(write_fd, "wb") as fh:
+            fh.write(payload)
+
+    def _frame(self, run_record: dict, prefix: str | None = None) -> str:
+        head = self.NONCE + " " if prefix is None else prefix
+        return head + json.dumps(
+            {"run_record": run_record, "receipts": []}) + "\n"
+
+    def test_only_the_frame_carrying_the_childs_nonce_is_read(self) -> None:
+        # The target writes a well-formed frame of its own before the observer
+        # emits and another after it. Neither carries the nonce the child sent
+        # before the target could run, so neither is the observer's record.
+        handoff = self._read(
+            self.NONCE + "\n"
+            + self._frame({"completed": True, "exit_code": 1}, prefix="")
+            + self._frame({"completed": True, "exit_code": 0})
+            + self._frame({"completed": True, "exit_code": 2}, prefix="")
+        )
+        assert handoff == {"receipts": [],
+                           "run_record": {"completed": True, "exit_code": 0}}
+
+    def test_a_frame_the_child_never_finished_hands_over_nothing(self) -> None:
+        # A child killed mid-write leaves a line without its terminator, and a
+        # child killed before it emitted leaves the nonce alone.
+        assert self._read(self.NONCE + "\n"
+                          + self._frame({"completed": True})[:-5]) is None
+        assert self._read(self.NONCE + "\n") is None
+        assert self._read("") is None
+
+    def test_target_bytes_in_front_of_the_frame_do_not_hide_it(self) -> None:
+        # The target owes the shared descriptor no terminator, so what it
+        # leaves there runs into the front of the observer's frame. The frame
+        # is still the observer's record: a target able to suppress the record
+        # could veto its own audit, and every re-invocation would repeat it.
+        record = {"completed": True, "exit_code": 0}
+        expected = {"receipts": [], "run_record": record}
+        assert self._read(self.NONCE + "\n" + self._frame(record)) == expected
+        assert self._read(
+            self.NONCE + "\n" + "x" + self._frame(record)) == expected
+        assert self._read(
+            self.NONCE + "\n" + '{"a":' + self._frame(record)) == expected
+
+    def test_a_long_unterminated_prefix_does_not_hide_the_frame(self) -> None:
+        # Nor does a large one, and reading it costs the parent a fixed
+        # buffer: what it discards it discards as it goes.
+        record = {"completed": True, "exit_code": 0}
+        assert self._read(
+            self.NONCE + "\n" + "n" * (4 << 20) + self._frame(record)
+        ) == {"receipts": [], "run_record": record}
+
+    def test_the_last_frame_carrying_the_nonce_is_the_record(self) -> None:
+        # The observer emits once, after the target has finished running, so
+        # the marked frame that comes last is the one it wrote.
+        assert self._read(
+            self.NONCE + "\n"
+            + self._frame({"completed": True, "exit_code": 9})
+            + self._frame({"completed": True, "exit_code": 0})
+        ) == {"receipts": [],
+              "run_record": {"completed": True, "exit_code": 0}}
+
+    def test_a_key_the_observer_did_not_write_is_refused(self) -> None:
+        # The parent signs the run record whole, so a key it does not know,
+        # inside the record or beside it, is a refusal rather than something
+        # passed through to the signer.
+        assert self._read(
+            self.NONCE + "\n"
+            + self._frame({"completed": True, "forged": True})) is None
+        assert self._read(self.NONCE + "\n" + self.NONCE + " " + json.dumps(
+            {"run_record": {"completed": True}, "receipts": [],
+             "forged": True}) + "\n") is None
+
+
 class TestAuditReceiptPublicVerify:
     """A signed audit receipt is publicly verifiable: a third party who holds
     only the auditor's exported public key can confirm it, without ever seeing

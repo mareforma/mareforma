@@ -128,7 +128,10 @@ def build_statement(root: Path) -> dict[str, Any]:
     finally:
         conn.close()
     subjects = [_subject_for_claim(c) for c in claims]
-    predicate = JSONLDExporter(root).export()
+    # The exporter is the surface that refuses a row verify-on-read rejected,
+    # and these are the rows it would read. Hand them over rather than let it
+    # reopen the graph and verify every claim a second time.
+    predicate = JSONLDExporter(root).export(claims)
     # Carry each claim's own asserter signature into its node so verify_bundle
     # can check it offline, and the enrolled validator set (with enrollment
     # envelopes) so those signatures verify against a chain-checked key rather
