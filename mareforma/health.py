@@ -52,9 +52,21 @@ def compute_health(conn: sqlite3.Connection) -> HealthReport:
     report = HealthReport()
 
     try:
-        from mareforma.db import list_claims, refutation_status, DatabaseError
+        from mareforma.db import DatabaseError
 
-        claims = list_claims(conn)
+        # One grouped pass, not a materialised table. The census is five
+        # integers, and reading every row's text, signature bundle and
+        # payloads into Python to add them up costs memory proportional to
+        # the stored findings. ``t_invalid IS NOT NULL`` is the same test
+        # refutation_status applies for its ``contradicted`` state, so the
+        # word keeps one meaning across both surfaces.
+        rows = conn.execute(
+            "SELECT support_level, COUNT(*) AS n, "
+            "SUM(status = 'open') AS n_open, "
+            "SUM(t_invalid IS NOT NULL) AS n_contradicted, "
+            "SUM(status = 'open' AND t_invalid IS NULL) AS n_standing "
+            "FROM claims GROUP BY support_level"
+        ).fetchall()
     except (sqlite3.OperationalError, sqlite3.DatabaseError, DatabaseError) as exc:
         # Read failure: surface as ``error`` rather than folding into
         # the empty-graph ``red`` state. Counters stay at zero so the
@@ -69,31 +81,16 @@ def compute_health(conn: sqlite3.Connection) -> HealthReport:
         )
         return report
 
-    for c in claims:
-        if c["status"] == "open":
-            report.claims_open += 1
-        else:
-            report.claims_resolved += 1
-
-        # One definition of the word, shared with the refutation
-        # taxonomy: contradicted means a signed contradiction verdict
-        # marked this claim invalid, not that the claim disputes
-        # something else.
-        if refutation_status(c)["state"] == "contradicted":
-            report.claims_contradicted += 1
-
-        level = c.get("support_level", "PRELIMINARY")
-        report.support_level_breakdown[level] = (
-            report.support_level_breakdown.get(level, 0) + 1
-        )
+    for r in rows:
+        level = r["support_level"]
+        report.support_level_breakdown[level] = r["n"]
+        report.claims_open += r["n_open"]
+        report.claims_resolved += r["n"] - r["n_open"]
+        report.claims_contradicted += r["n_contradicted"]
         # Same filter the promotion path applies: a retracted or
         # verdict-invalidated claim is no longer evidence of anything.
-        if (
-            level in ("REPLICATED", "ESTABLISHED")
-            and c["status"] == "open"
-            and c.get("t_invalid") is None
-        ):
-            report.standing_promoted += 1
+        if level in ("REPLICATED", "ESTABLISHED"):
+            report.standing_promoted += r["n_standing"]
 
     report.traffic_light, report.rationale = _compute_traffic_light(report)
     return report

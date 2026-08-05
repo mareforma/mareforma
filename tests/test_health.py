@@ -185,6 +185,44 @@ class TestCounts:
             conn.close()
         assert report.claims_contradicted == 0
 
+    def test_counts_without_materialising_every_row(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        # Four numbers do not need every claim's text, signature bundle and
+        # payloads boxed into Python. SQLite counts them in one pass, so the
+        # census must not go through list_claims.
+        import mareforma
+        from mareforma import db as _db
+        from tests._helpers import _bootstrap_key, _two_signers
+        sa, sb = _two_signers(tmp_path)
+        key = _bootstrap_key(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=key) as g:
+            prior = g.assert_claim("prior", generated_by="seed", seed=True)
+            g.assert_claim("finding A", supports=[prior],
+                           generated_by="agent_A", signer=sa)
+            g.assert_claim("finding B", supports=[prior],
+                           generated_by="agent_B", signer=sb)
+
+        conn = _open(tmp_path)
+        try:
+            add_claim(conn, tmp_path, "Contested claim", status="contested")
+            baseline = compute_health(conn)
+
+            def _refuse(*_args, **_kwargs):
+                raise AssertionError("compute_health must not read whole rows")
+
+            monkeypatch.setattr(_db, "list_claims", _refuse)
+            report = compute_health(conn)
+        finally:
+            conn.close()
+        assert report == baseline
+        assert (report.claims_open, report.claims_resolved) == (3, 1)
+        assert report.support_level_breakdown == {
+            "ESTABLISHED": 1, "REPLICATED": 2, "PRELIMINARY": 1,
+        }
+        # The ESTABLISHED seed stands alongside its two REPLICATED peers.
+        assert report.standing_promoted == 3
+
     def test_support_level_breakdown(self, tmp_path: Path) -> None:
         conn = _open(tmp_path)
         try:

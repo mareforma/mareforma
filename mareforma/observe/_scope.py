@@ -132,12 +132,15 @@ class Scope:
         # reused across every classify pass. The post-hoc auditor shares this so
         # a corpus audit pairs the shared reads once, not once per finding.
         self._norm_reads: "list[tuple[str, ReadRecord]] | None" = None
-        # Normalized form per raw read identifier, so a read loop over one path
-        # resolves it once.
+        # Normalized form per raw identifier, so a loop over one path resolves
+        # it once. Shared by reads, opens and failed opens.
         self._norm_cache: dict[str, str] = {}
         # Open counts keyed by normalized identifier, computed once and shared
         # the same way: the opens are identical across findings too.
         self._norm_opens: "dict[str, int] | None" = None
+        # (normalized identifier, exception type name) per failed open, paired
+        # once and shared for the same reason.
+        self._norm_failed_opens: "list[tuple[str, str]] | None" = None
 
     # -- recording (called by loaders + audit hook; must never raise upward) --
 
@@ -149,15 +152,15 @@ class Scope:
         )
 
     def _normalize(self, identifier: str) -> str:
-        """Normalize a read identifier once, memoized per raw string.
+        """Normalize an identifier once, memoized per raw string.
 
         Normalization happens HERE, on the producing host, where the filesystem
         that resolves a relative path and the process that set the working
         directory both live. A receipt then carries identifiers any reader can
         compare by plain string equality, from any directory and on any host,
-        which is the same rule the citation binding follows. A read loop hands
-        the same path in thousands of times, so the memo keeps ``realpath`` to
-        one call per distinct identifier.
+        which is the same rule the citation binding follows. A read or open loop
+        hands the same path in thousands of times, so the memo keeps
+        ``realpath`` to one call per distinct identifier.
         """
         norm = self._norm_cache.get(identifier)
         if norm is None:
@@ -217,15 +220,25 @@ class Scope:
         """
         if self._norm_opens is None:
             counts: dict[str, int] = {}
-            cache: dict[str, str] = {}
             for op in self.opens:
-                norm = cache.get(op)
-                if norm is None:
-                    norm = normalize_identifier(op)
-                    cache[op] = norm
+                norm = self._normalize(op)
                 counts[norm] = counts.get(norm, 0) + 1
             self._norm_opens = counts
         return self._norm_opens
+
+    def _normalized_failed_opens(self) -> "list[tuple[str, str]]":
+        """Each failed open paired with its normalized identifier, paired once.
+
+        A retry loop records the same path once per attempt, and the pairing is
+        the same for every finding, so it is built once and shared like the
+        reads and the opens.
+        """
+        if self._norm_failed_opens is None:
+            self._norm_failed_opens = [
+                (self._normalize(path), exc_type)
+                for path, exc_type in self.failed_opens
+            ]
+        return self._norm_failed_opens
 
     def coverage_counts(self) -> "tuple[int, int]":
         """``(reads_seen, opens_detected)``, the honest coverage bound.
@@ -352,8 +365,7 @@ class Scope:
             # could have read the data.
             failed: dict[str, int] = {}
             failed_types: set[str] = set()
-            for path, exc_type in self.failed_opens:
-                fn = normalize_identifier(path)
+            for fn, exc_type in self._normalized_failed_opens():
                 if fn in unexplained:
                     failed[fn] = failed.get(fn, 0) + 1
                     failed_types.add(exc_type)
@@ -491,6 +503,7 @@ class Scope:
         # per finding. Only the cited set differs per call.
         other._norm_reads = self._normalized_reads()
         other._norm_opens = self._normalized_opens()
+        other._norm_failed_opens = self._normalized_failed_opens()
         return other.classify()
 
 
@@ -552,8 +565,10 @@ def exit(scope: Scope) -> None:
     parent.models.extend(scope.models)
     if scope._error is not None:
         parent.mark_error(scope._error)
-    # The parent's read set grew, so any memoized normalization is stale.
+    # The parent's evidence grew, so any memoized normalization is stale.
     parent._norm_reads = None
+    parent._norm_opens = None
+    parent._norm_failed_opens = None
 
 
 # -- the single ingress-recording chokepoint --------------------------------

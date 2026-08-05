@@ -217,6 +217,30 @@ def test_uninstrumented_open_of_cited_path_is_a_coverage_gap(cited):
     assert h.verdict.read_coverage_fraction() == 0.0
 
 
+def test_the_audit_hook_imports_nothing_per_event(cited, monkeypatch):
+    # The hook is permanent and process-global once installed, so its body runs
+    # for every audited event in the process, scope or no scope. It must not
+    # import per event.
+    with obs.observe(cites=cited) as h:
+        fd = os.open(cited, os.O_RDONLY)
+        os.close(fd)
+    assert h.verdict.opens_detected == 1  # the hook is live, not a dead probe
+
+    import builtins
+
+    real_import = builtins.__import__
+    imported: list[str] = []
+
+    def counting(name, *args, **kwargs):
+        imported.append(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", counting)
+    for _ in range(5):  # audited opens with nothing observing
+        os.close(os.open(cited, os.O_RDONLY))
+    assert "_scope" not in imported
+
+
 def test_genuine_absence_is_ungrounded_not_opaque(cited):
     # No cited read, no seam, nothing opened: the scope was fully observed and
     # the data genuinely did not arrive. This is the only path to UNGROUNDED.

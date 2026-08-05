@@ -2606,18 +2606,30 @@ def _refuse_self_validation_across_set(
     if not anchors:
         return
     placeholders = ",".join("?" * len(anchors))
-    peer_keyids = {
-        r["asserter_keyid"] for r in conn.execute(
-            f"SELECT DISTINCT c.asserter_keyid "
-            f"FROM claims c, json_each(c.supports_json) j "
-            f"WHERE j.value IN ({placeholders}) "
-            f"AND c.support_level = 'REPLICATED' "
-            f"AND c.status = 'open' "
-            f"AND c.asserter_keyid IS NOT NULL",
-            anchors,
-        ).fetchall()
-    }
-    if validator_keyid in peer_keyids:
+    # The gate is a membership test, not an enumeration: all it needs is whether
+    # THIS validator asserted a converging peer. Leading on asserter_keyid lets
+    # idx_claims_asserter_keyid pick the validator's own rows, so json_each
+    # expands those and nothing else. Matching the anchors first left the
+    # planner no better path than every claim in the graph, and every promotion
+    # paid for the whole subset.
+    # Membership is the supports edge, not the peer's current level: a peer an
+    # earlier witness already lifted to ESTABLISHED is still a line its asserter
+    # took part in, so filtering on support_level dropped it from the set and
+    # cleared the refusal.
+    # The peer set is read from claims.supports_json, not from the reverse-edge
+    # cache the insert path narrows with. The cache is unsigned and its
+    # staleness check only counts claims, so a dropped edge is invisible; there
+    # it would block a promotion (fail closed), here it would drop a peer and
+    # clear a refusal (fail open on a trust gate).
+    peer = conn.execute(
+        f"SELECT 1 FROM claims c, json_each(c.supports_json) j "
+        f"WHERE c.asserter_keyid = ? "
+        f"AND c.status = 'open' "
+        f"AND j.value IN ({placeholders}) "
+        f"LIMIT 1",
+        (validator_keyid, *anchors),
+    ).fetchone()
+    if peer is not None:
         raise SelfValidationError(
             f"Validator {validator_keyid[:12]}… asserted a claim in the "
             f"converging set behind '{claim_id}'; a participant cannot "

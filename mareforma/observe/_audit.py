@@ -22,6 +22,8 @@ from __future__ import annotations
 import sys
 import threading
 
+from ._scope import current_scope
+
 # Thread-start audit events, version-dependent. CPython emits no thread-start
 # audit event before 3.12; 3.12 emits `_thread.start_new_thread` and 3.13+
 # `_thread.start_joinable_thread` (measured across 3.10-3.14). So thread-seam
@@ -83,11 +85,9 @@ def ensure_installed() -> None:
 
 
 def _audit_hook(event: str, args: tuple) -> None:
-    # Cheapest possible no-op when nothing is observing: one contextvar read.
-    # Imported lazily inside the hook so importing this module does not pull the
-    # whole scope machinery, and to keep the hot path a single attribute lookup.
-    from ._scope import current_scope
-
+    # The hook is permanent and process-global, so this body runs for every
+    # audited event in the process. Keep the no-op path to one call and one
+    # contextvar read; anything per-event here is paid forever.
     scope = current_scope()
     if scope is None:
         return

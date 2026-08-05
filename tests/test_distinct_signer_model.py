@@ -244,6 +244,75 @@ class TestEstablishedBoundary:
             g.validate(rep)
             assert g.get_claim(rep)["support_level"] == "ESTABLISHED"
 
+    def test_peer_lookup_does_not_scan_every_candidate_row(
+        self, tmp_path: Path,
+    ) -> None:
+        """The across-set gate asks "did THIS validator assert a peer", so the
+        lookup must key on asserter_keyid and json-expand only that signer's
+        rows. Matching the anchors first leaves the planner nothing better than
+        every claim in the graph, which costs the whole subset on every
+        promotion.
+        """
+        sa, sb = _two_signers(tmp_path)
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        val_key = _bootstrap_key(tmp_path, "val.key")
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            g.enroll_validator(_pem_of(val_key), identity="v")
+            up = g.assert_claim("anchor", generated_by="seed", seed=True)
+            rep = g.assert_claim("A", supports=[up], generated_by="lab_a", signer=sa)
+            g.assert_claim("B", supports=[up], generated_by="lab_b", signer=sb)
+        with mareforma.open(tmp_path, key_path=val_key) as g:
+            seen: list[str] = []
+            g._conn.set_trace_callback(seen.append)
+            try:
+                g.validate(rep)
+            finally:
+                g._conn.set_trace_callback(None)
+            peer_lookups = [
+                s for s in seen
+                if "json_each" in s and "c.asserter_keyid = " in s
+            ]
+            assert len(peer_lookups) == 1, (
+                f"expected one peer lookup, traced {peer_lookups}"
+            )
+            details = " | ".join(
+                r["detail"] for r in
+                g._conn.execute("EXPLAIN QUERY PLAN " + peer_lookups[0])
+            )
+        assert "idx_claims_asserter_keyid" in details, (
+            f"peer lookup is not keyed on the validator: {details}"
+        )
+
+    def test_gate_reads_supports_json_not_the_rebuildable_cache(
+        self, tmp_path: Path,
+    ) -> None:
+        """A missing reverse-edge row must not clear the refusal. The cache is
+        unsigned and its staleness check only counts claims, so a dropped edge
+        goes unnoticed; this gate reads the signed supports_json instead, where
+        a lost peer cannot open a promotion.
+        """
+        from mareforma.db import SelfValidationError
+
+        sa, sb = _two_signers(tmp_path)
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        pem_b = _signing.public_key_to_pem(sb.public_key())
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            g.enroll_validator(pem_b, identity="b")
+            up = g.assert_claim("anchor", generated_by="seed", seed=True)
+            rep = g.assert_claim("A", supports=[up], generated_by="lab_a", signer=sa)
+            peer = g.assert_claim(
+                "B", supports=[up], generated_by="lab_b", signer=sb)
+            g._conn.execute(
+                "DELETE FROM supports_cache.claim_supports WHERE claim_id = ?",
+                (peer,),
+            )
+            g._conn.commit()
+
+        sb_key = tmp_path / "_signer_b.key"
+        with mareforma.open(tmp_path, key_path=sb_key) as g:
+            with pytest.raises(SelfValidationError):
+                g.validate(rep)
+
 
 # ===========================================================================
 # Trust-layer counting agrees with promotion on the asserter_keyid axis
