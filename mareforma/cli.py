@@ -477,7 +477,7 @@ def status_cmd(as_json: bool) -> None:
     try:
         conn = open_db(root)
         try:
-            report = compute_health(root, conn)
+            report = compute_health(conn)
         finally:
             conn.close()
     except (DatabaseError, sqlite3.DatabaseError) as exc:

@@ -34,7 +34,7 @@ from ._canonical import canonicalize
 # Version of the trust-map shape. Bound into the rendered record so a consumer
 # knows which property set + tier semantics produced it, and a future revision
 # is distinguishable rather than silently reinterpreted.
-TRUST_MAP_VERSION = "v0.3.10"
+TRUST_MAP_VERSION = "v0.3.11"
 
 # Observed-grounding axis versions KNOWN to carry the verdict↔citation binding.
 # An ALLOWLIST, not a denylist: only a GROUNDED verdict stamped with one of these
@@ -463,14 +463,11 @@ def build_trust_map(
     conn,
     claim_id: str,
     *,
-    single_domain: "bool | None" = None,
     reexec_record: "dict | None" = None,
 ) -> "TrustMap | None":
     """Build the trust map for a stored claim, or ``None`` if it does not exist.
 
-    ``conn`` is an open graph connection. ``single_domain`` may be passed to
-    avoid a redundant validator-topology read when the caller already has it;
-    when ``None`` it is read from the graph. ``reexec_record`` optionally carries
+    ``conn`` is an open graph connection. ``reexec_record`` optionally carries
     a re-execution faithfulness verdict (from :meth:`mareforma.reexec.ReexecResult.to_map_record`)
     to place on the map's PROXY-tier faithfulness axis; when omitted the axis
     reads ``not present``.
@@ -480,16 +477,9 @@ def build_trust_map(
     claim = get_claim(conn, claim_id)
     if claim is None:
         return None
-    if single_domain is None:
-        from mareforma import validators as _validators
+    from mareforma import validators as _validators
 
-        n_roots = len(_validators.enrollment_roots(conn))
-    else:
-        # Explicit override (a caller that already knows the topology): the bool
-        # maps to a representative count, a single domain is one root, "not
-        # single" is two. A zero-root graph is only reached via the graph read
-        # above, where its distinct three-way handling matters.
-        n_roots = 1 if single_domain else 2
+    n_roots = len(_validators.enrollment_roots(conn))
     has_inclusion = _has_rekor_inclusion(conn, claim_id)
     # Attributability must reflect an ACTUAL signature check, not the promotion
     # gate: get_claim's ``verified`` passes PRELIMINARY rows through True without

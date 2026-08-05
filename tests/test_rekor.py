@@ -1313,6 +1313,15 @@ class TestRekorUrlValidation:
         with pytest.raises(_signing.SigningError):
             _signing.validate_rekor_url(f"https://{name}{suffix}/api/v1")
 
+    def test_base10_hostname_regex_is_gone(self):
+        """The base-10-only hostname regex the radix-aware guard replaced
+        must not linger in the package namespace. It matches the decimal
+        form without classifying it and misses the hex form entirely, so
+        reaching for it reintroduces the bypass."""
+        assert not hasattr(_signing, "_NUMERIC_HOSTNAME_RE")
+        with pytest.raises(_signing.SigningError):
+            _signing.validate_rekor_url("http://2130706433/api/v1/log/entries")
+
     def test_https_dns_hostname_accepted(self, tmp_path):
         # DNS hostnames are allowed, TLS to the resolved host is the
         # actual authentication.

@@ -71,7 +71,6 @@ import _thread
 from typing import Any
 
 from . import _scope
-from ._verdict import GroundingVerdict  # noqa: F401  (re-exported convenience)
 
 # Read modes for open(): a mode without 'w'/'x'/'a' and without '+' truncation
 # intent is an ingress. We record any mode that can read ('r', 'rb', 'r+', ...).

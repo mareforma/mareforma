@@ -73,9 +73,6 @@ _REKOR_USER_AGENT = (
 _MAX_REKOR_RESPONSE_SIZE = 64 * 1024
 
 
-_NUMERIC_HOSTNAME_RE = re.compile(r"^[0-9.]+$")
-
-
 def _b64_decode_tolerant(s: str) -> Optional[bytes]:
     """Decode a base64 string accepting both standard and URL-safe alphabets,
     with or without padding.

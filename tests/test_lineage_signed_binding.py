@@ -356,3 +356,13 @@ class TestV1DowngradeGuard:
         # lines are soft: the count rests at the single-line floor, never 2.
         assert eff["number"] == 1
         assert eff["soft"] is True
+
+
+class TestNoUnauthenticatedKeyHelper:
+    def test_raw_column_model_key_helper_is_gone(self) -> None:
+        """No helper may key independence off the raw column. One that does is
+        the forge this module closes, and it is the shorter call a future
+        caller reaches for first."""
+        from mareforma.trust import _store
+
+        assert not hasattr(_store, "_line_model_key")

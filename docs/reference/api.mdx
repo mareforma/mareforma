@@ -1072,7 +1072,8 @@ against the base on its own and the effect is the largest move, so opposing
 perturbations do not cancel; `perturbation_effects` carries one effect per
 perturbation, and their count widens the threshold as `multiplicity` does.
 `reconcile(grounding, influence)` relates the observer's flow verdict to the
-oracle's influence verdict.
+oracle's influence verdict and returns a `ReconcileResult` carrying the
+`relation` and a `reason`.
 
 ### `summarize(verdicts) -> GroundingReport`
 

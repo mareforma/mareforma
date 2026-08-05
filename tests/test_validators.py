@@ -17,6 +17,7 @@ Covers:
 from __future__ import annotations
 
 import base64
+import inspect
 import json
 from pathlib import Path
 
@@ -45,6 +46,21 @@ class TestAutoEnrollRoot:
             assert row["keyid"] == keyid
             assert row["enrolled_by_keyid"] == keyid  # self-signed root
             assert row["identity"] == "root"
+
+    def test_graph_takes_no_root_identity_knob(self, tmp_path: Path) -> None:
+        """The root label is fixed, so the constructor advertises no override.
+
+        mareforma.open() is the only sanctioned construction site and it never
+        forwarded a label, so the parameter promised a configurable root
+        identity no caller could reach."""
+        from mareforma._graph import EpistemicGraph
+
+        params = inspect.signature(EpistemicGraph.__init__).parameters
+        assert "signer_identity" not in params
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            keyid = _signing.public_key_id(graph._signer.public_key())
+            assert _validators.get_validator(graph._conn, keyid)["identity"] == "root"
 
     def test_reopen_with_same_key_is_idempotent(self, tmp_path: Path) -> None:
         key_path = _bootstrap_key(tmp_path)

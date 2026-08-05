@@ -41,7 +41,7 @@ class HealthReport:
     rationale: str = ""
 
 
-def compute_health(root: Path, conn: sqlite3.Connection) -> HealthReport:
+def compute_health(conn: sqlite3.Connection) -> HealthReport:
     """Build a HealthReport from graph.db.
 
     Never raises. On a SQLite read failure the report's traffic light

@@ -8,6 +8,7 @@ byte-stable, dependency-free HTML render.
 """
 from __future__ import annotations
 
+import inspect
 import json
 
 import pytest
@@ -20,6 +21,7 @@ from mareforma.trust_map import (
     TrustMap,
     TrustProperty,
     _assemble,
+    build_trust_map,
 )
 from mareforma.trust_map_html import render_html
 from tests._helpers import _claim
@@ -52,6 +54,14 @@ _SHAPE_BY_VERSION = {
         # v0.3.10 independence reports a per-finding numeric count of pairwise
         # distinct (model, data, signer) checks; v0.3.9 emitted only the closed
         # word set {UNVERIFIABLE, MULTI_ROOT}.
+        "independence_numeric": True,
+    },
+    "v0.3.11": {
+        "properties": _EXPECTED_PROPERTIES,
+        # v0.3.11 emits the same property set and independence values, but the
+        # trust_root axis is now always computed from the enrolled roots: the
+        # caller-supplied topology bool, which collapsed the three root states
+        # into two, is gone.
         "independence_numeric": True,
     },
 }
@@ -394,6 +404,17 @@ class TestZeroRootIndependence:
         tmap = _assemble(_claim(), n_roots=2, has_inclusion=False)
         assert tmap.get("independence").value == "MULTI_ROOT"
         assert tmap.get("trust_root").value == "multiple roots"
+
+    def test_builder_takes_no_topology_bool(self, graph) -> None:
+        """The builder reads the topology itself and accepts no bool override.
+        A bool cannot express the zero-root state above, and the value a caller
+        would reach for (``single_trust_domain``) is False on a rootless graph,
+        which would render "multiple roots" and drop the zero-root residual."""
+        assert "single_domain" not in inspect.signature(build_trust_map).parameters
+        cid = graph.assert_claim("real", classification="ANALYTICAL",
+                                 source_name="ds")
+        tmap = build_trust_map(graph._conn, cid)
+        assert tmap.get("trust_root").value == "single trust domain"
 
 
 class TestPreBindingAllowlist:

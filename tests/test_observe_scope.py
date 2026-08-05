@@ -459,3 +459,9 @@ def test_wrapped_loader_keeps_its_identity():
     assert open.__doc__
     assert inspect.signature(open) == real_open_sig
     assert pickle.loads(pickle.dumps(httpx.get)) is httpx.get
+
+
+def test_loaders_does_not_advertise_a_verdict_re_export():
+    # _loaders wraps loaders; the verdict type is taken from _verdict or from
+    # the package, so a name parked here would name an import site nobody keeps.
+    assert "GroundingVerdict" not in vars(_loaders)

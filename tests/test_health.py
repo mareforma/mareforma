@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import sqlite3
 from pathlib import Path
 
@@ -23,7 +24,7 @@ class TestTrafficLight:
     def test_red_when_no_claims(self, tmp_path: Path) -> None:
         conn = _open(tmp_path)
         try:
-            report = compute_health(tmp_path, conn)
+            report = compute_health(conn)
         finally:
             conn.close()
         assert report.traffic_light == "red"
@@ -33,7 +34,7 @@ class TestTrafficLight:
         conn = _open(tmp_path)
         try:
             add_claim(conn, tmp_path, "Single agent finding")
-            report = compute_health(tmp_path, conn)
+            report = compute_health(conn)
         finally:
             conn.close()
         assert report.traffic_light == "yellow"
@@ -56,7 +57,7 @@ class TestTrafficLight:
 
         conn = _open(tmp_path)
         try:
-            report = compute_health(tmp_path, conn)
+            report = compute_health(conn)
         finally:
             conn.close()
         assert report.traffic_light == "green"
@@ -90,7 +91,7 @@ class TestTrafficLight:
 
         conn = _open(tmp_path)
         try:
-            report = compute_health(tmp_path, conn)
+            report = compute_health(conn)
         finally:
             conn.close()
         assert report.traffic_light != "green"
@@ -119,7 +120,7 @@ class TestTrafficLight:
 
         conn = _open(tmp_path)
         try:
-            report = compute_health(tmp_path, conn)
+            report = compute_health(conn)
         finally:
             conn.close()
         assert report.traffic_light != "green"
@@ -137,7 +138,7 @@ class TestCounts:
         try:
             add_claim(conn, tmp_path, "Open claim", status="open")
             add_claim(conn, tmp_path, "Resolved claim", status="contested")
-            report = compute_health(tmp_path, conn)
+            report = compute_health(conn)
         finally:
             conn.close()
         assert report.claims_open == 1
@@ -165,7 +166,7 @@ class TestCounts:
 
         conn = _open(tmp_path)
         try:
-            report = compute_health(tmp_path, conn)
+            report = compute_health(conn)
         finally:
             conn.close()
         assert report.claims_contradicted == 1
@@ -179,7 +180,7 @@ class TestCounts:
         try:
             add_claim(conn, tmp_path, "Disputing finding", contradicts=["10.1038/some"])
             add_claim(conn, tmp_path, "Normal finding")
-            report = compute_health(tmp_path, conn)
+            report = compute_health(conn)
         finally:
             conn.close()
         assert report.claims_contradicted == 0
@@ -189,7 +190,7 @@ class TestCounts:
         try:
             add_claim(conn, tmp_path, "Claim 1")
             add_claim(conn, tmp_path, "Claim 2")
-            report = compute_health(tmp_path, conn)
+            report = compute_health(conn)
         finally:
             conn.close()
         assert report.support_level_breakdown.get("PRELIMINARY", 0) == 2
@@ -204,7 +205,7 @@ class TestNeverRaises:
     def test_empty_project_no_error(self, tmp_path: Path) -> None:
         conn = _open(tmp_path)
         try:
-            report = compute_health(tmp_path, conn)
+            report = compute_health(conn)
             assert isinstance(report, HealthReport)
         finally:
             conn.close()
@@ -229,7 +230,7 @@ class TestCorruptionVsEmpty:
         conn.close()
         # SELECT against a closed connection raises ProgrammingError;
         # compute_health must catch and surface ``error``.
-        report = compute_health(tmp_path, conn)
+        report = compute_health(conn)
         assert report.traffic_light == "error"
         assert "Could not read" in report.rationale
         assert "not the same as an empty graph" in report.rationale
@@ -242,7 +243,7 @@ class TestCorruptionVsEmpty:
             conn.execute("DROP TABLE claims_fts")
             conn.execute("DROP TABLE claims")
             conn.commit()
-            report = compute_health(tmp_path, conn)
+            report = compute_health(conn)
         finally:
             conn.close()
         assert report.traffic_light == "error"
@@ -253,8 +254,21 @@ class TestCorruptionVsEmpty:
         """
         conn = _open(tmp_path)
         try:
-            report = compute_health(tmp_path, conn)
+            report = compute_health(conn)
         finally:
             conn.close()
         assert report.traffic_light == "red"
         assert "No claims recorded" in report.rationale
+
+
+# ---------------------------------------------------------------------------
+# Signature
+# ---------------------------------------------------------------------------
+
+
+class TestSignature:
+    def test_snapshot_takes_only_the_connection(self) -> None:
+        """The snapshot reads the claims table and nothing on disk, so it
+        must not ask for a project root it cannot consult.
+        """
+        assert list(inspect.signature(compute_health).parameters) == ["conn"]

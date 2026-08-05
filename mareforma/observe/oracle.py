@@ -221,10 +221,6 @@ def _coerce_scalar(finding: Any) -> float:
         ) from exc
 
 
-def _default_metric(finding: Any) -> float:
-    return _coerce_scalar(finding)
-
-
 def perturbation_oracle(
     run_fn: Callable[[Any], Any],
     base_input: Any,

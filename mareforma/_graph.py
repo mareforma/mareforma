@@ -154,7 +154,6 @@ class EpistemicGraph:
         root: Path,
         *,
         signer: object | None = None,
-        signer_identity: str | None = None,
         rekor_url: str | None = None,
         require_rekor: bool = False,
         trust_insecure_rekor: bool = False,
@@ -221,7 +220,7 @@ class EpistemicGraph:
             _validators.auto_enroll_root(
                 self._conn,
                 signer,
-                identity=signer_identity or "root",
+                identity="root",
                 validator_type=validator_type,
                 root=self._root,
             )

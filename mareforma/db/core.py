@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from ..doi_resolver import is_doi
 from ._schema_sql import (  # noqa: F401
     _ADDITIVE_TABLES_SQL,
     _CLAIM_COLUMNS,
@@ -981,12 +982,9 @@ def classify_support(value: str) -> str:
     """
     if not isinstance(value, str):
         return SUPPORT_TYPE_EXTERNAL
-    # Late import, ``doi_resolver`` itself is import-light, but keep
-    # this helper free of network-y modules at module-import time.
-    from mareforma import doi_resolver as _doi
     if _is_claim_id(value):
         return SUPPORT_TYPE_CLAIM
-    if _doi.is_doi(value):
+    if is_doi(value):
         return SUPPORT_TYPE_DOI
     return SUPPORT_TYPE_EXTERNAL
 

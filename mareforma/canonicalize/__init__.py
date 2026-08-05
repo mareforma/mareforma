@@ -16,7 +16,6 @@ serial-sorted.
 from __future__ import annotations
 
 import hashlib
-import math
 import re
 import threading
 from typing import Any, Callable
@@ -54,29 +53,17 @@ def canonicalize_default(value: Any) -> bytes:
     """Default JCS-shaped canonicalizer.
 
     Non-finite floats (``NaN``, ``Inf``) have no canonical JSON form
-    under RFC 8785; this raises :class:`CanonicalizationError` with a
-    diagnostic pointer rather than the bare ``rfc8785`` error.
+    under RFC 8785, and neither do non-string keys or types JSON cannot
+    hold; ``rfc8785`` rejects all of them, and this raises
+    :class:`CanonicalizationError` with a diagnostic pointer added.
     """
-    _check_finite(value)
     try:
         return rfc8785.dumps(value)
     except rfc8785.CanonicalizationError as exc:
-        raise CanonicalizationError(str(exc)) from exc
-
-
-def _check_finite(value: Any) -> None:
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise CanonicalizationError(
-                f"non-finite floats are not byte-stable; values must be "
-                f"finite (got {value!r})"
-            )
-    elif isinstance(value, dict):
-        for v in value.values():
-            _check_finite(v)
-    elif isinstance(value, (list, tuple)):
-        for v in value:
-            _check_finite(v)
+        raise CanonicalizationError(
+            f"{exc}; values must be finite and JSON-representable "
+            f"for a byte-stable form"
+        ) from exc
 
 
 _REGISTRY: dict[str, Callable[[Any], bytes]] = {

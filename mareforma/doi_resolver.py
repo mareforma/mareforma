@@ -30,8 +30,3 @@ def is_doi(s: str) -> bool:
     reaching a consumer that builds ``https://doi.org/<value>``.
     """
     return len(s) <= _DOI_MAX_LEN and bool(_DOI_PATTERN.match(s))
-
-
-def extract_dois(values: list[str]) -> list[str]:
-    """Filter a list to only DOIs."""
-    return [v for v in values if is_doi(v)]

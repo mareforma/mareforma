@@ -152,6 +152,14 @@ def test_reconcile_opaque_is_observer_blind():
     )
 
 
+def test_reconcile_result_type_is_on_the_package_surface():
+    # Callers annotate what reconcile hands back without reaching into oracle.
+    assert "ReconcileResult" in obs.__all__
+    assert isinstance(
+        reconcile(OG.GROUNDED, OracleInfluence.INFLUENCED), obs.ReconcileResult
+    )
+
+
 # -- aggregate measurement ---------------------------------------------------
 
 def test_summarize_reports_the_split_and_opaque_trigger(tmp_path):
@@ -296,6 +304,20 @@ def test_oracle_records_the_default_scalar_reducer():
     result = perturbation_oracle(lambda x: x, 1.0, perturb=[5.0])
     assert result.reducer is scalar_reducer
     assert result.reducer.reinserts_model is False
+
+
+def test_module_offers_no_bare_metric_function():
+    """Every reduction the oracle offers is wrapped in a declared reducer.
+
+    A bare metric function would reduce a finding without a declaration, so the
+    result would carry no record of which reduction produced the number."""
+    import inspect
+
+    from mareforma.observe import oracle
+
+    bare = [name for name, member in vars(oracle).items()
+            if inspect.isfunction(member) and "metric" in name.lower()]
+    assert bare == []
 
 
 def test_oracle_records_a_declared_prose_reducer():

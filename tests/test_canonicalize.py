@@ -53,6 +53,16 @@ class TestDefaultCanonicalizer:
         with pytest.raises(CanonicalizationError):
             canonicalize_default({"a": [1, math.inf]})
 
+    @pytest.mark.parametrize("value", [{"a": [1, math.inf]}, {1: "x"}])
+    def test_rejection_carries_the_byte_stability_pointer(self, value):
+        """Every rejection says why, not just that the library refused.
+
+        A non-string key is as unrepresentable as a non-finite float, and both
+        reach the caller through the same handler."""
+        with pytest.raises(CanonicalizationError) as ei:
+            canonicalize_default(value)
+        assert "byte-stable" in str(ei.value)
+
 
 class TestRegistry:
     def test_unknown_form_raises(self):

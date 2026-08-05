@@ -56,6 +56,7 @@ from .oracle import (
     MetricReducer,
     OracleInfluence,
     OracleResult,
+    ReconcileResult,
     Reconciliation,
     declared_reducer,
     numeric_extraction_reducer,
@@ -200,6 +201,7 @@ __all__ = [
     "OracleInfluence",
     "OracleResult",
     "reconcile",
+    "ReconcileResult",
     "Reconciliation",
     # Declared metric reducer (prose findings need a stated reduction).
     "MetricReducer",

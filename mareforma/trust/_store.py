@@ -543,29 +543,6 @@ INDEPENDENCE_COUNTS_SQL = (
 )
 
 
-def _line_model_key(raw: "str | None") -> tuple:
-    """The independence model key for a stored ``model_lineage`` column value.
-
-    ``raw`` is the JSON string persisted on the evidence line, or ``None`` when
-    the finding was authored without an observed model call. A column that no
-    longer parses is treated as soft (never a fabricated distinct model).
-    """
-    # Lazy import: ``mareforma.observe`` imports ``trust._store`` (for
-    # ``is_content_addressed``), so importing the lineage helper at module top
-    # would close a cycle. By call time both modules are fully loaded.
-    from mareforma.observe._lineage import independence_model_key
-
-    if raw is None:
-        return ("absent",)
-    try:
-        lineage = json.loads(raw)
-    except (ValueError, TypeError):
-        lineage = None
-    if not isinstance(lineage, dict):
-        return ("soft",)
-    return independence_model_key(lineage)
-
-
 def _signed_model_lineage(
     conn: sqlite3.Connection,
     claim_id: str,
@@ -644,6 +621,9 @@ def _authentic_model_key(
 
     This is the model-axis parallel of :func:`_authentic_signer_keyid`.
     """
+    # Lazy import: ``mareforma.observe`` imports ``trust._store`` (for
+    # ``is_content_addressed``), so importing the lineage helper at module top
+    # would close a cycle. By call time both modules are fully loaded.
     from mareforma.observe._lineage import independence_model_key
 
     signed = _signed_model_lineage(conn, claim_id, bundle_json)
