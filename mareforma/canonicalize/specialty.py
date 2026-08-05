@@ -1,31 +1,41 @@
 """Specialty canonicalizers: domain-specific byte-stable forms.
 
 Importing this module registers ``rdkit-canonical-smiles-v1``,
-``fasta-nfc-v1``, and ``pdb-atom-sorted-v1`` with the central
+``smiles-nfc-fallback-v1``, ``fasta-nfc-v1``, ``fasta-nfc-v2``,
+``pdb-atom-sorted-v1`` and ``pdb-atom-sorted-v2`` with the central
 canonicalize registry. A claim that records its canonical form via
 ``result_canonical_form`` can then be re-canonicalised at replay time
 by the same name.
 
-The RDKit canonicaliser uses NFC string fallback when ``rdkit`` is
-unavailable. The fallback is byte-stable but NOT chemically
-canonical: tautomers and equivalent atom orderings of the same
-molecule produce different fallback bytes. Verifiers should consult
-:func:`rdkit_fallback_used` to decide whether byte equivalence on
-this form alone is sufficient evidence.
+New FASTA callers want ``fasta-nfc-v2``: ``fasta-nfc-v1`` keeps
+internal line breaks, so a re-wrapped copy of one sequence digests
+differently. New PDB callers want ``pdb-atom-sorted-v2``, which reads
+the hybrid-36 serials of a structure past 99999 atoms that v1 sorts as
+0. Both v1 forms stay registered because their bytes are already
+recorded in claims.
+
+``smiles-nfc-fallback-v1`` is the string form for hosts without
+``rdkit`` (install the ``chem`` extra to get it). It is byte-stable but
+NOT chemically canonical: tautomers and equivalent atom orderings of
+the same molecule produce different bytes. It is a separate form name
+because a name has to determine the bytes on every host.
 """
 
 from __future__ import annotations
 
 import unicodedata
 
-from mareforma.canonicalize import register_canonicalizer
+from mareforma.canonicalize import CanonicalizationError, register_canonicalizer
 
 
 __all__ = [
     "HAS_RDKIT",
     "canonicalize_fasta_nfc_v1",
+    "canonicalize_fasta_nfc_v2",
     "canonicalize_pdb_atom_sorted_v1",
+    "canonicalize_pdb_atom_sorted_v2",
     "canonicalize_rdkit_canonical_smiles_v1",
+    "canonicalize_smiles_nfc_fallback_v1",
     "rdkit_fallback_used",
 ]
 
@@ -38,27 +48,77 @@ except ImportError:
 
 
 def rdkit_fallback_used() -> bool:
-    """Return True iff the RDKit canonicaliser is in fallback mode."""
+    """Return True iff ``rdkit`` is absent, so the RDKit form refuses."""
     return not HAS_RDKIT
 
 
 def canonicalize_rdkit_canonical_smiles_v1(value: str) -> bytes:
-    """Canonical SMILES via RDKit; NFC string fallback when rdkit missing."""
+    """Canonical SMILES via RDKit. Refuses when rdkit is unavailable."""
     if not isinstance(value, str):
         raise TypeError("SMILES canonicaliser expects a string")
-    if HAS_RDKIT:  # pragma: no cover — environment-dependent
-        mol = Chem.MolFromSmiles(value)
-        if mol is None:
-            raise ValueError(f"rdkit could not parse SMILES {value!r}")
-        return Chem.MolToSmiles(mol, canonical=True).encode("utf-8")
+    if not HAS_RDKIT:
+        raise CanonicalizationError(
+            "rdkit-canonical-smiles-v1 requires rdkit; install it "
+            "(mareforma[chem]) or use smiles-nfc-fallback-v1"
+        )
+    mol = Chem.MolFromSmiles(value)  # pragma: no cover — needs rdkit
+    if mol is None:
+        raise ValueError(f"rdkit could not parse SMILES {value!r}")
+    return Chem.MolToSmiles(mol, canonical=True).encode("utf-8")
+
+
+def canonicalize_smiles_nfc_fallback_v1(value: str) -> bytes:
+    """NFC + strip of the SMILES string, UTF-8 bytes.
+
+    Byte-stable but not chemically canonical: two spellings of the same
+    molecule stay different bytes.
+    """
+    if not isinstance(value, str):
+        raise TypeError("SMILES canonicaliser expects a string")
     return unicodedata.normalize("NFC", value).strip().encode("utf-8")
 
 
 def canonicalize_fasta_nfc_v1(value: str) -> bytes:
-    """NFC + uppercase + strip trailing whitespace, UTF-8 bytes."""
+    """NFC + uppercase + strip trailing whitespace, UTF-8 bytes.
+
+    Keeps internal line breaks, so a re-wrapped or CRLF copy of one
+    record gives different bytes. Superseded by
+    :func:`canonicalize_fasta_nfc_v2`; kept because digests are already
+    recorded against these bytes.
+    """
     if not isinstance(value, str):
         raise TypeError("FASTA canonicaliser expects a string")
     return unicodedata.normalize("NFC", value).upper().strip().encode("utf-8")
+
+
+def canonicalize_fasta_nfc_v2(value: str) -> bytes:
+    """NFC, sequence lines unwrapped and uppercased, ``\\n`` endings.
+
+    Column wrap and CRLF/CR/LF carry no sequence semantics, so every
+    copy of one record canonicalises to the same bytes. Header lines
+    (``>`` and ``;``) keep their case, so two accessions differing only
+    in case stay distinct.
+    """
+    if not isinstance(value, str):
+        raise TypeError("FASTA canonicaliser expects a string")
+    result: list[str] = []
+    sequence: list[str] = []
+
+    def _flush_sequence() -> None:
+        if sequence:
+            result.append("".join(sequence))
+            sequence.clear()
+
+    for line in unicodedata.normalize("NFC", value).splitlines():
+        if line.startswith((">", ";")):
+            _flush_sequence()
+            result.append(line.strip())
+        else:
+            residues = "".join(line.split()).upper()
+            if residues:
+                sequence.append(residues)
+    _flush_sequence()
+    return ("\n".join(result) + "\n").encode("utf-8")
 
 
 _SERIAL_WIDTH = 5
@@ -125,5 +185,10 @@ def _sort_atom_blocks(value: str, serial_of) -> bytes:
 register_canonicalizer(
     "rdkit-canonical-smiles-v1", canonicalize_rdkit_canonical_smiles_v1,
 )
+register_canonicalizer(
+    "smiles-nfc-fallback-v1", canonicalize_smiles_nfc_fallback_v1,
+)
 register_canonicalizer("fasta-nfc-v1", canonicalize_fasta_nfc_v1)
+register_canonicalizer("fasta-nfc-v2", canonicalize_fasta_nfc_v2)
 register_canonicalizer("pdb-atom-sorted-v1", canonicalize_pdb_atom_sorted_v1)
+register_canonicalizer("pdb-atom-sorted-v2", canonicalize_pdb_atom_sorted_v2)

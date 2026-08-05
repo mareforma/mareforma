@@ -815,7 +815,7 @@ canonicalize({"x": 1})                          # json-c14n-v1 (RFC 8785)
 canonicalize({"x": 1}, form=DSSE_JCS_NFC_V1)    # NFC-normalising, same bytes as envelope
 ```
 
-Importing `mareforma.canonicalize` also registers the specialty forms `rdkit-canonical-smiles-v1`, `fasta-nfc-v1`, `pdb-atom-sorted-v1` via the auto-imported `specialty` submodule. RDKit canonicaliser gracefully falls back to NFC-stripped UTF-8 when `rdkit` isn't installed.
+Importing `mareforma.canonicalize` also registers the specialty forms `rdkit-canonical-smiles-v1`, `smiles-nfc-fallback-v1`, `fasta-nfc-v1`, `fasta-nfc-v2`, `pdb-atom-sorted-v1`, `pdb-atom-sorted-v2` via the auto-imported `specialty` submodule. New FASTA callers want `fasta-nfc-v2`, which absorbs column wrap and CRLF; `fasta-nfc-v1` keeps internal line breaks and stays registered only because digests are recorded against its bytes. New PDB callers want `pdb-atom-sorted-v2`, which reads the hybrid-36 serials of a structure past 99999 atoms that `pdb-atom-sorted-v1` sorts as 0. `rdkit-canonical-smiles-v1` needs `rdkit` (`pip install mareforma[chem]`) and refuses without it; a host that wants the NFC-stripped string form asks for `smiles-nfc-fallback-v1` by name, so the persisted form name says which algorithm produced the bytes.
 
 ### `mareforma.adapters.*`
 

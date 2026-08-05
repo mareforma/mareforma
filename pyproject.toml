@@ -43,6 +43,9 @@ Issues = "https://github.com/mareforma/mareforma/issues"
 clawinstitute = []  # httpx is already a core dep
 tooluniverse = []   # rfc8785 is already a core dep
 gemini = []          # read-only ingest, no platform SDK
+# Chemistry forms. rdkit-canonical-smiles-v1 refuses without rdkit
+# rather than substituting the string form under the same name.
+chem = ["rdkit>=2023.3"]
 dev = [
     "pytest>=9.0.3",
     "pytest-cov",

@@ -62,7 +62,8 @@ def compute_health(root: Path, conn: sqlite3.Connection) -> HealthReport:
         report.traffic_light = "error"
         report.rationale = (
             "Could not read claims table from graph.db "
-            f"({type(exc).__name__}: {exc}). Run `graph.restore()` or "
+            f"({type(exc).__name__}: {exc}). Run `mareforma restore` "
+            "(or `mareforma.restore(project_root)`) or "
             "investigate the .mareforma/ directory; this is not the "
             "same as an empty graph."
         )

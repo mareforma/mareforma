@@ -360,3 +360,38 @@ def test_examples_carry_no_config_file_the_package_never_reads():
         if not p.name.endswith("claims.toml")
     )
     assert stray == [], f"no reader parses {stray}"
+
+
+_GRAPH_CALL_RE = re.compile(r"graph\.([A-Za-z_][A-Za-z0-9_]*)\(")
+
+
+def _graph_calls_in_strings():
+    """Yield ``(path, lineno, name)`` for every ``graph.<name>(`` in a literal."""
+    import ast
+
+    package = ROOT / "mareforma"
+    for path in sorted(package.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+                continue
+            for match in _GRAPH_CALL_RE.finditer(node.value):
+                yield path.relative_to(ROOT), node.lineno, match.group(1)
+
+
+def test_message_strings_name_real_graph_methods():
+    """Advice text must not send an operator to a method that does not exist.
+
+    Error messages and docstrings that spell ``graph.<name>()`` are read as
+    a call to run. Every such name has to resolve on ``EpistemicGraph``, or
+    the reader gets an AttributeError at the moment they need the fix.
+    """
+    phantom = [
+        f"{path}:{lineno} -> graph.{name}()"
+        for path, lineno, name in _graph_calls_in_strings()
+        if not hasattr(mareforma.EpistemicGraph, name)
+    ]
+    assert not phantom, (
+        "message strings name methods EpistemicGraph does not have: "
+        + ", ".join(phantom)
+    )

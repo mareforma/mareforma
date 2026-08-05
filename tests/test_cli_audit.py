@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from mareforma import signing
@@ -355,6 +356,36 @@ class TestAuditSingleRun:
         # The run stopped early, so nothing can be said about the citation it
         # never reached. UNGROUNDED would claim a full observation.
         assert receipts["f2"]["grounding"] == "OPAQUE"
+
+    def test_audit_ctrl_c_during_classification_propagates(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        # The verdict loop runs after the scope closed, with no propagating
+        # exception to protect. A Ctrl-C there must kill the audit, not become
+        # an OPAQUE receipt the operator never asked for.
+        from mareforma.audit import run_audit
+        from mareforma.observe import _scope
+
+        data = tmp_path / "data.csv"
+        data.write_text("x\n1\n")
+        script = _script(tmp_path, f"open({str(data)!r}).read()\n")
+        key = _bootstrap_key(tmp_path, "auditor.key")
+        out = tmp_path / "audit-out"
+
+        def _interrupt(self, cited):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(_scope.Scope, "classify_against", _interrupt)
+
+        with pytest.raises(KeyboardInterrupt):
+            run_audit(
+                [str(script)],
+                findings_path=_mapping(tmp_path, {"f1": str(data)}),
+                out_dir=out,
+                key_path=key,
+                as_json=True,
+            )
+        assert not (out / "receipts.jsonl").exists()
 
     def test_audit_systemexit_code_is_preserved(self, tmp_path: Path) -> None:
         data = tmp_path / "data.csv"

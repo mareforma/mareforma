@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 
 from mareforma.db import add_claim, open_db
-from mareforma.health import HealthReport, compute_health
+from mareforma.health import HealthReport, _compute_traffic_light, compute_health
 
 
 def _open(tmp_path: Path) -> sqlite3.Connection:
@@ -40,24 +40,41 @@ class TestTrafficLight:
         assert "PRELIMINARY" in report.rationale
 
     def test_green_when_replicated_claim_exists(self, tmp_path: Path) -> None:
-        # Seed the upstream via the graph API (REPLICATED requires an
-        # ESTABLISHED upstream), then drop down to the db API for the
-        # rest of the test.
-        from mareforma import signing as _sig
+        # Promotion keys on two distinct non-NULL asserter_keyid values over
+        # a shared ESTABLISHED upstream, so each peer is signed with its own
+        # key. Unsigned peers stay PRELIMINARY and never reach REPLICATED.
         import mareforma
-        key = tmp_path / "k"
-        _sig.bootstrap_key(key)
+        from tests._helpers import _bootstrap_key, _two_signers
+        sa, sb = _two_signers(tmp_path)
+        key = _bootstrap_key(tmp_path, "root.key")
         with mareforma.open(tmp_path, key_path=key) as g:
             prior = g.assert_claim("prior", generated_by="seed", seed=True)
+            g.assert_claim("finding A", supports=[prior],
+                           generated_by="agent_A", signer=sa)
+            g.assert_claim("finding B", supports=[prior],
+                           generated_by="agent_B", signer=sb)
 
         conn = _open(tmp_path)
         try:
-            add_claim(conn, tmp_path, "finding A", supports=[prior], generated_by="agent_A")
-            add_claim(conn, tmp_path, "finding B", supports=[prior], generated_by="agent_B")
             report = compute_health(tmp_path, conn)
         finally:
             conn.close()
         assert report.traffic_light == "green"
+        assert report.support_level_breakdown["REPLICATED"] == 2
+
+    def test_green_when_only_replicated_claims_stand(self) -> None:
+        # REPLICATED alone is a green light: the ESTABLISHED term must not be
+        # the only thing carrying the verdict. Built directly because a graph
+        # with REPLICATED and no ESTABLISHED anchor is unreachable through
+        # the API.
+        report = HealthReport(
+            claims_open=1,
+            support_level_breakdown={"REPLICATED": 1},
+            standing_promoted=1,
+        )
+        light, rationale = _compute_traffic_light(report)
+        assert light == "green"
+        assert "replicated" in rationale.lower()
 
     def test_not_green_when_the_promoted_claim_is_retracted(
         self, tmp_path: Path,

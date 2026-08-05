@@ -1516,7 +1516,8 @@ Plus the public canonicalize registry and predicate-URI constants:
   with registered forms `json-c14n-v1` (default RFC 8785),
   `dsse-jcs-nfc-v1` (NFC-normalising, same bytes the signed
   envelope layer produces), plus specialty `rdkit-canonical-smiles-v1`
-  / `fasta-nfc-v1` / `pdb-atom-sorted-v1` registered on import of
+  / `smiles-nfc-fallback-v1` / `fasta-nfc-v1` / `fasta-nfc-v2` /
+  `pdb-atom-sorted-v1` / `pdb-atom-sorted-v2` registered on import of
   `mareforma.canonicalize`.
 - **Capability URI constants** at `mareforma.predicate_types` (also
   re-exported at the top level): `CLAIM_V1`, `TOOL_CALL_V1`,

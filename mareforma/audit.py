@@ -109,14 +109,16 @@ def _finding_verdict(scope, cited: tuple[str, ...]):
     """One finding's verdict from the shared observed evidence.
 
     Classification is pure and should not raise, but if it ever does the
-    receipt degrades to an honest OPAQUE rather than losing the finding , 
-    the same posture as the ``observe()`` teardown.
+    receipt degrades to an honest OPAQUE rather than losing the finding.
+    ``KeyboardInterrupt`` and ``SystemExit`` propagate: this loop runs after
+    the scope has closed, so an abort the operator asked for must end the
+    audit, not turn one finding OPAQUE and write the records anyway.
     """
     from mareforma.observe import GroundingVerdict, ObservedGrounding
 
     try:
         return scope.classify_against(cited)
-    except BaseException as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         return GroundingVerdict(
             grounding=ObservedGrounding.OPAQUE,
             reason=(

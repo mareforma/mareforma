@@ -384,6 +384,65 @@ class TestTOFUPin:
             )
 
 
+class TestOpenRefusesBeforeCreatingAnything:
+    """An open() that refuses must leave no project and no live handle."""
+
+    def test_pem_and_path_conflict_creates_no_project(self, tmp_path):
+        log_key = Ed25519PrivateKey.generate()
+        pem_file = tmp_path / "x.pem"
+        pem_file.write_bytes(_pubkey_pem(log_key))
+
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            mareforma.open(
+                tmp_path,
+                rekor_log_pubkey_pem=_pubkey_pem(log_key),
+                rekor_log_pubkey_path=pem_file,
+            )
+        assert not (tmp_path / ".mareforma").exists()
+
+    def test_unreadable_pubkey_path_raises_signing_error(self, tmp_path):
+        """A missing PEM file is a typed SigningError, like every other
+        pubkey failure in open(), not a bare FileNotFoundError."""
+        with pytest.raises(_signing.SigningError) as exc_info:
+            mareforma.open(
+                tmp_path,
+                rekor_log_pubkey_path=tmp_path / "absent.pem",
+            )
+        assert "absent.pem" in str(exc_info.value)
+        assert not (tmp_path / ".mareforma").exists()
+
+    def test_pin_mismatch_closes_the_connection(self, tmp_path, monkeypatch):
+        """Checks that need the open store still must not strand the
+        connection they opened when they refuse."""
+        import sqlite3
+
+        import mareforma.db as _db
+
+        opened = []
+        real_open_db = _db.open_db
+
+        def _tracking_open_db(root, *args, **kwargs):
+            conn = real_open_db(root, *args, **kwargs)
+            opened.append(conn)
+            return conn
+
+        monkeypatch.setattr(_db, "open_db", _tracking_open_db)
+
+        pin_path = tmp_path / ".mareforma" / "rekor_log_pubkey.pem"
+        pin_path.parent.mkdir(parents=True, exist_ok=True)
+        pin_path.write_bytes(_pubkey_pem(Ed25519PrivateKey.generate()))
+
+        with pytest.raises(_signing.SigningError, match="different key"):
+            mareforma.open(
+                tmp_path,
+                rekor_log_pubkey_pem=_pubkey_pem(Ed25519PrivateKey.generate()),
+            )
+
+        assert len(opened) == 1
+        with pytest.raises(sqlite3.ProgrammingError):
+            opened[0].execute("select 1")
+
+
 # ---------------------------------------------------------------------------
 # Opt-in vs opt-out, pubkey supplied vs omitted, pin behavior on first use
 # ---------------------------------------------------------------------------

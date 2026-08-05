@@ -3479,8 +3479,8 @@ def mark_claim_logged(
         raise DatabaseError(
             f"mark_claim_logged refused for claim '{claim_id}': the "
             f"existing signature_bundle on the row is malformed ({exc}). "
-            "Run graph.restore() to surface and recover from the "
-            "corruption."
+            "Run `mareforma restore` (or `mareforma.restore(project_root)`) "
+            "to surface and recover from the corruption."
         ) from exc
     if (
         envelope.get("payload") != existing_envelope.get("payload")
