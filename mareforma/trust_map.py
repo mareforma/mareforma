@@ -42,7 +42,7 @@ TRUST_MAP_VERSION = "v0.3.11"
 # hand-edited record, an older axis, or a future axis that drops binding, reads
 # as pre-binding ("citation binding not checkable"), which is the honest, fail-
 # safe default. A denylist would let an unknown/absent version overclaim as bound.
-_BINDING_AXIS_VERSIONS = frozenset({"v0.3.9"})
+_BINDING_AXIS_VERSIONS = frozenset({"v0.3.9", "v0.3.11"})
 
 # The rendered string for a GROUNDED verdict computed on a pre-binding axis. A
 # golden-file test pins this exact text; do not reword without updating it.

@@ -762,4 +762,11 @@ def verify_enrollment(validator_row: dict, parent_pubkey_pem: bytes) -> bool:
                   "enrolled_at", "enrolled_by_keyid"):
         if payload.get(field) != validator_row.get(field):
             return False
-    return True
+
+    try:
+        own_pub = _signing.public_key_from_pem(
+            base64.standard_b64decode(validator_row["pubkey_pem"]),
+        )
+    except (ValueError, TypeError, KeyError, _signing.SigningError):
+        return False
+    return validator_row["keyid"] == _signing.public_key_id(own_pub)

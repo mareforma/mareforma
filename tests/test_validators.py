@@ -580,6 +580,51 @@ class TestVerifyEnrollmentFullBinding:
             # signed identity → verify must fail.
             assert _validators.verify_enrollment(row_after, pubkey_pem) is False
 
+    def test_keyid_that_is_not_its_own_key_breaks_verify(
+        self, tmp_path: Path,
+    ) -> None:
+        """A keyid is an identity only because it is the hash of a key. A row
+        naming a keyid that is not ``public_key_id`` of its own pubkey_pem is
+        internally consistent (payload and row agree, the signature verifies),
+        so binding the fields alone accepts it and the validators table becomes
+        a keyid-to-key map anyone holding one enrolled key can extend."""
+        key = _signing.generate_keypair()
+        pubkey_pem = _signing.public_key_to_pem(key.public_key())
+        pem_b64 = base64.standard_b64encode(pubkey_pem).decode("ascii")
+        unbacked = "ab" * 32
+        now = "2026-05-12T00:00:00+00:00"
+        assert unbacked != _signing.public_key_id(key.public_key())
+        payload = {
+            "keyid": unbacked,
+            "pubkey_pem": pem_b64,
+            "identity": "peer-lab",
+            "validator_type": "human",
+            "enrolled_at": now,
+            "enrolled_by_keyid": unbacked,  # self-signed root
+        }
+        envelope = json.dumps(
+            _signing.sign_validator_enrollment(payload, key),
+            sort_keys=True, separators=(",", ":"),
+        )
+        row = {**payload, "enrollment_envelope": envelope}
+        assert _validators.verify_enrollment(row, pubkey_pem) is False
+
+        conn = open_db(tmp_path)
+        try:
+            conn.execute(
+                "INSERT INTO validators "
+                "(keyid, pubkey_pem, identity, validator_type, enrolled_at, "
+                " enrolled_by_keyid, enrollment_envelope) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (unbacked, pem_b64, "peer-lab", "human", now, unbacked,
+                 envelope),
+            )
+            conn.commit()
+            listed = _validators.list_validators_verified(conn)
+        finally:
+            conn.close()
+        assert [r["verified"] for r in listed] == [False]
+
 
 # ---------------------------------------------------------------------------
 # CLI: oversized --pubkey file is rejected before PEM parsing

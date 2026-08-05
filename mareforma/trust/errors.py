@@ -60,9 +60,13 @@ class PostHocPlanError(TrustError):
     honoring a rule registered after the run was already executing would launder
     a post-hoc plan as a pre-registration, so the core refuses it rather than
     counts it. A one-shot :meth:`EpistemicGraph.assert_finding` synthesises its
-    plan with ``preregistered=0`` and makes no such claim, so it never raises
-    this; a run that has authored no prior finding has not begun executing, so
-    nothing can post-date it.
+    plan with ``preregistered=0`` and makes no such claim, so it is exempt only
+    when that synthesised plan is the one on record: ``plan_id`` is
+    content-addressed and the flag is first-writer-wins, so a one-shot that
+    lands on a plan already registered with ``preregistered=1`` submits under
+    that claim and is refused like any other submission. A run that has
+    authored no prior finding has not begun executing, so nothing can
+    post-date it.
     """
 
 
