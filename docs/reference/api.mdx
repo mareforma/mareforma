@@ -153,7 +153,7 @@ claim_id = graph.assert_claim(
 **Raises**
 - `ValueError`: if `text` is empty, `classification` is invalid, `status` is invalid, or text exceeds 100k chars
 - `CycleDetectedError`: if `supports[]` would create a cycle (`A → ... → A`)
-- `IdempotencyConflictError`: if the same `idempotency_key` replays with a different `artifact_hash`
+- `IdempotencyConflictError`: if the same `idempotency_key` replays with any divergent semantic field (`text`, `classification`, `generated_by`, `supports`, `contradicts`, `source_name`, `artifact_hash`, `evidence`, `observed_grounding`, `original_signature_bundle`)
 - `IllegalStateTransitionError`: if a transition violates the state-machine triggers
 - `ChainIntegrityError`: if the `prev_hash` append-only chain check fails
 - `DatabaseError`: on SQLite write failure
@@ -162,27 +162,18 @@ claim_id = graph.assert_claim(
 
 #### Idempotency
 
-`idempotency_key` solves two distinct problems:
+`idempotency_key` is retry safety only.
 
-**Retry safety**: same key returns the existing `claim_id` with no INSERT. Use whenever a run may be interrupted and retried:
+**Retry safety**: same key plus matching semantic fields returns the existing `claim_id` with no INSERT. Use whenever a run may be interrupted and retried:
 
 ```python
 claim_id = graph.assert_claim("...", idempotency_key="run_abc_claim_1")
-# On retry: same claim_id returned, graph unchanged
+# On retry with the same fields: same claim_id returned, graph unchanged
 ```
 
-**Convergence convention**: two agents using the same structured key converge on the same `claim_id` even with different text, without needing explicit `supports=` links:
+**Strict contract**: a replay that supplies the same key with any divergent semantic field (`text`, `classification`, `generated_by`, `supports`, `contradicts`, `source_name`, `artifact_hash`, `evidence`, `observed_grounding`, `original_signature_bundle`) raises `IdempotencyConflictError` listing every mismatch, rather than silently dropping the new content. Use a different key or reconcile the conflict.
 
-```python
-# Lab A
-graph.assert_claim("Target T elevated (cohort_1)", idempotency_key="target_T_condition_C", generated_by="agent/a")
-# Lab B: same key, different text, different agent → same claim_id returned
-graph.assert_claim("Target T elevated (cohort_2)", idempotency_key="target_T_condition_C", generated_by="agent/b")
-```
-
-Use a structured key encoding the semantic content: `"target_T_condition_C"`, not a random run ID.
-
-A replay that supplies a different `artifact_hash` than the original raises `IdempotencyConflictError` rather than silently dropping the new hash.
+**Not a convergence mechanism**: two agents reaching the same conclusion converge through the epistemic ladder, not by sharing a key. Both cite the same `ESTABLISHED` upstream in `supports[]` and sign with distinct keys, and `REPLICATED` fires. Collapsing two authors into one row would erase the second contribution, so mareforma refuses it.
 
 ---
 
@@ -703,7 +694,7 @@ catching looks like `from mareforma import RekorInclusionError`.
 | `ScanCeilingReached` | `mareforma.db` | `query()`, `search()` | The read exhausted its scan ceiling (`max(limit * 50, 5000)` ordered rows) before collecting `limit` survivors, so the result would be short without saying so |
 | `ClaimNotFoundError` | `mareforma.db` | `validate()`, `get_claim()` callers | The claim does not exist |
 | `SignedClaimImmutableError` | `mareforma.db` | `update_claim()` | Tried to mutate a signed-payload field on a signed row |
-| `IdempotencyConflictError` | `mareforma.db` | `assert_claim()` | Idempotency-key replay with a conflicting `artifact_hash` |
+| `IdempotencyConflictError` | `mareforma.db` | `assert_claim()` | Idempotency-key replay with any conflicting semantic field (text, classification, generated_by, supports, contradicts, source_name, artifact_hash, evidence, observed_grounding, original_signature_bundle) |
 | `IllegalStateTransitionError` | `mareforma.db` | DB triggers | Transition violates the state-machine (e.g. PRELIMINARY → ESTABLISHED) |
 | `ChainIntegrityError` | `mareforma.db` | DB write | `prev_hash` append-only chain check failed |
 | `CycleDetectedError` | `mareforma.db` | `assert_claim()`, `update_claim()` | `supports[]` would form a cycle |
@@ -824,11 +815,13 @@ Importing `mareforma.canonicalize` also registers the specialty forms `rdkit-can
 
 Three opt-in adapter packages: see [Mareforma adapters](../for-agents/agents) (under the *Adapter framework* section) for full integration examples. Quick reference:
 
-| Package | Install | What it does |
-|---|---|---|
-| `mareforma.adapters.clawinstitute` | `pip install mareforma[clawinstitute]` | Workshop-event hook with HttpxClient, EventSource Protocol implementation, 3-layer content sanitisation, 8 typed exceptions. |
-| `mareforma.adapters.tooluniverse` | `pip install mareforma[tooluniverse]` | `ProvenanceToolAdapter` wraps any `mareforma.tools.Tool`; each call records a signed `tool-call:v1` claim. Container-exec class tools route to `container-exec:v1`. |
-| `mareforma.adapters.gemini` | `pip install mareforma[gemini]` | Read-only `OutputIngester` for 4 Gemini for Science capabilities. Per-capability `REQUIRED_FIELDS` validation; string payload values sanitised. |
+All three ship in the wheel and run on core dependencies, so none needs an install extra. Importing one registers its predicate URIs.
+
+| Package | What it does |
+|---|---|
+| `mareforma.adapters.clawinstitute` | Workshop-event hook with HttpxClient, EventSource Protocol implementation, 3-layer content sanitisation, 8 typed exceptions. |
+| `mareforma.adapters.tooluniverse` | `ProvenanceToolAdapter` wraps any `mareforma.tools.Tool`; each call records a signed `tool-call:v1` claim. Container-exec class tools route to `container-exec:v1`. |
+| `mareforma.adapters.gemini` | Read-only `OutputIngester` for 4 Gemini for Science capabilities. Per-capability `REQUIRED_FIELDS` validation; string payload values sanitised. |
 
 ---
 

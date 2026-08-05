@@ -20,7 +20,7 @@ Public surface:
 - :class:`ToolCallRecorder`: minimal shim around ProvenanceToolAdapter
   for the cross-adapter coexistence test (uses an in-memory demo Tool).
 
-Install: ``pip install mareforma[tooluniverse]``.
+Ships with ``pip install mareforma``; needs no install extra.
 """
 
 from __future__ import annotations

@@ -19,10 +19,17 @@ import re
 import shutil
 
 import click
+import pytest
 
 import mareforma
 import mareforma.cli as cli_module
-from mareforma.cli import cli
+from mareforma.cli import (
+    _VERIFY_FAIL,
+    _VERIFY_OK,
+    _VERIFY_UNVERIFIABLE,
+    _VERIFY_USAGE,
+    cli,
+)
 from mareforma.trust import STATUS_POLICY
 from tests._helpers import _bootstrap_key, _est, _pred, _prop, _requires_repo_checkout
 
@@ -165,6 +172,23 @@ def test_cli_module_docstring_carries_no_partial_command_index():
     )
 
 
+def test_every_verify_exit_code_is_tabled():
+    """every page tabling verify's exit codes tables all four.
+
+    A gate written from a table that stops at 2 has no branch for a usage
+    error, so a typo'd flag reads as a pass. That is the misread
+    ``_VerifyCommand`` remaps click's exit 2 to 3 to prevent, so a page
+    that omits the row hands back the hole the code closed.
+    """
+    codes = (_VERIFY_OK, _VERIFY_FAIL, _VERIFY_UNVERIFIABLE, _VERIFY_USAGE)
+    for page in (DOCS / "reference" / "cli.mdx",
+                 DOCS / "concepts" / "trust.mdx"):
+        text = page.read_text(encoding="utf-8")
+        rows = set(re.findall(r"^\| `(\d+)` \|", text, re.M))
+        missing = sorted(str(c) for c in codes if str(c) not in rows)
+        assert not missing, f"{page.name} omits verify exit code(s): {missing}"
+
+
 def test_findings_convergent_example_uses_a_distinct_signer(tmp_path):
     """the findings.mdx CONVERGENT recipe must reach CONVERGENT when run.
 
@@ -198,6 +222,229 @@ def test_findings_convergent_example_uses_a_distinct_signer(tmp_path):
     assert all("key_path" in b for b in convergent), (
         "the CONVERGENT example must open the graph under a second signing key"
     )
+
+
+def _call_arguments(text: str, name: str) -> list[str]:
+    """Return the argument text of every ``name(...)`` call in *text*."""
+    found = []
+    for match in re.finditer(rf"\b{name}\(", text):
+        depth = 1
+        for index in range(match.end(), len(text)):
+            if text[index] == "(":
+                depth += 1
+            elif text[index] == ")":
+                depth -= 1
+                if depth == 0:
+                    found.append(text[match.end():index])
+                    break
+    return found
+
+
+def test_docs_grounding_snippets_give_the_verdict_something_to_bind(tmp_path):
+    """every docs snippet passing ``grounding=`` must cite a matchable source.
+
+    The verdict is cross-checked against the finding's own citation. A
+    plain-string ``data_id`` is an opaque token, not a matchable path or
+    content address, so a snippet that omits ``data_source=`` (or
+    ``data_bytes=``) stores the verdict unbound and never exercises the gate.
+    A reader copying such a snippet signs a GROUNDED that was never checked.
+    """
+    from mareforma.observe import observe
+
+    cited = tmp_path / "trial.csv"
+    cited.write_text("a,b\n1,2\n", encoding="utf-8")
+    key = _bootstrap_key(tmp_path, "lab_a.key")
+    with mareforma.open(tmp_path, key_path=key) as graph:
+        with observe(cites=str(cited)) as obs:
+            cited.read_bytes()
+        unbound = graph.assert_finding(_prop(), _pred(), _est(),
+                                       data_id="dataset_alpha",
+                                       generated_by="analyst/model-a/lab_a",
+                                       grounding=obs.verdict)
+        bound = graph.assert_finding(_prop(), _pred(), _est(),
+                                     data_id="dataset_beta",
+                                     data_source=str(cited),
+                                     generated_by="analyst/model-a/lab_a",
+                                     grounding=obs.verdict)
+    assert "no finding citation to bind" in unbound["grounding"]["reason"]
+    assert "no finding citation to bind" not in bound["grounding"]["reason"]
+
+    unbindable = []
+    for page in sorted(DOCS.rglob("*.mdx")):
+        for block in _python_blocks(page.read_text(encoding="utf-8")):
+            for arguments in _call_arguments(block, "assert_finding"):
+                if "grounding=" not in arguments:
+                    continue
+                if "data_source=" in arguments or "data_bytes=" in arguments:
+                    continue
+                unbindable.append(str(page.relative_to(ROOT)))
+    assert not unbindable, (
+        "docs snippets bind a verdict with nothing to bind it to: "
+        + ", ".join(sorted(set(unbindable)))
+    )
+
+
+_IDEMPOTENCY_KEY_RE = re.compile(r"idempotency_key=(\"[^\"]*\"|'[^']*')")
+
+
+def test_idempotency_docs_do_not_teach_key_sharing_as_convergence(tmp_path):
+    """no page may sell ``idempotency_key`` as a cross-agent merge.
+
+    A replay carrying the same key with a divergent semantic field raises,
+    on purpose: collapsing two authors into one row would discard the
+    second contribution. So a snippet that replays a key must replay the
+    same arguments, and no prose may call the key a convergence convention.
+    """
+    key = _bootstrap_key(tmp_path, "lab_a.key")
+    with mareforma.open(tmp_path, key_path=key) as graph:
+        graph.assert_claim("Target T elevated (cohort_1)",
+                           idempotency_key="target_T_condition_C",
+                           generated_by="agent/a")
+        with pytest.raises(mareforma.IdempotencyConflictError) as raised:
+            graph.assert_claim("Target T elevated (cohort_2)",
+                               idempotency_key="target_T_condition_C",
+                               generated_by="agent/b")
+    assert "different text, generated_by" in str(raised.value)
+
+    diverging = []
+    for page in sorted(DOCS.rglob("*.mdx")):
+        for block in _python_blocks(page.read_text(encoding="utf-8")):
+            replays: dict[str, set[str]] = {}
+            for arguments in _call_arguments(block, "assert_claim"):
+                found = _IDEMPOTENCY_KEY_RE.search(arguments)
+                if found:
+                    replays.setdefault(found.group(1), set()).add(
+                        " ".join(arguments.split())
+                    )
+            if any(len(calls) > 1 for calls in replays.values()):
+                diverging.append(str(page.relative_to(ROOT)))
+    assert not diverging, (
+        "docs snippets replay one idempotency_key with different arguments, "
+        "which raises: " + ", ".join(sorted(set(diverging)))
+    )
+
+    # Example 05 installs a virtualenv beside its script, so the examples
+    # listing comes from git: a walk of the working tree hands this guard
+    # every vendored source in that tree, including files no reader wrote
+    # and some that are not UTF-8.
+    suffixes = (".mdx", ".md", ".py")
+    pages = [p for p in DOCS.rglob("*") if p.is_file() and p.suffix in suffixes]
+    pages += [p for suffix in suffixes for p in _example_files(suffix)]
+    convergence = sorted(
+        str(p.relative_to(ROOT))
+        for p in pages
+        if "convergence convention" in p.read_text(encoding="utf-8").lower()
+    )
+    assert not convergence, (
+        "pages still teach idempotency_key as a convergence convention: "
+        + ", ".join(convergence)
+    )
+
+
+def test_quickstart_python_blocks_run_end_to_end(tmp_path, monkeypatch):
+    """the quickstart must run as written, up to and including ESTABLISHED.
+
+    Promotion refuses a validator whose keyid signed the claim or any peer
+    in the converging set, so a page that promotes with the key that
+    asserted the claim ends in ``SelfValidationError`` at its last step.
+    The blocks are executed in order in a temp project; the only stub is
+    ``analyze``, the reader's own pipeline.
+    """
+    from mareforma import signing
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    signing.bootstrap_key(signing.default_key_path())
+
+    blocks = _python_blocks(
+        (DOCS / "introduction" / "quickstart.mdx").read_text(encoding="utf-8")
+    )
+    namespace: dict = {"analyze": lambda source: 1.0}
+    for block in blocks:
+        exec(compile(block, "quickstart.mdx", "exec"), namespace)
+
+    with mareforma.open(project, key_path=signing.default_key_path()) as graph:
+        assert graph.get_claim(namespace["id_a"])["support_level"] == "ESTABLISHED"
+
+
+def test_replicated_accordion_scopes_the_witnessing_policy_to_recovery(tmp_path):
+    """the witnessing policy is a recovery rule, not a live promotion gate.
+
+    ``require_rekor_witnessing()`` root-signs a policy row. The insert path
+    never reads it: convergence keys on ``transparency_logged``, which is
+    set at insert unless the graph was opened with a ``rekor_url``. So the
+    page that defines REPLICATED must name ``restore`` wherever it names
+    the policy, or it sells recovery enforcement as a live gate.
+    """
+    from mareforma import signing
+
+    root = _bootstrap_key(tmp_path, "root.key")
+    peer = signing.load_private_key(_bootstrap_key(tmp_path, "lab_b.key"))
+    with mareforma.open(tmp_path, key_path=root) as graph:
+        assert graph.require_rekor_witnessing()["rekor_required"] == 1
+        graph.enroll_validator(signing.public_key_to_pem(peer.public_key()),
+                               identity="lab_b")
+        seed = graph.assert_claim("upstream", classification="DERIVED",
+                                  generated_by="agent/seed", seed=True)
+        a = graph.assert_claim("A", supports=[seed], generated_by="lab_a")
+        b = graph.assert_claim("B", supports=[seed], generated_by="lab_b",
+                               signer=peer)
+        # No rekor_url, so both are born flagged and converge unwitnessed.
+        assert graph.get_claim(a)["transparency_logged"] == 1
+        assert graph.get_claim(a)["support_level"] == "REPLICATED"
+        assert graph.get_claim(b)["support_level"] == "REPLICATED"
+
+    trust = (DOCS / "concepts" / "trust.mdx").read_text(encoding="utf-8")
+    accordion = re.search(
+        r'<Accordion title="REPLICATED">(.*?)</Accordion>', trust, re.DOTALL
+    )
+    assert accordion, "trust.mdx has no REPLICATED accordion"
+    body = accordion.group(1)
+    if "require_rekor_witnessing" in body:
+        assert "restore" in body, (
+            "the REPLICATED accordion presents require_rekor_witnessing() as a "
+            "live convergence gate; it is enforced on restore"
+        )
+
+
+def test_quickstart_signing_key_step_is_not_labelled_optional(tmp_path):
+    """the key is optional for two sections of the page and required for the rest.
+
+    Without a loaded signer ``assert_claim`` stores an unsigned claim that
+    ``query`` hides unless the caller opts in with ``include_unverified``,
+    and ``seed=True``, ``enroll_validator`` and ``validate`` all raise,
+    since independence and promotion key on ``asserter_keyid``. The
+    bootstrap step must not read as skippable.
+    """
+    with mareforma.open(tmp_path) as graph:
+        graph.assert_claim("Cell type A receives more inhibitory input",
+                           classification="ANALYTICAL",
+                           source_name="dataset_alpha")
+        assert graph.query("cell type A", min_support="PRELIMINARY") == []
+        assert graph.query("cell type A", min_support="PRELIMINARY",
+                           include_unverified=True)
+        for call in (
+            lambda: graph.assert_claim("upstream", classification="DERIVED",
+                                       seed=True),
+            lambda: graph.enroll_validator(b"pem", identity="lab_b"),
+            lambda: graph.validate("00000000-0000-4000-8000-000000000000"),
+        ):
+            with pytest.raises(ValueError, match="signing key"):
+                call()
+
+    page = (DOCS / "introduction" / "quickstart.mdx").read_text(encoding="utf-8")
+    heading = re.search(r"^##.*signing key.*$", page, re.MULTILINE | re.IGNORECASE)
+    assert heading, "quickstart has no signing-key step"
+    assert "optional" not in heading.group(0).lower(), (
+        "the quickstart labels the signing key optional, yet its later "
+        "sections seed, enroll and validate, all of which need one"
+    )
+    step = _section(page, heading.group(0))
+    for required in ("seed", "enroll_validator", "validate", "include_unverified"):
+        assert required in step, (
+            f"the signing-key step must say {required} needs a key"
+        )
 
 
 def test_prov_o_claim_is_scoped_to_default_format():

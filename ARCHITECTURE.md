@@ -641,10 +641,9 @@ platform-specific translation lives. Three load-bearing properties:
   adapters ship platform plumbing (HTTP clients, payload shapes,
   event semantics). A new adapter never modifies `mareforma.db`,
   `_graph`, or `_canonical`; it imports them.
-- **Opt-in by install extra.** `pip install mareforma` brings the
-  core alone. `pip install mareforma[clawinstitute]` /
-  `[tooluniverse]` / `[gemini]` adds the platform's
-  runtime deps. Users pay for what they integrate.
+- **Opt-in by import.** Every adapter ships in the wheel and runs on
+  core dependencies, so none carries an install extra. An adapter costs
+  nothing until a caller imports it.
 - **Convention surface, not framework.** Each adapter exposes the
   same minimum: a constructor taking `graph=`, `predicate_uris()`
   enumerating the URIs it may emit, `emit_sample()` for the

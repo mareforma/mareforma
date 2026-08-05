@@ -83,7 +83,9 @@ The most common failure mode: two agents assert the same finding in different
 words without linking to a common upstream in `supports[]`. REPLICATED never
 fires because the graph cannot detect convergence without a shared anchor.
 
-The mitigation: `idempotency_key` as a convergence convention. Two
-agents using the same structured key converge on the same `claim_id`
-even with different text, without needing explicit `supports=` links;
-see the API reference [`assert_claim` → Idempotency](/reference/api#idempotency).
+The mitigation is the shared anchor itself: both agents cite the same
+`ESTABLISHED` upstream in `supports[]` and sign with distinct keys, and
+REPLICATED fires. Sharing an `idempotency_key` is not an alternative. It
+raises rather than merging two authors into one row, since the merge would
+discard the second contribution; see the API reference
+[`assert_claim` → Idempotency](/reference/api#idempotency).

@@ -106,9 +106,9 @@ graph.get_claim(c_analytical)             # single record by id
 ## 4. Idempotency
 
 ```python
-# Same idempotency_key → same claim_id returned, no duplicate inserted.
-# Useful for retry-safe agent loops, and a convergence convention: two agents
-# using the same key converge on one claim-id even with different phrasing.
+# Same idempotency_key and same fields → same claim_id returned, no duplicate
+# inserted. Useful for retry-safe agent loops. A replay with a different text or
+# generated_by raises IdempotencyConflictError instead of merging the two.
 KEY = "cell_A_inhibitory_dominance"
 
 id_a = graph.assert_claim(

@@ -58,10 +58,17 @@ this release as deprecated one-release aliases.
     replication. A fresh project bootstraps the chain via a *seed claim* (see
     below).
 
-    Promotion is also gated on the claim being witnessed (marked in the
-    transparency log). A project that requires witnessing
-    (`graph.require_rekor_witnessing()`) will not converge a claim until a
-    verified inclusion proof lands.
+    Promotion is also gated on the claim's `transparency_logged` flag. That
+    flag holds a claim back only when the graph was opened with a `rekor_url`
+    and submission has not yet succeeded; `graph.refresh_unsigned()` retries
+    it. With no `rekor_url` the flag is set at insert, so a signed claim
+    converges on its signature alone and the flag imposes no gate.
+
+    `graph.require_rekor_witnessing()` is a root-signed declaration, not a
+    live gate. It is enforced on recovery by
+    `restore(..., enforce_rekor_policy=True)`, which refuses to mark a signed
+    claim convergence-eligible without a verified, claim-bound inclusion
+    proof.
   </Accordion>
   <Accordion title="ESTABLISHED">
     A human (an enrolled validator) reviewed the provenance chain and
@@ -224,10 +231,12 @@ Exit codes are stable, for CI gates:
 | `0` | verified |
 | `1` | tamper or binding violation |
 | `2` | unverifiable (missing material to reach a verdict) |
+| `3` | usage error (bad flag or argument) |
 
 A missing local key makes a bundle *unverifiable* (2), never a *failure* (1):
-the auditor lacks the key, the bundle is not proven tampered. `--json` emits the
-verdict and trust map for a gate to parse.
+the auditor lacks the key, the bundle is not proven tampered. Code 3 is not a
+verdict at all, so a gate fails the build on it rather than reading it as one.
+`--json` emits the verdict and trust map for a gate to parse.
 
 ## Verify on read
 
@@ -260,7 +269,10 @@ label; the authoritative identity is the keyid embedded in the signed
 envelope.
 
 `validate()` raises `ValueError` if the claim is not yet `REPLICATED`,
-if no signer is loaded, or if the loaded signer is not enrolled.
+if no signer is loaded, or if the loaded signer is not enrolled. It raises
+`SelfValidationError` if the loaded key signed the claim itself, or signed
+any peer in the set that converged it: promotion needs a witness who
+asserted none of the lines being promoted.
 
 ## What trust is not
 

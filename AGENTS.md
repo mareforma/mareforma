@@ -1412,8 +1412,9 @@ its data provenance works. The graph does not validate it.
 ## Adapter framework (`mareforma.adapters.*`)
 
 Three opt-in adapter packages translate external AI platforms into
-signed mareforma claims. Each ships behind a matching install extra so
-the default install stays slim. All three share a convention surface
+signed mareforma claims. All three ship in the wheel and run on core
+dependencies, so none needs an install extra; an adapter costs nothing
+until a caller imports it. All three share a convention surface
 exercised by `tests/adapters/test_coexistence.py`: every adapter has
 `predicate_uris()` and `emit_sample()` so the cross-adapter test can
 verify multiple adapters writing into one graph without predicate-URI

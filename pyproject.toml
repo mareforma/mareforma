@@ -37,12 +37,9 @@ Repository = "https://github.com/mareforma/mareforma"
 Issues = "https://github.com/mareforma/mareforma/issues"
 
 [project.optional-dependencies]
-# Adapter extras. Each names the platform-specific runtime deps the
-# adapter needs. mareforma core stays slim; users opt into the
-# platforms they actually integrate with.
-clawinstitute = []  # httpx is already a core dep
-tooluniverse = []   # rfc8785 is already a core dep
-gemini = []          # read-only ingest, no platform SDK
+# No adapter extras. Every adapter runs on core deps, so an extra per
+# adapter would install nothing and still succeed, reading as "already
+# satisfied" to anyone who ran it. Adapters are opt-in by import.
 # Chemistry forms. rdkit-canonical-smiles-v1 refuses without rdkit
 # rather than substituting the string form under the same name.
 chem = ["rdkit>=2023.3"]

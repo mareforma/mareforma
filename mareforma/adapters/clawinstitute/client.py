@@ -137,15 +137,16 @@ class HttpxClient:
         timeout: float = 30.0,
         trust_insecure_base_url: bool = False,
     ) -> None:
-        # Import httpx at construction time, not per-request — the
-        # extras-install hint surfaces here instead of inside every
-        # _request call.
+        # Import httpx at construction time, not per-request, so the
+        # install hint surfaces here instead of inside every _request
+        # call. httpx is a core dep, so name it directly: no extra
+        # supplies it.
         try:
             import httpx
         except ImportError as exc:
             raise ImportError(
                 "mareforma.adapters.clawinstitute.HttpxClient requires "
-                "httpx. Install via: pip install mareforma[clawinstitute]"
+                "httpx. Install via: pip install httpx"
             ) from exc
 
         resolved_url = base_url or os.environ.get("CLAWINSTITUTE_BASE_URL")
@@ -309,7 +310,7 @@ class HttpxClient:
         ):
             raise ApiVersionError(
                 f"server reports API version {version!r}; this client "
-                f"requires {SUPPORTED_API_VERSION!r}. Upgrade the "
-                "mareforma[clawinstitute] extra to a matching release."
+                f"requires {SUPPORTED_API_VERSION!r}. Upgrade mareforma "
+                "to a matching release."
             )
         return version

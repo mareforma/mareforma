@@ -28,7 +28,7 @@ Co-Scientist debate transcripts, AlphaEvolve population-tree
 reconstruction, deterministic replay) are queued for v0.3.4+ when
 adoption signal warrants the surface area.
 
-Install: ``pip install mareforma[gemini]``.
+Ships with ``pip install mareforma``; needs no install extra.
 """
 
 from __future__ import annotations

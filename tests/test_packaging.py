@@ -187,8 +187,8 @@ def test_empty_extras_carry_a_justifying_comment():
     """an extra with no requirements is still published: ``Provides-Extra``
     rides in the wheel metadata, so ``pip install mareforma[name]`` succeeds
     silently instead of warning that the extra does not exist. That reads as
-    "already satisfied" when the truth may be "wired to nothing". The adapter
-    extras earn the empty list and say why on the line; every empty extra must.
+    "already satisfied" when the truth may be "wired to nothing". An empty
+    extra must say on its line why it earns the empty list.
     """
     data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
     extras = data["project"].get("optional-dependencies", {})
@@ -204,6 +204,41 @@ def test_empty_extras_carry_a_justifying_comment():
     assert not unexplained, (
         f"these extras install nothing and say nothing about why: {unexplained}. "
         "Delete them, or state the reason in a trailing comment"
+    )
+
+
+@_requires_repo_checkout
+def test_no_doc_prescribes_installing_an_empty_extra():
+    """``pip install mareforma[name]`` for an extra that resolves to nothing
+    installs nothing and still succeeds, so a doc that prints it teaches a
+    reader that the extra is what supplies the feature. Every install
+    instruction must name an extra that actually pulls a dependency.
+    """
+    data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    extras = data["project"].get("optional-dependencies", {})
+    empty = sorted(name for name, reqs in extras.items() if not reqs)
+    surfaces = [
+        *(REPO_ROOT / "docs").rglob("*.mdx"),
+        *(REPO_ROOT / "mareforma").rglob("*.py"),
+        *(REPO_ROOT / "examples").rglob("*.md"),
+        REPO_ROOT / "README.md",
+        REPO_ROOT / "ARCHITECTURE.md",
+        REPO_ROOT / "AGENTS.md",
+        REPO_ROOT / "CONTRIBUTING.md",
+    ]
+    # The changelog records extras as they were, including ones since removed.
+    changelog = REPO_ROOT / "docs" / "reference" / "changelog.mdx"
+    offenders = sorted(
+        f"{path.relative_to(REPO_ROOT)}: mareforma[{name}]"
+        for path in surfaces
+        if path != changelog
+        for name in empty
+        if f"pip install mareforma[{name}]" in path.read_text(encoding="utf-8")
+    )
+    assert not offenders, (
+        f"these docs tell a reader to install an extra that pulls nothing: "
+        f"{offenders}. Give the extra a dependency, or drop it and the "
+        "install instruction"
     )
 
 

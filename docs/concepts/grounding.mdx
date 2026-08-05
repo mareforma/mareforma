@@ -44,11 +44,17 @@ with observe(cites="/data/trial.csv") as obs:
 # Author the finding after the scope closes, then bind the verdict:
 graph.assert_finding(
     prop, prediction, estimate,
-    data_id="dataset_alpha",
+    data_id="sha256:...",
+    data_source="/data/trial.csv",
     generated_by="analyst/model-a/lab_a",
     grounding=obs.verdict,
 )
 ```
+
+`data_source=` names the location the finding cites, which is what the verdict is
+bound against. Omit it and pass only a free-text `data_id`, and there is nothing
+matchable to cross-check, so the verdict is stored unbound. See [Binding the
+verdict to the finding's citation](#binding-the-verdict-to-the-findings-citation).
 
 The verdict is available only after the `with` block closes, since it is a
 function of the whole span. Read `obs.verdict` after the block, not inside it.

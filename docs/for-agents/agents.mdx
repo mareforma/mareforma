@@ -193,8 +193,9 @@ from mareforma.observe import observe
 with observe(cites="/data/trial.csv") as obs:
     frame = pandas.read_csv("/data/trial.csv")   # wrapped loaders record the read
     estimate = analyze(frame)
-# author outside the scope, then sign:
-graph.assert_finding(prop, pred, estimate, data_id="dataset_alpha",
+# author outside the scope, then sign. data_source names the read location so the
+# verdict binds to a content-addressed data_id:
+graph.assert_finding(prop, pred, estimate, data_id=..., data_source="/data/trial.csv",
                      grounding=obs.verdict)
 ```
 
@@ -205,6 +206,13 @@ or uninstrumented reader could have hidden a read, so absence cannot be
 trusted). It is bound into the signed envelope, so verify-on-read re-checks it,
 and a non-`GROUNDED` verdict never counts toward `REPLICATED` promotion. A claim
 asserted without the observer carries no verdict and behaves exactly as before.
+
+The verdict must attest the finding's OWN data: its cited set is cross-checked
+against the finding's citation (the `data_id` set plus any `data_source=`), and a
+GROUNDED whose cited set is disjoint downgrades to OPAQUE (or raises with
+`grounding_strict=True`). The modal workflow cites a path in `observe(cites=...)`
+and passes that same path as `data_source=`, with a content-addressed `data_id`.
+The free-text `source_name` never participates in binding.
 
 Author inside the scope and sign after it closes: asserting a claim while its
 grounding scope is still open is refused. See [Grounding](/concepts/grounding)
@@ -550,42 +558,32 @@ and `mareforma.wrap_untrusted(...)` are public primitives.
 
 ## Idempotency
 
-`idempotency_key` solves two distinct problems.
-
-**Retry safety.** Same key → same `claim_id` returned, no duplicate
-inserted. Use this whenever an agent run may be interrupted and retried:
+`idempotency_key` is **retry safety only**. Same key + matching semantic
+fields → same `claim_id` returned, no duplicate inserted. Use this whenever
+an agent run may be interrupted and retried:
 
 ```python
 claim_id = graph.assert_claim("...", idempotency_key="run_abc_claim_1")
-# Crash and retry: same claim_id returned, graph unchanged
+# Crash and retry with the same fields: same claim_id returned, graph unchanged.
 claim_id = graph.assert_claim("...", idempotency_key="run_abc_claim_1")
 ```
 
-**Convergence convention.** Agents running the same conceptual query
-should use a structured key that encodes the semantic content of the
-claim, not a random run ID. Two agents using the same key converge on
-the same `claim_id` even with different text:
+**Strict contract.** A replay that supplies the same key with any
+divergent semantic field (`text`, `classification`, `generated_by`,
+`supports`, `contradicts`, `source_name`, `artifact_hash`,
+`evidence`, `observed_grounding`, `original_signature_bundle`) is not a retry. It is a different claim
+trying to ride someone else's key. `assert_claim` raises
+`IdempotencyConflictError` and lists every mismatched field, so a caller
+cannot believe their new state was registered when it was not. Use a
+different `idempotency_key` or reconcile the conflict.
 
-```python
-# Lab A
-graph.assert_claim(
-    "Target T is elevated in condition C (cohort_1, n=620)",
-    idempotency_key="target_T_elevated_condition_C",
-    generated_by="agent/model-a/lab_a",
-)
-
-# Lab B: same key, different text, different agent → same claim_id
-graph.assert_claim(
-    "Target T shows increased expression under condition C (cohort_2, n=580)",
-    idempotency_key="target_T_elevated_condition_C",
-    generated_by="agent/model-b/lab_b",
-)
-```
-
-**Hash conflicts raise.** A replay that supplies a different
-`artifact_hash` than the original is not a retry: it is a different
-claim that happens to share a key. `assert_claim` raises
-`IdempotencyConflictError` rather than silently dropping the new hash.
+**Not a convergence mechanism.** Two agents reaching the same conclusion
+must converge through the epistemic ladder, not by sharing a key. The
+supported pattern: both cite the same `ESTABLISHED` upstream in
+`supports[]` and sign with distinct keys, so `REPLICATED` fires
+automatically. `idempotency_key` collapsing two distinct findings into
+one row would erase the second agent's independent contribution;
+mareforma refuses that path on purpose.
 
 ---
 
@@ -644,7 +642,7 @@ graph.assert_claim("...", classification="DERIVED", supports=[upstream_id])
 
 **Treat REPLICATED as proof of truth.** Two INFERRED claims from the same LLM prior can still trigger REPLICATED if they share an ESTABLISHED upstream. Always check `classification` alongside `support_level`.
 
-**Call `graph.validate()` on a PRELIMINARY claim.** Raises `ValueError`. Also raises if no signer is loaded or the loaded signer is not an enrolled validator.
+**Call `graph.validate()` on a PRELIMINARY claim.** Raises `ValueError`. Also raises if no signer is loaded or the loaded signer is not an enrolled validator, and raises `SelfValidationError` if the loaded key signed the claim or any peer in its converging set. Promotion needs a witness who asserted none of those lines.
 
 ---
 
@@ -693,7 +691,7 @@ pipeline stages via `source_name` (any string convention works).
 
 ## Adapter framework
 
-Three opt-in adapter packages translate external AI platforms into signed mareforma claims. Each ships behind a matching install extra so the default install stays slim.
+Three opt-in adapter packages translate external AI platforms into signed mareforma claims. All three ship in the wheel and run on core dependencies, so none needs an install extra; an adapter costs nothing until a caller imports it.
 
 ### `mareforma.adapters.clawinstitute`
 
