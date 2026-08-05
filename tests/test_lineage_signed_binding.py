@@ -13,9 +13,9 @@ import json
 from pathlib import Path
 
 import mareforma
-from mareforma.trust._store import effective_independence
+from mareforma.trust._store import effective_independence, independence_counts
 from tests._helpers import (
-    _bootstrap_key, _enroll_key, _est, _pred, _prop, _verdict,
+    _bootstrap_key, _enroll_key, _est, _pred, _prop, _verdict, _wipe_db,
 )
 
 _CLAUDE = "claude-3-5-sonnet-20241022"   # COMPUTED root: claude-3-5-sonnet
@@ -147,6 +147,67 @@ class TestSignedLineageBinding:
         # lineage reads soft and cannot mint a distinct model. Count stays 1.
         assert eff["number"] == 1
         assert eff["soft"] is True
+
+
+def _same_model_pair(tmp_path: Path) -> str:
+    """Two same-model findings, distinct ENROLLED signers, distinct datasets.
+
+    The collapsed baseline the erasure tests attack: counts (1, 0), effective 1.
+    Returns the proposition's content id.
+    """
+    ka = _bootstrap_key(tmp_path, "ka.key")
+    kb = _bootstrap_key(tmp_path, "kb.key")
+    _enroll_key(tmp_path, ka, kb)
+    prop, pred = _prop(), _pred()
+    for key, data_id, run in ((ka, "ds1", "run1"), (kb, "ds2", "run2")):
+        with mareforma.open(tmp_path, key_path=key) as g:
+            g.assert_finding(
+                prop, pred, _est(), data_id=data_id, generated_by=run,
+                grounding=_verdict(_CLAUDE),
+            )
+    return prop.content_id()
+
+
+class TestErasedColumn:
+    """Erasing the unsigned column must not read as "no model call" either.
+
+    The forge direction (column rewritten to a distinct root) is covered above.
+    The absence direction is the same bypass mirrored: a NULL column would key
+    the line ``("absent",)``, which the signer axis counts per signer and, under
+    an enrolled human validator, re-keys to the human axis. The signed lineage
+    the claim still carries is the authority in both directions.
+    """
+
+    def test_stripping_the_column_from_claims_toml_does_not_inflate(
+        self, tmp_path: Path,
+    ) -> None:
+        """Deleting the ``model_lineage`` lines from claims.toml and restoring
+        must not promote a same-model pair to two independent lines. The
+        restored bundles still bind the signed lineage, so the collapse holds."""
+        cid = _same_model_pair(tmp_path)
+        toml = tmp_path / "claims.toml"
+        kept = [
+            line for line in toml.read_text().splitlines()
+            if not line.startswith("model_lineage")
+        ]
+        toml.write_text("\n".join(kept) + "\n")
+        _wipe_db(tmp_path)
+        mareforma.restore(tmp_path)
+
+        with mareforma.open(tmp_path, key_path=tmp_path / "ka.key") as g:
+            assert independence_counts(g._conn, cid) == (1, 0)
+            assert effective_independence(g._conn, cid)["number"] == 1
+
+    def test_nulling_the_column_does_not_inflate(self, tmp_path: Path) -> None:
+        """The direct-SQL form of the same erasure: wiping the denormalized
+        column leaves the signed lineage as the authority, so the same-model
+        pair stays collapsed."""
+        cid = _same_model_pair(tmp_path)
+        with mareforma.open(tmp_path, key_path=tmp_path / "ka.key") as g:
+            g._conn.execute("UPDATE evidence_lines SET model_lineage = NULL")
+            g._conn.commit()
+            assert independence_counts(g._conn, cid) == (1, 0)
+            assert effective_independence(g._conn, cid)["number"] == 1
 
 
 class TestV1DowngradeGuard:

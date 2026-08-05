@@ -520,6 +520,12 @@ def _is_human_signer(conn: sqlite3.Connection, keyid: str) -> bool:
 # regression test can pin its EXPLAIN QUERY PLAN (no full scan of
 # effect_estimates, the join stays keyed through idx_contrast_line and
 # idx_estimate_contrast).
+#
+# Only a live claim contributes a line: an editorially withdrawn claim
+# (status contested / retracted) or one a signed contradiction verdict
+# invalidated (t_invalid) is excluded, in BOTH directions. This is the same
+# predicate the REPLICATED promotion peer SELECT applies, so promotion and trust
+# counting agree, and the same exclusion query_claims applies by default.
 INDEPENDENCE_COUNTS_SQL = (
     "SELECT el.data_id AS data_id, el.model_lineage AS model_lineage, "
     " cl.generated_by AS generated_by, "
@@ -624,14 +630,16 @@ def _authentic_model_key(
     """The independence model key for a line, read from SIGNED material.
 
     The ``evidence_lines.model_lineage`` column is denormalized and unsigned, so
-    a direct/foreign writer can rewrite it to a fabricated distinct COMPUTED root
-    to inflate independence. We therefore key on the SIGNED lineage the claim's
-    envelope binds, never the raw column:
+    a direct/foreign writer can rewrite it to a fabricated distinct COMPUTED root,
+    or erase it, to inflate independence. We therefore key on the SIGNED lineage
+    the claim's envelope binds, never the raw column:
 
-    - a NULL column made no model claim → ``("absent",)`` (the legacy signer axis
-      still applies; a human line is re-keyed upstream);
-    - a present column whose claim carries an authenticated signed lineage keys on
-      that signed copy, so a forged column cannot move the count;
+    - a claim carrying an authenticated signed lineage keys on that signed copy
+      whatever the column says, so neither a forged column nor a stripped one can
+      move the count (erasing it would otherwise read as "no model call", which
+      the signer axis counts per signer);
+    - a NULL column with no signed lineage made no model claim → ``("absent",)``
+      (the legacy signer axis still applies; a human line is re-keyed upstream);
     - a present column with no authenticatable signed lineage (a v1 finding, an
       unsigned claim, or a bundle that does not verify) reads ``("soft",)``, a
       distinct model that cannot be certified, never counted.
@@ -640,11 +648,9 @@ def _authentic_model_key(
     """
     from mareforma.observe._lineage import independence_model_key
 
-    if raw_column is None:
-        return ("absent",)
     signed = _signed_model_lineage(conn, claim_id, bundle_json)
     if signed is None:
-        return ("soft",)
+        return ("absent",) if raw_column is None else ("soft",)
     return independence_model_key(signed)
 
 
@@ -768,6 +774,14 @@ def independence_counts(
     signed by an enrolled human validator counts on the human axis, the
     highest-value independent source, never folded into a model root. The two run
     axes are namespaced (``k:`` vs ``g:``) so a keyid can never alias a run label.
+
+    Only a live claim contributes: a retracted or contested claim, or one a
+    signed contradiction verdict invalidated, is excluded on both sides, so a
+    withdrawn support can drop a proposition off CONVERGENT and a withdrawn
+    refutation can drop it off REFUTED (see
+    :func:`mareforma.trust.status.compute_status`). Every such exclusion is
+    disclosed as a skipped line, so a reader can tell a proposition nobody
+    contested from one whose refutations were withdrawn.
 
     ``memo`` is an optional per-read-call cache. A proposition's counts are
     constant within one read call, so a ``query_frame`` pass that counts a

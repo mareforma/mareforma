@@ -27,7 +27,9 @@ import pytest
 import mareforma
 from mareforma import signing as _signing
 from mareforma.trust import _store
-from tests._helpers import _bootstrap_key, _pem_of, _two_signers
+from tests._helpers import (
+    _bootstrap_key, _enroll_key, _pem_of, _two_signers, _verdict,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +281,149 @@ class TestTrustCounting:
             status = g.proposition_status(prop.content_id())
         assert status["independent_support"] == 2
         assert status["status"] == "CONVERGENT"
+
+
+# ===========================================================================
+# A withdrawn or invalidated claim stops counting as a supporting line
+# ===========================================================================
+
+def _two_converging_findings(tmp_path: Path) -> dict:
+    """Two cross-model findings from distinct ENROLLED signers: CONVERGENT, 2.
+
+    Returns ``{"content_id", "a", "b", "root", "third"}``, where ``third`` is an
+    enrolled key that asserted nothing (so it may issue a verdict on the pair).
+    """
+    ka = _bootstrap_key(tmp_path, "ka.key")
+    kb = _bootstrap_key(tmp_path, "kb.key")
+    kc = _bootstrap_key(tmp_path, "kc.key")
+    _enroll_key(tmp_path, ka, kb)
+    _enroll_key(tmp_path, ka, kc, identity="third@lab.example")
+    prop, pred = _prop(), _pred()
+    findings = []
+    for key, data_id, run, model in (
+        (ka, "ds1", "run1", "claude-3-5-sonnet-20241022"),
+        (kb, "ds2", "run2", "gpt-4o-2024-08-06"),
+    ):
+        with mareforma.open(tmp_path, key_path=key) as g:
+            findings.append(g.assert_finding(
+                prop, pred, _est(), data_id=data_id, generated_by=run,
+                grounding=_verdict(model),
+            ))
+    return {
+        "content_id": prop.content_id(),
+        "a": findings[0]["claim_id"], "b": findings[1]["claim_id"],
+        "root": ka, "third": kc,
+    }
+
+
+def _contested_proposition(tmp_path: Path) -> dict:
+    """Two supports and two refutes from four distinct ENROLLED signers.
+
+    Returns ``{"content_id", "refutes", "root"}``, where ``refutes`` is the pair
+    of refuting claim_ids. The proposition reads CONTESTED, two each way.
+    """
+    from mareforma.trust import EffectEstimate, EffectType
+
+    root = _bootstrap_key(tmp_path, "k0.key")
+    prop, pred = _prop(), _pred()
+    refutes = []
+    for i, (value, model) in enumerate((
+        (-0.8, "claude-3-5-sonnet-20241022"), (-0.9, "gpt-4o-2024-08-06"),
+        (+0.8, "claude-3-5-sonnet-20241022"), (+0.9, "gpt-4o-2024-08-06"),
+    )):
+        key = root
+        if i:
+            key = _bootstrap_key(tmp_path, f"k{i}.key")
+            _enroll_key(tmp_path, root, key, identity=f"lab{i}@lab.example")
+        with mareforma.open(tmp_path, key_path=key) as g:
+            finding = g.assert_finding(
+                prop, pred, EffectEstimate(value, EffectType.SMD, p_value=0.001),
+                data_id=f"ds{i}", generated_by=f"run{i}",
+                grounding=_verdict(model),
+            )
+        if value > 0:
+            refutes.append(finding["claim_id"])
+    return {"content_id": prop.content_id(), "refutes": refutes, "root": root}
+
+
+class TestWithdrawnLinesStopCounting:
+    def test_retracted_finding_no_longer_corroborates(
+        self, tmp_path: Path,
+    ) -> None:
+        """Retraction is the documented withdrawal path, so a retracted claim
+        must stop counting as an independent supporting line: the proposition
+        falls back to PRELIMINARY and the effective number to 1."""
+        setup = _two_converging_findings(tmp_path)
+        with mareforma.open(tmp_path, key_path=setup["root"]) as g:
+            assert g.proposition_status(setup["content_id"])["status"] == "CONVERGENT"
+            g.update_claim(setup["b"], status="retracted")
+            status = g.proposition_status(setup["content_id"])
+            assert status["independent_support"] == 1
+            assert status["status"] == "PRELIMINARY"
+            assert _store.effective_independence(
+                g._conn, setup["content_id"]
+            )["number"] == 1
+
+    def test_contradicted_finding_no_longer_corroborates(
+        self, tmp_path: Path,
+    ) -> None:
+        """A signed contradiction verdict from a non-participating enrolled
+        validator invalidates the older claim (``t_invalid``). That claim must
+        stop counting too, including on the surviving sibling's trust map, which
+        would otherwise read independence 2 with nothing disclosing why."""
+        setup = _two_converging_findings(tmp_path)
+        with mareforma.open(tmp_path, key_path=setup["third"]) as g:
+            g.record_contradiction_verdict(
+                verdict_id="cv_1", member_claim_id=setup["a"],
+                other_claim_id=setup["b"], confidence={"stance": "refutes"},
+            )
+        with mareforma.open(tmp_path, key_path=setup["root"]) as g:
+            assert g.get_claim(setup["a"])["t_invalid"] is not None
+            status = g.proposition_status(setup["content_id"])
+            assert status["independent_support"] == 1
+            assert status["status"] == "PRELIMINARY"
+            assert g.trust_map(setup["b"]).get("independence").value == "1"
+
+    def test_status_flip_cannot_silently_erase_a_refutation(
+        self, tmp_path: Path,
+    ) -> None:
+        """``status`` is an unsigned column any handle holding the graph may
+        rewrite, including one carrying no key at all. Dropping the refuting
+        lines it names must therefore be disclosed: a proposition that reads
+        CONVERGENT with ``lines_skipped == 0`` after two keyless flips is a
+        manufactured consensus with nothing on the read saying so."""
+        setup = _contested_proposition(tmp_path)
+        with mareforma.open(tmp_path, key_path=setup["root"]) as g:
+            before = g.proposition_status(setup["content_id"])
+        assert before["status"] == "CONTESTED"
+        assert before["independent_refute"] == 2
+        assert before["lines_skipped"] == 0
+        with mareforma.open(tmp_path) as g:  # no key: cannot sign anything
+            for claim_id in setup["refutes"]:
+                g.update_claim(claim_id, status="contested")
+            after = g.proposition_status(setup["content_id"])
+        assert not (after["status"] == "CONVERGENT" and after["lines_skipped"] == 0)
+        assert after["lines_skipped"] == 2
+
+    def test_repeated_reads_do_not_re_record_the_same_drop(
+        self, tmp_path: Path,
+    ) -> None:
+        """A withdrawal is a state, not an event per read. ``lines_skipped``
+        carries it back on every read, so the health channel records each
+        dropped line once: an agent polling ``proposition_status`` while it
+        works must not grow ``health.jsonl`` in proportion to reads."""
+        setup = _contested_proposition(tmp_path)
+        log = tmp_path / ".mareforma" / "health.jsonl"
+        with mareforma.open(tmp_path, key_path=setup["root"]) as g:
+            for claim_id in setup["refutes"]:
+                g.update_claim(claim_id, status="retracted")
+            before = len(log.read_text(encoding="utf-8").splitlines())
+            for _ in range(10):
+                view = g.proposition_status(setup["content_id"])
+                assert view["lines_skipped"] == 2
+            after = len(log.read_text(encoding="utf-8").splitlines())
+        # One disclosure per withdrawn line, not one per line per read.
+        assert after - before == 2
 
 
 # ===========================================================================

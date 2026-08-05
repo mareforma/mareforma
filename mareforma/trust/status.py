@@ -123,6 +123,14 @@ def compute_status(independent_support: int, independent_refute: int) -> Status:
                     corroboration or independence verdict: cross-model error
                     correlation is unmodeled and is the named residual.
     - PRELIMINARY:  exactly 1 independent support, 0 independent refute.
+
+    The counts are over LIVE claims only: a claim that was retracted or
+    contested, or that a signed contradiction verdict invalidated, contributes no
+    line in either direction (see
+    :func:`mareforma.trust._store.independence_counts`). Withdrawal is therefore
+    symmetric: retracting a supporting finding can move a proposition off
+    CONVERGENT, and retracting a refuting one can move it off REFUTED, back to
+    the state the surviving evidence supports.
     """
     if independent_support < 0 or independent_refute < 0:
         raise ValueError("independence counts must be non-negative")

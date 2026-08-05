@@ -518,3 +518,226 @@ def test_restore_rebuilds_the_finding_evidence_tree(tmp_path: Path) -> None:
             "WHERE model_lineage IS NOT NULL LIMIT 1"
         ).fetchone()[0]
         assert post_lineage == pre_lineage
+
+
+def test_restore_refuses_a_second_self_signed_root(tmp_path: Path) -> None:
+    """A hand-edited claims.toml can append a second self-signed validator
+    block whose own envelope verifies. Every live write path keeps exactly one
+    root, so restore must too: two roots break the singleton-root invariant the
+    chain walk requires, and the recovered project would refuse validate() and
+    enroll_validator() for the honest root forever."""
+    victim = tmp_path / "victim"
+    attacker = tmp_path / "attacker"
+    victim.mkdir()
+    attacker.mkdir()
+
+    with mareforma.open(victim, key_path=_bootstrap_key(victim, "root.key")) as g:
+        g.assert_claim("honest finding", generated_by="x")
+    with mareforma.open(attacker, key_path=_bootstrap_key(attacker, "a.key")) as g:
+        g.assert_claim("attacker anchor", generated_by="a")
+
+    victim_toml = victim / "claims.toml"
+    data = tomllib.loads(victim_toml.read_text(encoding="utf-8"))
+    rogue = tomllib.loads(
+        (attacker / "claims.toml").read_text(encoding="utf-8")
+    )["validators"]
+    data["validators"].update(rogue)
+    victim_toml.write_text(tomli_w.dumps(data), encoding="utf-8")
+
+    _wipe_graph_db(victim)
+    with pytest.raises(RestoreError) as exc:
+        mareforma.restore(victim)
+    assert exc.value.kind == "enrollment_unverified"
+    assert "more than one self-signed root" in str(exc.value)
+    assert next(iter(rogue))[:12] in str(exc.value)
+
+
+def test_restore_refuses_a_repointed_finding_edge(tmp_path: Path) -> None:
+    """``findings.content_id`` is not part of the signed claim, so a hand-edited
+    claims.toml can re-attach another signer's genuinely signed finding to a
+    proposition it says nothing about and inflate that proposition's
+    independence count. Restore must refuse an edge whose claim text is not the
+    proposition the row points at."""
+    from tests._helpers import _est, _pred, _prop
+    from mareforma.trust import Direction, Proposition
+
+    prop, pred = _prop(), _pred()
+    other = Proposition(
+        subject="TP53", relation="affects", object="apoptosis",
+        direction=Direction.INCREASES,
+        scope={"population": "TNBC", "condition": "in vitro"},
+    )
+    root_key = _bootstrap_key(tmp_path, "root.key")
+    val_key = _bootstrap_key(tmp_path, "val.key")
+
+    with mareforma.open(tmp_path, key_path=root_key) as g:
+        g.enroll_validator(_pem_of(val_key), identity="v")
+        g.assert_finding(prop, pred, _est(), data_id="ds1", generated_by="A")
+    with mareforma.open(tmp_path, key_path=val_key) as g:
+        g.assert_finding(other, pred, _est(), data_id="ds2", generated_by="B")
+        assert g.proposition_status(prop.content_id())["status"] == "PRELIMINARY"
+
+    toml_path = tmp_path / "claims.toml"
+    data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+    for entry in data["findings"].values():
+        if entry["content_id"] == other.content_id():
+            entry["content_id"] = prop.content_id()
+    toml_path.write_text(tomli_w.dumps(data), encoding="utf-8")
+
+    _wipe_graph_db(tmp_path)
+    with pytest.raises(RestoreError) as exc:
+        mareforma.restore(tmp_path)
+    assert exc.value.kind == "claim_unverified"
+    assert "does not attest" in str(exc.value)
+
+
+_PREDICTIONS_DDL_SQL = (
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'predictions'"
+)
+_ALPHA_COLUMN_RE = re.compile(r"^[ \t]*alpha\b.*$", re.MULTILINE)
+
+# The permissive CHECK an older graph carries. Written out rather than derived
+# from the shipped DDL, so the legacy graph keeps this bound however the
+# current schema spells its own.
+_LEGACY_ALPHA_COLUMN = "    alpha REAL NOT NULL CHECK (alpha > 0 AND alpha < 1),"
+
+
+def _set_alpha_check(db_path: Path, column_sql: str) -> None:
+    """Replace the predictions alpha column definition in an existing graph.
+
+    Only the CHECK expression changes, so the stored rows still match the
+    recorded DDL. The rewrite asserts its own result: a step that leaves the
+    bound it found is a step that proves nothing.
+    """
+    import sqlite3
+
+    raw = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        ddl = raw.execute(_PREDICTIONS_DDL_SQL).fetchone()[0]
+        rewritten, count = _ALPHA_COLUMN_RE.subn(column_sql, ddl, count=1)
+        assert count == 1, f"no alpha column in the predictions DDL:\n{ddl}"
+        raw.execute("PRAGMA writable_schema=ON")
+        raw.execute(
+            "UPDATE sqlite_master SET sql = ? "
+            "WHERE type = 'table' AND name = 'predictions'",
+            (rewritten,),
+        )
+        raw.execute("PRAGMA writable_schema=RESET")
+        assert column_sql in raw.execute(_PREDICTIONS_DDL_SQL).fetchone()[0], (
+            "the alpha rewrite was inert: the graph still carries the bound it "
+            "was created with"
+        )
+    finally:
+        raw.close()
+
+
+def test_the_legacy_alpha_bound_does_not_depend_on_the_shipped_spelling(
+    tmp_path: Path,
+) -> None:
+    """The legacy step must install the older bound outright.
+
+    Deriving it from the current DDL by matching one spelling of the current
+    bound goes inert the moment that spelling changes, and an inert step leaves
+    the restore test below building a graph identical to the fresh schema.
+    """
+    key = _bootstrap_key(tmp_path, "root.key")
+    with mareforma.open(tmp_path, key_path=key):
+        pass
+    db_path = tmp_path / ".mareforma" / "graph.db"
+
+    # Stand in for a future schema that tightens alpha in its own words.
+    _set_alpha_check(
+        db_path, "    alpha REAL NOT NULL CHECK (alpha > 0 AND alpha <= 0.4),"
+    )
+    _set_alpha_check(db_path, _LEGACY_ALPHA_COLUMN)
+
+    from mareforma.db import open_db
+
+    conn = open_db(tmp_path)
+    try:
+        assert "alpha > 0 AND alpha < 1" in conn.execute(
+            _PREDICTIONS_DDL_SQL
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_restore_recovers_a_plan_registered_under_the_older_alpha_bound(
+    tmp_path: Path,
+) -> None:
+    """A graph created before alpha tightened to (0, 0.5) keeps the permissive
+    CHECK its schema was created with, so its predictions table still holds
+    alpha >= 0.5. Restore rebuilds a fresh database and replays every backed-up
+    row into it, so the fresh schema must accept whatever an existing graph
+    accepts. The bug: the tightened CHECK rejected the legacy plan, the single
+    restore transaction rolled back, and every claim in the backup was lost at
+    the one moment graph.db was already gone."""
+    from mareforma.db import _backup_claims_toml, open_db
+    from tests._helpers import _est, _pred, _prop, _verdict
+
+    key = _bootstrap_key(tmp_path, "root.key")
+    prop = _prop()
+    with mareforma.open(tmp_path, key_path=key) as g:
+        finding = g.assert_finding(
+            prop, _pred(), _est(), data_id="ds1", generated_by="run1",
+            grounding=_verdict("gpt-4o-2024-08-06", source="declared"),
+        )
+    claim_id = finding["claim_id"]
+
+    # Every statement in the schema is CREATE TABLE IF NOT EXISTS, so an
+    # existing project keeps the bound it was created with and can hold a plan
+    # the current API would refuse.
+    _set_alpha_check(tmp_path / ".mareforma" / "graph.db", _LEGACY_ALPHA_COLUMN)
+
+    conn = open_db(tmp_path)
+    try:
+        conn.execute(
+            "INSERT INTO predictions (plan_id, content_id, inference_regime, "
+            "test_type, direction_of_interest, alpha, preregistered, "
+            "registered_at) VALUES ('PL-legacy', ?, 'frequentist', "
+            "'superiority', 'decrease', 0.8, 0, '2026-01-01T00:00:00Z')",
+            (prop.content_id(),),
+        )
+        conn.commit()
+        _backup_claims_toml(conn, tmp_path)
+    finally:
+        conn.close()
+
+    _wipe_graph_db(tmp_path)
+    mareforma.restore(tmp_path)
+
+    with mareforma.open(tmp_path, key_path=key) as g:
+        assert g.get_claim(claim_id) is not None
+        assert g.proposition_status(prop.content_id()) is not None
+        assert g._conn.execute(
+            "SELECT alpha FROM predictions WHERE plan_id = 'PL-legacy'"
+        ).fetchone()[0] == 0.8
+
+
+def test_restore_names_a_rejected_trust_row_rather_than_a_bad_signature(
+    tmp_path: Path,
+) -> None:
+    """A trust-layer row the schema refuses is a broken backup, not a claim
+    whose signature failed. Reporting it as claim_unverified tells an operator
+    recovering from disk loss that their signed material was tampered with, and
+    points at no fix that would work."""
+    from tests._helpers import _est, _pred, _prop
+
+    key = _bootstrap_key(tmp_path, "root.key")
+    prop = _prop()
+    with mareforma.open(tmp_path, key_path=key) as g:
+        g.assert_finding(
+            prop, _pred(), _est(), data_id="ds1", generated_by="run1",
+        )
+
+    toml_path = tmp_path / "claims.toml"
+    data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+    for entry in data["predictions"].values():
+        entry["content_id"] = "no-such-proposition"
+    toml_path.write_text(tomli_w.dumps(data), encoding="utf-8")
+
+    _wipe_graph_db(tmp_path)
+    with pytest.raises(RestoreError) as exc:
+        mareforma.restore(tmp_path)
+    assert exc.value.kind == "trust_row_rejected"
+    assert "claims.toml" in str(exc.value)

@@ -29,8 +29,9 @@ from .core import (
     _extract_validation_signer_keyid,
     _extract_signature_bundle_keyid,
     _serialize_observed_grounding,
+    _validate_claim_text,
+    _replication_verdict_pae,
     _verdict_canonical_payload,
-    _REPLICATION_VERDICT_FIELDS,
     _CONTRADICTION_VERDICT_FIELDS,
     _TRUST_TABLE_BACKUP,
 )
@@ -375,6 +376,30 @@ def restore(
                         f"{exc}",
                         kind="enrollment_unverified",
                     ) from exc
+
+            # The per-row envelope check above is weaker than what every live
+            # write path enforces: one self-signed root, every other validator
+            # chained beneath it. A hand-edited claims.toml can carry a second
+            # self-signed block whose own envelope verifies, which would leave
+            # a table the chain walk refuses to trust at all. Re-run the live
+            # walk over the just-inserted rows.
+            _validators.invalidate_conn_cache(conn)
+            roots = _validators.enrollment_roots(conn)
+            if len(roots) > 1:
+                extra = ", ".join(f"{k[:12]}…" for k in roots[1:])
+                raise RestoreError(
+                    "claims.toml carries more than one self-signed root "
+                    f"validator (extra: {extra}). A project has exactly one "
+                    "root of trust.",
+                    kind="enrollment_unverified",
+                )
+            for keyid, _ in ordered_validators:
+                if not _validators.is_enrolled(conn, keyid):
+                    raise RestoreError(
+                        f"Validator {keyid[:12]}… does not chain back to the "
+                        "project root of trust.",
+                        kind="enrollment_unverified",
+                    )
 
             # Project policy: verify the root-signed [project_policy] envelope
             # (if present) and round-trip it into the restored graph. A present
@@ -833,6 +858,11 @@ def restore(
             # claims path, so the independence read re-authenticates it as before.
             _restore_trust_tables(conn, data)
 
+            # Refuse a finding attached to a proposition its claim never made.
+            # The edge itself is unsigned, so it is re-derived from the claim's
+            # signed text, the same posture as the REPLICATED re-derivation below.
+            _verify_finding_proposition_binding(conn)
+
             # Refuse a REPLICATED level no distinct-signer corroboration backs.
             # support_level is not signed, so this runs after the full graph +
             # verdicts are in place and re-derives the promotion invariant from
@@ -888,11 +918,16 @@ def _restore_trust_tables(conn: sqlite3.Connection, data: dict) -> None:
     and inserts each populated section. NULL-valued columns were omitted from the
     backup, so each column reads with a NULL default. The section shapes are
     validated first (restore's tamper threat model), and foreign-key or CHECK
-    violations translate to RestoreError rather than a raw IntegrityError. The
-    rows hang off finding attestation claims restore already verified, so no
-    per-row signature check is added here; the finding claim's signed
-    ``observed_grounding`` (round-tripped on the claims path) remains the
-    authority the independence read re-authenticates the model lineage against.
+    violations translate to RestoreError with kind='trust_row_rejected' rather
+    than a raw IntegrityError. That kind is deliberately not 'claim_unverified':
+    no signature was checked here, and telling an operator mid-recovery that
+    their signed material failed verification points at no fix. None
+    of these columns is signed: the finding -> proposition edge is re-derived
+    from signed material afterwards by
+    :func:`_verify_finding_proposition_binding`, and the model axis is read on
+    the finding claim's signed ``observed_grounding``, which round-trips on the
+    claims path, whether or not the replayed column survived: an edited backup
+    can drop a ``model_lineage`` entry, and the count must not move.
     """
     for section, table, pk, cols in _TRUST_TABLE_BACKUP:
         section_data = data.get(section)
@@ -917,8 +952,117 @@ def _restore_trust_tables(conn: sqlite3.Connection, data: dict) -> None:
                 ) from exc
 
 
+def _verify_plan_retirement_binding(conn: sqlite3.Connection) -> None:
+    """Refuse a restored retirement its attestation does not name.
+
+    A retirement moves the evidence under an un-runnable plan onto the plan that
+    supersedes it, and every column of the row is unsigned, so a tampered
+    claims.toml could point one somewhere else or rewrite why it was retired.
+    The triple is re-derivable from signed material: the retirement attestation's
+    ``text`` renders plan, replacement and reason (see
+    :func:`mareforma.trust._store.retirement_claim_text`), and restore verified
+    that text's signature on the claims path. A row whose claim does not render
+    it fails the whole restore (kind='claim_unverified').
+    """
+    from mareforma.trust import _store
+
+    rows = conn.execute(
+        "SELECT r.plan_id, r.superseded_by, r.reason, c.text AS claim_text "
+        "FROM plan_retirements r JOIN claims c ON c.claim_id = r.claim_id"
+    ).fetchall()
+    for r in rows:
+        expected = _store.retirement_claim_text(
+            r["plan_id"], r["superseded_by"], r["reason"],
+        )
+        if expected != r["claim_text"]:
+            raise RestoreError(
+                f"The retirement of plan {r['plan_id'][:12]}… names a "
+                "replacement or a reason its attestation claim does not; the "
+                "retirement in claims.toml was rewritten.",
+                kind="claim_unverified",
+            )
+
+
+def _verify_finding_proposition_binding(conn: sqlite3.Connection) -> None:
+    """Refuse a restored finding attached to a proposition its claim never made.
+
+    ``findings.content_id`` is not a signed field, so a tampered claims.toml can
+    re-point a genuinely signed finding at a proposition it says nothing about
+    and inflate that proposition's independence count. The edge is still
+    re-derivable from signed material: a finding claim's ``text`` is the
+    rendering of the proposition it attests. A finding whose proposition does
+    not render its own claim text is a rewritten edge and fails the whole
+    restore (kind='claim_unverified').
+    """
+    from mareforma.trust import Proposition
+
+    rows = conn.execute(
+        "SELECT f.finding_id, c.text AS claim_text, p.subject, p.relation, "
+        " p.object, p.direction, p.scope_json, p.magnitude "
+        "FROM findings f "
+        "JOIN claims c ON c.claim_id = f.claim_id "
+        "JOIN propositions p ON p.content_id = f.content_id"
+    ).fetchall()
+    for r in rows:
+        try:
+            proposition = Proposition.from_dict({
+                "subject": r["subject"],
+                "relation": r["relation"],
+                "object": r["object"],
+                "direction": r["direction"],
+                "scope": json.loads(r["scope_json"] or "{}"),
+                "magnitude": r["magnitude"],
+            })
+            expected = _validate_claim_text(proposition.text())
+        except (ValueError, TypeError) as exc:
+            raise RestoreError(
+                f"The proposition finding {r['finding_id'][:12]}… points at "
+                f"cannot be read back: {exc}",
+                kind="claim_unverified",
+            ) from exc
+        if expected != r["claim_text"]:
+            raise RestoreError(
+                f"Finding {r['finding_id'][:12]}… points at a proposition its "
+                "attestation claim does not attest; the finding edge in "
+                "claims.toml was rewritten.",
+                kind="claim_unverified",
+            )
+
+
+def _is_seed_attestation(validation_signature: str | None) -> bool:
+    """True when a row's envelope is a born-ESTABLISHED seed attestation.
+
+    A seed claim is asserted at ESTABLISHED and never passes through
+    REPLICATED, so the corroboration that step requires does not apply to it.
+    An unparseable value is not read as a seed: the caller has already verified
+    this column, and the gate's safe answer is to keep checking.
+    """
+    from mareforma import signing as _signing
+
+    try:
+        payload_type = json.loads(validation_signature or "")["payloadType"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return False
+    return payload_type == _signing.PAYLOAD_TYPE_SEED
+
+
+def _promotion_gates_pass(row: sqlite3.Row) -> bool:
+    """The own-row terms the live promotion reads, re-applied to a restored row.
+
+    ``record_replication_verdict`` records the verdict for every member of a
+    cluster and then promotes only the members that carry a signer identity, a
+    settled transparency log, and a grounding verdict that permits promotion.
+    The convergence path reads the same three of the claim it promotes.
+    """
+    return (
+        row["asserter_keyid"] is not None
+        and row["transparency_logged"] == 1
+        and _observed_grounding_promotes(row["observed_grounding"])
+    )
+
+
 def _verify_replicated_corroboration(conn: sqlite3.Connection) -> None:
-    """Refuse a restored REPLICATED level no distinct-signer corroboration backs.
+    """Refuse a restored promotion no distinct-signer corroboration backs.
 
     ``support_level`` is not a signed field, so a tampered claims.toml can flip a
     lone PRELIMINARY claim to REPLICATED while its signature still verifies. The

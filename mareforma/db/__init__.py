@@ -188,6 +188,7 @@ from .restore import (
     _verify_replicated_corroboration,
     _validate_section_shape,
     _restore_trust_tables,
+    _verify_finding_proposition_binding,
     _verify_and_insert_replication_verdict,
     _verify_and_insert_contradiction_verdict,
     _verify_and_insert_project_policy,
