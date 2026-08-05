@@ -43,7 +43,7 @@ import subprocess
 import sys
 import traceback
 from pathlib import Path
-from typing import Callable
+from typing import BinaryIO, Callable, Iterator
 
 import click
 
@@ -56,6 +56,33 @@ from mareforma.diagnose import _exit_code_of, _run_target
 RECEIPTS_FILE = "receipts.jsonl"
 RUN_RECORD_FILE = "run.json"
 ENVELOPES_DIR = "envelopes"
+
+# How a corpus child hands its records back to the parent that signs them: the
+# number of the write end of an anonymous pipe the parent opened before the
+# child started. The run directory cannot carry them, the audited target can
+# write there, and does so after the observer has finished; nor can a file,
+# the target can name any path and rewrite it on its way out.
+HANDOFF_FD_ENV = "MAREFORMA_AUDIT_HANDOFF_FD"
+
+# Reading that channel back. The nonce goes out on its own line before the
+# target starts, so it is the only thing on the stream at that point and a
+# short bound covers it. Everything after it is read in chunks: the target
+# shares the descriptor and owes it no terminator, so the observer's frame is
+# found by scanning rather than by line, and what is scanned past is discarded
+# as it goes. The frame cap only limits how much is held once the nonce marker
+# has already matched, which the target cannot make happen.
+_HANDOFF_NONCE_MAX = 64
+_HANDOFF_CHUNK = 1 << 16
+_HANDOFF_FRAME_MAX = 1 << 26
+
+# The fields a run record carries, the record built in :func:`run_audit`. The
+# parent signs what a child hands over, so it accepts exactly these: a key the
+# parent does not know is a key the observer did not write, and it must not
+# ride into a signed record. A field added to the record is added here too.
+RUN_RECORD_KEYS = frozenset({
+    "target", "exit_code", "partial", "findings", "reads", "seams",
+    "coverage", "completed", "traceback",
+})
 
 
 def load_findings(path: Path) -> dict[str, tuple[str, ...]]:

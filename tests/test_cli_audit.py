@@ -8,7 +8,10 @@ isolation; and nothing the target prints or writes enters a verdict.
 """
 from __future__ import annotations
 
+import base64
 import json
+import os
+import threading
 from pathlib import Path
 
 import pytest
