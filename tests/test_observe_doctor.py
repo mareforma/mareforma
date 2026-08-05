@@ -12,6 +12,7 @@ from click.testing import CliRunner
 
 import mareforma.observe as obs
 from mareforma.cli import cli
+from mareforma.observe import _doctor, _scope
 
 
 def test_coverage_report_lists_stdlib_and_seams():
@@ -27,6 +28,19 @@ def test_coverage_report_lists_stdlib_and_seams():
     kinds = {row["kind"] for row in report["seam_kinds"]}
     assert {"socket", "subprocess", "thread", "coverage-gap"} <= kinds
     assert report["known_bounds"]
+
+
+def test_coverage_report_names_every_seam_kind_the_classifier_records():
+    # The table is the operator's list of what can force OPAQUE, so a kind the
+    # classifier records and the table omits reads as a seam that cannot happen.
+    # Equality, not containment: the next kind added to _scope fails here.
+    report = obs.coverage_report()
+    kinds = {row["kind"] for row in report["seam_kinds"]}
+    assert kinds == set(_scope.SEAM_KINDS)
+    assert _scope.ABORT_SEAM in kinds
+    # Every kind carries a written effect, not the fail-closed placeholder.
+    assert set(_doctor._SEAM_EFFECTS) == set(_scope.SEAM_KINDS)
+    assert all(row["effect"] for row in report["seam_kinds"])
 
 
 def test_third_party_report_marks_httpx_wrapped():

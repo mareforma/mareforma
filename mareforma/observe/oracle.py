@@ -376,6 +376,17 @@ def perturbation_oracle(
             f"<= {decision_threshold:.4g}): the finding does not depend on the data"
         )
 
+    if not noise_measured:
+        # The threshold rested on a floor that was never measured. The caveat
+        # belongs to the measurement, not to the verdict it produced, so every
+        # reason carries it: a reader must be able to tell a missing floor from
+        # one measured at 0, and the reason is the line a reader reads.
+        reason += (
+            " (no noise estimate: one base run, so the floor is unmeasured "
+            "rather than measured small and run-to-run jitter is not ruled "
+            "out; raise repeats to measure it)"
+        )
+
     return OracleResult(
         influence=influence,
         effect_size=effect_size,

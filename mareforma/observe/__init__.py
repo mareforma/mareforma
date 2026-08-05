@@ -42,6 +42,7 @@ from ._verdict import (
     SeamEvent,
 )
 from .measure import (
+    GroundingAxisMismatchError,
     GroundingReport,
     IndependenceReport,
     PilotReport,
@@ -212,6 +213,7 @@ __all__ = [
     "summarize",
     "GroundingReport",
     "summarize_receipts",
+    "GroundingAxisMismatchError",
     # The independence arm of the measurement.
     "IndependenceReport",
     "summarize_independence",

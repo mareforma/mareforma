@@ -183,8 +183,32 @@ def summarize_receipts(receipts: Iterable[dict]) -> GroundingReport:
     seam kind. This reconstructs each verdict from its receipt and defers to
     :func:`summarize`, so a run that saved receipts to disk reports identically to
     one holding the live verdicts.
+
+    Raises :class:`GroundingAxisMismatchError` on a receipt stamped with a
+    different axis version. Axis versions differ in what counts as a matching
+    read, so folding one into the other's report would publish a number no
+    definition produced. Summarize each axis separately.
     """
-    return summarize(GroundingVerdict.from_receipt(r) for r in receipts)
+    return summarize(_verdict_on_this_axis(r) for r in receipts)
+
+
+def _verdict_on_this_axis(receipt: dict) -> GroundingVerdict:
+    """Reconstruct one receipt, refusing a version this axis did not define.
+
+    An UNSTAMPED receipt is read on this axis, the same default
+    :meth:`GroundingVerdict.from_receipt` applies: a hand-authored record with no
+    version claims no other definition, and one such record must not deny the
+    whole report.
+    """
+    version = receipt.get("version")
+    if version is not None and version != GROUNDING_AXIS_VERSION:
+        raise GroundingAxisMismatchError(
+            f"receipt written under grounding axis {version}, this release "
+            f"computes {GROUNDING_AXIS_VERSION}. The two disagree about which "
+            "reads match the cited set, so one report cannot mix them. "
+            "Summarize each axis separately."
+        )
+    return GroundingVerdict.from_receipt(receipt)
 
 
 @dataclass(frozen=True)

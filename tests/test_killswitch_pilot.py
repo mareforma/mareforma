@@ -114,7 +114,7 @@ def test_read_axis_killswitches_break_when_the_observer_goes_blind(
 
 def _ground_receipt(state: str, indep: dict | None = None) -> dict:
     r = {
-        "version": "v0.3.9",
+        "version": GROUNDING_AXIS_VERSION,
         "grounding": state,
         "reason": state.lower(),
         "cited_sources": ["/data/x"],

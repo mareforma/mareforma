@@ -77,10 +77,17 @@ def coverage_report() -> dict:
                 "importable": top in sys.modules or _is_importable(top),
             }
         )
+    # Described kinds first, in the order they are written; any kind the
+    # classifier records without a description still gets a row.
+    described = [k for k in _SEAM_EFFECTS if k in _scope.SEAM_KINDS]
+    rest = sorted(_scope.SEAM_KINDS.difference(_SEAM_EFFECTS))
     return {
         "stdlib_wrapped": stdlib,
         "third_party": third_party,
-        "seam_kinds": [{"kind": k, "effect": v} for k, v in _SEAM_KINDS.items()],
+        "seam_kinds": [
+            {"kind": k, "effect": _SEAM_EFFECTS.get(k, _UNNAMED_SEAM)}
+            for k in described + rest
+        ],
         "known_bounds": list(_KNOWN_BOUNDS),
     }
 

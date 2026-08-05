@@ -27,7 +27,8 @@ grounds a cited URL and a failed call never mints a model. A call to a local
 inference server is content-addressed by the served weights' digest, resolved from
 the running server through a scope-detached probe.
 
-A loader imported INSIDE an open scope is caught too, by the late-import hook.
+A loader imported INSIDE an open scope is caught too, by the late-import hook,
+whether the host used an ``import`` statement or ``importlib.import_module``.
 
 What the wrappers do not cover (``os.open``, ``mmap``, an unwrapped C-extension
 reader) is covered honestly by the audit hook's open/seam detection and the
@@ -174,7 +175,6 @@ def _make_observed_open(real_open):
                         f"open wrapper failed: {type(inner).__name__}"
                     )
             raise
-        scope = _scope.current_scope()
         if scope is None:
             return result
         try:
@@ -262,6 +262,8 @@ def _wrap_sqlite() -> None:
         _factory_passed = "factory" in kwargs or len(args) >= 5
         if not _factory_passed:
             kwargs["factory"] = _ObservedConnection
+        # Asked BEFORE the connect, which is what creates a missing database.
+        existed = _db_file_exists(database)
         conn = real_connect(database, *args, **kwargs)  # host errors propagate
         if _factory_passed:
             # The caller pinned their own connection factory, so our observing
@@ -281,6 +283,7 @@ def _wrap_sqlite() -> None:
             target = _path_str(database) or str(database)
             if isinstance(conn, _ObservedConnection):
                 conn._mf_target = target
+                conn._mf_created = not existed
         except BaseException:  # noqa: BLE001
             scope = _scope.current_scope()
             if scope is not None:
@@ -374,9 +377,14 @@ class _ObservedCursor(sqlite3.Cursor):
 
 
 class _ObservedConnection(sqlite3.Connection):
-    """Connection whose cursors observe fetches. ``_mf_target`` is the db path."""
+    """Connection whose cursors observe fetches. ``_mf_target`` is the db path.
+
+    ``_mf_created`` marks a database the connect itself brought into being, whose
+    rows can never be a read of a cited source.
+    """
 
     _mf_target = "sqlite:memory"
+    _mf_created = False
 
     def cursor(self, factory=_ObservedCursor):
         return super().cursor(factory)
@@ -523,11 +531,18 @@ def _wrap_import_hook() -> None:
     ``refresh_third_party()`` runs only at scope ENTRY, so a loader imported
     INSIDE an open scope (as diagnose and any observe() user does) would never
     be wrapped, its reads would go unseen and the finding read as a confident
-    false UNGROUNDED. Wrapping ``builtins.__import__`` closes that: when a scope
+    false UNGROUNDED. Wrapping the import entry points closes that: when a scope
     is open and one of the wrappable modules finishes importing, the third-party
     wrap re-runs. Fail-safe (any error is swallowed) and cheap when idle (a
     single contextvar read gates the whole body), so a process that never
     observes pays nothing.
+
+    Both entry points are wrapped. An ``import`` statement goes through
+    ``builtins.__import__``; ``importlib.import_module``, the idiomatic way to
+    import a name held in a variable, calls the import machinery directly and
+    never reaches the builtin. A caller that bound either name before the first
+    ``observe()`` keeps the real one, the same bound-reference bound every
+    wrapper here carries.
     """
     if "builtins.__import__" in _reals:
         return
@@ -1717,6 +1732,22 @@ def _path_str(file) -> str:
     if isinstance(file, os.PathLike):
         return os.fspath(file)
     return ""
+
+
+def _db_file_exists(database) -> bool:
+    """Whether a sqlite target already names a file on disk.
+
+    Asked before the connect, which creates a missing database. A target that
+    names no plain path (``:memory:``, a URI, an exotic type) answers True: the
+    connect created no file that could stand in for a cited source.
+    """
+    path = _path_str(database)
+    if not path or path == ":memory:" or path.startswith("file:"):
+        return True
+    try:
+        return os.path.exists(path)
+    except BaseException:  # noqa: BLE001 - an unstattable path
+        return True
 
 
 def _file_read_signal(identifier: str) -> tuple[bool, bool]:
