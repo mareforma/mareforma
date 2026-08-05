@@ -16,8 +16,8 @@ code lands.
 ```bash
 git clone https://github.com/mareforma/mareforma.git
 cd mareforma
-uv sync               # or: python -m venv .venv && pip install -e .
-pytest                # full suite must pass before any commit
+uv sync --extra dev   # or: python -m venv .venv && . .venv/bin/activate && pip install -e ".[dev]"
+uv run pytest         # full suite must pass before any commit
 ```
 
 Python ≥ 3.10. Dependencies are minimal (`click`, `tomli-w`, `tomli`,
@@ -58,7 +58,7 @@ Reporting channel and the response targets.
 
 1. Branch from `main`.
 2. Make the change with tests.
-3. `pytest`: must be green.
+3. `uv run pytest`: must be green.
 4. Self-review the full diff against the checklist below.
 5. Update any docs that describe the changed surface (`AGENTS.md`,
    `docs/reference/*.mdx`, `CHANGELOG.md`).
@@ -168,9 +168,11 @@ Rules of thumb:
   (`OSError`, `RuntimeError`, `ConnectionError`) when you need to
   test mareforma's fallback path; the assertion still lands and
   a `RuntimeWarning` surfaces.
-- Tests that need an actually-trained model must be guarded behind
-  an opt-in marker (`@pytest.mark.requires_model`) and skipped by
-  default; running the full suite must not download anything.
+- Tests that need an actually-trained model must skip unless the
+  weights are already on disk; running the full suite must not
+  download anything. A marker will not do that on its own: every
+  marker has to be registered under `[tool.pytest.ini_options]`,
+  and one `addopts` deselects needs a CI leg that selects it back.
 
 ## Tests that read repo files
 

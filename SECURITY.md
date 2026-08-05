@@ -139,6 +139,7 @@ Defects in any of these are P0 by definition. Report them.
 - DoS via pathologically large inputs to `assert_claim` (use rate
   limiting at your agent layer; mareforma will validate and reject
   but cannot prevent disk fill).
-- Network-level attacks against Crossref, DataCite, or Sigstore
-  (those are the upstreams' responsibility; mareforma's job is to
-  fail closed when they misbehave).
+- Network-level attacks against the upstreams mareforma contacts,
+  Sigstore-Rekor and the optional ClawInstitute API (those are the
+  upstreams' responsibility; mareforma's job is to fail closed when
+  they misbehave).

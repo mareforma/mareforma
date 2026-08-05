@@ -62,6 +62,8 @@ from tests._helpers import _requires_repo_checkout
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 PYPROJECT = REPO_ROOT / "pyproject.toml"
+README = REPO_ROOT / "README.md"
+CONTRIBUTING = REPO_ROOT / "CONTRIBUTING.md"
 DEPENDABOT = REPO_ROOT / ".github" / "dependabot.yml"
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 TESTS_DIR = REPO_ROOT / "tests"
@@ -82,6 +84,19 @@ _KNOWN_LOCKFILES = ("uv.lock", "poetry.lock", "Pipfile.lock", "pdm.lock", "pixi.
 # the shared skipif that gates on the linked version.
 _ABOVE_FLOOR_SQL = re.compile(r"ALTER\s+TABLE\b.*\bDROP\s+COLUMN", re.IGNORECASE)
 _ABOVE_FLOOR_MARKER = "_requires_drop_column"
+
+# A module-level availability flag a test skips on, ``HAS_RDKIT`` -> ``rdkit``.
+_HAS_FLAG = re.compile(r"\bHAS_([A-Z0-9]+(?:_[A-Z0-9]+)*)\b")
+
+# Marks pytest registers itself, so the contributor guide may name one
+# without pyproject listing it.
+_PYTEST_BUILTIN_MARKERS = frozenset(
+    {"parametrize", "skip", "skipif", "xfail", "usefixtures", "filterwarnings"}
+)
+
+# A marker the contributor guide prescribes, written either as a decorator
+# or as the argument of a documented ``pytest -m`` invocation.
+_DOC_MARKER = re.compile(r"@pytest\.mark\.(\w+)|pytest\s+-m\s+'?(\w+)")
 
 
 def _build_sdist_names():
@@ -323,6 +338,42 @@ def test_deselected_markers_have_a_job_that_selects_them():
     )
 
 
+def test_markers_named_in_the_contributor_guide_are_registered():
+    """the guide prescribed ``@pytest.mark.requires_model`` under a rule that
+    the full suite must download nothing, and nothing registered or deselected
+    it: a test carrying it emits a warning and then runs, downloading weights
+    on every CI leg. A marker the guide names must be one pytest knows.
+    """
+    registered = {
+        entry.split(":", 1)[0].strip()
+        for entry in tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["tool"]["pytest"][
+            "ini_options"
+        ]["markers"]
+    }
+    named = {
+        marker or selected
+        for marker, selected in _DOC_MARKER.findall(CONTRIBUTING.read_text(encoding="utf-8"))
+    }
+    unwired = sorted(named - registered - _PYTEST_BUILTIN_MARKERS)
+    assert not unwired, (
+        f"CONTRIBUTING.md prescribes markers pyproject does not register, so "
+        f"they select and skip nothing: {unwired}"
+    )
+
+
+def test_addopts_makes_an_unregistered_marker_an_error():
+    """without ``--strict-markers`` a typo'd or never-registered marker is a
+    ``PytestUnknownMarkWarning`` in a verbose log and the test runs unguarded,
+    which is how the guide's opt-in rule stayed inert. Strict turns it into a
+    collection error.
+    """
+    ini = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["tool"]["pytest"]["ini_options"]
+    assert "--strict-markers" in ini.get("addopts", ""), (
+        "addopts must carry --strict-markers so an unregistered marker fails "
+        "collection instead of warning and running"
+    )
+
+
 def _workflow_job(workflow_name, job_name):
     """Return the body of one job block from a workflow file, or None.
 
@@ -426,6 +477,39 @@ def _package_imports():
     return names
 
 
+_FENCED_CODE = re.compile(r"^```.*?^```", re.DOTALL | re.MULTILINE)
+_HTML_URL_ATTR = re.compile(r'(?:src|srcset|href)\s*=\s*"([^"]+)"')
+_MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
+
+
+def _readme_reference_targets():
+    """Every URL the README points at, from HTML attributes and Markdown links.
+
+    Fenced code blocks are stripped before the Markdown pass so a bracketed
+    expression in an example script cannot read as a link.
+    """
+    text = README.read_text(encoding="utf-8")
+    return _HTML_URL_ATTR.findall(text) + _MARKDOWN_LINK.findall(_FENCED_CODE.sub("", text))
+
+
+def test_readme_references_nothing_by_repo_relative_path():
+    """``project.readme`` makes this file the PyPI long description, and PyPI
+    resolves relative paths against the project page, where no repo tree
+    exists. A relative wordmark renders broken and a relative doc link 404s.
+    """
+    relative = sorted(
+        {
+            target
+            for target in _readme_reference_targets()
+            if not target.startswith(("http://", "https://", "#"))
+        }
+    )
+    assert not relative, (
+        f"these README references resolve against the PyPI project page and "
+        f"404 there; make them absolute: {relative}"
+    )
+
+
 def test_every_core_dependency_is_imported():
     """a core dependency nothing imports is supply-chain surface every
     ``pip install mareforma`` pays for and no code path uses. The extras carry
@@ -441,6 +525,50 @@ def test_every_core_dependency_is_imported():
     assert not unused, (
         f"core dependencies nothing under mareforma/ imports, so every install "
         f"carries them and their transitive deps for no code path: {unused}"
+    )
+
+
+def _setup_install_commands():
+    """Every install command in the contributor guide's Setup block.
+
+    Each match stops at the next ``&&``, comment or newline, so an
+    alternative offered behind ``# or:`` is checked on its own terms.
+    """
+    text = CONTRIBUTING.read_text(encoding="utf-8")
+    _, _, block = text.partition("\n## Setup\n")
+    block, _, _ = block.partition("\n## ")
+    return re.findall(r"(?:uv sync|pip install)[^\n&#]*", block)
+
+
+def _extras_named(command):
+    """The optional-dependency extras an install command opts into."""
+    named = {
+        part.strip() for group in re.findall(r"\[([^\]]+)\]", command) for part in group.split(",")
+    }
+    return named | set(re.findall(r"--extra\s+([\w-]+)", command))
+
+
+def test_contributing_setup_installs_the_extra_that_provides_pytest():
+    """the Setup block runs pytest on the line after the install, and the same
+    file makes a green suite a hard gate twice. pytest sits in an extra, and
+    neither ``uv sync`` nor ``pip install -e .`` installs one: uv installs a
+    dependency *group* by default, never an optional-dependency extra.
+    """
+    extras = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"][
+        "optional-dependencies"
+    ]
+    provides_pytest = {
+        name
+        for name, reqs in extras.items()
+        if any(_requirement_name(req) == "pytest" for req in reqs)
+    }
+    assert provides_pytest, "no extra declares pytest; the guard has nothing to pin"
+    commands = _setup_install_commands()
+    assert commands, "the Setup block documents no install command"
+    silent = [cmd.strip() for cmd in commands if not _extras_named(cmd) & provides_pytest]
+    assert not silent, (
+        f"these documented install commands leave pytest out of the "
+        f"environment, so the next line fails: {silent}"
     )
 
 

@@ -2325,3 +2325,27 @@ def test_trust_ladder_summary_matches_the_scenarios_it_pins():
         "test_trust_ladder describes refused shapes as permitted: "
         + ", ".join(inverted)
     )
+
+
+# HTTP clients and raw sockets, the only ways a module here reaches the network.
+_NETWORK_CLIENT = re.compile(r"\b(?:httpx|requests|urllib|aiohttp|socket)\b")
+
+
+def test_security_policy_names_no_doi_registry_as_a_network_upstream():
+    """the out-of-scope list scoped network attacks against Crossref and
+    DataCite. DOI handling is format-only: ``doi_resolver`` reaches no HTTP
+    client and the assert path never resolves a DOI, so those registries are
+    an attack surface the package cannot have. Naming them invents a trust
+    boundary and hides the upstreams that do carry one.
+    """
+    resolver = (ROOT / "mareforma" / "doi_resolver.py").read_text(encoding="utf-8")
+    assert not _NETWORK_CLIENT.search(resolver), (
+        "doi_resolver reaches the network now; re-derive the upstream list in "
+        "SECURITY.md before relaxing this guard"
+    )
+    security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+    named = sorted(registry for registry in ("Crossref", "DataCite") if registry in security)
+    assert not named, (
+        f"SECURITY.md names DOI registries as network upstreams, but mareforma "
+        f"never contacts one: {named}"
+    )

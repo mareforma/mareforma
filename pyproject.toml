@@ -83,7 +83,7 @@ mareforma = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v --tb=short -m 'not sdist'"
+addopts = "-v --tb=short --strict-markers -m 'not sdist'"
 markers = [
     "adapters: tests exercising the mareforma.adapters.* namespace",
     "sdist: builds an sdist and runs the shipped suite inside it (~45s)",
