@@ -519,6 +519,42 @@ class TestFullResponseVerification:
         resp = _build_rekor_response(leaves=leaves, target_index=0, log_key=key)
         assert _signing.verify_rekor_inclusion(resp, _pubkey_pem(key), _ENVELOPE) is True
 
+    def test_base64_wrapped_checkpoint_accepted(self) -> None:
+        """Some Rekor versions return the checkpoint base64-encoded; the
+        fallback must decode and verify it, not refuse the inclusion."""
+        key = Ed25519PrivateKey.generate()
+        leaves = [f"e{i}".encode() for i in range(11)]
+        resp = _build_rekor_response(leaves=leaves, target_index=7, log_key=key)
+        proof = resp["verification"]["inclusionProof"]
+        proof["checkpoint"] = base64.standard_b64encode(
+            proof["checkpoint"].encode("utf-8")
+        ).decode("ascii")
+        assert _signing.verify_rekor_inclusion(resp, _pubkey_pem(key), _ENVELOPE) is True
+
+    def test_foreign_origin_refused_when_pinned(self) -> None:
+        """An entry from another log the same key signs is not this log's."""
+        key = Ed25519PrivateKey.generate()
+        leaves = [f"e{i}".encode() for i in range(11)]
+        resp = _build_rekor_response(
+            leaves=leaves, target_index=7, log_key=key,
+            origin="attacker.shard.test - 0001",
+        )
+        with pytest.raises(_signing.RekorInclusionError) as exc_info:
+            _signing.verify_rekor_inclusion(
+                resp, _pubkey_pem(key), _ENVELOPE,
+                expected_origin="rekor.test - 0001",
+            )
+        assert exc_info.value.reason == "checkpoint_origin_mismatch"
+
+    def test_pinned_origin_accepted(self) -> None:
+        key = Ed25519PrivateKey.generate()
+        leaves = [f"e{i}".encode() for i in range(11)]
+        resp = _build_rekor_response(leaves=leaves, target_index=7, log_key=key)
+        assert _signing.verify_rekor_inclusion(
+            resp, _pubkey_pem(key), _ENVELOPE,
+            expected_origin="rekor.test - 0001",
+        ) is True
+
     def test_root_mismatch_proof_vs_checkpoint_refused(self) -> None:
         key = Ed25519PrivateKey.generate()
         leaves = [f"e{i}".encode() for i in range(8)]

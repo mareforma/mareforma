@@ -3,7 +3,7 @@
 Coverage:
 - ``predicate_payload`` TEXT column on claims table
 - ``predicate_type`` reflective registry (``mareforma.predicates()``)
-- ``mareforma export --format=in-toto-v1|ro-crate-1.2`` CLI
+- ``mareforma.exporters.in_toto`` / ``ro_crate`` builder output
 - Public ``assert_claim(..., signer=key)`` param on EpistemicGraph
 - Per-row ``original_signature_bundle`` column
 - ``record_replication_verdict(method='signed-elo-bracket-replay')`` enum
@@ -375,11 +375,11 @@ class TestPerCallSignerOverride:
 
 
 class TestExportFormats:
-    """The CLI integration test path covers `mareforma export --format`.
+    """Shape of the interop exports behind `mareforma export --format`.
 
-    Build the format outputs by directly calling the exporter modules
-    here (CLI-shell-level testing would need a click runner; the
-    existing test_cli.py tests cover the CLI plumbing).
+    These call the exporter builders directly. The CLI branches that
+    wrap them (flag handling, default output paths, `--json`) are
+    covered by ``TestExport`` in ``tests/test_cli.py``.
     """
 
     def _seed_graph(self, tmp_path: Path) -> str:

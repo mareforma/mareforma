@@ -28,45 +28,11 @@ _TEST_REKOR_URL = "https://rekor.test.example/api/v1/log/entries"
 
 
 # Reuse the Merkle helpers from the unit-test file.
-from tests._helpers import _bootstrap_key
+from tests._helpers import _bootstrap_key, _rekor_response_for
 from tests.test_rekor_verify import (
     _merkle_root, _merkle_inclusion_path,
     _sign_checkpoint_ed25519, _sign_checkpoint_ecdsa, _pubkey_pem,
 )
-
-
-def _build_rekor_post_response(
-    *, payload_hash: str, sig_b64: str,
-    uuid: str = "abc01deadbeef02", log_index: int = 42,
-    integrated_time: int = 1700000000,
-) -> dict:
-    """The body shape Rekor returns from a POST /log/entries.
-
-    submit_to_rekor verifies the embedded record encodes OUR hash + sig
-   , the mock must mirror them back faithfully or the submit itself
-    fails before our verification path runs.
-    """
-    record = {
-        "apiVersion": "0.0.1",
-        "kind": "hashedrekord",
-        "spec": {
-            "data": {"hash": {"algorithm": "sha256", "value": payload_hash}},
-            "signature": {
-                "content": sig_b64,
-                "publicKey": {"content": "<not-checked>"},
-            },
-        },
-    }
-    encoded = base64.standard_b64encode(
-        json.dumps(record, separators=(",", ":")).encode("utf-8"),
-    ).decode("ascii")
-    return {
-        uuid: {
-            "body": encoded,
-            "integratedTime": integrated_time,
-            "logIndex": log_index,
-        }
-    }
 
 
 def _build_rekor_get_response_with_proof(
@@ -138,7 +104,7 @@ def _wire_rekor_mock(
         spec = body["spec"]
         hash_value = spec["data"]["hash"]["value"]
         sig_content = spec["signature"]["content"]
-        body_dict = _build_rekor_post_response(
+        body_dict = _rekor_response_for(
             payload_hash=hash_value, sig_b64=sig_content,
             uuid=uuid, log_index=log_index,
         )
@@ -157,13 +123,9 @@ def _wire_rekor_mock(
         )
         if override_root is not None:
             # Mutate the checkpoint to sign a different root.
-            decoded = base64.standard_b64decode(full[uuid]["body"])
-            forged_leaves = [f"forged-{i}".encode() for i in range(11)]
-            forged_leaves[log_index] = decoded
-            new_root = _merkle_root(forged_leaves) if override_root == b"REGEN" else override_root
             cp = sign_fn(
                 origin="rekor.test - 0001", tree_size=11,
-                root_hash=new_root, signer_name="rekor.test", key=log_key,
+                root_hash=override_root, signer_name="rekor.test", key=log_key,
             )
             full[uuid]["verification"]["inclusionProof"]["checkpoint"] = cp
             # Leave the proof's hashes pointing at the real root, so the
@@ -183,6 +145,38 @@ def _wire_rekor_mock(
         url=f"{_TEST_REKOR_URL}/{uuid}",
         is_reusable=True, is_optional=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# The hostile-checkpoint wiring itself
+# ---------------------------------------------------------------------------
+
+
+class TestWireRekorMockOverrideRoot:
+    @pytest.mark.parametrize("forged_root", [bytes(range(32)), b"REGEN"])
+    def test_checkpoint_signs_the_given_root_not_the_proof_root(
+        self, httpx_mock, forged_root,
+    ):
+        """``override_root`` is signed as-is, no byte string is special,
+        and the proof's hashes keep pointing at the real root."""
+        import httpx
+
+        log_key = Ed25519PrivateKey.generate()
+        _wire_rekor_mock(httpx_mock, log_key=log_key, override_root=forged_root)
+
+        httpx.post(_TEST_REKOR_URL, json={
+            "spec": {
+                "data": {"hash": {"value": "ab" * 32}},
+                "signature": {"content": "c2ln"},
+            },
+        })
+        uuid = "abc01deadbeef02"
+        proof = httpx.get(f"{_TEST_REKOR_URL}/{uuid}").json()[uuid][
+            "verification"]["inclusionProof"]
+
+        signed_root = proof["checkpoint"].splitlines()[2]
+        assert signed_root == base64.standard_b64encode(forged_root).decode("ascii")
+        assert bytes.fromhex(proof["rootHash"]) != forged_root
 
 
 # ---------------------------------------------------------------------------
@@ -847,14 +841,14 @@ def _wire_foreign_entry_mock(
 
     def post_callback(request: httpx.Request) -> httpx.Response:
         spec = json.loads(request.content)["spec"]
-        return httpx.Response(201, json=_build_rekor_post_response(
+        return httpx.Response(201, json=_rekor_response_for(
             payload_hash=spec["data"]["hash"]["value"],
             sig_b64=spec["signature"]["content"],
             uuid=uuid, log_index=log_index,
         ))
 
     def get_callback(request: httpx.Request) -> httpx.Response:
-        foreign = _build_rekor_post_response(
+        foreign = _rekor_response_for(
             payload_hash="ab" * 32, sig_b64="Zm9yZWlnbi1zaWduYXR1cmU=",
             uuid=uuid, log_index=log_index,
         )

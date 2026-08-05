@@ -369,6 +369,78 @@ class TestExport:
             )["subject"]
             assert len(subjects) == 1
 
+    def test_export_format_in_toto_writes_default_file(
+        self, tmp_path: Path,
+    ) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            runner.invoke(cli, ["claim", "add", "In-toto claim GHI"],
+                          catch_exceptions=False)
+            result = runner.invoke(cli, ["export", "--format=in-toto-v1"],
+                                   catch_exceptions=False)
+            assert result.exit_code == 0, result.output
+            written = Path(fs) / "mareforma-statement.json"
+            assert written.exists()
+            statement = json.loads(written.read_text())
+            assert statement["_type"] == "https://in-toto.io/Statement/v1"
+
+    def test_export_format_ro_crate_writes_default_file(
+        self, tmp_path: Path,
+    ) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            runner.invoke(cli, ["claim", "add", "RO-Crate claim JKL"],
+                          catch_exceptions=False)
+            result = runner.invoke(cli, ["export", "--format=ro-crate-1.2"],
+                                   catch_exceptions=False)
+            assert result.exit_code == 0, result.output
+            written = Path(fs) / "ro-crate-metadata.json"
+            assert written.exists()
+            assert "@graph" in json.loads(written.read_text())
+
+    def test_export_format_prov_o_writes_default_file(
+        self, tmp_path: Path,
+    ) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            runner.invoke(cli, ["claim", "add", "PROV-O claim MNO"],
+                          catch_exceptions=False)
+            result = runner.invoke(cli, ["export", "--format=prov-o"],
+                                   catch_exceptions=False)
+            assert result.exit_code == 0, result.output
+            written = Path(fs) / "mareforma-prov-o.jsonld"
+            assert written.exists()
+            assert "@graph" in json.loads(written.read_text())
+
+    def test_export_format_prov_o_json_prints_and_writes_nothing(
+        self, tmp_path: Path,
+    ) -> None:
+        """--json short-circuits before the file write for interop formats."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            runner.invoke(cli, ["claim", "add", "PROV-O claim PQR"],
+                          catch_exceptions=False)
+            result = runner.invoke(cli, ["export", "--format=prov-o", "--json"],
+                                   catch_exceptions=False)
+            assert result.exit_code == 0, result.output
+            assert "@graph" in json.loads(result.output)
+            assert not (Path(fs) / "mareforma-prov-o.jsonld").exists()
+
+    def test_export_bundle_with_format_exits_1(self, tmp_path: Path) -> None:
+        """--bundle signs an in-toto envelope, --format selects an unsigned
+        shape; asking for both must refuse rather than silently pick one."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            runner.invoke(cli, ["claim", "add", "Conflicting flags STU"],
+                          catch_exceptions=False)
+            result = runner.invoke(
+                cli, ["export", "--bundle", "--format=in-toto-v1"],
+            )
+            assert result.exit_code == 1
+            assert "mutually exclusive" in result.output
+            assert not (Path(fs) / "mareforma-bundle.json").exists()
+            assert not (Path(fs) / "mareforma-statement.json").exists()
+
 
 # ---------------------------------------------------------------------------
 # claim validate

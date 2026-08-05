@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import base64
+import json
 import sqlite3
 import subprocess
 import sys
@@ -130,6 +132,45 @@ def _wipe_db(tmp_path: Path) -> None:
         p = tmp_path / ".mareforma" / fname
         if p.exists():
             p.unlink()
+
+
+def _rekor_response_for(
+    *,
+    payload_hash: str,
+    sig_b64: str,
+    uuid: str = "abc01deadbeef02",
+    log_index: int = 42,
+    integrated_time: int = 1700000000,
+) -> dict:
+    """Build a realistic Rekor 201 body whose `body` field actually
+    records the submitted hash + signature.
+
+    submit_to_rekor verifies the response, a generic mock without a
+    matching body fails the equality check. Shared builder for every
+    rekor test module, so that mirror contract has one definition to
+    move when it changes.
+    """
+    record = {
+        "apiVersion": "0.0.1",
+        "kind": "hashedrekord",
+        "spec": {
+            "data": {"hash": {"algorithm": "sha256", "value": payload_hash}},
+            "signature": {
+                "content": sig_b64,
+                "publicKey": {"content": "<not-checked>"},
+            },
+        },
+    }
+    encoded = base64.standard_b64encode(
+        json.dumps(record, separators=(",", ":")).encode("utf-8"),
+    ).decode("ascii")
+    return {
+        uuid: {
+            "body": encoded,
+            "integratedTime": integrated_time,
+            "logIndex": log_index,
+        }
+    }
 
 
 def _prop():

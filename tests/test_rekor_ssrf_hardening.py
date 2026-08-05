@@ -18,8 +18,8 @@ import pytest
 
 import mareforma
 from mareforma import signing as _signing
-from tests._helpers import _bootstrap_key
-from tests.test_rekor import _rekor_response_for
+from mareforma._urlguard import _numeric_shortcut_ipv4
+from tests._helpers import _bootstrap_key, _rekor_response_for
 
 
 def _sample_envelope():

@@ -30,47 +30,10 @@ import pytest
 import mareforma
 from mareforma import signing as _signing
 from mareforma._urlguard import _LOOPBACK_DNS_NAMES
-from tests._helpers import _bootstrap_key
+from tests._helpers import _bootstrap_key, _rekor_response_for
 
 
 _TEST_REKOR_URL = "https://rekor.test.example/api/v1/log/entries"
-
-
-def _rekor_response_for(
-    *,
-    payload_hash: str,
-    sig_b64: str,
-    uuid: str = "abc01deadbeef02",
-    log_index: int = 42,
-    integrated_time: int = 1700000000,
-) -> dict:
-    """Build a realistic Rekor 201 body whose `body` field actually
-    records the submitted hash + signature.
-
-    submit_to_rekor now verifies the response, a generic mock without a
-    matching body fails the equality check.
-    """
-    record = {
-        "apiVersion": "0.0.1",
-        "kind": "hashedrekord",
-        "spec": {
-            "data": {"hash": {"algorithm": "sha256", "value": payload_hash}},
-            "signature": {
-                "content": sig_b64,
-                "publicKey": {"content": "<not-checked>"},
-            },
-        },
-    }
-    encoded = base64.standard_b64encode(
-        json.dumps(record, separators=(",", ":")).encode("utf-8"),
-    ).decode("ascii")
-    return {
-        uuid: {
-            "body": encoded,
-            "integratedTime": integrated_time,
-            "logIndex": log_index,
-        }
-    }
 
 
 def _hash_and_sig(envelope: dict) -> tuple[str, str]:
@@ -336,6 +299,21 @@ class TestRekorResponseVerification:
             key,
         )
         return key, envelope
+
+    def test_shared_builder_mirrors_the_submission(self):
+        """Every rekor test module builds its 201 bodies with this one
+        helper, so it has to echo back exactly the hash and signature
+        submit_to_rekor compares against."""
+        sig_b64 = base64.standard_b64encode(b"a signature").decode("ascii")
+        body = _rekor_response_for(payload_hash="AB" * 32, sig_b64=sig_b64)
+
+        entry = next(iter(body.values()))
+        spec = json.loads(base64.standard_b64decode(entry["body"]))["spec"]
+        assert spec["data"]["hash"]["value"].lower() == "ab" * 32
+        assert (
+            _signing._b64_decode_tolerant(spec["signature"]["content"])
+            == _signing._b64_decode_tolerant(sig_b64)
+        )
 
     def test_hash_mismatch_in_response_is_rejected(self, httpx_mock):
         import base64
@@ -828,7 +806,6 @@ class TestOnePeerLoggedOneNot:
         transparency_logged=1 alone, but REPLICATED requires the NEW
         claim's transparency_logged=1 as well, agent B's continued
         unlogged state keeps both at PRELIMINARY."""
-        import base64
         from tests._helpers import _bootstrap_key as _bk
         key_path = _bootstrap_key(tmp_path)
         # Peer A is signed by a distinct key (sa); peer B is signed by the
@@ -840,28 +817,12 @@ class TestOnePeerLoggedOneNot:
         def one_shot_mirror(httpx_mock):
             def cb(request: "httpx.Request") -> "httpx.Response":
                 import httpx as _httpx
-                body = json.loads(request.content)
-                spec = body["spec"]
-                record = {
-                    "apiVersion": "0.0.1", "kind": "hashedrekord",
-                    "spec": {
-                        "data": {"hash": {
-                            "algorithm": "sha256",
-                            "value": spec["data"]["hash"]["value"],
-                        }},
-                        "signature": {
-                            "content": spec["signature"]["content"],
-                            "publicKey": {"content": "x"},
-                        },
-                    },
-                }
-                encoded = base64.standard_b64encode(
-                    json.dumps(record).encode("utf-8"),
-                ).decode("ascii")
-                return _httpx.Response(
-                    201,
-                    json={"uu": {"body": encoded, "logIndex": 1, "integratedTime": 1}},
-                )
+                spec = json.loads(request.content)["spec"]
+                return _httpx.Response(201, json=_rekor_response_for(
+                    payload_hash=spec["data"]["hash"]["value"],
+                    sig_b64=spec["signature"]["content"],
+                    uuid="uu", log_index=1, integrated_time=1,
+                ))
             httpx_mock.add_callback(cb, method="POST", url=_TEST_REKOR_URL)
 
         one_shot_mirror(httpx_mock)  # upstream succeeds
