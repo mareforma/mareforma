@@ -5,9 +5,9 @@ Wraps any object satisfying the :class:`Tool` protocol so each
 ``tool-call/v1`` predicate.
 
 The adapter supports a sync path against in-process Python tools,
-cache-hit-as-fresh-claim semantics and the ``mareforma-tu`` CLI,
-``.call_async`` for TaskManager-shaped async tools, and hardening
-against adversarial inputs. Which tools get wrapped is the caller's
+cache-hit-as-fresh-claim semantics, ``.call_async`` for
+TaskManager-shaped async tools, and hardening against adversarial
+inputs. Which tools get wrapped is the caller's
 decision: every tool handed to the adapter is recorded.
 """
 
@@ -95,9 +95,11 @@ class ProvenanceToolAdapter:
         this tool). Recorded in the predicate AND in the graph's
         ``supports[]`` chain so lineage walks find both.
     role : str
-        Logical role of this call. The role is recorded as a free-form
-        string in the predicate; role attestations are a separate
-        signed structure (see :mod:`roles`).
+        Logical role of this call. No predicate field carries it: the
+        sanitised role is recorded only as the middle segment of the
+        claim's ``generated_by`` label, ``adapter/<role>/<tool name>``.
+        The string is free-form, unrelated to the closed role set the
+        role attestations in :mod:`roles` accept.
     tool_namespace : str
         Default ``"tooluniverse"``. Other callers passing custom tool
         registries override this.

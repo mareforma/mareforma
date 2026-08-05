@@ -23,15 +23,20 @@ Conceptual clusters:
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import importlib
+import inspect
 import json
+import re
+from importlib.metadata import distribution
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 import mareforma
+from mareforma.cli import cli
 from mareforma.predicate_types import TOOL_CALL_V1
 from mareforma.tools import ToolCallError
 from tests._helpers import (
@@ -136,6 +141,44 @@ class TestIdentitySanitization:
         from mareforma.adapters.tooluniverse import ProvenanceToolAdapter
         with pytest.raises(ValueError, match="tool.name sanitised to empty"):
             ProvenanceToolAdapter(tool=_NamedMock("​"), graph=graph)
+
+
+def _param_doc(docstring: str, name: str) -> str:
+    """Return one numpydoc parameter block from *docstring*.
+
+    Python 3.13 dedents docstrings at compile time, so the block is matched
+    against cleaned text rather than the source indentation.
+    """
+    body = inspect.cleandoc(docstring)
+    match = re.search(
+        rf"^{name} : .*?(?=^\w+ : |\Z)", body, re.DOTALL | re.MULTILINE
+    )
+    assert match is not None, f"no `{name}` parameter documented"
+    return match.group(0)
+
+
+class TestRoleIsNotAPredicateField:
+    """The role reaches disk in `generated_by`, and the docs say so."""
+
+    def test_role_is_absent_from_the_predicate(self, graph):
+        from mareforma.adapters.tooluniverse import ProvenanceToolAdapter
+        from mareforma.adapters.tooluniverse.predicate import (
+            decode_predicate_from_text,
+        )
+        pta = ProvenanceToolAdapter(
+            tool=_NamedMock("PlainTool"), graph=graph, role="reviewer",
+        )
+        claim_id = pta.call()["metadata"]["mareforma_claim_id"]
+
+        row = graph.get_claim(claim_id)
+        assert "role" not in decode_predicate_from_text(row["text"])
+        assert row["generated_by"] == "adapter/reviewer/PlainTool"
+
+    def test_docstring_sends_the_reader_to_generated_by(self):
+        from mareforma.adapters.tooluniverse import ProvenanceToolAdapter
+        role_doc = _param_doc(ProvenanceToolAdapter.__doc__, "role")
+        assert "in the predicate" not in role_doc
+        assert "generated_by" in role_doc
 
 
 class _OversizeMock:
@@ -423,3 +466,94 @@ class TestTelemetryRemoved:
     def test_telemetry_module_gone(self):
         with pytest.raises(ModuleNotFoundError):
             importlib.import_module("mareforma.adapters.tooluniverse.telemetry")
+
+
+def _package_docstrings():
+    """Yield ``(module path, line, docstring)`` for the adapter package."""
+    package = Path(
+        importlib.import_module("mareforma.adapters.tooluniverse").__file__
+    ).parent
+    for path in sorted(package.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(
+                node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                       ast.AsyncFunctionDef)
+            ):
+                continue
+            text = ast.get_docstring(node)
+            if text:
+                yield path.name, getattr(node, "lineno", 1), text
+
+
+def _cli_names():
+    """Every name a reader can type: console scripts and click commands."""
+    names = {
+        entry.name
+        for entry in distribution("mareforma").entry_points
+        if entry.group == "console_scripts"
+    }
+    pending = [cli]
+    while pending:
+        for name, command in getattr(pending.pop(), "commands", {}).items():
+            names.add(name)
+            pending.append(command)
+    return names
+
+
+def _conftest_names():
+    """Top-level symbols ``tests/conftest.py`` defines."""
+    conftest = Path(__file__).resolve().parents[2] / "conftest.py"
+    names = set()
+    for node in ast.parse(conftest.read_text(encoding="utf-8")).body:
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef,
+                             ast.AsyncFunctionDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            names.update(
+                t.id for t in node.targets if isinstance(t, ast.Name)
+            )
+        elif isinstance(node, ast.AnnAssign) and isinstance(
+            node.target, ast.Name
+        ):
+            names.add(node.target.id)
+    return names
+
+
+# A whole token, so the media type ``application/x-mareforma-role+json``
+# is not read as a console script named ``mareforma-role``.
+_SCRIPT_RE = re.compile(r"(?<![\w-])mareforma-[a-z0-9-]+(?![\w-])")
+_SUBCOMMAND_RE = re.compile(r"``([a-z][a-z0-9-]*)``\s+subcommand")
+_CONFTEST_RE = re.compile(r"tests/conftest\.py::(\w+)")
+
+
+class TestDocstringsNameRealSurface:
+    """A docstring may only send the reader to something that exists."""
+
+    def test_no_phantom_cli_names(self):
+        real = _cli_names()
+        phantom = [
+            f"{name}:{lineno} -> {claimed}"
+            for name, lineno, text in _package_docstrings()
+            for claimed in (
+                _SCRIPT_RE.findall(text) + _SUBCOMMAND_RE.findall(text)
+            )
+            if claimed not in real
+        ]
+        assert not phantom, (
+            "docstrings name a command the package does not ship: "
+            + ", ".join(phantom)
+        )
+
+    def test_no_phantom_conftest_fixtures(self):
+        defined = _conftest_names()
+        phantom = [
+            f"{name}:{lineno} -> {symbol}"
+            for name, lineno, text in _package_docstrings()
+            for symbol in _CONFTEST_RE.findall(text)
+            if symbol not in defined
+        ]
+        assert not phantom, (
+            "docstrings cite conftest symbols that do not exist: "
+            + ", ".join(phantom)
+        )

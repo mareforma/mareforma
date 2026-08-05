@@ -1,14 +1,9 @@
-"""Deterministic Open Targets stand-in for the demo CLI.
+"""Deterministic Open Targets stand-in for the adapter tests.
 
-The CLI's ``demo`` subcommand and the adapter test both need a tool that
-behaves like ToolUniverse's `OpenTargets_search_targets` but returns a
-pinned response. This module ships that tool so the CLI is callable
-without the test fixtures at runtime.
-
-The pinned response payload is duplicated from
-``tests/conftest.py::MOCK_OPEN_TARGETS_PAYLOAD`` deliberately: the
-test fixture is a test-only artifact, while this demo tool ships with
-the package for runtime use.
+:class:`ToolCallRecorder` and the adapter tests need a tool that behaves
+like ToolUniverse's `OpenTargets_search_targets` but returns a pinned
+response. This module ships that tool so the adapter family can be
+exercised without ToolUniverse installed.
 """
 
 from __future__ import annotations
