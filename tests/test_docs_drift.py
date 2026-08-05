@@ -2434,3 +2434,84 @@ def test_security_policy_names_no_doi_registry_as_a_network_upstream():
         f"SECURITY.md names DOI registries as network upstreams, but mareforma "
         f"never contacts one: {named}"
     )
+
+
+_COSE_EMITTER_RE = re.compile(
+    r"""application/cose            # the registered COSE media type in an envelope
+      | COSE_Sign1                  # the CBOR tag a COSE signer writes
+      | \b(?:import|from)\s+(?:pycose|cwt)\b   # a COSE signing library
+    """,
+    re.VERBOSE,
+)
+
+
+def _assert_no_scitt_claim_without_cose(package_root):
+    """Fail unless every SCITT claim is backed by a real COSE emitter.
+
+    The claim and the evidence may not come from the same file: a surface that
+    names the standard cannot also be its own proof. Evidence is a media type,
+    a CBOR tag or a signing library, never the word, so a biomedical example
+    that mentions glucose exempts nothing.
+    """
+    sources = {
+        path: path.read_text(encoding="utf-8")
+        for path in sorted(package_root.rglob("*.py"))
+    }
+    assert sources, (
+        f"no python sources under {package_root}; the guard audits nothing, so "
+        f"a moved package would pass it"
+    )
+    claims = sorted(
+        str(path.relative_to(package_root))
+        for path, text in sources.items()
+        if "SCITT" in text
+    )
+    emitters = sorted(
+        str(path.relative_to(package_root))
+        for path, text in sources.items()
+        if "SCITT" not in text and _COSE_EMITTER_RE.search(text)
+    )
+    assert emitters or not claims, (
+        f"{claims} claim SCITT, but no COSE statement is emitted"
+    )
+
+
+def test_no_surface_claims_scitt_without_a_cose_statement():
+    """SCITT names a COSE signed statement; this package emits in-toto + DSSE.
+
+    Claiming the standard we do not implement is the kind of overclaim a first
+    skeptic can check in one grep, so the claim is only allowed once a COSE
+    statement is actually emitted.
+    """
+    _assert_no_scitt_claim_without_cose(ROOT / "mareforma")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'X = "SCITT-style signed bundle (a COSE signed statement)"',
+        'X = "SCITT-style signed bundle"  # glucose assay example',
+    ],
+)
+def test_scitt_guard_rejects_the_claim_without_a_real_cose_emitter(tmp_path, body):
+    """Neither the claim's own wording nor an unrelated word is evidence."""
+    (tmp_path / "surface.py").write_text(body, encoding="utf-8")
+    with pytest.raises(AssertionError, match="claim SCITT"):
+        _assert_no_scitt_claim_without_cose(tmp_path)
+
+
+def test_scitt_guard_accepts_the_claim_once_another_file_emits_cose(tmp_path):
+    """A separate emitter, named by media type, is what lifts the guard."""
+    (tmp_path / "surface.py").write_text(
+        'X = "SCITT-style signed bundle"', encoding="utf-8"
+    )
+    (tmp_path / "emitter.py").write_text(
+        'PAYLOAD_TYPE = "application/cose"', encoding="utf-8"
+    )
+    _assert_no_scitt_claim_without_cose(tmp_path)
+
+
+def test_scitt_guard_fails_on_an_empty_scan_set(tmp_path):
+    """A moved package must fail loudly, not pass by auditing nothing."""
+    with pytest.raises(AssertionError, match="audits nothing"):
+        _assert_no_scitt_claim_without_cose(tmp_path / "moved")

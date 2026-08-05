@@ -1126,7 +1126,7 @@ an RO-Crate 1.2 Process Run Crate, and `--format=prov-o` a W3C PROV-O
 JSON-LD graph. `--format` and `--bundle` are mutually exclusive:
 `--bundle` always signs the native JSON-LD.
 
-**SCITT-style signed bundle.** `mareforma export --bundle` wraps the
+**Signed export bundle.** `mareforma export --bundle` wraps the
 JSON-LD export in an in-toto Statement v1 envelope and signs it with
 the local Ed25519 key. The bundle includes one subject entry per
 claim (`urn:mareforma:claim:<uuid>`) with a SHA-256 of the claim's

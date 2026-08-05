@@ -1,5 +1,5 @@
 """
-export_bundle.py: SCITT-style signed export bundle.
+export_bundle.py: signed export bundle.
 
 Wraps the JSON-LD graph export in an in-toto Statement v1 envelope:
 

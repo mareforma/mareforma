@@ -603,8 +603,8 @@ def stats_cmd(ctx: click.Context, as_json: bool, last_n: int | None) -> None:
               help="Print JSON to stdout instead of writing a file. "
                    "Mutually exclusive with --bundle.")
 @click.option("--bundle", is_flag=True, default=False,
-              help="Produce a SCITT-style signed bundle (in-toto Statement "
-                   "v1 + DSSE envelope). Requires a loaded signing key.")
+              help="Produce a signed bundle (in-toto Statement v1 in a DSSE "
+                   "envelope). Requires a loaded signing key.")
 @click.option("--key", "key_path_opt", default=None, metavar="FILE",
               help="Signing key for --bundle (defaults to the local bootstrap "
                    "key). Pin this when the project's root validator is not "

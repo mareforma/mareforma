@@ -347,7 +347,7 @@ mareforma activity --json
 
 ## export
 
-Export all claims as a JSON-LD document, optionally as a SCITT-style signed bundle.
+Export all claims as a JSON-LD document, optionally as a signed bundle.
 
 ```bash
 mareforma export [OPTIONS]
@@ -370,7 +370,7 @@ mareforma export [OPTIONS]
 | `--format [jsonld\|in-toto-v1\|ro-crate-1.2\|prov-o]` | `jsonld` | Export format. Mutually exclusive with `--bundle` |
 | `--output PATH` | `ontology.jsonld` in the project root, not the working directory (varies by `--format`; `mareforma-bundle.json` with `--bundle`) | Output file path |
 | `--json` | `False` | Print JSON-LD to stdout instead of writing a file. Mutually exclusive with `--bundle` |
-| `--bundle` | `False` | Produce a SCITT-style signed bundle (in-toto Statement v1 + DSSE) |
+| `--bundle` | `False` | Produce a signed bundle (in-toto Statement v1 + DSSE) |
 | `--key FILE` | local bootstrap key | Signing key for `--bundle`. Pin this when the project's root validator is not the default key. Rejected without `--bundle`, since every other export is unsigned |
 
 **Examples**
@@ -397,7 +397,7 @@ The JSON-LD output uses `mare:` and `schema:` vocabularies. Each claim is a `mar
 
 ## verify
 
-Verify a claim, a SCITT-style signed bundle, a signed audit receipt, or an export directory. An existing directory is read as an export dir and anything that is not an existing path as a claim id resolved against the local project. An existing **file** is routed by its DSSE `payloadType`, never by its name:
+Verify a claim, a signed bundle, a signed audit receipt, or an export directory. An existing directory is read as an export dir and anything that is not an existing path as a claim id resolved against the local project. An existing **file** is routed by its DSSE `payloadType`, never by its name:
 
 | `payloadType` | Verified as |
 |---|---|
