@@ -146,7 +146,12 @@ def open(  # noqa: A001
             "signing needs the key that load_key=False refuses to load."
         )
 
-    root = Path(path) if path is not None else Path.cwd()
+    # Resolve once, at open. The sqlite connection binds to the file it
+    # opened, but the sidecars (claims.toml, .mareforma/health.jsonl) rebuild
+    # their path from this root on every write. A relative root would follow
+    # the process cwd, and a caller or an observed target that chdirs would
+    # split the corpus across two directories with no warning.
+    root = Path(path).resolve() if path is not None else Path.cwd()
     conn = open_db(root)
 
     resolved_key_path = (
@@ -192,8 +197,19 @@ def open(  # noqa: A001
         rekor_log_pubkey_pem = Path(rekor_log_pubkey_path).read_bytes()
     _pinned_path = root / ".mareforma" / "rekor_log_pubkey.pem"
     if rekor_log_pubkey_pem is None and _pinned_path.exists():
-        # Continue with the pinned key from a prior session.
+        # Continue with the pinned key from a prior session. Parse it
+        # before trusting it: a pin truncated by a crash mid-write is
+        # not None, so it would otherwise flow into every submit and
+        # fail inclusion verification per claim, blaming the log.
         rekor_log_pubkey_pem = _pinned_path.read_bytes()
+        try:
+            _pem_canonical_der(rekor_log_pubkey_pem)
+        except _signing.SigningError as exc:
+            raise _signing.SigningError(
+                f"Rekor log pubkey pinned at {_pinned_path} is not a "
+                f"readable public key ({exc}). Delete the pin file to "
+                "re-pin the log operator's key."
+            ) from exc
     elif rekor_log_pubkey_pem is not None and _pinned_path.exists():
         # TOFU pin enforcement: refuse silent log-key rotation. Compare
         # the pinned PEM and the supplied PEM by their CANONICAL DER
@@ -226,9 +242,40 @@ def open(  # noqa: A001
                 0o644,
             )
             try:
-                _os.write(fd, rekor_log_pubkey_pem)
-            finally:
+                written = _os.write(fd, rekor_log_pubkey_pem)
+                if written != len(rekor_log_pubkey_pem):
+                    raise OSError(
+                        f"Short write pinning the Rekor log pubkey to "
+                        f"{_pinned_path}: {written} of "
+                        f"{len(rekor_log_pubkey_pem)} bytes."
+                    )
+                # fsync before close: a power loss in the writeback
+                # window would otherwise leave a zero-byte pin that the
+                # next open() reads back as this project's pin.
+                _os.fsync(fd)
+            except OSError:
+                # The O_EXCL'd file is on disk and empty or truncated.
+                # Remove it before re-raising so the operator is not
+                # stranded behind a file they were never told about.
                 _os.close(fd)
+                try:
+                    _os.unlink(_pinned_path)
+                except OSError:
+                    pass
+                raise
+            _os.close(fd)
+            # Best-effort directory fsync so the creation itself
+            # survives a crash. Failure here is not fatal: the data is
+            # already durable.
+            if hasattr(_os, "O_DIRECTORY"):
+                try:
+                    dir_fd = _os.open(str(_pinned_path.parent), _os.O_DIRECTORY)
+                    try:
+                        _os.fsync(dir_fd)
+                    finally:
+                        _os.close(dir_fd)
+                except OSError:
+                    pass
         except FileExistsError:
             # Lost the race. Re-check the just-written file.
             existing = _pinned_path.read_bytes()
@@ -252,6 +299,7 @@ def open(  # noqa: A001
         signer=signer,
         rekor_url=rekor_url,
         require_rekor=require_rekor,
+        trust_insecure_rekor=trust_insecure_rekor,
         rekor_log_pubkey_pem=rekor_log_pubkey_pem,
         strict_promotion=strict_promotion,
     )

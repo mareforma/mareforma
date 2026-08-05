@@ -117,6 +117,45 @@ class TestSpecialtyForms:
         assert "ATOM      2" in lines[2]
         assert lines[3] == "END"
 
+    def test_pdb_v1_bytes_unchanged(self):
+        """v1 digests are already recorded against these bytes: a serial
+        it cannot read sorts as 0 and the line is kept."""
+        from mareforma.canonicalize.specialty import canonicalize_pdb_atom_sorted_v1
+        overflow = (
+            "ATOM  ***** N   GLY A   1\n"
+            "ATOM      1  N   GLY A   2\n"
+        )
+        assert canonicalize_pdb_atom_sorted_v1(overflow) == overflow.encode()
+        hybrid36 = (
+            "ATOM  A0000  CA  ALA A   2\n"
+            "ATOM  99999  N   ALA A   1\n"
+        )
+        assert canonicalize_pdb_atom_sorted_v1(hybrid36) == hybrid36.encode()
+
+    def test_pdb_v2_reads_hybrid36_serials(self):
+        """Serials past 99999 are hybrid-36 and must sort after the decimals."""
+        from mareforma.canonicalize.specialty import canonicalize_pdb_atom_sorted_v2
+        atoms = [
+            "ATOM  99998  CA  ALA A   1",
+            "ATOM  99999  N   ALA A   1",
+            "ATOM  A0000  CA  ALA A   2",
+            "ATOM  A0001  N   ALA A   2",
+        ]
+        pdb = "".join(line + "\n" for line in atoms)
+        out = canonicalize_pdb_atom_sorted_v1(pdb).decode()
+        assert out.strip().split("\n") == atoms
+        shuffled = "".join(
+            line + "\n" for line in [atoms[2], atoms[0], atoms[3], atoms[1]]
+        )
+        assert canonicalize_pdb_atom_sorted_v1(shuffled) == out.encode()
+
+    def test_pdb_canonicalizer_refuses_unreadable_serial(self):
+        """An overflow marker is not a serial; refuse instead of sorting it first."""
+        from mareforma.canonicalize.specialty import canonicalize_pdb_atom_sorted_v1
+        pdb = "ATOM  ***** CA  ALA A   1\nATOM      1  N   ALA A   1\n"
+        with pytest.raises(ValueError, match=r"atom serial"):
+            canonicalize_pdb_atom_sorted_v1(pdb)
+
     def test_rdkit_canonicalizer_fallback_path(self):
         """In CI rdkit may be absent; fallback returns NFC-stripped bytes."""
         from mareforma.canonicalize.specialty import (

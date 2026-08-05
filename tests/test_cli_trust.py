@@ -310,6 +310,52 @@ class TestDiagnose:
         r = CliRunner()
         res = r.invoke(cli, ["diagnose", "--json", "--", str(script)])
         assert res.exit_code == 5
+        # A non-zero SystemExit is an aborted run, exactly what `partial`
+        # renders as "target exited with error".
+        assert json.loads(res.output)["partial"] is True
+
+    def test_clean_systemexit_zero_is_not_partial(self, tmp_path: Path) -> None:
+        script = self._script(tmp_path, "raise SystemExit(0)\n")
+        r = CliRunner()
+        res = r.invoke(cli, ["diagnose", "--json", "--", str(script)])
+        assert res.exit_code == 0
+        assert json.loads(res.output)["partial"] is False
+
+    def test_aborted_run_never_reports_ungrounded(self, tmp_path: Path) -> None:
+        # The target exits on an error path before touching its cited file.
+        # UNGROUNDED means the scope was fully observed and the data did not
+        # arrive; a truncated run is not that, so the verdict floors to OPAQUE.
+        data = tmp_path / "data.csv"
+        data.write_text("a,b\n1,2\n")
+        script = self._script(tmp_path, "raise SystemExit(1)\n")
+        r = CliRunner()
+        res = r.invoke(
+            cli, ["diagnose", "--json", "--cites", str(data), "--", str(script)])
+        assert res.exit_code == 1
+        doc = json.loads(res.output)
+        assert doc["partial"] is True
+        assert doc["grounding"]["grounding"] == "OPAQUE"
+
+    def test_non_int_systemexit_code_is_echoed(self, tmp_path: Path) -> None:
+        # CPython prints a non-int code and exits 1. The message is the
+        # target's own, so it goes to stderr and never into a verdict.
+        script = self._script(
+            tmp_path, "raise SystemExit('fatal: upstream data missing')\n")
+        r = CliRunner()
+        res = r.invoke(cli, ["diagnose", "--json", "--", str(script)])
+        assert res.exit_code == 1
+        assert "fatal: upstream data missing" in res.output
+
+    def test_interpreter_flag_is_a_usage_error(self, tmp_path: Path) -> None:
+        # `python -u script.py` is a shape users copy out of their shell. The
+        # target runs in-process, so the flag cannot be honoured; reporting it
+        # as an invocation error beats running nothing and blaming the target.
+        script = self._script(tmp_path, "pass\n")
+        r = CliRunner()
+        res = r.invoke(cli, ["diagnose", "--", "python", "-u", str(script)])
+        assert res.exit_code == 2, res.output
+        assert "-u" in res.output
+        assert "OBSERVATION REPORT" not in res.output
 
     def test_uncaught_exception_exits_1_and_marks_partial(
         self, tmp_path: Path,

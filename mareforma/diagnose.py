@@ -37,12 +37,18 @@ def _looks_like_interpreter(token: str) -> bool:
 
 
 def _exit_code_of(exc: SystemExit) -> int:
-    """Normalize a SystemExit's code to an int, Python's own convention."""
+    """Normalize a SystemExit's code to an int, Python's own convention.
+
+    A non-int code is the target's own failure message. CPython prints it to
+    stderr and exits 1, so print it rather than drop it. It is target
+    self-report and never enters a verdict.
+    """
     code = exc.code
     if code is None:
         return 0
     if isinstance(code, int):
         return code
+    click.echo(str(code), err=True)
     return 1
 
 
@@ -51,7 +57,10 @@ def _run_target(command: list[str]) -> None:
 
     Strips a leading interpreter token (``python``/``python3``) so both
     ``diagnose -- python x.py`` and ``diagnose -- x.py`` work. ``-m mod`` runs a
-    module; anything else runs a script path.
+    module; anything else runs a script path. Any other interpreter flag is a
+    usage error: the target runs in-process, so the flag cannot be honoured,
+    and running the flag as a script path would blame the target for an
+    invocation mistake.
     """
     argv = list(command)
     if argv and _looks_like_interpreter(argv[0]):
@@ -59,6 +68,12 @@ def _run_target(command: list[str]) -> None:
     if not argv:
         raise click.UsageError(
             "diagnose needs a target after `--`, e.g. `-- python analysis.py`"
+        )
+    if argv[0].startswith("-") and argv[0] != "-m":
+        raise click.UsageError(
+            f"interpreter flag {argv[0]!r} is unsupported: the target runs "
+            "in-process. Supported shapes: `-- script.py [args]`, "
+            "`-- python script.py [args]`, `-- python -m module [args]`"
         )
 
     old_argv = sys.argv
@@ -171,6 +186,7 @@ def run_diagnose(
 ) -> int:
     """Run COMMAND under the observer and print the report. Returns an exit code."""
     from mareforma.observe import observe
+    from mareforma.observe import _scope
 
     exit_code = 0
     crashed = False
@@ -183,11 +199,16 @@ def run_diagnose(
             # Bad invocation of diagnose itself — re-raise so click reports it.
             raise
         except SystemExit as exc:
+            # A non-zero exit is an aborted run, the same event as a raised
+            # exception; only a clean sys.exit(0) leaves the run complete.
             exit_code = _exit_code_of(exc)
+            crashed = exit_code != 0
         except BaseException:  # noqa: BLE001 — a target crash is expected input
             crashed = True
             exit_code = 1
             tb_text = traceback.format_exc()
+        if crashed:
+            _scope.record_abort(exit_code)
 
     verdict = obs.verdict
     report = _build_report(command, cites, verdict, exit_code, crashed, tb_text)

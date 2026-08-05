@@ -130,6 +130,7 @@ class EpistemicGraph:
         signer_identity: str | None = None,
         rekor_url: str | None = None,
         require_rekor: bool = False,
+        trust_insecure_rekor: bool = False,
         rekor_log_pubkey_pem: bytes | None = None,
         strict_promotion: bool = False,
     ) -> None:
@@ -142,6 +143,11 @@ class EpistemicGraph:
         self._signer = signer
         self._rekor_url = rekor_url
         self._require_rekor = require_rekor
+        # The session opt-in for a private Rekor on a non-public address.
+        # mareforma.open() validates the URL once with this flag; every
+        # submit and fetch re-validates, so the flag has to travel with
+        # the URL or those re-validations reject what open() accepted.
+        self._trust_insecure_rekor = trust_insecure_rekor
         # Opt-in gate: require data on both sides of a REPLICATED pair. Off by
         # default; threaded into every write path that can trigger promotion.
         self._strict_promotion = strict_promotion
@@ -450,6 +456,7 @@ class EpistemicGraph:
             signer=signer if signer is not None else self._signer,
             rekor_url=self._rekor_url,
             require_rekor=self._require_rekor,
+            trust_insecure_rekor=self._trust_insecure_rekor,
             on_convergence_error=_bump_convergence_errors,
             rekor_log_pubkey_pem=self._rekor_log_pubkey_pem,
             predicate_payload=predicate_payload,
@@ -2572,6 +2579,7 @@ class EpistemicGraph:
 
             logged, entry = _signing.submit_to_rekor(
                 envelope, public_key, rekor_url=self._rekor_url,
+                allow_insecure=self._trust_insecure_rekor,
             )
             if logged and entry is not None:
                 # Merkle inclusion-proof verification (opt-in). Mirrors
@@ -2595,6 +2603,7 @@ class EpistemicGraph:
                     try:
                         full_body = _signing.fetch_inclusion_proof(
                             entry_uuid, self._rekor_url,
+                            allow_insecure=self._trust_insecure_rekor,
                         )
                         _signing.verify_rekor_inclusion(
                             full_body, self._rekor_log_pubkey_pem, envelope,

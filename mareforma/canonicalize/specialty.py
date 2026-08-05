@@ -61,13 +61,41 @@ def canonicalize_fasta_nfc_v1(value: str) -> bytes:
     return unicodedata.normalize("NFC", value).upper().strip().encode("utf-8")
 
 
-def canonicalize_pdb_atom_sorted_v1(value: str) -> bytes:
-    """Sort each ATOM/HETATM block by serial; preserve other lines.
+_SERIAL_WIDTH = 5
+_HY36_DIGITS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+_HY36_UPPER_OFFSET = 10 ** _SERIAL_WIDTH - 10 * 36 ** (_SERIAL_WIDTH - 1)
+_HY36_LOWER_OFFSET = 10 ** _SERIAL_WIDTH + 16 * 36 ** (_SERIAL_WIDTH - 1)
 
-    PDB serial numbers occupy columns 7-11 (0-indexed slice ``[6:11]``).
-    Lines that aren't ATOM/HETATM (HEADER, REMARK, SEQRES, ENDMDL, …)
-    keep their relative position. Ties within a block break on input
-    order (stable sort).
+
+def _decode_atom_serial(field: str) -> int:
+    """Decode a PDB serial field, decimal or hybrid-36.
+
+    Files past 99999 atoms encode the serial in hybrid-36: the uppercase
+    run starts at ``A0000`` (100000) and the lowercase run continues
+    above it. Raises ``ValueError`` on anything else.
+    """
+    text = field.strip()
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    if (
+        len(text) == _SERIAL_WIDTH
+        and text.isascii()
+        and text[0].isalpha()
+        and (text.isupper() or text.islower())
+        and all(char in _HY36_DIGITS for char in text.upper())
+    ):
+        offset = _HY36_UPPER_OFFSET if text.isupper() else _HY36_LOWER_OFFSET
+        return int(text.upper(), 36) + offset
+    raise ValueError(f"unreadable PDB atom serial {field!r}")
+
+
+def _sort_atom_blocks(value: str, serial_of) -> bytes:
+    """Sort each ATOM/HETATM block by ``serial_of(field)``; keep the rest.
+
+    Shared by both PDB forms so they differ only in how a serial field is
+    read, which is the whole difference between the two names.
     """
     if not isinstance(value, str):
         raise TypeError("PDB canonicaliser expects a string")
@@ -83,9 +111,9 @@ def canonicalize_pdb_atom_sorted_v1(value: str) -> bytes:
     for idx, line in enumerate(lines):
         if line.startswith(("ATOM", "HETATM")):
             try:
-                serial = int(line[6:11].strip())
-            except ValueError:
-                serial = 0
+                serial = serial_of(line[6:11])
+            except ValueError as exc:
+                raise ValueError(f"{exc} on line {idx + 1}: {line!r}") from None
             atom_block.append((serial, idx, line))
         else:
             _flush_atom_block()

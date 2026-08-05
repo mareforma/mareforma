@@ -337,6 +337,40 @@ class TestTOFUPin:
                 rekor_log_pubkey_pem=_pubkey_pem(log_key_new),
             )
 
+    def test_truncated_pin_refused_on_read(self, tmp_path):
+        """A zero-byte pin (crash mid-write) must not be trusted: it
+        would send every signed claim into inclusion-proof verification
+        with an unparseable key and stall the project silently."""
+        pin_path = tmp_path / ".mareforma" / "rekor_log_pubkey.pem"
+        pin_path.parent.mkdir(parents=True, exist_ok=True)
+        pin_path.write_bytes(b"")
+
+        with pytest.raises(_signing.SigningError) as exc_info:
+            mareforma.open(
+                tmp_path,
+                rekor_url=_TEST_REKOR_URL, trust_insecure_rekor=True,
+            )
+        assert str(pin_path) in str(exc_info.value)
+
+    def test_failed_pin_write_leaves_no_stub_behind(self, tmp_path, monkeypatch):
+        """A write that fails must remove the O_EXCL'd file. Leaving it
+        behind pins an empty key that later opens read back and trust."""
+        import os as _os
+
+        def _short_write(fd, data):
+            return 0
+
+        monkeypatch.setattr(_os, "write", _short_write)
+        pin_path = tmp_path / ".mareforma" / "rekor_log_pubkey.pem"
+
+        with pytest.raises(OSError):
+            mareforma.open(
+                tmp_path,
+                rekor_url=_TEST_REKOR_URL, trust_insecure_rekor=True,
+                rekor_log_pubkey_pem=_pubkey_pem(Ed25519PrivateKey.generate()),
+            )
+        assert not pin_path.exists()
+
     def test_pem_and_path_mutually_exclusive(self, tmp_path):
         log_key = Ed25519PrivateKey.generate()
         pem_file = tmp_path / "x.pem"

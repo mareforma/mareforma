@@ -266,11 +266,16 @@ def run_audit(
             # Bad invocation of audit itself, re-raise so click reports it.
             raise
         except SystemExit as exc:
+            # A non-zero exit is an aborted run, the same event as a raised
+            # exception; only a clean sys.exit(0) leaves the run complete.
             exit_code = _exit_code_of(exc)
+            crashed = exit_code != 0
         except BaseException:  # noqa: BLE001, a target crash is expected input
             crashed = True
             exit_code = 1
             tb_text = traceback.format_exc()
+        if crashed:
+            _scope.record_abort(exit_code)
     finally:
         _scope.exit(scope)
 
@@ -289,9 +294,15 @@ def run_audit(
         })
 
     out.mkdir(parents=True, exist_ok=True)
-    with (out / RECEIPTS_FILE).open("w", encoding="utf-8") as fh:
-        for rec in records:
-            fh.write(json.dumps(rec, sort_keys=True) + "\n")
+    # The envelopes are these same verdicts signed, so the directory gets the
+    # same truncation receipts.jsonl gets. Re-auditing into a used --out would
+    # otherwise leave an earlier run's envelopes beside the current ones, still
+    # signed and still verifying, with nothing on disk saying which run is
+    # current. Unconditional: deferred signing writes no envelopes, and a stale
+    # set surviving an unsigned run is the same mixed evidence.
+    for stale in (out / ENVELOPES_DIR).glob("*.json"):
+        stale.unlink()
+    _write_receipts(out / RECEIPTS_FILE, records)
     if signer is not None:
         _write_receipt_envelopes(out / ENVELOPES_DIR, records, signer)
 

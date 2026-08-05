@@ -1104,6 +1104,7 @@ def add_claim(
     signer: "object | None" = None,
     rekor_url: str | None = None,
     require_rekor: bool = False,
+    trust_insecure_rekor: bool = False,
     on_convergence_error: "Callable[[Exception], None] | None" = None,
     rekor_log_pubkey_pem: bytes | None = None,
     predicate_payload: dict | None = None,
@@ -1159,6 +1160,10 @@ def add_claim(
     require_rekor:
         When True, raise :class:`SigningError` if the initial Rekor
         submission fails. Use for production high-assurance flows.
+    trust_insecure_rekor:
+        The session opt-in that lets ``rekor_url`` point at a private
+        Rekor on a non-public address. Forwarded to the SSRF / scheme
+        re-validation the submit and fetch calls run.
 
     Raises
     ------
@@ -1510,6 +1515,7 @@ def add_claim(
             signer=signer,
             rekor_url=rekor_url,
             require_rekor=require_rekor,
+            trust_insecure_rekor=trust_insecure_rekor,
             rekor_log_pubkey_pem=rekor_log_pubkey_pem,
             own_transaction=_own_transaction,
         )
@@ -2886,6 +2892,7 @@ def _attempt_rekor_saga(
     signer: "object",
     rekor_url: str,
     require_rekor: bool,
+    trust_insecure_rekor: bool = False,
     rekor_log_pubkey_pem: bytes | None = None,
     own_transaction: bool = True,
 ) -> int:
@@ -2934,6 +2941,7 @@ def _attempt_rekor_saga(
 
     logged, entry = _signing.submit_to_rekor(
         envelope, signer.public_key(), rekor_url=rekor_url,
+        allow_insecure=trust_insecure_rekor,
     )
     if not logged or entry is None:
         if require_rekor:
@@ -2966,7 +2974,9 @@ def _attempt_rekor_saga(
                 )
             return 0
         try:
-            full_body = _signing.fetch_inclusion_proof(uuid, rekor_url)
+            full_body = _signing.fetch_inclusion_proof(
+                uuid, rekor_url, allow_insecure=trust_insecure_rekor,
+            )
             _signing.verify_rekor_inclusion(
                 full_body, rekor_log_pubkey_pem, envelope,
             )

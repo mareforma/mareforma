@@ -96,7 +96,8 @@ class ReadRecord:
 class SeamEvent:
     """A boundary the observer cannot see across, captured inside a scope.
 
-    ``kind`` is ``thread`` / ``subprocess`` / ``socket`` / ``coverage-gap``.
+    ``kind`` is ``thread`` / ``subprocess`` / ``socket`` / ``coverage-gap`` /
+    ``abort`` (the target stopped before the scope closed).
     ``detail`` is a short, non-sensitive descriptor (the audit event name, the
     connection host, or the cited path opened via an uninstrumented reader). A
     seam inside a scope with no qualifying cited read forces ``OPAQUE``, the

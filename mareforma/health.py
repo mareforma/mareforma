@@ -2,8 +2,10 @@
 
 Traffic light (claim-based)
 ---------------------------
-  green  : at least one REPLICATED or ESTABLISHED claim
-  yellow : claims exist but all are PRELIMINARY
+  green  : at least one standing REPLICATED or ESTABLISHED claim
+  yellow : claims exist but none is standing above PRELIMINARY, either
+           because none was ever promoted or because every promoted one
+           has since been retracted or invalidated
   red    : no claims at all
   error  : graph.db could not be read (corruption, missing table, locked)
 
@@ -25,8 +27,16 @@ from pathlib import Path
 class HealthReport:
     claims_open: int = 0
     claims_resolved: int = 0
+    # Claims a signed contradiction verdict marked invalid, the same
+    # reading as refutation_status(row)["state"] == "contradicted". It
+    # is not a count of claims that assert a contradiction, and it does
+    # not partition with open / resolved.
     claims_contradicted: int = 0
     support_level_breakdown: dict[str, int] = field(default_factory=dict)
+    # REPLICATED / ESTABLISHED claims still standing: open, and not marked
+    # invalid by a signed contradiction verdict. The breakdown above is the
+    # full census and counts a retracted claim like any other.
+    standing_promoted: int = 0
     traffic_light: str = "green"
     rationale: str = ""
 
@@ -42,7 +52,7 @@ def compute_health(root: Path, conn: sqlite3.Connection) -> HealthReport:
     report = HealthReport()
 
     try:
-        from mareforma.db import list_claims, DatabaseError
+        from mareforma.db import list_claims, refutation_status, DatabaseError
 
         claims = list_claims(conn)
     except (sqlite3.OperationalError, sqlite3.DatabaseError, DatabaseError) as exc:
@@ -64,20 +74,25 @@ def compute_health(root: Path, conn: sqlite3.Connection) -> HealthReport:
         else:
             report.claims_resolved += 1
 
-        try:
-            contradicts = json.loads(c.get("contradicts_json", "[]") or "[]")
-        except (TypeError, ValueError):
-            # Malformed JSON in a single row is per-row corruption,
-            # not whole-DB corruption. Skip the contradicts accounting
-            # for this row and continue producing a report for the rest.
-            contradicts = []
-        if contradicts:
+        # One definition of the word, shared with the refutation
+        # taxonomy: contradicted means a signed contradiction verdict
+        # marked this claim invalid, not that the claim disputes
+        # something else.
+        if refutation_status(c)["state"] == "contradicted":
             report.claims_contradicted += 1
 
         level = c.get("support_level", "PRELIMINARY")
         report.support_level_breakdown[level] = (
             report.support_level_breakdown.get(level, 0) + 1
         )
+        # Same filter the promotion path applies: a retracted or
+        # verdict-invalidated claim is no longer evidence of anything.
+        if (
+            level in ("REPLICATED", "ESTABLISHED")
+            and c["status"] == "open"
+            and c.get("t_invalid") is None
+        ):
+            report.standing_promoted += 1
 
     report.traffic_light, report.rationale = _compute_traffic_light(report)
     return report
@@ -92,6 +107,12 @@ def _compute_traffic_light(report: HealthReport) -> tuple[str, str]:
     replicated = report.support_level_breakdown.get("REPLICATED", 0)
     if established + replicated == 0:
         return "yellow", "All claims are PRELIMINARY, no independent replication yet."
+
+    if report.standing_promoted == 0:
+        return "yellow", (
+            "Every replicated or validated claim has been retracted or "
+            "invalidated by a signed contradiction verdict."
+        )
 
     return "green", "At least one independently replicated or validated claim."
 

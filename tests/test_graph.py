@@ -994,7 +994,7 @@ class TestRekorSagaAtomicity:
         """Open a graph with a key, mocking Rekor to always succeed."""
         from mareforma import signing as _signing
 
-        def _fake_submit(envelope, public_key, *, rekor_url):
+        def _fake_submit(envelope, public_key, *, rekor_url, **kwargs):
             return True, {
                 "uuid": "deadbeef" * 4,
                 "logIndex": 12345,
@@ -1092,7 +1092,7 @@ class TestRekorSagaAtomicity:
         # Open with Rekor and immediately fail the submit so the sidecar
         # row never gets written. refresh_unsigned will then have to
         # re-submit.
-        def _fail_initial(envelope, public_key, *, rekor_url):
+        def _fail_initial(envelope, public_key, *, rekor_url, **kwargs):
             return False, None
 
         monkeypatch.setattr(_signing, "submit_to_rekor", _fail_initial)
@@ -1111,7 +1111,7 @@ class TestRekorSagaAtomicity:
             # refresh_unsigned actually calls it (no sidecar to replay).
             submit_calls = {"count": 0}
 
-            def _success_submit(envelope, public_key, *, rekor_url):
+            def _success_submit(envelope, public_key, *, rekor_url, **kwargs):
                 submit_calls["count"] += 1
                 return True, {
                     "uuid": "freshcafe" * 4,

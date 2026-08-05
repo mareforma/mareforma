@@ -59,6 +59,55 @@ class TestTrafficLight:
             conn.close()
         assert report.traffic_light == "green"
 
+    def test_not_green_when_the_promoted_claim_is_retracted(
+        self, tmp_path: Path,
+    ) -> None:
+        # Retraction is a terminal state the product expects to reach. A graph
+        # whose only promoted claim was withdrawn must not read as healthy.
+        import mareforma
+        from tests._helpers import _bootstrap_key
+        key = _bootstrap_key(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=key) as g:
+            prior = g.assert_claim("prior", generated_by="seed", seed=True)
+            g.update_claim(prior, status="retracted")
+
+        conn = _open(tmp_path)
+        try:
+            report = compute_health(tmp_path, conn)
+        finally:
+            conn.close()
+        assert report.traffic_light != "green"
+        assert "retracted" in report.rationale
+        # The census stays the full per-level count, it is a public field.
+        assert report.support_level_breakdown["ESTABLISHED"] == 1
+
+    def test_not_green_when_the_promoted_claim_is_invalidated(
+        self, tmp_path: Path,
+    ) -> None:
+        # Same for a claim a signed contradiction verdict marked invalid.
+        import mareforma
+        from tests._helpers import _bootstrap_key, _pem_of, _two_signers
+        _sa, sb = _two_signers(tmp_path)
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        val_key = _bootstrap_key(tmp_path, "val.key")
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            g.enroll_validator(_pem_of(val_key), identity="v")
+            prior = g.assert_claim("prior", generated_by="seed", seed=True)
+            counter = g.assert_claim("counter", generated_by="lab_w", signer=sb)
+        with mareforma.open(tmp_path, key_path=val_key) as g:
+            g.record_contradiction_verdict(
+                verdict_id="cv_1", member_claim_id=prior,
+                other_claim_id=counter, confidence={"stance": "refutes"},
+            )
+
+        conn = _open(tmp_path)
+        try:
+            report = compute_health(tmp_path, conn)
+        finally:
+            conn.close()
+        assert report.traffic_light != "green"
+        assert "contradiction" in report.rationale
+
 
 # ---------------------------------------------------------------------------
 # Per-status + per-support-level counters
@@ -77,15 +126,46 @@ class TestCounts:
         assert report.claims_open == 1
         assert report.claims_resolved == 1
 
-    def test_claims_contradicted_count(self, tmp_path: Path) -> None:
+    def test_claims_contradicted_counts_signed_invalidations(
+        self, tmp_path: Path,
+    ) -> None:
+        # "contradicted" is the refutation taxonomy's word for a claim a
+        # signed contradiction verdict marked invalid.
+        import mareforma
+        from tests._helpers import _bootstrap_key, _pem_of, _two_signers
+        _sa, sb = _two_signers(tmp_path)
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        val_key = _bootstrap_key(tmp_path, "val.key")
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            g.enroll_validator(_pem_of(val_key), identity="v")
+            older = g.assert_claim("older", generated_by="seed", seed=True)
+            counter = g.assert_claim("counter", generated_by="lab_w", signer=sb)
+        with mareforma.open(tmp_path, key_path=val_key) as g:
+            g.record_contradiction_verdict(
+                verdict_id="cv_1", member_claim_id=older,
+                other_claim_id=counter, confidence={"stance": "refutes"},
+            )
+
         conn = _open(tmp_path)
         try:
-            add_claim(conn, tmp_path, "Contested finding", contradicts=["10.1038/some"])
-            add_claim(conn, tmp_path, "Normal finding")
             report = compute_health(tmp_path, conn)
         finally:
             conn.close()
         assert report.claims_contradicted == 1
+
+    def test_asserting_a_contradiction_is_not_being_contradicted(
+        self, tmp_path: Path,
+    ) -> None:
+        # A claim that disputes a DOI has not itself been refuted by
+        # anyone, so it does not belong in the contradicted count.
+        conn = _open(tmp_path)
+        try:
+            add_claim(conn, tmp_path, "Disputing finding", contradicts=["10.1038/some"])
+            add_claim(conn, tmp_path, "Normal finding")
+            report = compute_health(tmp_path, conn)
+        finally:
+            conn.close()
+        assert report.claims_contradicted == 0
 
     def test_support_level_breakdown(self, tmp_path: Path) -> None:
         conn = _open(tmp_path)

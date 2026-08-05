@@ -1309,6 +1309,10 @@ def diagnose_cmd(cites: tuple[str, ...], as_json: bool, redact_home: bool,
     A target that crashes still prints its partial observation and exits with
     the target's own exit code.
 
+    COMMAND is a script path, a script path behind `python`, or `-m module`.
+    Interpreter flags (-u, -O, -X, …) are rejected: the target runs
+    in-process, so there is no interpreter to pass them to.
+
     \b
     Examples:
         mareforma diagnose -- python analysis.py
@@ -1333,7 +1337,8 @@ def diagnose_cmd(cites: tuple[str, ...], as_json: bool, redact_home: bool,
 @click.option("--out", "out_dir", default="mareforma-audit", show_default=True,
               metavar="DIR",
               help="Output directory for the run record, receipts, and signed "
-                   "envelopes.")
+                   "envelopes. Re-running replaces all three, so the "
+                   "directory always holds one run.")
 @click.option("--key", "key_path", default=None, metavar="FILE",
               help="Auditor signing key (defaults to the bootstrap key).")
 @click.option("--json", "as_json", is_flag=True, default=False,
@@ -1365,6 +1370,10 @@ def audit_cmd(findings_path: str | None, corpus_dir: str | None, out_dir: str,
     not attack its auditor: a target written to defeat the audit could
     fabricate what the observer records. The signature attests the auditor's
     observation, not the target's honesty.
+
+    COMMAND is a script path, a script path behind `python`, or `-m module`.
+    Interpreter flags (-u, -O, -X, …) are rejected: the target runs
+    in-process, so there is no interpreter to pass them to.
 
     With --corpus, iterates run specs instead: one fresh interpreter per run,
     resumable (a run whose signed record verifies as complete is skipped on

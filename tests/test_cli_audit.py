@@ -317,6 +317,9 @@ class TestAuditSingleRun:
         receipts = {rec["finding_id"]: rec for rec in _read_receipts(out)}
         assert set(receipts) == {"f1", "f2"}
         assert receipts["f1"]["grounding"] == "GROUNDED"
+        # The run stopped early, so nothing can be said about the citation it
+        # never reached. UNGROUNDED would claim a full observation.
+        assert receipts["f2"]["grounding"] == "OPAQUE"
 
     def test_audit_systemexit_code_is_preserved(self, tmp_path: Path) -> None:
         data = tmp_path / "data.csv"
@@ -329,6 +332,26 @@ class TestAuditSingleRun:
         assert res.exit_code == 5
         run = _read_run(out)
         assert run["exit_code"] == 5
+        # A non-zero SystemExit aborted the run: the signed record and every
+        # receipt say so, and no receipt claims a fully observed absence.
+        assert run["partial"] is True
+        receipts = _read_receipts(out)
+        assert all(rec["partial"] is True for rec in receipts)
+        assert receipts[0]["grounding"] == "OPAQUE"
+
+    def test_audit_clean_systemexit_zero_is_not_partial(
+        self, tmp_path: Path,
+    ) -> None:
+        data = tmp_path / "data.csv"
+        data.write_text("x\n1\n")
+        script = _script(tmp_path, f"open({str(data)!r}).read()\nraise SystemExit(0)\n")
+        key = _bootstrap_key(tmp_path, "auditor.key")
+        out = tmp_path / "audit-out"
+        r = CliRunner()
+        res = _audit(r, tmp_path, script, {"f1": str(data)}, out, key)
+        assert res.exit_code == 0
+        assert _read_run(out)["partial"] is False
+        assert _read_receipts(out)[0]["grounding"] == "GROUNDED"
 
     def test_audit_out_dir_immune_to_target_chdir(self, tmp_path: Path) -> None:
         # The target chdirs away mid-run; a relative --out must still resolve
@@ -356,6 +379,31 @@ class TestAuditSingleRun:
             receipts = _read_receipts(fs / "audit-out")
             assert receipts[0]["grounding"] == "GROUNDED"
             assert not (decoy / "audit-out").exists()
+
+    def test_reaudit_into_one_out_dir_drops_the_previous_envelopes(
+        self, tmp_path: Path,
+    ) -> None:
+        # receipts.jsonl is truncated to the current run; the envelope set is
+        # the same verdicts signed, so it must be truncated too. Otherwise an
+        # auditor forwarding envelopes/ ships a superseded run's signed
+        # verdicts next to the current ones, with nothing on disk saying which
+        # is which.
+        data = tmp_path / "data.csv"
+        data.write_text("x\n1\n")
+        script = _script(tmp_path, f"open({str(data)!r}).read()\n")
+        key = _bootstrap_key(tmp_path, "auditor.key")
+
+        out = tmp_path / "audit-out"
+        r = CliRunner()
+        first = _audit(r, tmp_path, script, {"alpha": str(data)}, out, key)
+        assert first.exit_code == 0, first.output
+        second = _audit(r, tmp_path, script, {"beta": str(data)}, out, key)
+        assert second.exit_code == 0, second.output
+
+        current = {rec["finding_id"] for rec in _read_receipts(out)}
+        assert current == {"beta"}
+        names = sorted(p.name for p in (out / "envelopes").glob("*.json"))
+        assert names == ["001-beta.json"]
 
     def test_audit_sha256_cite_is_never_false_ungrounded(
         self, tmp_path: Path,

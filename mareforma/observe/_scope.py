@@ -33,8 +33,13 @@ from ._verdict import GroundingVerdict, ObservedGrounding, ReadRecord, SeamEvent
 # the open audit event; a C-extension file is floored to OPAQUE by its own
 # coverage-gap seam). Every other seam kind hides anything.
 _SOCKET_BLOCKS: frozenset[str] = frozenset({"url", "content-address", "unknown"})
+# The target aborted before the scope closed. Not a boundary in space but one in
+# time: the run stopped part way, so what it did not read says nothing about what
+# the pipeline reads. Recorded as a seam so the one classification routine
+# handles it, and blocking like every other non-socket seam.
+ABORT_SEAM = "abort"
 _BLOCKS_EVERYTHING: frozenset[str] = frozenset(
-    {"subprocess", "thread", "coverage-gap"}
+    {"subprocess", "thread", "coverage-gap", ABORT_SEAM}
 )
 
 
@@ -361,13 +366,24 @@ class Scope:
         relevant = [s for s in seams if _seam_blocks_ungrounded(s.kind, cited_kinds)]
         if relevant:
             kinds = ", ".join(sorted({s.kind for s in relevant}))
-            return GroundingVerdict(
-                grounding=ObservedGrounding.OPAQUE,
-                reason=(
+            if any(s.kind == ABORT_SEAM for s in relevant):
+                # Say what actually happened. The run was cut short, so no read
+                # was hidden; the observation simply never covered the whole
+                # pipeline, which is a different fact and the honest one.
+                reason = (
+                    "no cited read observed, but the target aborted before the "
+                    f"scope closed ({kinds}); the observation is truncated, so "
+                    "absence cannot be trusted"
+                )
+            else:
+                reason = (
                     "no cited read observed, but a seam relevant to the cited "
                     f"source(s) could have hidden one ({kinds}); absence cannot "
                     "be trusted"
-                ),
+                )
+            return GroundingVerdict(
+                grounding=ObservedGrounding.OPAQUE,
+                reason=reason,
                 seams=tuple(seams),
                 **base,
             )
@@ -449,3 +465,18 @@ def record_read(kind: str, identifier: str, nonempty: bool, content_address=None
     scope = _active.get()
     if scope is not None:
         scope.record_read(kind, identifier, nonempty, content_address)
+
+
+def record_abort(exit_code: int) -> None:
+    """Record that the observed target aborted, against the active scope if any.
+
+    Call it from inside the scope, before it closes: what the target had not
+    read yet was never going to be observed, so the verdict must stop short of
+    a confident UNGROUNDED.
+    """
+    scope = _active.get()
+    if scope is not None:
+        scope.record_seam(
+            ABORT_SEAM,
+            f"target aborted before the scope closed (exit code {exit_code})",
+        )

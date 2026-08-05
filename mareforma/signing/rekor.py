@@ -1144,6 +1144,7 @@ def verify_rekor_inclusion(
 
 def fetch_inclusion_proof(
     uuid: str, rekor_url: str, *, timeout: float = _REKOR_TIMEOUT,
+    allow_insecure: bool = False,
 ) -> dict[str, Any]:
     """Re-fetch a Rekor entry by uuid and return its full body.
 
@@ -1162,6 +1163,9 @@ def fetch_inclusion_proof(
         by appending ``/<uuid>`` to this.
     timeout:
         Per-request timeout in seconds.
+    allow_insecure:
+        Reach a private Rekor on a non-public address (the
+        ``trust_insecure_rekor`` session opt-in).
 
     Returns the FULL entry dict (with ``body`` + ``verification``).
 
@@ -1189,7 +1193,7 @@ def fetch_inclusion_proof(
     # ad-hoc verifier scripts) could otherwise bypass the SSRF /
     # scheme defenses. Idempotent and cheap.
     try:
-        validate_rekor_url(rekor_url)
+        validate_rekor_url(rekor_url, allow_insecure=allow_insecure)
     except SigningError as exc:
         raise RekorInclusionError(
             f"rekor_url failed SSRF / scheme validation: {exc}",
@@ -1274,6 +1278,7 @@ def fetch_inclusion_proof(
 
 def fetch_log_pubkey(
     rekor_url: str, *, timeout: float = _REKOR_TIMEOUT,
+    allow_insecure: bool = False,
 ) -> bytes:
     """Fetch the log operator's public key from a Rekor instance.
 
@@ -1298,6 +1303,9 @@ def fetch_log_pubkey(
         The same value passed to ``mareforma.open(rekor_url=...)``.
     timeout:
         Per-request timeout in seconds.
+    allow_insecure:
+        Reach a private Rekor on a non-public address (the
+        ``trust_insecure_rekor`` session opt-in).
 
     Returns
     -------
@@ -1314,7 +1322,7 @@ def fetch_log_pubkey(
     # property of this function rather than the call graph that
     # leads to it. mareforma.open() already validates; direct callers
     # (tests, scripts) might not. Idempotent and cheap.
-    validate_rekor_url(rekor_url)
+    validate_rekor_url(rekor_url, allow_insecure=allow_insecure)
     base = rekor_url.rstrip("/")
     # Best-effort: if the URL ends in `/entries`, replace that segment;
     # otherwise just append `/publicKey`.

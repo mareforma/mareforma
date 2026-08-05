@@ -239,7 +239,7 @@ def restore(
     from mareforma import signing as _signing
     from mareforma import validators as _validators
 
-    root = Path(project_root)
+    root = Path(project_root).resolve()
     toml_path = (
         Path(claims_toml) if claims_toml is not None else root / "claims.toml"
     )

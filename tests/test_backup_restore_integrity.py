@@ -233,3 +233,28 @@ def test_null_integrated_time_rekor_entry_does_not_break_the_backup(
     data = tomllib.loads(out.read_text())
     assert cid in data.get("rekor_inclusions", {})
     assert "integrated_time" not in data["rekor_inclusions"][cid]
+
+
+def test_a_relative_root_stays_anchored_across_a_chdir(tmp_path, monkeypatch):
+    """``mareforma.open("proj")`` must bind its sidecars to the directory the
+    connection opened, not re-resolve them against the cwd of the moment. A
+    caller (or an observed target) that chdirs into a sibling holding an
+    identically named subdirectory would otherwise split the corpus in two."""
+    root_key = _bootstrap_key(tmp_path, "root.key")
+    here = tmp_path / "a" / "proj"
+    there = tmp_path / "b" / "proj"
+    here.mkdir(parents=True)
+    there.mkdir(parents=True)
+
+    monkeypatch.chdir(tmp_path / "a")
+    with mareforma.open("proj", key_path=root_key) as g:
+        g.assert_claim("first claim alpha", generated_by="x")
+        monkeypatch.chdir(tmp_path / "b")
+        cid = g.assert_claim("second claim beta", generated_by="x")
+        g.query_provenance(cid)
+
+    data = tomllib.loads((here / "claims.toml").read_text())
+    texts = {c["text"] for c in data["claims"].values()}
+    assert texts == {"first claim alpha", "second claim beta"}
+    assert not (there / "claims.toml").exists()
+    assert not (there / ".mareforma").exists()

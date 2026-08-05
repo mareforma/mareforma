@@ -690,7 +690,9 @@ finding's UNGROUNDED tell, but it does block a URL or content-address
 citation whose bytes can arrive over the network. Thread, subprocess, and
 coverage-gap seams hide anything; an unknown seam or citation kind blocks
 (fail-closed). A cited C-runtime file with no observed read floors to OPAQUE
-("bytes not observable via PEP-578"), never a false UNGROUNDED.
+("bytes not observable via PEP-578"), never a false UNGROUNDED. A target that
+exits non-zero records an `abort` seam: the run stopped part way, so what it
+did not read says nothing about what the pipeline reads.
 
 The observed axis is **separate and additive**. It never touches the
 declared `classification` enum (`INFERRED` / `ANALYTICAL` / `DERIVED`) and

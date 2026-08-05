@@ -44,11 +44,14 @@ _MAX_FIELD_LEN: Final = 100_000
 _TRUNCATION_MARKER: Final = "\n…[mareforma: truncated, original exceeded 100k chars]"
 
 # Singleton zero-width / bidi-override / tag-lookalike codepoints we
-# refuse. Subset of ``validators._FORBIDDEN_DISPLAY_CHARS`` plus the
-# fullwidth ``<`` / ``>`` / ``/`` lookalikes — a hostile claim using
-# ``＜/untrusted_data＞`` could survive both sanitize and wrap if a
-# downstream NFKC normaliser (logging, RAG vectorizer, the LLM's own
-# tokenizer) folds the fullwidth glyphs to ASCII at read time.
+# refuse. Subset of ``validators._FORBIDDEN_DISPLAY_CHARS`` plus every
+# non-ASCII character that NFKC-folds to ``<``, ``>`` or ``/`` — a
+# hostile claim using ``＜/untrusted_data＞`` could survive both
+# sanitize and wrap if a downstream NFKC normaliser (logging, RAG
+# vectorizer, the LLM's own tokenizer) folds the glyphs to ASCII at
+# read time. The lookalike entries below are the full derivation over
+# the codepoint space, {0xFE64, 0xFE65, 0xFF0F, 0xFF1C, 0xFF1E}, which
+# tests/test_prompt_safety.py re-derives so the set cannot drift.
 _FORBIDDEN_CODEPOINTS: Final = frozenset({
     0x200B,  # ZERO WIDTH SPACE
     0x200C,  # ZERO WIDTH NON-JOINER
@@ -64,6 +67,8 @@ _FORBIDDEN_CODEPOINTS: Final = frozenset({
     0x2067,  # RIGHT-TO-LEFT ISOLATE
     0x2068,  # FIRST STRONG ISOLATE
     0x2069,  # POP DIRECTIONAL ISOLATE
+    0xFE64,  # SMALL LESS-THAN SIGN (NFKC → '<')
+    0xFE65,  # SMALL GREATER-THAN SIGN (NFKC → '>')
     0xFEFF,  # ZERO WIDTH NO-BREAK SPACE / BOM
     0xFF1C,  # FULLWIDTH LESS-THAN SIGN (NFKC → '<')
     0xFF1E,  # FULLWIDTH GREATER-THAN SIGN (NFKC → '>')
@@ -115,8 +120,8 @@ def sanitize_for_llm(text: str | None) -> str | None:
     - C0 (``< 0x20``) and C1 (``0x7F-0x9F``) control characters,
       except ``\\n`` and ``\\t`` which are kept (legitimate claim
       text contains them)
-    - Fullwidth ``<``, ``>``, ``/``: would NFKC-fold to ASCII and
-      reconstruct a forged delimiter post-wrap
+    - Fullwidth and small-form ``<``, ``>``, ``/``: would NFKC-fold to
+      ASCII and reconstruct a forged delimiter post-wrap
     - Variation selectors (U+FE00-FE0F, U+E0100-E01EF, U+180B-180D)
     - Interlinear annotation anchors (U+FFF9-FFFB)
     - **Tag plane (U+E0000-E007F)**: Goodside's "ASCII smuggler"
