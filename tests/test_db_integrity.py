@@ -124,6 +124,134 @@ def test_cross_thread_writes_do_not_merge_and_lose(tmp_path: Path) -> None:
         assert g.get_claim(b_result[0]) is not None
 
 
+def test_reader_thread_never_sees_an_uncommitted_claim(tmp_path: Path) -> None:
+    """A read on one thread must not return rows another thread has not
+    committed.
+
+    sqlite3 isolation is per connection, not per thread. A reader running while
+    thread A holds an open BEGIN IMMEDIATE on the shared connection runs inside
+    A's transaction and sees its rows, so a caller can be handed a claim_id and
+    a support level for state A's rollback then erases.
+    """
+    import sqlite3
+    import threading
+
+    import mareforma
+    import mareforma._supports as _supports
+    from tests._helpers import _bootstrap_key
+
+    key = _bootstrap_key(tmp_path, "root.key")
+
+    orig = _supports.record_supports_edges
+    a_in_txn = threading.Event()
+    release_a = threading.Event()
+    a_claim_id: list[str] = []
+
+    def patched(conn, claim_id, supports):
+        # Pause thread A INSIDE its owned transaction, after the claim row is
+        # inserted, then force the rollback that erases it.
+        if threading.current_thread().name == "writerA":
+            a_claim_id.append(claim_id)
+            a_in_txn.set()
+            release_a.wait(timeout=5.0)
+            raise sqlite3.OperationalError("forced rollback of A's transaction")
+        return orig(conn, claim_id, supports)
+
+    with mareforma.open(tmp_path, key_path=key) as g:
+        _supports.record_supports_edges = patched
+        try:
+            def run_a() -> None:
+                with pytest.raises(DatabaseError):
+                    g.assert_claim("claim authored by thread A", generated_by="a")
+
+            reads: dict[str, object] = {}
+
+            def run_reader() -> None:
+                reads["get"] = g.get_claim(a_claim_id[0])
+                reads["query"] = g.query("claim authored by thread A")
+
+            t_a = threading.Thread(target=run_a, name="writerA")
+            t_a.start()
+            assert a_in_txn.wait(timeout=5.0), "thread A never entered its txn"
+
+            t_r = threading.Thread(target=run_reader, name="reader")
+            t_r.start()
+            # The reader must not complete while A's transaction is open: it
+            # waits for the writer rather than reading A's uncommitted rows.
+            t_r.join(timeout=0.3)
+            assert t_r.is_alive(), "reader returned while A's txn was still open"
+
+            release_a.set()
+            t_a.join(timeout=5.0)
+            t_r.join(timeout=5.0)
+        finally:
+            _supports.record_supports_edges = orig
+
+        # A rolled back, so neither read may report the claim as persisted.
+        assert reads["get"] is None
+        assert reads["query"] == []
+
+
+def test_close_waits_for_an_in_flight_write(tmp_path: Path) -> None:
+    """close() must not tear down the shared connection while another thread
+    is inside a write.
+
+    The connection is shared across threads, so closing it under live
+    statements is a native crash, not a catchable error: no traceback, and
+    every other thread in the process goes with it. close() has to take the
+    same lock the writers take and wait its turn.
+    """
+    import threading
+
+    import mareforma
+    import mareforma._supports as _supports
+    from tests._helpers import _bootstrap_key
+
+    key = _bootstrap_key(tmp_path, "root.key")
+
+    orig = _supports.record_supports_edges
+    a_in_txn = threading.Event()
+    release_a = threading.Event()
+
+    def patched(conn, claim_id, supports):
+        # Pause thread A INSIDE its owned transaction, holding the graph lock.
+        if threading.current_thread().name == "writerA":
+            a_in_txn.set()
+            release_a.wait(timeout=5.0)
+        return orig(conn, claim_id, supports)
+
+    g = mareforma.open(tmp_path, key_path=key)
+    _supports.record_supports_edges = patched
+    try:
+        written: list[str] = []
+
+        def run_a() -> None:
+            written.append(
+                g.assert_claim("claim authored by thread A", generated_by="a")
+            )
+
+        t_a = threading.Thread(target=run_a, name="writerA")
+        t_a.start()
+        assert a_in_txn.wait(timeout=5.0), "thread A never entered its txn"
+
+        t_c = threading.Thread(target=g.close, name="closer")
+        t_c.start()
+        t_c.join(timeout=0.3)
+        assert t_c.is_alive(), "close() ran while A's write was still in flight"
+
+        release_a.set()
+        t_a.join(timeout=5.0)
+        t_c.join(timeout=5.0)
+    finally:
+        _supports.record_supports_edges = orig
+        g.close()
+
+    # A's write finished before the close, and the graph is closed after it.
+    assert written, "thread A never returned a claim_id"
+    with pytest.raises(RuntimeError, match="closed"):
+        g.assert_claim("after close")
+
+
 def test_update_claim_sanitizes_text_on_write(tmp_path: Path) -> None:
     """update_claim must strip zero-width / bidi codepoints like add_claim.
 
@@ -264,3 +392,55 @@ def test_sanitized_text_compares_equal_on_retry_and_signed_edit(
         # Re-supplying the original text is a no-op edit, not a mutation.
         update_claim(g._conn, tmp_path, cid, text=text, status="contested")
         assert g.get_claim(cid)["status"] == "contested"
+
+
+def test_literal_path_open_refuses_a_foreign_schema_version(
+    tmp_path: Path,
+) -> None:
+    """A literal-path db from another build must be refused, same as open_db.
+
+    The version guard exists because a db written by a different build may
+    carry a partial schema. Opening it silently through the literal-path
+    branch leaves the current code relying on triggers that may not be there.
+    """
+    import sqlite3
+
+    db_file = tmp_path / "custom.db"
+    open_db_from_db_path(db_file).close()
+    raw = sqlite3.connect(str(db_file))
+    raw.execute("PRAGMA user_version = 99")
+    raw.commit()
+    raw.close()
+
+    with pytest.raises(DatabaseError, match="user_version"):
+        open_db_from_db_path(db_file)
+
+
+def test_literal_path_open_migrates_a_legacy_claims_table(
+    tmp_path: Path,
+) -> None:
+    """A legacy claims table reached by literal path must be migrated in place.
+
+    open_db auto-adds the columns introduced after v0.3.0. Without the same
+    step here the first read fails with 'no such column: asserter_keyid'.
+    """
+    import sqlite3
+
+    from mareforma.db import list_claims
+
+    db_file = tmp_path / "custom.db"
+    open_db_from_db_path(db_file).close()
+    raw = sqlite3.connect(str(db_file))
+    # The laundering trigger and the partial index both name the column, so
+    # they go first; both are recreated on open.
+    raw.execute("DROP TRIGGER claims_signed_fields_no_laundering")
+    raw.execute("DROP INDEX idx_claims_asserter_keyid")
+    raw.execute("ALTER TABLE claims DROP COLUMN asserter_keyid")
+    raw.commit()
+    raw.close()
+
+    conn = open_db_from_db_path(db_file)
+    try:
+        assert list_claims(conn) == []
+    finally:
+        conn.close()

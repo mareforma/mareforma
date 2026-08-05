@@ -131,6 +131,39 @@ class TestOpenDb:
         with pytest.raises(DatabaseError, match="newer mareforma version"):
             open_db(tmp_path)
 
+    def _drift_the_schema(self, tmp_path: Path) -> None:
+        """One claim on disk, then a dropped column so the next open fails."""
+        conn = open_db(tmp_path)
+        add_claim(conn, tmp_path, "a finding")
+        conn.execute("ALTER TABLE claims DROP COLUMN branch_id")
+        conn.commit()
+        conn.close()
+
+    def test_schema_mismatch_points_at_restore_when_toml_exists(
+        self, tmp_path: Path,
+    ) -> None:
+        """Deleting graph.db is only half the recovery: restore is what
+        rebuilds it from claims.toml, and it refuses to run until the old
+        db is gone."""
+        self._drift_the_schema(tmp_path)
+        assert (tmp_path / "claims.toml").exists()
+        with pytest.raises(DatabaseError, match="mareforma restore") as exc:
+            open_db(tmp_path)
+        assert "claims.toml" in str(exc.value)
+
+    def test_schema_mismatch_admits_when_no_toml_exists(
+        self, tmp_path: Path,
+    ) -> None:
+        """Without claims.toml, deleting graph.db destroys the claims. The
+        message must not promise a backup it never looked for."""
+        self._drift_the_schema(tmp_path)
+        (tmp_path / "claims.toml").unlink()
+        with pytest.raises(DatabaseError, match="schema mismatch") as exc:
+            open_db(tmp_path)
+        message = str(exc.value)
+        assert "backed up" not in message
+        assert "No claims.toml" in message
+
 
 # ---------------------------------------------------------------------------
 # Claims CRUD

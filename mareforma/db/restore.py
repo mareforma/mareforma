@@ -634,7 +634,7 @@ def restore(
                         (
                             claim_id, c_text, c_classification,
                             insert_level,
-                            None,  # idempotency_key, TOML doesn't carry it
+                            c.get("idempotency_key"),
                             insert_validated_by, insert_validated_at,
                             c_status, c.get("source_name"),
                             c_generated_by,

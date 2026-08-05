@@ -29,6 +29,7 @@ from epistemic._builders import (  # noqa: E402
     _superiority,
     open_graph,
 )
+from tests._helpers import _two_signers  # noqa: E402
 
 
 from mareforma.observe._citation import normalize_identifier
@@ -183,35 +184,45 @@ def test_asserting_inside_open_scope_is_refused(tmp_path):
 
 # -- promotion gate ----------------------------------------------------------
 
-def test_ungrounded_finding_does_not_promote(tmp_path):
+def _converge_on_anchor(tmp_path, subject_grounding):
+    """Return the support level of a claim carrying *subject_grounding*.
+
+    The fixture is eligible to promote by construction: an ESTABLISHED anchor,
+    a GROUNDED peer from a distinct signer citing it, and the claim under test
+    citing the same anchor. So the only thing that can hold the level down is
+    the grounding gate on the convergence path. The peer is GROUNDED on purpose:
+    a non-GROUNDED peer is refused by the candidate SELECT's own clause, which
+    would mask whether the gate on the new claim runs at all.
+    """
+    sa, sb = _two_signers(tmp_path)
+    with open_graph(tmp_path) as g:
+        anchor = g.assert_claim("established anchor", seed=True)
+        g.assert_claim(
+            "peer from a distinct signer", supports=[anchor],
+            generated_by="lab_b", signer=sb,
+            observed_grounding=_grounded().to_signed_dict(),
+        )
+        subject = g.assert_claim(
+            "claim under test", supports=[anchor], generated_by="lab_a",
+            signer=sa, observed_grounding=subject_grounding.to_signed_dict(),
+        )
+        return g.get_claim(subject)["support_level"]
+
+
+def test_grounded_finding_promotes_on_convergence(tmp_path):
+    # Positive control: the fixture really is eligible, so the PRELIMINARY
+    # results below are the gate talking and not a precondition that never held.
+    assert _converge_on_anchor(tmp_path, _grounded()) == "REPLICATED"
+
+
+@pytest.mark.parametrize("verdict", [OG.UNGROUNDED, OG.OPAQUE])
+def test_non_grounded_finding_does_not_promote(tmp_path, verdict):
     # A finding whose execution shows it is not grounded must never ride into
     # REPLICATED, even when a distinct-signer peer would otherwise converge.
-    key_b = _bootstrap_validator_key(tmp_path)
-    with open_graph(tmp_path) as g:
-        g.assert_claim("established anchor", seed=True)
-        prop, pred = _prop(), _superiority()
-        g.register_plan(prop, pred)
-        g.submit_finding(
-            prop, pred, _smd(-0.8, p=0.001), data_id="dsA", generated_by="lab_a",
-            grounding=_ungrounded(),
-        )
-        # Peer from a distinct signer, sharing the ESTABLISHED anchor.
-        with mareforma.open(tmp_path, key_path=key_b) as g2:
-            prop2 = _prop()
-            pred2 = _superiority()
-            g2.register_plan(prop2, pred2)
-            g2.submit_finding(
-                prop2, pred2, _smd(-0.8, p=0.001), data_id="dsB",
-                generated_by="lab_b", grounding=_ungrounded(),
-            )
-        levels = [
-            r["support_level"]
-            for r in g._conn.execute(
-                "SELECT support_level FROM claims WHERE observed_grounding IS NOT NULL"
-            ).fetchall()
-        ]
-    assert levels, "expected finding claims with a recorded verdict"
-    assert all(lvl == "PRELIMINARY" for lvl in levels), levels
+    grounding = GroundingVerdict(
+        verdict, "no cited read", cited_sources=(CITED_PATH,),
+    )
+    assert _converge_on_anchor(tmp_path, grounding) == "PRELIMINARY"
 
 
 def test_idempotent_replay_reports_the_stored_verdict(tmp_path):
@@ -421,6 +432,39 @@ def test_decoy_cite_does_not_bind_finding(tmp_path):
             data_source="/data/trial.csv",
         )
     assert res["grounding"]["grounding"] == "OPAQUE"
+
+
+def test_assert_claim_verdict_is_marked_unbound(tmp_path):
+    # assert_claim carries no finding citation: source_name is free text and the
+    # claim has no data_id / data_source, so the verdict-to-citation check has
+    # nothing to compare. A verdict earned on a decoy read must therefore not
+    # store as a clean GROUNDED; it keeps the not-applicable annotation the
+    # finding path already emits, so a reader can tell binding was never
+    # exercised rather than passed.
+    decoy = normalize_identifier("/etc/hostname")
+    with open_graph(tmp_path) as g:
+        claim_id = g.assert_claim(
+            "IL-21 elevated in SLE CD4+ T cells",
+            classification="ANALYTICAL",
+            source_name="medeadb",
+            observed_grounding=_grounded(cited=(decoy,)).to_signed_dict(),
+        )
+        stored = g._stored_grounding(claim_id)
+    assert "no finding citation to bind" in stored["reason"]
+
+
+def test_assert_finding_annotation_is_not_doubled(tmp_path):
+    # The finding path binds before it calls assert_claim, so the claim path must
+    # not append the not-applicable marker a second time.
+    with open_graph(tmp_path) as g:
+        prop, pred = _prop(), _superiority()
+        g.register_plan(prop, pred)
+        res = g.submit_finding(
+            prop, pred, _smd(-0.8, p=0.001), data_id="dsA", generated_by="a",
+            grounding=_grounded(cited=(CITED_PATH,)),
+        )
+        stored = g._stored_grounding(res["claim_id"])
+    assert stored["reason"].count("no finding citation to bind") == 1
 
 
 def test_read_side_rejects_disjoint_grounded_record():

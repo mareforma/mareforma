@@ -690,6 +690,43 @@ class TestReplicatedGating:
             assert graph.get_claim(id_a)["support_level"] == "REPLICATED"
             assert graph.get_claim(id_b)["support_level"] == "REPLICATED"
 
+    def test_late_doi_resolution_does_not_promote_an_unlogged_claim(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """The peer filter demands transparency_logged=1 of every candidate,
+        so the claim being resolved must meet the same bar. A claim whose
+        Rekor submission failed must not reach REPLICATED when its DOI
+        resolves later, nor drag a logged peer up with it."""
+        from mareforma.db import core as _db
+        from tests._helpers import _two_signers
+        key_path = _bootstrap_key(tmp_path)
+        sa, sb = _two_signers(tmp_path)
+        # Rekor is down for peer B; the graph itself runs without a log, so
+        # the anchor and peer A stay transparency_logged=1.
+        monkeypatch.setattr(
+            _signing, "submit_to_rekor", lambda *a, **kw: (False, None),
+        )
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            upstream = graph.assert_claim(
+                "upstream", generated_by="seed", seed=True,
+            )
+            id_a = graph.assert_claim(
+                "agent A", supports=[upstream], generated_by="agent/a", signer=sa,
+            )
+            # Peer B is inserted through the db layer so the unresolved flag
+            # can be forced on without plumbing a fake DOI through a resolver.
+            id_b = _db.add_claim(
+                graph._conn, graph._root, "agent B", supports=[upstream],
+                generated_by="agent/b", signer=sb, unresolved=True,
+                rekor_url=_TEST_REKOR_URL,
+            )
+            assert graph.get_claim(id_b)["transparency_logged"] == 0
+
+            _db.mark_claim_resolved(graph._conn, graph._root, id_b)
+
+            assert graph.get_claim(id_b)["support_level"] == "PRELIMINARY"
+            assert graph.get_claim(id_a)["support_level"] == "PRELIMINARY"
+
 
 # ---------------------------------------------------------------------------
 # REPLICATED gating: one peer logged, one peer not

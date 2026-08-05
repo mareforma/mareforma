@@ -139,6 +139,28 @@ class TestRestoreHappyPath:
             v["keyid"] for v in pre_validators
         }
 
+    def test_round_trip_preserves_idempotency_keys(
+        self, tmp_path: Path,
+    ) -> None:
+        """A restored graph must keep honouring the retry-safe-writes contract.
+
+        Dropping idempotency_key on the round trip makes the post-restore
+        replay of a pipeline step insert a second signed near-duplicate
+        instead of returning the original claim_id.
+        """
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            cid = g.assert_claim("a resumable step", idempotency_key="run-1:s3")
+
+        _wipe_graph_db(tmp_path)
+        assert mareforma.restore(tmp_path)["claims_restored"] == 1
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            assert g.assert_claim(
+                "a resumable step", idempotency_key="run-1:s3",
+            ) == cid
+            assert len(g.query(include_unverified=True, limit=99)) == 1
+
     def test_restore_rebuilds_fts_index(self, tmp_path: Path) -> None:
         """The INSERT triggers fire during restore, populating
         claims_fts. Search must work on the restored graph."""

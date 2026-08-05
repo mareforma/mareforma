@@ -78,7 +78,11 @@ with mareforma.open() as graph:
 `classification` is your declaration of origin. `observed_grounding` is
 Mareforma's independent check on it, computed from what the run actually read.
 An `ANALYTICAL` claim that comes back `UNGROUNDED` is the silent-fallback
-failure caught in the act. `graph.db` is created automatically on first
+failure caught in the act. On `assert_claim` the verdict is stored unbound, with
+`[no finding citation to bind]` in its reason: there is no `data_id` or
+`data_source=` to cross-check it against, so it attests the read it saw, not that
+the read covered this claim's data. `assert_finding` binds it.
+`graph.db` is created automatically on first
 `mareforma.open()`. No `mareforma init` required.
 
 ---

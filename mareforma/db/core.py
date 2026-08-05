@@ -36,7 +36,9 @@ from ._schema_sql import (  # noqa: F401
 from .errors import (  # noqa: F401
     MareformaError,
     DatabaseError,
+    ScanCeilingReached,
     ClaimNotFoundError,
+    UnverifiedClaimError,
     SignedClaimImmutableError,
     IdempotencyConflictError,
     IllegalStateTransitionError,
@@ -180,6 +182,170 @@ def _db_path(root: Path) -> Path:
     return root / ".mareforma" / DB_FILENAME
 
 
+def _open_failure(
+    path: Path, exc: sqlite3.Error, corrupt_remedy: str,
+) -> DatabaseError:
+    """Wrap a failed open, choosing the remedy that fits the cause.
+
+    A file the process may not write and a file whose bytes are damaged both
+    arrive here as ``sqlite3.Error``. Answering both with the corruption
+    remedy tells an operator whose graph is intact to delete their only copy,
+    so the permission case gets its own sentence and names no deletion.
+    """
+    if "readonly database" in str(exc):
+        remedy = (
+            "That is a file permission problem, not damage to the graph. "
+            "Make the file writable, or copy the project somewhere writable "
+            "and open it there."
+        )
+    else:
+        remedy = corrupt_remedy
+    return DatabaseError(f"Could not open database at {path}: {exc}. {remedy}")
+
+
+def _ensure_supports_revision_row(conn: sqlite3.Connection) -> None:
+    """Seed the supports_revision singleton when it is missing.
+
+    ``INSERT OR IGNORE`` takes a write lock even when the row is already
+    there, so running it on every open makes a read-only graph.db
+    unopenable. The row is written once, on the fresh db and on the first
+    open of a graph that predates the table.
+    """
+    if conn.execute("SELECT 1 FROM supports_revision WHERE id = 1").fetchone():
+        return
+    conn.execute("INSERT INTO supports_revision (id, revision) VALUES (1, 0)")
+    conn.commit()
+
+
+def _ensure_managed_triggers(conn: sqlite3.Connection) -> None:
+    """Reconcile the claims-table write guards with their wanted text.
+
+    _SCHEMA_SQL never runs again on an initialised db, so a trigger whose
+    definition changed shape reaches an existing graph only from here. Doing
+    that as an unconditional drop-and-recreate would open a window on every
+    single open() in which another connection sees the claims table with no
+    laundering guard on it, which is exactly the substitution the triggers
+    exist to refuse. Compare against sqlite_master instead: the steady-state
+    open is a pure read, and a genuine rewrite runs inside one transaction so
+    the absence is never observable.
+    """
+    for name, wanted in _MANAGED_TRIGGERS:
+        stored = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+            (name,),
+        ).fetchone()
+        if stored is not None and stored[0] == wanted:
+            continue
+        own_transaction = not conn.in_transaction
+        if own_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+        conn.execute(wanted)
+        if own_transaction:
+            conn.commit()
+
+
+def _open_existing_db(
+    conn: sqlite3.Connection, root: Path, version: int,
+) -> None:
+    """Enforce and migrate the on-disk contract of an already-initialised db.
+
+    Shared by :func:`open_db` and :func:`open_db_from_db_path` so both entry
+    points refuse the same files and migrate the same ones: a db reached by a
+    literal path must meet the contract a db reached by project root meets.
+    Closes *conn* and raises :class:`DatabaseError` when the file cannot be
+    served. *root* is the project root used for the grandfather event and the
+    claims.toml remediation hint.
+    """
+    # No in-place migrations in this release. A db whose user_version
+    # is neither 0 nor _SCHEMA_VERSION was written by a different
+    # build of the dev branch and may carry a partial schema (e.g.
+    # a v2-stranded db is missing the retracted-is-terminal trigger
+    # that the fix relies on, even though its column set
+    # happens to match). Refuse rather than open silently.
+    if version != _SCHEMA_VERSION:
+        conn.close()
+        raise DatabaseError(
+            f"graph.db has user_version={version} but this mareforma "
+            f"expects user_version={_SCHEMA_VERSION}. The dev branch does "
+            "not migrate schemas. Delete .mareforma/graph.db to start "
+            "fresh; claims.toml is a human-readable record of the prior "
+            "state (the chain and signatures cannot be reconstructed "
+            "from it)."
+        )
+
+    # Initialised db, validate the schema by exact column-set match.
+    # Catching extras as well as missing columns means a partially-migrated
+    # or hand-edited claims table fails loudly instead of silently passing
+    # through code that assumes _CLAIM_COLUMNS is exhaustive.
+    existing_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()
+    }
+    # Auto-migrate the two columns added between v0.3.0 and v0.3.1.
+    # Both are non-signed, non-CHECK'd query-side denormalisations with
+    # safe defaults, so ALTER ADD COLUMN is a non-disruptive in-place
+    # additive migration that preserves every existing row's signed
+    # bytes. Concurrent first-opens hit a "duplicate column name" race
+    # we treat as benign.
+    added_cols = _ensure_claims_columns_for_upgrade(conn, existing_cols)
+    # The open that first adds asserter_keyid grandfathers every existing
+    # REPLICATED row (all promoted under the retired generated_by rule)
+    # with a one-time durable health event. Runs once: subsequent opens
+    # already have the column and skip the ALTER.
+    if "asserter_keyid" in added_cols:
+        _grandfather_legacy_replicated(conn, root)
+    existing_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()
+    }
+    expected_cols = set(_CLAIM_COLUMNS)
+    if existing_cols != expected_cols:
+        missing = expected_cols - existing_cols
+        extra = existing_cols - expected_cols
+        conn.close()
+
+        # Extras-only is the downgrade case: the db was written by a
+        # newer mareforma. Direct the user to upgrade rather than to
+        # delete, claims.toml may not be a faithful backup for columns
+        # the older version does not understand.
+        if extra and not missing:
+            raise DatabaseError(
+                f"graph.db was created by a newer mareforma version "
+                f"(extra columns: {sorted(extra)}). Upgrade the mareforma "
+                "package or back up claims.toml before downgrading."
+            )
+
+        parts: list[str] = []
+        if missing:
+            parts.append(f"missing: {sorted(missing)}")
+        if extra:
+            parts.append(f"unexpected: {sorted(extra)}")
+        # Only claim a backup after looking for one. Recovery is two
+        # steps, and restore refuses to run while graph.db still holds
+        # claims, so naming the deletion alone leaves the operator with
+        # a TOML file and no stated way to use it.
+        if (root / "claims.toml").exists():
+            remedy = (
+                "Delete .mareforma/graph.db, then run `mareforma "
+                "restore` to rebuild it from claims.toml with signature "
+                "verification."
+            )
+        else:
+            remedy = (
+                "No claims.toml is present, so deleting "
+                ".mareforma/graph.db discards the only copy of these "
+                "claims. Copy graph.db elsewhere first."
+            )
+        raise DatabaseError(
+            f"graph.db schema mismatch ({'; '.join(parts)}). {remedy}"
+        )
+    # Additive tables (project_policy, the trust layer) must be
+    # present on every initialised db, not just fresh ones ,
+    # otherwise an existing legacy graph.db lacks them and the first
+    # trust-layer write raises 'no such table'.
+    conn.executescript(_ADDITIVE_TABLES_SQL)
+    _ensure_evidence_lines_columns(conn)
+
+
 def open_db(root: Path) -> sqlite3.Connection:
     """Open (and initialise if needed) the graph database.
 
@@ -248,84 +414,9 @@ def open_db(root: Path) -> sqlite3.Connection:
             _attach_supports_cache(conn, root)
             return conn
 
-        # No in-place migrations in this release. A db whose user_version
-        # is neither 0 nor _SCHEMA_VERSION was written by a different
-        # build of the dev branch and may carry a partial schema (e.g.
-        # a v2-stranded db is missing the retracted-is-terminal trigger
-        # that the fix relies on, even though its column set
-        # happens to match). Refuse rather than open silently.
-        if version != _SCHEMA_VERSION:
-            conn.close()
-            raise DatabaseError(
-                f"graph.db has user_version={version} but this mareforma "
-                f"expects user_version={_SCHEMA_VERSION}. The dev branch does "
-                "not migrate schemas. Delete .mareforma/graph.db to start "
-                "fresh; claims.toml is a human-readable record of the prior "
-                "state (the chain and signatures cannot be reconstructed "
-                "from it)."
-            )
-
-        # Initialised db, validate the schema by exact column-set match.
-        # Catching extras as well as missing columns means a partially-migrated
-        # or hand-edited claims table fails loudly instead of silently passing
-        # through code that assumes _CLAIM_COLUMNS is exhaustive.
-        existing_cols = {
-            row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()
-        }
-        # Auto-migrate the two columns added between v0.3.0 and v0.3.1.
-        # Both are non-signed, non-CHECK'd query-side denormalisations with
-        # safe defaults, so ALTER ADD COLUMN is a non-disruptive in-place
-        # additive migration that preserves every existing row's signed
-        # bytes. Concurrent first-opens hit a "duplicate column name" race
-        # we treat as benign.
-        added_cols = _ensure_claims_columns_for_upgrade(conn, existing_cols)
-        # The open that first adds asserter_keyid grandfathers every existing
-        # REPLICATED row (all promoted under the retired generated_by rule)
-        # with a one-time durable health event. Runs once: subsequent opens
-        # already have the column and skip the ALTER.
-        if "asserter_keyid" in added_cols:
-            _grandfather_legacy_replicated(conn, root)
-        existing_cols = {
-            row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()
-        }
-        expected_cols = set(_CLAIM_COLUMNS)
-        if existing_cols != expected_cols:
-            missing = expected_cols - existing_cols
-            extra = existing_cols - expected_cols
-            conn.close()
-
-            # Extras-only is the downgrade case: the db was written by a
-            # newer mareforma. Direct the user to upgrade rather than to
-            # delete, claims.toml may not be a faithful backup for columns
-            # the older version does not understand.
-            if extra and not missing:
-                raise DatabaseError(
-                    f"graph.db was created by a newer mareforma version "
-                    f"(extra columns: {sorted(extra)}). Upgrade the mareforma "
-                    "package or back up claims.toml before downgrading."
-                )
-
-            parts: list[str] = []
-            if missing:
-                parts.append(f"missing: {sorted(missing)}")
-            if extra:
-                parts.append(f"unexpected: {sorted(extra)}")
-            raise DatabaseError(
-                f"graph.db schema mismatch ({'; '.join(parts)}). "
-                "Delete .mareforma/graph.db to start fresh, "
-                "your claims are backed up in claims.toml."
-            )
+        _open_existing_db(conn, root, version)
         _attach_supports_cache(conn, root)
-        # Additive tables (project_policy, the trust layer) must be
-        # present on every initialised db, not just fresh ones , 
-        # otherwise an existing legacy graph.db lacks them and the first
-        # trust-layer write raises 'no such table'.
-        conn.executescript(_ADDITIVE_TABLES_SQL)
-        # Same reason the additive tables re-run here: _SCHEMA_SQL never runs
-        # again on an initialised db, so a trigger whose definition changed
-        # shape only reaches it through this drop-and-recreate script.
-        conn.executescript(_SIGNED_FIELDS_TRIGGER_SQL)
-        _ensure_evidence_lines_columns(conn)
+        _ensure_managed_triggers(conn)
         conn.commit()
         return conn
 
@@ -346,10 +437,10 @@ def open_db(root: Path) -> sqlite3.Connection:
 def open_db_from_db_path(db_path: "str | Path") -> sqlite3.Connection:
     """Open the graph DB from a direct path to ``graph.db`` (not a project root).
 
-    The CLI conventionally accepts ``--db <project_root>/.mareforma/graph.db``
-    even though ``open_db`` takes the project root and re-derives that
-    path. This helper reverses the convention so a caller that has the
-    file path can use it without silently rewriting it.
+    ``open_db`` takes the project root and re-derives the file path. This
+    helper reverses that for a caller who already holds the file path, so the
+    path is honoured instead of silently rewritten. An existing db goes through
+    the same version guard and column migration either entry point applies.
 
     Accepted shapes:
       - ``<root>/.mareforma/graph.db``: opens ``<root>`` as project root.
@@ -376,11 +467,11 @@ def open_db_from_db_path(db_path: "str | Path") -> sqlite3.Connection:
         if version == 0:
             conn.executescript(_SCHEMA_SQL)
             conn.executescript(_ADDITIVE_TABLES_SQL)
+            _ensure_supports_revision_row(conn)
             conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
         else:
-            conn.executescript(_ADDITIVE_TABLES_SQL)
-            _ensure_evidence_lines_columns(conn)
-        conn.executescript(_SIGNED_FIELDS_TRIGGER_SQL)
+            _open_existing_db(conn, db_file.parent, version)
+        _ensure_managed_triggers(conn)
         conn.commit()
         # Attach the rebuildable supports cache just like open_db does. Without
         # it add_claim's unconditional supports-edge maintenance hits
@@ -1627,7 +1718,7 @@ def _maybe_update_replicated_unlocked(
     # nor any open peer is promoted.
     new_status_row = conn.execute(
         "SELECT status, support_level, asserter_keyid, observed_grounding, "
-        "t_invalid FROM claims WHERE claim_id = ?",
+        "t_invalid, transparency_logged FROM claims WHERE claim_id = ?",
         (new_claim_id,),
     ).fetchone()
     if new_status_row is None or new_status_row["status"] != "open":
@@ -1733,12 +1824,15 @@ def _maybe_update_replicated_unlocked(
     strict_peer_clause = (
         "\n          AND c.artifact_hash IS NOT NULL" if strict_promotion else ""
     )
-    cand_placeholders = ",".join("?" * len(candidate_ids))
+    # The candidate list is as wide as the anchor's in-degree, so it is bound as
+    # a single JSON array rather than one variable per id: a well-cited anchor
+    # would otherwise cross SQLite's per-statement variable cap, and the failure
+    # is swallowed into a retry flag whose retry rebuilds the same statement.
     rows = conn.execute(
         f"""
         SELECT c.claim_id, c.asserter_keyid, c.supports_json
         FROM claims c
-        WHERE c.claim_id IN ({cand_placeholders})
+        WHERE c.claim_id IN (SELECT value FROM json_each(?))
           AND c.asserter_keyid IS NOT NULL
           AND c.asserter_keyid != ?
           AND c.support_level != 'ESTABLISHED'
@@ -1762,7 +1856,8 @@ def _maybe_update_replicated_unlocked(
               AND c.artifact_hash = ?
           ){strict_peer_clause}
         """,
-        (*candidate_ids, new_asserter_keyid, artifact_hash, artifact_hash),
+        (json.dumps(candidate_ids), new_asserter_keyid,
+         artifact_hash, artifact_hash),
     ).fetchall()
 
     # Authoritative anchor re-check against claims.supports_json, the cache
@@ -1811,17 +1906,17 @@ def _maybe_update_replicated_unlocked(
         return
 
     peer_ids = [r["claim_id"] for r in rows] + [new_claim_id]
-    peer_placeholders = ",".join("?" * len(peer_ids))
     # status='open' folded into the UPDATE's WHERE closes the TOCTOU
     # window between the SELECT above and this UPDATE: another writer
     # could flip a peer (or the new row) to contested/retracted between
     # the two statements. The row-level lock SQLite acquires during
     # UPDATE is the actual gate; the pre-SELECT is a cheap fast-path.
+    # One JSON-array variable for the peers, same reason as the SELECT above.
     conn.execute(
-        f"UPDATE claims SET support_level = 'REPLICATED', updated_at = ? "
-        f"WHERE claim_id IN ({peer_placeholders}) AND status = 'open' "
-        f"AND t_invalid IS NULL",
-        (_now(), *peer_ids),
+        "UPDATE claims SET support_level = 'REPLICATED', updated_at = ? "
+        "WHERE claim_id IN (SELECT value FROM json_each(?)) "
+        "AND status = 'open' AND t_invalid IS NULL",
+        (_now(), json.dumps(peer_ids)),
     )
 
 
@@ -2015,13 +2110,15 @@ def find_dangling_supports(conn: sqlite3.Connection) -> list[dict]:
     if not candidates:
         return []
 
+    # One JSON-array variable, not one per ref: the distinct-citation count
+    # scales with the graph and would cross SQLite's per-statement variable cap.
     refs = sorted({ref for (_cid, ref) in candidates})
-    placeholders = ",".join("?" * len(refs))
     existing = {
         r["claim_id"]
         for r in conn.execute(
-            f"SELECT claim_id FROM claims WHERE claim_id IN ({placeholders})",
-            refs,
+            "SELECT claim_id FROM claims "
+            "WHERE claim_id IN (SELECT value FROM json_each(?))",
+            (json.dumps(refs),),
         ).fetchall()
     }
 
@@ -4663,6 +4760,35 @@ def _read_scan_ceiling(limit: int) -> int:
     return max(limit * 50, 5000)
 
 
+def _enrolled_generator_condition(prefix: str = "") -> str:
+    """SQL for the default read filter's enrolled-generator half.
+
+    Mirrors the PRELIMINARY branch of :func:`_read_path_row` in SQL so LIMIT
+    counts survivors rather than scanned rows: the dominant drain (unsigned and
+    unenrolled-generator PRELIMINARY traffic) never enters the scan, and cannot
+    push a real match past the scan ceiling. The Python filter stays as written,
+    this only spares it the rows it would have dropped anyway. ``json_valid``
+    guards the extract: a malformed bundle is not enrolled, and must not fail
+    the whole statement. *prefix* qualifies the columns for joined statements.
+    """
+    bundle = f"{prefix}signature_bundle"
+    return (
+        f"({prefix}support_level != 'PRELIMINARY' OR (json_valid({bundle}) AND "
+        f"json_extract({bundle}, '$.signatures[0].keyid') "
+        f"IN (SELECT keyid FROM validators)))"
+    )
+
+
+def _scan_ceiling_error(surface: str, ceiling: int, found: int, limit: int):
+    """The ScanCeilingReached a read surface raises when its scan ran out."""
+    return ScanCeilingReached(
+        f"{surface} stopped at the {ceiling}-row scan ceiling with {found} of "
+        f"{limit} claims collected; rows past the ceiling were not read, so "
+        f"this result would be short without saying so. Narrow the query or "
+        f"lower limit."
+    )
+
+
 def _read_path_row(
     conn: sqlite3.Connection,
     row,
@@ -4710,7 +4836,7 @@ def _project_verified_rows(
     *,
     limit: int,
     include_unverified: bool,
-) -> list[dict]:
+) -> tuple[list[dict], int]:
     """Filter and project rows for a read surface, stopping at ``limit`` survivors.
 
     Computes the per-call reputation, enrolled set, and trust-domain disclosure
@@ -4719,13 +4845,19 @@ def _project_verified_rows(
     the table is sorted once, not re-sorted per batch. ``rows`` may be a live
     cursor: the early break then stops fetching, so the common path pulls a
     handful of rows rather than the whole scan ceiling.
+
+    Returns ``(survivors, scanned)``. ``scanned`` is how many rows were pulled,
+    which the caller compares against the scan ceiling to tell "that is all
+    there is" from "the scan ran out before the survivors did".
     """
     reputation = _compute_validator_reputation(conn)
     enrolled_keyids = _enrolled_validator_keyids(conn)
     trust_domain = _trust_domain_disclosure(conn)
     verify_cache: dict = {}
     results: list[dict] = []
+    scanned = 0
     for row in rows:
+        scanned += 1
         d = _read_path_row(
             conn, row,
             reputation=reputation, enrolled_keyids=enrolled_keyids,
@@ -4736,7 +4868,7 @@ def _project_verified_rows(
             results.append(d)
             if len(results) >= limit:
                 break
-    return results
+    return results, scanned
 
 
 def query_claims(
@@ -4875,9 +5007,12 @@ def query_claims(
             if "t_invalid IS NULL" in conditions:
                 conditions.remove("t_invalid IS NULL")
 
+    if not include_unverified:
+        conditions.append(_enrolled_generator_condition())
+
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
-    # The verified-claim filter runs in Python after the fetch, so a flat
+    # The signature re-verification runs in Python after the fetch, so a flat
     # `LIMIT limit` could under-return when the top rows are all drained. Order
     # the table once and materialise up to the scan ceiling of sorted rows in a
     # single statement (no growing OFFSET, so no per-batch re-scan and re-sort),
@@ -4888,17 +5023,21 @@ def query_claims(
         f"WHEN 'ESTABLISHED' THEN 3 WHEN 'REPLICATED' THEN 2 ELSE 1 END DESC, "
         f"created_at DESC LIMIT ?"
     )
+    ceiling = _read_scan_ceiling(limit)
     try:
-        cursor = conn.execute(base_sql, params + [_read_scan_ceiling(limit)])
+        cursor = conn.execute(base_sql, params + [ceiling])
     except sqlite3.OperationalError as exc:
         raise DatabaseError(f"Failed to query claims: {exc}") from exc
     # Step the live cursor rather than .fetchall(): _project_verified_rows breaks
     # at `limit` survivors, and on the common path (the first `limit` rows all
     # survive) that break stops fetching too, so the ceiling stays the worst-case
     # bound for the adversarial drain path instead of the per-call materialisation.
-    return _project_verified_rows(
+    results, scanned = _project_verified_rows(
         conn, cursor, limit=limit, include_unverified=include_unverified,
     )
+    if scanned >= ceiling and len(results) < limit:
+        raise _scan_ceiling_error("query", ceiling, len(results), limit)
+    return results
 
 
 def _extract_signature_bundle_keyid(bundle_json: str | None) -> str | None:
@@ -5022,6 +5161,8 @@ def search_claims(
     if classification is not None:
         conditions.append("c.classification = ?")
         params.append(classification)
+    if not include_unverified:
+        conditions.append(_enrolled_generator_condition("c."))
 
     where = " AND ".join(conditions)
     select_cols = ", ".join(f"c.{col}" for col in _CLAIM_COLUMNS)
@@ -5036,8 +5177,9 @@ def search_claims(
         f"WHERE {where} "
         f"ORDER BY rank LIMIT ?"
     )
+    ceiling = _read_scan_ceiling(limit)
     try:
-        cursor = conn.execute(base_sql, params + [_read_scan_ceiling(limit)])
+        cursor = conn.execute(base_sql, params + [ceiling])
     except sqlite3.OperationalError as exc:
         # FTS5 raises OperationalError on malformed MATCH syntax.
         # Wrap so callers don't have to import sqlite3 to pattern-match.
@@ -5049,9 +5191,12 @@ def search_claims(
         raise DatabaseError(f"Failed to search claims: {exc}") from exc
     # Step the ranked cursor lazily: _project_verified_rows stops at `limit`
     # survivors, so the common path fetches a handful, not the whole ceiling.
-    return _project_verified_rows(
+    results, scanned = _project_verified_rows(
         conn, cursor, limit=limit, include_unverified=include_unverified,
     )
+    if scanned >= ceiling and len(results) < limit:
+        raise _scan_ceiling_error("search", ceiling, len(results), limit)
+    return results
 
 
 def get_validator_reputation(conn: sqlite3.Connection) -> dict[str, int]:
@@ -5299,6 +5444,11 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
                 entry["validated_at"] = c["validated_at"]
             if c.get("unresolved"):
                 entry["unresolved"] = True
+            if c.get("idempotency_key"):
+                # Not signed material, but dropping it breaks the retry-safe
+                # write contract on a restored graph: the replay of a step
+                # misses the key lookup and inserts a signed near-duplicate.
+                entry["idempotency_key"] = c["idempotency_key"]
             if c.get("convergence_retry_needed"):
                 # Audit flag: preserved across restore so the operator's
                 # TODO list of "claims whose convergence detection still

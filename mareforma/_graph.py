@@ -60,6 +60,17 @@ _LLM_WRAP_FIELDS = ("text", "comparison_summary")
 # could realistically use as a multi-line injection payload.
 _LLM_SANITIZE_FIELDS = ("source_name", "generated_by", "validated_by")
 
+# The two sets above are the only fields whose treatment is named. Every
+# other string in the row is cleaned by the closing pass in
+# _format_row_for_llm, so adding a column cannot quietly add an unsanitized
+# field to an LLM-bound result.
+_LLM_NAMED_FIELDS = frozenset(_LLM_WRAP_FIELDS + _LLM_SANITIZE_FIELDS)
+
+# The run token a claim is attributed to when the caller names none. Every
+# path that resolves an absent generated_by uses this one name so a write and
+# the checks that read it back cannot drift apart.
+DEFAULT_RUN_TOKEN = "agent"
+
 
 def _model_lineage_of(grounding):
     """The model/method lineage a grounding verdict carries, or None.
@@ -85,11 +96,20 @@ def _format_row_for_llm(row: dict, prompt_safety) -> dict:
     for field in _LLM_SANITIZE_FIELDS:
         if field in out:
             out[field] = prompt_safety.sanitize_for_llm(out[field])
+    # Close the set: the remaining columns carry caller-supplied prose too
+    # (evidence rationales, adapter predicate payloads, grounding reasons),
+    # so strip hostile codepoints and forged delimiters from every string
+    # left. No wrapper on these: several are JSON the caller parses.
+    for field, value in out.items():
+        if field not in _LLM_NAMED_FIELDS and isinstance(value, str):
+            out[field] = prompt_safety.strip_forged_tags(
+                prompt_safety.sanitize_for_llm(value)
+            )
     return out
 
 
 def _synchronized(method):
-    """Serialize a graph mutation under the graph's re-entrant lock.
+    """Serialize a graph call under the graph's re-entrant lock.
 
     The connection is opened with ``check_same_thread=False``, so one graph may
     be driven from several threads. Transaction ownership in the db layer is
@@ -104,9 +124,16 @@ def _synchronized(method):
     a writer at a time, so ``not conn.in_transaction`` becomes a thread-correct
     ownership test. The lock is an ``RLock`` so the existing nested-call pattern
     (``submit_finding`` calling ``assert_claim`` inside one transaction, on the
-    same thread) re-enters instead of deadlocking. Read-only methods are left
-    unwrapped: SQLite serves them from the committed snapshot and they must not
-    block behind a long write.
+    same thread) re-enters instead of deadlocking.
+
+    Reads take the same lock. sqlite3 isolation is per CONNECTION, not per
+    thread, so a read issued while another thread holds an open
+    ``BEGIN IMMEDIATE`` on the shared connection runs inside that transaction
+    and returns rows the writer's rollback then erases. The cost is that a
+    reader waits for the writer ahead of it, including the Rekor round trip
+    ``submit_finding`` holds inside its transaction. Waiting is the lesser
+    harm: handing a caller a claim_id, a support level, or a trust map for
+    state that never lands is the failure this project exists to catch.
     """
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
@@ -453,6 +480,22 @@ class EpistemicGraph:
         def _bump_convergence_errors(_exc: Exception) -> None:
             self._convergence_errors += 1
 
+        from mareforma.observe._binding import predicate_citation_sources
+
+        # A claim asserted directly carries nothing to bind a verdict against:
+        # source_name is free text and no data_id or data_source lands in a
+        # bindable field, so the verdict-to-citation check the finding path runs
+        # is inapplicable here. Annotate the record with the same not-applicable
+        # marker so an unbound verdict is distinguishable on read from one that
+        # passed the check. assert_finding binds first and hands down a predicate
+        # carrying the citation, so a bound verdict is left alone and the marker
+        # is never appended twice. A non-dict verdict is left untouched so
+        # add_claim raises its own TypeError on it.
+        if isinstance(observed_grounding, dict) and not (
+            predicate_citation_sources(predicate_payload)
+        ):
+            observed_grounding = self._annotate_unbound(observed_grounding)
+
         return _db.add_claim(
             self._conn,
             self._root,
@@ -461,7 +504,7 @@ class EpistemicGraph:
             supports=supports,
             contradicts=contradicts,
             idempotency_key=idempotency_key,
-            generated_by=generated_by or "agent",
+            generated_by=generated_by or DEFAULT_RUN_TOKEN,
             source_name=source_name,
             status=status,
             unresolved=unresolved,
@@ -480,6 +523,7 @@ class EpistemicGraph:
             strict_promotion=self._strict_promotion,
         )
 
+    @_synchronized
     def query(
         self,
         text: str | None = None,
@@ -581,6 +625,13 @@ class EpistemicGraph:
         ------
         ValueError
             If ``min_support`` or ``classification`` is not a valid value.
+        ScanCeilingReached
+            If the read exhausted its scan ceiling (``max(limit * 50, 5000)``
+            ordered rows) before collecting ``limit`` survivors. Rows dropped
+            by verify-on-read do not count as survivors, so a graph carrying
+            many unverifiable rows can bury a real match behind the ceiling.
+            The read refuses rather than return a short list that reads as an
+            empty graph; narrow the query or lower ``limit``.
         """
         self._check_open()
         return _db.query_claims(
@@ -657,6 +708,7 @@ class EpistemicGraph:
             strict_promotion=self._strict_promotion,
         )
 
+    @_synchronized
     def refutation_status(self, claim_id: str) -> dict:
         """Return the refutation classification for *claim_id*.
 
@@ -678,6 +730,7 @@ class EpistemicGraph:
             )
         return _db.refutation_status(row)
 
+    @_synchronized
     def search(
         self,
         query: str,
@@ -720,6 +773,8 @@ class EpistemicGraph:
         ValueError
             If ``query`` is empty or pure wildcards, or fails FTS5
             parsing. Also for invalid ``min_support`` / ``classification``.
+        ScanCeilingReached
+            Same scan ceiling as :meth:`query`, on the ranked fetch.
         """
         self._check_open()
         return _db.search_claims(
@@ -838,6 +893,7 @@ class EpistemicGraph:
             signer=self._signer,
         )
 
+    @_synchronized
     def replication_verdicts(
         self,
         *,
@@ -860,6 +916,7 @@ class EpistemicGraph:
             include_invalidated=include_invalidated,
         )
 
+    @_synchronized
     def contradiction_verdicts(
         self, *, claim_id: str | None = None,
         include_invalidated: bool = False,
@@ -877,6 +934,7 @@ class EpistemicGraph:
             include_invalidated=include_invalidated,
         )
 
+    @_synchronized
     def get_validator_reputation(self) -> dict[str, int]:
         """Return ``{validator_keyid: count}`` for every enrolled validator.
 
@@ -888,11 +946,13 @@ class EpistemicGraph:
         self._check_open()
         return _db.get_validator_reputation(self._conn)
 
+    @_synchronized
     def get_claim(self, claim_id: str) -> dict | None:
         """Return a single claim dict by ID, or None if not found."""
         self._check_open()
         return _db.get_claim(self._conn, claim_id)
 
+    @_synchronized
     def trust_map(self, claim_id: str, *, reexec_record: "dict | None" = None):
         """Return the per-finding :class:`mareforma.trust_map.TrustMap` for a claim.
 
@@ -1409,19 +1469,27 @@ class EpistemicGraph:
         # can only land at a timestamp at or after now (>= registered_at on an
         # honored path), so it cannot retroactively move the run's first
         # execution before the plan's registration.
-        if generated_by is not None:
-            reg = _store.plan_registration(self._conn, plan_id)
-            if reg is not None and reg["preregistered"] == 1:
-                first_exec = _store.run_first_execution(self._conn, generated_by)
-                if first_exec is not None and reg["registered_at"] > first_exec:
-                    raise PostHocPlanError(
-                        f"plan {plan_id[:12]}… was registered at "
-                        f"{reg['registered_at']}, after run {generated_by!r} first "
-                        f"executed at {first_exec}. A plan registered once the run "
-                        "was already producing findings is not a pre-registration; "
-                        "it is refused, not honored. Pre-register the plan before "
-                        "the run executes, or submit under a fresh run token."
-                    )
+        #
+        # Omitting generated_by is not a third exemption. The claim write
+        # resolves it to DEFAULT_RUN_TOKEN, so the work IS attributed to a run;
+        # the guard resolves it the same way and asks about the same token. The
+        # consequence is intended: a project that never sets a run token puts
+        # every finding under one identity, so once any finding exists no later
+        # preregistered=1 plan can be submitted under the default. That is the
+        # collapsed run identity the health event below already reports.
+        run_token = generated_by or DEFAULT_RUN_TOKEN
+        reg = _store.plan_registration(self._conn, plan_id)
+        if reg is not None and reg["preregistered"] == 1:
+            first_exec = _store.run_first_execution(self._conn, run_token)
+            if first_exec is not None and reg["registered_at"] > first_exec:
+                raise PostHocPlanError(
+                    f"plan {plan_id[:12]}… was registered at "
+                    f"{reg['registered_at']}, after run {run_token!r} first "
+                    f"executed at {first_exec}. A plan registered once the run "
+                    "was already producing findings is not a pre-registration; "
+                    "it is refused, not honored. Pre-register the plan before "
+                    "the run executes, or submit under a fresh run token."
+                )
 
         # Bind the grounding verdict to the finding's citation, AFTER the
         # idempotency check, so an idempotent replay (which reuses the first
@@ -1510,7 +1578,7 @@ class EpistemicGraph:
                 # meaningless when the run token is the default/None. Flag it
                 # loudly (non-blocking) only here, on an actual new write, not
                 # on idempotent re-submits or calls about to fork/raise.
-                if not generated_by or generated_by == "agent":
+                if not generated_by or generated_by == DEFAULT_RUN_TOKEN:
                     from mareforma import health as _health
                     _health.append_health_event(
                         self._root, "submit_finding",
@@ -1697,6 +1765,21 @@ class EpistemicGraph:
             }
         )
 
+    @staticmethod
+    def _annotate_unbound(record: dict) -> dict:
+        """Mark a verdict that had no citation to bind against, at most once.
+
+        The finding path binds before it calls :meth:`assert_claim` and the claim
+        path checks again, so the marker must be idempotent: a reader tells an
+        unexercised binding from a passed one by its presence, not its count.
+        """
+        from mareforma.observe._binding import UNBOUND_ANNOTATION
+
+        reason = record.get("reason", "")
+        if UNBOUND_ANNOTATION in reason:
+            return record
+        return {**record, "reason": f"{reason} {UNBOUND_ANNOTATION}"}
+
     def _bind_grounding(
         self, grounding, finding_sources, *, strict, content_id
     ) -> dict | None:
@@ -1738,9 +1821,7 @@ class EpistemicGraph:
         if result.state is BindingState.NOT_APPLICABLE:
             # Nothing to bind against; keep the verdict and annotate so a reader
             # sees the binding was not exercised rather than silently assumed.
-            record = dict(record)
-            record["reason"] = f"{record.get('reason', '')} [no finding citation to bind]"
-            return record
+            return self._annotate_unbound(record)
 
         # DISJOINT. Only a GROUNDED verdict is unsafe to store as-is, an OPAQUE
         # or UNGROUNDED verdict does not promote and does not claim the data
@@ -1770,6 +1851,7 @@ class EpistemicGraph:
         record.pop("receipt_digest", None)
         return record
 
+    @_synchronized
     def proposition_status(self, proposition_or_content_id) -> dict | None:
         """The retrieval view for one proposition: derived Status, independence
         counts, and the frame-level contest. Accepts a content_id or a
@@ -1783,8 +1865,9 @@ class EpistemicGraph:
             if isinstance(proposition_or_content_id, str)
             else proposition_or_content_id.content_id()
         )
-        return _store.proposition_status(self._conn, cid, root=self._root)
+        return _store.proposition_status(self._conn, cid, disclose=self._skips)
 
+    @_synchronized
     def get_proposition(self, content_id: str) -> dict | None:
         """Return the stored proposition row as a dict, or None."""
         self._check_open()
@@ -1793,6 +1876,7 @@ class EpistemicGraph:
         row = _store.get_proposition_row(self._conn, content_id)
         return dict(row) if row is not None else None
 
+    @_synchronized
     def query_frame(
         self, frame_id_or_proposition, *, min_status: str | None = None
     ) -> list[dict]:
@@ -1830,8 +1914,16 @@ class EpistemicGraph:
         ``<untrusted_data>...</untrusted_data>`` delimiters. The short
         metadata fields ``source_name``, ``generated_by``, ``validated_by``
         are sanitized but not wrapped: they are short labels, not
-        free-form text. Other fields (``claim_id``, ``support_level``,
-        timestamps) pass through unchanged.
+        free-form text. Every other string value is sanitized and has
+        forged ``<untrusted_data>`` delimiters replaced by ``[stripped]``,
+        without a wrapper, since several of them (``evidence_json``,
+        ``predicate_payload``, ``observed_grounding``, the ``*_json``
+        columns) are JSON the caller parses. Non-string values pass
+        through unchanged.
+
+        One consequence: the signature fields in this view are cleaned
+        text, not the signed bytes. Read them from :meth:`query` when the
+        signature has to verify.
 
         The caller must still tell the LLM in the system prompt that
         everything inside ``<untrusted_data>`` is data, not instructions.
@@ -2093,6 +2185,7 @@ class EpistemicGraph:
             created_at=created_at,
         )
 
+    @_synchronized
     def list_validators(self) -> list[dict]:
         """Return the validator rows, ordered by enrollment time.
 
@@ -2124,11 +2217,14 @@ class EpistemicGraph:
         Returns
         -------
         dict
-            ``{"checked", "promoted", "still_pending"}``: int counts.
-            ``checked`` is the total rows examined; ``promoted`` is the
-            number that ran detection cleanly this pass (the flag was
-            cleared); ``still_pending`` is the number that errored
-            again and remain flagged.
+            ``{"checked", "retried_ok", "promoted", "still_pending"}``:
+            int counts. ``checked`` is the total rows examined;
+            ``retried_ok`` is the number that ran detection cleanly this
+            pass (the flag was cleared); ``promoted`` is the subset of
+            those whose support level actually moved, so a claim with no
+            converging peer recovers cleanly and counts zero promotions;
+            ``still_pending`` is the number that errored again and remain
+            flagged.
 
         Side effects: only the per-claim flag column and (transitively)
         the convergence-detection promotions themselves are mutated.
@@ -2139,6 +2235,7 @@ class EpistemicGraph:
         flagged = _db.list_convergence_retry_claims(self._conn)
 
         checked = len(flagged)
+        retried_ok = 0
         promoted = 0
         still_pending = 0
 
@@ -2148,7 +2245,7 @@ class EpistemicGraph:
                     supports = json.loads(row.get("supports_json") or "[]")
                 except (json.JSONDecodeError, TypeError):
                     supports = []
-                generated_by = row.get("generated_by") or "agent"
+                generated_by = row.get("generated_by") or DEFAULT_RUN_TOKEN
                 artifact_hash = row.get("artifact_hash")
                 claim_id = row["claim_id"]
 
@@ -2168,15 +2265,33 @@ class EpistemicGraph:
                     _db.clear_convergence_retry_flag(
                         self._conn, self._root, claim_id,
                     )
-                    promoted += 1
+                    retried_ok += 1
+                    # The helper returns clean-or-swallowed-error, never
+                    # whether a row was promoted, so read the support level
+                    # back. Detection that ran and moved nothing (the common
+                    # case: no converging peer) must not report a promotion.
+                    if self._support_level(claim_id) != row["support_level"]:
+                        promoted += 1
                 else:
                     still_pending += 1
 
         return {
             "checked": checked,
+            "retried_ok": retried_ok,
             "promoted": promoted,
             "still_pending": still_pending,
         }
+
+    def _support_level(self, claim_id: str) -> str | None:
+        """The claim's current support level, or None when it is gone.
+
+        Reads the column directly so a retry pass can tell a promotion from a
+        clean run that moved nothing.
+        """
+        row = self._conn.execute(
+            "SELECT support_level FROM claims WHERE claim_id = ?", (claim_id,)
+        ).fetchone()
+        return row["support_level"] if row is not None else None
 
     def classify_supports(
         self, values: list[str],
@@ -2195,6 +2310,7 @@ class EpistemicGraph:
         """
         return _db.classify_supports(values)
 
+    @_synchronized
     def query_provenance(
         self,
         claim_id: str,
@@ -2408,6 +2524,7 @@ class EpistemicGraph:
             "depth": depth,
         }
 
+    @_synchronized
     def find_dangling_supports(self) -> list[dict]:
         """Return UUID-shaped ``supports[]`` entries that point nowhere.
 
@@ -2426,9 +2543,21 @@ class EpistemicGraph:
         helper is for auditing integrity, not for blocking writes.
         REPLICATED detection already refuses to promote on a dangling
         reference, so a hanging arrow cannot trigger spurious promotion.
+
+        Raises
+        ------
+        mareforma.DatabaseError
+            If the audit query fails (an unparseable ``supports_json`` planted
+            by a hand-edit is the reachable case). The raw sqlite3 error is not
+            part of the public surface, so it is translated rather than leaked.
         """
         self._check_open()
-        return _db.find_dangling_supports(self._conn)
+        try:
+            return _db.find_dangling_supports(self._conn)
+        except sqlite3.Error as exc:
+            raise _db.DatabaseError(
+                f"Failed to audit dangling supports: {exc}",
+            ) from exc
 
     @_synchronized
     def refresh_unsigned(self) -> dict[str, int]:
@@ -2687,7 +2816,7 @@ class EpistemicGraph:
         }
 
     def get_tools(
-        self, *, generated_by: str = "agent",
+        self, *, generated_by: str = DEFAULT_RUN_TOKEN,
         include_deprecated_aliases: bool = False,
     ) -> list:
         """Return agent tool callables pre-bound to this graph.
@@ -2871,6 +3000,7 @@ class EpistemicGraph:
         """
         return self._convergence_errors
 
+    @_synchronized
     def health(self) -> dict[str, int]:
         """Single-call audit summary of mareforma state.
 
@@ -2974,8 +3104,14 @@ class EpistemicGraph:
         finally:
             _db.resume_backup(self._conn, self._root)
 
+    @_synchronized
     def close(self) -> None:
         """Close the underlying database connection.
+
+        Takes the graph lock like every other mutator: the connection is
+        shared across threads, and closing it under another thread's live
+        statements crashes the process instead of raising. Waiting here lets
+        an in-flight write commit first.
 
         Subsequent calls on this graph raise ``RuntimeError`` with an
         actionable message instead of leaking a raw

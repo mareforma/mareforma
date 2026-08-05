@@ -301,7 +301,10 @@ the operator should look at.
 
 Retry convergence detection (PRELIMINARY → REPLICATED) for every
 claim flagged `convergence_retry_needed=1`. Returns
-`{"checked", "promoted", "still_pending"}`.
+`{"checked", "retried_ok", "promoted", "still_pending"}`. `retried_ok`
+counts the claims whose detection ran cleanly this pass; `promoted` is
+the subset that actually moved off PRELIMINARY, which is zero when the
+claim has no converging peer.
 
 The detection path runs after every successful claim INSERT. When a
 SQLite trigger or contention pattern causes that check to raise,

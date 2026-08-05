@@ -463,7 +463,9 @@ def restore(
 from mareforma.db import (
     MareformaError,
     DatabaseError,
+    ScanCeilingReached,
     ClaimNotFoundError,
+    UnverifiedClaimError,
     SignedClaimImmutableError,
     IdempotencyConflictError,
     IllegalStateTransitionError,
@@ -588,6 +590,7 @@ __all__ = [
     "CycleDetectedError",
     "GraphTooLargeError",
     "DatabaseError",
+    "ScanCeilingReached",
     "EvidenceCitationError",
     "IdempotencyConflictError",
     "IllegalStateTransitionError",

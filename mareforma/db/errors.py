@@ -9,6 +9,31 @@ class DatabaseError(MareformaError):
     """Raised when a graph.db operation fails."""
 
 
+class ScanCeilingReached(DatabaseError):
+    """Raised when a read surface exhausts its scan ceiling short of ``limit``.
+
+    ``query_claims`` and ``search_claims`` bound how many ordered rows they
+    materialise. Rows dropped by verify-on-read do not count as survivors, so a
+    flood of rows that fail that check can fill the ceiling before ``limit``
+    real matches are reached. Returning the short list would be indistinguishable
+    from an empty graph, and the query-before-asserting pattern would then
+    re-assert what is already recorded, so the read refuses instead. Narrow the
+    query or lower ``limit`` to bring the survivors inside the ceiling.
+    """
+
+
+class UnverifiedClaimError(MareformaError):
+    """Raised when an export is asked to publish a claim that failed verify-on-read.
+
+    The interop exports (JSON-LD, PROV-O, RO-Crate) carry a claim's
+    ``support_level`` off the machine, where nothing re-checks it. A REPLICATED
+    or ESTABLISHED row whose signature does not re-verify must not leave with
+    that level attached, and demoting it silently would hide the tamper, so the
+    export refuses and names the rows. Run ``mareforma verify <claim_id>`` for
+    the detail, then retract or repair the row.
+    """
+
+
 class ClaimNotFoundError(MareformaError):
     """Raised when a claim lookup finds no matching record."""
 

@@ -81,6 +81,12 @@ Mareforma could not see: a subprocess, a C extension, a warmed connection.
 Mareforma computes this from the run, so an agent that declares `ANALYTICAL` on a
 silent pipeline failure leaves the gap on the record instead of hiding it.
 
+The verdict says a cited read happened, not that it was a read of this claim's own
+data. `assert_claim` has no citation to bind it to, so the stored reason carries
+`[no finding citation to bind]`. Use `assert_finding` with `data_source=` when you
+want the verdict cross-checked against the data the claim rests on. See
+[Grounding](/concepts/grounding).
+
 ## Query what is already known
 
 ```python

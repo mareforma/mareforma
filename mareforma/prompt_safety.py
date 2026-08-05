@@ -9,18 +9,20 @@ hidden instructions, RTL/LTR overrides that visually reorder text, or
 a forged ``</untrusted_data>`` closing tag that breaks out of the
 wrapper.
 
-This module provides two minimal operations:
+This module provides three minimal operations:
 
 - :func:`sanitize_for_llm` strips zero-width / bidi / C0-C1 control
   characters (whitespace except ``\\n`` and ``\\t`` is kept) and caps
   pathologically long inputs.
-- :func:`wrap_untrusted` strips any forged opening/closing tag from the
-  inner content and wraps the result in
+- :func:`strip_forged_tags` replaces any forged opening/closing tag
+  with ``[stripped]``, leaving the content otherwise intact.
+- :func:`wrap_untrusted` strips forged tags and wraps the result in
   ``<untrusted_data>...</untrusted_data>`` delimiters.
 
 Callers should be opinionated about what they wrap. The graph's
 ``query_for_llm`` method wraps the ``text`` and ``comparison_summary``
-fields and sanitizes-only on the short metadata labels.
+fields, sanitizes-only on the short metadata labels, and sanitizes plus
+strips forged tags on every other string in the row.
 
 Threat model
 ------------
@@ -110,6 +112,40 @@ def _forged_tag_re(tag: str) -> re.Pattern[str]:
     )
 
 
+def strip_forged_tags(text: str | None, *, tag: str = "untrusted_data") -> str | None:
+    """Replace every literal ``<{tag}>`` / ``</{tag}>`` in *text* with
+    ``[stripped]``.
+
+    The tag-forgery half of :func:`wrap_untrusted`, without the wrapping.
+    Use it on content that must be splice-safe but cannot carry delimiters
+    of its own, such as a JSON column whose shape the caller parses.
+
+    Returns ``None`` for ``None`` input.
+    """
+    if text is None:
+        return None
+    if not isinstance(text, str):
+        raise TypeError(
+            f"strip_forged_tags expects str or None, got {type(text).__name__}"
+        )
+    _validate_tag(tag)
+    return _forged_tag_re(tag).sub("[stripped]", text)
+
+
+def _validate_tag(tag: str) -> None:
+    """Reject a tag that would make the wrapper itself injectable.
+
+    The tag is a static identifier in callers we control, but bound the
+    contract: a tag with whitespace or ``>`` would let an attacker close
+    the delimiter from inside.
+    """
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", tag):
+        raise ValueError(
+            f"tag {tag!r} must be a simple ASCII identifier (letters, "
+            "digits, underscore; not starting with a digit)."
+        )
+
+
 def sanitize_for_llm(text: str | None) -> str | None:
     """Strip prompt-injection-hostile codepoints and cap length.
 
@@ -189,17 +225,8 @@ def wrap_untrusted(text: str | None, *, tag: str = "untrusted_data") -> str:
         raise TypeError(
             f"wrap_untrusted expects str or None, got {type(text).__name__}"
         )
-    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", tag):
-        # The tag is a static identifier in callers we control, but
-        # bound the contract: a tag with whitespace or `>` would let
-        # the wrapper itself become injectable.
-        raise ValueError(
-            f"tag {tag!r} must be a simple ASCII identifier (letters, "
-            "digits, underscore; not starting with a digit)."
-        )
-
-    stripped = _forged_tag_re(tag).sub("[stripped]", text)
-    return f"<{tag}>\n{stripped}\n</{tag}>"
+    _validate_tag(tag)
+    return f"<{tag}>\n{strip_forged_tags(text, tag=tag)}\n</{tag}>"
 
 
 def safe_for_llm(text: str | None, *, tag: str = "untrusted_data") -> str:

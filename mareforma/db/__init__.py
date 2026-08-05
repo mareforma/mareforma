@@ -32,7 +32,9 @@ from ._schema_sql import (
 from .errors import (
     MareformaError,
     DatabaseError,
+    ScanCeilingReached,
     ClaimNotFoundError,
+    UnverifiedClaimError,
     SignedClaimImmutableError,
     IdempotencyConflictError,
     IllegalStateTransitionError,
@@ -70,6 +72,7 @@ from .core import (
     # Connection management.
     open_db,
     open_db_from_db_path,
+    _open_existing_db,
     _db_path,
     _ensure_claims_columns_for_upgrade,
     _ensure_evidence_lines_columns,
@@ -153,6 +156,8 @@ from .core import (
     query_claims,
     search_claims,
     _read_scan_ceiling,
+    _enrolled_generator_condition,
+    _scan_ceiling_error,
     _read_path_row,
     _project_verified_rows,
     _row_verified_on_read,
@@ -207,7 +212,9 @@ __all__ = [
     # Exceptions.
     "MareformaError",
     "DatabaseError",
+    "ScanCeilingReached",
     "ClaimNotFoundError",
+    "UnverifiedClaimError",
     "SignedClaimImmutableError",
     "IdempotencyConflictError",
     "IllegalStateTransitionError",

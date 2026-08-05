@@ -74,6 +74,34 @@ class GroundingCitationMismatchError(Exception):
 # and the write side both emit it, and tests pin it, so it must not drift.
 DISJOINT_REASON = "verdict cited-set disjoint from finding citation"
 
+# The marker appended to a verdict that had no citation to bind against, so a
+# reader tells an unexercised check from a passed one. Both write paths (the
+# finding bind and the plain claim) emit it; frozen wording, same as above.
+UNBOUND_ANNOTATION = "[no finding citation to bind]"
+
+
+def predicate_citation_sources(predicate) -> tuple[str, ...]:
+    """The bindable citation identifiers a claim's predicate declares.
+
+    The normalized ``data_sources`` plus any content-addressed ``data_ids``.
+    One rule, read by the write gate (is a GROUNDED verdict storable) and by
+    both read-side re-checks (is a stored one still honest); they have to agree
+    by construction or a row restore accepts is one the audit surface rejects.
+    Empty for a plain claim: ``source_name`` is free text and never binds, and a
+    string-fallback ``data_id`` is an opaque token the read side cannot
+    reproduce. A non-string element is dropped rather than compared as itself,
+    which is how a hand-edited or foreign-written row arrives.
+    """
+    from mareforma.trust._store import is_content_addressed
+
+    if not isinstance(predicate, dict):
+        return ()
+    sources = predicate.get("data_sources") or []
+    data_ids = predicate.get("data_ids") or []
+    out = [s for s in sources if isinstance(s, str)]
+    out += [d for d in data_ids if isinstance(d, str) and is_content_addressed(d)]
+    return tuple(out)
+
 
 def check_grounding_binding(
     verdict_cited: tuple[str, ...],

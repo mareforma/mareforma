@@ -85,3 +85,24 @@ def test_stale_cache_edge_cannot_promote_a_non_citing_claim(tmp_path):
         assert g.get_claim(z)["support_level"] == "PRELIMINARY"
         # y has no valid peer (z is filtered out), so it stays PRELIMINARY too.
         assert g.get_claim(y)["support_level"] == "PRELIMINARY"
+
+
+def test_stale_cache_edge_is_not_reported_as_lineage(tmp_path):
+    """query_provenance reads the same rebuildable cache, so it owes the same
+    re-check: an edge no signed supports_json attests is not lineage."""
+    _sa, sb = _two_signers(tmp_path)
+    root_key = _bootstrap_key(tmp_path, "root.key")
+    with mareforma.open(tmp_path, key_path=root_key) as g:
+        up = g.assert_claim("anchor", generated_by="seed", seed=True)
+        z = g.assert_claim("Z", generated_by="lab_z", signer=sb)
+        g._conn.execute(
+            "INSERT INTO supports_cache.claim_supports "
+            "(claim_id, supports_claim_id, position) VALUES (?, ?, 0)",
+            (z, up),
+        )
+        g._conn.commit()
+
+        assert g.get_claim(z)["supports_json"] == "[]"
+        assert [e["claim_id"] for e in g.query_provenance(z)["upstream"]] == []
+        anchor_prov = g.query_provenance(up)
+        assert [e["claim_id"] for e in anchor_prov["downstream"]] == []

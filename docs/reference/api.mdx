@@ -490,12 +490,12 @@ Retry convergence detection (PRELIMINARY → REPLICATED) for every claim flagged
 
 ```python
 result = graph.refresh_convergence()
-# {"checked": N, "promoted": M, "still_pending": K}
+# {"checked": N, "retried_ok": M, "promoted": P, "still_pending": K}
 ```
 
 The detection path runs after every successful claim INSERT. When a SQLite trigger or contention pattern causes that check to raise, mareforma swallows the error so writes never crash, logs a WARNING, and flags the claim for retry.
 
-**Returns** `dict` with keys `checked`, `promoted`, `still_pending`.
+**Returns** `dict` with keys `checked`, `retried_ok`, `promoted`, `still_pending`. `retried_ok` counts the claims whose detection ran cleanly this pass; `promoted` is the subset whose support level actually moved. A claim with no converging peer recovers cleanly and promotes nothing, so `retried_ok` without `promoted` is the normal outcome.
 
 ---
 
@@ -698,6 +698,7 @@ catching looks like `from mareforma import RekorInclusionError`.
 | Exception | Module | Raised by | Meaning |
 |---|---|---|---|
 | `DatabaseError` | `mareforma.db` | `open()` and any write | SQLite error or unmigratable schema |
+| `ScanCeilingReached` | `mareforma.db` | `query()`, `search()` | The read exhausted its scan ceiling (`max(limit * 50, 5000)` ordered rows) before collecting `limit` survivors, so the result would be short without saying so |
 | `ClaimNotFoundError` | `mareforma.db` | `validate()`, `get_claim()` callers | The claim does not exist |
 | `SignedClaimImmutableError` | `mareforma.db` | `update_claim()` | Tried to mutate a signed-payload field on a signed row |
 | `IdempotencyConflictError` | `mareforma.db` | `assert_claim()` | Idempotency-key replay with a conflicting `artifact_hash` |

@@ -52,11 +52,15 @@ class TestEstablishedUpstreamRule:
     def test_replicated_blocked_with_only_preliminary_upstream(
         self, tmp_path: Path,
     ) -> None:
+        """Distinct signers, so the anchor's support_level is the only thing
+        holding the pair at PRELIMINARY."""
+        from tests._helpers import _two_signers
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
             up = g.assert_claim("upstream", generated_by="seed")  # NO seed=True
             assert g.get_claim(up)["support_level"] == "PRELIMINARY"
-            a = g.assert_claim("a", supports=[up], generated_by="A")
-            b = g.assert_claim("b", supports=[up], generated_by="B")
+            a = g.assert_claim("a", supports=[up], generated_by="A", signer=sa)
+            b = g.assert_claim("b", supports=[up], generated_by="B", signer=sb)
             # Without seed=True the upstream is PRELIMINARY → REPLICATED gate
             # does not fire.
             assert g.get_claim(a)["support_level"] == "PRELIMINARY"

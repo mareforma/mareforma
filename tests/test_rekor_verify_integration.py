@@ -602,6 +602,136 @@ class TestH2SidecarBeforeMarkClaim:
             assert "uuid" in entry
 
 
+def _assert_claim_while_rekor_is_down(tmp_path, httpx_mock, key_path) -> str:
+    """Persist one claim with transparency_logged=0 by 503ing the submit.
+
+    The starting state for every refresh_unsigned case: the operator
+    recovery path only has work to do once a claim is unlogged.
+    """
+    httpx_mock.add_response(
+        method="POST", url=_TEST_REKOR_URL,
+        status_code=503, is_optional=True,
+    )
+    with mareforma.open(
+        tmp_path, key_path=key_path,
+        rekor_url=_TEST_REKOR_URL, trust_insecure_rekor=True,
+    ) as graph:
+        cid = graph.assert_claim("pending", classification="ANALYTICAL")
+        assert graph.get_claim(cid)["transparency_logged"] == 0
+    return cid
+
+
+class TestRefreshUnsignedVerification:
+    """refresh_unsigned is the recovery path after a Rekor outage, so it
+    is where a silent promotion would land: the row would read
+    transparency_logged=1 with no verified inclusion proof behind it.
+    When the graph carries a pinned log key, only a proof that verifies
+    may promote the claim."""
+
+    def test_verified_proof_promotes_and_reaches_the_sidecar(
+        self, tmp_path, httpx_mock,
+    ):
+        log_key = Ed25519PrivateKey.generate()
+        key_path = _bootstrap_key(tmp_path)
+        cid = _assert_claim_while_rekor_is_down(tmp_path, httpx_mock, key_path)
+
+        _wire_rekor_mock(httpx_mock, log_key=log_key)
+        with mareforma.open(
+            tmp_path, key_path=key_path,
+            rekor_url=_TEST_REKOR_URL, trust_insecure_rekor=True,
+            rekor_log_pubkey_pem=_pubkey_pem(log_key),
+        ) as graph:
+            assert graph.refresh_unsigned()["logged"] == 1
+            assert graph.get_claim(cid)["transparency_logged"] == 1
+            raw = graph._conn.execute(
+                "SELECT raw_response_b64 FROM rekor_inclusions "
+                "WHERE claim_id = ?", (cid,),
+            ).fetchone()["raw_response_b64"]
+        # The proof the recovery path verified is what restore reads.
+        stored = json.loads(base64.standard_b64decode(raw))
+        entry = next(iter(stored.values()))
+        assert "inclusionProof" in entry["verification"]
+
+    def test_hostile_checkpoint_leaves_the_claim_unlogged(
+        self, tmp_path, httpx_mock,
+    ):
+        log_key = Ed25519PrivateKey.generate()
+        key_path = _bootstrap_key(tmp_path)
+        cid = _assert_claim_while_rekor_is_down(tmp_path, httpx_mock, key_path)
+
+        # Rekor is back but signs a checkpoint over a root the proof's
+        # hashes do not reconstruct.
+        _wire_rekor_mock(
+            httpx_mock, log_key=log_key, override_root=b"\xff" * 32,
+        )
+        with mareforma.open(
+            tmp_path, key_path=key_path,
+            rekor_url=_TEST_REKOR_URL, trust_insecure_rekor=True,
+            rekor_log_pubkey_pem=_pubkey_pem(log_key),
+        ) as graph:
+            with pytest.warns(
+                UserWarning, match="inclusion-proof verification.*failed",
+            ):
+                result = graph.refresh_unsigned()
+            assert result == {"checked": 1, "logged": 0, "still_unlogged": 1}
+            assert graph.get_claim(cid)["transparency_logged"] == 0
+
+    def test_submit_response_without_uuid_leaves_the_claim_unlogged(
+        self, tmp_path, httpx_mock,
+    ):
+        """No uuid means no re-fetch, so there is nothing to verify."""
+        log_key = Ed25519PrivateKey.generate()
+        key_path = _bootstrap_key(tmp_path)
+        cid = _assert_claim_while_rekor_is_down(tmp_path, httpx_mock, key_path)
+
+        _wire_rekor_mock(httpx_mock, log_key=log_key, uuid="")
+        with mareforma.open(
+            tmp_path, key_path=key_path,
+            rekor_url=_TEST_REKOR_URL, trust_insecure_rekor=True,
+            rekor_log_pubkey_pem=_pubkey_pem(log_key),
+        ) as graph:
+            with pytest.warns(UserWarning, match="response had no uuid"):
+                result = graph.refresh_unsigned()
+            assert result == {"checked": 1, "logged": 0, "still_unlogged": 1}
+            assert graph.get_claim(cid)["transparency_logged"] == 0
+
+
+class TestSubmitResponseWithoutUuid:
+    """Submit-time counterpart: a response carrying no uuid cannot be
+    re-fetched, so the inclusion proof the caller asked for can never be
+    obtained. require_rekor=True refuses the write; otherwise the claim
+    persists unlogged."""
+
+    def test_require_rekor_raises(self, tmp_path, httpx_mock):
+        log_key = Ed25519PrivateKey.generate()
+        _wire_rekor_mock(httpx_mock, log_key=log_key, uuid="")
+
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(
+            tmp_path, key_path=key_path,
+            rekor_url=_TEST_REKOR_URL, trust_insecure_rekor=True,
+            rekor_log_pubkey_pem=_pubkey_pem(log_key),
+            require_rekor=True,
+        ) as graph:
+            with pytest.raises(_signing.SigningError, match="no uuid"):
+                graph.assert_claim("no uuid", classification="ANALYTICAL")
+
+    def test_without_require_rekor_the_claim_stays_unlogged(
+        self, tmp_path, httpx_mock,
+    ):
+        log_key = Ed25519PrivateKey.generate()
+        _wire_rekor_mock(httpx_mock, log_key=log_key, uuid="")
+
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(
+            tmp_path, key_path=key_path,
+            rekor_url=_TEST_REKOR_URL, trust_insecure_rekor=True,
+            rekor_log_pubkey_pem=_pubkey_pem(log_key),
+        ) as graph:
+            cid = graph.assert_claim("no uuid", classification="ANALYTICAL")
+            assert graph.get_claim(cid)["transparency_logged"] == 0
+
+
 # ---------------------------------------------------------------------------
 # The sidecar must carry a proof restore can verify
 # ---------------------------------------------------------------------------

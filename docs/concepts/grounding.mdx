@@ -204,11 +204,17 @@ mareforma measure run-receipts.jsonl --json
 
 A `GROUNDED` verdict is only as honest as the claim it is attached to. The verdict
 is computed against the source you named in `observe(cites=...)`, which need not be
-the data the finding cites. So at bind time the verdict's cited set is cross-checked
-against the finding's own citation: its `data_id` set plus any `data_source=`. A
-`GROUNDED` whose cited set shares nothing with the finding downgrades to `OPAQUE`
-with a signed reason, or raises `GroundingCitationMismatchError` when you pass
-`grounding_strict=True`.
+the data the finding cites. So on `assert_finding` and `submit_finding`, at bind
+time, the verdict's cited set is cross-checked against the finding's own citation:
+its `data_id` set plus any `data_source=`. A `GROUNDED` whose cited set shares
+nothing with the finding downgrades to `OPAQUE` with a signed reason, or raises
+`GroundingCitationMismatchError` when you pass `grounding_strict=True`.
+
+`assert_claim` has no citation to bind against. A plain claim carries no `data_id`
+and no `data_source=`, and the free-text `source_name` never binds, so there is
+nothing to cross-check the verdict with. Such a verdict is stored with
+`[no finding citation to bind]` appended to its signed reason: the binding was not
+exercised, not passed. Assert a finding when you want the verdict bound.
 
 The modal honest workflow cites a path in the verdict, passes that same path as
 `data_source=`, and content-addresses the `data_id`:

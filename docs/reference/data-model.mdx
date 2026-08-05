@@ -14,7 +14,7 @@ All persistent state lives in a single SQLite file at `<project_root>/.mareforma
 | `text` | TEXT | required | No | The falsifiable assertion. Hard cap 100,000 chars. Sanitized on write (zero-width / bidi / control chars stripped) |
 | `classification` | TEXT | `INFERRED` | No | Epistemic origin: `INFERRED` / `ANALYTICAL` / `DERIVED` |
 | `support_level` | TEXT | `PRELIMINARY` | No | Graph-derived trust: `PRELIMINARY` / `REPLICATED` / `ESTABLISHED`. Transitions enforced by BEFORE triggers. REPLICATED fires when ≥2 claims signed by distinct keys (`asserter_keyid`) cite a shared ESTABLISHED upstream |
-| `idempotency_key` | TEXT | `NULL` | Yes | UNIQUE: same key → same `claim_id`, no INSERT |
+| `idempotency_key` | TEXT | `NULL` | Yes | UNIQUE: same key → same `claim_id`, no INSERT. Round-trips through `claims.toml` so a replay after a restore still returns the original claim |
 | `validated_by` | TEXT | `NULL` | Yes | Cosmetic display label set by `graph.validate()` (authoritative identity lives in `validation_signature`) |
 | `validated_at` | TEXT | `NULL` | Yes | UTC ISO 8601 timestamp of validation |
 | `status` | TEXT | `open` | No | Editorial: `open` / `contested` / `retracted` |

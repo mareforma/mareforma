@@ -101,6 +101,20 @@ CREATE TABLE IF NOT EXISTS supports_cache.cache_meta (
 """
 
 
+# The cache is unsigned and rebuildable, so a walk may only narrow what
+# the signed rows already say. Every edge it returns must still be cited
+# by the parent's authoritative claims.supports_json; a planted or
+# half-written cache row names an ancestry no signature covers. Applied
+# to both arms of both walks, the same re-check the convergence
+# candidate lookup runs before a promotion.
+_EDGE_IS_ATTESTED = """
+            AND EXISTS (
+                SELECT 1 FROM claims c, json_each(c.supports_json) e
+                 WHERE c.claim_id = cs.claim_id
+                   AND e.value = cs.supports_claim_id
+            )"""
+
+
 def _cache_path(root: Path) -> Path:
     return root / ".mareforma" / CACHE_FILENAME
 
@@ -382,21 +396,25 @@ def walk_upstream(
     write time. Default 4 matches :meth:`EpistemicGraph.query_provenance`:
     deep enough for most provenance audits without dragging the
     entire ancestral chain on every call.
+
+    Every hop is re-checked against the parent's signed
+    ``claims.supports_json``, so a cache edge nothing attests is
+    dropped rather than reported as lineage.
     """
     if depth < 1:
         return []
     rows = conn.execute(
-        """
+        f"""
         WITH RECURSIVE upstream(claim_id, supports_claim_id, depth, position)
         AS (
-            SELECT claim_id, supports_claim_id, 1 AS depth, position
-              FROM supports_cache.claim_supports
-             WHERE claim_id = ?
+            SELECT cs.claim_id, cs.supports_claim_id, 1 AS depth, cs.position
+              FROM supports_cache.claim_supports cs
+             WHERE cs.claim_id = ?{_EDGE_IS_ATTESTED}
             UNION ALL
             SELECT cs.claim_id, cs.supports_claim_id, u.depth + 1, cs.position
               FROM supports_cache.claim_supports cs
               JOIN upstream u ON cs.claim_id = u.supports_claim_id
-             WHERE u.depth < ?
+             WHERE u.depth < ?{_EDGE_IS_ATTESTED}
         )
         SELECT DISTINCT supports_claim_id AS claim_id, depth, position
           FROM upstream
@@ -417,22 +435,23 @@ def walk_downstream(
 
     Uses the ``idx_supports_reverse`` index for O(deg) per hop. Returns
     ``{claim_id, depth, position}`` rows where ``claim_id`` is a
-    downstream consumer.
+    downstream consumer. Edges are re-checked against the citing
+    claim's signed ``claims.supports_json``, as in :func:`walk_upstream`.
     """
     if depth < 1:
         return []
     rows = conn.execute(
-        """
+        f"""
         WITH RECURSIVE downstream(claim_id, supports_claim_id, depth, position)
         AS (
-            SELECT claim_id, supports_claim_id, 1 AS depth, position
-              FROM supports_cache.claim_supports
-             WHERE supports_claim_id = ?
+            SELECT cs.claim_id, cs.supports_claim_id, 1 AS depth, cs.position
+              FROM supports_cache.claim_supports cs
+             WHERE cs.supports_claim_id = ?{_EDGE_IS_ATTESTED}
             UNION ALL
             SELECT cs.claim_id, cs.supports_claim_id, d.depth + 1, cs.position
               FROM supports_cache.claim_supports cs
               JOIN downstream d ON cs.supports_claim_id = d.claim_id
-             WHERE d.depth < ?
+             WHERE d.depth < ?{_EDGE_IS_ATTESTED}
         )
         SELECT DISTINCT claim_id, depth, position
           FROM downstream
