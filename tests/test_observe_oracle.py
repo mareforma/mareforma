@@ -46,6 +46,48 @@ def test_oracle_C_incidental_dependence_is_not_influenced():
     assert res.influence is OracleInfluence.NOT_INFLUENCED
 
 
+def test_opposing_perturbations_do_not_cancel():
+    # Each perturbation is its own comparison against the base. Pooling them all
+    # into one mean let a +1 and a -1 perturbation of an identity pipeline
+    # cancel to zero effect and report the data as ignored.
+    res = perturbation_oracle(lambda x: x, 0.0, [1.0, -1.0], repeats=3)
+    assert res.influence is OracleInfluence.INFLUENCED
+    assert res.effect_size == 1.0
+    assert res.perturbation_effects == (1.0, 1.0)
+
+
+def test_effect_is_the_largest_perturbation_not_the_average():
+    # Perturbations of differing size must not dilute each other: two +1 and one
+    # -1 around base 10 on a doubling pipeline each move the finding by 2, so
+    # the effect is 2, not the 0.667 a pooled mean reported.
+    res = perturbation_oracle(lambda x: x * 2, 10.0, [11.0, 11.0, 9.0])
+    assert res.effect_size == pytest.approx(2.0)
+    assert res.perturbation_effects == pytest.approx((2.0, 2.0, 2.0))
+
+
+def test_perturbation_count_widens_the_threshold():
+    # Taking the max over k perturbations is itself a multiple comparison, so
+    # the threshold gains the extreme-value sigmas a family of k would. Base
+    # [0,1,2] (std ~0.816) with one perturbation moving the finding by 3 clears
+    # the 2.449 margin; add a second perturbation that does not move it and the
+    # margin widens to ~3.41, so the same move is UNDECIDABLE, not INFLUENCED.
+    one = perturbation_oracle(_replays([0.0, 1.0, 2.0, 3.0, 4.0, 5.0]), 0.0,
+                              [1.0], repeats=3)
+    two = perturbation_oracle(_replays([0.0, 1.0, 2.0, 3.0, 4.0, 5.0,
+                                        0.0, 1.0, 2.0]), 0.0, [1.0, 2.0],
+                              repeats=3)
+    assert one.influence is OracleInfluence.INFLUENCED
+    assert two.effect_size == one.effect_size
+    assert two.decision_threshold > one.decision_threshold
+    assert two.influence is OracleInfluence.UNDECIDABLE
+
+
+def _replays(values):
+    """A run_fn that returns the given values in order, one per call."""
+    seq = iter(values)
+    return lambda x: next(seq)
+
+
 def test_oracle_noise_below_threshold_is_undecidable():
     # A stochastic pipeline whose perturbation effect clears one noise sd but not
     # the full noise margin must be UNDECIDABLE, never silently INFLUENCED nor
@@ -131,6 +173,59 @@ def test_summarize_reports_the_split_and_opaque_trigger(tmp_path):
     assert report.ungrounded == 1
     assert report.incidental_read_rate == 0.5
     assert report.opaque_dominates(threshold=0.5) is False
+
+
+def test_incidental_rate_does_not_depend_on_the_summarizing_cwd(tmp_path,
+                                                               monkeypatch):
+    # A receipt is written on the producing host and summarized anywhere: by a
+    # later run, by `mareforma measure`, or off-host after --redact-home. The
+    # read identifier is resolved once, where the filesystem is authoritative,
+    # so the same receipt reports the same number from any directory.
+    from mareforma.observe import summarize_receipts
+
+    data = tmp_path / "trial.csv"
+    data.write_text("x\n1\n")
+    monkeypatch.chdir(tmp_path)
+    with obs.observe(cites=str(data)) as h:
+        open("trial.csv").read()  # relative read of the cited source
+    assert h.verdict.grounding is OG.GROUNDED
+    receipt = h.verdict.receipt()
+
+    assert summarize_receipts([receipt]).incidental_read_rate == 0.0
+    monkeypatch.chdir(tmp_path.parent)
+    assert summarize_receipts([receipt]).incidental_read_rate == 0.0
+
+
+def test_summarize_receipts_refuses_an_older_grounding_axis():
+    # The older axis stored the loader's RAW read identifier and normalized both
+    # sides at compare time. This one normalizes at record time and compares by
+    # plain string, so an older receipt's relative identifier no longer equals
+    # its normalized cited source and would be counted as an incidental read.
+    # Two definitions of the number cannot share one report.
+    from mareforma.observe import GROUNDING_AXIS_VERSION, summarize_receipts
+    from mareforma.observe.measure import GroundingAxisMismatchError
+
+    older = {
+        "version": "v0.3.9",
+        "grounding": "GROUNDED",
+        "reason": "a read matching the cited source returned non-empty data",
+        "cited_sources": ["/data/trial.csv"],
+        "grounded_sources": ["/data/trial.csv"],
+        "reads": [{"kind": "pandas", "identifier": "trial.csv", "nonempty": True,
+                   "content_address": None}],
+        "coverage": {"reads_seen": 1, "opens_detected": 1},
+    }
+    assert older["version"] != GROUNDING_AXIS_VERSION
+
+    current = {**older, "version": GROUNDING_AXIS_VERSION,
+               "reads": [{"kind": "pandas", "identifier": "/data/trial.csv",
+                          "nonempty": True, "content_address": None}]}
+    assert summarize_receipts([current]).incidental_read_rate == 0.0
+
+    with pytest.raises(GroundingAxisMismatchError) as exc:
+        summarize_receipts([older])
+    assert "v0.3.9" in str(exc.value)
+    assert GROUNDING_AXIS_VERSION in str(exc.value)
 
 
 def test_summarize_flags_opaque_dominance():

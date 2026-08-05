@@ -52,16 +52,21 @@ Coverage bound: a loader must be OPENED inside the scope to be observed. A file
 handle or database connection created before the scope (a module-level or pooled
 connection) and reused inside it is not swapped for an observing wrapper, so its
 reads are invisible and the finding reads as UNGROUNDED. Open the cited source
-inside the scope for it to count.
+inside the scope for it to count. The scope reaches only the asyncio tasks
+created inside it; a task that predates it is seamed at entry, so its reads land
+OPAQUE rather than UNGROUNDED.
 """
 from __future__ import annotations
 
 import builtins
+import functools
+import importlib
 import os
 import sqlite3
 import sys
 import threading
 import time
+import weakref
 import _thread
 from typing import Any
 
@@ -141,17 +146,24 @@ def _make_observed_open(real_open):
     ``io.open``), and neither delegates to the other by name.
     """
 
+    @functools.wraps(real_open)
     def observed_open(file, mode="r", *args, **kwargs):
+        scope = _scope.current_scope()
+        opens_before = len(scope.opens) if scope is not None else 0
         try:
             result = real_open(file, mode, *args, **kwargs)
         except BaseException as exc:
             # The host error propagates untouched, but the failure itself is
             # evidence: a read-mode open of a cited path that raised cannot
             # have delivered data, and classify() uses that to name the
-            # failure instead of blaming an uninstrumented reader. Only the
-            # exception TYPE is recorded (the message can carry a path).
-            scope = _scope.current_scope()
-            if scope is not None:
+            # failure instead of blaming an uninstrumented reader. Only a
+            # failure the audit hook saw an open event for counts: CPython
+            # validates the mode string and the path first, so a bad mode or an
+            # embedded NUL raises with no open behind it, and recording it
+            # would let the failures outnumber the opens and explain away a
+            # real hidden read. Only the exception TYPE is recorded (the
+            # message can carry a path).
+            if scope is not None and len(scope.opens) > opens_before:
                 try:
                     if _is_read_mode(mode):
                         identifier = _path_str(file)
@@ -237,6 +249,7 @@ def _wrap_sqlite() -> None:
     real_connect = sqlite3.connect
     _reals["sqlite3.connect"] = real_connect
 
+    @functools.wraps(real_connect)
     def observed_connect(database, *args, **kwargs):
         # Transparent when nothing is observing: no factory swap, no behavior
         # change (wrappers no-op outside an active scope).
@@ -291,11 +304,40 @@ class _ObservedCursor(sqlite3.Cursor):
         scope = _scope.current_scope()
         if scope is None:
             return
+        if getattr(self.connection, "_mf_created", False):
+            # The database did not exist when the connection opened, so the
+            # connect created it. Rows it returns come from what this run wrote,
+            # never from the cited source, and a citation must not be grounded
+            # in a file the run brought into being (a typo'd path is the plain
+            # case). Recording nothing leaves the absence tell standing.
+            return
+        if not self._mf_first(scope, nonempty):
+            return
         try:
             target = getattr(self.connection, "_mf_target", None) or "sqlite:memory"
             _scope.record_read("sqlite", target, nonempty)
         except BaseException as exc:  # noqa: BLE001
             scope.mark_error(f"sqlite cursor wrapper failed: {type(exc).__name__}")
+
+    def _mf_first(self, scope, nonempty: bool) -> bool:
+        """Whether this (execute, scope, emptiness) triple is still unrecorded.
+
+        A per-row ``fetchone`` loop repeats one identical read, so the retained
+        records (and the receipt they are serialized into) would grow with the
+        host's row count. Every classification input is an ``any(...)`` over
+        them, so one record per emptiness carries the same evidence. The scope is
+        part of the key, held weakly so a closed scope is not retained: a cursor
+        read inside two scopes must record in both, or the second would read as
+        a confident false UNGROUNDED.
+        """
+        ref = getattr(self, "_mf_scope", None)
+        if ref is None or ref() is not scope:
+            self._mf_scope = weakref.ref(scope)
+            self._mf_recorded = set()
+        if nonempty in self._mf_recorded:
+            return False
+        self._mf_recorded.add(nonempty)
+        return True
 
     def fetchone(self):
         row = super().fetchone()
@@ -319,6 +361,7 @@ class _ObservedCursor(sqlite3.Cursor):
     # FALSE UNGROUNDED. Record once, on the first row the iteration yields.
     def execute(self, *args, **kwargs):
         self._mf_iter_recorded = False
+        self._mf_recorded = set()  # a new result set records again
         return super().execute(*args, **kwargs)
 
     def __iter__(self):
@@ -362,6 +405,7 @@ def _wrap_thread_seams() -> None:
     real_start = threading.Thread.start
     _reals["threading.Thread.start"] = real_start
 
+    @functools.wraps(real_start)
     def observed_start(self, *args, **kwargs):
         _mark_thread_seam("threading.Thread.start")
         return real_start(self, *args, **kwargs)  # host behavior unchanged
@@ -374,6 +418,7 @@ def _wrap_thread_seams() -> None:
     real_snt = _thread.start_new_thread
     _reals["_thread.start_new_thread"] = real_snt
 
+    @functools.wraps(real_snt)
     def observed_snt(function, args, kwargs=None):
         _mark_thread_seam("_thread.start_new_thread")
         if kwargs is None:
@@ -401,6 +446,7 @@ def _wrap_executor_seams() -> None:
     real_submit = ThreadPoolExecutor.submit
     _reals["ThreadPoolExecutor.submit"] = real_submit
 
+    @functools.wraps(real_submit)
     def observed_submit(self, *args, **kwargs):
         _mark_thread_seam("concurrent.futures.ThreadPoolExecutor.submit")
         return real_submit(self, *args, **kwargs)  # host behavior unchanged
@@ -410,6 +456,7 @@ def _wrap_executor_seams() -> None:
     real_map = ThreadPoolExecutor.map
     _reals["ThreadPoolExecutor.map"] = real_map
 
+    @functools.wraps(real_map)
     def observed_map(self, *args, **kwargs):
         _mark_thread_seam("concurrent.futures.ThreadPoolExecutor.map")
         return real_map(self, *args, **kwargs)
@@ -462,6 +509,7 @@ def _wrap_import_hook() -> None:
     real_import = builtins.__import__
     _reals["builtins.__import__"] = real_import
 
+    @functools.wraps(real_import)
     def observed_import(name, *args, **kwargs):
         module = real_import(name, *args, **kwargs)  # host import unchanged
         if _scope.current_scope() is not None and name:
@@ -479,11 +527,14 @@ def _wrap_import_hook() -> None:
     builtins.__import__ = observed_import
 
 
+_PANDAS_READERS = ("read_csv", "read_parquet", "read_table", "read_json", "read_excel")
+
+
 def _wrap_pandas_if_present() -> None:
     pd = sys.modules.get("pandas")
     if pd is None:
         return
-    for name in ("read_csv", "read_parquet", "read_table", "read_json", "read_excel"):
+    for name in _PANDAS_READERS:
         key = f"pandas.{name}"
         if key in _reals:
             continue
@@ -503,6 +554,10 @@ def _pl_source(args, kwargs, result) -> str:
     return _path_str(src) if src is not None else ""
 
 
+_POLARS_READERS = ("read_csv", "read_parquet", "read_ipc", "read_json",
+                   "read_ndjson", "read_avro", "read_excel")
+
+
 def _wrap_polars_if_present() -> None:
     # polars reads through its Rust core with no Python open, so a cited read is
     # invisible to the open hook and would floor to a false UNGROUNDED. Wrapping
@@ -513,8 +568,7 @@ def _wrap_polars_if_present() -> None:
     pl = sys.modules.get("polars")
     if pl is None:
         return
-    for name in ("read_csv", "read_parquet", "read_ipc", "read_json",
-                 "read_ndjson", "read_avro", "read_excel"):
+    for name in _POLARS_READERS:
         key = f"polars.{name}"
         if key in _reals:
             continue
@@ -551,6 +605,7 @@ def _make_lazy_polars_seam_wrapper(real):
     one the observer could not see.
     """
 
+    @functools.wraps(real)
     def wrapper(*args, **kwargs):
         result = real(*args, **kwargs)  # host errors propagate untouched
         scope = _scope.current_scope()
@@ -581,6 +636,7 @@ def _make_duckdb_seam_wrapper(real):
     one the observer could not see.
     """
 
+    @functools.wraps(real)
     def wrapper(*args, **kwargs):
         result = real(*args, **kwargs)  # host errors propagate untouched
         scope = _scope.current_scope()
@@ -642,9 +698,8 @@ def _wrap_httpx_if_present() -> None:
     real_get = getattr(httpx, "get", None)
     if real_get is not None and "httpx.get" not in _reals:
         _reals["httpx.get"] = real_get
-        httpx.get = _make_return_value_wrapper(
-            real_get, "http", _resp_source, _resp_nonempty
-        )
+        # Same recorder as every other HTTP path, so one rule governs them all.
+        httpx.get = _make_http_func_wrapper(real_get, streaming_kw=None)
 
 
 def _wrap_requests_if_present() -> None:
@@ -673,6 +728,9 @@ def _wrap_requests_if_present() -> None:
 # GROUNDED or a false UNGROUNDED, socket seams block URL/content-address
 # citations but leave a file-cited finding's tell intact.
 
+_REQUESTS_SESSION_VERBS = ("get", "post", "put", "patch", "delete")
+
+
 def _wrap_requests_session_if_present() -> None:
     requests = sys.modules.get("requests")
     if requests is None:
@@ -696,7 +754,7 @@ def _wrap_requests_session_if_present() -> None:
             Session.request = _make_http_method_wrapper(
                 real, streaming_kw="stream", method_arg=True
             )
-    for name in ("get", "post", "put", "patch", "delete"):
+    for name in _REQUESTS_SESSION_VERBS:
         key = f"requests.Session.{name}"
         if key in _reals:
             continue
@@ -786,6 +844,7 @@ def _make_http_method_wrapper(real, *, streaming_kw, method_arg=False):
     ``"GET"``, is read as the source.
     """
 
+    @functools.wraps(real)
     def wrapper(self, *args, **kwargs):
         result = real(self, *args, **kwargs)  # host errors propagate untouched
         scope = _scope.current_scope()
@@ -814,6 +873,7 @@ def _make_http_func_wrapper(real, *, streaming_kw):
     download into memory.
     """
 
+    @functools.wraps(real)
     def wrapper(*args, **kwargs):
         result = real(*args, **kwargs)  # host errors propagate untouched
         scope = _scope.current_scope()
@@ -838,6 +898,7 @@ def _make_async_http_method_wrapper(real, *, streaming):
     body is never materialized in the observer frame); False records the read.
     """
 
+    @functools.wraps(real)
     async def wrapper(self, *args, **kwargs):
         result = await real(self, *args, **kwargs)  # host errors propagate
         scope = _scope.current_scope()
@@ -871,9 +932,32 @@ def _record_http_response(scope, args, kwargs, result, client=None) -> None:
             "HTTP read whose target could not be resolved to an absolute URL",
         )
         return
+    if _transport_is_producer_controlled(scope, client, url):
+        # The 2xx was authored by a transport the producer supplied, so no read
+        # of the cited URL happened. Record the gap rather than the read, the
+        # way the branch above does, so the citation floors to OPAQUE.
+        scope.record_seam(
+            "coverage-gap",
+            "HTTP response answered by a producer-supplied transport; "
+            "no network read observed",
+        )
+        return
+    if _response_ok(result) is None:
+        # A response shape the observer cannot introspect. Recording it as an
+        # empty read would suppress the cited URL's coverage gap and publish a
+        # confident false UNGROUNDED; the gap floors it to OPAQUE instead. A
+        # definite non-2xx is different: delivery WAS observed and failed, so it
+        # records the empty read below.
+        scope.record_seam(
+            "coverage-gap", "HTTP response shape not readable; delivery not observed"
+        )
+        return
     content_address = None
     if scope.content_address:
         content_address = _maybe_content_address(result)
+    # The recording chokepoint normalizes the identifier, which on this path is
+    # what keeps a credential (userinfo, or the signature a presigned URL carries
+    # in its query) out of anything stored, printed, or signed.
     _scope.record_read("http", url, _resp_nonempty(result), content_address)
 
 
@@ -888,6 +972,7 @@ def _record_http_response(scope, args, kwargs, result, client=None) -> None:
 def _make_http_post_method_wrapper(real):
     """Wrap a bound ``Client.post`` that returns a response."""
 
+    @functools.wraps(real)
     def wrapper(self, *args, **kwargs):
         result = real(self, *args, **kwargs)  # host errors propagate untouched
         scope = _scope.current_scope()
@@ -905,6 +990,7 @@ def _make_http_post_method_wrapper(real):
 def _make_async_http_post_method_wrapper(real):
     """Wrap a bound ``AsyncClient.post`` that returns a response."""
 
+    @functools.wraps(real)
     async def wrapper(self, *args, **kwargs):
         result = await real(self, *args, **kwargs)  # host errors propagate
         scope = _scope.current_scope()
@@ -928,6 +1014,7 @@ def _make_http_send_wrapper(real):
     lineage may be recorded twice, benign: equal lineages collapse to one.
     """
 
+    @functools.wraps(real)
     def wrapper(self, *args, **kwargs):
         result = real(self, *args, **kwargs)  # host errors propagate untouched
         scope = _scope.current_scope()
@@ -947,6 +1034,7 @@ def _make_http_send_wrapper(real):
 def _make_async_http_send_wrapper(real):
     """Wrap ``httpx.AsyncClient.send(request)`` (async SDK model-call path)."""
 
+    @functools.wraps(real)
     async def wrapper(self, *args, **kwargs):
         result = await real(self, *args, **kwargs)  # host errors propagate
         scope = _scope.current_scope()
@@ -973,6 +1061,7 @@ def _make_aiohttp_request_wrapper(real):
     seams: COMPUTED only when aiohttp's own network stack answered.
     """
 
+    @functools.wraps(real)
     async def wrapper(self, *args, **kwargs):
         result = await real(self, *args, **kwargs)  # host errors propagate
         scope = _scope.current_scope()
@@ -1025,14 +1114,17 @@ def _record_http_post(scope, client, args, kwargs, result) -> None:
 def _record_model_from_request(scope, client, args, kwargs, body, result) -> None:
     if not isinstance(body, dict):
         return
-    url = _resp_source(args, kwargs, None)
+    # ``client`` resolves the ``base_url`` idiom: a relative POST target must
+    # reach the provider match and the digest probe as the absolute URL the
+    # call actually requested, the same one the ``.send`` seam reads.
+    url = _resp_source(args, kwargs, None, client)
     _record_model_lineage(
         scope, body, url, result,
-        networked=_transport_is_networked(client, url),
+        networked=_transport_is_networked(scope, client, url),
     )
 
 
-def _transport_is_networked(client, url) -> bool:
+def _transport_is_networked(scope, client, url) -> bool:
     """Whether an httpx client answers *url* through a real network transport.
 
     COMPUTED is gated on this. The provider HOST is genuine, but the 2xx
@@ -1042,6 +1134,10 @@ def _transport_is_networked(client, url) -> bool:
     transports earn COMPUTED, an ALLOWLIST, so an unknown transport fails safe to
     producer-controlled (PROXY) rather than being trusted. The aiohttp seam has
     its own gate, :func:`_aiohttp_is_networked`; every seam passes one.
+
+    A check that cannot run at all (httpx absent, or its transport names moved)
+    fails the same way, and marks the scope so the broken gate is named rather
+    than silently reading as trusted.
     """
     try:
         import httpx
@@ -1052,8 +1148,24 @@ def _transport_is_networked(client, url) -> bool:
         except BaseException:  # noqa: BLE001 - URL/mount resolution quirk
             transport = getattr(client, "_transport", None)
         return isinstance(transport, networked)
-    except BaseException:  # noqa: BLE001 - httpx absent or shape changed
-        return True
+    except BaseException as exc:  # noqa: BLE001 - httpx absent or shape changed
+        scope.mark_error(f"transport allowlist check failed: {type(exc).__name__}")
+        return False
+
+
+def _transport_is_producer_controlled(scope, client, url) -> bool:
+    """Whether an httpx *client* answered *url* from an in-process transport.
+
+    The data axis asks the gate the lineage axis already asks: a response the
+    producer's own transport authored certifies no read of the cited URL, so it
+    cannot ground one. Only an httpx client is asked; the other seams reach the
+    recording chokepoint without one (the requests wrappers, the module-level
+    functions), and aiohttp carries its own gate.
+    """
+    httpx = sys.modules.get("httpx")
+    if httpx is None or not isinstance(client, (httpx.Client, httpx.AsyncClient)):
+        return False
+    return not _transport_is_networked(scope, client, url)
 
 
 def _aiohttp_is_networked(session, real, result) -> bool:
@@ -1156,7 +1268,7 @@ def _record_model_from_httpx_request(scope, client, request, result) -> None:
     url = str(getattr(request, "url", "") or "")
     _record_model_lineage(
         scope, body, url, result,
-        networked=_transport_is_networked(client, url),
+        networked=_transport_is_networked(scope, client, url),
     )
 
 
@@ -1242,7 +1354,10 @@ def _ollama_server_base(url) -> "str | None":
         return None
     if parts.port == 11434 or (parts.path or "").startswith("/api/"):
         port = parts.port or 11434
-        return f"{parts.scheme or 'http'}://{parts.hostname}:{port}"
+        # Built from the ALLOWLISTED host, never the raw one: a URL with no
+        # netloc passes the check as "" and would otherwise emit the literal
+        # host ``None``, a name a resolver can answer off-box.
+        return f"{parts.scheme or 'http'}://{host or 'localhost'}:{port}"
     return None
 
 
@@ -1421,12 +1536,17 @@ def _record_c_ext_read(args, kwargs) -> None:
     """Record a C-extension read of the path (stat-based non-emptiness proxy).
 
     The same honest proxy the builtins.open path uses, the C reader's byte flow
-    is not observable either. No-op outside a scope; never raises into host code.
+    is not observable either. A write/create mode is egress, not ingress, so it
+    records nothing, the same rule ``builtins.open`` follows; a cited file with
+    no read then floors to OPAQUE on its coverage-gap seam, never a forged
+    GROUNDED. No-op outside a scope; never raises into host code.
     """
     scope = _scope.current_scope()
     if scope is None:
         return
     try:
+        if not _c_ext_reads(args, kwargs):
+            return
         path = _c_ext_source(args, kwargs)
         if path:
             _, nonempty = _file_read_signal(path)
@@ -1442,6 +1562,7 @@ def _make_c_ext_wrapper(real):
     :func:`_make_c_ext_class_wrapper`, which preserves ``isinstance``.
     """
 
+    @functools.wraps(real)
     def wrapper(*args, **kwargs):
         result = real(*args, **kwargs)  # host errors propagate untouched
         _record_c_ext_read(args, kwargs)
@@ -1479,6 +1600,18 @@ def _make_c_ext_class_wrapper(real_cls):
         return _make_c_ext_wrapper(real_cls)
 
 
+def _c_ext_reads(args, kwargs) -> bool:
+    """Whether a C-extension constructor call opens its file for reading.
+
+    ``h5py.File`` and ``netCDF4.Dataset`` take the mode second, positionally or
+    as ``mode=``. Only a string in that slot decides: an omitted mode means the
+    libraries' own ``"r"`` default, and a reader whose second argument is
+    something else (pyarrow's ``columns``) has no mode and reads by construction.
+    """
+    mode = kwargs.get("mode", args[1] if len(args) > 1 else None)
+    return not isinstance(mode, str) or mode_reads_existing(mode)
+
+
 def _c_ext_source(args, kwargs) -> str:
     src = None
     for key in ("name", "filename", "source", "path", "filepath"):
@@ -1499,6 +1632,7 @@ def _make_return_value_wrapper(real, kind, source_of, nonempty_of):
     return exposes bytes cheaply.
     """
 
+    @functools.wraps(real)
     def wrapper(*args, **kwargs):
         result = real(*args, **kwargs)  # host errors propagate untouched
         scope = _scope.current_scope()
@@ -1640,10 +1774,10 @@ def _response_ok(result):
     """Whether an HTTP response is a success, library-agnostic.
 
     ``httpx`` and ``requests`` expose ``status_code``; ``aiohttp`` exposes
-    ``status``. A shape the observer cannot read returns ``None``, callers
-    treat that as fail-closed (neither ground the read nor mint lineage) rather
-    than assume the call succeeded. Shared by the read and lineage paths so a
-    single rule governs both.
+    ``status``. A shape the observer cannot read returns ``None``, callers treat
+    that as fail-closed rather than assume the call succeeded: the lineage path
+    mints nothing, the read path records a coverage gap instead of a read.
+    Shared by the read and lineage paths so a single rule governs both.
 
     Only 2xx counts as success. httpx does not follow redirects by default, so a
     3xx is a short "moved" stub the observer received in place of the cited bytes
@@ -1659,10 +1793,10 @@ def _response_ok(result):
 
 
 def _resp_nonempty(result) -> bool:
-    # A non-success response carries an error body, not the cited data; and a
-    # response the observer cannot introspect is not evidence of a read. Both
-    # fail closed to "not a read" so a cited URL floors to OPAQUE, never GROUNDED
-    # off an error page.
+    # A non-success response carries an error body, not the cited data, so it is
+    # not a read: a cited URL is never GROUNDED off an error page. An unreadable
+    # shape also answers False here, but callers must not reach that case; they
+    # record a coverage gap for it instead (see :func:`_record_http_response`).
     try:
         if _response_ok(result) is not True:
             return False
@@ -1685,3 +1819,58 @@ def _maybe_content_address(result):
     except BaseException:  # noqa: BLE001
         return None
     return None
+
+
+# -- what is wrapped, declared for the coverage report ------------------------
+#
+# The doctor renders these groups, so its self-report cannot drift from what the
+# wrappers above install. Each value is the ``_reals`` keys the group's wrap
+# function installs; a group installs the subset the host module actually
+# exposes, so a group counts as wrapped when ANY of its keys took.
+
+STDLIB_WRAPS: dict[str, tuple[str, ...]] = {
+    "builtins.open (file reads)": ("open",),
+    "io.open (pathlib, zipfile)": (
+        "io.open", "pathlib._NormalAccessor.open",
+    ),
+    "sqlite3 (query rows)": ("sqlite3.connect",),
+}
+
+THIRD_PARTY_WRAPS: dict[str, tuple[str, ...]] = {
+    "pandas readers": tuple(f"pandas.{n}" for n in _PANDAS_READERS),
+    "requests.get": ("requests.get",),
+    "requests.Session (pooled)": ("requests.Session.request",) + tuple(
+        f"requests.Session.{n}" for n in _REQUESTS_SESSION_VERBS
+    ),
+    "httpx.get": ("httpx.get",),
+    "httpx.Client / AsyncClient (pooled)": tuple(
+        f"httpx.{cls}.{name}"
+        for cls in ("Client", "AsyncClient")
+        for name in ("get", "post", "send")
+    ),
+    "aiohttp (recorded as a network seam)": ("aiohttp.ClientSession._request",),
+    "h5py (HDF5)": ("h5py.File",),
+    "pyarrow (Parquet / Arrow)": (
+        "pyarrow.parquet.read_table", "pyarrow.feather.read_table",
+    ),
+    "netCDF4": ("netCDF4.Dataset",),
+    "polars (eager readers ground; lazy collect is a coverage-gap seam)": tuple(
+        f"polars.{n}" for n in _POLARS_READERS
+    ) + ("polars.LazyFrame.collect",),
+    "duckdb (recorded as a coverage-gap seam)": tuple(
+        f"duckdb.{n}" for n in _DUCKDB_QUERY_ENTRIES
+    ) + tuple(
+        f"duckdb.DuckDBPyConnection.{n}" for n in _DUCKDB_QUERY_ENTRIES
+    ),
+}
+
+# Seam plumbing, not loaders: these observe threads and late imports rather than
+# a data source, so the report covers them under seam kinds, not as coverage.
+SEAM_WRAPS: tuple[str, ...] = (
+    "threading.Thread.start",
+    "_thread.start_new_thread",
+    "ThreadPoolExecutor.submit",
+    "ThreadPoolExecutor.map",
+    "builtins.__import__",
+    "importlib.import_module",
+)

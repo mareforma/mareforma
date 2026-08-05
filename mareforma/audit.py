@@ -311,8 +311,7 @@ def run_audit(
         for r in scope.reads
     ]
     seams = [{"kind": s.kind, "detail": s.detail} for s in scope.seams]
-    reads_seen = sum(1 for r in scope.reads if r.kind == "file")
-    opens_detected = len(scope.opens)
+    reads_seen, opens_detected = scope.coverage_counts()
     run_record = {
         "target": list(command),
         "exit_code": exit_code,

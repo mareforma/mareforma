@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from mareforma.observe.oracle import (
+    _THIN_REPEATS,
     OracleInfluence,
     numeric_extraction_reducer,
     perturbation_oracle,
@@ -148,6 +149,46 @@ def test_thick_sigma_is_not_thin():
     res = perturbation_oracle(_run(), 0.0, lambda x: x + 1, repeats=5,
                               thin_sigma_guard=True)
     assert res.noise_is_thin is False
+    assert res.noise_measured is True
+
+
+def test_single_repeat_records_that_noise_was_never_measured():
+    # repeats=1 (the default) measures no noise: the floor is 0 by construction,
+    # so pure run-to-run jitter clears it. The verdict on the shipped default is
+    # unchanged, but it must not read as a bare INFLUENCED against a trusted
+    # floor: the thin flag covers repeats=1 and noise_measured says the estimate
+    # is missing, not merely small.
+    seq = iter([0.3, -0.4])
+    res = perturbation_oracle(lambda x: next(seq), 0.0, lambda x: x + 1)
+    assert res.influence is OracleInfluence.INFLUENCED
+    assert res.noise_floor == 0.0
+    assert res.noise_is_thin is True
+    assert res.noise_measured is False
+    assert "no noise estimate" in res.reason
+
+
+def test_single_repeat_names_the_missing_floor_on_a_flat_finding():
+    # The caveat belongs to the measurement, not to the verdict it produced. A
+    # NOT_INFLUENCED call at repeats=1 prints a 0 threshold resting on the same
+    # unmeasured floor, so the reason must say the floor is missing rather than
+    # measured small. noise_measured carries it structurally; the reason is the
+    # line a reader reads.
+    res = perturbation_oracle(lambda x: 1.0, 0.0, lambda x: x + 1)
+    assert res.influence is OracleInfluence.NOT_INFLUENCED
+    assert res.noise_measured is False
+    assert "no noise estimate" in res.reason
+
+
+def test_measured_zero_noise_is_not_confused_with_no_estimate():
+    # A deterministic pipeline measured over enough repeats has a real noise
+    # floor that happens to be 0. That is a measurement, so the caveat is off.
+    res = perturbation_oracle(lambda x: x * 2.0, 1.0, lambda x: x + 5.0,
+                              repeats=_THIN_REPEATS)
+    assert res.influence is OracleInfluence.INFLUENCED
+    assert res.noise_floor == 0.0
+    assert res.noise_measured is True
+    assert res.noise_is_thin is False
+    assert "no noise estimate" not in res.reason
 
 
 # -- default scalar reducer unchanged ---------------------------------------

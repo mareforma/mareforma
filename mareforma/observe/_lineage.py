@@ -332,6 +332,11 @@ def model_distinct_pair(a: "dict | None", b: "dict | None") -> bool:
     return True
 
 
+def _model_key(record: "ModelLineage") -> str:
+    """The record's model string, normalized for identity comparison."""
+    return (record.model_id or "").strip().casefold()
+
+
 def collapse_lineage(records: list[ModelLineage]) -> ModelLineage | None:
     """The single finding-level lineage for a scope's captured model records.
 
@@ -345,19 +350,30 @@ def collapse_lineage(records: list[ModelLineage]) -> ModelLineage | None:
 
     A model identity is a remote family root OR a local weights digest, two
     distinct LOCAL models have ``family_root is None`` and are told apart only by
-    their digests, so distinctness counts BOTH. A mixed or downgraded span drops
-    the identity fields (root, digest, attestor) so the finding-level lineage
-    never carries a stale digest that ``independence_model_key`` would key on.
+    their digests, so distinctness counts BOTH. A declaration of the same
+    ``model_id`` as a digest capture names that one identity in the root space,
+    so it corroborates it; only a different model, or a second digest, is mixed.
+    A mixed or downgraded span drops the identity fields (root, digest, attestor)
+    so the finding-level lineage never carries a stale digest that
+    ``independence_model_key`` would key on.
     """
     if not records:
         return None
     if len(records) == 1:
         return records[0]
-    roots = {r.family_root for r in records if r.family_root is not None}
     digests = {r.digest for r in records if r.digest is not None}
+    # A local model captured at the seam is keyed by its weights digest and has
+    # no family root, while the producer's declaration of the SAME model roots
+    # normally. Same model_id: one identity in two spaces, so the rooted record
+    # corroborates the digest instead of counting as a second model.
+    digested_ids = {_model_key(r) for r in records if r.digest is not None}
+    roots = {
+        r.family_root for r in records
+        if r.family_root is not None and _model_key(r) not in digested_ids
+    }
     tiers = {r.tier for r in records}
-    # More than one distinct model identity (a root and a digest are different
-    # models) is a mixed span, never a single clean model.
+    # More than one distinct model identity (an unreconciled root and a digest
+    # are different models) is a mixed span, never a single clean model.
     mixed = (len(roots) + len(digests)) > 1
     if ModelLineageTier.UNVERIFIABLE in tiers or mixed:
         return replace(
@@ -371,7 +387,11 @@ def collapse_lineage(records: list[ModelLineage]) -> ModelLineage | None:
     # capture backs the shared identity (an all-declared span).
     tier = ModelLineageTier.COMPUTED if ModelLineageTier.COMPUTED in tiers else ModelLineageTier.PROXY
     # Not mixed: at most one root and one digest, and never both, every record
-    # shares the single surviving identity, so records[0] carries it correctly.
+    # shares the single surviving identity.
     root = next(iter(roots)) if roots else None
     digest = next(iter(digests)) if digests else None
-    return replace(records[0], tier=tier, family_root=root, digest=digest)
+    # The digest-carrying record is the base when there is one: collapsing onto
+    # records[0] would stamp the surviving digest with the declaring record's
+    # attestor, and independence_model_key reads that as soft.
+    base = next((r for r in records if r.digest is not None), records[0])
+    return replace(base, tier=tier, family_root=root, digest=digest)

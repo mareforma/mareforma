@@ -119,6 +119,41 @@ class TestAuditSingleRun:
         envelopes = sorted((out / "envelopes").glob("*.json"))
         assert len(envelopes) == 3
 
+    def test_coverage_counts_cited_opens_not_imports(
+        self, tmp_path: Path,
+    ) -> None:
+        # The target imports stdlib modules and reads exactly the cited file.
+        # Coverage is the fraction of the CITED ingress the observer read
+        # through, so it is 1/1 here: the import machinery's .pyc opens and
+        # runpy's opens of the script itself are not data-ingress for the
+        # cited source and must not deflate the bound.
+        data = tmp_path / "data.csv"
+        data.write_text("a,b\n1,2\n")
+        script = _script(tmp_path, (
+            "import json, wave, colorsys\n"
+            f"open({str(data)!r}).read()\n"
+        ))
+        key = _bootstrap_key(tmp_path, "auditor.key")
+
+        r = CliRunner()
+        diag = r.invoke(cli, ["diagnose", "--cites", str(data), "--json",
+                              "--", str(script)])
+        assert diag.exit_code == 0, diag.output
+        assert json.loads(diag.output)["coverage"] == {
+            "reads_seen": 1,
+            "opens_detected": 1,
+            "read_coverage_fraction": 1.0,
+        }
+
+        out = tmp_path / "audit-out"
+        res = _audit(r, tmp_path, script, {"f1": str(data)}, out, key)
+        assert res.exit_code == 0, res.output
+        assert _read_run(out)["coverage"] == {
+            "reads_seen": 1,
+            "opens_detected": 1,
+            "read_coverage_fraction": 1.0,
+        }
+
     def test_audit_receipts_feed_summarize_pilot_unchanged(
         self, tmp_path: Path,
     ) -> None:

@@ -163,6 +163,22 @@ def test_aiohttp_gate_shapes_still_exist() -> None:
         asyncio.run(session.close())
 
 
+def test_broken_transport_allowlist_is_not_computed(monkeypatch) -> None:
+    # The gate is the trust boundary, so a gate that cannot run must read as
+    # producer-controlled, not as trusted. A non-type bound to one of the
+    # allowlisted names makes the isinstance check raise.
+    monkeypatch.setattr(httpx, "HTTPTransport", object(), raising=False)
+    client = _offline_client()
+    with obs.observe() as h:
+        client.post(_ANTHROPIC_URL,
+                    json={"model": "claude-3-5-sonnet-20241022",
+                          "messages": [{"role": "user", "content": "hi"}]})
+    client.close()
+    assert h.verdict.model_lineage.tier is ModelLineageTier.PROXY
+    # And the broken check is named, not swallowed.
+    assert "transport allowlist check failed" in h.verdict.reason
+
+
 def test_real_network_transport_still_computed(httpx_mock) -> None:
     # pytest-httpx patches HTTPTransport.handle_request but leaves the client's
     # real network transport in place, standing in for a genuine provider call:

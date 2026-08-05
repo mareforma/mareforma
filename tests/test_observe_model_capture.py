@@ -89,6 +89,28 @@ def test_httpx_post_model_captured_openai(httpx_mock):
     assert any(s.kind == "socket" for s in verdict.seams)
 
 
+def test_base_url_relative_post_is_computed(httpx_mock):
+    # The modal hand-rolled idiom: a client with base_url and a relative path.
+    # The seam must read the absolute URL the call requested, so the provider
+    # match holds and the .post capture equals the .send one instead of
+    # collapsing a real call to UNVERIFIABLE.
+    httpx_mock.add_response(url=_ANTHROPIC_URL, json={"content": []})
+    client = httpx.Client(base_url="https://api.anthropic.com")
+    with obs.observe() as h:
+        client.post(
+            "/v1/messages",
+            json={"model": "claude-3-5-sonnet-20241022",
+                  "messages": [{"role": "user", "content": "hi"}]},
+        )
+    client.close()
+    lineage = h.verdict.model_lineage
+    assert lineage is not None
+    assert lineage.tier is ModelLineageTier.COMPUTED
+    assert lineage.family_root == "claude-3-5-sonnet"
+    assert lineage.provider == "anthropic"
+    assert [r.identifier for r in h.verdict.reads] == [_ANTHROPIC_URL]
+
+
 # -- COMPUTED via the SDK send() path ----------------------------------------
 
 def test_httpx_client_send_captures_model(httpx_mock):

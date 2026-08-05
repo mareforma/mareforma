@@ -280,6 +280,48 @@ def test_requests_session_subclass_overriding_request_is_observed():
     assert h.verdict.grounding is OG.GROUNDED
 
 
+class _DuckResponse:
+    """A response shape the observer cannot introspect: bytes, but no status."""
+
+    def __init__(self, url):
+        self.url = url
+        self.content = b"col\n1\n"
+        self.text = "col\n1\n"
+
+
+def test_unreadable_response_shape_is_opaque_not_ungrounded():
+    # A response with no status_code and no status is "I could not read the
+    # delivery", not "the data did not arrive". Recording it as an empty read
+    # suppressed the cited URL's coverage gap and published a confident false
+    # UNGROUNDED, a worse verdict than the no-call case, which is OPAQUE.
+    import httpx
+
+    class DuckClient(httpx.Client):
+        def send(self, request, *args, **kwargs):  # custom transport
+            return _DuckResponse(str(request.url))
+
+    url = "https://example.org/data.csv"
+    client = DuckClient()
+    with obs.observe(cites=url) as h:
+        client.get(url)
+    client.close()
+    assert h.verdict.grounding is OG.OPAQUE
+    assert any(s.kind == "coverage-gap" for s in h.verdict.seams)
+
+
+def test_module_level_http_get_unreadable_response_is_opaque():
+    # The module-level get wrappers (requests.get, httpx.get) share the recorder,
+    # so they share the rule.
+    from mareforma.observe import _loaders
+
+    url = "https://example.org/data.csv"
+    get = _loaders._make_http_func_wrapper(_DuckResponse, streaming_kw="stream")
+    with obs.observe(cites=url) as h:
+        get(url)
+    assert h.verdict.grounding is OG.OPAQUE
+    assert any(s.kind == "coverage-gap" for s in h.verdict.seams)
+
+
 def test_httpx_client_get_is_recorded(httpx_mock):
     import httpx
 
@@ -453,6 +495,55 @@ def test_aiohttp_request_records_a_socket_seam():
     verdict = asyncio.run(go())
     assert verdict.grounding is OG.OPAQUE
     assert any(s.kind == "socket" for s in verdict.seams)
+
+
+# -- asyncio hand-off --------------------------------------------------------
+
+def test_pre_scope_asyncio_task_read_is_opaque(cited_file):
+    # The scope is a contextvar, so it reaches only tasks created INSIDE it. A
+    # long-lived worker task (a queue consumer started at import) doing the real
+    # ingress leaves the scope with no read and no seam, the sole path to a
+    # confident false UNGROUNDED. The thread-pool analogue is already seamed.
+    import asyncio
+
+    async def go():
+        queue = asyncio.Queue()
+        done = asyncio.Event()
+
+        async def worker():
+            path = await queue.get()
+            with open(path) as f:
+                f.read()
+            done.set()
+
+        task = asyncio.create_task(worker())  # created BEFORE the scope
+        await asyncio.sleep(0)  # let it reach the queue
+        with obs.observe(cites=cited_file) as h:
+            await queue.put(cited_file)
+            await done.wait()
+        await task
+        return h.verdict
+
+    verdict = asyncio.run(go())
+    assert verdict.grounding is OG.OPAQUE
+    assert any(s.kind == "thread" for s in verdict.seams)
+
+
+def test_in_scope_asyncio_task_read_is_grounded(cited_file):
+    # The covered case must stay covered: a task created inside the scope
+    # inherits the context, so its read grounds the finding.
+    import asyncio
+
+    async def go():
+        with obs.observe(cites=cited_file) as h:
+            async def worker():
+                with open(cited_file) as f:
+                    f.read()
+
+            await asyncio.create_task(worker())
+        return h.verdict
+
+    assert asyncio.run(go()).grounding is OG.GROUNDED
 
 
 # -- read reach: io.open / pathlib -------------------------------------------
@@ -651,6 +742,27 @@ def test_wrapped_h5py_grounded_reason_does_not_overclaim_byte_flow(tmp_path):
     assert "returned non-empty data" not in h.verdict.reason
 
 
+def test_c_ext_write_mode_is_not_a_read(tmp_path):
+    # h5py.File(p, "w") and netCDF4.Dataset(p, "w") create and write; nothing is
+    # read. Counting the constructor as a read let a pipeline that WROTE the
+    # cited .h5 inside the scope earn a signed GROUNDED, while the same pattern
+    # through open(out, "w") is UNGROUNDED. h5py is not installed on the base CI
+    # leg, so drive the production wrapper over a stand-in that writes like it.
+    from mareforma.observe import _loaders
+
+    class _Reader:
+        def __init__(self, path, mode="r"):
+            if "r" not in mode:
+                open(path, "wb").write(b"\x89HDF\r\n\x1a\n" + b"0" * 64)
+
+    Wrapped = _loaders._make_c_ext_class_wrapper(_Reader)
+    path = str(tmp_path / "out.h5")
+    with obs.observe(cites=path) as h:
+        Wrapped(path, "w")
+    assert h.verdict.grounding is not OG.GROUNDED
+    assert not [r for r in h.verdict.reads if r.kind == "c-extension"]
+
+
 def test_wrapped_pyarrow_read_is_grounded(tmp_path):
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
@@ -699,22 +811,38 @@ def test_failed_open_names_the_failure_not_a_reader(tmp_path):
     # A read-mode open of the cited source that raises leaves an audit `open`
     # event behind but no read. The seam must say the open failed and name the
     # exception type; blaming an uninstrumented reader misdescribes a failure
-    # the observer saw in full. Verdict stays OPAQUE (fail-closed): a failed
-    # wrapped open does not rule out a hidden successful one elsewhere.
+    # the observer saw in full.
     missing = str(tmp_path / "missing.csv")
     with obs.observe(cites=missing) as h:
         try:
             open(missing)
         except FileNotFoundError:
             pass
-    assert h.verdict.grounding is OG.OPAQUE
-    gaps = [s for s in h.verdict.seams if s.kind == "coverage-gap"]
-    assert gaps, "a failed cited open must still record a coverage-gap seam"
+    gaps = [s for s in h.verdict.seams if s.kind == "failed-open"]
+    assert gaps, "a failed cited open must still record a failed-open seam"
     assert any("failed (FileNotFoundError)" in s.detail for s in gaps)
     assert all("uninstrumented" not in s.detail for s in gaps)
     # Exception TYPE only: the detail is signed and publishable, so it must
     # never carry the path the exception message would leak.
     assert all(missing not in s.detail for s in gaps)
+
+
+def test_failed_open_alone_is_ungrounded_not_opaque(tmp_path):
+    # The failure accounts for every open of the cited path, so the observer
+    # saw the whole ingress surface and the data provably did not arrive. That
+    # is the silent-fallback tell: UNGROUNDED, with the failure named in the
+    # reason. A scope that never attempts the read lands UNGROUNDED already,
+    # and more observation must not buy a weaker verdict.
+    missing = str(tmp_path / "missing.csv")
+    with obs.observe(cites=missing) as h:
+        try:
+            open(missing)
+        except FileNotFoundError:
+            pass
+    assert h.verdict.grounding is OG.UNGROUNDED
+    assert any(s.kind == "failed-open" for s in h.verdict.seams)
+    assert "failed (FileNotFoundError)" in h.verdict.reason
+    assert missing not in h.verdict.reason
 
 
 def test_pandas_failed_read_names_the_failure(tmp_path):
@@ -728,9 +856,9 @@ def test_pandas_failed_read_names_the_failure(tmp_path):
             pd.read_csv(missing)
         except (FileNotFoundError, OSError):
             _ = 0.83  # cached fallback
-    assert h.verdict.grounding is OG.OPAQUE
+    assert h.verdict.grounding is OG.UNGROUNDED
     assert any(
-        s.kind == "coverage-gap" and "failed (FileNotFoundError)" in s.detail
+        s.kind == "failed-open" and "failed (FileNotFoundError)" in s.detail
         for s in h.verdict.seams
     )
 
@@ -774,3 +902,114 @@ def test_failed_open_beside_hidden_open_stays_generic(tmp_path):
         for s in h.verdict.seams
     )
     assert all("failed (" not in s.detail for s in h.verdict.seams)
+
+
+def test_open_rejected_before_the_audit_event_is_not_a_failed_open(tmp_path):
+    # CPython validates the mode string before it fires the ``open`` audit
+    # event, so ``open(p, "rw")`` raises with no open behind it. Recording that
+    # as a failed open would let the failures outnumber the opens and explain
+    # away a real hidden read, turning the honest OPAQUE into a confident
+    # UNGROUNDED.
+    import os
+
+    p = tmp_path / "trial.csv"
+    p.write_text("arm,value\nA,1\n")
+    with obs.observe(cites=str(p)) as h:
+        try:
+            open(str(p), "rw")
+        except ValueError:
+            pass
+        fd = os.open(str(p), os.O_RDONLY)  # hidden successful read
+        os.read(fd, 64)
+        os.close(fd)
+    assert h.verdict.grounding is OG.OPAQUE
+    assert any(
+        s.kind == "coverage-gap" and "uninstrumented reader" in s.detail
+        for s in h.verdict.seams
+    )
+    assert all(s.kind != "failed-open" for s in h.verdict.seams)
+
+
+def test_embedded_nul_path_does_not_break_teardown(tmp_path):
+    # An embedded NUL is rejected before the audit event too, and the recorded
+    # identifier cannot be normalized, so recording it crashed the verdict
+    # computation. The seam that stands must be the hidden reader.
+    import os
+
+    p = tmp_path / "trial.csv"
+    p.write_text("arm,value\nA,1\n")
+    with obs.observe(cites=str(p)) as h:
+        try:
+            open(str(p) + "\x00x")
+        except ValueError:
+            pass
+        fd = os.open(str(p), os.O_RDONLY)  # hidden successful read
+        os.read(fd, 64)
+        os.close(fd)
+    assert h.verdict.grounding is OG.OPAQUE
+    assert "teardown" not in h.verdict.reason
+    assert any(
+        s.kind == "coverage-gap" and "uninstrumented reader" in s.detail
+        for s in h.verdict.seams
+    )
+
+
+# -- Windows drive-lettered citations ----------------------------------------
+
+def test_drive_lettered_citation_kinds_match_posix():
+    # ``urlsplit(r"C:\data\trial.csv")`` reports scheme "c", so a drive letter
+    # must be read as a local path, not as an opaque target. The identifier is
+    # a plain string, so this pins the classifier on every platform.
+    from mareforma.observe._citation import citation_kind
+
+    assert citation_kind(r"C:\data\trial.csv") == "file"
+    assert citation_kind(r"C:\data\trial.h5") == "c-extension-file"
+
+
+def test_drive_lettered_h5_citation_is_opaque_floor():
+    # The C-extension floor must hold for a Windows path: no observed read of a
+    # cited .h5 is a coverage gap, never a confident UNGROUNDED.
+    from mareforma.observe._scope import Scope
+
+    verdict = Scope(cited=(r"C:\data\x.h5",)).classify()
+    assert verdict.grounding is OG.OPAQUE
+    assert any(s.kind == "coverage-gap" for s in verdict.seams)
+
+
+# -- credentials never enter a recorded identifier ---------------------------
+
+def test_presigned_url_read_records_no_signature(httpx_mock):
+    # A presigned bucket URL carries its signature in the query string, and the
+    # read is copied verbatim into signed, forwardable receipts. The query is
+    # dropped at record time, so the credential never reaches an artifact.
+    import json
+
+    import httpx
+
+    presigned = "https://b.s3.amazonaws.com/t.csv?X-Amz-Signature=6a0bdeadbeef"
+    httpx_mock.add_response(url=presigned, text="col\n1\n")
+    client = httpx.Client()
+    with obs.observe(cites="https://b.s3.amazonaws.com/t.csv") as h:
+        client.get(presigned)
+    client.close()
+    assert h.verdict.grounding is OG.GROUNDED
+    assert [r.identifier for r in h.verdict.reads] == [
+        "https://b.s3.amazonaws.com/t.csv"
+    ]
+    assert "X-Amz-Signature" not in json.dumps(h.verdict.receipt())
+
+
+def test_url_userinfo_never_reaches_a_cited_source():
+    # A ``user:password@host`` citation is normalized into the signed claim
+    # record, where it cannot be redacted afterwards. The password is stripped
+    # with the rest of the userinfo before the identifier is stored.
+    import json
+
+    from mareforma.observe._citation import normalize_identifier
+
+    raw = "https://svc-user:s3cr3t@data.lab.internal/trial.csv?x=1"
+    assert normalize_identifier(raw) == "https://data.lab.internal/trial.csv"
+    with obs.observe(cites=raw) as h:
+        pass
+    assert "s3cr3t" not in json.dumps(h.verdict.receipt())
+    assert "s3cr3t" not in json.dumps(h.verdict.to_signed_dict())

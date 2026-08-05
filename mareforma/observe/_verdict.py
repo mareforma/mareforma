@@ -52,7 +52,16 @@ from .._canonical import canonicalize
 # write-time result. A v0.3.8 envelope omits ``cited_sources``; its absence is
 # "the citation binding was not checkable," never tampering, the pre-binding
 # label the auditor surface renders.
-GROUNDING_AXIS_VERSION = "v0.3.9"
+#
+# v0.3.11 bumps the MATCH RULE: a read identifier is normalized when it is
+# RECORDED, on the host whose filesystem can resolve it, and the summarizer then
+# compares normalized strings directly. A v0.3.9 receipt carries the loader's raw
+# identifier, so the same run's reads match its cited set under one rule and not
+# the other, and one report cannot mix the two. ``summarize_receipts`` refuses
+# the mismatch rather than reinterpreting an older receipt under the newer rule.
+# The digest is over the receipt, not a claim about it: an older receipt stays
+# verifiable against its own bytes.
+GROUNDING_AXIS_VERSION = "v0.3.11"
 
 
 class ObservedGrounding(str, Enum):
@@ -77,8 +86,12 @@ class ObservedGrounding(str, Enum):
 class ReadRecord:
     """One data-ingress event captured inside an observed scope.
 
-    ``identifier`` is the normalized handle the read touched: an absolute file
-    path, a database connection target, or a ``scheme://host/path`` for a URL.
+    ``identifier`` is the normalized handle the read touched: an absolute,
+    symlink-resolved file path, a database connection target, or a
+    ``scheme://host/path`` for a URL. Normalization happens when the read is
+    recorded, on the host that resolved it, so no credential (the userinfo and
+    query a presigned URL carries) is ever stored and a reader can compare the
+    identifier without touching a filesystem.
     ``nonempty`` is whether the read returned any bytes or rows, an empty read
     of a cited source is the silent-fallback signature, so it is recorded as a
     read that happened but carried nothing. ``content_address`` is the
@@ -97,11 +110,13 @@ class SeamEvent:
     """A boundary the observer cannot see across, captured inside a scope.
 
     ``kind`` is ``thread`` / ``subprocess`` / ``socket`` / ``coverage-gap`` /
-    ``abort`` (the target stopped before the scope closed).
+    ``abort`` (the target stopped before the scope closed) / ``failed-open``.
     ``detail`` is a short, non-sensitive descriptor (the audit event name, the
     connection host, or the cited path opened via an uninstrumented reader). A
     seam inside a scope with no qualifying cited read forces ``OPAQUE``, the
-    read could have happened on the far side of the seam.
+    read could have happened on the far side of the seam. ``failed-open`` is
+    the exception: it records an open the observer watched fail, which hides
+    nothing and leaves the verdict ``UNGROUNDED``.
     """
 
     kind: str
@@ -245,12 +260,13 @@ class GroundingVerdict:
         )
 
     def read_coverage_fraction(self) -> float | None:
-        """Fraction of detected opens the observer actually read through.
+        """Fraction of the detected cited opens the observer read through.
 
-        ``reads_seen / opens_detected``. ``None`` when nothing was opened (the
-        fraction is undefined, not zero). A value below 1.0 means the observer
-        detected data-ingress it could not see the bytes of, the honest
-        coverage bound the measurement reports.
+        ``reads_seen / opens_detected``, both counted over the cited paths seen
+        opened. ``None`` when no cited path was opened (the fraction is
+        undefined, not zero). A value below 1.0 means the observer detected
+        data-ingress it could not see the bytes of, the honest coverage bound
+        the measurement reports.
         """
         if self.opens_detected <= 0:
             return None

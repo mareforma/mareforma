@@ -71,13 +71,14 @@ by the `sha256:` hash of the returned bytes against a cited data id.
 
 ## When the observer cannot see: seams
 
-The observed scope propagates into `asyncio` tasks but not into library-spawned
-threads or a child process. A read on the far side of one of those boundaries is
-invisible. Rather than call that invisible read a genuine absence, the observer
-records a **seam** and, when the seam is relevant to the citation, returns
-`OPAQUE`:
+The observed scope propagates into the `asyncio` tasks created inside it, but not
+into a task that predates it, a library-spawned thread, or a child process. A
+read on the far side of one of those boundaries is invisible. Rather than call
+that invisible read a genuine absence, the observer records a **seam** and, when
+the seam is relevant to the citation, returns `OPAQUE`:
 
 - a thread start (`threading.Thread.start`, `_thread.start_new_thread`),
+- an `asyncio` task already pending when the scope opened,
 - a subprocess or new process (`subprocess`, `os.exec`, `os.fork`, ...),
 - a raw socket connection,
 - a cited path opened through an uninstrumented reader (`os.open`), a `duckdb`
@@ -92,7 +93,11 @@ an unrelated network call. A socket seam does block a **URL** or **content-addre
 citation, whose bytes can arrive over the network. Thread, subprocess, and
 coverage-gap seams can hide anything, so they always block; an unknown seam or
 citation kind blocks too (fail-closed). A cited URL with no observed HTTP read is
-unknown coverage, so it is `OPAQUE`, never `UNGROUNDED`.
+unknown coverage, so it is `OPAQUE`, never `UNGROUNDED`. An open of the cited
+source that the observer watched **fail**, and that accounts for every open of
+that path, hides nothing: it is recorded as a `failed-open` seam and the verdict
+stays `UNGROUNDED`, naming the failure and its exception type. That is the
+try/except silent fallback, reported as the tell it is.
 
 Keep-alive HTTP is covered: pooled `requests.Session`, `httpx.Client` /
 `AsyncClient`, and `aiohttp` sessions reused inside the scope are wrapped, so a
@@ -132,7 +137,10 @@ The oracle handles the honest hard case: a stochastic pipeline (an LLM at nonzer
 temperature) moves run to run even with fixed input. It measures that run-to-run
 noise first and calls `INFLUENCED` only when the perturbation moves the finding
 past the noise floor. When the effect sits inside the noise band the answer is
-`UNDECIDABLE`, never a silent `INFLUENCED`.
+`UNDECIDABLE`, never a silent `INFLUENCED`. Measuring the noise needs repeats: at
+the default `repeats=1` nothing is measured, so the floor is 0 and jitter alone
+can clear it. The result records that as `noise_measured=False` and names it in
+the reason, so a reader can tell a missing floor from a small one.
 
 A prose finding needs a reduction to a scalar the oracle can compare.
 `numeric_extraction_reducer` pulls the reported number out of an answer string

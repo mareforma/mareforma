@@ -40,15 +40,46 @@ def normalize_identifier(raw: str) -> str:
         return raw
     parts = urlsplit(raw)
     if parts.scheme in ("http", "https", "ftp") and parts.netloc:
-        path = parts.path or "/"
-        return f"{parts.scheme}://{parts.netloc.lower()}{path}"
+        return _url_identity(parts)
     if parts.scheme in ("file",) and parts.path:
         return _normalize_path(parts.path)
-    # A bare path (no scheme, or a Windows drive letter mis-parsed as a scheme).
-    if not parts.scheme or len(parts.scheme) == 1:
+    if _is_local_path(raw, parts):
         return _normalize_path(raw)
     # A DB URL or other opaque target: lowercase the scheme+netloc, keep path.
     return raw.strip()
+
+
+def _url_identity(parts) -> str:
+    """``scheme://host[:port]/path`` for a pre-split URL, credentials dropped.
+
+    Built from the host, never the netloc: userinfo IS a password and the query
+    string of a presigned bucket URL IS its signature. Identifiers are copied
+    into signed receipts and signed claim records, which are meant to be
+    forwarded and cannot be redacted once signed.
+    """
+    host = parts.hostname or ""
+    if ":" in host:  # an IPv6 literal, which urlsplit hands back unbracketed
+        host = f"[{host}]"
+    try:
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:  # a malformed port: the host alone is the identity
+        port = ""
+    return f"{parts.scheme}://{host}{port}{parts.path or '/'}"
+
+
+def _is_local_path(identifier: str, parts) -> bool:
+    """Whether a pre-split identifier names a local filesystem path.
+
+    A bare path has no scheme; a Windows drive letter (``C:\\data\\x.csv``) is
+    mis-parsed by ``urlsplit`` as a one-character scheme. The write side
+    (``normalize_identifier``) and the read side (``citation_kind``) share this
+    predicate so a path cannot be a path for one and opaque for the other.
+    """
+    return (
+        identifier.startswith("/")
+        or parts.scheme in ("", "file")
+        or len(parts.scheme) == 1
+    )
 
 
 def _normalize_path(path: str) -> str:
@@ -117,7 +148,7 @@ def citation_kind(identifier: str) -> str:
     parts = urlsplit(identifier)
     if parts.scheme in ("http", "https", "ftp") and parts.netloc:
         return "url"
-    if identifier.startswith("/") or (parts.scheme in ("", "file")):
+    if _is_local_path(identifier, parts):
         lower = identifier.lower()
         if any(lower.endswith(suf) for suf in _C_EXTENSION_SUFFIXES):
             return "c-extension-file"

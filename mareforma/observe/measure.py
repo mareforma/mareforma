@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Iterable
 
-from ._citation import read_matches_citation
+from ._citation import read_norm_matches
 from ._verdict import GroundingVerdict, ObservedGrounding
 
 
@@ -112,9 +112,15 @@ class GroundingReport:
 
 
 def _has_incidental_read(v: GroundingVerdict) -> bool:
-    """Whether the verdict carried a non-empty read that matched no cited source."""
+    """Whether the verdict carried a non-empty read that matched no cited source.
+
+    Pure string comparison over identifiers both sides normalized at write time,
+    the same rule the citation binding follows: a receipt is summarized from
+    another directory, another run, or another host, and touching the filesystem
+    here would make the number depend on where the report was produced.
+    """
     for r in v.reads:
-        if r.nonempty and not read_matches_citation(
+        if r.nonempty and not read_norm_matches(
             r.identifier, r.content_address, v.cited_sources
         ):
             return True

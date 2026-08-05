@@ -13,7 +13,9 @@ correct here. It also handles the honest hard case, a stochastic pipeline
 naive "did it change" test would call everything influenced. The oracle measures
 that run-to-run noise first and only calls INFLUENCED when the perturbation moves
 the finding by more than the noise floor. When the effect is comparable to the
-noise, the answer is UNDECIDABLE, never a silent INFLUENCED.
+noise, the answer is UNDECIDABLE, never a silent INFLUENCED. Measuring the noise
+takes repeats: at the default ``repeats=1`` the floor is 0 because nothing was
+measured, and the result says so rather than passing 0 off as a trusted floor.
 
 Flow and influence are different constructs, so the observer and the oracle can
 honestly disagree: a finding can read the cited data (flow) and then ignore it
@@ -32,10 +34,12 @@ from typing import Any, Callable, Sequence
 from ._verdict import ObservedGrounding
 
 # Below this many repeats the base-run spread is a THIN estimate of the
-# pipeline's noise: pstdev over 2-4 samples routinely understates the population
+# pipeline's noise: pstdev over 1-4 samples routinely understates the population
 # sigma, so an INFLUENCED verdict resting on that floor is over-confident. The
 # guard (opt-in) widens the noise margin by a small-sample factor; the informational
-# ``noise_is_thin`` flag is always recorded so a reader sees the caveat.
+# ``noise_is_thin`` flag is always recorded so a reader sees the caveat. A single
+# repeat is the extreme of that: there is no estimate to widen, so ``noise_measured``
+# records the floor as missing rather than small.
 _THIN_REPEATS = 5
 
 
@@ -174,6 +178,10 @@ class OracleResult:
     reason: str
     base_values: tuple[float, ...] = ()
     perturbed_values: tuple[float, ...] = ()
+    # One effect per perturbation, in the order they were tried: how far that
+    # perturbation alone moved the finding from the base mean. effect_size is
+    # the largest of these, so a reader can see which perturbation moved it.
+    perturbation_effects: tuple[float, ...] = ()
     # The declared reducer used to reduce each finding to a scalar, so the
     # measurement artifact is auditable about how prose became a number.
     reducer: "MetricReducer | None" = None
@@ -182,6 +190,10 @@ class OracleResult:
     # repeats to be trusted. Both are recorded so the verdict is auditable.
     multiplicity: int = 1
     noise_is_thin: bool = False
+    # Whether the noise floor was measured at all. False means a single base run,
+    # so the floor is 0 by construction and run-to-run jitter is not ruled out:
+    # a missing estimate, not a small one. Never claimed without the runs to back it.
+    noise_measured: bool = False
 
     @property
     def reinserts_model(self) -> bool:
@@ -238,12 +250,17 @@ def perturbation_oracle(
         Either a callable that maps the base input to a perturbed input, or a
         sequence of already-perturbed inputs. Each perturbation is a different
         way of changing the cited data; the finding should move if it depends
-        on that data.
+        on that data. Each is scored against the base on its own and the effect
+        size is the largest move, so perturbations of opposite sign do not
+        cancel; the per-perturbation effects are on the result.
     repeats:
         Runs per configuration. Above 1, the spread of the base runs measures
         the pipeline's run-to-run noise (LLM nondeterminism), which sets the
         floor a real effect must clear. Use temperature 0 / a pinned seed plus
-        repeats to bound the noise honestly.
+        repeats to bound the noise honestly. At ``1`` (the default) no noise is
+        measured at all: the floor is 0, so on a stochastic pipeline jitter alone
+        can clear the threshold. The result records that as ``noise_measured``
+        False and says so in its reason; raise repeats to measure the floor.
     metric:
         Reduces a finding to a scalar for comparison. Defaults to ``float()``.
     effect_threshold:
@@ -263,12 +280,16 @@ def perturbation_oracle(
         ``sqrt(2 * ln(multiplicity))`` sigmas to the multiplier, the scale of the
         largest spurious deviation expected across ``multiplicity`` standard
         draws, so the control is applied BEFORE any influence number is computed.
-        ``1`` (the default) adds nothing: a single finding needs no correction.
+        ``1`` (the default) adds nothing: a single finding tried against a single
+        perturbation needs no correction. The number of perturbations multiplies
+        the family, since the effect is the max across them.
     thin_sigma_guard:
         When True, widen the noise margin by a small-sample factor whenever the
         noise floor rests on fewer than ``_THIN_REPEATS`` repeats (a thin pstdev
         understates the real sigma). Off by default, so the scalar path is
-        unchanged; ``noise_is_thin`` is recorded either way.
+        unchanged; ``noise_is_thin`` is recorded either way. The guard cannot
+        rescue ``repeats=1``: there is no sigma to widen, which is what
+        ``noise_measured`` reports.
 
     Returns
     -------
@@ -293,30 +314,41 @@ def perturbation_oracle(
 
     base_values = tuple(m(run_fn(base_input)) for _ in range(repeats))
     perturbed_inputs = _resolve_perturbations(base_input, perturb)
-    perturbed_values: list[float] = []
-    for pin in perturbed_inputs:
-        perturbed_values.extend(m(run_fn(pin)) for _ in range(repeats))
-    perturbed_values = tuple(perturbed_values)
+    perturbed_runs = tuple(
+        tuple(m(run_fn(pin)) for _ in range(repeats)) for pin in perturbed_inputs
+    )
+    perturbed_values = tuple(v for runs in perturbed_runs for v in runs)
 
     base_mean = statistics.fmean(base_values)
-    pert_mean = statistics.fmean(perturbed_values)
-    effect_size = abs(pert_mean - base_mean)
+    # Each perturbation is a different way of changing the cited data, so each
+    # is its own comparison against the base. Pooling them into one mean lets
+    # opposing perturbations cancel, so take the largest move any one produced.
+    perturbation_effects = tuple(
+        abs(statistics.fmean(runs) - base_mean) for runs in perturbed_runs
+    )
+    effect_size = max(perturbation_effects)
 
     # Noise floor from run-to-run spread of the base configuration. With a
-    # single deterministic run there is no measurable noise, so the floor is 0
-    # and effect_threshold alone decides.
-    noise_std = statistics.pstdev(base_values) if len(base_values) > 1 else 0.0
+    # single run there is no measurable noise, so the floor is 0 and
+    # effect_threshold alone decides.
+    noise_measured = len(base_values) > 1
+    noise_std = statistics.pstdev(base_values) if noise_measured else 0.0
 
     # A noise floor estimated from too few repeats is thin (pstdev understates
-    # the population sigma). Always record it; widen the margin only when the
-    # guard is on, so the default scalar path is unchanged.
-    noise_is_thin = 1 < repeats < _THIN_REPEATS
+    # the population sigma), and a single repeat estimates nothing at all. Always
+    # record it; widen the margin only when the guard is on, so the default
+    # scalar path is unchanged.
+    noise_is_thin = repeats < _THIN_REPEATS
     sigma_multiplier = noise_multiplier
-    if multiplicity > 1:
-        # The extreme-value scale of the max of ``multiplicity`` standard draws:
+    # Taking the max over the perturbations is itself a multiple comparison, so
+    # the family the threshold must hold for is the declared multiplicity times
+    # the number of perturbations tried.
+    family = multiplicity * len(perturbation_effects)
+    if family > 1:
+        # The extreme-value scale of the max of ``family`` standard draws:
         # the extra sigmas a family of that size needs to hold its false-influence
         # rate. Applied before the influence call, per finding.
-        sigma_multiplier += math.sqrt(2.0 * math.log(multiplicity))
+        sigma_multiplier += math.sqrt(2.0 * math.log(family))
     if thin_sigma_guard and noise_is_thin:
         sigma_multiplier *= math.sqrt(_THIN_REPEATS / repeats)
     noise_margin = sigma_multiplier * noise_std
@@ -356,9 +388,11 @@ def perturbation_oracle(
         reason=reason,
         base_values=base_values,
         perturbed_values=perturbed_values,
+        perturbation_effects=perturbation_effects,
         reducer=reducer,
         multiplicity=multiplicity,
         noise_is_thin=noise_is_thin,
+        noise_measured=noise_measured,
     )
 
 

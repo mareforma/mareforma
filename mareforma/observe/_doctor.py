@@ -15,37 +15,34 @@ from __future__ import annotations
 
 import sys
 
-from . import _loaders
+from . import _loaders, _scope
 
-# The loaders the observer wraps, grouped for the report. Keys are the entries
-# that appear in ``_loaders._reals`` once wrapped; the label is human-facing.
-_STDLIB_WRAPS = {
-    "open": "builtins.open (file reads)",
-    "sqlite3.connect": "sqlite3 (query rows)",
-}
-_THIRD_PARTY_WRAPS = {
-    "pandas.read_csv": "pandas readers",
-    "requests.get": "requests.get",
-    "requests.Session.get": "requests.Session (pooled)",
-    "httpx.get": "httpx.get",
-    "httpx.Client.get": "httpx.Client / AsyncClient (pooled)",
-    "aiohttp.ClientSession._request": "aiohttp (recorded as a network seam)",
-    "h5py.File": "h5py (HDF5)",
-    "pyarrow.parquet.read_table": "pyarrow (Parquet / Arrow)",
-    "netCDF4.Dataset": "netCDF4",
-}
+# The loaders the observer wraps are declared in ``_loaders`` beside the wrap
+# functions themselves (``STDLIB_WRAPS`` / ``THIRD_PARTY_WRAPS``), so this report
+# cannot claim coverage the wrappers do not install, or omit one they do.
 
-# The seam kinds the classifier can raise, and what each means for a verdict.
-_SEAM_KINDS = {
+# What each seam kind means for a verdict. The kinds themselves come from
+# ``_scope.SEAM_KINDS``, beside the classifier that records them, so this report
+# cannot omit a kind the classifier can raise; only the wording lives here.
+_SEAM_EFFECTS = {
     "socket": "network read; forces OPAQUE for URL / content-address citations",
     "subprocess": "child process; forces OPAQUE (see attach for coverage)",
     "thread": "library thread; forces OPAQUE",
     "coverage-gap": "an uninstrumented or C-runtime reader; forces OPAQUE",
+    _scope.ABORT_SEAM: "the observed target exited before the scope closed; "
+                       "the observation is truncated, so it forces OPAQUE",
+    "failed-open": "an observed open of the cited source that raised; names "
+                   "the failure, does not force OPAQUE",
 }
+# A kind the classifier gained and the wording above has not caught up with. An
+# unmodelled kind blocks every citation, so OPAQUE is what it forces.
+_UNNAMED_SEAM = "forces OPAQUE; this build carries no description for it"
 
 _KNOWN_BOUNDS = (
     "A resource opened BEFORE the scope (a module-level or pooled handle other "
     "than the wrapped HTTP sessions) is not swapped, so its reads are invisible.",
+    "The scope reaches only the asyncio tasks created inside it; a task that "
+    "predates the scope is seamed at entry and lands OPAQUE.",
     "A read on a fork-started multiprocessing child is not observed (fork skips "
     "interpreter startup); it lands OPAQUE via the subprocess seam.",
     "Foreign-runtime readers (R, Julia, a CLI subprocess) are OPAQUE, not "
@@ -67,16 +64,16 @@ def coverage_report() -> dict:
     reals = _loaders._reals
 
     stdlib = [
-        {"loader": label, "wrapped": key in reals}
-        for key, label in _STDLIB_WRAPS.items()
+        {"loader": label, "wrapped": any(k in reals for k in keys)}
+        for label, keys in _loaders.STDLIB_WRAPS.items()
     ]
     third_party = []
-    for key, label in _THIRD_PARTY_WRAPS.items():
-        top = key.split(".", 1)[0]
+    for label, keys in _loaders.THIRD_PARTY_WRAPS.items():
+        top = keys[0].split(".", 1)[0]
         third_party.append(
             {
                 "loader": label,
-                "wrapped": key in reals,
+                "wrapped": any(k in reals for k in keys),
                 "importable": top in sys.modules or _is_importable(top),
             }
         )

@@ -140,3 +140,28 @@ def test_measure_cli_bad_path_exits_1(tmp_path):
     runner = CliRunner()
     result = runner.invoke(cli, ["measure", str(tmp_path / "nope.jsonl")])
     assert result.exit_code == 1
+
+
+def test_coverage_report_lists_every_wrapped_loader():
+    # The report is the observer's self-report. A loader that is wrapped but has
+    # no row under-reports coverage: a polars or duckdb operator reads "not
+    # covered" and instruments a seam the observer already sees.
+    report = obs.coverage_report()
+    loaders = {row["loader"] for row in report["stdlib_wrapped"]}
+    loaders |= {row["loader"] for row in report["third_party"]}
+    for name in ("io.open", "polars", "duckdb"):
+        assert any(name in loader for loader in loaders), name
+
+
+def test_every_installed_wrapper_is_declared():
+    # Drift guard: every key the loaders put in ``_reals`` belongs to a reported
+    # loader group or to the seam plumbing. A loader added without a doctor row
+    # fails here instead of silently shrinking the report.
+    from mareforma.observe import _loaders
+
+    obs.coverage_report()  # installs, so _reals reflects this environment
+    declared = set(_loaders.SEAM_WRAPS)
+    for keys in (*_loaders.STDLIB_WRAPS.values(),
+                 *_loaders.THIRD_PARTY_WRAPS.values()):
+        declared.update(keys)
+    assert set(_loaders._reals) <= declared
