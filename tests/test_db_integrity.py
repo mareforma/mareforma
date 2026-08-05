@@ -446,3 +446,37 @@ def test_literal_path_open_migrates_a_legacy_claims_table(
         assert list_claims(conn) == []
     finally:
         conn.close()
+
+
+@_requires_drop_column
+def test_open_migrates_a_policy_table_without_the_strict_column(
+    tmp_path: Path,
+) -> None:
+    """A project_policy table from a build that predates strict promotion must
+    gain the column in place, keeping the declaration it already carries. The
+    flat columns are a cache over the signed envelope, so nothing signed moves.
+    """
+    import sqlite3
+
+    from mareforma.db import get_project_policy
+
+    open_db(tmp_path).close()
+    raw = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
+    raw.execute(
+        "ALTER TABLE project_policy DROP COLUMN strict_promotion_required"
+    )
+    raw.execute(
+        "INSERT INTO project_policy "
+        "(id, rekor_required, signer_keyid, envelope, created_at) "
+        "VALUES (1, 1, 'k', '{}', '2026-01-01T00:00:00+00:00')"
+    )
+    raw.commit()
+    raw.close()
+
+    conn = open_db(tmp_path)
+    try:
+        policy = get_project_policy(conn)
+    finally:
+        conn.close()
+    assert policy["rekor_required"] == 1
+    assert policy["strict_promotion_required"] == 0

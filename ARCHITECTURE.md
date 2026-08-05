@@ -133,7 +133,9 @@ Three rules:
    independence. REPLICATED is a convergence signal, not a truth claim.
    Opening with `strict_promotion=True` (opt-in, off by default) turns the
    equal-data collapse into a hard gate: a pair then promotes only when
-   BOTH sides carry non-NULL data. Independence itself is reported on its
+   BOTH sides carry non-NULL data. The root validator signs that gate into
+   the project policy, one-way, so it binds every later opener and not just
+   the handle that asked for it. Independence itself is reported on its
    own axis by the read-side trust map (`graph.trust_map`), which surfaces
    the effective-independence number and marks it `UNVERIFIABLE` when the
    supporting lineage is too soft to certify a distinct model or when every

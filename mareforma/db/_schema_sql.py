@@ -631,17 +631,20 @@ _MANAGED_TRIGGERS = (
 # otherwise be missing on every upgrade.
 _ADDITIVE_TABLES_SQL = """
 -- project_policy: a root-signed, single-row declaration of project-wide
--- trust policy. Today it carries rekor_required: once set, the project's
--- findings must be witnessed by the transparency log before they can
--- converge. The row is a singleton (id = 1). The signed envelope is the
--- authority; the flat columns are a denormalized read cache. restore
+-- trust policy. rekor_required: the project's findings must be witnessed by
+-- the transparency log before they can converge. strict_promotion_required:
+-- a converging pair must carry data (artifact_hash) on both sides. Both are
+-- one-way once declared, and both bind every writer, not just the handle
+-- that declared them. The row is a singleton (id = 1). The signed envelope
+-- is the authority; the flat columns are a denormalized read cache. restore
 -- verifies the envelope against the enrolled root before enforcing.
 CREATE TABLE IF NOT EXISTS project_policy (
-    id             INTEGER PRIMARY KEY CHECK (id = 1),
-    rekor_required INTEGER NOT NULL,
-    signer_keyid   TEXT NOT NULL,
-    envelope       TEXT NOT NULL,
-    created_at     TEXT NOT NULL
+    id                        INTEGER PRIMARY KEY CHECK (id = 1),
+    rekor_required            INTEGER NOT NULL,
+    signer_keyid              TEXT NOT NULL,
+    envelope                  TEXT NOT NULL,
+    created_at                TEXT NOT NULL,
+    strict_promotion_required INTEGER NOT NULL DEFAULT 0
 );
 
 -- Trust layer: the structured meaning above the signed claim graph. A finding
@@ -787,6 +790,23 @@ CREATE TABLE IF NOT EXISTS effect_estimates (
     n_total        INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_estimate_contrast ON effect_estimates(contrast_id);
+
+-- supports_revision: a monotonic counter over supports-edge mutations, bumped
+-- by every write that changes the claim_supports cache. It lives in graph.db,
+-- not in the cache file, so it commits in the same database as the claims row
+-- it describes. The cache stamps the value it last saw; a mismatch means the
+-- cache missed a mutation (a crash between the two WAL commits, or a writer
+-- that did not maintain the cache) and the cache is rebuilt on next open. The
+-- claim-count check alone cannot see an in-place supports edit, which moves no
+-- count. Additive: existing graphs gain the table and the singleton row on the
+-- next open, and the first open after the upgrade rebuilds the cache once.
+-- The singleton row is seeded by _ensure_supports_revision_row, not here: an
+-- INSERT in this script would need write access on every open, including the
+-- opens that change nothing.
+CREATE TABLE IF NOT EXISTS supports_revision (
+    id       INTEGER PRIMARY KEY CHECK (id = 1),
+    revision INTEGER NOT NULL DEFAULT 0
+);
 """
 
 

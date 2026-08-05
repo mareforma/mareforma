@@ -117,6 +117,14 @@ def open(  # noqa: A001
         distinct-signer axis alone; absent data never blocks). Opt-in and
         additive: it never loosens the default, only adds the data-presence
         requirement.
+
+        Passing True DECLARES the rule on the project: the root validator
+        signs a one-way ``project_policy`` row, and every later opener,
+        including the CLI, promotes under it whether or not it passes the
+        flag. That makes it a property of the project rather than of the
+        handle. Only the root key can declare it, so a keyless or non-root
+        caller raises :class:`mareforma.ProjectPolicyError` instead of
+        receiving a gate that binds nothing but its own writes.
     validator_type:
         ``'human'`` or ``'llm'``, the self-declared type recorded if this key
         auto-enrolls as the project's root validator. Ignored once a root
@@ -495,6 +503,7 @@ from mareforma.db import (
     RestoreError,
     CycleDetectedError,
     GraphTooLargeError,
+    ProjectPolicyError,
     VerdictIssuerError,
     REFUTATION_STATES,
     VALID_REFUTATION_FILTERS,
@@ -618,6 +627,7 @@ __all__ = [
     "KeyPermissionError",
     "RekorInclusionError",
     "LLMValidatorPromotionError",
+    "ProjectPolicyError",
     "RestoreError",
     "SelfValidationError",
     "SignedClaimImmutableError",

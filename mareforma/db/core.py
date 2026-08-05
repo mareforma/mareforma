@@ -50,6 +50,7 @@ from .errors import (  # noqa: F401
     RestoreError,
     CycleDetectedError,
     GraphTooLargeError,
+    ProjectPolicyError,
     VerdictIssuerError,
 )
 
@@ -343,7 +344,9 @@ def _open_existing_db(
     # otherwise an existing legacy graph.db lacks them and the first
     # trust-layer write raises 'no such table'.
     conn.executescript(_ADDITIVE_TABLES_SQL)
+    _ensure_supports_revision_row(conn)
     _ensure_evidence_lines_columns(conn)
+    _ensure_project_policy_columns(conn)
 
 
 def open_db(root: Path) -> sqlite3.Connection:
@@ -641,6 +644,53 @@ def _ensure_evidence_lines_columns(conn: sqlite3.Connection) -> None:
                 return
             raise DatabaseError(
                 f"Could not add evidence_lines.model_lineage column: {exc}"
+            ) from exc
+
+
+# Policy columns added after the table shipped, with their declarations.
+_PROJECT_POLICY_ADDED_COLUMNS = (
+    ("strict_promotion_required", "INTEGER NOT NULL DEFAULT 0"),
+    ("rekor_declared_at", "TEXT"),
+    ("strict_promotion_declared_at", "TEXT"),
+)
+
+
+def _ensure_project_policy_columns(conn: sqlite3.Connection) -> None:
+    """Add the columns a legacy policy table predates.
+
+    The flat columns are a read cache over the signed envelope, so the ALTERs
+    touch no signed bytes: a policy declared before ``strict_promotion_required``
+    existed is a v1 envelope that says nothing about strict promotion, which is
+    exactly what the ``DEFAULT 0`` records, and one declared before the
+    ``*_declared_at`` columns says nothing about when each flag was declared,
+    which is what NULL records. Runs after the additive-tables script, so the
+    table itself is guaranteed present. Same posture as
+    ``_ensure_evidence_lines_columns``.
+    """
+    def _columns() -> set[str]:
+        return {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(project_policy)"
+            ).fetchall()
+        }
+
+    cols = _columns()
+    for name, decl in _PROJECT_POLICY_ADDED_COLUMNS:
+        if name in cols:
+            continue
+        try:
+            conn.execute(
+                f"ALTER TABLE project_policy ADD COLUMN {name} {decl}"
+            )
+            conn.commit()
+        except sqlite3.OperationalError as exc:
+            # Concurrent open: another process won the ALTER race. Re-check
+            # before raising, "duplicate column name" is benign.
+            if name in _columns():
+                continue
+            raise DatabaseError(
+                f"Could not add project_policy.{name} column: {exc}"
             ) from exc
 
 
@@ -1730,7 +1780,9 @@ def _maybe_update_replicated_unlocked(
     must carry an ``artifact_hash``. The default rule promotes on the
     distinct-signer axis alone (absent data never blocks); an operator who wants
     data-distinctness as a hard gate turns this on. It never loosens the default
-   , it only adds the data-presence requirement.
+   , it only adds the data-presence requirement. The caller's flag is ORed with
+    the project's root-signed policy, so the rule is the project's and not the
+    writing handle's.
 
     Independence axis: distinct asserter_keyid
     ------------------------------------------
@@ -1760,6 +1812,12 @@ def _maybe_update_replicated_unlocked(
     """
     if not supports:
         return
+
+    # The project's declared policy is the floor. It is root-signed and
+    # one-way, so a handle opened without the flag (the CLI, a second
+    # process, a later session) is held to it: the promotion rule belongs to
+    # the project, not to whoever performs the insert.
+    strict_promotion = strict_promotion or strict_promotion_required(conn)
 
     # A tainted new claim (status != 'open') must not enter the trust
     # ladder. The candidate-peer SQL filter below blocks an existing
@@ -5406,10 +5464,61 @@ def get_project_policy(conn: sqlite3.Connection) -> dict | None:
     trusting either.
     """
     row = conn.execute(
-        "SELECT rekor_required, signer_keyid, envelope, created_at "
+        "SELECT rekor_required, strict_promotion_required, signer_keyid, "
+        "envelope, created_at, rekor_declared_at, strict_promotion_declared_at "
         "FROM project_policy WHERE id = 1"
     ).fetchone()
     return dict(row) if row is not None else None
+
+
+def project_policy_flags(policy: dict | None) -> tuple[bool, bool]:
+    """The ``(rekor_required, strict_promotion_required)`` pair of *policy*.
+
+    An absent policy declares neither. Callers compare flag tuples rather
+    than rows so the one-way rule is stated in one place.
+    """
+    if policy is None:
+        return (False, False)
+    return (
+        bool(policy["rekor_required"]),
+        bool(policy["strict_promotion_required"]),
+    )
+
+
+def project_policy_declared_at(
+    policy: dict | None,
+) -> tuple[str | None, str | None]:
+    """When each of *policy*'s flags was first declared, in flag order.
+
+    ``created_at`` is when the row was last signed, so extending the policy
+    with a second rule moves it forward and it cannot date the first rule. A
+    declaration signed before the per-flag times existed carries neither, and
+    for it ``created_at`` is the best evidence there is: fall back to it for
+    the flags such a policy does declare, which is what those projects were
+    already held to. An undeclared flag has no declaration time.
+    """
+    if policy is None:
+        return (None, None)
+    rekor, strict = project_policy_flags(policy)
+    fallback = policy["created_at"]
+    return (
+        (policy["rekor_declared_at"] or fallback) if rekor else None,
+        (policy["strict_promotion_declared_at"] or fallback) if strict else None,
+    )
+
+
+def strict_promotion_required(conn: sqlite3.Connection) -> bool:
+    """True when the project's stored policy gates promotion on data.
+
+    Read on the promotion path so the rule belongs to the project rather than
+    to whichever handle happens to be writing: the declaration is root-signed
+    and one-way, so a caller that opened without ``strict_promotion`` is held
+    to it too.
+    """
+    row = conn.execute(
+        "SELECT strict_promotion_required FROM project_policy WHERE id = 1"
+    ).fetchone()
+    return bool(row["strict_promotion_required"]) if row is not None else False
 
 
 def set_project_policy(
@@ -5419,28 +5528,68 @@ def set_project_policy(
     envelope: str,
     signer_keyid: str,
     rekor_required: bool,
+    strict_promotion_required: bool,
     created_at: str,
+    rekor_declared_at: str | None,
+    strict_promotion_declared_at: str | None,
 ) -> dict:
     """Persist the singleton project policy and refresh the backup.
 
-    One-way: a policy already present is returned unchanged (a project cannot
-    revoke witnessing once required). Locks with BEGIN IMMEDIATE so a racing
-    writer serializes on the singleton insert. Returns the effective policy.
+    One-way: a flag already declared stays declared, at the time it was first
+    declared. A declaration that adds a flag replaces the row with its newly
+    signed envelope; one that adds nothing returns the stored policy unchanged.
+    Locks with BEGIN IMMEDIATE so a racing writer serializes on the singleton.
+    Returns the effective policy.
+
+    Raises
+    ------
+    ProjectPolicyError
+        If the stored policy carries a flag this envelope does not, or dates a
+        flag earlier than this envelope does: the signed material cannot speak
+        for that flag, so the write is refused rather than dropping the rule or
+        moving its start forward. Re-read the policy and sign the union.
     """
+    wanted = (rekor_required, strict_promotion_required)
+    wanted_since = (rekor_declared_at, strict_promotion_declared_at)
     existing = get_project_policy(conn)
-    if existing is not None:
+    if existing is not None and project_policy_flags(existing) == wanted:
         return existing
     conn.execute("BEGIN IMMEDIATE")
     try:
         existing = get_project_policy(conn)
-        if existing is not None:
+        stored = project_policy_flags(existing)
+        if existing is not None and stored == wanted:
             conn.execute("COMMIT")
             return existing
+        if any(was and not now for was, now in zip(stored, wanted)):
+            conn.execute("ROLLBACK")
+            raise ProjectPolicyError(
+                "The stored project policy declares a rule this envelope "
+                "does not carry, so persisting it would revoke that rule. "
+                "Re-read the policy and sign the union."
+            )
+        if any(
+            was is not None and (now is None or now > was)
+            for was, now in zip(project_policy_declared_at(existing), wanted_since)
+        ):
+            conn.execute("ROLLBACK")
+            raise ProjectPolicyError(
+                "The stored project policy declares a rule earlier than this "
+                "envelope dates it, so persisting it would move the rule's "
+                "start forward. Re-read the policy and sign the union."
+            )
+        conn.execute("DELETE FROM project_policy WHERE id = 1")
         conn.execute(
             "INSERT INTO project_policy "
-            "(id, rekor_required, signer_keyid, envelope, created_at) "
-            "VALUES (1, ?, ?, ?, ?)",
-            (1 if rekor_required else 0, signer_keyid, envelope, created_at),
+            "(id, rekor_required, strict_promotion_required, signer_keyid, "
+            "envelope, created_at, rekor_declared_at, "
+            "strict_promotion_declared_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                1 if rekor_required else 0,
+                1 if strict_promotion_required else 0,
+                signer_keyid, envelope, created_at,
+                rekor_declared_at, strict_promotion_declared_at,
+            ),
         )
         conn.execute("COMMIT")
     except BaseException:
@@ -5706,6 +5855,9 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
         if policy_row is not None:
             data["project_policy"] = {
                 "rekor_required": bool(policy_row["rekor_required"]),
+                "strict_promotion_required": bool(
+                    policy_row["strict_promotion_required"]
+                ),
                 "signer_keyid": policy_row["signer_keyid"],
                 "envelope": policy_row["envelope"],
                 "created_at": policy_row["created_at"],
@@ -5716,6 +5868,15 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
         # the documented delete-and-restore recovery rebuilds the finding tree,
         # not just the surviving finding claims. Emitted only when populated.
         _backup_trust_tables(conn, data)
+
+        # Supports-edge revision counter. Not signed material: the supports
+        # cache compares itself against it to decide whether to rebuild. It
+        # round-trips so a restored graph resumes the count instead of
+        # climbing back through values a surviving cache file already stamped.
+        from mareforma import _supports
+        data["graph_meta"] = {
+            "supports_revision": _supports.supports_revision(conn),
+        }
 
         out = root / "claims.toml"
         payload = tomli_w.dumps(data).encode("utf-8")

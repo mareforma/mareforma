@@ -178,6 +178,9 @@ class EpistemicGraph:
         self._trust_insecure_rekor = trust_insecure_rekor
         # Opt-in gate: require data on both sides of a REPLICATED pair. Off by
         # default; threaded into every write path that can trigger promotion.
+        # Asking for it also declares it on the project (see the end of
+        # __init__), so this handle's copy of the flag only ever agrees with
+        # the stored policy the write paths read.
         self._strict_promotion = strict_promotion
         # Rekor log operator's public key, used to verify the signed
         # checkpoint that anchors each inclusion proof. When None,
@@ -246,6 +249,16 @@ class EpistemicGraph:
                         "table is repaired; run `mareforma validator list`."
                     )
                 _warnings.warn(msg, stacklevel=2)
+
+        # strict_promotion governs a state transition applied to rows other
+        # sessions write, so it is a project rule and is recorded as one: the
+        # root signs a one-way policy every later opener reads. A caller who
+        # cannot make that declaration is refused here rather than handed a
+        # gate that only holds while their own handle is doing the writing.
+        if strict_promotion:
+            self._declare_project_policy(
+                "the strict-promotion policy", strict_promotion_required=True,
+            )
 
     # ------------------------------------------------------------------
     # Core API
@@ -2168,15 +2181,35 @@ class EpistemicGraph:
 
         Raises
         ------
-        ValueError
+        ProjectPolicyError
             If no signer is loaded, or the loaded signer is not the project's
-            single root validator.
+            single root validator. Subclasses ``ValueError``.
         """
         self._check_open()
+        return self._declare_project_policy("the Rekor witnessing policy",
+                                            rekor_required=True)
+
+    def _declare_project_policy(
+        self,
+        what: str,
+        *,
+        rekor_required: bool = False,
+        strict_promotion_required: bool = False,
+    ) -> dict:
+        """Root-sign an extension of the project's trust policy.
+
+        The declaration is project-wide and one-way, so the flags asked for are
+        unioned with the stored ones and signed together: extending a policy
+        never drops a rule an earlier declaration recorded. Each flag keeps the
+        time it was first declared, so extending the policy cannot restate an
+        older rule as newer than it is. Idempotent, a declaration that adds
+        nothing returns the stored policy untouched. ``what`` names the rule in
+        the refusal messages.
+        """
         if self._signer is None:
-            raise ValueError(
-                "graph.require_rekor_witnessing requires a loaded signing key. "
-                "Reopen the graph with the root key_path."
+            raise _db.ProjectPolicyError(
+                f"Declaring {what} needs the project's root signing key. "
+                "Reopen the graph with key_path pointing at it."
             )
         from mareforma import signing as _signing
         from mareforma import validators as _validators
@@ -2184,24 +2217,50 @@ class EpistemicGraph:
         signer_keyid = _signing.public_key_id(self._signer.public_key())
         root_keyid = _validators.trust_domain_root(self._conn)
         if root_keyid is None or signer_keyid != root_keyid:
-            raise ValueError(
-                "Only the project's root validator may declare the Rekor "
-                "witnessing policy. Reopen with the root key."
+            raise _db.ProjectPolicyError(
+                f"Only the project's root validator may declare {what}. "
+                "Reopen with the root key."
             )
         existing = _db.get_project_policy(self._conn)
-        if existing is not None:
+        had_rekor, had_strict = _db.project_policy_flags(existing)
+        rekor_required = rekor_required or had_rekor
+        strict_promotion_required = strict_promotion_required or had_strict
+        if existing is not None and (had_rekor, had_strict) == (
+            rekor_required, strict_promotion_required
+        ):
             return existing
         created_at = _now()
+        # A flag already declared keeps its own start time; one this call adds
+        # starts now. Without that, extending the policy would restamp the
+        # older rule and any check grandfathering on it would skip everything
+        # written between the two declarations.
+        was_rekor_at, was_strict_at = _db.project_policy_declared_at(existing)
+        rekor_declared_at = was_rekor_at or (
+            created_at if rekor_required else None
+        )
+        strict_declared_at = was_strict_at or (
+            created_at if strict_promotion_required else None
+        )
         envelope = _signing.sign_project_policy(
-            {"rekor_required": True, "created_at": created_at},
+            {
+                "version": _signing._PROJECT_POLICY_VERSION,
+                "rekor_required": rekor_required,
+                "strict_promotion_required": strict_promotion_required,
+                "created_at": created_at,
+                "rekor_declared_at": rekor_declared_at,
+                "strict_promotion_declared_at": strict_declared_at,
+            },
             self._signer,
         )
         return _db.set_project_policy(
             self._conn, self._root,
             envelope=json.dumps(envelope, sort_keys=True, separators=(",", ":")),
             signer_keyid=signer_keyid,
-            rekor_required=True,
+            rekor_required=rekor_required,
+            strict_promotion_required=strict_promotion_required,
             created_at=created_at,
+            rekor_declared_at=rekor_declared_at,
+            strict_promotion_declared_at=strict_declared_at,
         )
 
     @_synchronized

@@ -179,6 +179,7 @@ class RestoreError(MareformaError):
       - ``'policy_absent'``            : enforce_rekor_policy set but no signed policy
       - ``'policy_unverifiable'``      : enforced policy has no pinned Rekor log key
       - ``'policy_unverified'``        : project_policy envelope fails verify
+      - ``'policy_violation'``         : rebuilt row breaks the signed policy
       - ``'rekor_inclusion_invalid'``  : Rekor inclusion entry or proof invalid
     """
 
@@ -214,6 +215,22 @@ class GraphTooLargeError(MareformaError):
     """
 
 
+
+
+class ProjectPolicyError(MareformaError, ValueError):
+    """Raised when a project-policy declaration is refused.
+
+    The project policy (Rekor witnessing, strict promotion) is root-signed,
+    project-wide and one-way, so declaring one is a privileged write, not a
+    handle setting. This fires when the caller cannot make that declaration:
+    no signing key is loaded, the loaded key is not the project's single root
+    validator, or a concurrent writer already declared a rule the envelope in
+    hand does not carry. Refusing is the point: a caller who asked for the
+    stricter rule and cannot record it must not proceed believing it holds.
+
+    Subclasses ``ValueError`` because the declaration surfaces raised that
+    before the policy grew its own type.
+    """
 
 
 class VerdictIssuerError(MareformaError):

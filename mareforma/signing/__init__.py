@@ -30,7 +30,12 @@ from .core import (
     _ENROLLMENT_FIELDS,
     _VALIDATION_FIELDS,
     _SEED_FIELDS,
-    _PROJECT_POLICY_FIELDS,
+    _PROJECT_POLICY_FIELDS_V1,
+    _PROJECT_POLICY_FIELDS_V2,
+    _PROJECT_POLICY_FIELDS_V3,
+    _PROJECT_POLICY_FIELDS_BY_VERSION,
+    _PROJECT_POLICY_VERSION,
+    _project_policy_fields,
     VALID_CLAIM_ROLES,
     # Exceptions.
     SigningError,

@@ -142,6 +142,13 @@ check, open with `strict_promotion=True`: a pair then promotes only when BOTH
 sides carry non-NULL data. It is off by default and only ever adds the
 requirement. It never loosens the default signer-axis rule.
 
+The gate is project state, not a session option. Asking for it has the root
+validator sign a one-way policy record, so every later opener promotes under
+it, restore rebuilds it, and a second session cannot promote around it by
+opening without the flag. Only the root key can declare it: a keyless or
+non-root caller gets a `ProjectPolicyError` rather than a gate that binds
+nothing but its own writes.
+
 ## The independence axis
 
 Independence is reported as its own axis, separate from the support labels,

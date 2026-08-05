@@ -14,6 +14,8 @@ Coverage:
 from __future__ import annotations
 
 import json
+import shutil
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -124,6 +126,86 @@ class TestSupportsCache:
         # Cache rebuilt with the restored chain.
         with mareforma.open(tmp_path) as graph:
             assert _supports.claim_supports_count(graph._conn) == 1
+
+    def test_supports_revision_survives_restore(self, tmp_path: Path) -> None:
+        # A restored graph resumes the counter its backup recorded. Restarting
+        # at 0 would let it climb back through values a surviving cache file
+        # already stamped, and pre-loss edges would read as fresh.
+        with mareforma.open(tmp_path) as graph:
+            a = graph.assert_claim("a")
+            graph.assert_claim("b", supports=[a])
+            before = _supports.supports_revision(graph._conn)
+        assert before > 0
+
+        (tmp_path / ".mareforma" / "graph.db").unlink()
+        (tmp_path / ".mareforma" / "claim_supports_cache.db").unlink()
+        mareforma.restore(tmp_path)
+
+        with mareforma.open(tmp_path) as graph:
+            assert _supports.supports_revision(graph._conn) == before
+            assert not _supports.is_cache_stale(graph._conn)
+
+    def test_graph_without_counter_migrates(self, tmp_path: Path) -> None:
+        # A graph written before the counter existed carries neither the table
+        # nor a cache stamp. The next open adds both and rebuilds once.
+        with mareforma.open(tmp_path) as graph:
+            a = graph.assert_claim("a")
+            graph.assert_claim("b", supports=[a])
+        cache = tmp_path / ".mareforma" / "claim_supports_cache.db"
+        conn = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
+        try:
+            conn.execute("ATTACH DATABASE ? AS supports_cache", (str(cache),))
+            conn.execute("DROP TABLE supports_revision")
+            conn.execute(
+                "DELETE FROM supports_cache.cache_meta "
+                "WHERE key = 'source_revision'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with mareforma.open(tmp_path) as graph:
+            assert _supports.claim_supports_count(graph._conn) == 1
+            assert not _supports.is_cache_stale(graph._conn)
+
+    def test_torn_in_place_edge_edit_is_detected(self, tmp_path: Path) -> None:
+        # The cache is an attached database and both files run WAL, so a crash
+        # can commit the graph half of an in-place supports edit and lose the
+        # cache half. The claim count does not move on such an edit, so the
+        # count check alone leaves the pre-edit edges served forever. The
+        # supports revision lives in graph.db and moves with every edge
+        # mutation, so the surviving cache stamp is behind and next open
+        # rebuilds.
+        with mareforma.open(tmp_path) as graph:
+            a = graph.assert_claim("a")
+            c = graph.assert_claim("c")
+            b = graph.assert_claim("b", supports=[a])
+        cache = tmp_path / ".mareforma" / "claim_supports_cache.db"
+        pre_edit = tmp_path / "cache-before-edit.db"
+        shutil.copy2(cache, pre_edit)
+
+        with mareforma.open(tmp_path) as graph:
+            graph.update_claim(b, supports=[c])
+        # The cache half of the edit never reached disk.
+        shutil.copy2(pre_edit, cache)
+
+        conn = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("ATTACH DATABASE ? AS supports_cache", (str(cache),))
+            assert _supports.is_cache_stale(conn) is True
+        finally:
+            conn.close()
+
+        with mareforma.open(tmp_path) as graph:
+            a_down = {
+                e["claim_id"] for e in graph.query_provenance(a)["downstream"]
+            }
+            c_down = {
+                e["claim_id"] for e in graph.query_provenance(c)["downstream"]
+            }
+        assert b not in a_down, "stale edge: b still shows as downstream of a"
+        assert b in c_down, "lost edge: b should be downstream of c"
 
 
 # ----------------------------------------------------------------------------

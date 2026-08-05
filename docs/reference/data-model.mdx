@@ -183,12 +183,13 @@ Removal is intentionally unsupported currently; validator history is append-only
 
 ## project_policy table
 
-A root-signed, single-row (`id = 1`) declaration of project-wide trust policy. Today it carries `rekor_required`: once set, findings must be witnessed by the transparency log before they can converge (this backs `require_rekor_witnessing`). The signed `envelope` is the authority; the flat columns are a denormalized read cache. Restore verifies the envelope against the enrolled root before enforcing.
+A root-signed, single-row (`id = 1`) declaration of project-wide trust policy. It carries `rekor_required` (findings must be witnessed by the transparency log before they can converge, backing `require_rekor_witnessing`) and `strict_promotion_required` (a converging pair must carry data on both sides, backing `open(strict_promotion=True)`). Both are one-way once declared and bind every writer, not just the handle that declared them. The signed `envelope` is the authority; the flat columns are a denormalized read cache. The envelope payload carries its own version, so a declaration signed before a flag existed keeps verifying under the field list it was signed with. Extending the policy re-signs the row, which moves `created_at`, so each flag also carries the time it was first declared and a check that grandfathers earlier claims reads that instead. Restore verifies the envelope against the enrolled root before enforcing.
 
 | Field | Type | Description |
 |---|---|---|
 | `id` | INTEGER (PK) | CHECK `id = 1`: the row is a singleton |
 | `rekor_required` | INTEGER | `1` when findings must be Rekor-witnessed before they converge |
+| `strict_promotion_required` | INTEGER | `1` when a converging pair must carry `artifact_hash` on both sides |
 | `signer_keyid` | TEXT | Keyid of the root that signed the policy envelope |
 | `envelope` | TEXT | Root-signed DSSE-style envelope; the authoritative copy of the policy |
 | `created_at` | TEXT | UTC ISO 8601 |

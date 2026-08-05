@@ -21,12 +21,18 @@ import warnings
 from pathlib import Path
 from typing import Any
 
-from .errors import RestoreError
+from .errors import (
+    LLMValidatorPromotionError,
+    RestoreError,
+    SelfValidationError,
+    VerdictIssuerError,
+)
 from .core import (
     open_db,
+    _CorroborationIndex,
+    _promotion_window,
     _compute_prev_hash,
     _is_claim_id,
-    _observed_grounding_promotes,
     _refuse_llm_contradiction_issuer,
     _refuse_llm_validator,
     _refuse_self_validation,
@@ -336,6 +342,10 @@ def restore(
     _validate_section_shape(
         data.get("project_policy"), "project_policy", allow_scalar_entries=True,
     )
+    # [graph_meta] holds fields too: the supports-edge revision counter.
+    _validate_section_shape(
+        data.get("graph_meta"), "graph_meta", allow_scalar_entries=True,
+    )
 
     validators_section: dict = data.get("validators", {}) or {}
     claims_section: dict = data.get("claims", {}) or {}
@@ -473,9 +483,10 @@ def restore(
             # Project policy: verify the root-signed [project_policy] envelope
             # (if present) and round-trip it into the restored graph. A present
             # but unverifiable policy is tampered signed material and aborts.
-            policy_rekor_required = _verify_and_insert_project_policy(
+            policy = _verify_and_insert_project_policy(
                 conn, data.get("project_policy"), validators_section, _signing,
             )
+            policy_rekor_required = bool(policy and policy["rekor_required"])
             # Enforcement is the operator's out-of-band assertion, like the
             # pinned log pubkey: only when they pass enforce_rekor_policy does
             # restore refuse to reconstruct convergence-eligible state for a
@@ -967,6 +978,14 @@ def restore(
             # claims path, so the independence read re-authenticates it as before.
             _restore_trust_tables(conn, data)
 
+            # Resume the supports-edge revision counter the backup recorded.
+            _restore_supports_revision(conn, data.get("graph_meta"))
+
+            # Refuse a retirement that names a plan pair its attestation does
+            # not. The row decides which rule a proposition's stranded evidence
+            # is gated under, and none of its columns is signed.
+            _verify_plan_retirement_binding(conn)
+
             # Refuse a finding attached to a proposition its claim never made.
             # The edge itself is unsigned, so it is re-derived from the claim's
             # signed text, the same posture as the REPLICATED re-derivation below.
@@ -1023,6 +1042,29 @@ def restore(
         raise
     finally:
         conn.close()
+
+
+def _restore_supports_revision(conn: sqlite3.Connection, section: Any) -> None:
+    """Resume the supports-edge revision counter from ``[graph_meta]``.
+
+    The counter is not signed material: it decides only whether the
+    rebuildable supports cache is trusted or rebuilt. A backup written before
+    the counter existed carries no section and leaves the restored graph at 0.
+    A present but malformed value is refused rather than silently dropped,
+    because restoring at 0 lets the counter climb back through values a
+    surviving cache file already stamped, and stale edges would read as fresh.
+    """
+    if not isinstance(section, dict) or "supports_revision" not in section:
+        return
+    revision = section["supports_revision"]
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        raise RestoreError(
+            "claims.toml field [graph_meta].supports_revision must be a "
+            f"non-negative integer, got {revision!r}.",
+            kind="toml_malformed",
+        )
+    from mareforma import _supports
+    _supports.set_supports_revision(conn, revision)
 
 
 def _restore_trust_tables(conn: sqlite3.Connection, data: dict) -> None:
@@ -1143,154 +1185,55 @@ def _verify_finding_proposition_binding(conn: sqlite3.Connection) -> None:
             )
 
 
-def _is_seed_attestation(validation_signature: str | None) -> bool:
-    """True when a row's envelope is a born-ESTABLISHED seed attestation.
-
-    A seed claim is asserted at ESTABLISHED and never passes through
-    REPLICATED, so the corroboration that step requires does not apply to it.
-    An unparseable value is not read as a seed: the caller has already verified
-    this column, and the gate's safe answer is to keep checking.
-    """
-    from mareforma import signing as _signing
-
-    try:
-        payload_type = json.loads(validation_signature or "")["payloadType"]
-    except (json.JSONDecodeError, KeyError, TypeError):
-        return False
-    return payload_type == _signing.PAYLOAD_TYPE_SEED
-
-
-def _promotion_gates_pass(row: sqlite3.Row) -> bool:
-    """The own-row terms the live promotion reads, re-applied to a restored row.
-
-    ``record_replication_verdict`` records the verdict for every member of a
-    cluster and then promotes only the members that carry a signer identity, a
-    settled transparency log, and a grounding verdict that permits promotion.
-    The convergence path reads the same three of the claim it promotes.
-    """
-    return (
-        row["asserter_keyid"] is not None
-        and row["transparency_logged"] == 1
-        and _observed_grounding_promotes(row["observed_grounding"])
-    )
-
-
 def _verify_replicated_corroboration(conn: sqlite3.Connection) -> None:
-    """Refuse a restored promotion no distinct-signer corroboration backs.
+    """Refuse a restored promotion no signed evidence backs.
 
-    ``support_level`` is not a signed field, so a tampered claims.toml can flip a
-    lone PRELIMINARY claim to REPLICATED while its signature still verifies. The
-    signed material is enough to re-establish the promotion invariant: a claim's
-    ``supports`` edges are signed, and each signer's ``asserter_keyid`` is
-    re-derived from the verified signature bundle. A genuine REPLICATED must
-    share an ESTABLISHED, open anchor with at least one peer carrying a distinct,
-    non-NULL asserter_keyid. A row that cannot show this is a forged level and
-    fails the whole restore (kind='claim_unverified').
+    ``support_level`` is not a signed field, so a tampered claims.toml can flip
+    a lone PRELIMINARY claim to REPLICATED while its signature still verifies.
+    :class:`_CorroborationIndex` re-derives the rung from signed material, the
+    same rule the live read path applies before it serves a row; here an
+    unbacked row fails the whole restore rather than degrading one read.
 
-    A REPLICATED level is legitimate on either of the two paths that produce it:
-
-    (a) An enrolled validator's signed replication verdict names the claim AND
-        the claim passes the terms that verdict path promotes on. Restore
-        verifies each verdict's signature before insert, but membership proves
-        only that a verdict named the claim: the live path records the verdict
-        for every member of a cluster and promotes the qualifying ones, so a
-        claim that is named and not promoted is normal. ``_promotion_gates_pass``
-        is the difference between the two.
-    (b) Automatic convergence: the claim shares an ESTABLISHED anchor in its
-        signed ``supports`` with a peer carrying a distinct, non-NULL
-        asserter_keyid, a different artifact hash, and a grounding verdict that
-        permits promotion (on both sides).
-
-    Path (b) checks durable, signed facts only. It deliberately does NOT re-apply
-    the live promotion's point-in-time filters (peer/anchor still ``open``, peer
-    ``t_invalid`` NULL, transparency): those conditions can change AFTER a
-    genuine promotion, the peer can be contradicted or the anchor retracted
-    later, and re-applying them would false-reject an honest REPLICATED that was
-    invalidated or whose anchor was withdrawn after it earned the level. The
-    artifact-hash collapse and the observed-grounding gate are different in kind
-    and ARE re-applied: both columns are bound into the signed statement and no
-    code path rewrites either, so a claim that satisfied them at promotion time
-    still satisfies them now. Forgery is still blocked: a lone flipped claim
-    cannot conjure a second real signature on a shared ESTABLISHED anchor, and
-    ESTABLISHED itself is gated by a signed validation envelope restore verifies.
-    Legacy REPLICATED rows predate the asserter_keyid rule and carry a NULL
-    asserter_keyid; they are grandfathered elsewhere and skipped here.
+    A project whose root-signed policy requires strict promotion is held to it
+    here too: a claim created after that declaration must carry data, and so
+    must the peer backing it. Claims created before the declaration keep their
+    level, the policy is not retroactive, and both timestamps are signed so the
+    grandfathering window cannot be widened, neither by editing the backup nor
+    by declaring a second, unrelated rule later.
     """
     rows = conn.execute(
-        "SELECT claim_id, asserter_keyid, supports_json, artifact_hash, "
-        "observed_grounding FROM claims "
-        "WHERE support_level = 'REPLICATED' AND asserter_keyid IS NOT NULL"
+        "SELECT claim_id, support_level, asserter_keyid, supports_json, "
+        "artifact_hash, observed_grounding, transparency_logged, "
+        "created_at, validation_signature FROM claims "
+        "WHERE support_level IN ('REPLICATED', 'ESTABLISHED')"
     ).fetchall()
     if not rows:
         return
-    # Both probes are answered once for the whole graph rather than once per
-    # row: neither has an index that can serve it, so per-row probing costs a
-    # full scan each time and restore's cost becomes quadratic in graph size.
-    verdict_claim_ids = {
-        cid
-        for v in conn.execute(
-            "SELECT member_claim_id, other_claim_id FROM replication_verdicts"
-        )
-        for cid in (v["member_claim_id"], v["other_claim_id"])
-        if cid is not None
-    }
-    # Every ESTABLISHED anchor mapped to the (keyid, artifact_hash) pairs of
-    # the promotion-eligible claims citing it. A keyid other than the row's own
-    # necessarily belongs to another claim, so this subsumes the old "peer is a
-    # different claim" guard. The grounding gate mirrors the live peer clause.
-    peers_by_anchor: dict[str, set[tuple[str, str | None]]] = {}
-    for e in conn.execute(
-        "SELECT j.value AS anchor_id, c.asserter_keyid AS keyid, "
-        "c.artifact_hash AS artifact_hash "
-        "FROM claims c, json_each(c.supports_json) j "
-        "JOIN claims a ON a.claim_id = j.value "
-        "AND a.support_level = 'ESTABLISHED' "
-        "WHERE c.asserter_keyid IS NOT NULL "
-        "AND (c.observed_grounding IS NULL OR ("
-        "  CASE WHEN json_valid(c.observed_grounding) "
-        "  THEN json_extract(c.observed_grounding, '$.grounding') "
-        "  ELSE NULL END) = 'GROUNDED')"
-    ):
-        peers_by_anchor.setdefault(e["anchor_id"], set()).add(
-            (e["keyid"], e["artifact_hash"])
-        )
+    index = _CorroborationIndex(conn, {})
     for r in rows:
-        claim_id = r["claim_id"]
-        # (a) Named in a signature-verified replication verdict, and promotable
-        # on the terms that path applies before it lifts a member.
-        if claim_id in verdict_claim_ids and _promotion_gates_pass(r):
+        failure = index.failure(r)
+        if failure is None:
             continue
-        try:
-            supports = json.loads(r["supports_json"]) or []
-        except (ValueError, TypeError):
-            supports = []
-        # (b) Automatic convergence on a shared ESTABLISHED anchor. A peer that
-        # produced byte-identical output is the same result twice, not
-        # corroboration, so an equal non-NULL artifact_hash disqualifies it.
-        own_keyid = r["asserter_keyid"]
-        own_hash = r["artifact_hash"]
-        corroborated = _observed_grounding_promotes(
-            r["observed_grounding"]
-        ) and any(
-            keyid != own_keyid
-            and (artifact_hash is None or own_hash is None
-                 or artifact_hash != own_hash)
-            for anchor in supports
-            for keyid, artifact_hash in peers_by_anchor.get(anchor, ())
-        )
-        if not corroborated:
+        if failure == "strict_promotion_without_data":
             raise RestoreError(
-                f"Claim {claim_id} is stored as {r['support_level']} but no "
-                "distinct-signer corroboration on a shared ESTABLISHED anchor "
-                "backs the REPLICATED rung it stands on: a peer "
-                "must carry a different artifact hash, and neither side may "
-                "carry a non-promoting grounding verdict. A replication verdict "
-                "naming the claim does not settle it either: a verdict names "
-                "every member of its cluster and promotes only the qualifying "
-                "ones. The support level is not a signed field; this one is "
-                "unverifiable and the backup may be tampered.",
-                kind="claim_unverified",
+                f"Claim {r['claim_id']} is stored as {r['support_level']} with "
+                "no artifact_hash, which this project's root-signed "
+                "strict-promotion policy forbids for a claim created after "
+                "the declaration.",
+                kind="policy_violation",
             )
+        raise RestoreError(
+            f"Claim {r['claim_id']} is stored as {r['support_level']} but no "
+            "distinct-signer corroboration on a shared ESTABLISHED anchor "
+            "backs the REPLICATED rung it stands on: a peer "
+            "must carry a different artifact hash, and neither side may "
+            "carry a non-promoting grounding verdict. A replication verdict "
+            "naming the claim does not settle it either: a verdict names "
+            "every member of its cluster and promotes only the qualifying "
+            "ones. The support level is not a signed field; this one is "
+            "unverifiable and the backup may be tampered.",
+            kind="claim_unverified",
+        )
 
 
 def _gate_replayed_verdict_issuer(
@@ -1527,21 +1470,28 @@ def _verify_and_insert_project_policy(
     policy_section: dict | None,
     validators_section: dict,
     _signing,
-) -> bool:
+) -> dict | None:
     """Verify a ``[project_policy]`` envelope and round-trip it into the graph.
 
     The policy must be signed by the project's root validator (self-enrolled).
     A present-but-unverifiable policy is tampered signed material and aborts the
-    restore. The flat row fields must match the signed payload. Returns True iff
-    a valid policy requiring Rekor witnessing is present; False when absent.
+    restore. The flat row fields must match the signed payload, under the field
+    list of the payload's own version: an envelope written before a flag existed
+    verifies under the rules it was signed with, and one written before the
+    per-flag declaration times existed cannot have them edited in, since the
+    match is checked both ways. Returns the restored policy row as a dict, or
+    None when the section is absent.
     """
     if not policy_section:
-        return False
+        return None
     ctx = "Project policy"
     signer_keyid = _required_field(policy_section, "signer_keyid", ctx)
     envelope_json = _required_field(policy_section, "envelope", ctx)
     created_at = _required_field(policy_section, "created_at", ctx)
     rekor_required = bool(policy_section.get("rekor_required"))
+    strict_promotion = bool(policy_section.get("strict_promotion_required"))
+    rekor_declared_at = policy_section.get("rekor_declared_at")
+    strict_declared_at = policy_section.get("strict_promotion_declared_at")
 
     enrollment = validators_section.get(signer_keyid)
     if enrollment is None:
@@ -1593,10 +1543,27 @@ def _verify_and_insert_project_policy(
             kind="policy_unverified",
         )
     # Bind the flat row to the signed payload so a tampered cache is caught.
+    # The payload's own version fixes which fields it is allowed to carry, so
+    # a v1 envelope cannot be read as declaring a flag it never signed.
     payload = _signing.envelope_payload(env)
+    try:
+        signed_fields = _signing._project_policy_fields(
+            payload.get("version", 1)
+        )
+    except _signing.InvalidEnvelopeError as exc:
+        raise RestoreError(f"{ctx}: {exc}", kind="policy_unverified") from exc
+    if set(payload) != set(signed_fields):
+        raise RestoreError(
+            f"{ctx} signed payload does not carry the fields its version "
+            "declares, TOML tampered.",
+            kind="policy_unverified",
+        )
     if (
         bool(payload.get("rekor_required")) != rekor_required
+        or bool(payload.get("strict_promotion_required")) != strict_promotion
         or payload.get("created_at") != created_at
+        or payload.get("rekor_declared_at") != rekor_declared_at
+        or payload.get("strict_promotion_declared_at") != strict_declared_at
     ):
         raise RestoreError(
             f"{ctx} row fields do not match the signed envelope, "
@@ -1605,11 +1572,23 @@ def _verify_and_insert_project_policy(
         )
     conn.execute(
         "INSERT INTO project_policy "
-        "(id, rekor_required, signer_keyid, envelope, created_at) "
-        "VALUES (1, ?, ?, ?, ?)",
-        (1 if rekor_required else 0, signer_keyid, envelope_json, created_at),
+        "(id, rekor_required, strict_promotion_required, signer_keyid, "
+        "envelope, created_at, rekor_declared_at, "
+        "strict_promotion_declared_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            1 if rekor_required else 0,
+            1 if strict_promotion else 0,
+            signer_keyid, envelope_json, created_at,
+            rekor_declared_at, strict_declared_at,
+        ),
     )
-    return rekor_required
+    return {
+        "rekor_required": rekor_required,
+        "strict_promotion_required": strict_promotion,
+        "created_at": created_at,
+        "rekor_declared_at": rekor_declared_at,
+        "strict_promotion_declared_at": strict_declared_at,
+    }
 
 
 def _validate_section_shape(

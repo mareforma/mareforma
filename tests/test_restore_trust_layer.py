@@ -509,6 +509,249 @@ def test_project_policy_round_trips_through_restore(tmp_path: Path) -> None:
     assert policy is not None and policy["rekor_required"] == 1
 
 
+def test_strict_promotion_policy_round_trips_through_restore(
+    tmp_path: Path,
+) -> None:
+    """The strict-promotion rule is part of the signed declaration, so a
+    recovered graph keeps gating promotion on data instead of quietly
+    reverting to the looser signer-axis rule."""
+    root_key = _bootstrap_key(tmp_path, "root.key")
+    with mareforma.open(tmp_path, key_path=root_key, strict_promotion=True) as g:
+        g.assert_claim("anchored", generated_by="x")
+
+    _wipe_graph_db(tmp_path)
+    mareforma.restore(tmp_path)
+
+    from mareforma.db import open_db, strict_promotion_required
+    conn = open_db(tmp_path)
+    try:
+        assert strict_promotion_required(conn) is True
+    finally:
+        conn.close()
+
+
+def test_restore_accepts_a_policy_envelope_signed_before_the_strict_field(
+    tmp_path: Path,
+) -> None:
+    """A v1 policy envelope, the shape signed before strict promotion existed,
+    still verifies and still restores. Deployed projects carry these; adding a
+    field to the declaration must not invalidate them."""
+    root_key = _bootstrap_key(tmp_path, "root.key")
+    with mareforma.open(tmp_path, key_path=root_key) as g:
+        g.assert_claim("anchored", generated_by="x")
+        g.require_rekor_witnessing()
+
+    # Re-sign the declaration the way the pre-versioning code did: the payload
+    # is exactly {created_at, rekor_required}, with no version field.
+    toml_path = tmp_path / "claims.toml"
+    data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+    created_at = data["project_policy"]["created_at"]
+    payload = json.dumps(
+        {"created_at": created_at, "rekor_required": True},
+        sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    envelope = _signing._build_envelope(
+        payload, _signing.load_private_key(root_key),
+        payload_type=_signing.PAYLOAD_TYPE_PROJECT_POLICY,
+    )
+    data["project_policy"] = {
+        "rekor_required": True,
+        "signer_keyid": data["project_policy"]["signer_keyid"],
+        "envelope": json.dumps(envelope, sort_keys=True, separators=(",", ":")),
+        "created_at": created_at,
+    }
+    toml_path.write_text(tomli_w.dumps(data), encoding="utf-8")
+
+    _wipe_graph_db(tmp_path)
+    mareforma.restore(tmp_path)
+
+    from mareforma.db import get_project_policy, open_db
+    conn = open_db(tmp_path)
+    try:
+        policy = get_project_policy(conn)
+    finally:
+        conn.close()
+    assert policy["rekor_required"] == 1
+    # A v1 envelope declares nothing about strict promotion, and restore must
+    # not read a rule into it that the root never signed.
+    assert policy["strict_promotion_required"] == 0
+
+
+def test_restore_dates_an_undated_policy_envelope_by_its_created_at(
+    tmp_path: Path,
+) -> None:
+    """A policy envelope signed before the per-flag declaration times existed
+    still verifies and still restores, and its flags are dated by the one
+    timestamp it does carry, so a project that upgrades is held to exactly the
+    window it was already held to."""
+    root_key = _bootstrap_key(tmp_path, "root.key")
+    with mareforma.open(tmp_path, key_path=root_key, strict_promotion=True) as g:
+        g.assert_claim("anchored", generated_by="x")
+
+    # Re-sign the declaration the way the pre-v3 code did: the payload carries
+    # the flags and one created_at, and nothing dating either flag.
+    toml_path = tmp_path / "claims.toml"
+    data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+    created_at = data["project_policy"]["created_at"]
+    payload = json.dumps(
+        {
+            "version": 2,
+            "rekor_required": False,
+            "strict_promotion_required": True,
+            "created_at": created_at,
+        },
+        sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    envelope = _signing._build_envelope(
+        payload, _signing.load_private_key(root_key),
+        payload_type=_signing.PAYLOAD_TYPE_PROJECT_POLICY,
+    )
+    data["project_policy"] = {
+        "rekor_required": False,
+        "strict_promotion_required": True,
+        "signer_keyid": data["project_policy"]["signer_keyid"],
+        "envelope": json.dumps(envelope, sort_keys=True, separators=(",", ":")),
+        "created_at": created_at,
+    }
+    toml_path.write_text(tomli_w.dumps(data), encoding="utf-8")
+
+    _wipe_graph_db(tmp_path)
+    mareforma.restore(tmp_path)
+
+    from mareforma.db import (
+        get_project_policy, open_db, project_policy_declared_at,
+    )
+    conn = open_db(tmp_path)
+    try:
+        policy = get_project_policy(conn)
+    finally:
+        conn.close()
+    assert policy["strict_promotion_required"] == 1
+    assert policy["strict_promotion_declared_at"] is None
+    assert project_policy_declared_at(policy) == (None, created_at)
+
+
+def test_restore_refuses_a_declaration_time_the_envelope_does_not_carry(
+    tmp_path: Path,
+) -> None:
+    """The declaration times are signed material. Editing one into the flat
+    fields of an envelope that does not carry it moves the grandfathering
+    cutoff, so restore aborts rather than honouring the edit."""
+    root_key = _bootstrap_key(tmp_path, "root.key")
+    with mareforma.open(tmp_path, key_path=root_key, strict_promotion=True) as g:
+        g.assert_claim("anchored", generated_by="x")
+
+    toml_path = tmp_path / "claims.toml"
+    data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+    data["project_policy"]["rekor_declared_at"] = "2099-01-01T00:00:00+00:00"
+    toml_path.write_text(tomli_w.dumps(data), encoding="utf-8")
+
+    _wipe_graph_db(tmp_path)
+    with pytest.raises(RestoreError) as exc:
+        mareforma.restore(tmp_path)
+    assert "not match the signed envelope" in str(exc.value)
+
+
+def test_restore_refuses_a_stripped_strict_promotion_flag(tmp_path: Path) -> None:
+    """Dropping the strict flag from the flat fields leaves it in the signed
+    envelope, so the cache no longer matches the declaration and restore
+    aborts. The gate cannot be edited off the project."""
+    root_key = _bootstrap_key(tmp_path, "root.key")
+    with mareforma.open(tmp_path, key_path=root_key, strict_promotion=True) as g:
+        g.assert_claim("anchored", generated_by="x")
+
+    toml_path = tmp_path / "claims.toml"
+    data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+    data["project_policy"]["strict_promotion_required"] = False
+    toml_path.write_text(tomli_w.dumps(data), encoding="utf-8")
+
+    _wipe_graph_db(tmp_path)
+    with pytest.raises(RestoreError) as exc:
+        mareforma.restore(tmp_path)
+    assert "not match the signed envelope" in str(exc.value)
+
+
+def test_restore_refuses_a_replicated_row_the_strict_policy_forbids(
+    tmp_path: Path,
+) -> None:
+    """support_level is not signed, so a tampered backup can name REPLICATED
+    for a dataless claim. Under a strict policy this project could never have
+    promoted it, and restore says so instead of laundering the level."""
+    root_key = _bootstrap_key(tmp_path, "root.key")
+    val_key = _bootstrap_key(tmp_path, "val.key")
+    root_signer = _signing.load_private_key(root_key)
+    val_signer = _signing.load_private_key(val_key)
+    with mareforma.open(tmp_path, key_path=root_key, strict_promotion=True) as g:
+        seed = g.assert_claim("anchor", generated_by="seed", seed=True)
+        g.enroll_validator(_pem_of(val_key), identity="v")
+        c1 = g.assert_claim(
+            "converged", supports=[seed], generated_by="A", signer=root_signer,
+        )
+        g.assert_claim(
+            "converged", supports=[seed], generated_by="B", signer=val_signer,
+        )
+        assert g.get_claim(c1)["support_level"] == "PRELIMINARY"
+
+    with pytest.raises(RestoreError) as exc:
+        _forge_replicated_and_restore(tmp_path, c1)
+    assert exc.value.kind == "policy_violation"
+
+
+def test_a_verdict_does_not_excuse_the_strict_policy(tmp_path: Path) -> None:
+    """A verdict names every member of its cluster, so under a strict policy
+    every dataless member ends up named and left PRELIMINARY. Membership must
+    not buy the level the policy forbids: the verdict path is held to the same
+    four terms the live promotion applies, artifact_hash included."""
+    root_key = _bootstrap_key(tmp_path, "root.key")
+    issuer_key = _bootstrap_key(tmp_path, "issuer.key")
+    with mareforma.open(tmp_path, key_path=root_key, strict_promotion=True) as g:
+        g.enroll_validator(_pem_of(issuer_key), identity="issuer")
+        a = g.assert_claim("alpha", generated_by="A")
+        b = g.assert_claim("beta", generated_by="B")
+    with mareforma.open(tmp_path, key_path=issuer_key) as g:
+        g.record_replication_verdict(
+            verdict_id="rv_strict", cluster_id="cl_strict",
+            member_claim_id=a, other_claim_id=b,
+            method="semantic-cluster", confidence={},
+        )
+    with mareforma.open(tmp_path, key_path=root_key) as g:
+        # The verdict named both and the strict policy promoted neither.
+        assert g.get_claim(a)["support_level"] == "PRELIMINARY"
+        assert g.get_claim(b)["support_level"] == "PRELIMINARY"
+
+    with pytest.raises(RestoreError) as exc:
+        _forge_replicated_and_restore(tmp_path, a)
+    assert exc.value.kind == "policy_violation"
+
+
+def test_a_later_policy_rule_does_not_widen_strict_grandfathering(
+    tmp_path: Path,
+) -> None:
+    """Adding an unrelated rule must not relax the strict-promotion gate over
+    the claims already written. The cutoff is when strict promotion was first
+    declared, not when the policy row was last signed, so a witnessing
+    declaration after the fact leaves the forged level refused."""
+    root_key = _bootstrap_key(tmp_path, "root.key")
+    val_key = _bootstrap_key(tmp_path, "val.key")
+    root_signer = _signing.load_private_key(root_key)
+    val_signer = _signing.load_private_key(val_key)
+    with mareforma.open(tmp_path, key_path=root_key, strict_promotion=True) as g:
+        seed = g.assert_claim("anchor", generated_by="seed", seed=True)
+        g.enroll_validator(_pem_of(val_key), identity="v")
+        c1 = g.assert_claim(
+            "converged", supports=[seed], generated_by="A", signer=root_signer,
+        )
+        g.assert_claim(
+            "converged", supports=[seed], generated_by="B", signer=val_signer,
+        )
+        assert g.get_claim(c1)["support_level"] == "PRELIMINARY"
+        g.require_rekor_witnessing()
+
+    with pytest.raises(RestoreError) as exc:
+        _forge_replicated_and_restore(tmp_path, c1)
+    assert exc.value.kind == "policy_violation"
+
+
 def test_enforced_policy_fails_closed_on_an_unwitnessed_signed_claim(
     tmp_path: Path,
 ) -> None:

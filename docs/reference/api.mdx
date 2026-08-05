@@ -104,6 +104,7 @@ result = mareforma.restore("/path/to/project")
 | `policy_unverified` | A `[project_policy]` is present but its root signature or field binding failed. |
 | `policy_absent` | `enforce_rekor_policy=True` but no root-signed policy requiring witnessing is present. |
 | `policy_unverifiable` | `enforce_rekor_policy=True` without a pinned `rekor_log_pubkey_pem` to verify inclusion proofs. |
+| `policy_violation` | A rebuilt row breaks the project's signed policy, such as a REPLICATED claim with no `artifact_hash` under strict promotion. |
 
 ---
 
@@ -596,10 +597,10 @@ Declare that this project's findings must be witnessed by the transparency log b
 graph.require_rekor_witnessing()
 ```
 
-Root-only and one-way (mirrors validator enrollment): only the project's single root of trust may set the policy, and a project cannot un-require witnessing. Idempotent once set. Returns the effective policy dict.
+Root-only and one-way (mirrors validator enrollment): only the project's single root of trust may set the policy, and a project cannot un-require witnessing. Idempotent once set. Extending the policy signs the union, so declaring one rule never drops another. Returns the effective policy dict.
 
 **Raises**
-- `ValueError`: no signer loaded, or the loaded signer is not the project's single root validator
+- `ProjectPolicyError` (a `ValueError`): no signer loaded, or the loaded signer is not the project's single root validator
 
 ---
 
@@ -683,6 +684,7 @@ from mareforma.db import (
     IdempotencyConflictError, IllegalStateTransitionError,
     ChainIntegrityError, CycleDetectedError, VerdictIssuerError,
     EvidenceCitationError, InvalidValidationEnvelopeError,
+    ProjectPolicyError,
 )
 from mareforma.signing import (
     KeyNotFoundError, SigningError, InvalidEnvelopeError,
@@ -706,6 +708,7 @@ catching looks like `from mareforma import RekorInclusionError`.
 | `ChainIntegrityError` | `mareforma.db` | DB write | `prev_hash` append-only chain check failed |
 | `CycleDetectedError` | `mareforma.db` | `assert_claim()`, `update_claim()` | `supports[]` would form a cycle |
 | `VerdictIssuerError` | `mareforma.db` | `record_replication_verdict()`, `record_contradiction_verdict()` | No signer loaded, signer not enrolled (chain walk fails), invalid method enum, referenced claim missing, or self-contradiction (`member == other`) |
+| `ProjectPolicyError` | `mareforma.db` | `open(strict_promotion=True)`, `require_rekor_witnessing()` | The project-policy declaration was refused: no signer loaded, the signer is not the project's single root validator, or a concurrent writer declared a rule the envelope in hand does not carry. Subclasses `ValueError` |
 | `EvidenceCitationError` | `mareforma.db` | `validate()` with `evidence_seen=...` | A cited entry isn't a strict-v4 UUID, points to a non-existent claim, post-dates `validated_at`, or disagrees with the envelope's `evidence_seen` field |
 | `InvalidValidationEnvelopeError` | `mareforma.db` | `db.validate_claim()` | Validation envelope is structurally / cryptographically invalid: malformed JSON, wrong `payloadType`, signer not enrolled, signature does not verify against the claimed signer, or payload binds a different `claim_id` / `validator_keyid` / timestamp than the row being promoted |
 | `KeyNotFoundError` | `mareforma.signing` | `open(require_signed=True)` | No private key at `key_path` |

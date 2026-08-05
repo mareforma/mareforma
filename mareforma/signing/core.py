@@ -169,15 +169,42 @@ _SEED_FIELDS = (
     "seeded_at",
 )
 
-# Fields included in the signed payload of a project-policy declaration.
-# The root validator signs (rekor_required, created_at) to declare, once
-# and tamper-evidently, that this project's findings must be witnessed by
-# the transparency log before they can converge. restore verifies this
-# envelope against the enrolled root before enforcing the policy.
-_PROJECT_POLICY_FIELDS = (
+# Fields included in the signed payload of a project-policy declaration,
+# per payload version. The root validator signs the declaration once and
+# tamper-evidently; restore verifies the envelope against the enrolled root
+# before enforcing it.
+#
+# v1 declared witnessing alone. v2 adds ``strict_promotion_required`` (data
+# on both sides of a converging pair) and carries its own ``version`` inside
+# the signed bytes. v3 adds a per-flag declaration time, because ``created_at``
+# is when the row was last signed: extending a policy with a second rule moves
+# it forward, and any check keyed on it would treat the whole history before
+# the second declaration as predating the first. Each check reads its own
+# flag's timestamp instead. NULL until the flag is declared. The version
+# selects the field list, so an envelope signed before a field existed keeps
+# verifying under the rules it was signed with and a deployed project is never
+# invalidated by the newer field.
+_PROJECT_POLICY_FIELDS_V1 = (
     "rekor_required",
     "created_at",
 )
+_PROJECT_POLICY_FIELDS_V2 = (
+    "version",
+    "rekor_required",
+    "strict_promotion_required",
+    "created_at",
+)
+_PROJECT_POLICY_FIELDS_V3 = _PROJECT_POLICY_FIELDS_V2 + (
+    "rekor_declared_at",
+    "strict_promotion_declared_at",
+)
+_PROJECT_POLICY_FIELDS_BY_VERSION = {
+    1: _PROJECT_POLICY_FIELDS_V1,
+    2: _PROJECT_POLICY_FIELDS_V2,
+    3: _PROJECT_POLICY_FIELDS_V3,
+}
+# Version every new declaration is signed at.
+_PROJECT_POLICY_VERSION = 3
 
 
 # ---------------------------------------------------------------------------
@@ -791,19 +818,40 @@ def sign_seed_claim(
     )
 
 
+def _project_policy_fields(version: Any) -> tuple[str, ...]:
+    """Signed field list for a project-policy payload of *version*.
+
+    ``version`` is read from the payload itself; a payload that carries no
+    version is v1, the shape that predates the field. A version this build
+    does not know is refused rather than read under the wrong field list.
+    """
+    fields = _PROJECT_POLICY_FIELDS_BY_VERSION.get(version)
+    if fields is None:
+        raise InvalidEnvelopeError(
+            f"project-policy payload version {version!r} is not one this "
+            "mareforma build can read. Upgrade the package."
+        )
+    return fields
+
+
 def sign_project_policy(
     policy: dict[str, Any],
     private_key: Ed25519PrivateKey,
 ) -> dict[str, Any]:
     """Sign a project-policy declaration.
 
-    The record must contain ``rekor_required`` (bool) and ``created_at``
-    (ISO 8601 UTC). The root validator signs it so restore can prove, from
-    the signed material alone, that the project requires transparency-log
-    witnessing. The payload type is distinct so a policy envelope cannot be
-    substituted for a validation or seed envelope, or vice versa.
+    The record must contain ``created_at`` (ISO 8601 UTC) and the flags the
+    declaration sets. ``version`` selects the signed field list and defaults
+    to 1 (``rekor_required`` only); a v2 record adds
+    ``strict_promotion_required``, a v3 record adds the time each flag was
+    first declared. The root validator signs it so restore can prove, from the
+    signed material alone, which rules the project runs under and since when.
+    The payload type is distinct so a policy envelope cannot be substituted
+    for a validation or seed envelope, or vice versa.
     """
-    payload = _canonical_record(_PROJECT_POLICY_FIELDS, policy)
+    payload = _canonical_record(
+        _project_policy_fields(policy.get("version", 1)), policy,
+    )
     return _build_envelope(
         payload, private_key,
         payload_type=PAYLOAD_TYPE_PROJECT_POLICY,
