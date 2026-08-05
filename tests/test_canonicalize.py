@@ -143,6 +143,7 @@ class TestSpecialtyForms:
         assert "rdkit-canonical-smiles-v1" in names
         assert "fasta-nfc-v1" in names
         assert "pdb-atom-sorted-v1" in names
+        assert "pdb-atom-sorted-v2" in names
 
     def test_fasta_canonicalizer_normalizes(self):
         from mareforma.canonicalize.specialty import canonicalize_fasta_nfc_v1

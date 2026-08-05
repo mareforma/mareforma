@@ -182,6 +182,44 @@ def _sort_atom_blocks(value: str, serial_of) -> bytes:
     return ("\n".join(result) + "\n").encode("utf-8")
 
 
+def _decimal_atom_serial(field: str) -> int:
+    """Decode a decimal PDB serial field; anything else sorts as 0."""
+    try:
+        return int(field.strip())
+    except ValueError:
+        return 0
+
+
+def canonicalize_pdb_atom_sorted_v1(value: str) -> bytes:
+    """Sort each ATOM/HETATM block by decimal serial; preserve other lines.
+
+    PDB serial numbers occupy columns 7-11 (0-indexed slice ``[6:11]``).
+    Lines that aren't ATOM/HETATM (HEADER, REMARK, SEQRES, ENDMDL, …)
+    keep their relative position. Ties within a block break on input
+    order (stable sort).
+
+    A serial this form cannot read as decimal sorts as 0, so the
+    hybrid-36 serials a file past 99999 atoms carries all collapse to
+    the front of their block. New callers want
+    :func:`canonicalize_pdb_atom_sorted_v2`; v1 stays because its bytes
+    are already recorded in claims.
+    """
+    return _sort_atom_blocks(value, _decimal_atom_serial)
+
+
+def canonicalize_pdb_atom_sorted_v2(value: str) -> bytes:
+    """Sort each ATOM/HETATM block by decimal or hybrid-36 serial.
+
+    Same shape as :func:`canonicalize_pdb_atom_sorted_v1`, reading the
+    serials past 99999 that v1 collapses to 0. An ATOM/HETATM line whose
+    serial is neither decimal nor hybrid-36 raises ``ValueError`` naming
+    the line. That includes the ``*****`` overflow marker a writer emits
+    past 99999 atoms without hybrid-36: the marker carries no order, and
+    a guessed serial would reorder the file.
+    """
+    return _sort_atom_blocks(value, _decode_atom_serial)
+
+
 register_canonicalizer(
     "rdkit-canonical-smiles-v1", canonicalize_rdkit_canonical_smiles_v1,
 )
