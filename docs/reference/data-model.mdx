@@ -193,7 +193,28 @@ A root-signed, single-row (`id = 1`) declaration of project-wide trust policy. I
 | `strict_promotion_required` | INTEGER | `1` when a converging pair must carry `artifact_hash` on both sides |
 | `signer_keyid` | TEXT | Keyid of the root that signed the policy envelope |
 | `envelope` | TEXT | Root-signed DSSE-style envelope; the authoritative copy of the policy |
-| `created_at` | TEXT | UTC ISO 8601 |
+| `created_at` | TEXT | UTC ISO 8601: when the row was last signed |
+| `rekor_declared_at` | TEXT | UTC ISO 8601: when `rekor_required` was first declared, NULL until then |
+| `strict_promotion_declared_at` | TEXT | UTC ISO 8601: when `strict_promotion_required` was first declared, NULL until then |
+
+## supports_revision table
+
+A single-row (`id = 1`) monotonic counter over the `claim_supports` cache, bumped by every claim insert and every supports-edge change. It lives in `graph.db` rather than in the cache file, so it commits in the same database as the row it describes. The cache stamps the revision it was built from; a mismatch means the cache missed a mutation (a crash between the two WAL commits, or a writer that did not maintain it) and the cache is rebuilt on the next open. The claim-count check alone cannot see an in-place supports edit, which moves no count. Additive: an existing graph gains the table and its row on the next open, and that open rebuilds the cache once.
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | INTEGER (PK) | CHECK `id = 1`: the row is a singleton |
+| `revision` | INTEGER | Bumped by every write that can change supports lineage |
+
+## claims_fts table
+
+The FTS5 virtual table behind text search. It is independent of `claims` (not `content=claims`), so storage is the only price of the feature and the sync triggers stay readable. `claim_id` is UNINDEXED, stored for join-back but not tokenized; the `unicode61` tokenizer folds diacritics (`remove_diacritics 2`), so "gene" matches "géné".
+
+Three triggers keep it in lockstep with `claims`, all AFTER the write, so an `IntegrityError` on the wrapping statement rolls back the claim row and the search index together:
+
+- **`claims_fts_ai`**: AFTER INSERT, inserts the new `claim_id` and `text`
+- **`claims_fts_ad`**: AFTER DELETE, deletes the row's index entry
+- **`claims_fts_au`**: AFTER UPDATE OF `text`, rewrites the indexed text. `text` is a signed field, so this fires only on the unsigned-edit path
 
 ## Trust layer tables
 

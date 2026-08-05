@@ -605,8 +605,10 @@ For the reader who wants to read the actual enforcement:
 
 - **State-machine triggers**: [`mareforma/db/_schema_sql.py`](mareforma/db/_schema_sql.py) `_SCHEMA_SQL`
   (search for `claims_insert_state_check`, `claims_update_state_check`,
-  `claims_update_status_terminal`, `claims_signed_fields_no_laundering`,
-  `claims_signed_no_delete`)
+  `claims_update_status_terminal`, `claims_signed_no_delete`).
+  `claims_signed_fields_no_laundering` lives in `_SIGNED_FIELDS_TRIGGER_SQL`,
+  re-created on every `open_db()` so an existing database gains the current
+  watch list
 - **Convergence detection**: `_maybe_update_replicated_unlocked` in [`mareforma/db/core.py`](mareforma/db/core.py) (distinct `asserter_keyid` + equal-data collapse)
 - **Verify-on-read**: `_row_verified_on_read`, `_verify_validation_on_read`,
   `_verify_participant_bundle_on_read` in `db/core.py`, wired into `get_claim`,

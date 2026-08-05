@@ -42,6 +42,9 @@ jobs:
     # (h5py, pyarrow, pandas, polars, duckdb, aiohttp, requests) so the grounding tests
     # that skip elsewhere actually run. Pinned to 3.13 because cp314 wheels for the
     # native scientific deps may not exist yet. HTTP tests mock the network.
+    # `chem` rides along as its own name rather than joining the heavy extra,
+    # which may hold only deps a test imports; nothing imports rdkit directly,
+    # the chemistry form does.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -53,7 +56,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -e ".[dev,test-heavy]"
+        run: pip install -e ".[dev,test-heavy,chem]"
 
       - name: Run tests
         run: pytest

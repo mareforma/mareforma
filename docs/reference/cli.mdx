@@ -636,7 +636,7 @@ mareforma reexec RUN_PATH [OPTIONS]
 | `0` | REPRODUCED |
 | `1` | DIVERGED |
 | `2` | COULD_NOT_REEXECUTE (faithfulness unknown, not a NO) |
-| `3` | malformed run record (usage error) |
+| `3` | usage error (bad flag or argument, malformed run record, or an unrenderable `--map`) |
 
 **Examples**
 
@@ -672,6 +672,6 @@ mareforma restore
 mareforma restore backups/state.toml
 ```
 
-The output reports `validators_restored` and `claims_restored` counts. Failure exits `1` with a `RestoreError` message naming the failure mode: `graph_not_empty`, `toml_not_found`, `toml_malformed`, `enrollment_unverified`, `claim_unverified`, `mode_inconsistent`, `orphan_signer`, or `rekor_inclusion_invalid`. Three further modes (`policy_unverified`, `policy_absent`, `policy_unverifiable`) exist but fire only under `enforce_rekor_policy`, which the CLI `restore` does not expose; see the `mareforma.restore()` API table for those.
+The output reports `validators_restored` and `claims_restored` counts. Failure exits `1` with a `RestoreError` message naming the failure mode: `graph_not_empty`, `toml_not_found`, `toml_unreadable`, `toml_malformed`, `enrollment_unverified`, `claim_unverified`, `trust_row_rejected`, `mode_inconsistent`, `orphan_signer`, `policy_violation`, or `rekor_inclusion_invalid`. Three further modes (`policy_unverified`, `policy_absent`, `policy_unverifiable`) exist but fire only under `enforce_rekor_policy`, which the CLI `restore` does not expose; see the `mareforma.restore()` API table for those.
 
 `claims.toml` includes a `[rekor_inclusions]` section. Older files written without it restore successfully with a `RekorSidecarSectionAbsentWarning`. Run `refresh_unsigned()` afterward to re-fetch inclusion proofs.

@@ -227,8 +227,8 @@ Return a single claim dict by ID, or `None` if not found.
 
 Return the per-finding `TrustMap` for a claim, or `None` if it does not
 exist. A read-side artifact: it places every trust property (attributability,
-provenance, grounding, methodological validity, leakage, independence,
-contestation, standing, trust-root, witnessing) at a tier
+provenance, grounding, faithfulness, methodological validity, leakage,
+independence, contestation, standing, trust-root, witnessing) at a tier
 (`COMPUTED` / `PROXIED` / `DEFERRED`) with the residual named, and infers
 nothing it cannot compute. The independence axis leads: it reports the
 effective-independence number (pairwise-distinct model, data, and signer
@@ -660,8 +660,29 @@ that composes both. Pre-registration only counts when the rule is bound before
 the run produces outcomes, so `submit_finding` raises `PostHocPlanError` when a
 pre-registered plan's `registered_at` post-dates the run's first observed
 execution (its earliest prior finding under the same `generated_by` run token);
-a one-shot `assert_finding` claims no pre-registration and never raises it. Full
-reference:
+a one-shot `assert_finding` claims no pre-registration, so it is exempt only
+when its synthesised plan is the one on record. A one-shot that lands on a plan
+already pre-registered submits under that plan and is refused too.
+
+`retire_plan` is the recovery for a plan the gates cannot run. A plan written by
+a release with a wider alpha bound can state a rule that decides nothing (alpha
+at or above 0.5), and the `predictions` row can be neither corrected nor
+deleted, so its evidence drops out of every recompute and the proposition reads
+`UNTESTED` with `lines_skipped` non-zero. The drop names the plan on
+`.mareforma/health.jsonl` as `ungateable_plan_skipped`; pass that `plan_id`:
+
+```python
+graph.retire_plan(plan_id, alpha=0.05, reason="registered at an un-runnable alpha")
+```
+
+It registers the same rule at the alpha given (only the alpha moves, so the
+side of the null cannot be re-chosen after the numbers are in), records the
+retirement with its reason, and writes both as signed attestations. The retired
+row is left exactly as registered, and the evidence that stood under it gates
+under the replacement from then on. The replacement is flagged
+`preregistered=0`, because it was registered after the evidence. Only a plan
+whose rule cannot be run is retirable, so retirement never withdraws a line that
+counts; `PlanNotRetirableError` says which rule refused. Full reference:
 [docs.mareforma.com](https://docs.mareforma.com/reference/api) and the
 [Findings](https://docs.mareforma.com/concepts/findings) concept page.
 

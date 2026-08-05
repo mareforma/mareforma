@@ -102,6 +102,7 @@ result = mareforma.restore("/path/to/project")
 | `toml_malformed` | TOML parse error. |
 | `enrollment_unverified` | A validator's enrollment envelope failed verification. |
 | `claim_unverified` | A claim's `signature_bundle` or `validation_signature` failed verification. |
+| `trust_row_rejected` | A trust-layer row replayed from claims.toml breaks a schema constraint, such as a foreign key pointing at a row the backup does not carry. No signature was checked. |
 | `mode_inconsistent` | Signed-mode graph (validators enrolled) contains a claim with no signature. |
 | `orphan_signer` | A claim is signed by a keyid not present in the validators section. |
 | `rekor_inclusion_invalid` | A `[rekor_inclusions]` entry failed verification, references a missing claim, is missing required fields, or does not bind to the claim it is attached to. |
@@ -1147,8 +1148,12 @@ result = graph.assert_finding(
 
 **Returns** `dict` with `finding_id`, `content_id`, `plan_id`, `claim_id`,
 `bearing` (`{"direction", "significant"}`), `bearings` (the per-line list, one
-entry for a single-line finding), `status`, `idempotent` (bool), and
-`proposition_status` (the full view below).
+entry for a single-line finding), `status`, `idempotent` (bool), `grounding`
+(the stored observed-grounding record, `None` when no verdict was supplied),
+`model_lineage` (the model or method lineage recorded on the evidence lines,
+`None` when no model call was observed), and `proposition_status` (the full
+view below). An idempotent replay reports the `grounding` and `model_lineage`
+stored on the reused finding, not the ones passed to the replay.
 
 Idempotent on the finding's `data_id` set: re-asserting the same dataset(s)
 returns the prior finding rather than double-counting it. All validation runs
@@ -1166,7 +1171,14 @@ The retrieval view for one proposition. Accepts a `content_id` or a
 `Proposition`. `None` if not registered.
 
 **Returns** `dict` with `content_id`, `frame_id`, `direction`, `status`,
-`independent_support`, `independent_refute`, `frame_status`, `status_policy`.
+`independent_support`, `independent_refute`, `frame_status`, `status_policy`,
+and `lines_skipped`, the count of this proposition's evidence lines that no
+longer reconstruct into a gateable bearing and were therefore left out of the
+counts. A dropped refutation reads as consensus, so read this next to the two
+counts.
+
+A line dropped because its plan states a rule no gate can run is recoverable;
+see `retire_plan` above.
 
 #### `get_proposition(content_id) -> dict | None`
 
