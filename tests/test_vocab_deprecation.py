@@ -35,8 +35,10 @@ def test_corroborated_attribute_deprecated() -> None:
     with pytest.warns(DeprecationWarning, match="CONVERGENT"):
         member = Status.CORROBORATED
     assert member is Status.CONVERGENT
-    with pytest.raises(AttributeError):
+    with pytest.raises(AttributeError) as excinfo:
         Status.NOT_A_REAL_STATUS
+    # The message names what the caller mistyped, on every supported Python.
+    assert "NOT_A_REAL_STATUS" in str(excinfo.value)
 
 
 def test_convergent_value_lookup_does_not_warn(recwarn) -> None:

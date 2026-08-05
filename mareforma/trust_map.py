@@ -53,6 +53,11 @@ PRE_BINDING_GROUNDED_LABEL = "GROUNDED (pre-binding axis; citation binding not c
 # inferred to a confident answer.
 NOT_PRESENT = "not present"
 
+# The placeholder every renderer substitutes for an absent value, so a blank
+# cell always means a rendering failure and never an absent value. A golden-file
+# test pins this exact text; do not reword without updating it.
+ABSENT_VALUE = "n/a"
+
 # The faithfulness verdicts the map will place. An ALLOWLIST: only these three
 # render as a faithfulness signal; any other value in a supplied record reads as
 # "not present", the honest fail-safe (a hand-edited or future-shaped record does
@@ -161,8 +166,24 @@ def parse_grounding_record(value) -> "dict | None":
 def _short(keyid: str | None) -> str:
     """First 12 hex chars of a keyid for display, or a placeholder."""
     if not keyid:
-        return "n/a"
+        return ABSENT_VALUE
     return f"{keyid[:12]}…"
+
+
+def _source_strings(value: object) -> list[str]:
+    """A stored source list as display strings, tolerating a tampered shape.
+
+    A hand-built or tampered record can hold an unhashable element or a value
+    that is not a list at all where a list of paths belongs. The map has to
+    render what it reads, so anything else degrades to its string form instead
+    of raising out of ``build_trust_map`` and taking down verify/map for the
+    claim.
+    """
+    if not value:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    return [str(value)]
 
 
 def _grounding_property(claim: dict) -> TrustProperty:
@@ -186,8 +207,9 @@ def _grounding_property(claim: dict) -> TrustProperty:
         )
     state = record.get("grounding")
     reason = record.get("reason") or ""
-    cited = record.get("cited_sources") or []
-    grounded = record.get("grounded_sources")
+    cited = _source_strings(record.get("cited_sources"))
+    grounded_raw = record.get("grounded_sources")
+    grounded = None if grounded_raw is None else _source_strings(grounded_raw)
     version = record.get("version")
     pre_binding = version not in _BINDING_AXIS_VERSIONS
     # A plain file read is a stat-based proxy (opened + non-empty), not a
@@ -206,14 +228,14 @@ def _grounding_property(claim: dict) -> TrustProperty:
     # wider, so the gap is visible, not hidden.
     if grounded is not None:
         note = (
-            f"; grounded on: {', '.join(map(str, grounded))}" if grounded
+            f"; grounded on: {', '.join(grounded)}" if grounded
             else "; grounded on: (no cited read observed)"
         )
         if cited and set(cited) - set(grounded):
-            note += f"; declared cited (not all read-verified): {', '.join(map(str, cited))}"
+            note += f"; declared cited (not all read-verified): {', '.join(cited)}"
     else:
         note = (
-            f"; declared cited set, binding not checkable: {', '.join(map(str, cited))}"
+            f"; declared cited set, binding not checkable: {', '.join(cited)}"
             if cited else "; cited set: (none recorded)"
         )
     residual = f"{reason}{note}" if reason else f"observed axis{note}"

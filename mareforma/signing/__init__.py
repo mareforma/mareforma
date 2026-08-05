@@ -40,6 +40,7 @@ from .core import (
     # Key management.
     default_key_path,
     generate_keypair,
+    _fsync_parent,
     save_private_key,
     load_private_key,
     public_key_id,

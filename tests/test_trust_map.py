@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from mareforma.trust_map import (
     NOT_PRESENT,
     PRE_BINDING_GROUNDED_LABEL,
@@ -362,9 +364,10 @@ class TestHtmlRender:
         assert ">grounding<" in html
         assert ">GROUNDED<" in html
         assert ">DEFERRED<" in html
-        # A None value renders as an em-dash placeholder, never "None".
+        # A None value renders as the "n/a" placeholder, never "None"
+        # and never a blank cell an auditor would read as a broken render.
         assert ">None<" not in html
-        assert ", " in html
+        assert ">n/a<" in html
 
     def test_html_escapes_dynamic_text(self) -> None:
         tmap = TrustMap("v1", "claim", "<script>x</script>",
@@ -424,12 +427,21 @@ class TestGroundingSurfacesGroundedSubset:
         assert "/B.csv" in resid and "declared cited" in resid
 
 
-def test_grounding_render_survives_non_string_sources():
+@pytest.mark.parametrize("cited, grounded", [
+    ([1, "/A.csv"], [2]),
+    ([["nested"]], []),
+    ([{"a": 1}], ["/A.csv"]),
+    (["/A.csv"], [["nested"]]),
+    (["/A.csv"], 7),
+    (7, ["/A.csv"]),
+])
+def test_grounding_render_survives_non_string_sources(cited, grounded):
     # A DB-tampered non-string element in grounded/cited must degrade to an
     # honest rendered map, not crash build_trust_map (which would take down
-    # `mareforma verify`/`map` for that claim).
+    # `mareforma verify`/`map` for that claim). Unhashable elements and
+    # non-iterable values are the same class: the map still renders.
     rec = {"version": "v0.3.9", "grounding": "GROUNDED", "reason": "r",
-           "cited_sources": [1, "/A.csv"], "grounded_sources": [2]}
+           "cited_sources": cited, "grounded_sources": grounded}
     tmap = _assemble(_claim(observed_grounding=json.dumps(rec)), n_roots=1,
                      has_inclusion=False)
     assert tmap.get("grounding").value  # rendered, did not raise

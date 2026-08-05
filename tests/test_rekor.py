@@ -29,6 +29,7 @@ import pytest
 
 import mareforma
 from mareforma import signing as _signing
+from mareforma._urlguard import _LOOPBACK_DNS_NAMES
 from tests._helpers import _bootstrap_key
 
 
@@ -127,6 +128,17 @@ def _mirror_rekor(httpx_mock, *, uuid_prefix: str = "m") -> None:
     httpx_mock.add_callback(
         callback, method="POST", url=_TEST_REKOR_URL, is_reusable=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# Outbound client identity
+# ---------------------------------------------------------------------------
+
+class TestRekorUserAgent:
+    def test_reports_the_shipped_package_version(self) -> None:
+        assert _signing.rekor._REKOR_USER_AGENT.startswith(
+            f"mareforma/{mareforma.__version__} ",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +403,52 @@ class TestRekorResponseVerification:
             envelope, key.public_key(), rekor_url=_TEST_REKOR_URL,
         )
         assert logged is False
+
+    def _mock_entry(self, httpx_mock, record) -> None:
+        encoded = base64.standard_b64encode(
+            json.dumps(record).encode("utf-8"),
+        ).decode("ascii")
+        httpx_mock.add_response(
+            method="POST", url=_TEST_REKOR_URL,
+            status_code=201, json={"u": {"body": encoded, "logIndex": 1}},
+        )
+
+    @pytest.mark.parametrize("bad_value", [None, 12345, ["a"], {"a": "b"}])
+    def test_non_string_hash_in_response_is_rejected(self, httpx_mock, bad_value):
+        """A present but non-string hash must degrade to (False, None) like
+        any other body mismatch. submit_to_rekor promises never to raise,
+        and its callers run after the claim row is already inserted."""
+        key, envelope = self._build_envelope()
+        self._mock_entry(httpx_mock, {
+            "apiVersion": "0.0.1",
+            "kind": "hashedrekord",
+            "spec": {
+                "data": {"hash": {"algorithm": "sha256", "value": bad_value}},
+                "signature": {
+                    "content": envelope["signatures"][0]["sig"],
+                    "publicKey": {"content": "x"},
+                },
+            },
+        })
+        logged, entry = _signing.submit_to_rekor(
+            envelope, key.public_key(), rekor_url=_TEST_REKOR_URL,
+        )
+        assert logged is False
+        assert entry is None
+
+    @pytest.mark.parametrize("spec", [{}, {"data": "not-a-mapping"}])
+    def test_unusable_entry_spec_is_rejected(self, httpx_mock, spec):
+        """The extraction guard covers a missing field and a scalar where a
+        mapping belongs."""
+        key, envelope = self._build_envelope()
+        self._mock_entry(httpx_mock, {
+            "apiVersion": "0.0.1", "kind": "hashedrekord", "spec": spec,
+        })
+        logged, entry = _signing.submit_to_rekor(
+            envelope, key.public_key(), rekor_url=_TEST_REKOR_URL,
+        )
+        assert logged is False
+        assert entry is None
 
 
 # ---------------------------------------------------------------------------
@@ -1099,7 +1157,7 @@ class TestMarkClaimLoggedVerification:
         with mareforma.open(tmp_path, key_path=key_path) as graph:
             claim_id = graph.assert_claim("host")
         bad_bundle = json.dumps({
-            "payloadType": "application/vnd.mareforma.claim+json",
+            "payloadType": _signing.PAYLOAD_TYPE_CLAIM,
             "payload": base64.standard_b64encode(b'"nope"').decode("ascii"),
             "signatures": [{"keyid": "x", "sig": "y"}],
         })
@@ -1205,6 +1263,8 @@ class TestRekorUrlValidation:
         "https://2130706433/api/v1/log/entries",        # decimal of 127.0.0.1
         "https://0177.0.0.1/api/v1/log/entries",        # octal of 127.0.0.1
         "https://0.0.0.0/api/v1/log/entries",           # unspecified
+        "https://127.0.0.1./api/v1/log/entries",        # absolute-name form
+        "https://127.1./api/v1/log/entries",            # absolute short form
     ])
     def test_dns_shortcut_bypasses_rejected(self, tmp_path, url):
         """DNS shortcuts that ipaddress.ip_address() rejects but kernels
@@ -1212,6 +1272,14 @@ class TestRekorUrlValidation:
         bypass payloads."""
         with pytest.raises(_signing.SigningError):
             mareforma.open(tmp_path, rekor_url=url)
+
+    @pytest.mark.parametrize("suffix", ["", ".", ".."])
+    @pytest.mark.parametrize("name", sorted(_LOOPBACK_DNS_NAMES))
+    def test_loopback_alias_rejected_with_the_root_dot(self, name, suffix):
+        """A trailing dot makes an absolute DNS name that resolves the
+        same, so every alias must be blocked in that form too."""
+        with pytest.raises(_signing.SigningError):
+            _signing.validate_rekor_url(f"https://{name}{suffix}/api/v1")
 
     def test_https_dns_hostname_accepted(self, tmp_path):
         # DNS hostnames are allowed, TLS to the resolved host is the

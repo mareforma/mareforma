@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from mareforma import signing as _signing
+from mareforma.db.errors import DatabaseError
 
 
 class ValidatorError(Exception):
@@ -424,6 +425,51 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _rollback_quietly(conn: sqlite3.Connection) -> None:
+    """Roll back, tolerating there being no transaction left to roll back."""
+    try:
+        conn.execute("ROLLBACK")
+    except sqlite3.OperationalError:
+        pass
+
+
+def _refuse_if_present(conn: sqlite3.Connection, keyid: str) -> None:
+    """Raise :class:`ValidatorAlreadyEnrolledError` if *keyid* has a row."""
+    if is_enrolled(conn, keyid):
+        raise ValidatorAlreadyEnrolledError(
+            f"Key {keyid[:12]}… is already enrolled."
+        )
+    # is_enrolled returned False but the row might still exist with a
+    # broken chain (e.g. tampered envelope or singleton-root violated).
+    # Catching that here surfaces the inconsistency as a typed error
+    # instead of a raw sqlite3.IntegrityError from the INSERT.
+    if get_validator(conn, keyid) is not None:
+        raise ValidatorAlreadyEnrolledError(
+            f"Key {keyid[:12]}… already has a row in the validators "
+            "table, but its chain does not verify back to a self-signed "
+            "root. The table appears tampered — investigate before "
+            "enrolling further keys."
+        )
+
+
+def _record_root_enroll(root, outcome: str, **fields) -> None:
+    """Append the root bootstrap outcome to ``.mareforma/health.jsonl``.
+
+    The ``UserWarning`` on the success path is transient (a single stderr
+    line at open time); the health event persists so the root-of-trust
+    decision, and any failure to make it, stays auditable long after the
+    warning has scrolled away. Best-effort: a missing root path or an
+    unwritable log never blocks enrollment nor masks its outcome.
+    """
+    if root is None:
+        return
+    try:
+        from mareforma.health import append_health_event
+        append_health_event(root, "root_auto_enroll", outcome=outcome, **fields)
+    except Exception:
+        pass
+
+
 def auto_enroll_root(
     conn: sqlite3.Connection,
     signer,
@@ -449,6 +495,12 @@ def auto_enroll_root(
     therefore runs inside ``BEGIN IMMEDIATE``: SQLite blocks the second
     writer until the first commits, after which the second's re-check
     sees count == 1 and bails out.
+
+    A write that fails outright lands in the same handler, so the two are
+    separated by re-reading the table: when nothing was enrolled and no
+    other key holds the root (a lock held past the busy timeout, say),
+    this raises :class:`~mareforma.db.errors.DatabaseError` rather than
+    return a None the caller would read as a foreign root.
 
     First-time root enrollment also emits a ``UserWarning`` with the
     keyid fingerprint so an operator who opened the project with the
@@ -511,32 +563,35 @@ def auto_enroll_root(
         # empty" invariant the cache implicitly relied on.
         invalidate_conn_cache(conn)
     except sqlite3.IntegrityError:
-        try:
-            conn.execute("ROLLBACK")
-        except sqlite3.OperationalError:
-            pass
+        _rollback_quietly(conn)
         return get_validator(conn, keyid)
-    except sqlite3.OperationalError:
-        try:
-            conn.execute("ROLLBACK")
-        except sqlite3.OperationalError:
-            pass
-        return get_validator(conn, keyid)
+    except sqlite3.OperationalError as exc:
+        _rollback_quietly(conn)
+        # A lost race and a write that never happened both land here. Re-read
+        # the table to tell them apart: a row for this keyid, or any other
+        # validator, means someone else made the write and returning is right.
+        # Otherwise nothing is enrolled and no key holds the root, so refuse.
+        # Returning None there hands the caller the wrong diagnosis (a foreign
+        # root) and a remedy it cannot run (enrolment by a validator that does
+        # not exist), when the answer is to retry once the lock clears.
+        existing_after_rollback = get_validator(conn, keyid)
+        if existing_after_rollback is not None:
+            return existing_after_rollback
+        if count_validators(conn) > 0:
+            return None
+        _record_root_enroll(
+            root, "fail", keyid=keyid, identity=identity, error=str(exc),
+        )
+        raise DatabaseError(
+            f"Could not enroll key {keyid[:12]}… as the root validator: "
+            f"{exc}. Another process holds the write lock on graph.db; "
+            "retry once it finishes."
+        ) from exc
 
-    # Durable record of the root bootstrap. The UserWarning below is transient
-    # (a single stderr line at open time); the health event persists in
-    # .mareforma/health.jsonl so the root-of-trust decision stays auditable
-    # long after the warning has scrolled away. Best-effort: a missing root
-    # path or unwritable log never blocks enrollment.
-    if root is not None:
-        try:
-            from mareforma.health import append_health_event
-            append_health_event(
-                root, "root_auto_enroll", outcome="ok",
-                keyid=keyid, identity=identity, validator_type=validator_type,
-            )
-        except Exception:
-            pass
+    _record_root_enroll(
+        root, "ok",
+        keyid=keyid, identity=identity, validator_type=validator_type,
+    )
 
     import warnings
     _notice = (
@@ -601,21 +656,7 @@ def enroll_validator(
 
     new_pub = _signing.public_key_from_pem(new_pubkey_pem)
     new_keyid = _signing.public_key_id(new_pub)
-    if is_enrolled(conn, new_keyid):
-        raise ValidatorAlreadyEnrolledError(
-            f"Key {new_keyid[:12]}… is already enrolled."
-        )
-    # is_enrolled returned False but the row might still exist with a
-    # broken chain (e.g. tampered envelope or singleton-root violated).
-    # Catching that here surfaces the inconsistency as a typed error
-    # instead of a raw sqlite3.IntegrityError from the INSERT below.
-    if get_validator(conn, new_keyid) is not None:
-        raise ValidatorAlreadyEnrolledError(
-            f"Key {new_keyid[:12]}… already has a row in the validators "
-            "table, but its chain does not verify back to a self-signed "
-            "root. The table appears tampered — investigate before "
-            "enrolling further keys."
-        )
+    _refuse_if_present(conn, new_keyid)
 
     pem_b64 = base64.standard_b64encode(new_pubkey_pem).decode("ascii")
     now = _utcnow_iso()
@@ -630,15 +671,36 @@ def enroll_validator(
     envelope = _signing.sign_validator_enrollment(enrollment, parent_signer)
     envelope_json = json.dumps(envelope, sort_keys=True, separators=(",", ":"))
 
-    conn.execute(
-        "INSERT INTO validators "
-        "(keyid, pubkey_pem, identity, validator_type, enrolled_at, "
-        " enrolled_by_keyid, enrollment_envelope) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (new_keyid, pem_b64, identity, validator_type, now,
-         parent_keyid, envelope_json),
-    )
-    conn.commit()
+    # The checks above ran with no write lock held, so a second enrolment of
+    # the same key can land in the gap and the loser's INSERT would raise a
+    # raw sqlite3.IntegrityError past this method's documented contract. Take
+    # the lock and re-check under it, as auto_enroll_root does. When the
+    # caller already holds a transaction, its outer commit flushes this write.
+    _own_txn = not conn.in_transaction
+    try:
+        if _own_txn:
+            conn.execute("BEGIN IMMEDIATE")
+        _refuse_if_present(conn, new_keyid)
+        conn.execute(
+            "INSERT INTO validators "
+            "(keyid, pubkey_pem, identity, validator_type, enrolled_at, "
+            " enrolled_by_keyid, enrollment_envelope) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (new_keyid, pem_b64, identity, validator_type, now,
+             parent_keyid, envelope_json),
+        )
+        if _own_txn:
+            conn.commit()
+    except ValidatorAlreadyEnrolledError:
+        if _own_txn:
+            _rollback_quietly(conn)
+        raise
+    except sqlite3.IntegrityError as exc:
+        if _own_txn:
+            _rollback_quietly(conn)
+        raise ValidatorAlreadyEnrolledError(
+            f"Key {new_keyid[:12]}… is already enrolled."
+        ) from exc
     # Drop the chain-verification cache: a fresh row changed the
     # singleton-root count's adjacency and the new keyid's chain has
     # never been walked. Re-walks on next is_enrolled call are O(chain

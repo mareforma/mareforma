@@ -80,7 +80,9 @@ class _StatusMeta(EnumMeta):
         if new is not None:
             _warn_retired_status(name, new)
             return cls[new]
-        return super().__getattr__(name)
+        # EnumType dropped __getattr__ in Python 3.12, so raise here rather
+        # than delegate: the message has to name what the caller mistyped.
+        raise AttributeError(f"type object {cls.__name__!r} has no attribute {name!r}")
 
 
 class Status(str, Enum, metaclass=_StatusMeta):

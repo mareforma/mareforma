@@ -224,6 +224,22 @@ def generate_keypair() -> Ed25519PrivateKey:
     return Ed25519PrivateKey.generate()
 
 
+def _fsync_parent(path: Path) -> None:
+    """Best-effort fsync of *path*'s directory, so the directory entry for a
+    freshly created or renamed key survives a crash. A no-op on platforms
+    without ``O_DIRECTORY``."""
+    if not hasattr(os, "O_DIRECTORY"):
+        return
+    try:
+        dir_fd = os.open(str(path.parent), os.O_DIRECTORY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError:
+        pass
+
+
 def save_private_key(
     key: Ed25519PrivateKey,
     path: Path,
@@ -269,6 +285,11 @@ def save_private_key(
         )
         try:
             os.write(fd, pem)
+            # Bootstrap prints the keyid and exits, so nothing else will
+            # flush this. A power loss in the writeback window would leave a
+            # zero-length key that graph.db's root validator row already
+            # names, and that root can never be re-enrolled.
+            os.fsync(fd)
         except OSError:
             # If the write failed (disk full, IO error), the O_EXCL'd file
             # is on disk but empty. Without cleanup, the next bootstrap
@@ -282,6 +303,7 @@ def save_private_key(
                 pass
             raise
         os.close(fd)
+        _fsync_parent(path)
         return
 
     # Rotation path. Mirror the durable atomic write the claims.toml backup
@@ -312,15 +334,7 @@ def save_private_key(
         except OSError:
             pass
         raise
-    if hasattr(os, "O_DIRECTORY"):
-        try:
-            dir_fd = os.open(str(path.parent), os.O_DIRECTORY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-        except OSError:
-            pass
+    _fsync_parent(path)
 
 
 def load_private_key(path: Path) -> Ed25519PrivateKey:

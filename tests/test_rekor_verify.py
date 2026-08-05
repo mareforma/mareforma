@@ -797,6 +797,81 @@ class TestL1RekorUrlRevalidation:
         assert exc_info.value.reason == "malformed_proof"
 
 
+class _FakePubkeyResponse:
+    """Stand-in for the streaming response fetch_log_pubkey reads:
+    a status code, a content-length header, and one body chunk."""
+
+    def __init__(self, status_code: int, body: bytes) -> None:
+        self.status_code = status_code
+        self.headers = {"content-length": str(len(body))}
+        self._body = body
+
+    def __enter__(self) -> "_FakePubkeyResponse":
+        return self
+
+    def __exit__(self, *exc_info) -> bool:
+        return False
+
+    def iter_bytes(self):
+        yield self._body
+
+
+class TestFetchLogPubkeyBody:
+    """fetch_log_pubkey is public and users are told to call it before
+    pinning a log key, so the endpoint it actually GETs and the answers
+    it refuses need coverage past the SSRF guard."""
+
+    def _patch_stream(self, monkeypatch, response: _FakePubkeyResponse) -> dict:
+        seen: dict[str, str] = {}
+
+        def fake_stream(method, url, **kwargs):
+            seen["url"] = url
+            return response
+
+        monkeypatch.setattr(
+            "mareforma.signing.rekor.httpx.stream", fake_stream,
+        )
+        return seen
+
+    def test_entries_suffix_replaced_by_publickey(self, monkeypatch) -> None:
+        pem = _pubkey_pem(Ed25519PrivateKey.generate())
+        seen = self._patch_stream(monkeypatch, _FakePubkeyResponse(200, pem))
+
+        body = _signing.fetch_log_pubkey(
+            "https://rekor.test.example/api/v1/log/entries",
+        )
+
+        assert seen["url"] == "https://rekor.test.example/api/v1/log/publicKey"
+        assert body == pem
+
+    def test_publickey_appended_without_entries_suffix(self, monkeypatch) -> None:
+        pem = _pubkey_pem(Ed25519PrivateKey.generate())
+        seen = self._patch_stream(monkeypatch, _FakePubkeyResponse(200, pem))
+
+        body = _signing.fetch_log_pubkey(
+            "https://rekor.test.example/api/v1/log/",
+        )
+
+        assert seen["url"] == "https://rekor.test.example/api/v1/log/publicKey"
+        assert body == pem
+
+    def test_non_pem_body_refused(self, monkeypatch) -> None:
+        self._patch_stream(
+            monkeypatch, _FakePubkeyResponse(200, b"<html>not a key</html>"),
+        )
+        with pytest.raises(_signing.SigningError, match="did not return a PEM"):
+            _signing.fetch_log_pubkey(
+                "https://rekor.test.example/api/v1/log/entries",
+            )
+
+    def test_non_2xx_refused(self, monkeypatch) -> None:
+        self._patch_stream(monkeypatch, _FakePubkeyResponse(404, b"missing"))
+        with pytest.raises(_signing.SigningError, match="HTTP 404"):
+            _signing.fetch_log_pubkey(
+                "https://rekor.test.example/api/v1/log/entries",
+            )
+
+
 class TestH1ExceptionContract:
     """H1: verify_rekor_inclusion's base64-fallback path must re-raise
     the documented RekorInclusionError, not the raw decode exception

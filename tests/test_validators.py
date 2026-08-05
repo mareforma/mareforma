@@ -24,6 +24,7 @@ import pytest
 from click.testing import CliRunner
 
 import mareforma
+from mareforma import db as _db
 from mareforma import signing as _signing
 from mareforma import validators as _validators
 from mareforma.cli import cli as mareforma_cli
@@ -116,6 +117,38 @@ class TestBootstrapRace:
             f"expected exactly one root, got {len(all_rows)} — "
             "BEGIN IMMEDIATE is supposed to serialize the racing writers"
         )
+
+    def test_lock_timeout_refuses_instead_of_returning_none(
+        self, tmp_path: Path,
+    ) -> None:
+        """A write that never happened is not a lost race. When another
+        process holds the write lock past the busy timeout, nothing is
+        enrolled and no key holds the root, so returning None would be read
+        upstream as 'a different key holds the root' — the wrong diagnosis
+        and an unrunnable remedy. It must refuse with the sqlite reason."""
+        open_db(tmp_path).close()
+        blocker = open_db(tmp_path)
+        conn = open_db(tmp_path)
+        conn.execute("PRAGMA busy_timeout = 50")
+        try:
+            blocker.execute("BEGIN IMMEDIATE")
+            with pytest.raises(_db.DatabaseError, match="locked"):
+                _validators.auto_enroll_root(
+                    conn, _signing.generate_keypair(), identity="root",
+                    root=tmp_path,
+                )
+            assert _validators.count_validators(conn) == 0
+        finally:
+            blocker.close()
+            conn.close()
+
+        events = [
+            json.loads(line) for line in
+            (tmp_path / ".mareforma" / "health.jsonl")
+            .read_text(encoding="utf-8").splitlines()
+        ]
+        assert [e["outcome"] for e in events
+                if e["op"] == "root_auto_enroll"] == ["fail"]
 
     def test_root_self_enrollment_emits_warning(self, tmp_path: Path) -> None:
         """A fresh-graph root enrollment must fire a UserWarning so the
@@ -415,6 +448,43 @@ class TestEnrollValidator:
                 _validators.enroll_validator(
                     graph._conn, graph._signer, root_pem, identity="root-clone",
                 )
+
+    def test_concurrent_enroll_of_same_key_raises_typed_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Two `validator add` runs for the same public key both pass the
+        pre-checks. The loser's INSERT must surface as the documented
+        ValidatorAlreadyEnrolledError, not a raw sqlite3.IntegrityError."""
+        root_key_path = _bootstrap_key(tmp_path, "root.key")
+        new_pem = _signing.public_key_to_pem(
+            _signing.generate_keypair().public_key(),
+        )
+        real_utcnow = _validators._utcnow_iso
+        raced = False
+
+        def racing_utcnow() -> str:
+            # Runs after the pre-checks and before the INSERT: the window
+            # another process enrolling the same key would land in.
+            nonlocal raced
+            if not raced:
+                raced = True
+                conn = open_db(tmp_path)
+                try:
+                    _validators.enroll_validator(
+                        conn, _signing.load_private_key(root_key_path),
+                        new_pem, identity="winner",
+                    )
+                finally:
+                    conn.close()
+            return real_utcnow()
+
+        with mareforma.open(tmp_path, key_path=root_key_path) as graph:
+            monkeypatch.setattr(_validators, "_utcnow_iso", racing_utcnow)
+            with pytest.raises(_validators.ValidatorAlreadyEnrolledError):
+                _validators.enroll_validator(
+                    graph._conn, graph._signer, new_pem, identity="loser",
+                )
+            assert _validators.count_validators(graph._conn) == 2
 
     def test_enrolled_validator_envelope_verifies_under_parent(
         self, tmp_path: Path,

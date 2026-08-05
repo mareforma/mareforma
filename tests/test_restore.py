@@ -368,6 +368,29 @@ class TestRestoreAdversarial:
             mareforma.restore(tmp_path)
         assert exc_info.value.kind == "enrollment_unverified"
 
+    def test_refused_restore_leaves_no_project_behind(
+        self, tmp_path: Path,
+    ) -> None:
+        """A refused restore must leave the project in its pre-restore state.
+
+        restore() opens the db before it verifies anything, so a refusal used
+        to leave an empty graph.db and supports cache in a directory that had
+        neither. Every later read command then reports a live empty project
+        instead of "no mareforma project here"."""
+        self._setup_and_wipe(tmp_path)
+        assert not (tmp_path / ".mareforma").exists()
+        data = self._read_toml(tmp_path)
+        victim = next(
+            keyid for keyid, v in data["validators"].items()
+            if v["enrolled_by_keyid"] != keyid
+        )
+        data["validators"][victim]["identity"] = "TAMPERED-IDENTITY"
+        self._write_toml(tmp_path, data)
+
+        with pytest.raises(_db.RestoreError):
+            mareforma.restore(tmp_path)
+        assert not (tmp_path / ".mareforma").exists()
+
     def test_tampered_payload_type_raises_restore_error(
         self, tmp_path: Path,
     ) -> None:

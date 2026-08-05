@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from html import escape
 
-from .trust_map import TrustMap, Tier
+from .trust_map import ABSENT_VALUE, TrustMap, Tier
 
 # Tier → a stable accent the badge uses. Kept as plain hex so the page needs no
 # external stylesheet and renders the same everywhere.
@@ -48,7 +48,7 @@ def render_html(trust_map: TrustMap) -> str:
     rows = []
     for p in trust_map.properties:
         accent = _TIER_ACCENT.get(p.tier.value, "#6b6b6b")
-        value = "n/a" if p.value is None else p.value
+        value = ABSENT_VALUE if p.value is None else p.value
         rows.append(
             "      <tr>\n"
             f"        <td class=\"prop\">{escape(p.name)}</td>\n"

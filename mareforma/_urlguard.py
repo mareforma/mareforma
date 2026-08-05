@@ -158,7 +158,10 @@ def validate_public_https_url(
       address on most kernels.
     - Hostnames carrying non-ASCII Unicode digits (``①②⑧.0.0.1``), which
       a C resolver may read as a numeric address.
-    - ``localhost`` and its ``/etc/hosts`` aliases.
+    - ``localhost`` and its ``/etc/hosts`` aliases, in the bare form and
+      in the absolute form carrying the DNS root dot (``ip6-localhost.``).
+    - The same forms written with the IDNA label separators U+3002, U+FF0E
+      and U+FF61 (``127。0。0。1``), which the client folds back to ``.``.
 
     DNS hostnames that don't look like loopback shortcuts are accepted;
     defending against a DNS rebind at connect-time would need ahead-of-time
@@ -198,21 +201,25 @@ def validate_public_https_url(
     hostname = parsed.hostname
     if hostname is None:
         raise error_cls(f"{param_name} is missing a hostname: {url!r}")
+    # Normalize to the form the HTTP client will resolve, once, before any
+    # classification: fold the IDNA label separators, then drop the DNS root
+    # dot ('ip6-localhost.' is the absolute form of the same name and
+    # resolves identically; rstrip, since 'ip6-localhost..' parses out too).
+    host = hostname.lower().translate(_LABEL_SEPARATORS).rstrip(".")
     try:
-        ip = ipaddress.ip_address(hostname)
+        ip = ipaddress.ip_address(host)
     except ValueError:
         # Not a strict IP literal, apply the DNS-shortcut bypass guards.
-        hl = hostname.lower()
         if (
-            hl in _LOOPBACK_DNS_NAMES
-            or hl.endswith(".localhost")
-            or hl.startswith("localhost.")
+            host in _LOOPBACK_DNS_NAMES
+            or host.endswith(".localhost")
+            or host.startswith("localhost.")
         ):
             raise error_cls(
                 f"{param_name} hostname {hostname!r} resolves to loopback. "
                 f"{bypass_hint}"
             )
-        if has_non_ascii_digit(hostname):
+        if _has_non_ascii_digit(host):
             # ①②⑧.0.0.1 and friends: a resolver may read the Unicode
             # digits as a numeric address; no public DNS name uses them.
             raise error_cls(
@@ -220,8 +227,8 @@ def validate_public_https_url(
                 "digit characters that a resolver may read as a numeric IP "
                 f"shortcut. {bypass_hint}"
             )
-        shortcut_ip = numeric_shortcut_ipv4(hostname)
-        if shortcut_ip is not None and is_blocked_ip(shortcut_ip):
+        shortcut_ip = _numeric_shortcut_ipv4(host)
+        if shortcut_ip is not None and _is_blocked_ip(shortcut_ip):
             # 127.1, 2130706433, 0x7f000001, 0177.0.0.1 etc., ipaddress
             # rejects these but socket.getaddrinfo (any radix) resolves
             # them to the internal address below.

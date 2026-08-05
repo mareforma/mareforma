@@ -27,6 +27,7 @@ from mareforma.signing import (
     InvalidEnvelopeError,
     KeyNotFoundError,
     KeyPermissionError,
+    PAYLOAD_TYPE_CLAIM,
     SigningError,
     bootstrap_key,
     default_key_path,
@@ -250,15 +251,30 @@ class TestSignVerify:
         # Different keyid → verify returns False (not InvalidSignature).
         assert verify_envelope(envelope, other_key.public_key()) is False
 
-    def test_malformed_envelope_raises(self):
-        with pytest.raises(InvalidEnvelopeError):
+    def test_wrong_payload_type_raises(self):
+        with pytest.raises(InvalidEnvelopeError, match="unexpected payloadType"):
             verify_envelope({"payloadType": "wrong/type"}, generate_keypair().public_key())
-        with pytest.raises(InvalidEnvelopeError):
+
+    def test_undecodable_payload_raises(self):
+        """Each case asserts on the message: a stale payloadType would
+        otherwise be refused by the type check and read as a pass."""
+        with pytest.raises(InvalidEnvelopeError, match="malformed envelope"):
             verify_envelope(
                 {
-                    "payloadType": "application/vnd.mareforma.claim+json",
+                    "payloadType": PAYLOAD_TYPE_CLAIM,
                     "payload": "not-base64!!!",
                     "signatures": [{"keyid": "x", "sig": "y"}],
+                },
+                generate_keypair().public_key(),
+            )
+
+    def test_envelope_without_signatures_raises(self):
+        with pytest.raises(InvalidEnvelopeError, match="no signatures"):
+            verify_envelope(
+                {
+                    "payloadType": PAYLOAD_TYPE_CLAIM,
+                    "payload": base64.standard_b64encode(b"{}").decode("ascii"),
+                    "signatures": [],
                 },
                 generate_keypair().public_key(),
             )
@@ -463,6 +479,32 @@ class TestPrivateKeyStorage:
         assert len(oks) == 1, f"expected exactly one winner, got {oks}"
         assert len(errs) == 3, f"expected three losers, got {errs}"
 
+    def test_exclusive_save_is_durable(self, tmp_path, monkeypatch):
+        # First-time bootstrap must reach the disk. A crash in the writeback
+        # window otherwise leaves a zero-length key that graph.db's root
+        # validator row already names, and that root can never be replaced.
+        key = generate_keypair()
+        key_path = tmp_path / "signing.key"
+
+        synced_inodes = []
+        real_fsync = os.fsync
+
+        def rec_fsync(fd):
+            synced_inodes.append(os.fstat(fd).st_ino)
+            return real_fsync(fd)
+
+        monkeypatch.setattr(os, "fsync", rec_fsync)
+        save_private_key(key, key_path, exclusive=True)
+
+        assert key_path.stat().st_ino in synced_inodes, (
+            "the bootstrap key was never fsynced"
+        )
+        assert key_path.parent.stat().st_ino in synced_inodes, (
+            "the new directory entry was never fsynced"
+        )
+        assert (load_private_key(key_path).public_key().public_bytes_raw()
+                == key.public_key().public_bytes_raw())
+
     def test_save_private_key_exclusive_refuses_to_replace(self, tmp_path):
         key_a = generate_keypair()
         key_b = generate_keypair()
@@ -536,7 +578,7 @@ class TestEnvelopePayloadDictContract:
         import base64
         bad_payload_b64 = base64.standard_b64encode(b'"just a string"').decode("ascii")
         envelope = {
-            "payloadType": "application/vnd.mareforma.claim+json",
+            "payloadType": PAYLOAD_TYPE_CLAIM,
             "payload": bad_payload_b64,
             "signatures": [{"keyid": "x", "sig": "y"}],
         }
@@ -547,7 +589,7 @@ class TestEnvelopePayloadDictContract:
         import base64
         bad_payload_b64 = base64.standard_b64encode(b'[1, 2, 3]').decode("ascii")
         envelope = {
-            "payloadType": "application/vnd.mareforma.claim+json",
+            "payloadType": PAYLOAD_TYPE_CLAIM,
             "payload": bad_payload_b64,
             "signatures": [{"keyid": "x", "sig": "y"}],
         }

@@ -167,6 +167,53 @@ def _restore_original_signature_bundle(c: dict, claim_id: str) -> str | None:
     )
 
 
+def _restore_evidence_domain(
+    evidence: dict, domain: str, claim_id: str,
+) -> int:
+    """Coerce one restored GRADE domain to an int.
+
+    Same posture as :func:`_restore_predicate_payload`. A bare ``int()``
+    over a tampered TOML leaks a ``ValueError`` or a ``TypeError`` past
+    restore's documented error surface. An absent or falsy value keeps the
+    0 default, a number or a digit string passes through, anything else
+    (booleans included) aborts. Out-of-range scores stay with the CHECK
+    constraint on insert, which already reports them.
+    """
+    val = evidence.get(domain)
+    if not isinstance(val, bool):
+        if not val:
+            return 0
+        if isinstance(val, (int, float)):
+            return int(val)
+        if isinstance(val, str) and val.isdigit():
+            return int(val)
+    raise RestoreError(
+        f"Claim {claim_id} evidence_json domain {domain!r} is not a GRADE "
+        f"score (got {type(val).__name__}); claims.toml is malformed.",
+        kind="claim_unverified",
+    )
+
+
+def _discard_created_paths(
+    mareforma_dir: Path, dir_existed: bool, files_existed: set[str],
+) -> None:
+    """Remove what a refused restore created under ``.mareforma/``.
+
+    ``restore`` opens the db before it verifies anything, so a refusal would
+    otherwise leave an empty ``graph.db`` and supports cache behind and every
+    later read command would report a live empty project instead of no project
+    at all. Only paths this call created are removed. An ``OSError`` here is
+    swallowed: cleanup must not mask the ``RestoreError`` that is the answer.
+    """
+    try:
+        for path in mareforma_dir.iterdir():
+            if path.is_file() and path.name not in files_existed:
+                path.unlink()
+        if not dir_existed:
+            mareforma_dir.rmdir()
+    except OSError:
+        pass
+
 
 def restore(
     project_root: Path | str,
@@ -281,11 +328,25 @@ def restore(
     # AttributeError past the documented RestoreError contract.
     for _section_name in (
         "validators", "claims", "replication_verdicts", "contradiction_verdicts",
+        "rekor_inclusions",
     ):
         _validate_section_shape(data.get(_section_name), _section_name)
+    # [project_policy] holds fields, not rows, so only the section shape is
+    # checked; _required_field reports a missing or malformed field.
+    _validate_section_shape(
+        data.get("project_policy"), "project_policy", allow_scalar_entries=True,
+    )
 
     validators_section: dict = data.get("validators", {}) or {}
     claims_section: dict = data.get("claims", {}) or {}
+
+    # Note what the project already had: open_db creates .mareforma/ and its
+    # files, and a refused restore has to hand the directory back untouched.
+    mareforma_dir = root / ".mareforma"
+    dir_existed = mareforma_dir.is_dir()
+    files_existed = (
+        {p.name for p in mareforma_dir.iterdir()} if dir_existed else set()
+    )
 
     conn = open_db(root)
     try:
@@ -471,11 +532,25 @@ def restore(
                 # Evidence-vector round-trip. The TOML carries the
                 # canonical JSON; we re-derive ev_* + chain_input from
                 # it so the chain_hash matches the original.
+                # An unparseable vector is a refusal, not a zeroed row: the
+                # signed path already treats it that way, and swallowing it
+                # here restored a claim whose ev_* columns contradict the
+                # evidence_json blob written back beside them.
                 evidence_json_str = c.get("evidence_json") or "{}"
                 try:
                     evidence_dict = json.loads(evidence_json_str)
-                except (ValueError, TypeError):
-                    evidence_dict = {}
+                except (ValueError, TypeError) as exc:
+                    raise RestoreError(
+                        f"Claim {claim_id} evidence_json is malformed.",
+                        kind="toml_malformed",
+                    ) from exc
+                if not isinstance(evidence_dict, dict):
+                    raise RestoreError(
+                        f"Claim {claim_id} evidence_json must be a JSON "
+                        f"object (got {type(evidence_dict).__name__}); "
+                        "claims.toml is malformed.",
+                        kind="claim_unverified",
+                    )
                 # Observed grounding verdict (optional/versioned). Parse the
                 # stored JSON record so the chain hash and statement_cid rebuild
                 # from the same bytes the original signing path bound. Absent for
@@ -655,11 +730,21 @@ def restore(
                                 c.get("signature_bundle")
                             ),
                             c.get("artifact_hash"), prev_hash,
-                            int(evidence_dict.get("risk_of_bias", 0) or 0),
-                            int(evidence_dict.get("inconsistency", 0) or 0),
-                            int(evidence_dict.get("indirectness", 0) or 0),
-                            int(evidence_dict.get("imprecision", 0) or 0),
-                            int(evidence_dict.get("publication_bias", 0) or 0),
+                            _restore_evidence_domain(
+                                evidence_dict, "risk_of_bias", claim_id,
+                            ),
+                            _restore_evidence_domain(
+                                evidence_dict, "inconsistency", claim_id,
+                            ),
+                            _restore_evidence_domain(
+                                evidence_dict, "indirectness", claim_id,
+                            ),
+                            _restore_evidence_domain(
+                                evidence_dict, "imprecision", claim_id,
+                            ),
+                            _restore_evidence_domain(
+                                evidence_dict, "publication_bias", claim_id,
+                            ),
                             evidence_json_str,
                             statement_cid_str,
                             1 if c.get("convergence_retry_needed") else 0,
@@ -931,6 +1016,11 @@ def restore(
             "validators_restored": len(ordered_validators),
             "claims_restored": len(ordered_claims),
         }
+    except BaseException:
+        # Close first so the files are unlocked, then drop the residue.
+        conn.close()
+        _discard_created_paths(mareforma_dir, dir_existed, files_existed)
+        raise
     finally:
         conn.close()
 
@@ -1522,7 +1612,9 @@ def _verify_and_insert_project_policy(
     return rekor_required
 
 
-def _validate_section_shape(section: Any, name: str) -> None:
+def _validate_section_shape(
+    section: Any, name: str, *, allow_scalar_entries: bool = False,
+) -> None:
     """Confirm a claims.toml section is a table of tables before iteration.
 
     An absent section (None) is fine. A present section must be a table whose
@@ -1531,6 +1623,10 @@ def _validate_section_shape(section: Any, name: str) -> None:
     of either would leak a raw ``AttributeError`` past the documented
     ``RestoreError`` contract, so name the offending section/entry and raise
     ``RestoreError(kind='toml_malformed')`` instead.
+
+    ``allow_scalar_entries`` covers a table of scalars such as
+    ``[project_policy]``, whose values are fields rather than rows: the section
+    itself is still checked, the per-entry check is skipped.
     """
     if section is None:
         return
@@ -1540,6 +1636,8 @@ def _validate_section_shape(section: Any, name: str) -> None:
             f"{type(section).__name__}.",
             kind="toml_malformed",
         )
+    if allow_scalar_entries:
+        return
     for entry_key, entry_val in section.items():
         if not isinstance(entry_val, dict):
             raise RestoreError(

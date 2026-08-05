@@ -55,6 +55,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec as _ec
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from .. import __version__
 from .._urlguard import validate_public_https_url
 from .core import SigningError, public_key_to_pem
 
@@ -62,7 +63,7 @@ from .core import SigningError, public_key_to_pem
 PUBLIC_REKOR_URL = "https://rekor.sigstore.dev/api/v1/log/entries"
 _REKOR_TIMEOUT = 10.0
 _REKOR_USER_AGENT = (
-    "mareforma/0.3.0 (+https://github.com/mareforma/mareforma; "
+    f"mareforma/{__version__} (+https://github.com/mareforma/mareforma; "
     "mailto:hello@mareforma.com)"
 )
 
@@ -278,6 +279,11 @@ def submit_to_rekor(
         rec_hash = spec["data"]["hash"]["value"]
         rec_sig = spec["signature"]["content"]
     except (KeyError, TypeError):
+        return (False, None)
+    # The keys can be present and hold null, a number or a container. That
+    # extracts cleanly, so without this the comparison below raises out of a
+    # function whose callers run after the claim row is already inserted.
+    if not isinstance(rec_hash, str) or not isinstance(rec_sig, str):
         return (False, None)
     if rec_hash.lower() != expected_hash.lower():
         return (False, None)
