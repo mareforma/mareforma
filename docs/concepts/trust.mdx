@@ -106,6 +106,7 @@ envelope.
 
 ```python
 import mareforma
+from mareforma.signing import load_private_key
 
 with mareforma.open() as graph:
     # Bootstrap the chain. Only an enrolled validator can produce a seed.
@@ -117,15 +118,19 @@ with mareforma.open() as graph:
     )
 
     # Downstream peers now have an ESTABLISHED upstream to converge on.
+    # Each peer signs under its own key: two peers asserted through the
+    # graph's single key share one asserter_keyid and stay PRELIMINARY.
     id_a = graph.assert_claim(
         "Finding A consistent with X",
         supports=[seed_id],
         generated_by="agent/model-a",
+        signer=load_private_key("lab_a.key"),
     )
     id_b = graph.assert_claim(
         "Finding B consistent with X",
         supports=[seed_id],
         generated_by="agent/model-b",
+        signer=load_private_key("lab_b.key"),
     )
 
     graph.get_claim(id_a)["support_level"]  # → "REPLICATED"

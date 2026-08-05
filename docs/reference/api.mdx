@@ -98,6 +98,7 @@ result = mareforma.restore("/path/to/project")
 |---|---|
 | `graph_not_empty` | Target `graph.db` already has claims. |
 | `toml_not_found` | claims.toml does not exist. |
+| `toml_unreadable` | claims.toml exists but cannot be read, such as a permission error or a path that resolves to a directory. |
 | `toml_malformed` | TOML parse error. |
 | `enrollment_unverified` | A validator's enrollment envelope failed verification. |
 | `claim_unverified` | A claim's `signature_bundle` or `validation_signature` failed verification. |
@@ -207,25 +208,32 @@ for r in results:
 `claim_id`, `text`, `classification`, `support_level`, `idempotency_key`,
 `validated_by`, `validated_at`, `status`, `source_name`, `generated_by`,
 `supports_json`, `contradicts_json`, `comparison_summary`, `branch_id`,
-`unresolved`, `signature_bundle`, `transparency_logged`, `artifact_hash`,
-`validation_signature`, `validator_keyid`, `prev_hash`,
-`ev_risk_of_bias`, `ev_inconsistency`, `ev_indirectness`,
+`unresolved`, `signature_bundle`, `transparency_logged`,
+`validation_signature`, `validator_keyid`, `asserter_keyid`, `artifact_hash`,
+`prev_hash`, `ev_risk_of_bias`, `ev_inconsistency`, `ev_indirectness`,
 `ev_imprecision`, `ev_pub_bias`, `evidence_json`, `statement_cid`,
-`t_invalid`, `predicate_payload`, `original_signature_bundle`,
-`observed_grounding`, `created_at`, `updated_at`. `observed_grounding` is the
-stored grounding verdict (the queryable denormalisation of the signed
-predicate's grounding record). Plus two reputation projections computed at query time:
+`t_invalid`, `convergence_retry_needed`, `predicate_payload`,
+`original_signature_bundle`, `observed_grounding`, `created_at`,
+`updated_at`. `asserter_keyid` is the signing key the independence axis
+counts. `observed_grounding` is the stored grounding verdict (the queryable
+denormalisation of the signed predicate's grounding record).
+`convergence_retry_needed` is set on a claim whose promotion check failed and
+is waiting for `refresh_convergence()`. Plus two reputation projections
+computed at query time:
 
 - `validator_reputation: int`: for ESTABLISHED rows, the count of
   ESTABLISHED claims signed by the same validator. `0` otherwise.
 - `generator_enrolled: bool`: `True` iff the claim's signing keyid
   is in the validators table.
 
+ESTABLISHED rows carry two more keys: `single_trust_domain: bool` and
+`trust_domain_root: str | None`, disclosing whether all validators trace to
+one root of trust. It is a disclosure, not a Sybil guard. Rows below
+ESTABLISHED omit both.
+
 **Raises** `ValueError` if `min_support` or `classification` is invalid.
 
 REPLICATED / ESTABLISHED rows are re-verified on read: a row whose signature fails to verify is excluded from the result. Never raises.
-
-For ESTABLISHED rows, each result also carries `single_trust_domain: bool`, a disclosure of whether all validators trace to one root of trust. It is a disclosure, not a Sybil guard.
 
 ---
 

@@ -171,6 +171,7 @@ class RestoreError(MareformaError):
 
       - ``'graph_not_empty'``          : existing graph.db has claims
       - ``'toml_not_found'``           : claims.toml does not exist
+      - ``'toml_unreadable'``          : claims.toml exists but cannot be read
       - ``'toml_malformed'``           : TOML parse error
       - ``'enrollment_unverified'``    : enrollment envelope fails verify
       - ``'claim_unverified'``         : claim signature fails verify

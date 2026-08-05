@@ -26,7 +26,8 @@ conclusion.
 Mareforma is that combination. It is **not** trying to replace:
 
 - W3C PROV-O (richer provenance vocabulary, mareforma is a runtime
-  library, not an RDF graph)
+  library, not an RDF graph; the graph exports as a PROV-O JSON-LD
+  graph via `mareforma/exporters/prov_o.py`)
 - FAIRSCAPE's EVI (research-evidence ontology; the schema stays
   mareforma-native and there is no EVI export)
 - IETF SCITT (federated supply-chain transparency; mareforma uses Rekor
@@ -168,7 +169,7 @@ independence axis of the trust map instead.
 
 ## Trust map
 
-Three read-side CLI commands expose a claim's trust state without
+The read-side CLI commands expose a claim's trust state without
 adding any signed field:
 
 - `mareforma map <claim>` renders the per-claim trust map

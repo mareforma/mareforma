@@ -40,6 +40,7 @@ from mareforma.cli import (
 from mareforma.observe.oracle import perturbation_oracle
 from mareforma.trust import STATUS_POLICY
 from tests._helpers import _bootstrap_key, _est, _pred, _prop, _requires_repo_checkout
+from tests.test_distinct_signer_model import _build_established
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs"
@@ -162,13 +163,24 @@ def test_signed_bytes_are_named_by_the_symbol_that_exists():
         f"are `canonical_statement`: {stale}"
     )
 
+# Every page that describes `mareforma export` to a reader. AGENTS.md is the
+# in-repo agent contract, so it drifts out of the published pair unless it is
+# held to the same guards.
+_EXPORT_PAGES = (
+    DOCS / "reference" / "cli.mdx",
+    DOCS / "for-agents" / "agents.mdx",
+    ROOT / "AGENTS.md",
+)
+
 
 def test_export_format_choices_documented():
-    """every --format choice from the CLI appears in cli.mdx."""
-    cli_doc = (DOCS / "reference" / "cli.mdx").read_text(encoding="utf-8")
-    assert "--format" in cli_doc, "cli.mdx does not document the --format option"
-    for choice in _export_format_choices():
-        assert choice in cli_doc, f"cli.mdx does not document --format={choice}"
+    """every --format choice from the CLI appears on every export page."""
+    for page in _EXPORT_PAGES:
+        name = page.relative_to(ROOT)
+        text = page.read_text(encoding="utf-8")
+        assert "--format" in text, f"{name} does not document the --format option"
+        for choice in _export_format_choices():
+            assert choice in text, f"{name} does not document --format={choice}"
 
 
 def _cli_section(name: str) -> str:
@@ -649,6 +661,129 @@ def test_every_verify_exit_code_is_tabled():
         assert not missing, f"{page.name} omits verify exit code(s): {missing}"
 
 
+def test_trust_page_routes_verify_by_payload_type():
+    """the page carrying the exit-code table must route a file as the CLI does.
+
+    ``_verify_signed_file`` reads the DSSE ``payloadType`` and sends an audit
+    receipt and a signed audit run to their own verifiers before the bundle
+    fallback. A CI-gate author who reads "an existing file is a signed bundle"
+    takes exit 2 on a receipt for "this artifact could not be checked" rather
+    than "pin the auditor's key with --key".
+    """
+    # The prose name for each payload type the router branches on. A branch
+    # with no entry here fails the guard rather than passing unnamed.
+    labels = {
+        "PAYLOAD_TYPE_AUDIT_RECEIPT": "audit receipt",
+        "PAYLOAD_TYPE_AUDIT_RUN": "audit-run record",
+    }
+    routed = set(
+        re.findall(
+            r"PAYLOAD_TYPE_\w+", inspect.getsource(cli_module._verify_signed_file)
+        )
+    )
+    page = " ".join(
+        (DOCS / "concepts" / "trust.mdx").read_text(encoding="utf-8").split()
+    )
+    assert "payloadType" in page, (
+        "trust.mdx does not say a file is routed by its DSSE payloadType"
+    )
+    for const in sorted(routed):
+        label = labels.get(const)
+        assert label is not None, (
+            f"_verify_signed_file routes {const}, which this guard has no "
+            "prose name for; name it here and on the page"
+        )
+        assert label in page, f"trust.mdx does not name the {label} target"
+
+
+_CARDINAL_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+}
+
+
+def test_architecture_trust_map_count_matches_its_command_bullets():
+    """a spelled-out count goes stale the moment a bullet is appended.
+
+    ARCHITECTURE.md is the design reference, so a reader who trusts the
+    count over the list is left guessing which listed command does not
+    ship. The section may state no count at all; it may not state a wrong
+    one.
+    """
+    text = (ROOT / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    section = text.split("\n## Trust map\n", 1)[1].split("\n## ", 1)[0]
+    bullets = re.findall(r"^- `mareforma \w+", section, re.MULTILINE)
+    opening = section.strip().split(":", 1)[0].lower()
+    stated = [
+        _CARDINAL_WORDS[word]
+        for word in re.findall(r"[a-z]+", opening)
+        if word in _CARDINAL_WORDS
+    ]
+    assert all(count == len(bullets) for count in stated), (
+        f"the Trust map opener counts {stated} commands but lists "
+        f"{len(bullets)}: {opening}"
+    )
+
+
+def test_no_page_promises_a_cli_only_established_promotion():
+    """ESTABLISHED needs a seed anchor, and no CLI command writes one.
+
+    REPLICATED requires an ESTABLISHED upstream and ``claim validate``
+    refuses anything below REPLICATED, so a walkthrough that never leaves
+    the CLI dead-ends on a fresh graph. Only ``assert_claim(seed=True)``
+    breaks the deadlock, and ``claim add`` exposes no ``--seed``. The guard
+    lifts on its own the day the CLI grows that option.
+    """
+    add = cli.commands["claim"].commands["add"]
+    if any("--seed" in param.opts for param in add.params):
+        return
+    pages = [ROOT / "AGENTS.md", *sorted(DOCS.rglob("*.mdx"))]
+    offenders = sorted(
+        str(page.relative_to(ROOT))
+        for page in pages
+        if "CLI only" in page.read_text(encoding="utf-8")
+    )
+    assert not offenders, (
+        "pages promise a CLI-only path to ESTABLISHED, but `mareforma claim "
+        f"add` cannot write the seed anchor: {offenders}"
+    )
+
+
+# Pages that carry a REPLICATED convergence recipe in prose.
+_REPLICATION_PAGES = (
+    ROOT / "AGENTS.md",
+    DOCS / "for-agents" / "agents.mdx",
+    DOCS / "concepts" / "trust.mdx",
+)
+
+# ``min_support="REPLICATED"`` is a query filter, not a promotion claim.
+_MIN_SUPPORT_RE = re.compile(r"""min_support\s*=\s*["']REPLICATED["']""")
+
+
+def test_replicated_recipes_sign_the_peers_with_distinct_keys():
+    """a convergence recipe run under one key stays PRELIMINARY, silently.
+
+    Promotion counts independence by distinct ``asserter_keyid``, so two
+    peers asserted through one open graph share one keyid and never
+    converge. A snippet that annotates that pair as REPLICATED teaches the
+    reader that a same-key rerun counts as corroboration.
+    """
+    unsigned = []
+    for page in _REPLICATION_PAGES:
+        for block in _python_blocks(page.read_text(encoding="utf-8")):
+            if "assert_claim" not in block:
+                continue
+            if "REPLICATED" not in _MIN_SUPPORT_RE.sub("", block):
+                continue
+            if "signer=" in block or block.count("key_path=") >= 2:
+                continue
+            unsigned.append(str(page.relative_to(ROOT)))
+    assert not unsigned, (
+        "REPLICATED recipes assert both peers under one key in: "
+        + ", ".join(sorted(set(unsigned)))
+    )
+
+
 def test_findings_convergent_example_uses_a_distinct_signer(tmp_path):
     """the findings.mdx CONVERGENT recipe must reach CONVERGENT when run.
 
@@ -910,13 +1045,15 @@ def test_quickstart_signing_key_step_is_not_labelled_optional(tmp_path):
 def test_prov_o_claim_is_scoped_to_default_format():
     """the 'NOT PROV-O-conformant' line no longer reads as a blanket
     claim now that --format=prov-o emits real W3C PROV-O."""
-    cli_doc = (DOCS / "reference" / "cli.mdx").read_text(encoding="utf-8")
-    # If the page still warns about PROV-O non-conformance, it must also
-    # point at the prov-o format so the claim reads as scope, not denial.
-    if "PROV-O-conformant" in cli_doc:
-        assert "--format=prov-o" in cli_doc or "`prov-o`" in cli_doc, (
-            "the PROV-O-conformance caveat must name the prov-o format"
-        )
+    for page in _EXPORT_PAGES:
+        text = page.read_text(encoding="utf-8")
+        # If the page still warns about PROV-O non-conformance, it must also
+        # point at the prov-o format so the claim reads as scope, not denial.
+        if "PROV-O-conformant" in text:
+            assert "--format=prov-o" in text or "`prov-o`" in text, (
+                f"{page.relative_to(ROOT)}: the PROV-O-conformance caveat "
+                "must name the prov-o format"
+            )
 
 
 def test_prov_o_overview_tracks_whether_the_export_path_validates():
@@ -1872,6 +2009,181 @@ def test_source_doc_pointers_resolve():
         if not (ROOT / ref).is_file()
     ]
     assert dead == [], "source points at docs pages that do not exist: " + ", ".join(dead)
+
+def _restore_error_kinds() -> set[str]:
+    """Every ``kind=`` literal restore.py raises a ``RestoreError`` with."""
+    import ast
+
+    path = ROOT / "mareforma" / "db" / "restore.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+    kinds = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+        if name != "RestoreError":
+            continue
+        for keyword in node.keywords:
+            if keyword.arg == "kind" and isinstance(keyword.value, ast.Constant):
+                kinds.add(keyword.value.value)
+    return kinds
+
+
+def test_every_restore_error_kind_is_documented():
+    """A kind missing from the docs is a failure mode callers cannot match on.
+
+    ``RestoreError.kind`` exists so a caller can branch without parsing the
+    message. Any kind the rebuild raises but no reader lists is a branch
+    nobody writes, and the policy and Rekor kinds are exactly the ones that
+    fire once transparency-log enforcement is on.
+    """
+    from mareforma.db.errors import RestoreError
+
+    readers = {
+        "AGENTS.md": (ROOT / "AGENTS.md").read_text(encoding="utf-8"),
+        "docs/reference/api.mdx": (DOCS / "reference" / "api.mdx").read_text(
+            encoding="utf-8"
+        ),
+        "docs/reference/cli.mdx": (DOCS / "reference" / "cli.mdx").read_text(
+            encoding="utf-8"
+        ),
+        "RestoreError docstring": RestoreError.__doc__ or "",
+        "mareforma.restore docstring": mareforma.restore.__doc__ or "",
+    }
+    missing = sorted(
+        f"{reader} is missing {kind!r}"
+        for kind in _restore_error_kinds()
+        for reader, text in readers.items()
+        if kind not in text
+    )
+    assert not missing, "undocumented RestoreError kinds: " + ", ".join(missing)
+
+
+def test_agents_restore_signature_names_every_keyword():
+    """AGENTS.md is the in-repo agent contract; a short signature hides options.
+
+    An agent that reads only the contract cannot pass a parameter the
+    contract never names, so it stays on the default without knowing there
+    is a choice.
+    """
+    import inspect
+
+    text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    heading = next(
+        line for line in text.splitlines() if line.startswith("### `mareforma.restore(")
+    )
+    keywords = [
+        name
+        for name, param in inspect.signature(mareforma.restore).parameters.items()
+        if param.kind is inspect.Parameter.KEYWORD_ONLY
+    ]
+    absent = [name for name in keywords if name not in heading]
+    assert not absent, (
+        f"AGENTS.md restore heading omits keyword parameters {absent}: {heading}"
+    )
+
+
+# The two references that enumerate what a ``query()`` result dict holds,
+# keyed by the heading each one gives the method.
+_QUERY_PAGES = {
+    "AGENTS.md": (ROOT / "AGENTS.md", "### `graph.query("),
+    "docs/reference/api.mdx": (DOCS / "reference" / "api.mdx", "### `query("),
+}
+
+# A backticked identifier, allowing the ``name: type`` form the reputation
+# projections are written in.
+_RESULT_KEY_RE = re.compile(r"`([a-z_][a-z0-9_]*)(?::[^`]*)?`")
+
+
+def _documented_query_keys(path: pathlib.Path) -> set[str]:
+    """The result keys a page names in its ``query()`` returns block."""
+    text = path.read_text(encoding="utf-8")
+    start = text.index("ach dict contains:")
+    return set(_RESULT_KEY_RE.findall(text[start:text.index("**Raises", start)]))
+
+
+def test_query_result_keys_match_the_projection(tmp_path):
+    """Both references must name every key ``query()`` hands back.
+
+    A key no reader lists is a key an agent reopens the database to recover,
+    and the undocumented set held ``observed_grounding`` and
+    ``asserter_keyid``, the grounding and independence signals. Equality also
+    catches the reverse drift, a page still listing a dropped column.
+    """
+    root_key, _, _, _ = _build_established(tmp_path)
+    with mareforma.open(tmp_path, key_path=root_key) as g:
+        rows = g.query(min_support="ESTABLISHED", limit=9)
+    assert rows, "no ESTABLISHED row to read the full projection from"
+    returned = set(rows[0])
+
+    drift = {}
+    for name, (path, _heading) in _QUERY_PAGES.items():
+        documented = _documented_query_keys(path)
+        if documented != returned:
+            drift[name] = {
+                "undocumented": sorted(returned - documented),
+                "not returned": sorted(documented - returned),
+            }
+    assert not drift, f"query() result keys drifted from the docs: {drift}"
+
+
+def _documented_return_keys(name: str) -> set[str]:
+    """The keys the API reference's ``**Returns**`` block names for *name*."""
+    text = (DOCS / "reference" / "api.mdx").read_text(encoding="utf-8")
+    block = text[text.index(f"#### `{name}("):]
+    returns = re.search(r"\*\*Returns\*\* `dict`(.*?)\n\n", block, re.DOTALL)
+    assert returns is not None, f"api.mdx has no Returns block for {name}"
+    return set(_RESULT_KEY_RE.findall(returns.group(1)))
+
+
+def test_finding_return_keys_match_the_reference(tmp_path):
+    """The two finding surfaces must name every key they hand back.
+
+    A Returns list reads as closed, so a key it leaves out is one a caller
+    finds only by reading the source. ``model_lineage`` is the independence
+    signal on a written finding, and ``lines_skipped`` is the disclosure
+    that evidence dropped out of the counts, the case that key exists to
+    make visible.
+    """
+    root_key = _bootstrap_key(tmp_path, "lab_a.key")
+    with mareforma.open(tmp_path, key_path=root_key) as graph:
+        result = graph.assert_finding(
+            _prop(), _pred(), _est(),
+            data_id="dataset_alpha", generated_by="analyst/a",
+        )
+
+    surfaces = {
+        "assert_finding": set(result),
+        "proposition_status": set(result["proposition_status"]),
+    }
+    drift = {}
+    for name, returned in surfaces.items():
+        documented = _documented_return_keys(name)
+        if documented != returned:
+            drift[name] = {
+                "undocumented": sorted(returned - documented),
+                "not returned": sorted(documented - returned),
+            }
+    assert not drift, f"api.mdx return keys drifted from the code: {drift}"
+
+
+def test_query_parameters_documented_in_both_references():
+    """A parameter no reference names is a filter nobody passes.
+
+    ``refutation_filter`` is the refutation-state filter; an agent reading a
+    table without it queries everything and filters by hand.
+    """
+    import inspect
+
+    parameters = list(inspect.signature(mareforma.EpistemicGraph.query).parameters)[1:]
+    absent = {}
+    for name, (path, heading) in _QUERY_PAGES.items():
+        section = _section(path.read_text(encoding="utf-8"), heading)
+        missing = [p for p in parameters if f"`{p}`" not in section]
+        if missing:
+            absent[name] = missing
+    assert not absent, f"query() parameters missing from the docs: {absent}"
 
 
 _GRAPH_CALL_RE = re.compile(r"graph\.([A-Za-z_][A-Za-z0-9_]*)\(")

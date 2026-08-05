@@ -465,10 +465,11 @@ def restore(
     ------
     mareforma.db.RestoreError
         With a ``.kind`` field naming the failure mode: graph_not_empty,
-        toml_not_found, toml_malformed, enrollment_unverified,
-        claim_unverified, mode_inconsistent, orphan_signer,
-        rekor_inclusion_invalid, policy_unverified, policy_absent, or
-        policy_unverifiable.
+        toml_not_found, toml_unreadable, toml_malformed,
+        enrollment_unverified, claim_unverified, trust_row_rejected,
+        mode_inconsistent, orphan_signer, rekor_inclusion_invalid,
+        policy_unverified, policy_absent, policy_unverifiable, or
+        policy_violation.
     """
     from mareforma.db import restore as _restore
     return _restore(
