@@ -38,6 +38,18 @@ class NoRegisteredPlanError(TrustError):
     """
 
 
+class PlanNotRetirableError(TrustError):
+    """A plan was offered for retirement that must not be retired.
+
+    Raised by :meth:`EpistemicGraph.retire_plan` in three cases: the plan's
+    stored rule still reconstructs into a runnable gate (retirement is the
+    recovery for a rule the gates cannot run, not a way to withdraw evidence a
+    reader dislikes); the plan is already retired, so a second retirement would
+    let the operator shop for the alpha that reads best; or the retirement would
+    recover no evidence line, which would spend the one retirement for nothing.
+    """
+
+
 class FindingPlanForkError(TrustError):
     """A finding already exists for (content_id, data_id) under a different plan.
 
