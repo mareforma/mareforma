@@ -6,8 +6,11 @@ immutable predicate. These pin that _normalize_evidence rejects bad input.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+import mareforma
 from mareforma.db.core import _normalize_evidence
 
 
@@ -35,6 +38,28 @@ class TestEvidenceValidation:
         with pytest.raises(ValueError):
             _normalize_evidence({"imprecision": 1})
 
+    def test_non_bool_upgrade_flag_rejected(self) -> None:
+        with pytest.raises(ValueError, match="large_effect"):
+            _normalize_evidence({"large_effect": "probably"})
+
+    def test_bare_string_reporting_compliance_rejected(self) -> None:
+        # list("CONSORT") splats into seven single-letter guidelines, and the
+        # claim signs compliance with all of them.
+        with pytest.raises(ValueError, match="reporting_compliance"):
+            _normalize_evidence({"reporting_compliance": "CONSORT"})
+
+    def test_non_string_reporting_compliance_entry_rejected(self) -> None:
+        with pytest.raises(ValueError, match="reporting_compliance"):
+            _normalize_evidence({"reporting_compliance": ["CONSORT", 7]})
+
+    def test_non_string_rationale_value_rejected(self) -> None:
+        with pytest.raises(ValueError, match="rationale"):
+            _normalize_evidence({"rationale": {"risk_of_bias": 3}})
+
+    def test_non_string_study_design_rejected(self) -> None:
+        with pytest.raises(ValueError, match="study_design"):
+            _normalize_evidence({"study_design": {"kind": "rct"}})
+
     def test_valid_evidence_normalizes(self) -> None:
         out = _normalize_evidence(
             {"grounding_score": 0.8, "grounding_rationale": "read the cited file"}
@@ -48,3 +73,10 @@ class TestEvidenceValidation:
         assert _normalize_evidence(None) == _normalize_evidence({})
         out = _normalize_evidence(None)
         assert out["risk_of_bias"] == 0 and out["large_effect"] is False
+
+    def test_assert_claim_refuses_before_writing(self, tmp_path: Path) -> None:
+        """The refusal happens on the public path, with no claim written."""
+        with mareforma.open(tmp_path) as graph:
+            with pytest.raises(ValueError, match="reporting_compliance"):
+                graph.assert_claim("x", evidence={"reporting_compliance": "CONSORT"})
+            assert graph.query() == []

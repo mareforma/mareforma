@@ -91,10 +91,10 @@ def _serialize_predicate_payload(payload: dict | None) -> str:
 
     Canonical JSON (sorted keys, NFC Unicode, no whitespace, ``allow_nan=False``)
     so the column round-trips byte-stably across writers. ``None`` becomes
-    the empty string to match the column's ``DEFAULT ''`` and keep
-    Callers that never pass this kwarg write the same bytes
-    they did before. The active signed envelope is the authoritative copy
-    of the predicate body; this column is the queryable denormalisation.
+    the empty string to match the column's ``DEFAULT ''`` so callers that
+    never pass this kwarg write the same bytes they did before. The active
+    signed envelope is the authoritative copy of the predicate body; this
+    column is the queryable denormalisation.
 
     Raises :class:`TypeError` if payload is non-dict. Adapters MUST pass
     a JSON-object-shaped dict (the typed predicate body); passing a
@@ -109,7 +109,7 @@ def _serialize_predicate_payload(payload: dict | None) -> str:
         raise TypeError(
             f"predicate_payload must be a dict (the typed predicate body), "
             f"got {type(payload).__name__}. Wrap non-dict values in a dict "
-            "with a documented key, e.g. {{'value': <your value>}}."
+            "with a documented key, e.g. {'value': <your value>}."
         )
     from .._canonical import canonicalize
     return canonicalize(payload).decode("utf-8")
@@ -709,6 +709,10 @@ def _normalize_evidence(evidence: dict | None) -> dict:
     dict, and the reporting_compliance list. ``study_design`` and the
     grounding snapshot are carried only when present, so a claim without
     them produces byte-identical canonical bytes to a legacy claim.
+
+    Every field is type-checked here, because every field signs into the
+    immutable predicate and nothing downstream re-reads it: a wrong type is
+    refused with a ValueError rather than coerced into a permanent record.
     """
     src = evidence or {}
     out: dict = {}
@@ -722,11 +726,44 @@ def _normalize_evidence(evidence: dict | None) -> dict:
             )
         out[domain] = val
     for flag in _EVIDENCE_UPGRADE_FLAGS:
-        out[flag] = src.get(flag, False)
-    out["rationale"] = dict(src.get("rationale") or {})
-    out["reporting_compliance"] = list(src.get("reporting_compliance") or ())
-    if src.get("study_design") is not None:
-        out["study_design"] = src["study_design"]
+        val = src.get(flag, False)
+        if not isinstance(val, bool):
+            raise ValueError(
+                f"evidence upgrade flag {flag!r} must be a bool, got {val!r}: "
+                "a non-flag value must not sign into the immutable predicate"
+            )
+        out[flag] = val
+    rationale = src.get("rationale") or {}
+    if not isinstance(rationale, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in rationale.items()
+    ):
+        raise ValueError(
+            f"evidence rationale must be a dict of str to str, got "
+            f"{rationale!r}: an unreadable justification must not sign into "
+            "the immutable predicate"
+        )
+    out["rationale"] = dict(rationale)
+    compliance = src.get("reporting_compliance") or ()
+    # A bare str is the silent case: list("CONSORT") splats into seven
+    # single-letter guidelines and signs compliance with every one of them.
+    if not isinstance(compliance, (list, tuple)) or not all(
+        isinstance(item, str) for item in compliance
+    ):
+        raise ValueError(
+            f"evidence reporting_compliance must be a list of guideline "
+            f"names, got {compliance!r}: pass ['CONSORT'], not 'CONSORT', so "
+            "a permanent record does not claim compliance the asserter never "
+            "meant"
+        )
+    out["reporting_compliance"] = list(compliance)
+    study_design = src.get("study_design")
+    if study_design is not None:
+        if not isinstance(study_design, str):
+            raise ValueError(
+                f"evidence study_design must be a str, got {study_design!r}: "
+                "a non-string value must not sign into the immutable predicate"
+            )
+        out["study_design"] = study_design
     if src.get("grounding_score") is not None:
         raw = src["grounding_score"]
         if isinstance(raw, bool) or not isinstance(raw, (int, float)):
@@ -789,12 +826,15 @@ _CLAIM_ID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
 
-# Cap on the number of DISTINCT claims the acyclicity walk may reach before it
-# gives up. With node-dedup the walk always terminates, so this is not a
-# correctness bound, it is a runaway guard against an absurdly large reachable
-# set. Generous: a legitimate fan-out in a mature graph can reach many thousands
-# of claims at shallow depth, and exceeding the cap is reported as
-# GraphTooLargeError, never as a cycle.
+# Cap on the number of DISTINCT nodes the acyclicity walk may reach before it
+# gives up. It is the LIMIT on the walk's recursive CTE, so the walk stops here
+# rather than being measured after the fact. With node-dedup the walk always
+# terminates, so this is not a correctness bound, it is a runaway guard against
+# an absurdly large reachable set. A node is a claim_id or an external
+# reference carried in a reached claim's supports_json. Generous: a legitimate
+# fan-out in a mature graph can reach many thousands of claims at shallow
+# depth, and exceeding the cap is reported as GraphTooLargeError, never as a
+# cycle.
 _REACHABLE_CLAIM_CAP = 100_000
 
 
@@ -955,9 +995,15 @@ def _check_no_cycle(
     stored cycle exists among other claims (a DB-write adversary could
     plant one), and such a stored cycle never turns into a spurious verdict
     here, only ``new_claim_id`` being reachable from the seeds is a cycle.
-    The reachable-set size is bounded by ``_REACHABLE_CLAIM_CAP`` as a
-    runaway guard: exceeding it raises :class:`GraphTooLargeError` (a distinct
-    condition, never a cycle), so a legitimate wide fan-out is not mislabeled.
+    The walk itself stops at ``_REACHABLE_CLAIM_CAP`` nodes: the ``reach``
+    body carries a ``LIMIT`` of one past the cap, which short-circuits row
+    generation, so a runaway graph costs the cap rather than its full size.
+    Coming back with that extra row means the walk was truncated and raises
+    :class:`GraphTooLargeError` (a distinct condition, never a cycle), so a
+    legitimate wide fan-out is not mislabeled. ``hit`` is checked first, so a
+    cycle inside the truncated prefix is still reported as a cycle; one whose
+    target sits past the truncation point reads as GraphTooLargeError. Either
+    way the write is refused.
     """
     seeds = [s for s in supports if _is_claim_id(s)]
     if not seeds:
@@ -979,13 +1025,14 @@ def _check_no_cycle(
               JOIN json_each(c.supports_json) je
              WHERE c.supports_json IS NOT NULL
                AND json_valid(c.supports_json)
+            LIMIT ?
         )
         SELECT
             MAX(CASE WHEN node = ? THEN 1 ELSE 0 END) AS hit,
             COUNT(*) AS visited
         FROM reach
         """,
-        (json.dumps(seeds), new_claim_id),
+        (json.dumps(seeds), _REACHABLE_CLAIM_CAP + 1, new_claim_id),
     ).fetchone()
 
     if row is not None and row["hit"]:
@@ -996,9 +1043,10 @@ def _check_no_cycle(
     if row is not None and (row["visited"] or 0) > _REACHABLE_CLAIM_CAP:
         raise GraphTooLargeError(
             f"supports[] reaches more than {_REACHABLE_CLAIM_CAP} distinct "
-            "upstream claims; the acyclicity walk gave up. This is not a cycle "
-            "(the walk terminates on cycles), the reachable graph is "
-            "extraordinarily large. Investigate before relaxing the cap."
+            "upstream nodes; the acyclicity walk stopped at the cap. This is "
+            "not a cycle the walk found, the reachable graph is "
+            "extraordinarily large and nothing past the cap was walked. "
+            "Investigate before relaxing the cap."
         )
 
 
@@ -1539,9 +1587,12 @@ def add_claim(
             ),
         )
         # Maintain claim_supports rebuildable cache inside the same
-        # transaction so the edge rows and the main-claim INSERT
-        # commit atomically. Cache is auto-rebuilt on next open if
-        # maintenance ever drifts.
+        # transaction so the edge rows and the main-claim INSERT commit
+        # together on the normal path. The cache is an attached WAL
+        # database, so SQLite commits it separately and a crash between
+        # the two commits can write one without the other. That torn
+        # write moves the claim count out of step with the stamped one,
+        # and the next open rebuilds the cache.
         from mareforma import _supports
         _supports.record_supports_edges(conn, claim_id, supports)
         if _own_transaction:
@@ -1601,6 +1652,7 @@ def add_claim(
     if rekor_enabled:
         transparency_logged = _attempt_rekor_saga(
             conn,
+            root,
             claim_id=claim_id,
             envelope=envelope,
             signer=signer,
@@ -1912,12 +1964,19 @@ def _maybe_update_replicated_unlocked(
     # the two statements. The row-level lock SQLite acquires during
     # UPDATE is the actual gate; the pre-SELECT is a cheap fast-path.
     # One JSON-array variable for the peers, same reason as the SELECT above.
-    conn.execute(
-        "UPDATE claims SET support_level = 'REPLICATED', updated_at = ? "
-        "WHERE claim_id IN (SELECT value FROM json_each(?)) "
-        "AND status = 'open' AND t_invalid IS NULL",
-        (_now(), json.dumps(peer_ids)),
-    )
+    # The support_level guard keeps the write to the rows that actually change
+    # level, matching record_replication_verdict. Peers already at REPLICATED
+    # stay in the candidate set (they still corroborate) but must not have their
+    # updated_at re-dated to this insert: that field is a claim's end time on
+    # every export surface.
+    with _promotion_window(conn):
+        conn.execute(
+            "UPDATE claims SET support_level = 'REPLICATED', updated_at = ? "
+            "WHERE claim_id IN (SELECT value FROM json_each(?)) "
+            "AND support_level = 'PRELIMINARY' "
+            "AND status = 'open' AND t_invalid IS NULL",
+            (_now(), json.dumps(peer_ids)),
+        )
 
 
 def _maybe_update_replicated(
@@ -2983,6 +3042,7 @@ def list_unresolved_claims(conn: sqlite3.Connection) -> list[dict]:
 
 def _attempt_rekor_saga(
     conn: sqlite3.Connection,
+    root: Path,
     *,
     claim_id: str,
     envelope: dict,
@@ -3003,7 +3063,10 @@ def _attempt_rekor_saga(
     ----------
     1. The claim is already INSERTed with ``transparency_logged=0``
        (the caller's responsibility, before this helper runs).
-    2. Submit the envelope to Rekor; on failure, return 0.
+    2. Submit the envelope to Rekor. On failure, warn and append a
+       ``rekor_submit`` fail event to ``health.jsonl`` (so an outage is
+       visible in ``mareforma activity``, not only in a per-claim trust
+       map), then return 0.
     3. **(opt-in) Verify the inclusion proof.** If the caller supplied
        ``rekor_log_pubkey_pem``, re-fetch the entry via
        :func:`signing.fetch_inclusion_proof` and pass the full body to
@@ -3048,6 +3111,17 @@ def _attempt_rekor_saga(
                 "transparency_logged=0; call "
                 "EpistemicGraph.refresh_unsigned() to retry."
             )
+        warnings.warn(
+            f"Rekor submission to {rekor_url} failed for claim {claim_id}. "
+            "The claim is stored and signed, but transparency_logged stays 0, "
+            "which blocks REPLICATED promotion until "
+            "EpistemicGraph.refresh_unsigned() logs it.",
+            stacklevel=2,
+        )
+        from mareforma.health import append_health_event
+        append_health_event(
+            root, "rekor_submit", outcome="fail", claim_id=claim_id,
+        )
         return 0
 
     # Step 3 (opt-in): cryptographic inclusion-proof verification. The
@@ -4760,6 +4834,18 @@ def _read_scan_ceiling(limit: int) -> int:
     return max(limit * 50, 5000)
 
 
+def _require_non_negative_limit(limit: int, surface: str) -> None:
+    """Refuse a negative limit on a read surface.
+
+    Zero is a legitimate boundary (a pager or budget loop that has drained) and
+    returns no rows. A negative limit has no reading: it is a caller's
+    arithmetic mistake, and quietly returning nothing would hide it."""
+    if limit < 0:
+        raise ValueError(
+            f"{surface} limit must be zero or greater, got {limit}."
+        )
+
+
 def _enrolled_generator_condition(prefix: str = "") -> str:
     """SQL for the default read filter's enrolled-generator half.
 
@@ -4789,6 +4875,12 @@ def _scan_ceiling_error(surface: str, ceiling: int, found: int, limit: int):
     )
 
 
+# Returned instead of None when a row is dropped because its signature did not
+# re-verify. A failed re-verification is a tamper signal, not ordinary
+# filtering, and the caller counts the two apart.
+_VERIFY_EXCLUDED = object()
+
+
 def _read_path_row(
     conn: sqlite3.Connection,
     row,
@@ -4798,16 +4890,17 @@ def _read_path_row(
     include_unverified: bool,
     trust_domain: tuple,
     verify_cache: dict,
-) -> dict | None:
-    """Project one claims row for a read surface, or None to exclude it.
+) -> dict | None | object:
+    """Project one claims row for a read surface, or exclude it.
 
     Shared by :func:`query_claims` and :func:`search_claims` so the read-path
     verification cannot drift between the two surfaces. Attaches
     ``generator_enrolled`` and ``validator_reputation``; drops an
-    unenrolled-generator PRELIMINARY row unless ``include_unverified``; drops a
-    REPLICATED / ESTABLISHED row whose signature does not re-verify (independent
-    of ``include_unverified``, which only relaxes the PRELIMINARY generator
-    filter, never the high-trust signature check); and attaches the trust-domain
+    unenrolled-generator PRELIMINARY row unless ``include_unverified`` (returns
+    ``None``); drops a REPLICATED / ESTABLISHED row whose signature does not
+    re-verify (returns :data:`_VERIFY_EXCLUDED`, independent of
+    ``include_unverified``, which only relaxes the PRELIMINARY generator filter,
+    never the high-trust signature check); and attaches the trust-domain
     disclosure to an ESTABLISHED row.
     """
     d = dict(row)
@@ -4824,7 +4917,7 @@ def _read_path_row(
     ):
         return None
     if not _row_verified_on_read(conn, d, verify_cache):
-        return None
+        return _VERIFY_EXCLUDED
     if d["support_level"] == "ESTABLISHED":
         d["single_trust_domain"], d["trust_domain_root"] = trust_domain
     return d
@@ -4836,6 +4929,7 @@ def _project_verified_rows(
     *,
     limit: int,
     include_unverified: bool,
+    on_verify_excluded: Callable[[int], None] | None = None,
 ) -> tuple[list[dict], int]:
     """Filter and project rows for a read surface, stopping at ``limit`` survivors.
 
@@ -4846,16 +4940,28 @@ def _project_verified_rows(
     cursor: the early break then stops fetching, so the common path pulls a
     handful of rows rather than the whole scan ceiling.
 
+    Rows dropped by verify-on-read are counted and reported: a WARNING names
+    the count, and *on_verify_excluded* (when given) receives it, so a tampered
+    row registers as a signal instead of as a shorter list. Without this the
+    only trace of a tamper on an enumerating surface is a row that is not
+    there, indistinguishable from a claim that never existed.
+
     Returns ``(survivors, scanned)``. ``scanned`` is how many rows were pulled,
     which the caller compares against the scan ceiling to tell "that is all
     there is" from "the scan ran out before the survivors did".
     """
+    if limit <= 0:
+        # The loop appends a survivor before testing the stop condition, so it
+        # would hand back one row for a limit of zero. Nothing was asked for:
+        # return nothing, and skip the per-call reputation and trust-domain work.
+        return [], 0
     reputation = _compute_validator_reputation(conn)
     enrolled_keyids = _enrolled_validator_keyids(conn)
     trust_domain = _trust_domain_disclosure(conn)
     verify_cache: dict = {}
     results: list[dict] = []
     scanned = 0
+    excluded = 0
     for row in rows:
         scanned += 1
         d = _read_path_row(
@@ -4864,10 +4970,22 @@ def _project_verified_rows(
             include_unverified=include_unverified, trust_domain=trust_domain,
             verify_cache=verify_cache,
         )
-        if d is not None:
+        if d is _VERIFY_EXCLUDED:
+            excluded += 1
+        elif d is not None:
             results.append(d)
             if len(results) >= limit:
                 break
+    if excluded:
+        import logging
+        logging.getLogger("mareforma").warning(
+            "Read excluded %s claim(s) whose signature did not re-verify; "
+            "call get_claim() or `mareforma verify` on the affected claim_id "
+            "for the detail.",
+            excluded,
+        )
+        if on_verify_excluded is not None:
+            on_verify_excluded(excluded)
     return results, scanned
 
 
@@ -4881,13 +4999,15 @@ def query_claims(
     include_unverified: bool = False,
     include_invalidated: bool = False,
     refutation_filter: str | None = None,
+    on_verify_excluded: Callable[[int], None] | None = None,
 ) -> list[dict]:
     """Return claims ordered by support_level (desc) then recency (desc).
 
     Parameters
     ----------
     limit:
-        Maximum number of claims to return. Default 10.
+        Maximum number of claims to return. Default 10. Zero returns no
+        claims; a negative limit raises ``ValueError``.
     text:
         Optional substring filter: case-insensitive LIKE match on claim text.
     min_support:
@@ -4906,6 +5026,11 @@ def query_claims(
         excluded: a contradiction_verdicts row from an enrolled
         validator has marked them invalid. Pass ``True`` for audit /
         history queries where you want to see contradicted claims too.
+    on_verify_excluded:
+        Optional callback receiving the number of rows this call dropped
+        because their signature did not re-verify. No flag surfaces those
+        rows, so this is how a caller learns a result is short because the
+        graph was tampered with rather than because it is empty.
 
     Each returned dict carries the standard claim columns plus two
     reputation projections computed at query time:
@@ -4917,6 +5042,8 @@ def query_claims(
         ``signature_bundle`` is signed by an enrolled validator. False
         for unsigned claims and for signatures by unenrolled keys.
     """
+    _require_non_negative_limit(limit, "query")
+
     conditions: list[str] = []
     params: list = []
 
@@ -5034,6 +5161,7 @@ def query_claims(
     # bound for the adversarial drain path instead of the per-call materialisation.
     results, scanned = _project_verified_rows(
         conn, cursor, limit=limit, include_unverified=include_unverified,
+        on_verify_excluded=on_verify_excluded,
     )
     if scanned >= ceiling and len(results) < limit:
         raise _scan_ceiling_error("query", ceiling, len(results), limit)
@@ -5119,21 +5247,25 @@ def search_claims(
     classification: str | None = None,
     include_unverified: bool = False,
     include_invalidated: bool = False,
+    on_verify_excluded: Callable[[int], None] | None = None,
 ) -> list[dict]:
     """FTS5-ranked search over claim text.
 
     Returns claim dicts ordered by FTS5 rank (best match first). Each
     dict carries the same projection as :func:`query_claims`:
     ``validator_reputation`` and ``generator_enrolled`` are attached
-    per row, and ``include_unverified`` / ``include_invalidated``
-    filters apply identically.
+    per row, and ``include_unverified`` / ``include_invalidated`` /
+    ``on_verify_excluded`` behave identically.
 
     The ``query`` string is passed through to SQLite's FTS5 MATCH
     operator. FTS5 syntax (phrase matching with double quotes, prefix
     search with trailing ``*``, ``AND``/``OR``/``NOT`` operators, and
     parentheses) works as documented in SQLite. Pure-wildcard queries
-    are refused (see :func:`_validate_fts5_query`).
+    are refused (see :func:`_validate_fts5_query`). ``limit`` follows
+    :func:`query_claims`: zero returns no claims, a negative limit raises
+    ``ValueError``.
     """
+    _require_non_negative_limit(limit, "search")
     fts_query = _validate_fts5_query(query)
 
     if min_support is not None and min_support not in VALID_SUPPORT_LEVELS:
@@ -5193,6 +5325,7 @@ def search_claims(
     # survivors, so the common path fetches a handful, not the whole ceiling.
     results, scanned = _project_verified_rows(
         conn, cursor, limit=limit, include_unverified=include_unverified,
+        on_verify_excluded=on_verify_excluded,
     )
     if scanned >= ceiling and len(results) < limit:
         raise _scan_ceiling_error("search", ceiling, len(results), limit)

@@ -3,9 +3,21 @@
 from __future__ import annotations
 
 import ast
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
+
+# Fixtures that simulate a legacy schema drop a column, which SQLite only
+# learned in 3.35. ``open_db`` accepts down to 3.30, where the statement is a
+# syntax error, so those fixtures skip on a build inside the supported window
+# instead of failing the suite.
+_requires_drop_column = pytest.mark.skipif(
+    sqlite3.sqlite_version_info < (3, 35),
+    reason="ALTER TABLE ... DROP COLUMN needs SQLite >= 3.35",
+)
 
 
 def _bootstrap_key(tmp_path: Path, name: str = "mareforma.key") -> Path:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import subprocess
 import sys
+import unicodedata
 
 import pytest
 
@@ -262,9 +263,12 @@ class TestNfcKeyCollision:
         can find the source of the collision in their data."""
         composed = "café"
         decomposed = "café"
+        assert composed != decomposed  # different code points
         with pytest.raises(ValueError) as exc_info:
             canonicalize({composed: 1, decomposed: 2})
         msg = str(exc_info.value)
-        # The NFC-normalized target appears in the message; at least
-        # one of the originals appears in repr form.
-        assert "collide" in msg
+        # The NFC-normalized target and both originals appear in
+        # repr form, so the caller can pinpoint the colliding pair.
+        assert repr(unicodedata.normalize("NFC", composed)) in msg
+        assert repr(composed) in msg
+        assert repr(decomposed) in msg

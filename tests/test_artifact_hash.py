@@ -196,18 +196,25 @@ class TestReplicatedHashGate:
         assert open_graph.get_claim(a)["support_level"] == "PRELIMINARY"
         assert open_graph.get_claim(b)["support_level"] == "PRELIMINARY"
 
-    def test_mismatched_hashes_block_replicated(self, open_graph) -> None:
+    def test_mismatched_hashes_do_not_block_replicated(
+        self, open_graph, tmp_path,
+    ) -> None:
+        """Only EQUAL non-NULL hashes collapse: a mismatched pair is exactly
+        what the clause lets through, so promotion runs on signer convergence.
+        Distinct signers supply the WHO axis, leaving the hashes as the only
+        thing under test."""
+        sa, sb = _two_signers(tmp_path)
         upstream = open_graph.assert_claim("upstream finding", generated_by="seed", seed=True)
         a = open_graph.assert_claim(
             "agent A finding", supports=[upstream],
-            generated_by="agent-A", artifact_hash=HASH_A,
+            generated_by="agent-A", artifact_hash=HASH_A, signer=sa,
         )
         b = open_graph.assert_claim(
             "agent B finding", supports=[upstream],
-            generated_by="agent-B", artifact_hash=HASH_B,
+            generated_by="agent-B", artifact_hash=HASH_B, signer=sb,
         )
-        assert open_graph.get_claim(a)["support_level"] == "PRELIMINARY"
-        assert open_graph.get_claim(b)["support_level"] == "PRELIMINARY"
+        assert open_graph.get_claim(a)["support_level"] == "REPLICATED"
+        assert open_graph.get_claim(b)["support_level"] == "REPLICATED"
 
     def test_one_side_missing_hash_falls_back_to_identity_only(
         self, open_graph, tmp_path,
@@ -282,44 +289,54 @@ class TestReplicatedHashGate:
         assert open_graph.get_claim(b)["support_level"] == "REPLICATED"
         assert open_graph.get_claim(c)["support_level"] == "REPLICATED"
 
-    def test_same_agent_same_hash_does_not_promote(self, open_graph) -> None:
-        """The hash gate must not bypass the same-agent independence check.
-        Identity convergence requires distinct generated_by, full stop."""
+    def test_same_agent_label_does_not_block_replicated(
+        self, open_graph, tmp_path,
+    ) -> None:
+        """``generated_by`` is a display label and plays no part in the gate: a
+        pair carrying the same label still promotes on distinct signers and
+        non-colliding hashes. The independence axis is the asserter_keyid, so
+        the label must neither grant nor withhold a promotion."""
+        sa, sb = _two_signers(tmp_path)
         upstream = open_graph.assert_claim("upstream finding", generated_by="seed", seed=True)
         a = open_graph.assert_claim(
             "first finding", supports=[upstream],
-            generated_by="agent-A", artifact_hash=HASH_A,
+            generated_by="agent-A", artifact_hash=HASH_A, signer=sa,
         )
         b = open_graph.assert_claim(
             "second finding from same agent", supports=[upstream],
-            generated_by="agent-A", artifact_hash=HASH_A,
+            generated_by="agent-A", artifact_hash=HASH_B, signer=sb,
         )
-        assert open_graph.get_claim(a)["support_level"] == "PRELIMINARY"
-        assert open_graph.get_claim(b)["support_level"] == "PRELIMINARY"
+        assert open_graph.get_claim(a)["support_level"] == "REPLICATED"
+        assert open_graph.get_claim(b)["support_level"] == "REPLICATED"
 
-    def test_mark_claim_resolved_reapplies_hash_gate(self, open_graph) -> None:
+    def test_mark_claim_resolved_reapplies_hash_gate(
+        self, open_graph, tmp_path,
+    ) -> None:
         """When a DOI resolves late, the deferred REPLICATED re-check must
-        consult the row's persisted artifact_hash — not bypass the gate."""
+        consult the row's persisted artifact_hash — not bypass the gate. The
+        peers carry distinct signers, so only the shared hash can hold them
+        back."""
+        sa, sb = _two_signers(tmp_path)
         # Peer A converges on upstream with HASH_A (no DOIs → resolved).
         upstream = open_graph.assert_claim("upstream", generated_by="seed", seed=True)
         a = open_graph.assert_claim(
             "peer A", supports=[upstream],
-            generated_by="agent-A", artifact_hash=HASH_A,
+            generated_by="agent-A", artifact_hash=HASH_A, signer=sa,
         )
-        # Insert peer B with an unresolved flag forced on, hash=HASH_B.
+        # Insert peer B with an unresolved flag forced on, hash=HASH_A.
         # We use the db layer directly so we can fix unresolved=True without
         # actually plumbing a fake DOI through the resolver.
         b = _db.add_claim(
             open_graph._conn, open_graph._root, "peer B",
             supports=[upstream], generated_by="agent-B",
-            artifact_hash=HASH_B, unresolved=True,
+            artifact_hash=HASH_A, unresolved=True, signer=sb,
         )
-        # Confirm B is held back by unresolved AND would also be blocked by hash.
+        # Confirm B is held back by unresolved AND would also collapse on hash.
         assert open_graph.get_claim(b)["support_level"] == "PRELIMINARY"
         assert open_graph.get_claim(a)["support_level"] == "PRELIMINARY"
         # Clear unresolved flag — should re-fire REPLICATED check.
         _db.mark_claim_resolved(open_graph._conn, open_graph._root, b)
-        # Hashes still mismatch → still PRELIMINARY.
+        # Hashes are EQUAL → the pair collapses → still PRELIMINARY.
         assert open_graph.get_claim(b)["support_level"] == "PRELIMINARY"
         assert open_graph.get_claim(a)["support_level"] == "PRELIMINARY"
 

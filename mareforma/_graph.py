@@ -195,6 +195,10 @@ class EpistemicGraph:
         # promotions stopped firing. Track the count here so it can be
         # asserted in tests and surfaced in dashboards.
         self._convergence_errors = 0
+        # Rows a read dropped because their signature did not re-verify. The
+        # enumerating surfaces cannot return them, so without this counter a
+        # tampered graph reads as a graph with fewer claims.
+        self._read_verify_exclusions = 0
 
         # Bootstrap-of-trust: the first key opened against a fresh project's
         # graph.db auto-enrolls as the root validator. This is silent and
@@ -643,6 +647,7 @@ class EpistemicGraph:
             include_unverified=include_unverified,
             include_invalidated=include_invalidated,
             refutation_filter=refutation_filter,
+            on_verify_excluded=self._record_verify_exclusions,
         )
 
     @_synchronized
@@ -785,6 +790,20 @@ class EpistemicGraph:
             limit=limit,
             include_unverified=include_unverified,
             include_invalidated=include_invalidated,
+            on_verify_excluded=self._record_verify_exclusions,
+        )
+
+    def _record_verify_exclusions(self, n: int) -> None:
+        """Record that a read dropped *n* rows failing signature re-verification.
+
+        Counted on the graph and appended to the health log, because no read
+        surface can show the rows themselves: without this a tampered graph
+        answers a query with a shorter list and nothing else.
+        """
+        self._read_verify_exclusions += n
+        from mareforma import health as _health
+        _health.append_health_event(
+            self._root, "read_verify_excluded", outcome="fail", n=n,
         )
 
     # ------------------------------------------------------------------
@@ -2614,194 +2633,195 @@ class EpistemicGraph:
         public_key = self._signer.public_key()
         current_keyid = _signing.public_key_id(public_key)
 
-        for claim in unlogged:
-            cid = claim["claim_id"]
-            try:
-                envelope = json.loads(claim["signature_bundle"])
-            except (json.JSONDecodeError, TypeError):
-                warnings.warn(
-                    f"Claim {cid} has a malformed signature_bundle; "
-                    "skipping during refresh_unsigned.",
-                    stacklevel=2,
-                )
-                still_unlogged += 1
-                continue
-
-            # Key-rotation guard. If the user ran `mareforma bootstrap
-            # --overwrite` since the claim was signed, this graph's signer
-            # cannot re-submit on the old key's behalf. Rekor would reject
-            # the public-key vs signature mismatch every time; warn and
-            # skip so the operator notices instead of retrying forever.
-            try:
-                bundle_keyid = envelope["signatures"][0]["keyid"]
-            except (KeyError, IndexError, TypeError):
-                warnings.warn(
-                    f"Claim {cid} signature_bundle has no keyid; skipping.",
-                    stacklevel=2,
-                )
-                still_unlogged += 1
-                continue
-            if bundle_keyid != current_keyid:
-                warnings.warn(
-                    f"Claim {cid} was signed by keyid {bundle_keyid[:12]}… "
-                    f"but the current signer is {current_keyid[:12]}…. The "
-                    "old key must be restored to re-log this claim. Skipping.",
-                    stacklevel=2,
-                )
-                still_unlogged += 1
-                continue
-
-            # Drift guard. If the row was tampered after assert_claim, the
-            # envelope's signed payload no longer matches the live row.
-            # Submitting it to Rekor would create a permanent public record
-            # of a claim text that no longer exists locally. Compare the
-            # canonical re-derivation of the live row against the envelope
-            # payload bytes.
-            try:
-                payload_bytes = base64.standard_b64decode(envelope["payload"])
-            except (KeyError, TypeError, ValueError):
-                warnings.warn(
-                    f"Claim {cid} signature_bundle payload could not be "
-                    "decoded; skipping during refresh_unsigned.",
-                    stacklevel=2,
-                )
-                still_unlogged += 1
-                continue
-            # The signed payload is a canonical in-toto Statement v1
-            # whose predicate carries the evidence vector. Re-derive
-            # with the row's stored evidence_json so a row+envelope
-            # drift detector compares like-with-like.
-            try:
-                evidence_dict = json.loads(claim.get("evidence_json") or "{}")
-            except (ValueError, TypeError):
-                evidence_dict = {}
-            live_fields = {
-                "claim_id": cid,
-                "text": claim["text"],
-                "classification": claim["classification"],
-                "generated_by": claim["generated_by"],
-                "supports": json.loads(claim.get("supports_json") or "[]"),
-                "contradicts": json.loads(claim.get("contradicts_json") or "[]"),
-                "source_name": claim.get("source_name"),
-                "artifact_hash": claim.get("artifact_hash"),
-                "created_at": claim["created_at"],
-            }
-            # A grounded claim binds its observed_grounding verdict into the
-            # signed payload, so the re-derivation must include it or the drift
-            # guard fires on every untampered grounded row. Add the key only when
-            # present, mirroring the restore path, so pre-observer claims stay
-            # byte-identical.
-            from mareforma.db.restore import _parse_observed_grounding
-
-            observed_grounding = _parse_observed_grounding(
-                claim.get("observed_grounding")
-            )
-            if observed_grounding is not None:
-                live_fields["observed_grounding"] = observed_grounding
-            live_payload = _signing.canonical_statement(live_fields, evidence_dict)
-            if live_payload != payload_bytes:
-                warnings.warn(
-                    f"Claim {cid} row drifted from its signed payload; "
-                    "refusing to log a stale signature to Rekor. "
-                    "Investigate the row vs signature_bundle mismatch.",
-                    stacklevel=2,
-                )
-                still_unlogged += 1
-                continue
-
-            # Step-4-replay path. If the Rekor saga's sidecar INSERT
-            # succeeded but the claims-row UPDATE failed (213 design),
-            # rekor_inclusions has the entry for this claim. Replay the
-            # UPDATE from stored coords instead of submitting again to
-            # avoid creating a duplicate Rekor entry.
-            #
-            # Placed AFTER the drift guard so a tampered row cannot ride
-            # the sidecar replay to re-attach valid Rekor coords to
-            # invalid payload bytes. The drift guard refusal is uniform
-            # across both the replay and re-submit paths, there is no
-            # way to launder a stale signature through this method.
-            saved_entry = _db.get_rekor_inclusion(self._conn, cid)
-            if saved_entry is not None:
-                augmented = _signing.attach_rekor_entry(envelope, saved_entry)
-                new_bundle = json.dumps(
-                    augmented, sort_keys=True, separators=(",", ":"),
-                )
-                _db.mark_claim_logged(
-                    self._conn, self._root, cid, new_bundle,
-                    strict_promotion=self._strict_promotion,
-                )
-                logged_count += 1
-                continue
-
-            logged, entry = _signing.submit_to_rekor(
-                envelope, public_key, rekor_url=self._rekor_url,
-                allow_insecure=self._trust_insecure_rekor,
-            )
-            if logged and entry is not None:
-                # Merkle inclusion-proof verification (opt-in). Mirrors
-                # the submit-time path in db._attempt_rekor_saga: when
-                # the graph was opened with a log pubkey, re-fetch the
-                # entry and cryptographically verify before persisting.
-                # On verification failure, the entry stays unlogged
-                # (the operator can retry once they investigate).
-                proof_entry = None
-                if self._rekor_log_pubkey_pem is not None:
-                    entry_uuid = entry.get("uuid")
-                    if not isinstance(entry_uuid, str) or not entry_uuid:
-                        warnings.warn(
-                            f"Claim {cid} submitted to Rekor but the "
-                            "response had no uuid; cannot verify "
-                            "inclusion proof. Leaving unlogged.",
-                            stacklevel=2,
-                        )
-                        still_unlogged += 1
-                        continue
-                    try:
-                        full_body = _signing.fetch_inclusion_proof(
-                            entry_uuid, self._rekor_url,
-                            allow_insecure=self._trust_insecure_rekor,
-                        )
-                        _signing.verify_rekor_inclusion(
-                            full_body, self._rekor_log_pubkey_pem, envelope,
-                        )
-                        proof_entry = full_body
-                    except _signing.RekorInclusionError as exc:
-                        warnings.warn(
-                            f"Claim {cid} inclusion-proof verification "
-                            f"failed (uuid {entry_uuid}, reason="
-                            f"{exc.reason}). Leaving unlogged; refresh "
-                            "again after investigating.",
-                            stacklevel=2,
-                        )
-                        still_unlogged += 1
-                        continue
-                # Saga step 3 (sidecar write) BEFORE step 4 (row UPDATE),
-                # mirroring _attempt_rekor_saga in db.py. Without this,
-                # a mark_claim_logged failure (drift refusal, transient
-                # IntegrityError, contention) would leave the entry in
-                # Rekor with no local sidecar record; the next
-                # refresh_unsigned would re-submit and create a duplicate
-                # Rekor entry. Writing the sidecar first lets the next
-                # refresh route through the saved_entry replay path
-                # above instead.
-                if not _db._record_rekor_inclusion(
-                    self._conn, cid, entry, proof_entry=proof_entry,
-                ):
-                    # Sidecar write itself failed (rare; emits its own
-                    # warning). Leave the row unlogged, refresh_unsigned
-                    # will retry, accepting the duplicate-Rekor-entry
-                    # risk documented in _record_rekor_inclusion.
+        with self.defer_backup():
+            for claim in unlogged:
+                cid = claim["claim_id"]
+                try:
+                    envelope = json.loads(claim["signature_bundle"])
+                except (json.JSONDecodeError, TypeError):
+                    warnings.warn(
+                        f"Claim {cid} has a malformed signature_bundle; "
+                        "skipping during refresh_unsigned.",
+                        stacklevel=2,
+                    )
                     still_unlogged += 1
                     continue
-                augmented = _signing.attach_rekor_entry(envelope, entry)
-                new_bundle = json.dumps(
-                    augmented, sort_keys=True, separators=(",", ":"),
+
+                # Key-rotation guard. If the user ran `mareforma bootstrap
+                # --overwrite` since the claim was signed, this graph's signer
+                # cannot re-submit on the old key's behalf. Rekor would reject
+                # the public-key vs signature mismatch every time; warn and
+                # skip so the operator notices instead of retrying forever.
+                try:
+                    bundle_keyid = envelope["signatures"][0]["keyid"]
+                except (KeyError, IndexError, TypeError):
+                    warnings.warn(
+                        f"Claim {cid} signature_bundle has no keyid; skipping.",
+                        stacklevel=2,
+                    )
+                    still_unlogged += 1
+                    continue
+                if bundle_keyid != current_keyid:
+                    warnings.warn(
+                        f"Claim {cid} was signed by keyid {bundle_keyid[:12]}… "
+                        f"but the current signer is {current_keyid[:12]}…. The "
+                        "old key must be restored to re-log this claim. Skipping.",
+                        stacklevel=2,
+                    )
+                    still_unlogged += 1
+                    continue
+
+                # Drift guard. If the row was tampered after assert_claim, the
+                # envelope's signed payload no longer matches the live row.
+                # Submitting it to Rekor would create a permanent public record
+                # of a claim text that no longer exists locally. Compare the
+                # canonical re-derivation of the live row against the envelope
+                # payload bytes.
+                try:
+                    payload_bytes = base64.standard_b64decode(envelope["payload"])
+                except (KeyError, TypeError, ValueError):
+                    warnings.warn(
+                        f"Claim {cid} signature_bundle payload could not be "
+                        "decoded; skipping during refresh_unsigned.",
+                        stacklevel=2,
+                    )
+                    still_unlogged += 1
+                    continue
+                # The signed payload is a canonical in-toto Statement v1
+                # whose predicate carries the evidence vector. Re-derive
+                # with the row's stored evidence_json so a row+envelope
+                # drift detector compares like-with-like.
+                try:
+                    evidence_dict = json.loads(claim.get("evidence_json") or "{}")
+                except (ValueError, TypeError):
+                    evidence_dict = {}
+                live_fields = {
+                    "claim_id": cid,
+                    "text": claim["text"],
+                    "classification": claim["classification"],
+                    "generated_by": claim["generated_by"],
+                    "supports": json.loads(claim.get("supports_json") or "[]"),
+                    "contradicts": json.loads(claim.get("contradicts_json") or "[]"),
+                    "source_name": claim.get("source_name"),
+                    "artifact_hash": claim.get("artifact_hash"),
+                    "created_at": claim["created_at"],
+                }
+                # A grounded claim binds its observed_grounding verdict into the
+                # signed payload, so the re-derivation must include it or the drift
+                # guard fires on every untampered grounded row. Add the key only when
+                # present, mirroring the restore path, so pre-observer claims stay
+                # byte-identical.
+                from mareforma.db.restore import _parse_observed_grounding
+
+                observed_grounding = _parse_observed_grounding(
+                    claim.get("observed_grounding")
                 )
-                _db.mark_claim_logged(self._conn, self._root, cid, new_bundle,
-                                      strict_promotion=self._strict_promotion)
-                logged_count += 1
-            else:
-                still_unlogged += 1
+                if observed_grounding is not None:
+                    live_fields["observed_grounding"] = observed_grounding
+                live_payload = _signing.canonical_statement(live_fields, evidence_dict)
+                if live_payload != payload_bytes:
+                    warnings.warn(
+                        f"Claim {cid} row drifted from its signed payload; "
+                        "refusing to log a stale signature to Rekor. "
+                        "Investigate the row vs signature_bundle mismatch.",
+                        stacklevel=2,
+                    )
+                    still_unlogged += 1
+                    continue
+
+                # Step-4-replay path. If the Rekor saga's sidecar INSERT
+                # succeeded but the claims-row UPDATE failed (213 design),
+                # rekor_inclusions has the entry for this claim. Replay the
+                # UPDATE from stored coords instead of submitting again to
+                # avoid creating a duplicate Rekor entry.
+                #
+                # Placed AFTER the drift guard so a tampered row cannot ride
+                # the sidecar replay to re-attach valid Rekor coords to
+                # invalid payload bytes. The drift guard refusal is uniform
+                # across both the replay and re-submit paths, there is no
+                # way to launder a stale signature through this method.
+                saved_entry = _db.get_rekor_inclusion(self._conn, cid)
+                if saved_entry is not None:
+                    augmented = _signing.attach_rekor_entry(envelope, saved_entry)
+                    new_bundle = json.dumps(
+                        augmented, sort_keys=True, separators=(",", ":"),
+                    )
+                    _db.mark_claim_logged(
+                        self._conn, self._root, cid, new_bundle,
+                        strict_promotion=self._strict_promotion,
+                    )
+                    logged_count += 1
+                    continue
+
+                logged, entry = _signing.submit_to_rekor(
+                    envelope, public_key, rekor_url=self._rekor_url,
+                    allow_insecure=self._trust_insecure_rekor,
+                )
+                if logged and entry is not None:
+                    # Merkle inclusion-proof verification (opt-in). Mirrors
+                    # the submit-time path in db._attempt_rekor_saga: when
+                    # the graph was opened with a log pubkey, re-fetch the
+                    # entry and cryptographically verify before persisting.
+                    # On verification failure, the entry stays unlogged
+                    # (the operator can retry once they investigate).
+                    proof_entry = None
+                    if self._rekor_log_pubkey_pem is not None:
+                        entry_uuid = entry.get("uuid")
+                        if not isinstance(entry_uuid, str) or not entry_uuid:
+                            warnings.warn(
+                                f"Claim {cid} submitted to Rekor but the "
+                                "response had no uuid; cannot verify "
+                                "inclusion proof. Leaving unlogged.",
+                                stacklevel=2,
+                            )
+                            still_unlogged += 1
+                            continue
+                        try:
+                            full_body = _signing.fetch_inclusion_proof(
+                                entry_uuid, self._rekor_url,
+                                allow_insecure=self._trust_insecure_rekor,
+                            )
+                            _signing.verify_rekor_inclusion(
+                                full_body, self._rekor_log_pubkey_pem, envelope,
+                            )
+                            proof_entry = full_body
+                        except _signing.RekorInclusionError as exc:
+                            warnings.warn(
+                                f"Claim {cid} inclusion-proof verification "
+                                f"failed (uuid {entry_uuid}, reason="
+                                f"{exc.reason}). Leaving unlogged; refresh "
+                                "again after investigating.",
+                                stacklevel=2,
+                            )
+                            still_unlogged += 1
+                            continue
+                    # Saga step 3 (sidecar write) BEFORE step 4 (row UPDATE),
+                    # mirroring _attempt_rekor_saga in db.py. Without this,
+                    # a mark_claim_logged failure (drift refusal, transient
+                    # IntegrityError, contention) would leave the entry in
+                    # Rekor with no local sidecar record; the next
+                    # refresh_unsigned would re-submit and create a duplicate
+                    # Rekor entry. Writing the sidecar first lets the next
+                    # refresh route through the saved_entry replay path
+                    # above instead.
+                    if not _db._record_rekor_inclusion(
+                        self._conn, cid, entry, proof_entry=proof_entry,
+                    ):
+                        # Sidecar write itself failed (rare; emits its own
+                        # warning). Leave the row unlogged, refresh_unsigned
+                        # will retry, accepting the duplicate-Rekor-entry
+                        # risk documented in _record_rekor_inclusion.
+                        still_unlogged += 1
+                        continue
+                    augmented = _signing.attach_rekor_entry(envelope, entry)
+                    new_bundle = json.dumps(
+                        augmented, sort_keys=True, separators=(",", ":"),
+                    )
+                    _db.mark_claim_logged(self._conn, self._root, cid, new_bundle,
+                                          strict_promotion=self._strict_promotion)
+                    logged_count += 1
+                else:
+                    still_unlogged += 1
 
         from mareforma import health as _health
         _health.append_health_event(
@@ -2999,6 +3019,24 @@ class EpistemicGraph:
         ``mareforma`` logger for details.
         """
         return self._convergence_errors
+
+    @property
+    def read_verify_exclusions(self) -> int:
+        """Rows :meth:`query` and :meth:`search` dropped as unverifiable.
+
+        A REPLICATED or ESTABLISHED row whose signature does not re-verify
+        is excluded from every enumerating read, and no flag brings it back.
+        The result is a shorter list that reads exactly like a graph missing
+        those claims, so the exclusion is counted here (and appended to
+        ``.mareforma/health.jsonl`` as ``read_verify_excluded``).
+
+        Resets to zero each time the graph is re-opened, and counts only the
+        reads this session made: zero means nothing was excluded from what was
+        read, not that the graph is untampered. A non-zero value means a claim
+        on disk failed re-verification; name it with :meth:`get_claim` or
+        ``mareforma verify`` to see which.
+        """
+        return self._read_verify_exclusions
 
     @_synchronized
     def health(self) -> dict[str, int]:

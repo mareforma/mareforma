@@ -29,6 +29,7 @@ from mareforma.db import (
     open_db,
     update_claim,
 )
+from tests._helpers import _requires_drop_column
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +140,7 @@ class TestOpenDb:
         conn.commit()
         conn.close()
 
+    @_requires_drop_column
     def test_schema_mismatch_points_at_restore_when_toml_exists(
         self, tmp_path: Path,
     ) -> None:
@@ -151,6 +153,7 @@ class TestOpenDb:
             open_db(tmp_path)
         assert "claims.toml" in str(exc.value)
 
+    @_requires_drop_column
     def test_schema_mismatch_admits_when_no_toml_exists(
         self, tmp_path: Path,
     ) -> None:

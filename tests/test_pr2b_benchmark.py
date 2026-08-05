@@ -12,6 +12,7 @@ deterministic, so it is not gated on wall-clock timing (which varies by machine)
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import mareforma
@@ -93,13 +94,16 @@ def test_pr2b_verify_count_is_bounded(
         )
 
 
-def test_pr2b_cache_collapses_a_repeated_row_in_one_walk(tmp_path):
-    """A claim reachable by two provenance paths is verified once, not twice.
+def test_pr2b_cache_collapses_a_repeated_row_in_one_walk(tmp_path, monkeypatch):
+    """One provenance walk verifies each envelope once, however often the
+    node it belongs to is reached.
 
     query_provenance shares one verify cache across the upstream and downstream
-    hydration, so a node that appears in both walks collapses to a single
-    ``(keyid, digest)`` check. This is the case where the cache genuinely saves
-    a redundant verification, measured directly.
+    hydration, so a node reached by two paths costs a single
+    ``(keyid, digest)`` check. The fixture makes the walk actually revisit a
+    node (the anchor is cited by the focal claim directly and through its
+    peers) and gives one signer two high-trust claims, so a count keyed on the
+    signer alone would report a second check that never happened.
     """
     kv = tmp_path / "mareforma.key"
     _signing.bootstrap_key(kv)
@@ -109,30 +113,37 @@ def test_pr2b_cache_collapses_a_repeated_row_in_one_walk(tmp_path):
         sb = _enrolled_signer(g, tmp_path, "sb")
         a = g.assert_claim("A", generated_by="x", supports=[anchor], signer=sa)
         b = g.assert_claim("B", generated_by="y", supports=[anchor], signer=sb)
-        # A downstream claim that cites both A and B, so the anchor and the
-        # REPLICATED peers are reachable on more than one path from it.
-        g.assert_claim("C cites both", generated_by="z", supports=[a, b], signer=sa)
+        # Second claim by sa: two distinct envelopes under one keyid.
+        e = g.assert_claim("E", generated_by="x2", supports=[anchor], signer=sa)
+        # The focal claim cites the anchor both directly and through its
+        # peers, so the anchor lands in the upstream edge list twice.
+        focal = g.assert_claim(
+            "F", generated_by="z", supports=[a, b, e, anchor], signer=sb,
+        )
+        g.assert_claim("D", generated_by="w", supports=[focal], signer=sa)
 
+        # Count verifications per signed payload. The digest identifies the
+        # envelope; the keyid alone does not, since every claim envelope
+        # shares a payload prefix and one signer can hold several claims.
         seen: dict[str, int] = {}
+        by_signer: dict[str, set[str]] = {}
         real = _signing.verify_envelope
 
-        # Count verifications per signature digest to prove a repeated node is
-        # checked at most once within a single provenance walk.
-        import mareforma.signing as _S
-
         def counting(env, *args, **kwargs):
-            try:
-                key = env["signatures"][0]["keyid"] + ":" + env["payload"][:16]
-            except Exception:
-                key = "?"
-            seen[key] = seen.get(key, 0) + 1
+            digest = hashlib.sha256(env["payload"].encode("utf-8")).hexdigest()
+            seen[digest] = seen.get(digest, 0) + 1
+            by_signer.setdefault(env["signatures"][0]["keyid"], set()).add(digest)
             return real(env, *args, **kwargs)
 
-        _S.verify_envelope = counting
-        try:
-            g.query_provenance(a, depth=4)
-        finally:
-            _S.verify_envelope = real
+        monkeypatch.setattr(_signing, "verify_envelope", counting)
+
+        prov = g.query_provenance(focal, depth=4)
+
+        # The fixture holds up: the anchor really is reached twice, and one
+        # signer really does hold two of the verified envelopes.
+        upstream_ids = [edge["claim_id"] for edge in prov["upstream"]]
+        assert upstream_ids.count(anchor) == 2
+        assert any(len(digests) > 1 for digests in by_signer.values())
 
         assert seen, "expected the provenance walk to verify signatures"
         assert max(seen.values()) == 1, (

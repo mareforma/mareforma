@@ -26,9 +26,11 @@ import pytest
 
 import mareforma
 from mareforma import signing as _signing
+from mareforma.db import UnverifiedClaimError, list_claims
 from mareforma.trust import _store
 from tests._helpers import (
-    _bootstrap_key, _enroll_key, _pem_of, _two_signers, _verdict,
+    _bootstrap_key, _enroll_key, _est, _pem_of, _pred, _prop,
+    _requires_drop_column, _two_signers, _verdict,
 )
 
 
@@ -103,6 +105,36 @@ class TestReplicatedKeysOnSigner:
             assert g.get_claim(b)["asserter_keyid"] is None
             assert g.get_claim(a)["support_level"] == "PRELIMINARY"
             assert g.get_claim(b)["support_level"] == "PRELIMINARY"
+
+    def test_already_replicated_peers_are_not_rewritten(
+        self, tmp_path: Path,
+    ) -> None:
+        """A converging insert promotes only PRELIMINARY rows.
+
+        Peers already at REPLICATED stay in the candidate set (they still
+        corroborate), but the promotion UPDATE must not touch them: rewriting
+        their ``updated_at`` would date an old claim to the moment a stranger
+        cited the same anchor, and that field is exported as the claim's
+        end time.
+        """
+        sa, sb = _two_signers(tmp_path)
+        sc = _signing.load_private_key(_bootstrap_key(tmp_path, "_signer_c.key"))
+        g, _ = _open_root_graph(tmp_path)
+        with g:
+            up = g.assert_claim("anchor", generated_by="seed", seed=True)
+            a = g.assert_claim("A", supports=[up], generated_by="lab_a", signer=sa)
+            b = g.assert_claim("B", supports=[up], generated_by="lab_b", signer=sb)
+            assert g.get_claim(a)["support_level"] == "REPLICATED"
+            assert g.get_claim(b)["support_level"] == "REPLICATED"
+            before = {
+                cid: g.get_claim(cid)["updated_at"] for cid in (a, b)
+            }
+
+            c = g.assert_claim("C", supports=[up], generated_by="lab_c", signer=sc)
+            assert g.get_claim(c)["support_level"] == "REPLICATED"
+            assert {
+                cid: g.get_claim(cid)["updated_at"] for cid in (a, b)
+            } == before
 
 
 # ===========================================================================
@@ -525,6 +557,38 @@ class TestVerifyOnRead:
             # query excludes the forged high-trust row.
             ids = {r["claim_id"] for r in g.query(min_support="ESTABLISHED", limit=99)}
             assert rep not in ids
+
+    def test_read_exclusion_is_counted_and_logged(self, tmp_path: Path) -> None:
+        """A shorter result set reads the same as an empty graph. The exclusion
+        must reach the operator as a signal: a counter on the graph and a
+        health event, not only a missing row."""
+        root_key, _, rep, _ = _build_established(
+            tmp_path, rep_text="quasarflux marker term",
+        )
+        conn = sqlite3.connect(_db_path(tmp_path))
+        try:
+            conn.execute(
+                "UPDATE claims SET validation_signature = ? WHERE claim_id = ?",
+                ('{"payloadType":"forged","payload":"x","signatures":[]}', rep),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            assert g.read_verify_exclusions == 0
+            g.query(min_support="ESTABLISHED", limit=99)
+            assert g.read_verify_exclusions == 1
+            g.search("quasarflux", limit=99)
+            assert g.read_verify_exclusions == 2
+
+        events = [
+            json.loads(line)
+            for line in (_db_path(tmp_path).parent / "health.jsonl")
+            .read_text().splitlines() if line.strip()
+        ]
+        excluded = [e for e in events if e["op"] == "read_verify_excluded"]
+        assert [e["n"] for e in excluded] == [1, 1]
 
     def test_legacy_unsigned_replicated_is_verify_exempt(self, tmp_path: Path) -> None:
         """A REPLICATED row whose asserter is not enrolled (no pubkey to check)
@@ -1063,6 +1127,7 @@ class TestGrandfatherMigration:
         return [json.loads(line) for line in path.read_text().splitlines()
                 if line.strip()]
 
+    @_requires_drop_column
     def test_legacy_replicated_survives_upgrade_with_health_event(
         self, tmp_path: Path,
     ) -> None:

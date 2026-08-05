@@ -19,6 +19,7 @@ from mareforma.db import (
     open_db_from_db_path,
     update_claim,
 )
+from tests._helpers import _requires_drop_column
 
 
 def test_open_db_wraps_a_corrupt_file_as_database_error(tmp_path: Path) -> None:
@@ -416,6 +417,7 @@ def test_literal_path_open_refuses_a_foreign_schema_version(
         open_db_from_db_path(db_file)
 
 
+@_requires_drop_column
 def test_literal_path_open_migrates_a_legacy_claims_table(
     tmp_path: Path,
 ) -> None:

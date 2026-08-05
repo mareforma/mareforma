@@ -694,6 +694,20 @@ class TestPredicatePayloadTypeValidation:
                     predicate_payload=42,  # type: ignore[arg-type]
                 )
 
+    def test_typeerror_shows_valid_python_remedy(self, tmp_path: Path) -> None:
+        """The message an adapter author reads must be copyable. The escaped
+        braces of an f-string do not collapse in a plain literal, so the
+        suggested wrapper printed as ``{{'value': ...}}``."""
+        with mareforma.open(tmp_path) as graph:
+            with pytest.raises(TypeError) as exc:
+                graph.assert_claim(
+                    "claim",
+                    predicate_payload="just a string",  # type: ignore[arg-type]
+                )
+        message = str(exc.value)
+        assert "{{" not in message
+        assert "{'value':" in message
+
 
 class TestRoCrateInputValidation:
     """RO-Crate exporter refuses non-UUID claim_ids and gracefully

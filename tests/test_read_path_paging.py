@@ -109,6 +109,35 @@ def test_unenrolled_drain_does_not_bury_an_enrolled_survivor(
     assert [r["text"] for r in rows] == ["the enrolled survivor"]
 
 
+def test_zero_limit_returns_no_rows_on_both_read_surfaces(tmp_path):
+    """A limit of zero means zero rows. The read loop appended a survivor
+    before testing the stop condition, so a drained pager or budget loop got a
+    phantom row at the boundary."""
+    root_key = _bootstrap_key(tmp_path, "root.key")
+    with mareforma.open(tmp_path, key_path=root_key) as g:
+        for i in range(3):
+            g.assert_claim(f"finding number {i}", generated_by="x")
+
+    with mareforma.open(tmp_path, key_path=root_key) as g:
+        assert g.query(limit=0) == []
+        assert g.search("finding", limit=0) == []
+
+
+def test_negative_limit_is_refused_on_both_read_surfaces(tmp_path):
+    """A negative limit is a caller arithmetic bug. Refuse it rather than
+    serving a row (or an empty list) that hides the mistake."""
+    root_key = _bootstrap_key(tmp_path, "root.key")
+    with mareforma.open(tmp_path, key_path=root_key) as g:
+        for i in range(3):
+            g.assert_claim(f"finding number {i}", generated_by="x")
+
+    with mareforma.open(tmp_path, key_path=root_key) as g:
+        with pytest.raises(ValueError, match="limit"):
+            g.query(limit=-5)
+        with pytest.raises(ValueError, match="limit"):
+            g.search("finding", limit=-5)
+
+
 def test_scan_ceiling_truncation_raises_instead_of_a_short_list(
     tmp_path, monkeypatch,
 ):

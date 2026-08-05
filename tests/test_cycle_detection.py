@@ -156,6 +156,41 @@ class TestEdgeCases:
                     )
         pytest.fail("Expected GraphTooLargeError on reachable-cap overflow")
 
+    def test_reachable_cap_bounds_the_walk_not_only_the_verdict(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """The cap stops the walk; it does not report on a finished one.
+
+        The reach CTE carries its own LIMIT, so a chain far past the cap stops
+        a few nodes past it instead of materialising the whole reachable set.
+        Counted through a sqlite3 progress handler: walking all 400 nodes costs
+        an order of magnitude more virtual-machine steps than stopping at 10.
+        """
+        from mareforma.db import core as _db_core
+        chain = 400
+        with mareforma.open(tmp_path) as g:
+            ids = [g.assert_claim("genesis")]
+            for i in range(chain - 1):
+                ids.append(g.assert_claim(f"link {i}", supports=[ids[-1]]))
+            monkeypatch.setattr(_db_core, "_REACHABLE_CLAIM_CAP", 10)
+            conn = g._conn
+            steps = 0
+
+            def count_step() -> int:
+                nonlocal steps
+                steps += 1
+                return 0
+
+            conn.set_progress_handler(count_step, 1)
+            try:
+                with pytest.raises(GraphTooLargeError):
+                    _check_no_cycle(conn, str(uuid.uuid4()), [ids[-1]])
+            finally:
+                conn.set_progress_handler(None, 0)
+        # Walking the whole 400-node chain costs ~15k steps; stopping at the
+        # cap costs a few hundred. The threshold sits well clear of both.
+        assert steps < 2000, f"walk was not bounded: {steps} vm steps"
+
 
 # ---------------------------------------------------------------------------
 # Interaction with signed-claim immutability

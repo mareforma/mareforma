@@ -25,6 +25,9 @@ Regression guards for the packaging issues:
        two literals are independent and nothing else compares them.
 - every marker ``addopts`` deselects is selected back by some workflow
        step, so a marked test has a job that runs it.
+- a test fixture that needs SQL newer than the declared SQLite floor
+       carries a version skipif, so it skips instead of erroring on a
+       build inside the supported window.
 
 Each guard fails on the pre-fix tree.
 """
@@ -62,6 +65,12 @@ _BUILD_ONLY_IMPORTS = frozenset({"setuptools"})
 _REQUIRED_SDIST_TEST_FILES = ("tests/conftest.py", "tests/_helpers.py")
 
 _KNOWN_LOCKFILES = ("uv.lock", "poetry.lock", "Pipfile.lock", "pdm.lock", "pixi.lock")
+
+# ``ALTER TABLE ... DROP COLUMN`` first shipped in SQLite 3.35, above the
+# ``_MIN_SQLITE`` floor ``open_db`` accepts, so a fixture using it must carry
+# the shared skipif that gates on the linked version.
+_ABOVE_FLOOR_SQL = re.compile(r"ALTER\s+TABLE\b.*\bDROP\s+COLUMN", re.IGNORECASE)
+_ABOVE_FLOOR_MARKER = "_requires_drop_column"
 
 
 def _build_sdist_names():
@@ -373,6 +382,24 @@ def test_dep_use_is_measured_by_imports_not_prose():
     assert not _tests_reference("aioresponses"), (
         "no test imports aioresponses; a scan that counts prose as use guards "
         "nothing, since any name in a comment satisfies it"
+    )
+
+
+def test_above_floor_sql_in_tests_carries_a_version_skipif():
+    """a fixture using SQL above the declared SQLite floor must skip on the
+    older builds ``open_db`` still accepts, not error with a raw syntax error.
+    """
+    this_file = pathlib.Path(__file__).resolve()
+    unguarded = []
+    for path in TESTS_DIR.rglob("*.py"):
+        if path.resolve() == this_file:
+            continue
+        text = path.read_text(encoding="utf-8")
+        if _ABOVE_FLOOR_SQL.search(text) and _ABOVE_FLOOR_MARKER not in text:
+            unguarded.append(str(path.relative_to(REPO_ROOT)))
+    assert not unguarded, (
+        f"these tests use SQL newer than the SQLite floor mareforma declares "
+        f"and carry no {_ABOVE_FLOOR_MARKER} skipif: {sorted(unguarded)}"
     )
 
 

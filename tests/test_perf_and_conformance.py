@@ -4,6 +4,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import pytest
+
 import mareforma
 from mareforma import _supports
 
@@ -15,10 +17,16 @@ from mareforma import _supports
 # The cache exists so REPLICATED queries don't degrade to a full
 # table scan as the graph grows. The pin is expressed at 1k claims and
 # relative to a primary-key lookup on the same machine, so it runs in
-# the default suite on every invocation. A larger absolute pin is not
-# reachable today: assert_claim rewrites the whole claims.toml backup
-# per insert, so building the fixture is quadratic and a 50k graph
-# takes hours.
+# the default suite on every invocation.
+#
+# There is no absolute pin at a larger n. Deferring the claims.toml backup
+# for the whole build took the fixture off its quadratic curve, but the cost
+# still grows with the graph: measured 0.7s at 1k claims, 12s at 4k, 56s at
+# 8k, so a 50k graph runs for tens of minutes. That is too slow for the
+# default suite and no job selects anything outside it, so an absolute 50k
+# pin would be carried and never executed. The 1k relative pin is the guard:
+# an O(N) regression in walk_upstream pushes it into the hundreds of
+# milliseconds and fails here.
 
 
 def _build_wide_dag(
@@ -39,17 +47,52 @@ def _build_wide_dag(
     import random as _random
     rng = _random.Random(42)  # reproducible
     ids: list[str] = []
-    seed = graph.assert_claim("seed")
-    ids.append(seed)
-    for i in range(1, n):
-        # Pool of recently-seen ids to support; sliding window keeps
-        # the per-walk recursion depth bounded.
-        pool = ids[max(0, len(ids) - seed_pool):]
-        k = min(fanout, len(pool))
-        supports = rng.sample(pool, k=k) if k else []
-        cid = graph.assert_claim(f"claim-{i}", supports=supports)
-        ids.append(cid)
+    # One claims.toml rewrite for the whole build. Without the window each
+    # insert re-serialises the entire table, which makes the setup quadratic
+    # and swamps the walk it exists to measure.
+    with graph.defer_backup():
+        seed = graph.assert_claim("seed")
+        ids.append(seed)
+        for i in range(1, n):
+            # Pool of recently-seen ids to support; sliding window keeps
+            # the per-walk recursion depth bounded.
+            pool = ids[max(0, len(ids) - seed_pool):]
+            k = min(fanout, len(pool))
+            supports = rng.sample(pool, k=k) if k else []
+            cid = graph.assert_claim(f"claim-{i}", supports=supports)
+            ids.append(cid)
     return ids
+
+
+def test_wide_dag_build_rewrites_claims_toml_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The DAG helper builds under one backup rewrite, not one per claim.
+
+    ``claims.toml`` is re-serialised in full on every mutation, so a bare
+    insertion loop is quadratic and the setup dwarfs the measurement it
+    exists to take. Nothing the pins assert reads the backup, and the file
+    on exit is the same either way.
+    """
+    import tomli_w
+
+    real_dumps = tomli_w.dumps
+    rewrites = []
+
+    def counting_dumps(*args, **kwargs):
+        rewrites.append(1)
+        return real_dumps(*args, **kwargs)
+
+    monkeypatch.setattr(tomli_w, "dumps", counting_dumps)
+    with mareforma.open(tmp_path) as graph:
+        ids = _build_wide_dag(graph, 25)
+
+    assert len(rewrites) == 1, (
+        f"{len(rewrites)} claims.toml rewrites for 25 claims: the build loop "
+        "pays a full re-serialisation per claim"
+    )
+    assert len(ids) == 25
+    assert (tmp_path / "claims.toml").exists()
 
 
 def _percentile(samples: list[float], q: float) -> float:

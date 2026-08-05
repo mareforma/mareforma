@@ -201,14 +201,16 @@ class CycleDetectedError(MareformaError):
 
 class GraphTooLargeError(MareformaError):
     """Raised when a new claim's ``supports[]`` transitively reach more distinct
-    upstream claims than the reachable-claim cap allows.
+    upstream nodes than the reachable-claim cap allows.
 
-    This is a pathological-graph guard, NOT a cycle. The acyclicity walk visits
-    every distinct claim reachable from the new claim's supports; a legitimate
-    but enormous fan-out (a foundational claim cited across a mature graph) can
-    reach very many claims at shallow depth. Rejecting that write is a safety
-    valve against a runaway walk, and it is reported as its own condition so a
-    caller is never told "cycle" when the graph is merely large.
+    This is a pathological-graph guard, NOT a cycle. The acyclicity walk stops
+    at the cap; a legitimate but enormous fan-out (a foundational claim cited
+    across a mature graph) can reach very many claims at shallow depth.
+    Rejecting that write is a safety valve against a runaway walk, and it is
+    reported as its own condition so a caller is never told "cycle" when the
+    graph is merely large. The walk says nothing about the part it did not
+    reach, so a cycle beyond the cap surfaces here rather than as
+    :class:`CycleDetectedError`. Either way the write is refused.
     """
 
 

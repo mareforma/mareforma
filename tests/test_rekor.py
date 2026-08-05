@@ -635,6 +635,38 @@ class TestAssertClaimWithRekor:
         envelope = json.loads(claim["signature_bundle"])
         assert "rekor" not in envelope
 
+    def test_rekor_failure_warns_and_records_a_health_event(
+        self, tmp_path: Path, httpx_mock,
+    ) -> None:
+        """A failed submit is pushed, not left for a per-claim trust map.
+
+        Submit is the saga step most likely to fail, and while it fails every
+        claim written stops short of REPLICATED. The other three failure
+        branches warn; this one must too, and must land in health.jsonl so an
+        outage shows up in `mareforma activity`.
+        """
+        httpx_mock.add_response(method="POST", url=_TEST_REKOR_URL, status_code=503)
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(
+            tmp_path, key_path=key_path, rekor_url=_TEST_REKOR_URL,
+        ) as graph:
+            with pytest.warns(UserWarning, match="transparency_logged stays 0"):
+                claim_id = graph.assert_claim("rekor down")
+
+        events = [
+            json.loads(line)
+            for line in (
+                tmp_path / ".mareforma" / "health.jsonl"
+            ).read_text().splitlines()
+            if line.strip()
+        ]
+        assert any(
+            e["op"] == "rekor_submit"
+            and e["outcome"] == "fail"
+            and e["claim_id"] == claim_id
+            for e in events
+        ), f"no rekor_submit fail event recorded: {events}"
+
     def test_saga_does_not_commit_a_caller_owned_transaction(
         self, tmp_path: Path, httpx_mock,
     ) -> None:
