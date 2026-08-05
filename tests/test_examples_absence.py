@@ -37,6 +37,7 @@ from mareforma.trust import (
     Proposition,
 )
 from mareforma.trust._store import effective_independence
+from tests._helpers import _requires_repo_checkout
 
 _ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 _OPENAI_URL = "https://api.openai.com/v1/chat/completions"
@@ -229,6 +230,7 @@ _COUNT_CLAIM = re.compile(
 )
 
 
+@_requires_repo_checkout
 def test_example_02_narration_matches_the_engine(tmp_path: Path) -> None:
     """The shipped script may not narrate a count the engine did not print.
 

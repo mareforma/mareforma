@@ -13,6 +13,7 @@ from pathlib import Path
 
 import mareforma
 from mareforma import signing as _signing
+from tests._helpers import _requires_repo_checkout
 
 _EXAMPLE = (
     Path(__file__).resolve().parents[1]
@@ -20,6 +21,9 @@ _EXAMPLE = (
     / "04_private_data_public_findings"
     / "04_private_data_public_findings.py"
 )
+
+# examples/ is not in the sdist, so the shipped suite skips this module.
+pytestmark = _requires_repo_checkout
 
 
 def _banner(node: ast.stmt) -> str | None:

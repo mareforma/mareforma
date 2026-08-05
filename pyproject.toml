@@ -70,7 +70,6 @@ test-heavy = [
     "requests>=2.31",
     "responses>=0.24",
 ]
-docs = []
 
 [project.scripts]
 mareforma = "mareforma.cli:cli"
@@ -87,9 +86,10 @@ mareforma = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short -m 'not sdist'"
 markers = [
     "adapters: tests exercising the mareforma.adapters.* namespace",
+    "sdist: builds an sdist and runs the shipped suite inside it (~45s)",
 ]
 
 [tool.coverage.run]

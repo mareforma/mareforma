@@ -172,6 +172,29 @@ Rules of thumb:
   an opt-in marker (`@pytest.mark.requires_model`) and skipped by
   default; running the full suite must not download anything.
 
+## Tests that read repo files
+
+The sdist ships the whole `tests/` tree so distro packagers can run it,
+but it does not ship `docs/`, `examples/`, `.github/` or `AGENTS.md`. A
+test that reads one of those carries the shared skip, as a module-level
+`pytestmark` or as a decorator on the one test or class that needs it:
+
+```python
+from tests._helpers import _requires_repo_checkout
+
+pytestmark = _requires_repo_checkout
+```
+
+The skip keys on `PKG-INFO`, a file only an unpacked sdist carries. Do
+not key it on the tree the test reads (`skipif(not DOCS.is_dir())`):
+that spelling also skips in CI the day a path moves, so the guard goes
+quiet instead of failing.
+
+`pytest -m sdist` builds the archive, unpacks it and runs the shipped
+suite inside it, which is what catches a new test that reads a repo file
+without the skip. It costs about 45 seconds, so `addopts` deselects it
+and one CI leg selects it back.
+
 ## Examples
 
 Examples in `examples/` must:

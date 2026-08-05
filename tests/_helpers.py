@@ -19,6 +19,39 @@ _requires_drop_column = pytest.mark.skipif(
     reason="ALTER TABLE ... DROP COLUMN needs SQLite >= 3.35",
 )
 
+# The sdist ships the suite for packagers but not the repo trees some tests
+# read (docs/, examples/, .github/, AGENTS.md), so those tests skip when the
+# suite runs from an unpacked archive. The predicate is PKG-INFO, a file only
+# an unpacked sdist carries, not the absence of the tree a test reads: keyed
+# on absence, the guard would go quiet in CI the day a path moved.
+_requires_repo_checkout = pytest.mark.skipif(
+    (Path(__file__).resolve().parent.parent / "PKG-INFO").exists(),
+    reason="reads a repo tree the sdist does not ship",
+)
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _example_files(suffix: str = ".py", root: Path = _REPO_ROOT) -> list[Path]:
+    """Return the example files ending in *suffix* that *root* tracks in git.
+
+    Example 05 installs into its own directory: its ``--install`` clones a
+    repository and builds a virtualenv beside the script, and both are
+    gitignored. A walk of the working tree hands every vendored source in
+    that virtualenv to the guards that read the example tree, so the
+    listing comes from git, and falls back to the walk outside a checkout.
+    """
+    try:
+        tracked = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-z", "--", "examples"],
+            capture_output=True,
+            check=True,
+            text=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return sorted((root / "examples").rglob(f"*{suffix}"))
+    return sorted(root / name for name in tracked.split("\0") if name.endswith(suffix))
+
 
 def _bootstrap_key(tmp_path: Path, name: str = "mareforma.key") -> Path:
     """Generate a signing key at ``tmp_path / name`` and return the path.

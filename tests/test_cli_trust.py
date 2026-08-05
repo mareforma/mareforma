@@ -21,6 +21,7 @@ import mareforma
 from mareforma import signing
 from mareforma.cli import cli, _claim_bound_sources, _trust_map_plaintext
 from mareforma.db import open_db
+from tests._helpers import _requires_repo_checkout
 
 
 def _bootstrap_default_key() -> None:
@@ -240,8 +241,12 @@ def _run_recipe(body: str, tmp_path: Path, verify_exit: int, **env) -> int:
     ).returncode
 
 
+@_requires_repo_checkout
 class TestCiRecipeHonorsTheExitCodeContract:
-    """The shipped CI recipe must fail on every code that is not a verdict."""
+    """The shipped CI recipe must fail on every code that is not a verdict.
+
+    Reads the recipe out of examples/06_ci_verify, which the sdist omits.
+    """
 
     def test_usage_error_fails_the_gate(self, tmp_path: Path) -> None:
         # Exit 3 is a typo'd flag, not a verdict, so the gate cannot pass on it.

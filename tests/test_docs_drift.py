@@ -22,10 +22,14 @@ import click
 import mareforma
 from mareforma.cli import cli
 from mareforma.trust import STATUS_POLICY
-from tests._helpers import _bootstrap_key, _est, _pred, _prop
+from tests._helpers import _bootstrap_key, _est, _pred, _prop, _requires_repo_checkout
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs"
+
+# This module reads docs/ and examples/, trees the sdist does not ship, so it
+# skips as a unit when the shipped suite runs from an unpacked archive.
+pytestmark = _requires_repo_checkout
 
 
 def _python_blocks(text: str) -> list[str]:

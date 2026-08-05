@@ -12,12 +12,17 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
+from tests._helpers import _requires_repo_checkout
+
 _EXAMPLE = (
     Path(__file__).resolve().parents[1]
     / "examples"
     / "05_drug_target_provenance"
     / "05_drug_target_provenance.py"
 )
+
+# examples/ is not in the sdist, so the shipped suite skips this module.
+pytestmark = _requires_repo_checkout
 
 
 def _load() -> ModuleType:

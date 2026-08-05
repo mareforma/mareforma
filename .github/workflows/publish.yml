@@ -5,7 +5,14 @@ on:
     types: [published]
 
 jobs:
+  # A PyPI upload cannot be taken back, and `twine check` reads metadata
+  # rendering only. Run the same matrix a push runs and hold the upload behind
+  # it, so a release cut from a red commit fails before it ships.
+  test:
+    uses: ./.github/workflows/tests.yml
+
   publish:
+    needs: test
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

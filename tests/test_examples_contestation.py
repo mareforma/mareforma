@@ -13,11 +13,15 @@ import ast
 from pathlib import Path
 
 from mareforma.prompt_safety import safe_for_llm
+from tests._helpers import _requires_repo_checkout
 
 _EXAMPLE_DIR = (
     Path(__file__).resolve().parents[1] / "examples" / "03_documented_contestation"
 )
 _EXAMPLE = _EXAMPLE_DIR / "03_documented_contestation.py"
+
+# examples/ is not in the sdist, so the shipped suite skips this module.
+pytestmark = _requires_repo_checkout
 
 
 def _display_helper():

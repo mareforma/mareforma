@@ -5,6 +5,9 @@ Regression guards for the packaging issues:
 - the sdist must ship a *runnable* test suite (conftest, shared
        helpers, and every subpackage) or none at all. Completeness is the
        shipped choice, so this pins the complete tree.
+- the shipped suite must run green from the unpacked archive, so a test
+       reading a repo tree the sdist leaves out (docs/, examples/,
+       ``.github/``) skips downstream instead of failing a fine release.
 - no dead ``[git]`` optional-dependency extra and no ``gitpython``
        in the dev extra (nothing imports it).
 - every core dependency is imported somewhere under ``mareforma/``
@@ -39,6 +42,8 @@ import functools
 import os
 import pathlib
 import re
+import subprocess
+import sys
 import tarfile
 import tempfile
 
@@ -48,6 +53,8 @@ except ModuleNotFoundError:  # Python 3.10
     import tomli as tomllib
 
 import pytest
+
+from tests._helpers import _requires_repo_checkout
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 PYPROJECT = REPO_ROOT / "pyproject.toml"
@@ -118,6 +125,36 @@ def test_sdist_ships_complete_runnable_suite():
         )
 
 
+@pytest.mark.sdist
+@_requires_repo_checkout
+def test_sdist_suite_runs_green_from_the_archive(tmp_path):
+    """the shipped suite must pass from the unpacked archive, not just collect.
+
+    Member names cannot see this: a test that reads a repo tree the archive
+    leaves out (docs/, examples/, .github/) hands a packager a red build for a
+    release that is fine. Such tests skip downstream, and this catches the next
+    one that does not. Marked ``sdist`` because it costs about 45 seconds.
+    """
+    build_meta = pytest.importorskip("setuptools.build_meta")
+
+    cwd = os.getcwd()
+    os.chdir(REPO_ROOT)
+    try:
+        name = build_meta.build_sdist(str(tmp_path))
+    finally:
+        os.chdir(cwd)
+    with tarfile.open(tmp_path / name) as tf:
+        tf.extractall(tmp_path, filter="data")
+
+    run = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"],
+        cwd=tmp_path / name.removesuffix(".tar.gz"),
+        capture_output=True,
+        text=True,
+    )
+    assert run.returncode == 0, run.stdout[-4000:]
+
+
 def test_every_test_subpackage_is_required_in_the_sdist():
     """the guard above promises every test subpackage, so the set it walks must
     come from the tree. A hardcoded list goes stale on the next subpackage:
@@ -139,6 +176,30 @@ def test_no_dead_git_extra_and_no_gitpython_dev():
     dev = extras.get("dev", [])
     assert not any(req.lower().startswith("gitpython") for req in dev), (
         "gitpython is unused; it must not sit in the dev extra"
+    )
+
+
+def test_empty_extras_carry_a_justifying_comment():
+    """an extra with no requirements is still published: ``Provides-Extra``
+    rides in the wheel metadata, so ``pip install mareforma[name]`` succeeds
+    silently instead of warning that the extra does not exist. That reads as
+    "already satisfied" when the truth may be "wired to nothing". The adapter
+    extras earn the empty list and say why on the line; every empty extra must.
+    """
+    data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    extras = data["project"].get("optional-dependencies", {})
+    text = PYPROJECT.read_text(encoding="utf-8")
+    _, _, block = text.partition("[project.optional-dependencies]\n")
+    block, _, _ = block.partition("\n[")
+    unexplained = sorted(
+        name
+        for name, reqs in extras.items()
+        if not reqs
+        and not re.search(rf"^{re.escape(name)}\s*=\s*\[\s*\]\s*#\s*\S", block, re.M)
+    )
+    assert not unexplained, (
+        f"these extras install nothing and say nothing about why: {unexplained}. "
+        "Delete them, or state the reason in a trailing comment"
     )
 
 
@@ -199,10 +260,14 @@ def test_version_literals_agree():
     )
 
 
+@_requires_repo_checkout
 def test_deselected_markers_have_a_job_that_selects_them():
     """a marker deselected by ``addopts`` and selected by no workflow step is
     dead weight: no invocation reaches it, ``-k`` cannot override the marker
     filter, and the tests behind it rot uncompiled while reading as coverage.
+
+    The sdist ships no .github/, where this would read an empty workflow set
+    and pass on every marker; it skips there instead.
     """
     ini = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["tool"]["pytest"]["ini_options"]
     excluded = set(re.findall(r"not\s+([A-Za-z_]\w*)", ini.get("addopts", "")))
@@ -217,6 +282,47 @@ def test_deselected_markers_have_a_job_that_selects_them():
     assert not unreachable, (
         f"addopts deselects markers no workflow step selects back: {unreachable}"
     )
+
+
+def _workflow_job(workflow_name, job_name):
+    """Return the body of one job block from a workflow file, or None.
+
+    A job is a bare two-space key under ``jobs:``; its body runs to the next
+    one. Text, not YAML: pyyaml is not a dependency here.
+    """
+    text = (WORKFLOWS_DIR / workflow_name).read_text(encoding="utf-8")
+    _, _, jobs = text.partition("\njobs:\n")
+    for block in re.split(r"^  (?=[\w-]+:\s*$)", jobs, flags=re.M)[1:]:
+        head, _, body = block.partition("\n")
+        if head.strip().rstrip(":") == job_name:
+            return body
+    return None
+
+
+@_requires_repo_checkout
+def test_publish_is_gated_on_the_test_suite():
+    """a PyPI upload is irreversible per version, and ``twine check`` reads
+    metadata rendering only, so a publish job with no test gate ships whatever
+    the tagged commit contains. ``tests.yml`` fires on the tag push but nothing
+    reads its conclusion: the upload finishes long before the matrix reports.
+
+    The sdist ships no .github/; this skips there.
+    """
+    publish = _workflow_job("publish.yml", "publish")
+    assert publish is not None, "publish.yml declares no publish job"
+    gated = re.search(r"^\s*needs:", publish, flags=re.M) or re.search(
+        r"^\s*run:.*\bpytest\b", publish, flags=re.M
+    )
+    assert gated, (
+        "the publish job neither declares needs: nor runs pytest, so an "
+        "irreversible upload can ship from a commit with a red suite"
+    )
+    if re.search(r"^\s*needs:", publish, flags=re.M):
+        gate = re.search(r"^\s*needs:\s*\[?\s*([\w-]+)", publish, flags=re.M).group(1)
+        gate_job = _workflow_job("publish.yml", gate)
+        assert gate_job is not None and re.search(
+            r"uses:\s*\./\.github/workflows/tests\.yml", gate_job
+        ), f"the publish job waits on '{gate}', which does not run the suite"
 
 
 def _requirement_name(req):
@@ -403,6 +509,7 @@ def test_above_floor_sql_in_tests_carries_a_version_skipif():
     )
 
 
+@_requires_repo_checkout
 def test_dependabot_produces_real_updates():
     """both ecosystems scheduled, and no uncommitted lockfile claim."""
     text = DEPENDABOT.read_text(encoding="utf-8")
@@ -431,6 +538,7 @@ def _dependabot_entry(ecosystem):
     return None
 
 
+@_requires_repo_checkout
 def test_dependabot_pip_does_not_ratchet_version_floors():
     """the pip entry must pin a versioning strategy that leaves satisfied
     constraints alone. Without it Dependabot rewrites the lower bound on every
