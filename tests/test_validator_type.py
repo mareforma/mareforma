@@ -177,6 +177,14 @@ class TestEnvelopeBindsValidatorType:
         assert tampered["validator_type"] == "human"
         assert _validators.verify_enrollment(tampered, root_pem) is False
 
+    def test_verify_enrollment_docstring_lists_every_bound_field(self) -> None:
+        """The docstring enumerates the fields the check binds, so a
+        reader who builds an enrollment record from it has to include
+        validator_type rather than sign it as null."""
+        doc = _validators.verify_enrollment.__doc__
+        for field in _signing._ENROLLMENT_FIELDS:
+            assert field in doc, field
+
 
 # ---------------------------------------------------------------------------
 # LLM-typed validator cannot promote past REPLICATED

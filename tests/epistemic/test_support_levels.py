@@ -47,7 +47,6 @@ from tests._helpers import _pem_of, _two_signers
 from tests.epistemic._builders import (
     _bootstrap_validator_key,
     open_graph,
-    open_signed_graph,
 )
 
 
@@ -474,7 +473,7 @@ class TestDerivedChain:
 
 class TestEstablishedGate:
     def test_validate_on_preliminary_raises(self, tmp_path: Path) -> None:
-        with open_signed_graph(tmp_path) as graph:
+        with open_graph(tmp_path) as graph:
             claim_id = graph.assert_claim(
                 "single agent claim",
                 generated_by="agent/model-a/lab_a",
@@ -485,7 +484,7 @@ class TestEstablishedGate:
     def test_validate_on_replicated_succeeds(self, tmp_path: Path) -> None:
         validator_key_path = _bootstrap_validator_key(tmp_path)
         sa, sb = _two_signers(tmp_path)
-        with open_signed_graph(tmp_path) as graph:
+        with open_graph(tmp_path) as graph:
             upstream = graph.assert_claim("upstream", generated_by="seed", seed=True)
             id_a = graph.assert_claim(
                 "claim A", generated_by="agent/model-a/lab_a", supports=[upstream],
@@ -529,6 +528,6 @@ class TestEstablishedGate:
     def test_validate_on_nonexistent_claim_raises(
         self, tmp_path: Path
     ) -> None:
-        with open_signed_graph(tmp_path) as graph:
+        with open_graph(tmp_path) as graph:
             with pytest.raises(ClaimNotFoundError):
                 graph.validate("no-such-uuid")

@@ -453,11 +453,27 @@ mareforma verify mareforma-bundle.json # → "verified: N claim subjects match"
 
 `predicateType` is `urn:mareforma:predicate:epistemic-graph:v1`. URN
 namespacing means schema evolution to v2 carries a new predicate type
-without breaking v1 verifiers. Tampered claim text, or even a re-signed
-bundle whose predicate was edited, fails verification: each claim's
-subject digest and its own asserter signature are checked against the
-presented content, and the displayed support level against signed
-material. Editorial status is exporter-attested, not verified.
+without breaking v1 verifiers. Content added to the predicate or mutated
+in it fails verification even when the bundle is re-signed with the same
+key: each claim's subject digest and its own asserter signature are
+checked against the presented content, and the displayed support level
+against signed material. Content removed does not: a verified bundle
+attests the claims it carries, not that they are all the claims in the
+graph, so a claim dropped together with its subject entry verifies
+clean. Editorial status is exporter-attested, not verified.
+
+**Validator set in the predicate.** The predicate carries
+`mare:validators`, the exporting graph's enrolled validator table: one
+object per validator with `keyid`, `pubkey_pem` (base64 of the PEM),
+`identity`, `validator_type`, `enrolled_at`, `enrolled_by_keyid` and
+`enrollment_envelope`. Verification chain-checks that set first, so every
+per-claim signature is checked against a key whose own enrollment is
+signed rather than against the exporter's word. A bundle whose validators
+do not descend from exactly one root, or that is signed by any key other
+than that root, is refused. `mare:trustDomainRoot` names the root and
+`mare:singleTrustDomain` reports whether the whole table traces to it.
+That pair is a disclosure about the exporting graph, not a guard against
+one operator holding every key.
 
 ---
 

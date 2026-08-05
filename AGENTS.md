@@ -1043,9 +1043,12 @@ mareforma verify mareforma-bundle.json # → "verified: N claim subjects match"
 
 `predicateType` is `urn:mareforma:predicate:epistemic-graph:v1`. URN
 namespacing means schema evolution to v2 carries a new predicate type
-without breaking v1 verifiers. Tampered claim text, or even a
-re-signed bundle whose predicate was edited, fails the per-claim
-subject digest check.
+without breaking v1 verifiers. Content added to the predicate or
+mutated in it fails the per-claim subject digest and asserter-signature
+checks, even when the bundle is re-signed with the same key. Content
+removed does not: a verified bundle attests the claims it carries, not
+that they are all the claims in the graph, so a claim dropped together
+with its subject entry verifies clean.
 
 ---
 

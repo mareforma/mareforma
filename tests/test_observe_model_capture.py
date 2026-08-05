@@ -201,6 +201,16 @@ def test_aiohttp_request_captures_model():
     assert lineage.model_id == "claude-3-5-sonnet-20241022"
 
 
+def test_aiohttp_url_reads_the_keyword_aiohttp_accepts():
+    # aiohttp names the URL parameter ``str_or_url``. Reading any other keyword
+    # loses the URL on a keyword call, which downgrades a call that did execute
+    # to UNVERIFIABLE with no provider or method.
+    from mareforma.observe._loaders import _aiohttp_url
+
+    assert _aiohttp_url(("POST", _ANTHROPIC_URL), {}) == _ANTHROPIC_URL
+    assert _aiohttp_url(("POST",), {"str_or_url": _ANTHROPIC_URL}) == _ANTHROPIC_URL
+
+
 # -- PROXY: producer-declared ------------------------------------------------
 
 def test_producer_wrapper_is_proxy():

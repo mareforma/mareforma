@@ -22,7 +22,8 @@ prov:Activity, no prov:wasAssociatedWith, no model identity, no
 prompt/response hashes). Consumers integrating against the export
 should treat it as a mareforma-native format with media type
 ``application/x-mareforma-graph+json``, not as a standards-compliant
-PROV-O graph. See ``docs/reference/export-format.md`` for the schema.
+PROV-O graph. See ``docs/for-agents/agents.mdx`` under "Export and
+signed bundles" for the shape.
 """
 
 from __future__ import annotations

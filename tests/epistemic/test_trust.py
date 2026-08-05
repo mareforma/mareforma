@@ -369,7 +369,7 @@ class TestSuccessCriteria:
         assert status["status"] == Status.PRELIMINARY.value
         assert status["independent_support"] == 1
 
-    def test_two_independent_lines_reach_corroborated(self, tmp_path: Path) -> None:
+    def test_two_independent_lines_reach_convergent(self, tmp_path: Path) -> None:
         h = _prop(Direction.DECREASES)
         # v0.3.7 counts independent support by distinct asserter_keyid (the
         # finding-claim signer). assert_finding signs with the graph's loaded

@@ -28,11 +28,13 @@ out of scope: the PROV model carries less than the signed graph
 (no DSSE envelopes, no evidence vector, no hash chain), so a
 round-trip through PROV-O would drop integrity surface.
 
-The four-invariant validator :func:`validate_prov_o` runs over the
-exported document and raises :class:`ProvOValidationError` on
-structural violations. It is a hand-rolled schema check, not a full
-SHACL or OWL validator: the four invariants are the minimum a
-consumer needs to walk the document without nil-pointer surprises.
+The four-invariant validator :func:`validate_prov_o` raises
+:class:`ProvOValidationError` on a structural violation. It is
+exported for consumers and for regression tests; the exporter does
+not run it, so ``build_prov_o`` returns the document as built. It is
+a hand-rolled schema check, not a full SHACL or OWL validator: the
+four invariants are the minimum a consumer needs to walk the
+document without nil-pointer surprises.
 """
 
 from __future__ import annotations

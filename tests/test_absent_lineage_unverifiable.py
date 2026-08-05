@@ -16,6 +16,7 @@ import mareforma
 from mareforma.trust._store import (
     effective_independence,
     effective_independence_receipt,
+    independence_counts,
 )
 from tests._helpers import (
     _bootstrap_key, _enroll_key, _est, _pred, _prop, _verdict,
@@ -102,6 +103,20 @@ class TestAbsentLineageIsUnverifiable:
             rec = effective_independence_receipt(g._conn, prop.content_id())
         assert rec["soft"] is True
         assert rec["number"] == 1
+
+    def test_counters_do_not_promise_they_always_agree(self) -> None:
+        """The two counters answer different questions and routinely differ.
+
+        The tests above pin the split on the commonest shape in the wild: a
+        finding with no observed model call reads 2 on the ladder and 1 on the
+        map. A docstring promising they can never disagree invites a caller to
+        quote either number for either question.
+        """
+        for fn in (independence_counts, effective_independence):
+            text = " ".join((fn.__doc__ or "").split())
+            assert "never disagree" not in text, (
+                f"{fn.__name__} promises an agreement the counters do not hold"
+            )
 
     def test_declared_human_signer_does_not_certify_independence(
         self, tmp_path: Path,

@@ -23,6 +23,7 @@ import stat
 
 import pytest
 
+from mareforma import signing as _signing
 from mareforma.signing import (
     InvalidEnvelopeError,
     KeyNotFoundError,
@@ -297,6 +298,41 @@ class TestSignVerify:
         env_a = sign_claim(_claim_fields(), key)
         env_b = sign_claim(_claim_fields(), key)
         assert env_a == env_b
+
+
+class TestVerifyEnvelopeSignatureScope:
+    """``verify_envelope`` checks ``signatures[0]`` and nothing else, so
+    the docstring has to say so: a caller who reads it as "the envelope
+    verifies" accepts forged role entries on a claim-with-roles bundle."""
+
+    def test_extra_signature_entry_is_not_verified(self):
+        key = generate_keypair()
+        envelope = sign_claim(_claim_fields(), key)
+        envelope["signatures"].append(
+            {"keyid": "forged", "sig": "AAAA", "role": "reviewer"},
+        )
+        assert verify_envelope(envelope, key.public_key()) is True
+
+    def test_docstring_states_the_first_signature_scope(self):
+        doc = verify_envelope.__doc__
+        assert "signatures[0]" in doc
+        assert "verify_envelope_multi" in doc
+
+
+class TestSignDocstringsListEveryBoundField:
+    """A record field the docstring omits is signed as null (the payload is
+    built with ``record.get``), and the two fields that were omitted are the
+    two whose job is tamper detection."""
+
+    def test_enrollment_docstring_lists_every_bound_field(self):
+        doc = _signing.sign_validator_enrollment.__doc__
+        for field in _signing._ENROLLMENT_FIELDS:
+            assert field in doc, field
+
+    def test_validation_docstring_lists_every_bound_field(self):
+        doc = _signing.sign_validation.__doc__
+        for field in _signing._VALIDATION_FIELDS:
+            assert field in doc, field
 
 
 # ---------------------------------------------------------------------------

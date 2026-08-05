@@ -334,7 +334,10 @@ enrolled validator chain to a single root (which must be the bundle
 signer), and the displayed support level (ESTABLISHED against a
 validator-signed validation envelope, REPLICATED against distinct-signer
 corroboration). Editorial status (`retracted` / `contested`) carries no
-signature and stays exporter-attested.
+signature and stays exporter-attested, and so does completeness: a
+verified bundle attests the claims it carries, not that they are all the
+claims in the graph. A claim removed together with its subject entry and
+re-signed by the same key verifies clean.
 
 ### Canonicalization: RFC 8785 strict
 

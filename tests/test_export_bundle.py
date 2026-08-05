@@ -7,6 +7,8 @@ Covers:
   - verify_bundle round-trips an untampered bundle and returns the
     Statement
   - tampered claim text breaks subject-digest verification
+  - a claim dropped with its subject entry and re-signed still verifies:
+    the bundle binds the claims it carries, not the claim set
   - tampered bundle signature breaks DSSE verification
   - empty graph produces a valid bundle with zero subjects
   - cross-version skew (predicateType mismatch) is caught
@@ -32,6 +34,8 @@ import pytest
 from click.testing import CliRunner
 
 import mareforma
+import mareforma.export_bundle
+from mareforma._atomic import atomic_write_bytes, atomic_write_text
 from mareforma import signing as _signing
 from mareforma.cli import cli
 from mareforma.export_bundle import (
@@ -193,6 +197,43 @@ class TestTamperDetection:
 
         with pytest.raises(BundleVerificationError, match="digest mismatch"):
             verify_bundle(bundle_path, pk.public_key())
+
+    def test_dropped_claim_still_verifies(self, tmp_path: Path) -> None:
+        """A bundle binds the claims it carries, not the claim set.
+
+        Delete a claim's node and its subject entry, re-sign with the same
+        key, and verification passes with one fewer subject: nothing counts
+        claims or chains them, so omission is outside the bound. Pinned so
+        the bound is read here rather than rediscovered against a bundle
+        someone published.
+        """
+        key_path, pk = _bootstrap(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as g:
+            headline = g.assert_claim("headline", generated_by="seed", seed=True)
+            awkward = g.assert_claim(
+                "awkward result", generated_by="lab", contradicts=[headline],
+            )
+        bundle_path = tmp_path / "bundle.json"
+        write_bundle(tmp_path, bundle_path, pk)
+        statement = verify_bundle(bundle_path, pk.public_key())
+        assert len(statement["subject"]) == 2
+
+        statement["predicate"]["@graph"] = [
+            node for node in statement["predicate"]["@graph"]
+            if node.get("@id") != f"mare:claim/{awkward}"
+        ]
+        statement["subject"] = [
+            s for s in statement["subject"]
+            if s["name"] != f"{SUBJECT_PREFIX}{awkward}"
+        ]
+        bundle_path.write_text(json.dumps(sign_bundle(statement, pk)))
+
+        reduced = verify_bundle(bundle_path, pk.public_key())
+        assert len(reduced["subject"]) == 1
+
+    def test_module_docstring_states_the_completeness_bound(self) -> None:
+        doc = " ".join(mareforma.export_bundle.__doc__.split())
+        assert "not that they are all the claims in the graph" in doc
 
     def test_wrong_predicate_type_fails(self, tmp_path: Path) -> None:
         """Future v2 predicate type → v1 verifier refuses."""

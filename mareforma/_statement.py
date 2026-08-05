@@ -91,7 +91,7 @@ def build_statement(
     text
         The claim text. Hashed (NFC-normalized) into subject.digest.
     classification
-        ``INFERRED``, ``ANALYTICAL``, ``DERIVED``, or ``SEED``.
+        ``INFERRED``, ``ANALYTICAL``, or ``DERIVED``.
     generated_by
         Producing-agent identifier.
     supports / contradicts

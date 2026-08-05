@@ -13,6 +13,9 @@ no stored status string exists to migrate.
 
 from __future__ import annotations
 
+import pathlib
+import re
+
 import pytest
 
 import mareforma
@@ -57,6 +60,23 @@ def test_replicated_label_deprecation_warning() -> None:
     with pytest.warns(DeprecationWarning, match="deprecated"):
         established = mareforma.ESTABLISHED
     assert established == "ESTABLISHED"
+
+
+def test_epistemic_test_names_carry_no_retired_status_label() -> None:
+    # The epistemic suite is where the live vocabulary has to be authoritative:
+    # someone grepping a retired label to check the rename landed should find
+    # only the alias exercises in this file, not a test named for the old word.
+    from mareforma.trust.status import _RETIRED_STATUS_ALIASES
+
+    epistemic = pathlib.Path(__file__).resolve().parent / "epistemic"
+    stale = [
+        f"{path.name}:{lineno} {name}"
+        for path in sorted(epistemic.glob("test_*.py"))
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        for name in re.findall(r"def (test_\w+)", line)
+        if any(old.lower() in name.lower() for old in _RETIRED_STATUS_ALIASES)
+    ]
+    assert stale == [], "tests named for a retired status label: " + ", ".join(stale)
 
 
 def test_unknown_public_attribute_still_raises() -> None:

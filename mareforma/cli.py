@@ -1,19 +1,10 @@
 """
 cli.py: Mareforma command-line interface.
 
-Commands
---------
-    mareforma bootstrap                        generate Ed25519 signing key
-    mareforma validator add --pubkey ...       enroll a new validator
-    mareforma validator list                   list enrolled validators
-    mareforma claim add TEXT [options]         assert a scientific claim
-    mareforma claim list [--status] [--source] list claims
-    mareforma claim show ID                    show claim details
-    mareforma claim update ID [options]        update a claim
-    mareforma claim validate ID [options]      promote REPLICATED → ESTABLISHED
-    mareforma status                           epistemic health dashboard
-    mareforma export [--output path]           write ontology.jsonld
-    mareforma restore [path]                   rebuild graph.db from claims.toml
+For the command surface run ``mareforma --help``, which is generated from
+the group below, or read ``docs/reference/cli.mdx``, which a drift guard
+holds to it. Neither is transcribed here: a third hand-kept copy would go
+stale without anything failing.
 """
 
 from __future__ import annotations

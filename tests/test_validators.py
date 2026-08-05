@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import inspect
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -1247,51 +1248,34 @@ class TestCLIValidateProducesSignedEnvelope:
 
 class TestConnCacheInvalidation:
     """The per-connection chain-verification cache is dropped whenever a
-    validator-mutation path runs through our Python API. Without this,
-    on Connection wrappers that DO accept arbitrary attributes (apsw,
-    certain SQLAlchemy adapters, future subclasses), an
-    ``is_enrolled(K) → True`` call caches the keyid; a subsequent
-    mutation would leave the cache pointing at a True that no longer
-    reflects ground truth until the connection is reopened.
+    validator-mutation path runs through our Python API. Without this, an
+    ``is_enrolled(K) → True`` call caches the keyid; a subsequent mutation
+    would leave the cache pointing at a True that no longer reflects
+    ground truth until the connection is reopened.
 
-    Stdlib ``sqlite3.Connection`` refuses ``setattr``, so on stdlib
-    ``_conn_cache`` falls into its per-call fresh-set safe branch and
-    the cache never persists. To exercise the invalidation logic
-    independently of stdlib behavior, the tests below use a tiny
-    ``_AttrConn`` wrapper that allows attribute writes — same surface
-    the cache code actually targets.
+    ``open_db`` builds every connection as ``_GraphConnection``, which
+    accepts the cache attribute, so the cache persists on the type the
+    product runs on and these tests observe it there directly. A raw
+    stdlib ``sqlite3.Connection`` refuses ``setattr`` and falls into the
+    per-call fresh-set branch of ``_conn_cache``; that branch is pinned
+    below on a connection built outside ``open_db``.
 
     Raw-SQL mutations from outside our Python paths are explicitly out
     of scope for this gate — see ``invalidate_conn_cache`` docstring.
     """
 
-    class _AttrConn:
-        """Minimal sqlite3.Connection-like shim that accepts arbitrary
-        attribute writes (which stdlib sqlite3.Connection refuses).
-        Lets us exercise the cache + invalidation logic in isolation
-        from whether the running stdlib is one of the wrappers that
-        happens to accept attrs."""
-
-        def __init__(self, real_conn):
-            self._real = real_conn
-
-        def __getattr__(self, name):
-            return getattr(self._real, name)
-
-    def test_cache_persists_when_attrs_allowed(
+    def test_cache_persists_on_a_graph_connection(
         self, tmp_path: Path,
     ) -> None:
-        """On a Connection wrapper that accepts attrs, _conn_cache
-        actually persists across calls — establishing the baseline the
-        invalidation has to clear."""
+        """_conn_cache persists across calls on a graph connection,
+        establishing the baseline the invalidation has to clear."""
         conn = open_db(tmp_path)
         try:
-            attr_conn = self._AttrConn(conn)
-            cache_a = _validators._conn_cache(attr_conn)
+            cache_a = _validators._conn_cache(conn)
             cache_a.add("test-keyid-deadbeef")
-            cache_b = _validators._conn_cache(attr_conn)
-            # Same set object returned across calls — cache really does
-            # persist on this wrapper.
+            cache_b = _validators._conn_cache(conn)
+            # Same set object returned across calls, so the cache really
+            # does persist on the connection open_db builds.
             assert cache_b is cache_a
             assert "test-keyid-deadbeef" in cache_b
         finally:
@@ -1304,29 +1288,41 @@ class TestConnCacheInvalidation:
         next _conn_cache call returns a fresh empty set."""
         conn = open_db(tmp_path)
         try:
-            attr_conn = self._AttrConn(conn)
-            cache = _validators._conn_cache(attr_conn)
+            cache = _validators._conn_cache(conn)
             cache.add("test-keyid-cafebabe")
-            assert "test-keyid-cafebabe" in _validators._conn_cache(attr_conn)
+            assert "test-keyid-cafebabe" in _validators._conn_cache(conn)
 
-            _validators.invalidate_conn_cache(attr_conn)
+            _validators.invalidate_conn_cache(conn)
 
-            after = _validators._conn_cache(attr_conn)
+            after = _validators._conn_cache(conn)
             assert "test-keyid-cafebabe" not in after
             assert after == set()
         finally:
             conn.close()
 
-    def test_invalidate_on_unattributed_conn_is_noop(
+    def test_invalidate_on_uncached_conn_is_noop(
         self, tmp_path: Path,
     ) -> None:
-        """On a connection that never built a cache (e.g. stdlib
-        sqlite3.Connection where setattr is refused), invalidation
-        must not raise. Idempotent."""
+        """On a connection that never built a cache, invalidation must
+        not raise, and it stays a no-op when repeated."""
         conn = open_db(tmp_path)
         try:
             _validators.invalidate_conn_cache(conn)  # never cached → no-op
             _validators.invalidate_conn_cache(conn)  # twice still no-op
+        finally:
+            conn.close()
+
+    def test_raw_stdlib_conn_gets_a_fresh_cache_every_call(self) -> None:
+        """A connection built outside open_db refuses the cache attribute,
+        so _conn_cache returns a new set each call and invalidation has
+        nothing to drop. Slow but correct, and it must not raise."""
+        conn = sqlite3.connect(":memory:")
+        try:
+            first = _validators._conn_cache(conn)
+            first.add("test-keyid-f00d")
+            assert _validators._conn_cache(conn) is not first
+            assert _validators._conn_cache(conn) == set()
+            _validators.invalidate_conn_cache(conn)
         finally:
             conn.close()
 

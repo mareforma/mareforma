@@ -1,9 +1,10 @@
 """
 tests/epistemic/test_trust_ladder.py — Honesty tests for trust ladder boundaries.
 
-All tests here PASS by design. They document what the system permits — not
-what it prevents. The same posture as test_spurious_replicated in
-test_support_levels.py: make the known limitations explicit and visible.
+All tests here PASS by design. They pin the ladder's boundaries: the shapes
+the graph refuses at write time, and the limitations it knowingly permits.
+The same posture as test_spurious_replicated in test_support_levels.py:
+make the known limitations explicit and visible.
 
 Scenarios covered
 -----------------
@@ -11,10 +12,6 @@ Scenarios covered
     - The validator's authenticated identity is the keyid embedded in the
       signed validation envelope; ``validated_by`` is a free-form display
       string and ``validate()`` stores whatever the caller passes.
-
-  Local-key trust footprint
-    - Anyone with read access to the project's signing key can act as the
-      enrolled root validator. Mareforma is local-trust, not cross-org PKI.
 
   Self-supporting claim
     - Updating a claim to include its own claim_id in supports[] is
@@ -25,7 +22,9 @@ Scenarios covered
       CycleDetectedError on update_claim.
 
   Contradicting and supporting the same claim
-    - A claim can list the same claim_id in both supports and contradicts.
+    - Listing the same claim_id in both supports[] and contradicts[] is
+      refused at write time with ValueError, from add_claim and
+      update_claim alike.
 """
 
 from __future__ import annotations
@@ -47,7 +46,6 @@ from tests._helpers import _pem_of, _two_signers, _wipe_db
 from tests.epistemic._builders import (
     _bootstrap_validator_key,
     open_graph,
-    open_signed_graph,
 )
 
 
@@ -71,7 +69,7 @@ class TestTrustLaundering:
         # on distinct generated_by. Sign the two converging peers with distinct
         # keys so the pair promotes (generated_by stays a display label).
         sa, sb = _two_signers(tmp_path)
-        with open_signed_graph(tmp_path) as g:
+        with open_graph(tmp_path) as g:
             upstream = g.assert_claim("upstream reference", generated_by="seed", seed=True)
             id_a = g.assert_claim(
                 "Drug X causes effect Y",
@@ -108,7 +106,7 @@ class TestTrustLaundering:
         # Distinct signers on the two converging peers so the pair reaches
         # REPLICATED under the v0.3.7 asserter-keyid axis (see the test above).
         sa, sb = _two_signers(tmp_path)
-        with open_signed_graph(tmp_path) as g:
+        with open_graph(tmp_path) as g:
             upstream = g.assert_claim("prior", generated_by="seed", seed=True)
             rep_id = g.assert_claim("finding", supports=[upstream], generated_by="A", signer=sa)
             g.assert_claim("finding", supports=[upstream], generated_by="B", signer=sb)
@@ -252,7 +250,7 @@ class TestLaunchSubstrateShipGate:
         urn:mareforma:predicate:claim:v1. Subject digest binds the
         text; predicate carries SIGNED_FIELDS + EvidenceVector."""
         from mareforma import signing as _signing
-        with open_signed_graph(tmp_path) as g:
+        with open_graph(tmp_path) as g:
             cid = g.assert_claim("anchor finding")
             claim = g.get_claim(cid)
         envelope = json.loads(claim["signature_bundle"])
@@ -267,7 +265,7 @@ class TestLaunchSubstrateShipGate:
     ) -> None:
         """Every claim row carries an ev_* + evidence_json column set.
         The signed predicate binds them; restore catches tampering."""
-        with open_signed_graph(tmp_path) as g:
+        with open_graph(tmp_path) as g:
             cid = g.assert_claim("evidence-bearing claim")
             row = g.get_claim(cid)
         for col in (

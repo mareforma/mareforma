@@ -655,6 +655,58 @@ class TestProvOExport:
             validate_prov_o(doc)
         assert ei.value.invariant == "activity-needs-agent"
 
+    def test_validate_catches_attribution_to_an_activity(self) -> None:
+        from mareforma.exporters.prov_o import (
+            validate_prov_o, ProvOValidationError,
+        )
+        doc = {
+            "@context": {"prov": "http://www.w3.org/ns/prov#"},
+            "@graph": [
+                {"@id": "ag", "@type": "prov:Agent"},
+                {
+                    "@id": "act",
+                    "@type": "prov:Activity",
+                    "prov:wasAssociatedWith": {"@id": "ag"},
+                },
+                {
+                    "@id": "x",
+                    "@type": "prov:Entity",
+                    "prov:wasGeneratedBy": {"@id": "act"},
+                    # Attribution must land on an Agent, not the Activity.
+                    "prov:wasAttributedTo": {"@id": "act"},
+                },
+            ],
+        }
+        with pytest.raises(ProvOValidationError) as ei:
+            validate_prov_o(doc)
+        assert ei.value.invariant == "attribution-targets-agent"
+
+    def test_validate_catches_derivation_from_an_agent(self) -> None:
+        from mareforma.exporters.prov_o import (
+            validate_prov_o, ProvOValidationError,
+        )
+        doc = {
+            "@context": {"prov": "http://www.w3.org/ns/prov#"},
+            "@graph": [
+                {"@id": "ag", "@type": "prov:Agent"},
+                {
+                    "@id": "act",
+                    "@type": "prov:Activity",
+                    "prov:wasAssociatedWith": {"@id": "ag"},
+                },
+                {
+                    "@id": "x",
+                    "@type": "prov:Entity",
+                    "prov:wasGeneratedBy": {"@id": "act"},
+                    # Derivation runs Entity → Entity, so an Agent is out.
+                    "prov:wasDerivedFrom": [{"@id": "ag"}],
+                },
+            ],
+        }
+        with pytest.raises(ProvOValidationError) as ei:
+            validate_prov_o(doc)
+        assert ei.value.invariant == "derivation-targets-entity"
+
     def test_focal_claim_walks_ancestors(self, tmp_path: Path) -> None:
         from mareforma.exporters.prov_o import build_prov_o
         with mareforma.open(tmp_path) as graph:

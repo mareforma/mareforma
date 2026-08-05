@@ -596,7 +596,7 @@ def parse_rekor_checkpoint(checkpoint_text: str) -> dict[str, Any]:
         line = raw_line.rstrip("\r")
         if not line:
             continue
-        # Each line: ",  <name> <base64-encoded-sig-with-prefix>"
+        # Each line: "— <name> <base64-encoded-sig-with-prefix>"
         prefix = _SIGNED_NOTE_DASH + " "
         if not line.startswith(prefix):
             raise RekorInclusionError(

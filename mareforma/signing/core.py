@@ -722,7 +722,11 @@ def sign_validator_enrollment(
 
     The record must contain ``keyid`` (sha256-hex of the NEW validator's
     raw public key), ``pubkey_pem`` (base64 of the new validator's PEM),
-    ``identity``, ``enrolled_at``, and ``enrolled_by_keyid``.
+    ``identity``, ``validator_type`` (``'human'`` or ``'llm'``),
+    ``enrolled_at``, and ``enrolled_by_keyid``. Every one of the six is
+    bound by the signature; a field the caller leaves out is signed as
+    null and fails :func:`mareforma.validators.verify_enrollment` against
+    the persisted row.
     *private_key* is the parent validator's key (equal to the new key for
     the root self-enrollment).
     """
@@ -740,10 +744,14 @@ def sign_validation(
     """Sign a validation event for a claim.
 
     The record must contain ``claim_id`` (the claim being promoted to
-    ESTABLISHED), ``validator_keyid`` (the signing validator), and
-    ``validated_at`` (ISO 8601 UTC). The envelope is persisted to the
-    claim's ``validation_signature`` column so the promotion event is
-    independently verifiable.
+    ESTABLISHED), ``validator_keyid`` (the signing validator),
+    ``validated_at`` (ISO 8601 UTC), and ``evidence_seen`` (the claim_ids
+    the validator reviewed, ``[]`` for none). ``evidence_seen`` is bound
+    by the signature like the rest, so an empty list is the way to say
+    "reviewed nothing"; leaving the key out signs it as null, which
+    ``validate_claim`` and restore then refuse. The envelope is persisted
+    to the claim's ``validation_signature`` column so the promotion event
+    is independently verifiable.
     """
     payload = _canonical_record(_VALIDATION_FIELDS, validation)
     return _build_envelope(
@@ -871,13 +879,26 @@ def verify_envelope(
     *,
     expected_payload_type: Optional[str] = None,
 ) -> bool:
-    """Verify a signature envelope against a public key.
+    """Verify one signature in an envelope against a public key.
 
-    Returns True iff the envelope is well-formed, names this public key
-    (by keyid), and the signature matches the payload bytes.
+    Returns True iff the envelope is well-formed, its first signature
+    entry names this public key (by keyid), and that signature matches
+    the payload bytes.
+
+    Only ``signatures[0]`` is verified. Later entries are read past, so
+    a True return says nothing about them: on a ``claim-with-roles:v1``
+    envelope it authenticates the asserter alone, and forged role
+    entries in ``signatures[1:]`` survive it while their role labels
+    stay readable. Verify those with :func:`verify_envelope_multi` and
+    a role-to-key map, or walk ``signatures[1:]`` in the caller.
 
     Does NOT decode the payload or re-validate semantic fields: those are
     the caller's concern. The contract here is purely cryptographic.
+
+    See Also
+    --------
+    verify_envelope_multi : verify every signature under a keyed role.
+    sign_claim_with_roles : produce a multi-signature claim envelope.
 
     Parameters
     ----------

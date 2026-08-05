@@ -2900,14 +2900,20 @@ class EpistemicGraph:
         """Return agent tool callables pre-bound to this graph.
 
         Returns two plain Python functions that any agent framework can wrap.
-        ``generated_by`` is baked into the closure: set it to the calling
-        agent's identifier so REPLICATED detection works across independent runs.
+        ``generated_by`` is baked into the closure as a display and provenance
+        label on each claim. REPLICATED independence keys on the signing key
+        (``asserter_keyid``), not on that label, and every tool from one
+        binding signs with the key the graph was opened with: all claims
+        recorded through it share one asserter keyid. Independent lines need a
+        graph handle per agent, each opened with its own key, or
+        ``graph.assert_claim(..., signer=...)`` with distinct keys.
 
         Parameters
         ----------
         generated_by:
-            Agent identifier, e.g. ``"agent/model-a/lab_a"``.
-            Defaults to ``'agent'``.
+            Agent identifier, e.g. ``"agent/model-a/lab_a"``, carried as a
+            display label. Defaults to ``'agent'``. It plays no part in the
+            trust axes.
         include_deprecated_aliases:
             When True, appends a deprecated ``assert_finding`` tool that
             forwards to ``record_claim`` and warns on use. The LLM-facing

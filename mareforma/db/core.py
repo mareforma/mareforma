@@ -1171,9 +1171,11 @@ def normalize_artifact_hash(value: str | None) -> str | None:
 
     A claim's ``artifact_hash`` is the SHA256 of the output bytes that
     backed the claim (a figure, a CSV, a pickled model). It is signed
-    into the claim envelope and used as a parallel REPLICATED signal:
-    when two peers cite the same upstream and both supply a hash, the
-    hashes must match for REPLICATED to fire.
+    into the claim envelope and read as a secondary collapse check: two
+    peers citing the same upstream that both supply an EQUAL hash are
+    one line of evidence (a byte-identical rerun is not corroboration)
+    and do not promote on their own. Distinct hashes, or an absent hash
+    on either side, never block the distinct-signer axis.
 
     Accepts canonical hex digests only: no ``sha256:`` prefix, no
     base64, no whitespace. Case is normalised to lowercase so two
@@ -1328,10 +1330,12 @@ def add_claim(
     artifact_hash:
         Optional SHA256 hex digest of the artifact bytes (figure, CSV,
         model) backing this claim. When supplied it is included in the
-        signed payload and used as a parallel REPLICATED signal: peers
-        that share an upstream AND both supply a hash must agree on the
-        hash to converge. When ``None`` on either peer, behaviour falls
-        back to identity-only REPLICATED.
+        signed payload and read as a secondary collapse check: peers
+        sharing an upstream that both supply an EQUAL hash are one line
+        of evidence and do not promote on their own. Distinct hashes, or
+        ``None`` on either side, never block the distinct-signer axis;
+        ``strict_promotion`` is the opt-in that makes non-NULL data on
+        both sides a hard requirement.
     signer:
         Optional Ed25519 private key. When provided, the claim is signed
         before INSERT and the signature envelope is persisted to the

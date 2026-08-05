@@ -1126,9 +1126,9 @@ def _make_aiohttp_request_wrapper(real):
 
 
 def _aiohttp_url(args, kwargs) -> str:
-    # aiohttp _request(self, method, url, ...): the URL is the 2nd positional arg
-    # (args[0] is the HTTP verb), or the ``url`` kwarg.
-    url = kwargs.get("url")
+    # aiohttp _request(self, method, str_or_url, ...): the URL is the 2nd
+    # positional arg (args[0] is the HTTP verb), or the ``str_or_url`` kwarg.
+    url = kwargs.get("str_or_url")
     if url is None and len(args) >= 2:
         url = args[1]
     return str(url or "")

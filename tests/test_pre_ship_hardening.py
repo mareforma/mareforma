@@ -1,5 +1,5 @@
-"""Regressions across the paths a finding travels: read, convergence, backup,
-restore, and the export bundle.
+"""Regressions on the supports/contradicts coherence gate and the query
+substring filter.
 
 Locked-in invariants:
 

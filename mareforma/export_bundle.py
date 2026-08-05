@@ -25,6 +25,11 @@ Editorial status (``retracted`` / ``contested``) and comparison
 summaries are exporter-attested only: the data model records no
 signature for a status change, so a verified bundle does not attest
 them (use the retract-then-supersede pattern for a signed retraction).
+Completeness is outside the bound as well. A verified bundle attests
+the claims it carries, not that they are all the claims in the graph:
+a claim removed together with its subject entry and re-signed by the
+same key verifies clean, because nothing here counts the claims or
+chains them.
 
 Design choices (one-way doors, locked currently):
 
@@ -38,7 +43,9 @@ Design choices (one-way doors, locked currently):
   PROV-O modelling: the JSON-LD scoping rationale already covers
   why (see ``mareforma/exporters/jsonld.py`` module docstring).
 
-The schema lives in ``docs/reference/scitt-bundle.md``.
+The bundle shape is written up in ``docs/for-agents/agents.mdx`` under
+"Export and signed bundles"; the command surface in
+``docs/reference/cli.mdx`` under ``mareforma export``.
 """
 
 from __future__ import annotations

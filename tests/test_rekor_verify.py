@@ -99,6 +99,30 @@ def _sign_checkpoint_ecdsa(
     return body + "\n" + f"— {signer_name} {sig_b64}\n"
 
 
+def _checkpoint_text(
+    *,
+    tree_size: str = "1",
+    root_hash: bytes = b"\x00" * 32,
+    separator: str = "\n\n",
+) -> str:
+    """Build a checkpoint whose only defect is the one the caller injects.
+
+    The signature line is well formed, so a refusal test built on this
+    helper is pinned to the field it names rather than to a second,
+    unnamed defect in the fixture.
+    """
+    return (
+        "origin\n"
+        + tree_size
+        + "\n"
+        + base64.standard_b64encode(root_hash).decode()
+        + separator
+        + "— name "
+        + base64.standard_b64encode(b"\x00" * 4 + b"\x00" * 64).decode()
+        + "\n"
+    )
+
+
 def _pubkey_pem(key) -> bytes:
     return key.public_key().public_bytes(
         encoding=serialization.Encoding.PEM,
@@ -251,39 +275,34 @@ class TestCheckpointParsing:
         assert len(key_hash) == 4
         assert len(sig_bytes) == 64  # Ed25519 sig
 
+    def test_refusal_fixture_is_otherwise_well_formed(self) -> None:
+        # The three refusal tests below inject one defect each into this
+        # fixture. Pin the undamaged fixture so none of them can pass on a
+        # second, unnamed defect in the signature line.
+        parsed = _signing.parse_rekor_checkpoint(_checkpoint_text())
+        assert len(parsed["signatures"]) == 1
+
     def test_non_integer_tree_size_refused(self) -> None:
-        text = (
-            "origin\nnot-a-number\n"
-            + base64.standard_b64encode(b"\x00" * 32).decode()
-            + "\n\n,  name "
-            + base64.standard_b64encode(b"\x00" * 4 + b"\x00" * 64).decode()
-            + "\n"
-        )
         with pytest.raises(_signing.RekorInclusionError) as exc_info:
-            _signing.parse_rekor_checkpoint(text)
+            _signing.parse_rekor_checkpoint(
+                _checkpoint_text(tree_size="not-a-number"),
+            )
         assert exc_info.value.reason == "checkpoint_malformed"
+        assert "'not-a-number' is not an integer" in str(exc_info.value)
 
     def test_short_root_hash_refused(self) -> None:
-        text = (
-            "origin\n1\n"
-            + base64.standard_b64encode(b"\x00" * 16).decode()
-            + "\n\n,  name "
-            + base64.standard_b64encode(b"\x00" * 4 + b"\x00" * 64).decode()
-            + "\n"
-        )
         with pytest.raises(_signing.RekorInclusionError) as exc_info:
-            _signing.parse_rekor_checkpoint(text)
+            _signing.parse_rekor_checkpoint(
+                _checkpoint_text(root_hash=b"\x00" * 16),
+            )
         assert exc_info.value.reason == "checkpoint_malformed"
+        assert "root hash is 16 bytes, expected 32" in str(exc_info.value)
 
     def test_missing_separator_refused(self) -> None:
-        text = (
-            "origin\n1\n"
-            + base64.standard_b64encode(b"\x00" * 32).decode()
-            + "\n,  name AAAAAA\n"
-        )
         with pytest.raises(_signing.RekorInclusionError) as exc_info:
-            _signing.parse_rekor_checkpoint(text)
+            _signing.parse_rekor_checkpoint(_checkpoint_text(separator="\n"))
         assert exc_info.value.reason == "checkpoint_malformed"
+        assert "missing blank-line separator" in str(exc_info.value)
 
     def test_no_signature_line_refused(self) -> None:
         text = (

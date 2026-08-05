@@ -722,13 +722,23 @@ def verify_enrollment(validator_row: dict, parent_pubkey_pem: bytes) -> bool:
 
     Returns True iff the row's ``enrollment_envelope`` is a well-formed
     DSSE-style envelope, the signature matches the parent's public key,
-    AND every field in the signed payload (keyid, pubkey_pem, identity,
-    enrolled_at, enrolled_by_keyid) equals the corresponding row column.
+    every field in the signed payload (keyid, pubkey_pem, identity,
+    validator_type, enrolled_at, enrolled_by_keyid) equals the
+    corresponding row column, AND the row's ``keyid`` is the
+    :func:`~mareforma.signing.public_key_id` of its own ``pubkey_pem``.
 
     Binding all fields, not just ``keyid``, gives defense in depth:
     an attacker who swaps ``identity`` or ``pubkey_pem`` in the row
     breaks verification even if they could somehow reuse a legitimate
     envelope.
+
+    The keyid-to-key binding is what makes a keyid an identity, and only
+    the write path computed it. Without it, a holder of one enrolled key
+    can sign a child enrollment naming any keyid at all over its own
+    pubkey, and every read-side path (the chain walk, the listing, restore)
+    reads that keyid as an enrolled validator. The distinct-signer axis and
+    the self-verdict guards are keyid comparisons, so an unbacked keyid is
+    a second identity for the same key.
     """
     try:
         envelope = json.loads(validator_row["enrollment_envelope"])

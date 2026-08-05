@@ -8,7 +8,8 @@ Covers:
   - 2-cycle, 3-cycle, n-cycle via update_claim rejected
   - DOI-only supports pass (not graph nodes)
   - mixed claim_id + DOI supports — only the claim_id part walks
-  - depth cap kicks in on pathologically long chains
+  - reachable-claim cap kicks in on pathologically long chains,
+    reported as GraphTooLargeError, not a cycle
   - empty supports passes
   - signed claim's supports[] cannot be mutated (the signed-immutability
     invariant still holds — cycle detection never reached on signed
@@ -109,6 +110,27 @@ class TestDOIPassThrough:
                 supports=["10.1234/some.doi"],
             )
         assert cid  # no exception raised
+
+    def test_mixed_supports_walk_the_claim_id_half_only(
+        self, tmp_path: Path,
+    ) -> None:
+        """A DOI beside a claim_id must neither hide nor invent a cycle.
+
+        The walk seeds off the _is_claim_id filter, so a mixed list has to
+        behave exactly like the claim_id part alone: the claim_id closes the
+        cycle it closes, and the DOI stays inert.
+        """
+        doi = "10.1234/x"
+        with mareforma.open(tmp_path) as g:
+            a = g.assert_claim("A")
+            b = g.assert_claim("B", supports=[a, doi])
+        conn = open_db(tmp_path)
+        try:
+            with pytest.raises(CycleDetectedError, match="cycle"):
+                _check_no_cycle(conn, a, [b, doi])
+            _check_no_cycle(conn, str(uuid.uuid4()), [a, doi])
+        finally:
+            conn.close()
 
 
 # ---------------------------------------------------------------------------

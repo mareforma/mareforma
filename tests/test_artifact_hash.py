@@ -250,6 +250,22 @@ class TestReplicatedHashGate:
         assert open_graph.get_claim(a)["support_level"] == "REPLICATED"
         assert open_graph.get_claim(b)["support_level"] == "REPLICATED"
 
+    def test_docstrings_state_the_collapse_rule(self) -> None:
+        """The two in-code surfaces must not sell the retired agreement gate.
+
+        A reader who follows "the hashes must match for REPLICATED to fire"
+        supplies matching hashes and gets the opposite outcome: the pair
+        collapses to one line and never promotes, as the test above pins.
+        """
+        for fn in (_db.normalize_artifact_hash, _db.add_claim):
+            text = " ".join((fn.__doc__ or "").split())
+            assert "must match" not in text and "must agree" not in text, (
+                f"{fn.__name__} still documents the retired hash-agreement gate"
+            )
+            assert "collapse" in text, (
+                f"{fn.__name__} must state the collapse rule the gate applies"
+            )
+
     def test_third_peer_breaks_a_collapsed_pair(
         self, open_graph, tmp_path,
     ) -> None:

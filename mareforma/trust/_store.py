@@ -856,14 +856,18 @@ def independence_counts(
     Counted by distinct **signer** (the claim's ``asserter_keyid``) AND distinct
     **model/method**, with a ``data_id`` guard (see :func:`_count_run_distinct`):
     one signer yields at most one independent support and one independent refute,
-    and two same-model checks no longer read as two independent lines. This is
-    the same WHO axis the REPLICATED promotion query keys on, read from the same
-    denormalised claim column, and the same model axis the promotion gate now
-    reads off the evidence line, so promotion and trust counting can never
-    disagree. Legacy evidence lines whose claim predates the keyid column (NULL
-    ``asserter_keyid``) fall back to the retired ``generated_by`` run axis, and a
-    finding with no observed model call carries no model constraint, so both keep
-    their count instead of collapsing (status_policy@v4). A no-model-call line
+    and two same-model checks no longer read as two independent lines. A keyid
+    counts only when the claim's signature bundle authenticates it
+    (:func:`_authentic_signer_keyid`), so this axis is not the unsigned column
+    the REPLICATED promotion query reads; that query is a separate check under
+    its own editorial filters, and the two answer different questions and can
+    differ. So can this count and the trust map's number:
+    :func:`effective_independence` re-keys a line with no observed model call to
+    soft, so it sits at or below the count here. Legacy evidence lines whose
+    claim predates the keyid column (NULL ``asserter_keyid``) fall back to the
+    retired ``generated_by`` run axis, and a finding with no observed model call
+    carries no model constraint, so both keep their count instead of collapsing
+    (status_policy@v4). A no-model-call line
     signed by an enrolled human validator counts on the human axis, never folded
     into a model root. That axis rests on a self-declared ``validator_type``, so
     the trust map's per-finding disclosure does not certify it; only this legacy
