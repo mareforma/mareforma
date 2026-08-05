@@ -8,7 +8,7 @@ Wraps the JSON-LD graph export in an in-toto Statement v1 envelope:
       "subject": [
         {
           "name":   "urn:mareforma:claim:<uuid>",
-          "digest": {"sha256": "<canonical_payload_hash>"}
+          "digest": {"sha256": "<canonical_statement_hash>"}
         },
         ...
       ],
@@ -534,7 +534,7 @@ def verify_bundle(
         )
 
     # Verify each subject digest against the corresponding claim's
-    # canonical_payload in the predicate.
+    # canonical_statement bytes in the predicate.
     subjects = {s["name"]: s["digest"]["sha256"] for s in statement.get("subject", [])}
     predicate = statement.get("predicate") or {}
     nodes = predicate.get("@graph") or []

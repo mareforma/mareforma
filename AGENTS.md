@@ -803,11 +803,12 @@ constraint + INSERT trigger). A separate trigger on `status` makes
 `retracted` terminal. Transitions out of retracted are refused, so
 the only way to resurrect a withdrawn finding is to assert a new
 claim citing the old via `contradicts=`. Illegal transitions raise
-`IllegalStateTransitionError` with a parsed `<from>-><to>` string
-instead of an opaque `CHECK CONSTRAINT FAILED` message.
+`IllegalStateTransitionError` carrying the trigger's static suffix
+(`illegal_transition:from_preliminary` and its siblings) instead of
+an opaque `CHECK CONSTRAINT FAILED` message.
 
 The `claims` table also carries a `prev_hash` append-only hash chain
-(`sha256(prev_chain_link || canonical_payload)`) with a UNIQUE
+(`sha256(prev_chain_link || canonical_statement_bytes)`) with a UNIQUE
 constraint. `BEGIN IMMEDIATE` wraps the chain-extend INSERT so two
 concurrent writers cannot branch the chain. The chain is independent
 of per-claim signatures. It attests row ordering, not claim

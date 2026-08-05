@@ -455,13 +455,13 @@ verification.
 media type `application/x-mareforma-graph+json`). This default format is
 NOT PROV-O-conformant; pass `--format=prov-o` for a real W3C PROV-O
 graph. Each claim node carries every `SIGNED_FIELDS` member so the bundle
-verifier can re-derive `canonical_payload` from a node alone.
+verifier can re-derive `canonical_statement` bytes from a node alone.
 
 **SCITT-style signed bundle.** `mareforma export --bundle` wraps the
 JSON-LD export in an in-toto Statement v1 envelope and signs it with the
 local Ed25519 key. The bundle includes one subject entry per claim
-(`urn:mareforma:claim:<uuid>`) with a SHA-256 of the claim's
-`canonical_payload`, plus a bundle-level DSSE signature. Verify with
+(`urn:mareforma:claim:<uuid>`) with a SHA-256 of the claim's canonical
+Statement v1 bytes, plus a bundle-level DSSE signature. Verify with
 `mareforma verify <bundle.json>`:
 
 ```bash

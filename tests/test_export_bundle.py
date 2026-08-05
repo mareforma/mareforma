@@ -175,7 +175,7 @@ class TestTamperDetection:
         """Mutate a claim's text inside the predicate, re-sign the
         bundle as if we own the key. The per-claim subject digest
         check catches the mismatch — bundle DSSE verifies, but the
-        claim digest no longer matches the canonical_payload of the
+        claim digest no longer matches the canonical_statement of the
         tampered text."""
         key_path, pk = _bootstrap(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as g:

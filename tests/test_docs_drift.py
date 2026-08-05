@@ -117,12 +117,108 @@ def test_status_policy_stamp_documented_matches_code():
         assert not stale, f"{page.name} still documents stale policy stamps {stale}"
 
 
+# ``canonical_payload`` was removed because it produced different bytes from
+# the production encoding. Private helpers with the word inside a longer name
+# (``_verdict_canonical_payload``) sign verdict envelopes, not claims, so the
+# guard matches the bare name only.
+_DEAD_SIGNING_NAME_RE = re.compile(r"(?<![\w])canonical_payload")
+
+# The changelog records the rename itself, so it keeps the old name.
+_SIGNING_NAME_EXEMPT = frozenset({"CHANGELOG.md", "changelog.mdx"})
+
+
+def _signing_name_sources():
+    """Yield every doc and package file the signing-name guard reads."""
+    for name in ("AGENTS.md", "ARCHITECTURE.md", "README.md"):
+        yield ROOT / name
+    yield from sorted(DOCS.rglob("*.mdx"))
+    yield from sorted((ROOT / "mareforma").rglob("*.py"))
+
+
+def test_signed_bytes_are_named_by_the_symbol_that_exists():
+    """docs and comments must name the signed bytes ``canonical_statement``.
+
+    ``canonical_statement`` is the only exported name; importing
+    ``canonical_payload`` raises. The passages that still spell the removed
+    name are written for external verifier authors and tell them to re-derive
+    bytes by a name that resolves to nothing.
+    """
+    from mareforma import signing as _signing
+
+    assert hasattr(_signing, "canonical_statement")
+    assert not hasattr(_signing, "canonical_payload")
+
+    stale = []
+    for path in _signing_name_sources():
+        if path.name in _SIGNING_NAME_EXEMPT:
+            continue
+        for lineno, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), 1
+        ):
+            if _DEAD_SIGNING_NAME_RE.search(line):
+                stale.append(f"{path.relative_to(ROOT)}:{lineno}")
+    assert not stale, (
+        "these lines name the removed `canonical_payload`; the signed bytes "
+        f"are `canonical_statement`: {stale}"
+    )
+
+
 def test_export_format_choices_documented():
     """every --format choice from the CLI appears in cli.mdx."""
     cli_doc = (DOCS / "reference" / "cli.mdx").read_text(encoding="utf-8")
     assert "--format" in cli_doc, "cli.mdx does not document the --format option"
     for choice in _export_format_choices():
         assert choice in cli_doc, f"cli.mdx does not document --format={choice}"
+
+
+def _cli_section(name: str) -> str:
+    """The body of one ``## <name>`` section of cli.mdx."""
+    text = (DOCS / "reference" / "cli.mdx").read_text(encoding="utf-8")
+    match = re.search(rf"^## {re.escape(name)}\n(.*?)(?=^## )",
+                      text, re.M | re.DOTALL)
+    assert match is not None, f"cli.mdx has no {name} section"
+    return match.group(1)
+
+
+def test_export_options_table_lists_every_option():
+    """the export options table must name every flag the command takes.
+
+    A reader signing a bundle for a project whose root validator is not the
+    XDG bootstrap key needs ``--key``, and an option missing from the table
+    reads as an option that does not exist. The page then sends that reader
+    looking for a way to pin a signer the command already accepts.
+    """
+    table = _cli_section("export").split("**Options**", 1)[1]
+    missing = [
+        param.opts[0]
+        for param in cli.commands["export"].params
+        if isinstance(param, click.Option)
+        and not param.hidden
+        and not any(opt in table for opt in param.opts)
+    ]
+    assert not missing, f"cli.mdx export options table omits {missing}"
+
+
+def test_verify_documents_the_payload_types_it_routes_a_file_by():
+    """the verify page must describe file routing the way the code does.
+
+    ``_verify_signed_file`` dispatches on the DSSE ``payloadType``: an audit
+    receipt and an audit run record reach their own verifiers before the
+    bundle verifier is ever tried, and the filename decides nothing. A page
+    that says an existing file is verified as a signed bundle points the CI
+    gate author who wired ``mareforma audit`` at the wrong verdict.
+    """
+    from mareforma import signing as _signing
+
+    section = _cli_section("verify")
+    assert "payloadType" in section, (
+        "cli.mdx does not say verify routes a file by its DSSE payloadType"
+    )
+    for payload_type in (_signing.PAYLOAD_TYPE_AUDIT_RECEIPT,
+                         _signing.PAYLOAD_TYPE_AUDIT_RUN):
+        assert payload_type in section, (
+            f"cli.mdx does not document the {payload_type} target kind"
+        )
 
 
 def test_every_cli_command_documented():
@@ -133,16 +229,363 @@ def test_every_cli_command_documented():
     command drifts out of the reference, not only for today's ``audit`` and
     ``reexec`` gaps. Hidden/deprecated commands (e.g. ``stats``) are excluded
     because they are absent from ``--help`` and the reference by design. The
-    check requires the canonical ``mareforma <cmd>`` form rather than a bare
-    substring, so a command whose name is also a common word (``key``,
-    ``map``, ``status``) cannot read as documented by coincidence.
+    check requires a section heading, not a substring: a row in the summary
+    table satisfies any substring check, which is how six commands came to be
+    listed with their arguments, options and defaults documented nowhere.
     """
     cli_doc = (DOCS / "reference" / "cli.mdx").read_text(encoding="utf-8")
     visible = [name for name, cmd in cli.commands.items()
                if not getattr(cmd, "hidden", False)]
-    missing = sorted(name for name in visible
-                     if f"mareforma {name}" not in cli_doc)
-    assert not missing, f"cli.mdx omits visible command(s): {missing}"
+    missing = sorted(
+        name for name in visible
+        if not re.search(rf"^#{{2,3}} {re.escape(name)}\b", cli_doc, re.M)
+    )
+    assert not missing, f"cli.mdx has no section for command(s): {missing}"
+
+
+# Releases from this one on are mirrored section for section on the docs page.
+# The page rewrote 0.3.0 and the 0.2.x line as themed summaries, and says so.
+_MIRROR_FLOOR = (0, 3, 1)
+
+
+def _release_sections(text: str, version_pattern: str) -> dict[str, list[str]]:
+    """Map each release heading to its ``###`` section names, in order."""
+    releases: dict[str, list[str]] = {}
+    current: list[str] | None = None
+    for line in text.splitlines():
+        release = re.match(version_pattern, line)
+        if release:
+            current = releases.setdefault(release.group(1), [])
+            continue
+        section = re.match(r"### (.+)", line)
+        if section is not None and current is not None:
+            current.append(section.group(1).strip())
+    return releases
+
+
+def test_changelog_mirror_carries_every_section_of_each_release():
+    """the docs changelog page must not drop a section of a mirrored release.
+
+    The page says it mirrors ``CHANGELOG.md``, and it is the surface a user
+    reaching the docs site first sees. A dropped Security block reads as a
+    release with no security content.
+    """
+    changelog = _release_sections(
+        (ROOT / "CHANGELOG.md").read_text(encoding="utf-8"),
+        r"## \[([0-9][0-9.]*)\]",
+    )
+    mirror = _release_sections(
+        (DOCS / "reference" / "changelog.mdx").read_text(encoding="utf-8"),
+        r"## v([0-9][0-9.]*)",
+    )
+    drift = {
+        version: (sections, mirror.get(version))
+        for version, sections in changelog.items()
+        if tuple(int(p) for p in version.split(".")) >= _MIRROR_FLOOR
+        and mirror.get(version) != sections
+    }
+    assert not drift, f"the changelog mirror drifted from CHANGELOG.md: {drift}"
+
+
+_CHANGELOG_PAGES = (
+    ROOT / "CHANGELOG.md",
+    DOCS / "reference" / "changelog.mdx",
+)
+
+
+def test_changelog_says_when_the_supports_counter_bumps(tmp_path):
+    """the counter entry must name every write that moves the revision.
+
+    ``record_supports_edges`` bumps the revision for a claim that carries no
+    supports at all, because the cache stamps the claim count alongside it. An
+    entry that scopes the counter to supports edges sends an implementer
+    debugging a stale cache looking for an edge write that never happened.
+    """
+    from mareforma import _supports
+
+    key = _bootstrap_key(tmp_path, "lab_a.key")
+    with mareforma.open(tmp_path, key_path=key) as graph:
+        before = _supports.supports_revision(graph._conn)
+        graph.assert_claim("no supports here", generated_by="agent/a")
+        after = _supports.supports_revision(graph._conn)
+    assert after == before + 1, (
+        "a claim with no supports no longer bumps the revision; re-read the "
+        "changelog entry against the counter before changing this test"
+    )
+    for page in _CHANGELOG_PAGES:
+        prose = " ".join(page.read_text(encoding="utf-8").split())
+        assert (
+            "a counter bumped by every claim insert and every supports-edge "
+            "change" in prose
+        ), f"{page.name} does not say when the supports counter bumps"
+
+
+_RELEASE_0_3_11 = (
+    (ROOT / "CHANGELOG.md", "## [0.3.11]"),
+    (DOCS / "reference" / "changelog.mdx", "## v0.3.11"),
+)
+
+
+def test_changelog_names_every_extra_this_release_removed():
+    """the release note must account for every install name that stopped resolving.
+
+    0.3.10 published ``clawinstitute``, ``tooluniverse``, ``gemini`` and
+    ``docs``. All four are gone, and an extra a distribution does not declare
+    is ignored rather than refused, so a requirements file naming one keeps
+    installing silently. The note is the only surface that can tell a reader
+    auditing the upgrade why the name went away.
+    """
+    for page, heading in _RELEASE_0_3_11:
+        text = page.read_text(encoding="utf-8")
+        body = " ".join(_section(text, heading).split())
+        missing = [
+            extra
+            for extra in ("clawinstitute", "tooluniverse", "gemini", "docs")
+            if f"`{extra}`" not in body
+        ]
+        assert not missing, (
+            f"the 0.3.11 entry in {page.name} does not name the removed "
+            f"extras {missing}"
+        )
+
+
+def test_changelog_names_the_rekor_verifier_signature_change():
+    """the release note must name the exported helper that gained a parameter.
+
+    ``verify_rekor_inclusion`` is in ``mareforma.signing.__all__`` and now
+    takes the signed envelope it is proving inclusion for, so every direct
+    call written against 0.3.10 raises ``TypeError`` on the first upgrade.
+    The release note is the only surface that connects that failure to the
+    binding it enforces.
+    """
+    from mareforma.signing import verify_rekor_inclusion
+
+    # Only the positional parameters carry the breaking change. A keyword-only
+    # option with a default leaves every 0.3.10 call site working, so adding one
+    # must not fail this guard.
+    sig = inspect.signature(verify_rekor_inclusion)
+    positional = [
+        name
+        for name, param in sig.parameters.items()
+        if param.kind is param.POSITIONAL_OR_KEYWORD
+    ]
+    assert positional == ["rekor_body", "log_pubkey_pem", "envelope"], (
+        "verify_rekor_inclusion no longer takes the envelope third; re-read "
+        f"the release note against the signature before changing this test: {positional}"
+    )
+    for page, heading in _RELEASE_0_3_11:
+        body = " ".join(_section(page.read_text(encoding="utf-8"), heading).split())
+        assert "verify_rekor_inclusion" in body, (
+            f"the 0.3.11 entry in {page.name} does not name "
+            "verify_rekor_inclusion, whose call signature changed"
+        )
+
+
+def test_changelog_names_the_pre_registration_gate_on_the_default_token():
+    """the release note must carry the gate that now fires without a run token.
+
+    The guard resolves an omitted ``generated_by`` to the default run token,
+    so a project that never sets one cannot submit a ``preregistered=1`` plan
+    once any finding exists. That turns a working 0.3.10 script into a
+    ``PostHocPlanError``, and the note is where an upgrading reader gets the
+    name to search for.
+    """
+    for page, heading in _RELEASE_0_3_11:
+        body = " ".join(_section(page.read_text(encoding="utf-8"), heading).split())
+        assert "PostHocPlanError" in body, (
+            f"the 0.3.11 entry in {page.name} does not name PostHocPlanError, "
+            "which the pre-registration gate now raises on the default run token"
+        )
+
+
+def test_docs_scope_the_one_shot_pre_registration_exemption():
+    """the docs must not promise the one-shot can never hit the post-hoc gate.
+
+    The exemption is carried by the plan row, not by the call path: a one-shot
+    that lands on a plan someone already registered with ``preregistered=1``
+    submits under that claim and is refused, which
+    ``tests/epistemic/test_plan_finding.py`` pins. A reader who mixes the two
+    APIs in one run meets an exception both surfaces rule out.
+    """
+    from mareforma.trust import PostHocPlanError
+
+    surfaces = (
+        ("PostHocPlanError docstring", PostHocPlanError.__doc__),
+        ("AGENTS.md", (ROOT / "AGENTS.md").read_text(encoding="utf-8")),
+    )
+    for name, text in surfaces:
+        prose = " ".join(text.split())
+        assert "synthesised plan is the one on record" in prose, (
+            f"{name} does not scope the one-shot exemption to the plan row it "
+            "owns, so it reads as an exemption by call path"
+        )
+
+
+def test_changelog_names_the_failed_open_verdict(tmp_path):
+    """the release note must carry the verdict a failed cited open now lands.
+
+    The 0.3.10 entry says a failed open still floors to OPAQUE, never
+    UNGROUNDED. This release reversed that: when the observed failures account
+    for every open of the cited path, the scope lands UNGROUNDED. Without a
+    0.3.11 bullet the 0.3.10 sentence is the most recent word in the file, and
+    a reader who wrote a gate on it has the two states swapped.
+    """
+    from mareforma import observe as obs
+    from mareforma.observe import ObservedGrounding
+
+    missing = str(tmp_path / "missing.csv")
+    with obs.observe(cites=missing) as h:
+        try:
+            open(missing)
+        except FileNotFoundError:
+            pass
+    assert h.verdict.grounding is ObservedGrounding.UNGROUNDED, (
+        "a failed cited open no longer lands UNGROUNDED; re-read the release "
+        "note against the classifier before changing this test"
+    )
+    for page, heading in _RELEASE_0_3_11:
+        body = " ".join(_section(page.read_text(encoding="utf-8"), heading).split())
+        assert "failed open" in body and "UNGROUNDED" in body, (
+            f"the 0.3.11 entry in {page.name} does not say a failed open of a "
+            "cited source now lands UNGROUNDED"
+        )
+
+
+_VALIDATORS_DDL_RE = re.compile(
+    r"CREATE TABLE IF NOT EXISTS validators \((.*?)\n\);", re.DOTALL
+)
+
+
+def _validators_columns():
+    """Return the ``validators`` column names in schema order."""
+    from mareforma.db import _schema_sql
+
+    body = _VALIDATORS_DDL_RE.search(_schema_sql._SCHEMA_SQL).group(1)
+    return [
+        line.split()[0]
+        for line in body.strip().splitlines()
+        if line.startswith("    ") and not line.strip().startswith("CHECK")
+    ]
+
+
+def test_data_model_documents_every_validators_column():
+    """the column-level schema page must list all seven validators columns.
+
+    The page is the authority a reader reconstructs an enrollment payload
+    from, and ``validator_type`` is bound into the signed envelope, so a
+    payload rebuilt from a six-column table never verifies.
+    """
+    section = _section(
+        (DOCS / "reference" / "data-model.mdx").read_text(encoding="utf-8"),
+        "## validators table",
+    )
+    missing = [c for c in _validators_columns() if f"`{c}`" not in section]
+    assert not missing, (
+        f"the validators table section omits column(s): {missing}"
+    )
+
+
+def test_data_model_documents_every_model_lineage_key():
+    """the ``model_lineage`` row must list every key the observer stores.
+
+    The page is what a reader rebuilds or audits a lineage record from, and
+    ``independence_model_key`` reads ``attestor`` and ``digest`` first: a
+    record rebuilt without them cannot express a local weights-digest
+    identity at all, so it silently loses its distinct-model credit.
+    """
+    from mareforma.observe._lineage import ModelLineage
+
+    section = _section(
+        (DOCS / "reference" / "data-model.mdx").read_text(encoding="utf-8"),
+        "### evidence_lines table",
+    )
+    row = next(line for line in section.splitlines()
+               if line.startswith("| `model_lineage`"))
+    stored = ModelLineage.from_dict({}).to_dict()
+    missing = [key for key in stored if key not in row]
+    assert not missing, (
+        f"the model_lineage row omits stored key(s): {missing}"
+    )
+
+
+_STATE_CODE_RE = re.compile(r"RAISE\(ABORT, '(mareforma:state:[^']+)'\)")
+_WATCHED_COLUMNS_RE = re.compile(r"BEFORE UPDATE OF\n(.*?)\nON claims", re.DOTALL)
+
+
+def _laundering_prose(page):
+    """The passage in *page* that lists what the laundering trigger watches."""
+    lines = [
+        line for line in page.read_text(encoding="utf-8").splitlines()
+        if "claims_signed_fields_no_laundering" in line and "`created_at`" in line
+    ]
+    assert lines, (
+        f"{page.name} no longer describes what "
+        "claims_signed_fields_no_laundering watches"
+    )
+    return " ".join(lines)
+
+
+def test_docs_name_every_column_the_laundering_trigger_watches():
+    """the watched list must be the trigger's, not a shorter one.
+
+    Both pages read as exhaustive. ``observed_grounding`` and
+    ``predicate_payload`` are watched because flipping one to GROUNDED lifts
+    the claims the observer refused to promote and clearing the other turns a
+    binding violation into a clean verdict. An auditor reading a short list
+    concludes those two columns are unguarded.
+    """
+    from mareforma.db import _schema_sql
+
+    body = _WATCHED_COLUMNS_RE.search(_schema_sql._SIGNED_FIELDS_TRIGGER_SQL)
+    columns = [c.strip() for c in body.group(1).replace("\n", " ").split(",")]
+    # The pages write the five GRADE columns as the `ev_*` family.
+    watched = {"ev_*" if c.startswith("ev_") else c for c in columns}
+    for page in (DOCS / "reference" / "data-model.mdx", ROOT / "ARCHITECTURE.md"):
+        prose = _laundering_prose(page)
+        missing = sorted(c for c in watched if f"`{c}`" not in prose)
+        assert not missing, (
+            f"{page.name} omits watched column(s) {missing} from the "
+            "claims_signed_fields_no_laundering list"
+        )
+
+
+def test_data_model_names_every_state_code_the_triggers_raise():
+    """the page must carry the codes the triggers actually raise.
+
+    ``RAISE()`` cannot concatenate a column value below SQLite 3.46, so every
+    code is a static suffix rather than a from/to pair. A reader who writes a
+    handler against the documented format matches a string the code has never
+    emitted.
+    """
+    from mareforma.db import _schema_sql
+
+    source = pathlib.Path(_schema_sql.__file__).read_text(encoding="utf-8")
+    codes = set(_STATE_CODE_RE.findall(source))
+    assert codes, "no mareforma:state: codes found in the schema module"
+    page = (DOCS / "reference" / "data-model.mdx").read_text(encoding="utf-8")
+    missing = sorted(code for code in codes if code not in page)
+    assert not missing, (
+        f"data-model.mdx does not name state code(s): {missing}"
+    )
+
+
+def test_data_model_documents_every_table_the_schema_creates():
+    """the schema reference must not omit a table the release added.
+
+    ``supports_revision`` carries the counter a stale supports cache is
+    detected against and ``claims_fts`` backs every text search. A reader
+    auditing ``graph.db`` against this page finds tables the page never
+    mentions.
+    """
+    from mareforma.db import _schema_sql
+
+    source = pathlib.Path(_schema_sql.__file__).read_text(encoding="utf-8")
+    tables = set(re.findall(
+        r"CREATE (?:VIRTUAL )?TABLE IF NOT EXISTS (\w+)", source
+    ))
+    page = (DOCS / "reference" / "data-model.mdx").read_text(encoding="utf-8")
+    missing = sorted(name for name in tables if name not in page)
+    assert not missing, f"data-model.mdx documents no table named: {missing}"
 
 
 def test_bundle_pages_state_the_completeness_bound():
@@ -1123,6 +1566,66 @@ def test_open_tables_document_every_keyword(page, heading):
     assert not missing, (
         f"{page.name} open() table has no row for: {', '.join(missing)}"
     )
+
+def test_unresolved_row_describes_the_restore_path_that_sets_it(tmp_path):
+    """the `unresolved` row must not read as inert.
+
+    No write path sets the flag, but restore replays it from a claims.toml
+    that carries ``unresolved = true``, and a set flag holds the claim out of
+    REPLICATED with no error. An operator who reads "always 0" rules out the
+    one thing keeping the claim at PRELIMINARY.
+    """
+    from mareforma import db as _db
+    from mareforma import signing as _signing
+    from tests._helpers import _pem_of
+
+    source = tmp_path / "source"
+    source.mkdir()
+    root_key = _bootstrap_key(source, "root.key")
+    key_a, key_b = _bootstrap_key(source, "a.key"), _bootstrap_key(source, "b.key")
+    with mareforma.open(source, key_path=root_key) as g:
+        g.enroll_validator(_pem_of(key_a), identity="a")
+        g.enroll_validator(_pem_of(key_b), identity="b")
+        up = g.assert_claim("anchor", generated_by="seed", seed=True)
+        first = g.assert_claim("A", supports=[up], generated_by="lab_a",
+                               signer=_signing.load_private_key(key_a))
+
+    # A pre-v0.3.10 capture that quarantined the claim.
+    project = tmp_path / "restored"
+    project.mkdir()
+    toml = (source / "claims.toml").read_text(encoding="utf-8")
+    (project / "claims.toml").write_text(
+        toml.replace(f"[claims.{first}]", f"[claims.{first}]\nunresolved = true"),
+        encoding="utf-8",
+    )
+    mareforma.restore(project)
+
+    with mareforma.open(project, key_path=root_key) as g:
+        assert g.get_claim(first)["unresolved"] == 1
+        # The second independent line lands, and neither side promotes: the
+        # convergence candidate query skips the quarantined row silently.
+        second = g.assert_claim("B", supports=[up], generated_by="lab_b",
+                                signer=_signing.load_private_key(key_b))
+        assert g.get_claim(first)["support_level"] == "PRELIMINARY"
+        assert g.get_claim(second)["support_level"] == "PRELIMINARY"
+
+        assert [c["claim_id"] for c in _db.list_unresolved_claims(g._conn)] == [first]
+        _db.mark_claim_resolved(g._conn, project, first)
+        assert g.get_claim(first)["support_level"] == "REPLICATED"
+        assert g.get_claim(second)["support_level"] == "REPLICATED"
+
+    page = (DOCS / "reference" / "data-model.mdx").read_text(encoding="utf-8")
+    row = next(line for line in page.splitlines()
+               if line.startswith("| `unresolved` |"))
+    assert "always `0`" not in row and "inert" not in row, (
+        "the unresolved row calls the flag inert; restore replays it"
+    )
+    assert "mark_claim_resolved" in row, (
+        "the unresolved row must name the clearing path"
+    )
+    index_row = next(line for line in page.splitlines()
+                     if line.startswith("| `idx_claims_unresolved` |"))
+    assert "inert" not in index_row, "the index row repeats the inert claim"
 
 
 def test_api_compute_status_counts_independence_by_signer():

@@ -17,7 +17,7 @@ description: "The Mareforma command-line interface: identity setup, claim manage
 | `mareforma status` | Epistemic health dashboard |
 | `mareforma activity` | Rolling operational rates (`stats` is a deprecated alias) |
 | `mareforma export` | Write `ontology.jsonld` (or signed bundle) |
-| `mareforma verify` | Verify a claim, signed bundle, or export dir |
+| `mareforma verify` | Verify a claim, signed bundle, audit receipt, or export dir |
 | `mareforma map` | Show a claim's per-finding trust map |
 | `mareforma diagnose` | Run a Python target under the observer, report data flow |
 | `mareforma audit` | Audit a third-party pipeline: one signed grounding receipt per finding |
@@ -61,6 +61,40 @@ Safe rotation: back up the old key, run `graph.refresh_unsigned()` to drain the 
 mareforma bootstrap
 # → Generated signing key at /home/you/.config/mareforma/key
 # → Public key id: ed25519:abc123...
+```
+
+---
+
+## key
+
+Inspect the locally-configured signing key. A bare `mareforma key` prints the group help and exits 2.
+
+```bash
+mareforma key [SUBCOMMAND]
+```
+
+### key show
+
+Print the public half of the local signing key. The private key never leaves the file at `--key-path` (default `~/.config/mareforma/key`); what this command emits is the public half, safe to email, paste, or pipe.
+
+```bash
+mareforma key show [OPTIONS]
+```
+
+**Options**
+
+| Option | Default | Description |
+|---|---|---|
+| `--key-path PATH` | `~/.config/mareforma/key` | Override the default key path |
+| `--pem` | `False` | Emit only the PEM-encoded public key to stdout, for `validator add --pubkey` |
+| `--keyid` | `False` | Emit only the keyid (SHA-256 hex of the raw public key bytes), for scripts |
+
+**Examples**
+
+```bash
+mareforma key show                     # human-readable identity card
+mareforma key show --pem > pubkey.pem  # send to a project admin to be enrolled
+mareforma key show --keyid
 ```
 
 ---
@@ -284,6 +318,33 @@ mareforma status [OPTIONS]
 
 ---
 
+## activity
+
+Show rolling operational rates from the activity log (`.mareforma/health.jsonl`), one JSONL line per operation that produces operational signal: provenance queries, grounding sensor verdicts, `refresh_unsigned` retries. The report gives grounding-pass-rate and Rekor-log-recovery-rate, so an operator sees how mareforma has been behaving without re-querying `graph.db`.
+
+Distinct from `mareforma status`: `status` is a snapshot of graph state right now, `activity` is a rolling view of what mareforma has been doing. `mareforma stats` is a deprecated alias for this command.
+
+```bash
+mareforma activity [OPTIONS]
+```
+
+**Options**
+
+| Option | Default | Description |
+|---|---|---|
+| `--json` | `False` | Emit JSON to stdout instead of a formatted table |
+| `--last N` | all events | Aggregate only the last N events (N >= 1) |
+
+**Examples**
+
+```bash
+mareforma activity
+mareforma activity --last=100
+mareforma activity --json
+```
+
+---
+
 ## export
 
 Export all claims as a JSON-LD document, optionally as a SCITT-style signed bundle.
@@ -292,7 +353,7 @@ Export all claims as a JSON-LD document, optionally as a SCITT-style signed bund
 mareforma export [OPTIONS]
 ```
 
-**Plain JSON-LD** (`--format=jsonld`, default). Writes `ontology.jsonld` in the mareforma-native vocabulary (`@type=mare:Graph`, media type `application/x-mareforma-graph+json`). This default format is NOT PROV-O-conformant: it uses an honest mareforma-native vocabulary rather than name-dropping PROV-O without populating the full graph. For a real W3C PROV-O graph, use `--format=prov-o` (below). Each claim node carries every `SIGNED_FIELDS` member so a bundle verifier can re-derive `canonical_payload` from a node alone.
+**Plain JSON-LD** (`--format=jsonld`, default). Writes `ontology.jsonld` in the mareforma-native vocabulary (`@type=mare:Graph`, media type `application/x-mareforma-graph+json`). This default format is NOT PROV-O-conformant: it uses an honest mareforma-native vocabulary rather than name-dropping PROV-O without populating the full graph. For a real W3C PROV-O graph, use `--format=prov-o` (below). Each claim node carries every `SIGNED_FIELDS` member so a bundle verifier can re-derive `canonical_statement` bytes from a node alone.
 
 **Interop formats** (`--format`). Beyond the native JSON-LD, `export` emits three interchange formats for external tooling:
 
@@ -300,16 +361,17 @@ mareforma export [OPTIONS]
 - `--format=ro-crate-1.2`: an RO-Crate 1.2 Process Run Crate (`ro-crate-metadata.json`).
 - `--format=prov-o`: a W3C PROV-O JSON-LD graph for provenance-aware tooling.
 
-**Signed bundle** (`--bundle`). Wraps the JSON-LD export in an in-toto Statement v1 envelope and signs it with the local Ed25519 key. The bundle includes one subject entry per claim (`urn:mareforma:claim:<uuid>`) with a SHA-256 of the claim's `canonical_payload`, plus a bundle-level DSSE signature. Requires a bootstrapped XDG key. `--bundle` and `--format` are mutually exclusive: `--bundle` always signs the native JSON-LD.
+**Signed bundle** (`--bundle`). Wraps the JSON-LD export in an in-toto Statement v1 envelope and signs it with the local Ed25519 bootstrap key, or with the key `--key` pins when the project's root validator is not the default key. The bundle includes one subject entry per claim (`urn:mareforma:claim:<uuid>`) with a SHA-256 of the claim's canonical Statement v1 bytes, plus a bundle-level DSSE signature. `--bundle` and `--format` are mutually exclusive: `--bundle` always signs the native JSON-LD.
 
 **Options**
 
 | Option | Default | Description |
 |---|---|---|
 | `--format [jsonld\|in-toto-v1\|ro-crate-1.2\|prov-o]` | `jsonld` | Export format. Mutually exclusive with `--bundle` |
-| `--output PATH` | `./ontology.jsonld` (varies by `--format`; `./mareforma-bundle.json` with `--bundle`) | Output file path |
+| `--output PATH` | `ontology.jsonld` in the project root, not the working directory (varies by `--format`; `mareforma-bundle.json` with `--bundle`) | Output file path |
 | `--json` | `False` | Print JSON-LD to stdout instead of writing a file. Mutually exclusive with `--bundle` |
 | `--bundle` | `False` | Produce a SCITT-style signed bundle (in-toto Statement v1 + DSSE) |
+| `--key FILE` | local bootstrap key | Signing key for `--bundle`. Pin this when the project's root validator is not the default key. Rejected without `--bundle`, since every other export is unsigned |
 
 **Examples**
 
@@ -335,7 +397,15 @@ The JSON-LD output uses `mare:` and `schema:` vocabularies. Each claim is a `mar
 
 ## verify
 
-Verify a claim, a SCITT-style signed bundle, or an export directory (the audit receipt). `TARGET` is detected by shape: an existing file is verified as a signed bundle, an existing directory as an export dir, anything else as a claim id resolved against the local project.
+Verify a claim, a SCITT-style signed bundle, a signed audit receipt, or an export directory. An existing directory is read as an export dir and anything that is not an existing path as a claim id resolved against the local project. An existing **file** is routed by its DSSE `payloadType`, never by its name:
+
+| `payloadType` | Verified as |
+|---|---|
+| `application/vnd.mareforma.audit-receipt+json` | A per-finding audit receipt from `mareforma audit` |
+| `application/vnd.mareforma.audit-run+json` | A signed audit run record |
+| anything else | A signed bundle |
+
+A signed audit run record is always unverifiable (exit 2), whether or not its signature checks out. Its `completed` flag is the key a `--corpus` audit resumes on, not a claim verdict, so `verify` reports on it and refuses to call it verified or tampered.
 
 For a bundle, this checks the DSSE signature (over the DSSE PAE encoding, so it interoperates with standard verifiers), every per-claim subject digest, every per-claim **asserter signature** bound to the claim's presented content, the enrolled validator chain to a single root (which must be the bundle signer), and the displayed **support level** (ESTABLISHED against a validator-signed validation envelope, REPLICATED against distinct-signer corroboration). For a claim id, verification uses only public material (auditor mode) and prints the claim's trust map.
 
@@ -349,7 +419,7 @@ mareforma verify TARGET [OPTIONS]
 
 | Argument | Description |
 |---|---|
-| `TARGET` | A claim id, a `mareforma-bundle.json` file, or an export directory. Detected by shape (existing file → bundle, existing dir → export dir, otherwise → claim id) |
+| `TARGET` | A claim id, a signed file (bundle, audit receipt, or audit run record), or an export directory. An existing dir → export dir, a path that does not exist → claim id, an existing file → routed by its DSSE `payloadType` |
 
 **Options**
 
@@ -357,7 +427,7 @@ mareforma verify TARGET [OPTIONS]
 |---|---|
 | `--json` | Emit a machine-readable verdict (and, for a claim, its trust map) to stdout |
 | `--redact-home` | Rewrite `$HOME` to `~` in the printed trust map (never applied to signed receipts) |
-| `--key FILE` | Signer key to verify a bundle, export directory, or audit receipt against (defaults to the local bootstrap key). Pin this when the signer is not the default key |
+| `--key FILE` | Signer key to verify a bundle, export directory, or audit receipt against (defaults to the local bootstrap key). Pin this when the signer is not the default key. A receipt signed with a non-default key that is *not* pinned reads as unverifiable (exit 2), not tampered; once pinned, a mismatch is a definite failure (exit 1) |
 
 **Exit codes** (stable, for CI gates). The 1-vs-2 split is the point: a gate must tell "this claim is tampered" from "I could not check this claim."
 
@@ -377,6 +447,70 @@ mareforma export --bundle
 mareforma verify mareforma-bundle.json
 # → Bundle verified: 12 claim subject(s) match.
 mareforma verify ./export-dir
+
+mareforma audit --key auditor.key --findings findings.json --out audit/ -- python analysis.py
+mareforma verify audit/envelopes/001-f1.json --key auditor.key
+```
+
+---
+
+## map
+
+Show the per-finding trust map for a claim. Places every trust property (attributability, provenance, grounding, faithfulness, methodological validity, leakage, independence, contestation, standing, trust-root, witnessing) at its tier with the residual named. A read-side artifact: it adds no signed field and infers nothing it cannot compute.
+
+```bash
+mareforma map CLAIM_ID [OPTIONS]
+```
+
+**Arguments**
+
+| Argument | Description |
+|---|---|
+| `CLAIM_ID` | The claim whose trust map to render |
+
+**Options**
+
+| Option | Default | Description |
+|---|---|---|
+| `--html` | `False` | Render the trust map as one self-contained HTML file |
+| `--json` | `False` | Emit the trust map as JSON to stdout |
+| `--output PATH` | stdout | Write the artifact to this path instead of stdout |
+| `--redact-home` | `False` | Rewrite `$HOME` to `~` in the emitted artifact |
+
+**Examples**
+
+```bash
+mareforma map <claim-id>
+mareforma map <claim-id> --json
+mareforma map <claim-id> --html --output trust-map.html
+```
+
+---
+
+## diagnose
+
+Run a Python target under the observer and report what data flowed. `COMMAND` runs in-process (via `runpy`, the coverage.py pattern; a subprocess would hide the target behind the observer's own seam) with the grounding observer active, then the observed reads, seams, and coverage are printed. With `--cites` the grounding verdict for those sources is computed too; without it the report is observation-only, because no verdict is invented for a citation you did not state.
+
+A target that crashes still prints its partial observation and exits with the target's own exit code. `COMMAND` is a script path, a script path behind `python`, or `-m module`. Interpreter flags (`-u`, `-O`, `-X`, ...) are rejected: the target runs in-process, so there is no interpreter to pass them to.
+
+```bash
+mareforma diagnose [OPTIONS] COMMAND...
+```
+
+**Options**
+
+| Option | Default | Description |
+|---|---|---|
+| `--cites SRC` | none | A source the run should ground on (path, URL, or `sha256:`). Repeatable |
+| `--json` | `False` | Emit the observation report as JSON |
+| `--redact-home` | `False` | Rewrite `$HOME` to `~` in the emitted report |
+
+**Examples**
+
+```bash
+mareforma diagnose -- python analysis.py
+mareforma diagnose --cites /data/trial.csv -- analysis.py
+mareforma diagnose -- -m mypkg.pipeline
 ```
 
 ---
@@ -410,6 +544,62 @@ mareforma audit [OPTIONS] [COMMAND]...
 mareforma audit --findings findings.json -- python analysis.py
 mareforma audit --findings findings.json --out audit/ -- -m mypkg.run
 mareforma audit --corpus runs/ --out audit/
+```
+
+---
+
+## observe
+
+Inspect the execution-observed grounding machinery. `--doctor` is the only mode the command supports, and reports observer coverage for this environment: which read seams are instrumented here and which are not. A bare `mareforma observe` exits 2 with an error naming `--doctor`.
+
+```bash
+mareforma observe --doctor [OPTIONS]
+```
+
+**Options**
+
+| Option | Default | Description |
+|---|---|---|
+| `--doctor` | `False` | Report observer coverage for this environment |
+| `--json` | `False` | Emit the report as JSON |
+
+**Examples**
+
+```bash
+mareforma observe --doctor
+mareforma observe --doctor --json
+```
+
+---
+
+## measure
+
+Aggregate a pipeline's grounding verdicts into the reported split. `RECEIPTS_PATH` is required (a bare `mareforma measure` exits 2 with `Error: Missing argument 'RECEIPTS_PATH'.`) and holds either a JSON array of verdict receipts or a JSONL file with one receipt per line, as `mareforma audit` writes.
+
+The report gives the GROUNDED / UNGROUNDED / OPAQUE split, the incidental-read rate, mean read coverage, and OPAQUE bucketed by seam kind. When a receipt carries an `independence` record, the independence arm is reported alongside it: the effective-independence distribution, the UNVERIFIABLE fraction, and the same-model-collapse rate.
+
+```bash
+mareforma measure RECEIPTS_PATH [OPTIONS]
+```
+
+**Arguments**
+
+| Argument | Description |
+|---|---|
+| `RECEIPTS_PATH` | JSON array of verdict receipts, or a JSONL file with one receipt per line |
+
+**Options**
+
+| Option | Default | Description |
+|---|---|---|
+| `--json` | `False` | Emit the report as JSON |
+| `--redact-home` | `False` | Rewrite `$HOME` to `~` in emitted paths (never applied to signed receipts) |
+
+**Examples**
+
+```bash
+mareforma measure run-receipts.jsonl
+mareforma measure run-receipts.json --json --redact-home
 ```
 
 ---
