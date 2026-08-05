@@ -354,6 +354,7 @@ mareforma verify TARGET [OPTIONS]
 |---|---|
 | `--json` | Emit a machine-readable verdict (and, for a claim, its trust map) to stdout |
 | `--redact-home` | Rewrite `$HOME` to `~` in the printed trust map (never applied to signed receipts) |
+| `--key FILE` | Signer key to verify a bundle, export directory, or audit receipt against (defaults to the local bootstrap key). Pin this when the signer is not the default key |
 
 **Exit codes** (stable, for CI gates). The 1-vs-2 split is the point: a gate must tell "this claim is tampered" from "I could not check this claim."
 

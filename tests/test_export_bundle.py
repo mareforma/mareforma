@@ -10,6 +10,8 @@ Covers:
   - tampered bundle signature breaks DSSE verification
   - empty graph produces a valid bundle with zero subjects
   - cross-version skew (predicateType mismatch) is caught
+  - the exported validator set chains to one root of trust, and the
+    bundle is signed by that root
   - CLI commands `mareforma export --bundle` and `mareforma verify`
     round-trip
 """
@@ -239,6 +241,28 @@ class TestCLI:
             assert result.exit_code == 0, result.output
             assert "verified" in result.output
 
+    def test_verify_bundle_with_public_pem_only(self, tmp_path: Path) -> None:
+        # A bundle is what an outside party receives, so the exported public
+        # PEM must be enough to reach a verdict: no private key, and no chmod
+        # 600 on material that is not a secret.
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            self._ensure_xdg(tmp_path)
+            with mareforma.open() as g:
+                g.assert_claim("seeded", generated_by="seed", seed=True)
+            runner.invoke(cli, ["export", "--bundle"], catch_exceptions=False)
+            shown = runner.invoke(cli, ["key", "show", "--pem"])
+            assert shown.exit_code == 0, shown.output
+            pub = Path("signer_pub.pem")
+            pub.write_text(shown.output)
+            assert b"PRIVATE" not in pub.read_bytes()
+
+            result = runner.invoke(
+                cli, ["verify", "mareforma-bundle.json", "--key", str(pub)],
+            )
+            assert result.exit_code == 0, result.output
+            assert "verified" in result.output
+
     def test_verify_tampered_bundle_exit_1(self, tmp_path: Path) -> None:
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
@@ -256,6 +280,149 @@ class TestCLI:
             result = runner.invoke(cli, ["verify", "mareforma-bundle.json"])
             assert result.exit_code == 1
             assert "verification failed" in result.output.lower()
+
+    def _project_rooted_at_own_key(self, tmp_path: Path) -> tuple[Path, str]:
+        """Bootstrap a default key, then root the project at a different one."""
+        self._ensure_xdg(tmp_path)
+        root_key = Path("project.key").resolve()
+        _signing.bootstrap_key(root_key)
+        import mareforma
+        with mareforma.open(".", key_path=root_key) as g:
+            g.assert_claim("seeded", generated_by="seed", seed=True)
+        keyid = _signing.public_key_id(
+            _signing.load_private_key(root_key).public_key()
+        )
+        return root_key, keyid
+
+    def test_export_bundle_refuses_when_the_key_is_not_the_root(
+        self, tmp_path: Path,
+    ) -> None:
+        """Signing with the default key when the project roots elsewhere would
+        write a bundle no key can verify. Refuse at export instead."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            _, keyid = self._project_rooted_at_own_key(tmp_path)
+            result = runner.invoke(cli, ["export", "--bundle"])
+            assert result.exit_code != 0, result.output
+            assert keyid[:12] in result.output
+            assert "--key" in result.output
+            assert not Path("mareforma-bundle.json").exists()
+
+    def test_export_bundle_key_option_signs_with_the_root(
+        self, tmp_path: Path,
+    ) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            root_key, _ = self._project_rooted_at_own_key(tmp_path)
+            result = runner.invoke(
+                cli, ["export", "--bundle", "--key", str(root_key)],
+                catch_exceptions=False,
+            )
+            assert result.exit_code == 0, result.output
+            statement = verify_bundle(
+                Path("mareforma-bundle.json"),
+                _signing.load_private_key(root_key).public_key(),
+            )
+            assert len(statement["subject"]) == 1
+
+    def test_export_bundle_refuses_pre_bootstrap_unsigned_rows(
+        self, tmp_path: Path,
+    ) -> None:
+        """A claim added before bootstrap stays unsigned, and verify reads an
+        unsigned row in a signed graph as tampered. Refuse at export instead of
+        writing an artifact that accuses an honest graph."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            added = runner.invoke(cli, ["claim", "add", "before bootstrap"],
+                                  catch_exceptions=False)
+            assert added.exit_code == 0, added.output
+            unsigned_id = added.output.split()[-1].strip()
+            self._ensure_xdg(tmp_path)
+            runner.invoke(cli, ["claim", "add", "after bootstrap"],
+                          catch_exceptions=False)
+
+            result = runner.invoke(cli, ["export", "--bundle"])
+            assert result.exit_code != 0, result.output
+            assert unsigned_id in result.output
+            assert not Path("mareforma-bundle.json").exists()
+
+    def test_bundle_signed_by_another_key_reads_unverifiable(
+        self, tmp_path: Path,
+    ) -> None:
+        """A bundle whose signer is not the local key is UNVERIFIABLE (exit 2),
+        never tampered: a wrong verification key is not proof of tamper. Pinning
+        the signer's public PEM reaches the definite verdict."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            root_key, _ = self._project_rooted_at_own_key(tmp_path)
+            runner.invoke(cli, ["export", "--bundle", "--key", str(root_key)],
+                          catch_exceptions=False)
+
+            result = runner.invoke(cli, ["verify", "mareforma-bundle.json"])
+            assert result.exit_code == 2, result.output
+            assert "unverifiable" in result.output.lower()
+
+            shown = runner.invoke(
+                cli, ["key", "show", "--pem", "--key-path", str(root_key)])
+            assert shown.exit_code == 0, shown.output
+            pub = Path("signer_pub.pem")
+            pub.write_text(shown.output)
+
+            pinned = runner.invoke(
+                cli, ["verify", "mareforma-bundle.json", "--key", str(pub)])
+            assert pinned.exit_code == 0, pinned.output
+            assert "verified" in pinned.output
+
+    def test_bundle_pinned_to_the_wrong_key_reads_tampered(
+        self, tmp_path: Path,
+    ) -> None:
+        """Pinning a key the bundle was not signed with is a definite negative
+        (exit 1), not the advice to pin a key that the caller already followed.
+        This is the cross-operator path: a received bundle checked against the
+        producer's public PEM."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            root_key, _ = self._project_rooted_at_own_key(tmp_path)
+            runner.invoke(cli, ["export", "--bundle", "--key", str(root_key)],
+                          catch_exceptions=False)
+
+            other_key = Path("other.key").resolve()
+            _signing.bootstrap_key(other_key)
+            shown = runner.invoke(
+                cli, ["key", "show", "--pem", "--key-path", str(other_key)])
+            assert shown.exit_code == 0, shown.output
+            pub = Path("other_pub.pem")
+            pub.write_text(shown.output)
+
+            result = runner.invoke(
+                cli, ["verify", "mareforma-bundle.json", "--key", str(pub),
+                      "--json"])
+            payload = json.loads(result.output)
+            assert payload["verdict"] == "tampered", result.output
+            assert payload["exit_code"] == 1, result.output
+            assert result.exit_code == 1, result.output
+
+    def test_verify_export_dir_honours_the_key_pin(
+        self, tmp_path: Path,
+    ) -> None:
+        """Naming the directory must verify the same bundle the file target
+        does. Dropping --key here reads an authentic bundle as tampered."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            root_key, _ = self._project_rooted_at_own_key(tmp_path)
+            runner.invoke(cli, ["export", "--bundle", "--key", str(root_key)],
+                          catch_exceptions=False)
+            export_dir = Path("export-dir")
+            export_dir.mkdir()
+            Path("mareforma-bundle.json").rename(
+                export_dir / "mareforma-bundle.json"
+            )
+
+            result = runner.invoke(
+                cli, ["verify", str(export_dir), "--key", str(root_key)],
+            )
+            assert result.exit_code == 0, result.output
+            assert "verified" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -424,7 +591,11 @@ class TestSupportLevelAttestation:
     ) -> None:
         """A real REPLICATED pair (distinct signers) promoted to ESTABLISHED by
         a third validator round-trips: the validation envelope and distinct
-        signers are present and check out."""
+        signers are present and check out.
+
+        The promotion carries a display label, the documented happy path:
+        ``validatedBy`` is cosmetic text, not the signer's keyid, so the
+        verifier must not compare the two."""
         root_key = tmp_path / "root.key"
         _signing.bootstrap_key(root_key)
         root_pk = _signing.load_private_key(root_key)
@@ -451,17 +622,65 @@ class TestSupportLevelAttestation:
             )
             assert g.get_claim(rep)["support_level"] == "REPLICATED"
         with mareforma.open(tmp_path, key_path=val2_key) as g:
-            g.validate(rep)
+            g.validate(rep, validated_by="reviewer@example.org")
             assert g.get_claim(rep)["support_level"] == "ESTABLISHED"
         bundle_path = tmp_path / "bundle.json"
         write_bundle(tmp_path, bundle_path, root_pk)
         statement = verify_bundle(bundle_path, root_pk.public_key())
+        labels = {
+            n["claimText"]: n.get("validatedBy")
+            for n in statement["predicate"]["@graph"]
+            if n.get("@type") == "mare:Claim"
+        }
+        assert labels["converged"] == "reviewer@example.org"
         levels = {
             n["claimText"]: n["supportLevel"]
             for n in statement["predicate"]["@graph"]
             if n.get("@type") == "mare:Claim"
         }
         assert levels["converged"] in ("ESTABLISHED", "REPLICATED")
+
+    def test_validation_envelope_declaring_another_validator_fails(
+        self, tmp_path: Path,
+    ) -> None:
+        """A validation envelope whose declared validator_keyid is not the key
+        that signed it must fail: the signature alone would let one validator
+        present a promotion as another validator's work."""
+        root_key = tmp_path / "root.key"
+        _signing.bootstrap_key(root_key)
+        root_pk = _signing.load_private_key(root_key)
+        other_key = tmp_path / "other.key"
+        _signing.bootstrap_key(other_key)
+        other_pk = _signing.load_private_key(other_key)
+        other_pem = _signing.public_key_to_pem(other_pk.public_key())
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            g.enroll_validator(other_pem, identity="other")
+            cid = g.assert_claim("borrowed identity", generated_by="a")
+
+        envelope = _signing.sign_validation(
+            {
+                "claim_id": cid,
+                "validator_keyid": _signing.public_key_id(other_pk.public_key()),
+                "validated_at": "2026-01-01T00:00:00Z",
+                "evidence_seen": [],
+            },
+            root_pk,  # signed by the root, but declaring the other validator
+        )
+        statement = build_statement(tmp_path)
+        for node in statement["predicate"]["@graph"]:
+            if node.get("claimText") == "borrowed identity":
+                node["supportLevel"] = "ESTABLISHED"
+                node["validationSignature"] = envelope
+                break
+        bundle_path = tmp_path / "bundle.json"
+        bundle_path.write_text(
+            json.dumps(sign_bundle(statement, root_pk)), encoding="utf-8",
+        )
+        with pytest.raises(
+            BundleVerificationError, match="declares validator",
+        ):
+            verify_bundle(bundle_path, root_pk.public_key())
 
     def test_llm_typed_validator_cannot_back_established(
         self, tmp_path: Path,
@@ -507,3 +726,153 @@ class TestSupportLevelAttestation:
         )
         with pytest.raises(BundleVerificationError, match="validator_type='llm'"):
             verify_bundle(bundle_path, root_pk.public_key())
+
+
+# ---------------------------------------------------------------------------
+# Exported validator chain (the bundle's trust anchor)
+# ---------------------------------------------------------------------------
+
+
+class TestExportedValidatorChain:
+    """Every asserter key the bundle presents is looked up in the chain-verified
+    validator set, so a bundle whose validator set does not descend from one
+    root, or that is signed by a key other than that root, must be refused."""
+
+    def _root_and_validator(self, tmp_path: Path):
+        """A graph with the root plus one enrolled validator, and one claim."""
+        root_key = tmp_path / "root.key"
+        _signing.bootstrap_key(root_key)
+        root_pk = _signing.load_private_key(root_key)
+        val_key = tmp_path / "val.key"
+        _signing.bootstrap_key(val_key)
+        val_pk = _signing.load_private_key(val_key)
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            g.enroll_validator(
+                _signing.public_key_to_pem(val_pk.public_key()), identity="v",
+            )
+            g.assert_claim("anchored", generated_by="a")
+        return root_pk, val_pk
+
+    def _write(self, tmp_path: Path, statement: dict, signer) -> Path:
+        bundle_path = tmp_path / "bundle.json"
+        bundle_path.write_text(
+            json.dumps(sign_bundle(statement, signer)), encoding="utf-8",
+        )
+        return bundle_path
+
+    def test_bundle_without_validators_is_refused(self, tmp_path: Path) -> None:
+        """Stripping the validator set would leave per-claim asserters unchecked,
+        so a bundle with no root of trust cannot verify."""
+        root_pk, _ = self._root_and_validator(tmp_path)
+        statement = build_statement(tmp_path)
+        statement["predicate"]["mare:validators"] = []
+        bundle_path = self._write(tmp_path, statement, root_pk)
+        with pytest.raises(
+            BundleVerificationError, match="exactly one root of trust, found 0",
+        ):
+            verify_bundle(bundle_path, root_pk.public_key())
+
+    def test_second_self_enrolled_root_is_refused(self, tmp_path: Path) -> None:
+        """Two self-enrolled roots mean two trust domains, and the caller's
+        pinned key can only anchor one of them."""
+        root_pk, _ = self._root_and_validator(tmp_path)
+        statement = build_statement(tmp_path)
+        validators = statement["predicate"]["mare:validators"]
+        root_entry = next(
+            v for v in validators if v["keyid"] == v["enrolled_by_keyid"]
+        )
+        rogue = dict(root_entry, keyid="ca" * 32, enrolled_by_keyid="ca" * 32)
+        validators.append(rogue)
+        bundle_path = self._write(tmp_path, statement, root_pk)
+        with pytest.raises(
+            BundleVerificationError, match="exactly one root of trust, found 2",
+        ):
+            verify_bundle(bundle_path, root_pk.public_key())
+
+    def test_validator_enrolled_by_an_absent_key_is_refused(
+        self, tmp_path: Path,
+    ) -> None:
+        """A validator whose parent is not in the bundle has no verifiable
+        enrollment, so its key cannot back any claim."""
+        root_pk, _ = self._root_and_validator(tmp_path)
+        statement = build_statement(tmp_path)
+        for v in statement["predicate"]["mare:validators"]:
+            if v["keyid"] != v["enrolled_by_keyid"]:
+                v["enrolled_by_keyid"] = "ca" * 32
+                break
+        bundle_path = self._write(tmp_path, statement, root_pk)
+        with pytest.raises(
+            BundleVerificationError, match="enrolled by a key absent",
+        ):
+            verify_bundle(bundle_path, root_pk.public_key())
+
+    def test_tampered_enrollment_envelope_is_refused(
+        self, tmp_path: Path,
+    ) -> None:
+        """The parent's signature over the enrollment is what admits a validator;
+        a flipped byte in it drops the validator out of the chain."""
+        root_pk, _ = self._root_and_validator(tmp_path)
+        statement = build_statement(tmp_path)
+        for v in statement["predicate"]["mare:validators"]:
+            if v["keyid"] != v["enrolled_by_keyid"]:
+                envelope = json.loads(v["enrollment_envelope"])
+                sig = base64.standard_b64decode(envelope["signatures"][0]["sig"])
+                flipped = bytes([sig[0] ^ 0xFF]) + sig[1:]
+                envelope["signatures"][0]["sig"] = (
+                    base64.standard_b64encode(flipped).decode("ascii")
+                )
+                v["enrollment_envelope"] = json.dumps(envelope)
+                break
+        bundle_path = self._write(tmp_path, statement, root_pk)
+        with pytest.raises(
+            BundleVerificationError, match="enrollment failed verification",
+        ):
+            verify_bundle(bundle_path, root_pk.public_key())
+
+    def test_mutually_enrolled_validators_never_chain_to_the_root(
+        self, tmp_path: Path,
+    ) -> None:
+        """Two validators that enroll each other verify against one another but
+        descend from no root, so the walk to the root has to refuse them."""
+        root_pk, _ = self._root_and_validator(tmp_path)
+        statement = build_statement(tmp_path)
+        pair = []
+        for name in ("a", "b"):
+            path = tmp_path / f"{name}.key"
+            _signing.bootstrap_key(path)
+            pair.append(_signing.load_private_key(path))
+        for signer, (holder, identity) in zip(
+            pair[::-1], [(pair[0], "a"), (pair[1], "b")],
+        ):
+            row = {
+                "keyid": _signing.public_key_id(holder.public_key()),
+                "pubkey_pem": base64.standard_b64encode(
+                    _signing.public_key_to_pem(holder.public_key())
+                ).decode("ascii"),
+                "identity": identity,
+                "validator_type": "human",
+                "enrolled_at": "2026-01-01T00:00:00Z",
+                "enrolled_by_keyid": _signing.public_key_id(signer.public_key()),
+            }
+            statement["predicate"]["mare:validators"].append(
+                dict(row, enrollment_envelope=json.dumps(
+                    _signing.sign_validator_enrollment(row, signer)
+                ))
+            )
+        bundle_path = self._write(tmp_path, statement, root_pk)
+        with pytest.raises(
+            BundleVerificationError, match="does not chain to the root",
+        ):
+            verify_bundle(bundle_path, root_pk.public_key())
+
+    def test_bundle_signed_by_a_non_root_validator_is_refused(
+        self, tmp_path: Path,
+    ) -> None:
+        """The pinned key must be the root the validators chain to, otherwise the
+        caller trusts one key and the claims chain to another."""
+        _, val_pk = self._root_and_validator(tmp_path)
+        bundle_path = self._write(tmp_path, build_statement(tmp_path), val_pk)
+        with pytest.raises(
+            BundleVerificationError, match="must be signed by its root",
+        ):
+            verify_bundle(bundle_path, val_pk.public_key())

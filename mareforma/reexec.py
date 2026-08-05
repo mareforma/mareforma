@@ -100,10 +100,12 @@ def _tolerance_is_wide(
     A relative tolerance of 100%+, or an absolute slack as large as the recorded
     magnitude itself, means almost any number would "reproduce". The REPRODUCED
     verdict still stands (the recorder declared the tolerance), but it is flagged
-    so a generous tolerance can never pass silently as a clean match.
+    so a generous tolerance can never pass silently as a clean match. A recorded
+    zero has no magnitude to compare against, so any slack at all is wide there;
+    the exact-match default (atol 0, rtol 0) has no slack and stays clean.
     """
     slack = max(atol, rtol * max(abs(recorded), abs(reproduced)))
-    return rtol >= 1.0 or (abs(recorded) > 0.0 and slack >= abs(recorded))
+    return rtol >= 1.0 or (slack > 0.0 and slack >= abs(recorded))
 
 
 def _conclusive_residual(atol: float, rtol: float, *, wide: bool) -> str:

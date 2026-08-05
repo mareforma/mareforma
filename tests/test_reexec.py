@@ -264,6 +264,27 @@ class TestWideToleranceIsFlagged:
         assert "WARNING" in result.residual
         assert "wide" in result.residual
 
+    def test_wide_absolute_tolerance_around_zero_is_flagged(self) -> None:
+        # A recorded zero (no effect, null result) is where a generous absolute
+        # tolerance makes every number "reproduce", so it has to be flagged too.
+        result = reexec(
+            _run(reported_value=0.0, tolerance=1e6),
+            registry={"pipe": lambda: 999999.0},
+        )
+        assert result.verdict is FaithfulnessVerdict.REPRODUCED
+        assert "WARNING" in result.residual
+
+    def test_slack_over_the_recorded_magnitude_is_flagged(self) -> None:
+        # Wideness is judged against the recorded magnitude, not against the
+        # number the re-run happened to produce: a slack larger than what was
+        # recorded is wide even when the re-run lands far above it.
+        result = reexec(
+            _run(reported_value=5.0, tolerance=6.0),
+            registry={"pipe": lambda: 11.0},
+        )
+        assert result.verdict is FaithfulnessVerdict.REPRODUCED
+        assert "WARNING" in result.residual
+
     def test_narrow_tolerance_is_not_flagged(self) -> None:
         result = reexec(
             _run(reported_value=5.0, tolerance=0.001),
@@ -371,6 +392,48 @@ class TestCli:
             assert "REPRODUCED" in res.output
             assert "PROXIED" in res.output
 
+    def test_map_overlay_json_is_one_document(self, tmp_path: Path) -> None:
+        # --json --map is the only programmatic path to the overlaid map, so it
+        # must emit a single parseable object carrying both the verdict and the
+        # map, not two concatenated top-level documents.
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            with mareforma.open(".") as g:
+                cid = g.assert_claim("f", classification="ANALYTICAL")
+            run = _run(
+                reported_value=_RECORDED_NUMBER,
+                pipeline={"target": "tests.test_reexec:deterministic_pipeline"},
+            )
+            Path("run.json").write_text(json.dumps(run), encoding="utf-8")
+            res = r.invoke(cli, ["reexec", "run.json", "--json", "--map", cid])
+            assert res.exit_code == 0, res.output
+            doc = json.loads(res.output)
+            assert doc["verdict"] == "REPRODUCED"
+            assert doc["trust_map"]["subject_id"] == cid
+
+    def test_map_overlay_json_keeps_the_verdict_on_a_map_failure(
+        self, tmp_path: Path,
+    ) -> None:
+        # A --map that cannot be rendered is a usage error, but the verdict is
+        # already known: it stays on stdout as a parseable document, with no
+        # trust_map key to claim an overlay that was never rendered.
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            with mareforma.open(".") as g:
+                g.assert_claim("f", classification="ANALYTICAL")
+            run = _run(
+                reported_value=_RECORDED_NUMBER,
+                pipeline={"target": "tests.test_reexec:deterministic_pipeline"},
+            )
+            Path("run.json").write_text(json.dumps(run), encoding="utf-8")
+            res = r.invoke(
+                cli, ["reexec", "run.json", "--json", "--map", "does-not-exist"],
+            )
+            assert res.exit_code == 3, res.output
+            doc = json.loads(res.stdout)
+            assert doc["verdict"] == "REPRODUCED"
+            assert "trust_map" not in doc
+
     def test_map_overlay_unknown_claim_exits_usage_error(
         self, tmp_path: Path,
     ) -> None:
@@ -391,3 +454,37 @@ class TestCli:
             assert "not found" in res.output
             # The faithfulness verdict still prints before the lookup error.
             assert "REPRODUCED" in res.output
+
+    def test_map_overlay_without_a_project_exits_usage_error(
+        self, tmp_path: Path,
+    ) -> None:
+        # No project at or above cwd is an environment error of the overlay,
+        # not a divergence: exit 3, so a gate never reads it as a failed re-run.
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            run = _run(
+                reported_value=_RECORDED_NUMBER,
+                pipeline={"target": "tests.test_reexec:deterministic_pipeline"},
+            )
+            Path("run.json").write_text(json.dumps(run), encoding="utf-8")
+            res = r.invoke(cli, ["reexec", "run.json", "--map", "any-id"])
+            assert res.exit_code == 3, res.output
+            assert "No mareforma project" in res.output
+
+    def test_map_overlay_unreadable_graph_exits_usage_error(
+        self, tmp_path: Path,
+    ) -> None:
+        # A damaged graph.db is likewise an overlay failure, not a divergence.
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            db = Path(".mareforma") / "graph.db"
+            db.parent.mkdir()
+            db.write_bytes(b"not a database")
+            run = _run(
+                reported_value=_RECORDED_NUMBER,
+                pipeline={"target": "tests.test_reexec:deterministic_pipeline"},
+            )
+            Path("run.json").write_text(json.dumps(run), encoding="utf-8")
+            res = r.invoke(cli, ["reexec", "run.json", "--map", "any-id"])
+            assert res.exit_code == 3, res.output
+            assert "Could not read graph.db" in res.output

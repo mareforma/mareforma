@@ -57,6 +57,38 @@ class TestClaimAdd:
             result = runner.invoke(cli, ["claim", "add", "   "])
         assert result.exit_code == 1
 
+    def test_add_from_subdirectory_joins_the_parent_project(
+        self, tmp_path: Path,
+    ) -> None:
+        """Run from a subdirectory of a project, add must write to that
+        project, not split the graph by creating a nested one."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            runner.invoke(cli, ["claim", "add", "Parent claim"],
+                          catch_exceptions=False)
+            sub = Path(fs) / "sub" / "deeper"
+            sub.mkdir(parents=True)
+            os.chdir(sub)
+            result = runner.invoke(cli, ["claim", "add", "Child claim"],
+                                   catch_exceptions=False)
+            assert result.exit_code == 0, result.output
+            assert not (sub / ".mareforma").exists()
+            listed = runner.invoke(cli, ["claim", "list", "--json"],
+                                   catch_exceptions=False)
+        texts = {c["text"] for c in json.loads(listed.output)}
+        assert texts == {"Parent claim", "Child claim"}
+
+    def test_add_in_a_bare_directory_still_creates_the_project(
+        self, tmp_path: Path,
+    ) -> None:
+        """With no project at or above cwd, add is still the way to make one."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            result = runner.invoke(cli, ["claim", "add", "First claim"],
+                                   catch_exceptions=False)
+            assert result.exit_code == 0, result.output
+            assert (Path(fs) / ".mareforma" / "graph.db").exists()
+
 
 # ---------------------------------------------------------------------------
 # claim list
@@ -185,6 +217,26 @@ class TestClaimUpdate:
                 cli, ["claim", "update", "no-such-id", "--status", "contested"]
             )
         assert result.exit_code == 1
+
+    def test_update_from_subdirectory_updates_parent_claim(
+        self, tmp_path: Path,
+    ) -> None:
+        """Run from a subdirectory, update must walk up to the project it is
+        inside, not mint a nested one and fail to find the claim."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            claim_id = self._add_and_get_id(runner, "Parent claim to update")
+            sub = Path(fs) / "sub"
+            sub.mkdir()
+            os.chdir(sub)
+            result = runner.invoke(
+                cli, ["claim", "update", claim_id, "--status", "contested"],
+            )
+            assert result.exit_code == 0, result.output
+            assert not (sub / ".mareforma").exists()
+            show = runner.invoke(cli, ["claim", "show", claim_id, "--json"],
+                                 catch_exceptions=False)
+        assert json.loads(show.output)["status"] == "contested"
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +455,23 @@ class TestClaimValidate:
             result = runner.invoke(cli, ["claim", "validate", claim_id])
         assert result.exit_code == 1
         assert "REPLICATED" in result.output
+
+    def test_validate_from_subdirectory_promotes_the_parent_claim(
+        self, tmp_path: Path,
+    ) -> None:
+        """Run from a subdirectory, validate must promote the claim in the
+        project it is inside, not fail against a nested empty one."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            self._ensure_xdg_key()
+            _, rep_id = self._make_replicated_claim_id()
+            sub = Path(fs) / "sub"
+            sub.mkdir()
+            os.chdir(sub)
+            result = runner.invoke(cli, ["claim", "validate", rep_id])
+            assert result.exit_code == 0, result.output
+            assert not (sub / ".mareforma").exists()
+        assert "ESTABLISHED" in result.output
 
     def test_validate_with_validated_by(self, tmp_path: Path) -> None:
         runner = CliRunner()

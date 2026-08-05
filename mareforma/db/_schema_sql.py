@@ -517,9 +517,15 @@ CREATE TABLE IF NOT EXISTS validators (
 # unsigned denormalisation of the bundle's signer that the REPLICATED promotion
 # query and the trust-layer independence count both read, so a row that
 # contradicts its own envelope inflates the distinct-signer count.
-_SIGNED_FIELDS_TRIGGER_SQL = """
-DROP TRIGGER IF EXISTS claims_signed_fields_no_laundering;
+#
+# predicate_payload is watched on the same ground. It stays outside the signed
+# envelope, but the audit path reads the finding's citation set out of it to
+# re-check a GROUNDED verdict against the sources the finding names, so one
+# UPDATE clearing it turns a binding violation into a clean verdict. The column
+# is only ever written at INSERT; a change on a signed row is tampering.
+_SIGNED_FIELDS_TRIGGER_NAME = "claims_signed_fields_no_laundering"
 
+_SIGNED_FIELDS_TRIGGER_SQL = """\
 CREATE TRIGGER claims_signed_fields_no_laundering
 BEFORE UPDATE OF
     text, classification, generated_by,
@@ -528,7 +534,8 @@ BEFORE UPDATE OF
     ev_risk_of_bias, ev_inconsistency, ev_indirectness,
     ev_imprecision, ev_pub_bias,
     evidence_json, observed_grounding, statement_cid,
-    prev_hash, created_at, signature_bundle, asserter_keyid
+    prev_hash, created_at, signature_bundle, asserter_keyid,
+    predicate_payload
 ON claims
 WHEN OLD.signature_bundle IS NOT NULL
   AND (
@@ -551,6 +558,7 @@ WHEN OLD.signature_bundle IS NOT NULL
      OR OLD.prev_hash IS NOT NEW.prev_hash
      OR OLD.created_at IS NOT NEW.created_at
      OR OLD.asserter_keyid IS NOT NEW.asserter_keyid
+     OR OLD.predicate_payload IS NOT NEW.predicate_payload
   )
 BEGIN
     SELECT RAISE(ABORT, 'mareforma:append_only:signed_field_locked');

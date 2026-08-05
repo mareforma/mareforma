@@ -80,10 +80,13 @@ def _verify_grounding_binding_on_read(claim_id, record, predicate) -> None:
     assert the data arrived. The binding re-check uses ``grounded_sources``, the
     cited sources a read was actually observed for, not the declared
     ``cited_sources``, so it matches the write-side gate exactly. The finding's
-    citation identifiers are taken from the signed predicate, the normalized
-    ``data_sources`` and any content-addressed ``data_ids``, so the comparison is
-    pure string equality with no filesystem access. A disjoint match is a binding
-    violation.
+    citation identifiers are taken from the predicate this restore parsed, the
+    normalized ``data_sources`` and any content-addressed ``data_ids``, so the
+    comparison is pure string equality with no filesystem access. A disjoint
+    match is a binding violation. Statement v1 binds neither key, so a claim
+    whose citation set lives only in the ``predicate_payload`` column is not
+    checkable here; the live audit path reads that column instead
+    (:func:`mareforma.cli._claim_bound_sources`).
     """
     if not isinstance(record, dict) or record.get("grounding") != "GROUNDED":
         return

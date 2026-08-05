@@ -9,10 +9,12 @@ from __future__ import annotations
 import base64
 import json
 import os
+import sqlite3
 import subprocess
 import textwrap
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 import mareforma
@@ -439,7 +441,7 @@ def _grounded_record(grounded: list[str]) -> dict:
 
 class TestVerifyGroundingBinding:
     def test_claim_bound_sources_reads_predicate_payload(self) -> None:
-        # The finding citation lives in the SIGNED predicate payload, not a
+        # The finding citation lives in the predicate_payload column, not a
         # (nonexistent) data_source column. Reading the wrong place silently
         # no-ops the whole binding re-check.
         ca = "sha256:" + "a" * 64
@@ -479,6 +481,33 @@ class TestVerifyGroundingBinding:
                     predicate_payload={"data_sources": [_REAL], "data_ids": []},
                     observed_grounding=_grounded_record([_DECOY]),
                 )
+            res = r.invoke(cli, ["verify", cid, "--json"])
+            assert res.exit_code == 1, res.output
+            assert "grounding binding violation" in res.output
+
+    def test_clearing_the_citation_on_a_signed_row_is_refused(
+        self, tmp_path: Path,
+    ) -> None:
+        # predicate_payload is unsigned, but the binding re-check reads it, so
+        # one UPDATE clearing it would turn the tampered verdict above into a
+        # clean one. The append-only trigger refuses that write, the guard
+        # asserter_keyid already earns as an unsigned column a read path trusts.
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            with mareforma.open(".") as g:
+                cid = g.assert_claim(
+                    "grounded finding", classification="ANALYTICAL",
+                    predicate_payload={"data_sources": [_REAL], "data_ids": []},
+                    observed_grounding=_grounded_record([_DECOY]),
+                )
+                with pytest.raises(
+                    sqlite3.IntegrityError, match="signed_field_locked",
+                ):
+                    g._conn.execute(
+                        "UPDATE claims SET predicate_payload = '' "
+                        "WHERE claim_id = ?", (cid,),
+                    )
             res = r.invoke(cli, ["verify", cid, "--json"])
             assert res.exit_code == 1, res.output
             assert "grounding binding violation" in res.output

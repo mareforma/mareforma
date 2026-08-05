@@ -871,6 +871,44 @@ class TestValidatorCLI:
         finally:
             conn.close()
 
+    def test_validator_add_from_subdirectory_enrolls_on_the_parent(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """Run from a subdirectory, enrollment must land on the project the
+        command is inside, not on a nested one created here."""
+        import os
+        root_key_path = _bootstrap_key(tmp_path, "root.key")
+        xdg_key = _signing.default_key_path()
+        xdg_key.parent.mkdir(parents=True, exist_ok=True)
+        xdg_key.write_bytes(root_key_path.read_bytes())
+        os.chmod(xdg_key, 0o600)
+        with mareforma.open(tmp_path):
+            pass
+
+        new_key = _signing.generate_keypair()
+        new_pem_path = tmp_path / "carol.pub.pem"
+        new_pem_path.write_bytes(_signing.public_key_to_pem(new_key.public_key()))
+
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        monkeypatch.chdir(sub)
+        runner = CliRunner()
+        result = runner.invoke(
+            mareforma_cli,
+            ["validator", "add", "--pubkey", str(new_pem_path),
+             "--identity", "carol"],
+        )
+        assert result.exit_code == 0, result.output
+        assert not (sub / ".mareforma").exists()
+
+        conn = open_db(tmp_path)
+        try:
+            assert _validators.is_enrolled(
+                conn, _signing.public_key_id(new_key.public_key()),
+            )
+        finally:
+            conn.close()
+
     def test_validator_list_shows_root_and_extras(
         self, tmp_path: Path, monkeypatch,
     ) -> None:

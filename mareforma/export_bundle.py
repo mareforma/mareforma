@@ -194,9 +194,63 @@ def sign_bundle(
     }
 
 
+class BundleExportError(Exception):
+    """Raised when a bundle would be written as an unverifiable artifact.
+
+    The message states its own remedy, so the caller reports it verbatim.
+    """
+
+
+def _unsigned_claim_ids(statement: dict[str, Any]) -> list[str]:
+    """Claim ids in *statement* that carry no asserter signature.
+
+    Claims recorded before the project had a signing key stay unsigned, and
+    nothing signs them after the fact. verify_bundle refuses such a row once
+    the graph carries validators, so a bundle holding one reads as tampered.
+    """
+    nodes = (statement.get("predicate") or {}).get("@graph") or []
+    prefix = "mare:claim/"
+    return [
+        node["@id"][len(prefix):]
+        for node in nodes
+        if node.get("@id", "").startswith(prefix) and not node.get("signatureBundle")
+    ]
+
+
 def write_bundle(root: Path, output_path: Path, private_key) -> Path:
-    """Build, sign, and write a bundle. Returns the path written."""
+    """Build, sign, and write a bundle. Returns the path written.
+
+    Refuses when *private_key* is not the graph's root of trust. verify_bundle
+    requires the signer to be the root every exported validator chains to, so
+    signing with any other key writes a file no key can verify, and the
+    recipient reads that as tamper. Fail here instead. Unsigned claims in a
+    signed graph are refused for the same reason.
+    """
+    from mareforma import signing as _signing
     statement = build_statement(root)
+    trust_root = statement["predicate"].get("mare:trustDomainRoot")
+    if trust_root is None:
+        raise BundleExportError(
+            "this project has no single root of trust, so no bundle from it "
+            "can verify; open it once with the key that should be its root. "
+            "Pass the root key with --key."
+        )
+    keyid = _signing.public_key_id(private_key.public_key())
+    if keyid != trust_root:
+        raise BundleExportError(
+            f"signing key {keyid[:12]}… is not this project's root of trust "
+            f"{trust_root[:12]}…; a bundle must be signed by its root. "
+            "Pass the root key with --key."
+        )
+    unsigned = _unsigned_claim_ids(statement)
+    if unsigned:
+        raise BundleExportError(
+            "these claims carry no signature, and this project's graph is "
+            "signed, so any bundle holding them verifies as tampered: "
+            + ", ".join(unsigned)
+            + ". They were recorded before the signing key existed and nothing "
+            "signs them now. Export without --bundle to carry them."
+        )
     bundle = sign_bundle(statement, private_key)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
@@ -217,6 +271,14 @@ class BundleVerificationError(Exception):
     The exception message names the first failing check so the
     caller can route between "this is corrupt" and "this is a
     cross-version skew" without parsing English.
+    """
+
+
+class BundleKeyMismatchError(BundleVerificationError):
+    """Raised when no signature on the bundle was made by the given key.
+
+    A distinct type because this is a wrong-key condition, not evidence of
+    tamper: the caller reports it as unverifiable unless the key was pinned.
     """
 
 
@@ -371,11 +433,14 @@ def _verify_established_level(
             f"claim:{claim_id} validation envelope binds a different claim_id "
             f"({payload.get('claim_id')!r})"
         )
-    displayed_by = node.get("validatedBy")
-    if displayed_by is not None and displayed_by != val_keyid:
+    # The node's validatedBy is a cosmetic display label, not an identity, so
+    # it is not checked here. The envelope's own declared validator is, and it
+    # has to be the key that signed it.
+    if payload.get("validator_keyid") != val_keyid:
         raise BundleVerificationError(
-            f"claim:{claim_id} validatedBy {str(displayed_by)[:12]}… does not "
-            "match the validation signer"
+            f"claim:{claim_id} validation envelope declares validator "
+            f"{str(payload.get('validator_keyid'))[:12]}… but is signed by "
+            f"{str(val_keyid)[:12]}…"
         )
 
 
@@ -416,7 +481,7 @@ def verify_bundle(
     keyid = _signing.public_key_id(public_key)
     matching = [s for s in sigs if s.get("keyid") == keyid]
     if not matching:
-        raise BundleVerificationError(
+        raise BundleKeyMismatchError(
             f"bundle:no signature matches the given public key (keyid {keyid[:12]}…)"
         )
     try:

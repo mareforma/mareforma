@@ -55,10 +55,12 @@ def _discover_root(start: "Path | None" = None) -> "Path | None":
     return None
 
 
-def _read_only_root() -> Path:
-    """Resolve the project root for a read-only command, or exit 1 if none.
+def _read_only_root(exit_code: int = 1) -> Path:
+    """Resolve the project root for a read-only command, or exit if none.
 
-    Never creates a project, that is a write-path side effect.
+    Never creates a project, that is a write-path side effect. A caller whose
+    exit codes carry a verdict passes its own usage-error code so a missing
+    project is not read as one of the verdicts.
     """
     root = _discover_root()
     if root is None:
@@ -66,8 +68,18 @@ def _read_only_root() -> Path:
             "No mareforma project here or in any parent directory. Write a "
             "claim first (e.g. `mareforma claim add ...`) to create one."
         )
-        sys.exit(1)
+        sys.exit(exit_code)
     return root
+
+
+def _write_root() -> Path:
+    """Resolve the project a mutating command must write to, or exit 1 if none.
+
+    Same upward walk as the read path. A command that changes existing state
+    joins the project it is run inside; it never creates a nested one as a side
+    effect of running from a subdirectory, which would split the graph.
+    """
+    return _read_only_root()
 
 
 def _err(msg: str) -> None:
@@ -343,7 +355,7 @@ def validator_add(pubkey_arg: str, identity: str, validator_type: str) -> None:
         sys.exit(1)
 
     try:
-        with mareforma.open(_root()) as graph:
+        with mareforma.open(_write_root()) as graph:
             if graph._signer is None:
                 _err(
                     "No signing key loaded. Run `mareforma bootstrap` first, "
@@ -570,6 +582,10 @@ def stats_cmd(ctx: click.Context, as_json: bool, last_n: int | None) -> None:
 @click.option("--bundle", is_flag=True, default=False,
               help="Produce a SCITT-style signed bundle (in-toto Statement "
                    "v1 + DSSE envelope). Requires a loaded signing key.")
+@click.option("--key", "key_path_opt", default=None, metavar="FILE",
+              help="Signing key for --bundle (defaults to the local bootstrap "
+                   "key). Pin this when the project's root validator is not "
+                   "the default key.")
 @click.option(
     "--format", "fmt",
     type=click.Choice(["jsonld", "in-toto-v1", "ro-crate-1.2", "prov-o"]),
@@ -585,7 +601,8 @@ def stats_cmd(ctx: click.Context, as_json: bool, last_n: int | None) -> None:
     ),
 )
 def export(
-    output: str | None, as_json: bool, bundle: bool, fmt: str,
+    output: str | None, as_json: bool, bundle: bool,
+    key_path_opt: str | None, fmt: str,
 ) -> None:
     """Export all claims, optionally as a signed bundle or interop format.
 
@@ -605,6 +622,10 @@ def export(
             "a signed in-toto v1 envelope; --format selects an unsigned "
             "export shape. Choose one."
         )
+        sys.exit(1)
+
+    if key_path_opt is not None and not bundle:
+        _err("--key only applies to --bundle; every other export is unsigned.")
         sys.exit(1)
 
     def _display_path(p: Path) -> str:
@@ -677,13 +698,17 @@ def export(
     if bundle:
         # Signed bundle path, needs a key.
         from mareforma import signing as _signing
-        from mareforma.export_bundle import write_bundle
+        from mareforma.export_bundle import BundleExportError, write_bundle
         try:
-            key_path = _signing.default_key_path()
+            key_path = (
+                Path(key_path_opt) if key_path_opt is not None
+                else _signing.default_key_path()
+            )
             if not key_path.exists():
                 _err(
-                    "mareforma export --bundle requires a signing key. "
-                    "Run `mareforma bootstrap` first."
+                    "mareforma export --bundle requires a signing key, and "
+                    f"there is none at {key_path}. Run `mareforma bootstrap` "
+                    "first."
                 )
                 sys.exit(1)
             private_key = _signing.load_private_key(key_path)
@@ -694,6 +719,9 @@ def export(
             )
             written = write_bundle(root, out_path, private_key)
             _ok(f"Exported signed bundle → {_display_path(written)}")
+        except BundleExportError as exc:
+            _err(f"Bundle export refused: {exc}")
+            sys.exit(1)
         except Exception as exc:
             _err(f"Bundle export failed: {exc}")
             sys.exit(1)
@@ -916,14 +944,23 @@ def _verify_bundle_file(
     Auditor posture: verification needs only the public key. The local signing
     key (its public half) is the material a solo operator has; when it is absent
     the bundle is UNVERIFIABLE (exit 2), never a failure (exit 1), the auditor
-    lacks the key, the bundle is not proven tampered. ``key_path`` (from
-    ``--key``) pins the signer's key when the default local key is not it.
+    lacks the key, the bundle is not proven tampered. A bundle signed with a
+    different key than the one supplied reads the same way, unless the caller
+    pinned that key with ``--key``, in which case the mismatch is a definite
+    failure. ``key_path`` (from ``--key``) pins the signer's key when the
+    default local key is not it, and takes the exported public PEM as readily
+    as a signing key.
     """
     from mareforma import signing as _signing
-    from mareforma.export_bundle import BundleVerificationError, verify_bundle
+    from mareforma.export_bundle import (
+        BundleKeyMismatchError,
+        BundleVerificationError,
+        verify_bundle,
+    )
 
+    pinned = key_path is not None
     verify_key_path = (
-        Path(key_path) if key_path is not None else _signing.default_key_path()
+        Path(key_path) if pinned else _signing.default_key_path()
     )
     if not verify_key_path.exists():
         reason = (
@@ -939,8 +976,27 @@ def _verify_bundle_file(
             _err(reason)
         return _VERIFY_UNVERIFIABLE
     try:
-        private_key = _signing.load_private_key(verify_key_path)
-        statement = verify_bundle(path, private_key.public_key())
+        public_key = _load_verify_public_key(verify_key_path)
+        statement = verify_bundle(path, public_key)
+    except BundleKeyMismatchError as exc:
+        if pinned:
+            reason = f"bundle verification failed: {exc}"
+            verdict, code = "tampered", _VERIFY_FAIL
+        else:
+            reason = (
+                "this bundle was signed with a different key than the local "
+                "one. This is unverifiable, not a failure; pin the signer's "
+                "key with --key."
+            )
+            verdict, code = "unverifiable", _VERIFY_UNVERIFIABLE
+        if as_json:
+            click.echo(json.dumps(
+                {"target": str(path), "target_kind": "bundle",
+                 "verdict": verdict, "exit_code": code,
+                 "reason": reason}, indent=2))
+        else:
+            _err(reason)
+        return code
     except BundleVerificationError as exc:
         reason = f"bundle verification failed: {exc}"
         if as_json:
@@ -1082,13 +1138,12 @@ def _verify_claim(target: str, as_json: bool, redact_home: bool) -> int:
         return unverifiable(f"could not read the project graph: {exc}")
 
 
-def _claim_bound_sources(claim: dict) -> list[str]:
+def _claim_bound_sources(claim: dict) -> tuple[str, ...]:
     """The finding's bound data-source identifiers for the binding re-check.
 
-    Read from the SIGNED predicate payload, the normalized ``data_sources`` the
-    finding declares its grounding is over, plus any content-addressed
-    ``data_ids``, exactly the set the write side bound against and the
-    verify-on-read path re-checks (see
+    Read from the ``predicate_payload`` column and passed through
+    :func:`mareforma.observe._binding.predicate_citation_sources`, the one rule
+    the write side bound against and the verify-on-read path re-checks (see
     :func:`mareforma.db.restore._verify_grounding_binding_on_read`). NOT the
     claim's ``supports`` (claim-id / DOI upstreams that would never intersect a
     data-path set), and NOT ``source_name`` (a free-text label that never binds).
@@ -1097,31 +1152,34 @@ def _claim_bound_sources(claim: dict) -> list[str]:
 
     ``data_source`` is not a claim column, so the finding citation lives only in
     ``predicate_payload``; reading it from anywhere else silently no-ops the
-    binding re-check.
+    binding re-check. That column is a denormalisation the signed envelope does
+    not cover, so the append-only trigger locks it on a signed row: without that
+    lock, clearing it would empty this set and pass a violation as clean.
     """
+    from mareforma.observe._binding import predicate_citation_sources
+
     raw = claim.get("predicate_payload")
     if not isinstance(raw, str):
-        return []
+        return ()
     try:
         predicate = json.loads(raw)
     except (ValueError, TypeError):
-        return []
-    if not isinstance(predicate, dict):
-        return []
-    from mareforma.trust._store import is_content_addressed
-
-    data_sources = predicate.get("data_sources") or []
-    data_ids = predicate.get("data_ids") or []
-    out = [s for s in data_sources if isinstance(s, str)]
-    out += [d for d in data_ids if isinstance(d, str) and is_content_addressed(d)]
-    return out
+        return ()
+    return predicate_citation_sources(predicate)
 
 
-def _verify_export_dir(path: Path, as_json: bool) -> int:
-    """Verify an export directory by finding and verifying its signed bundle."""
+def _verify_export_dir(
+    path: Path, as_json: bool, key_path: str | None = None,
+) -> int:
+    """Verify an export directory by finding and verifying its signed bundle.
+
+    ``key_path`` (from ``--key``) travels with the bundle: naming the directory
+    must reach the same verdict as naming the file inside it, or a pinned signer
+    reads as tampered.
+    """
     bundle = path / "mareforma-bundle.json"
     if bundle.is_file():
-        return _verify_bundle_file(bundle, as_json)
+        return _verify_bundle_file(bundle, as_json, key_path)
     reason = (
         f"no signed bundle (mareforma-bundle.json) found in {path}; nothing to "
         "verify with public material"
@@ -1180,7 +1238,7 @@ def verify(target: str, as_json: bool, redact_home: bool,
     try:
         if p.exists():
             if p.is_dir():
-                code = _verify_export_dir(p, as_json)
+                code = _verify_export_dir(p, as_json, key_path)
             else:
                 code = _verify_signed_file(p, as_json, key_path)
         else:
@@ -1623,9 +1681,10 @@ def reexec_cmd(run_path: Path, as_json: bool, map_claim: str | None) -> None:
     trust property. The verdict is not stored; it is a read-side overlay.
 
     Exit code carries the verdict: 0 REPRODUCED, 1 DIVERGED,
-    2 COULD_NOT_REEXECUTE, 3 usage error (a malformed run record, or a --map
-    claim id that does not exist, both distinct from an honest inconclusive
-    re-run).
+    2 COULD_NOT_REEXECUTE, 3 usage error (a bad flag or missing argument, a
+    malformed run record, or a --map that cannot be rendered: no project here,
+    an unreadable graph.db, or a claim id that does not exist, all distinct
+    from an honest inconclusive re-run).
 
     \b
     Examples:
@@ -1635,14 +1694,28 @@ def reexec_cmd(run_path: Path, as_json: bool, map_claim: str | None) -> None:
     """
     from mareforma.reexec import FaithfulnessVerdict, MalformedRunError, reexec
 
+    # Resolve the overlay's project before re-executing: a --map with no
+    # project to render into is a usage error, and it must not cost a pipeline
+    # run or land on the DIVERGED exit code.
+    map_root = _read_only_root(exit_code=3) if map_claim is not None else None
+
     try:
         result = reexec(run_path)
     except MalformedRunError as exc:
         _err(f"Malformed run record: {exc}")
         sys.exit(3)
 
+    # Under --json the verdict and the --map overlay are one document, the
+    # shape `verify --json` already emits, so the output stays parseable.
+    def _emit_json(overlay: dict | None = None) -> None:
+        doc = dict(result.to_dict())
+        if overlay is not None:
+            doc["trust_map"] = overlay
+        click.echo(json.dumps(doc, indent=2, sort_keys=True))
+
     if as_json:
-        click.echo(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+        if map_claim is None:
+            _emit_json()
     else:
         verdict = result.verdict.value
         if result.verdict is FaithfulnessVerdict.REPRODUCED:
@@ -1660,15 +1733,28 @@ def reexec_cmd(run_path: Path, as_json: bool, map_claim: str | None) -> None:
 
     if map_claim is not None:
         import mareforma
+        import sqlite3
+        from mareforma.db import DatabaseError
 
-        root = _read_only_root()
-        with mareforma.open(root, load_key=False) as graph:
-            tmap = graph.trust_map(map_claim, reexec_record=result.to_map_record())
+        try:
+            with mareforma.open(map_root, load_key=False) as graph:
+                tmap = graph.trust_map(
+                    map_claim, reexec_record=result.to_map_record(),
+                )
+        except (DatabaseError, sqlite3.DatabaseError) as exc:
+            # The overlay failed, but the verdict is known: emit it alone, with
+            # no trust_map key to claim a map that was never rendered.
+            if as_json:
+                _emit_json()
+            _err(f"Could not read graph.db: {exc}")
+            sys.exit(3)
         if tmap is None:
+            if as_json:
+                _emit_json()
             _err(f"Claim '{map_claim}' not found; cannot render its trust map.")
             sys.exit(3)
         if as_json:
-            click.echo(json.dumps(tmap.to_dict(), indent=2))
+            _emit_json(tmap.to_dict())
         else:
             _echo_trust_map(tmap, redact_home=False)
 
@@ -1729,7 +1815,9 @@ def claim_add(text, classification, status, source_name, supports, contradicts,
     import mareforma
     from mareforma.db import DatabaseError, MareformaError
 
-    root = _root()
+    # The documented way to create a project, so it may create one, but only
+    # where none exists above: inside a project it joins that project.
+    root = _discover_root() or _root()
     try:
         with mareforma.open(root) as graph:
             claim_id = graph.assert_claim(
@@ -1867,7 +1955,7 @@ def claim_update(claim_id, status, text, supports, contradicts):
         update_claim as _update,
     )
 
-    root = _root()
+    root = _write_root()
     try:
         with mareforma.open(root) as graph:
             _update(
@@ -1916,7 +2004,7 @@ def claim_validate(claim_id, validated_by):
     )
 
     try:
-        with mareforma.open(_root()) as graph:
+        with mareforma.open(_write_root()) as graph:
             graph.validate(claim_id, validated_by=validated_by)
     except ClaimNotFoundError as exc:
         _err(str(exc))

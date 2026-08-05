@@ -1521,7 +1521,9 @@ class EpistemicGraph:
                         "data_ids": sorted(data_id_set),
                         # Normalized read location(s) the finding declares, next
                         # to data_ids so the read side re-checks the grounding
-                        # binding against signed material. Omitted (not an empty
+                        # binding against the persisted citation set (this
+                        # column is unsigned; the append-only trigger locks it
+                        # on a signed row). Omitted (not an empty
                         # list) when no line names a data_source, so a finding
                         # without one is byte-identical to a pre-v0.3.9 finding.
                         **({"data_sources": data_sources} if data_sources else {}),
