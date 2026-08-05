@@ -635,16 +635,21 @@ _ADDITIVE_TABLES_SQL = """
 -- the transparency log before they can converge. strict_promotion_required:
 -- a converging pair must carry data (artifact_hash) on both sides. Both are
 -- one-way once declared, and both bind every writer, not just the handle
--- that declared them. The row is a singleton (id = 1). The signed envelope
--- is the authority; the flat columns are a denormalized read cache. restore
--- verifies the envelope against the enrolled root before enforcing.
+-- that declared them. The row is a singleton (id = 1). created_at is when the
+-- row was last signed, so extending the policy moves it; the *_declared_at
+-- columns hold when each flag was first declared and are what a grandfathering
+-- check reads. NULL until the flag is declared. The signed envelope is the
+-- authority; the flat columns are a denormalized read cache. restore verifies
+-- the envelope against the enrolled root before enforcing.
 CREATE TABLE IF NOT EXISTS project_policy (
-    id                        INTEGER PRIMARY KEY CHECK (id = 1),
-    rekor_required            INTEGER NOT NULL,
-    signer_keyid              TEXT NOT NULL,
-    envelope                  TEXT NOT NULL,
-    created_at                TEXT NOT NULL,
-    strict_promotion_required INTEGER NOT NULL DEFAULT 0
+    id                           INTEGER PRIMARY KEY CHECK (id = 1),
+    rekor_required               INTEGER NOT NULL,
+    signer_keyid                 TEXT NOT NULL,
+    envelope                     TEXT NOT NULL,
+    created_at                   TEXT NOT NULL,
+    strict_promotion_required    INTEGER NOT NULL DEFAULT 0,
+    rekor_declared_at            TEXT,
+    strict_promotion_declared_at TEXT
 );
 
 -- Trust layer: the structured meaning above the signed claim graph. A finding

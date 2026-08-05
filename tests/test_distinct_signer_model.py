@@ -748,6 +748,212 @@ class TestVerifyOnRead:
         assert rep not in q_ids
         assert rep not in s_ids
 
+    def test_promoted_row_without_corroboration_excluded_and_flagged(
+        self, tmp_path: Path,
+    ) -> None:
+        """A level above PRELIMINARY must be backed by the evidence that earns it.
+
+        ``support_level`` is not a signed field, so a signature that still
+        verifies says nothing about the rung the row sits on. Drop the storage
+        guard the way a writer with DB access can, promote a lone signed claim
+        with one UPDATE, and the read path must refuse the row exactly as it
+        refuses a signature mismatch.
+        """
+        sa, _ = _two_signers(tmp_path)
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            lone = g.assert_claim("lone finding", generated_by="lab_a", signer=sa)
+        conn = sqlite3.connect(_db_path(tmp_path))
+        try:
+            conn.execute("DROP TRIGGER IF EXISTS claims_signed_promotion_backed")
+            conn.execute(
+                "UPDATE claims SET support_level = 'REPLICATED' "
+                "WHERE claim_id = ?",
+                (lone,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            c = g.get_claim(lone)
+            assert c["support_level"] == "REPLICATED"
+            assert c["verified"] is False
+            ids = {r["claim_id"] for r in g.query(min_support="REPLICATED", limit=99)}
+            assert lone not in ids
+
+    def test_unsigned_replication_verdict_does_not_back_a_promotion(
+        self, tmp_path: Path,
+    ) -> None:
+        """A verdict row is evidence only once its own signature is checked.
+
+        Restore verifies every verdict before it inserts it, so the level
+        re-derivation there runs on a clean table. The live read path has no
+        such precondition: ``replication_verdicts`` is whatever is in graph.db.
+        A verdict naming the claim with a junk signature and an unenrolled
+        issuer must not carry it to REPLICATED.
+        """
+        sa, _ = _two_signers(tmp_path)
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            lone = g.assert_claim("lone finding", generated_by="lab_a", signer=sa)
+        conn = sqlite3.connect(_db_path(tmp_path))
+        try:
+            conn.execute("DROP TRIGGER IF EXISTS claims_signed_promotion_backed")
+            conn.execute(
+                "UPDATE claims SET support_level = 'REPLICATED' "
+                "WHERE claim_id = ?",
+                (lone,),
+            )
+            conn.execute(
+                "INSERT INTO replication_verdicts(verdict_id, cluster_id, "
+                "member_claim_id, other_claim_id, method, confidence_json, "
+                "issuer_keyid, signature, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("forged-v1", "forged-cluster", lone, None, "hash-match", "{}",
+                 "not-an-enrolled-keyid", b"not-an-envelope",
+                 "2026-01-01T00:00:00Z"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            c = g.get_claim(lone)
+            assert c["support_level"] == "REPLICATED"
+            assert c["verified"] is False
+            ids = {r["claim_id"] for r in g.query(min_support="REPLICATED", limit=99)}
+            assert lone not in ids
+
+    def test_validator_signed_replication_verdict_backs_a_promotion(
+        self, tmp_path: Path,
+    ) -> None:
+        """The verdict path still promotes: an enrolled issuer's signed verdict
+        carries both members, and both are served verified. Neither claim has a
+        distinct-signer peer, so the verdict is the only evidence behind them.
+        """
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        issuer_key = _bootstrap_key(tmp_path, "issuer.key")
+        _enroll_key(tmp_path, root_key, issuer_key, identity="issuer@lab.example")
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            a = g.assert_claim("alpha", generated_by="A")
+            b = g.assert_claim("beta", generated_by="B")
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            g.record_replication_verdict(
+                verdict_id="rv_1", cluster_id="cl_x",
+                member_claim_id=a, other_claim_id=b,
+                method="semantic-cluster", confidence={"cosine": 0.92},
+            )
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            assert g.get_claim(a)["verified"] is True
+            assert g.get_claim(b)["verified"] is True
+            ids = {r["claim_id"] for r in g.query(min_support="REPLICATED", limit=99)}
+            assert {a, b} <= ids
+
+    def test_verdict_membership_does_not_excuse_the_strict_policy(
+        self, tmp_path: Path,
+    ) -> None:
+        """The read path holds a verdict-backed level to all four promotion
+        terms, not three. Under a strict-promotion policy a dataless member is
+        named by the cluster's verdict and left PRELIMINARY, so a flipped
+        support_level on such a row must not read back verified.
+        """
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        issuer_key = _bootstrap_key(tmp_path, "issuer.key")
+        with mareforma.open(
+            tmp_path, key_path=root_key, strict_promotion=True,
+        ) as g:
+            g.enroll_validator(_pem_of(issuer_key), identity="issuer")
+            a = g.assert_claim("alpha", generated_by="A")
+            b = g.assert_claim("beta", generated_by="B")
+        with mareforma.open(tmp_path, key_path=issuer_key) as g:
+            g.record_replication_verdict(
+                verdict_id="rv_strict", cluster_id="cl_strict",
+                member_claim_id=a, other_claim_id=b,
+                method="semantic-cluster", confidence={},
+            )
+        conn = sqlite3.connect(_db_path(tmp_path))
+        try:
+            conn.execute("DROP TRIGGER IF EXISTS claims_signed_promotion_backed")
+            conn.execute(
+                "UPDATE claims SET support_level = 'REPLICATED' "
+                "WHERE claim_id = ?",
+                (a,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            c = g.get_claim(a)
+            assert c["support_level"] == "REPLICATED"
+            assert c["verified"] is False
+            ids = {r["claim_id"] for r in g.query(min_support="REPLICATED", limit=99)}
+            assert a not in ids
+
+    def test_unsigned_peer_row_does_not_back_a_promotion(
+        self, tmp_path: Path,
+    ) -> None:
+        """A converging peer is evidence only once its own bundle is checked.
+
+        ``asserter_keyid`` is a plain column on a row the attacker inserts, so
+        "a peer carrying a distinct, non-NULL keyid" is satisfied by any string
+        on a row nobody signed. The peer has to clear the bar the served row
+        clears: a bundle that names the same keyid and verifies.
+        """
+        sa, _ = _two_signers(tmp_path)
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            anchor = g.assert_claim("anchor", generated_by="seed", seed=True)
+            target = g.assert_claim(
+                "target finding", supports=[anchor], generated_by="lab_a",
+                signer=sa,
+            )
+            assert g.get_claim(target)["support_level"] == "PRELIMINARY"
+        conn = sqlite3.connect(_db_path(tmp_path))
+        try:
+            conn.execute("DROP TRIGGER IF EXISTS claims_signed_promotion_backed")
+            conn.execute(
+                "UPDATE claims SET support_level = 'REPLICATED' "
+                "WHERE claim_id = ?",
+                (target,),
+            )
+            conn.execute(
+                "INSERT INTO claims(claim_id, text, generated_by, supports_json, "
+                "asserter_keyid, signature_bundle, statement_cid, prev_hash, "
+                "support_level, transparency_logged, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, 'PRELIMINARY', 1, "
+                "'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                ("forged-peer-0001", "forged peer", "attacker",
+                 json.dumps([anchor]), "deadbeefdeadbeef"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            c = g.get_claim(target)
+            assert c["support_level"] == "REPLICATED"
+            assert c["verified"] is False
+            ids = {r["claim_id"] for r in g.query(min_support="REPLICATED", limit=99)}
+            assert target not in ids
+
+    def test_signed_peers_on_a_shared_anchor_back_a_promotion(
+        self, tmp_path: Path,
+    ) -> None:
+        """Honest convergence is untouched: two genuinely signed claims on one
+        ESTABLISHED anchor still read verified and are still served."""
+        sa, sb = _two_signers(tmp_path)
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            anchor = g.assert_claim("anchor", generated_by="seed", seed=True)
+            a = g.assert_claim("A", supports=[anchor], generated_by="lab_a", signer=sa)
+            b = g.assert_claim("B", supports=[anchor], generated_by="lab_b", signer=sb)
+            assert g.get_claim(a)["verified"] is True
+            assert g.get_claim(b)["verified"] is True
+            ids = {r["claim_id"] for r in g.query(min_support="REPLICATED", limit=99)}
+            assert {a, b} <= ids
+
     def test_search_returns_a_genuine_established_row_with_disclosure(
         self, tmp_path: Path,
     ) -> None:

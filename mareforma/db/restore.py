@@ -781,11 +781,12 @@ def restore(
                     # required on REPLICATED rows. Wrap the UPDATE so
                     # any trigger refusal surfaces as RestoreError.
                     try:
-                        conn.execute(
-                            "UPDATE claims SET support_level = 'REPLICATED' "
-                            "WHERE claim_id = ?",
-                            (claim_id,),
-                        )
+                        with _promotion_window(conn):
+                            conn.execute(
+                                "UPDATE claims SET support_level = 'REPLICATED' "
+                                "WHERE claim_id = ?",
+                                (claim_id,),
+                            )
                     except sqlite3.IntegrityError as exc:
                         raise RestoreError(
                             f"Claim {claim_id} promote-to-REPLICATED "
