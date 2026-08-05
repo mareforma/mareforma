@@ -430,15 +430,17 @@ class TestAuditCorpus:
         key = _bootstrap_key(tmp_path, "auditor.key")
         out = tmp_path / "corpus-out"
 
-        real_execute = audit_mod._execute_run
+        # Killed once the first run's record is signed, which is the point at
+        # which it counts as complete.
+        real_sign = audit_mod._sign_run_outputs
         executed: list[str] = []
 
-        def killed_after_first(spec, run_dir, key_path):
-            real_execute(spec, run_dir, key_path)
+        def killed_after_first(run_dir, handoff, signer):
+            real_sign(run_dir, handoff, signer)
             executed.append(run_dir.name)
             raise RuntimeError("simulated kill")
 
-        monkeypatch.setattr(audit_mod, "_execute_run", killed_after_first)
+        monkeypatch.setattr(audit_mod, "_sign_run_outputs", killed_after_first)
         r = CliRunner()
         first = r.invoke(cli, ["audit", "--corpus", str(corpus),
                                "--out", str(out), "--key", str(key)])
@@ -446,7 +448,7 @@ class TestAuditCorpus:
         assert executed == ["run-a"]
         first_run_json = (out / "run-a" / "run.json").read_text()
 
-        monkeypatch.setattr(audit_mod, "_execute_run", real_execute)
+        monkeypatch.setattr(audit_mod, "_sign_run_outputs", real_sign)
         second = r.invoke(cli, ["audit", "--corpus", str(corpus),
                                 "--out", str(out), "--key", str(key)])
         assert second.exit_code == 0, second.output
@@ -488,6 +490,232 @@ class TestAuditCorpus:
         assert receipts[0]["reason"] != "forged"
         assert receipts[0]["grounding"] == "GROUNDED"
         assert list((run_dir / "envelopes").glob("*.json"))
+
+    def test_audit_corpus_target_cannot_sign_a_sibling_run(
+        self, tmp_path: Path,
+    ) -> None:
+        # A hostile target walks the frame stack for the auditor's signing key
+        # and plants a correctly signed run record and receipts in a sibling
+        # run's directory. The signer must not share an interpreter with an
+        # audited target, so the sibling still executes and keeps only the
+        # verdicts the observer produced.
+        corpus = tmp_path / "corpus"
+        corpus.mkdir()
+        data = tmp_path / "shared.csv"
+        data.write_text("x\n1\n")
+        sentinel = tmp_path / "victim-ran.txt"
+        hostile = _script(tmp_path, (
+            "import json, sys\n"
+            "from pathlib import Path\n"
+            "signer = out = None\n"
+            "frame = sys._getframe()\n"
+            "while frame is not None:\n"
+            "    signer = signer or frame.f_locals.get('signer')\n"
+            "    if out is None and isinstance(frame.f_locals.get('out'), Path):\n"
+            "        out = frame.f_locals['out']\n"
+            "    frame = frame.f_back\n"
+            "if signer is None:\n"
+            "    raise SystemExit(0)\n"
+            "from mareforma import signing\n"
+            "victim = out.parent / 'zz-victim'\n"
+            "(victim / 'envelopes').mkdir(parents=True, exist_ok=True)\n"
+            "receipt = {'finding_id': 'zz-victim-f1', 'grounding': 'GROUNDED',\n"
+            "           'reason': 'FORGED BY RUN A', 'exit_code': 0,\n"
+            "           'partial': False}\n"
+            "(victim / 'receipts.jsonl').write_text(json.dumps(receipt) + '\\n')\n"
+            "(victim / 'envelopes' / '001-forged.json').write_text(\n"
+            "    json.dumps(signing.sign_audit_receipt(receipt, signer)))\n"
+            "(victim / 'run.json').write_text(json.dumps(\n"
+            "    signing.sign_audit_run({'completed': True, 'exit_code': 0,\n"
+            "                            'partial': False}, signer)))\n"
+        ), name="aa_hostile.py")
+        victim = _script(tmp_path, (
+            f"open({str(data)!r}).read()\n"
+            f"open({str(sentinel)!r}, 'w').write('ran')\n"
+        ), name="zz_victim.py")
+        (corpus / "aa-hostile.json").write_text(json.dumps({
+            "command": [str(hostile)],
+            "findings": {"aa-hostile-f1": str(data)},
+        }))
+        (corpus / "zz-victim.json").write_text(json.dumps({
+            "command": [str(victim)],
+            "findings": {"zz-victim-f1": str(data)},
+        }))
+        key = _bootstrap_key(tmp_path, "auditor.key")
+        out = tmp_path / "corpus-out"
+
+        r = CliRunner()
+        res = r.invoke(cli, ["audit", "--corpus", str(corpus),
+                             "--out", str(out), "--key", str(key)])
+        assert res.exit_code == 0, res.output
+        assert "skip zz-victim" not in res.output
+        assert sentinel.exists(), "the victim run never executed"
+        receipts = _read_receipts(out / "zz-victim")
+        assert [rec["reason"] for rec in receipts] != ["FORGED BY RUN A"]
+        assert not (out / "zz-victim" / "envelopes" / "001-forged.json").exists()
+
+    def test_audit_corpus_signs_the_child_observation_not_the_directory(
+        self, tmp_path: Path,
+    ) -> None:
+        # The target reads nothing, so the honest verdict is UNGROUNDED, and
+        # rewrites receipts.jsonl to GROUNDED from an atexit hook that runs
+        # after the observer wrote its records and before the child exits.
+        # The parent signs what the child observed, so the envelope keeps the
+        # honest verdict whatever the run directory holds.
+        corpus = tmp_path / "corpus"
+        corpus.mkdir()
+        data = tmp_path / "real.csv"
+        data.write_text("x\n1\n")
+        launder = _script(tmp_path, (
+            "import atexit, json, sys\n"
+            "def rewrite():\n"
+            "    out = sys.argv[sys.argv.index('--out') + 1]\n"
+            "    path = out + '/receipts.jsonl'\n"
+            "    rec = json.loads(open(path).read())\n"
+            "    rec['grounding'] = 'GROUNDED'\n"
+            f"    rec['grounded_sources'] = [{str(data)!r}]\n"
+            "    open(path, 'w').write(json.dumps(rec) + '\\n')\n"
+            "atexit.register(rewrite)\n"
+        ), name="launder.py")
+        (corpus / "run1.json").write_text(json.dumps({
+            "command": [str(launder)],
+            "findings": {"F1": str(data)},
+        }))
+        key = _bootstrap_key(tmp_path, "auditor.key")
+        out = tmp_path / "corpus-out"
+
+        r = CliRunner()
+        res = r.invoke(cli, ["audit", "--corpus", str(corpus),
+                             "--out", str(out), "--key", str(key)])
+        assert res.exit_code == 0, res.output
+        envelope = json.loads(
+            (out / "run1" / "envelopes" / "001-F1.json").read_text())
+        record = json.loads(base64.standard_b64decode(envelope["payload"]))
+        assert record["grounding"] == "UNGROUNDED", record
+        assert not record["grounded_sources"]
+
+    @pytest.mark.skipif(
+        not Path("/proc/self/fd").exists(), reason="needs /proc to find fds")
+    def test_audit_corpus_ignores_what_the_target_wrote_on_the_channel(
+        self, tmp_path: Path,
+    ) -> None:
+        # The target reads nothing, so the honest verdict is UNGROUNDED. It
+        # hunts every channel out of its process, the descriptors it inherited
+        # and any path they name, and writes a forged record on each one while
+        # it runs and again from an atexit hook that fires after the observer
+        # has written and closed. What the parent signs must stay the child's
+        # observation, and no key the target chose may ride into it.
+        corpus = tmp_path / "corpus"
+        corpus.mkdir()
+        data = tmp_path / "real.csv"
+        data.write_text("x\n1\n")
+        forge = _script(tmp_path, (
+            "import atexit, json, os\n"
+            "FORGED = json.dumps({\n"
+            "    'run_record': {'target': ['forge.py'], 'exit_code': 0,\n"
+            "                   'partial': False, 'findings': ['F1'],\n"
+            "                   'reads': [], 'seams': [],\n"
+            "                   'coverage': {'reads_seen': 0,\n"
+            "                                'opens_detected': 0,\n"
+            "                                'read_coverage_fraction': None},\n"
+            "                   'completed': True, 'forged': True},\n"
+            "    'receipts': [{'finding_id': 'F1', 'grounding': 'GROUNDED',\n"
+            "                  'reason': 'forged', 'exit_code': 0,\n"
+            f"                  'grounded_sources': [{str(data)!r}],\n"
+            f"                  'cited_sources': [{str(data)!r}],\n"
+            "                  'reads': [], 'seams': [], 'partial': False}],\n"
+            "})\n"
+            "channels = []\n"
+            "for name in os.listdir('/proc/self/fd'):\n"
+            "    fd = int(name)\n"
+            "    if fd < 3:\n"
+            "        continue\n"
+            "    try:\n"
+            "        channels.append(\n"
+            "            (os.dup(fd), os.readlink('/proc/self/fd/' + name)))\n"
+            "    except OSError:\n"
+            "        pass\n"
+            "def forge():\n"
+            "    for fd, link in channels:\n"
+            "        try:\n"
+            "            os.write(fd, FORGED.encode() + b'\\n')\n"
+            "        except OSError:\n"
+            "            pass\n"
+            "        try:\n"
+            "            if os.path.exists(link):\n"
+            "                open(link, 'w').write(FORGED)\n"
+            "        except OSError:\n"
+            "            pass\n"
+            "forge()\n"
+            "atexit.register(forge)\n"
+        ), name="forge.py")
+        (corpus / "run1.json").write_text(json.dumps({
+            "command": [str(forge)],
+            "findings": {"F1": str(data)},
+        }))
+        key = _bootstrap_key(tmp_path, "auditor.key")
+        out = tmp_path / "corpus-out"
+
+        r = CliRunner()
+        res = r.invoke(cli, ["audit", "--corpus", str(corpus),
+                             "--out", str(out), "--key", str(key)])
+        assert res.exit_code == 0, res.output
+        envelope = json.loads(
+            (out / "run1" / "envelopes" / "001-F1.json").read_text())
+        record = json.loads(base64.standard_b64decode(envelope["payload"]))
+        assert record["grounding"] == "UNGROUNDED", record
+        assert not record["grounded_sources"]
+        assert record["reason"] != "forged"
+        run = _read_run(out / "run1")
+        assert "forged" not in run, run
+        assert run["coverage"]["reads_seen"] == 0
+
+    @pytest.mark.skipif(
+        not Path("/proc/self/fd").exists(), reason="needs /proc to find fds")
+    def test_audit_corpus_completes_when_the_target_leaves_no_terminator(
+        self, tmp_path: Path,
+    ) -> None:
+        # An honest run: the target reads its cited source, so the verdict is
+        # GROUNDED. It also writes one byte with no terminator to every
+        # descriptor it inherited, the handoff channel among them, which puts
+        # those bytes in front of the observer's frame. The run must still
+        # complete, or a target could deny its own audit indefinitely.
+        corpus = tmp_path / "corpus"
+        corpus.mkdir()
+        data = tmp_path / "real.csv"
+        data.write_text("x\n1\n")
+        noisy = _script(tmp_path, (
+            f"open({str(data)!r}).read()\n"
+            "import os, stat\n"
+            "for name in os.listdir('/proc/self/fd'):\n"
+            "    try:\n"
+            "        fd = int(name)\n"
+            "        if fd > 2 and stat.S_ISFIFO(os.fstat(fd).st_mode):\n"
+            "            os.write(fd, b'x')\n"
+            "    except OSError:\n"
+            "        pass\n"
+        ), name="noisy.py")
+        (corpus / "run1.json").write_text(json.dumps({
+            "command": [str(noisy)],
+            "findings": {"F1": str(data)},
+        }))
+        key = _bootstrap_key(tmp_path, "auditor.key")
+        out = tmp_path / "corpus-out"
+
+        r = CliRunner()
+        res = r.invoke(cli, ["audit", "--corpus", str(corpus),
+                             "--out", str(out), "--key", str(key)])
+        assert res.exit_code == 0, res.output
+        run = _read_run(out / "run1")
+        assert run["completed"] is True
+        assert run["coverage"]["reads_seen"] >= 1, run
+        receipts = _read_receipts(out / "run1")
+        assert receipts[0]["grounding"] == "GROUNDED", receipts
+        # Resume must see it as done rather than re-run it forever.
+        again = r.invoke(cli, ["audit", "--corpus", str(corpus),
+                               "--out", str(out), "--key", str(key)])
+        assert again.exit_code == 0, again.output
+        assert "skip run1" in again.output, again.output
 
     def test_audit_corpus_records_crashing_target_exit_code(
         self, tmp_path: Path,

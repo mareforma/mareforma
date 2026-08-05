@@ -383,7 +383,7 @@ def validator_list(as_json: bool) -> None:
     import mareforma
     from mareforma import validators as _validators
 
-    with mareforma.open(_read_only_root()) as graph:
+    with mareforma.open(_read_only_root(), load_key=False) as graph:
         rows = _validators.list_validators(graph._conn)
 
     if as_json:
@@ -1011,7 +1011,7 @@ def _verify_claim(target: str, as_json: bool, redact_home: bool) -> int:
         )
 
     try:
-        with mareforma.open(root) as graph:
+        with mareforma.open(root, load_key=False) as graph:
             claim = graph.get_claim(target)
             if claim is None:
                 return unverifiable(
@@ -1239,7 +1239,7 @@ def map_cmd(claim_id: str, as_html: bool, as_json: bool,
 
     root = _read_only_root()
     try:
-        with mareforma.open(root) as graph:
+        with mareforma.open(root, load_key=False) as graph:
             tmap = graph.trust_map(claim_id)
     except (DatabaseError, sqlite3.DatabaseError) as exc:
         _err(f"Could not read graph.db: {exc}")
@@ -1341,10 +1341,14 @@ def diagnose_cmd(cites: tuple[str, ...], as_json: bool, redact_home: bool,
 @click.option("--redact-home", "redact_home", is_flag=True, default=False,
               help="Rewrite $HOME to ~ in the printed report (never applied "
                    "to signed receipts).")
+@click.option("--defer-signing", "defer_signing", is_flag=True, default=False,
+              hidden=True,
+              help="Corpus-child protocol: emit the records unsigned and load "
+                   "no key, so the parent can sign once this process is gone.")
 @click.argument("command", nargs=-1, type=click.UNPROCESSED)
 def audit_cmd(findings_path: str | None, corpus_dir: str | None, out_dir: str,
               key_path: str | None, as_json: bool, redact_home: bool,
-              command: tuple[str, ...]) -> None:
+              defer_signing: bool, command: tuple[str, ...]) -> None:
     """Audit a third-party pipeline: one signed grounding receipt per finding.
 
     Runs COMMAND in-process under the grounding observer, exactly like
@@ -1364,7 +1368,8 @@ def audit_cmd(findings_path: str | None, corpus_dir: str | None, out_dir: str,
 
     With --corpus, iterates run specs instead: one fresh interpreter per run,
     resumable (a run whose signed record verifies as complete is skipped on
-    re-invocation).
+    re-invocation). The corpus keeps the signing key out of every child, so a
+    target can only affect its own run, never a sibling's.
 
     \b
     Examples:
@@ -1380,6 +1385,10 @@ def audit_cmd(findings_path: str | None, corpus_dir: str | None, out_dir: str,
     if corpus_dir and (as_json or redact_home):
         raise click.UsageError(
             "--json and --redact-home apply to a single run, not --corpus")
+    if defer_signing and (corpus_dir or key_path):
+        raise click.UsageError(
+            "--defer-signing is the corpus-child protocol for a single run "
+            "and takes no key")
     if corpus_dir:
         sys.exit(run_corpus(corpus_dir, out_dir=out_dir, key_path=key_path))
     if not findings_path:
@@ -1391,6 +1400,7 @@ def audit_cmd(findings_path: str | None, corpus_dir: str | None, out_dir: str,
         list(command), findings_path=findings_path, out_dir=out_dir,
         key_path=key_path, as_json=as_json,
         redact_home=(_redact_home if redact_home else None),
+        defer_signing=defer_signing,
     ))
 
 
@@ -1643,7 +1653,7 @@ def reexec_cmd(run_path: Path, as_json: bool, map_claim: str | None) -> None:
         import mareforma
 
         root = _read_only_root()
-        with mareforma.open(root) as graph:
+        with mareforma.open(root, load_key=False) as graph:
             tmap = graph.trust_map(map_claim, reexec_record=result.to_map_record())
         if tmap is None:
             _err(f"Claim '{map_claim}' not found; cannot render its trust map.")

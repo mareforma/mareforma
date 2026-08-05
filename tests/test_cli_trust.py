@@ -15,6 +15,7 @@ from click.testing import CliRunner
 import mareforma
 from mareforma import signing
 from mareforma.cli import cli, _claim_bound_sources
+from mareforma.db import open_db
 
 
 def _bootstrap_default_key() -> None:
@@ -23,6 +24,17 @@ def _bootstrap_default_key() -> None:
     kp.parent.mkdir(parents=True, exist_ok=True)
     if not kp.exists():
         signing.bootstrap_key(kp)
+
+
+def _count_validators() -> int:
+    """Number of enrolled validators in the project at cwd."""
+    from mareforma import validators as _validators
+
+    conn = open_db(Path("."))
+    try:
+        return _validators.count_validators(conn)
+    finally:
+        conn.close()
 
 
 def _v038_grounded_record() -> str:
@@ -371,3 +383,50 @@ class TestVerifyGroundingBinding:
             res = r.invoke(cli, ["verify", cid, "--json"])
             assert res.exit_code == 1, res.output
             assert "grounding binding violation" in res.output
+
+
+# ---------------------------------------------------------------------------
+# read-only commands must not enroll the caller's key
+# ---------------------------------------------------------------------------
+
+class TestReadCommandsDoNotEnroll:
+    """`verify`, `map` and `validator list` are auditor-side reads.
+
+    Opening the graph with a signer auto-enrolls that key as the project's
+    self-signed root when the validators table is empty, which is a write no
+    read command may perform: root enrollment is immutable and would lock the
+    producer out of their own graph.
+    """
+
+    def _unsigned_project(self, tmp_path: Path) -> str:
+        """Write a claim with no key present, then bootstrap one."""
+        with mareforma.open(".") as g:
+            cid = g.assert_claim("unsigned", classification="ANALYTICAL")
+        assert _count_validators() == 0
+        _bootstrap_default_key()
+        return cid
+
+    def test_verify_leaves_validators_empty(self, tmp_path: Path) -> None:
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            cid = self._unsigned_project(tmp_path)
+            res = r.invoke(cli, ["verify", cid])
+            assert res.exit_code == 0, res.output
+            assert _count_validators() == 0
+
+    def test_map_leaves_validators_empty(self, tmp_path: Path) -> None:
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            cid = self._unsigned_project(tmp_path)
+            res = r.invoke(cli, ["map", cid])
+            assert res.exit_code == 0, res.output
+            assert _count_validators() == 0
+
+    def test_validator_list_leaves_validators_empty(self, tmp_path: Path) -> None:
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            self._unsigned_project(tmp_path)
+            res = r.invoke(cli, ["validator", "list"])
+            assert res.exit_code == 0, res.output
+            assert "No validators enrolled" in res.output
+            assert _count_validators() == 0

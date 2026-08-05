@@ -462,3 +462,48 @@ class TestSupportLevelAttestation:
             if n.get("@type") == "mare:Claim"
         }
         assert levels["converged"] in ("ESTABLISHED", "REPLICATED")
+
+    def test_llm_typed_validator_cannot_back_established(
+        self, tmp_path: Path,
+    ) -> None:
+        """An ESTABLISHED display backed by an llm-typed validator must fail.
+
+        The graph refuses this promotion in process (LLMValidatorPromotionError),
+        and the bundle carries each validator's enrollment-bound validator_type,
+        so the verifier has to enforce the same human-witnessed rule.
+        """
+        root_key = tmp_path / "root.key"
+        _signing.bootstrap_key(root_key)
+        root_pk = _signing.load_private_key(root_key)
+        bot_key = tmp_path / "bot.key"
+        _signing.bootstrap_key(bot_key)
+        bot_pk = _signing.load_private_key(bot_key)
+        bot_pem = _signing.public_key_to_pem(bot_pk.public_key())
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            g.enroll_validator(bot_pem, identity="bot", validator_type="llm")
+            cid = g.assert_claim("bot promoted", generated_by="a")
+
+        # Build the validation envelope the graph would refuse to accept.
+        envelope = _signing.sign_validation(
+            {
+                "claim_id": cid,
+                "validator_keyid": _signing.public_key_id(bot_pk.public_key()),
+                "validated_at": "2026-01-01T00:00:00Z",
+                "evidence_seen": [],
+            },
+            bot_pk,
+        )
+        statement = build_statement(tmp_path)
+        for node in statement["predicate"]["@graph"]:
+            if node.get("claimText") == "bot promoted":
+                node["supportLevel"] = "ESTABLISHED"
+                node["validationSignature"] = envelope
+                node.pop("validatedBy", None)
+                break
+        bundle_path = tmp_path / "bundle.json"
+        bundle_path.write_text(
+            json.dumps(sign_bundle(statement, root_pk)), encoding="utf-8",
+        )
+        with pytest.raises(BundleVerificationError, match="validator_type='llm'"):
+            verify_bundle(bundle_path, root_pk.public_key())

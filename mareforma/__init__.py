@@ -39,6 +39,7 @@ def open(  # noqa: A001
     *,
     key_path: "str | Path | None" = None,
     require_signed: bool = False,
+    load_key: bool = True,
     rekor_url: "str | None" = None,
     require_rekor: bool = False,
     trust_insecure_rekor: bool = False,
@@ -64,6 +65,14 @@ def open(  # noqa: A001
         When True, raise :class:`mareforma.signing.KeyNotFoundError` if no
         key is found at ``key_path``. Use for high-assurance contexts where
         an unsigned claim is unacceptable.
+    load_key:
+        When False, no signing key is loaded even if one exists, and the
+        graph opens read-only in effect: nothing is signed and the caller's
+        key is never auto-enrolled as the project's root validator. Read-only
+        commands (``verify``, ``map``, ``validator list``) use this so an
+        auditor's key leaves no trace in the graph it inspects. Combining it
+        with ``require_signed=True`` is a contradiction and raises
+        :class:`ValueError`.
     rekor_url:
         Transparency-log endpoint. When set, every signed claim is submitted
         to Rekor at INSERT time; the entry uuid + logIndex are attached to
@@ -131,6 +140,12 @@ def open(  # noqa: A001
     from mareforma.db import open_db
     from mareforma import signing as _signing
 
+    if require_signed and not load_key:
+        raise ValueError(
+            "require_signed=True and load_key=False contradict each other: "
+            "signing needs the key that load_key=False refuses to load."
+        )
+
     root = Path(path) if path is not None else Path.cwd()
     conn = open_db(root)
 
@@ -138,7 +153,7 @@ def open(  # noqa: A001
         Path(key_path) if key_path is not None else _signing.default_key_path()
     )
     signer = None
-    if resolved_key_path.exists():
+    if load_key and resolved_key_path.exists():
         signer = _signing.load_private_key(resolved_key_path)
     elif require_signed:
         raise _signing.KeyNotFoundError(

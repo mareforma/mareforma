@@ -222,8 +222,13 @@ class BundleVerificationError(Exception):
 
 def _verify_exported_validators(
     validators: list[dict],
-) -> tuple[dict[str, Any], str]:
-    """Verify the exported validator set; return (keyid -> public-key, root).
+) -> tuple[dict[str, Any], dict[str, str], str]:
+    """Verify the exported validator set.
+
+    Returns (keyid -> public-key, keyid -> validator_type, root). The type
+    comes from the enrollment payload the parent signed, so it is as
+    trustworthy as the key it accompanies, and the ESTABLISHED check needs it
+    to enforce the human-witnessed rule the graph enforces in process.
 
     Each enrollment envelope is verified against its parent's pubkey (the root
     is self-verified), mirroring the restore path, and every validator must
@@ -246,6 +251,7 @@ def _verify_exported_validators(
     root = roots[0]
 
     verified: dict[str, Any] = {}
+    verified_types: dict[str, str] = {}
     for keyid, v in by_keyid.items():
         parent = by_keyid.get(v.get("enrolled_by_keyid"))
         if parent is None:
@@ -271,6 +277,7 @@ def _verify_exported_validators(
             raise BundleVerificationError(
                 f"validators:{str(keyid)[:12]}… pubkey unparseable"
             ) from exc
+        verified_types[keyid] = v.get("validator_type")
 
     # Every validator must reach the single root by walking parents — no
     # island component and no cycle can smuggle in an off-root asserter key.
@@ -284,7 +291,7 @@ def _verify_exported_validators(
                 )
             seen.add(cur)
             cur = by_keyid[cur].get("enrolled_by_keyid")
-    return verified, root
+    return verified, verified_types, root
 
 
 def _string_supports(supports: Any) -> list[str]:
@@ -301,7 +308,8 @@ def _string_supports(supports: Any) -> list[str]:
 
 
 def _verify_established_level(
-    node: dict, claim_id: str, verified_validators: dict, _signing,
+    node: dict, claim_id: str, verified_validators: dict,
+    validator_types: dict, _signing,
 ) -> None:
     """Confirm a node displayed as ESTABLISHED carries a validator-signed
     promotion for THIS claim, so the exporter cannot inflate a claim's support
@@ -331,6 +339,15 @@ def _verify_established_level(
         raise BundleVerificationError(
             f"claim:{claim_id} validation signed by {str(val_keyid)[:12]}… "
             "which is not a chain-verified validator"
+        )
+    # ESTABLISHED means a human-typed validator witnessed the claim. The graph
+    # refuses an llm-typed promotion in process; the bundle carries the
+    # enrollment-bound validator_type, so the verifier refuses it too.
+    if validator_types.get(val_keyid) == "llm":
+        raise BundleVerificationError(
+            f"claim:{claim_id} is shown ESTABLISHED but its validation is "
+            f"signed by {str(val_keyid)[:12]}…, enrolled with "
+            "validator_type='llm'"
         )
     try:
         ok = _signing.verify_envelope(vs, val_pub, expected_payload_type=declared)
@@ -446,7 +463,7 @@ def verify_bundle(
     # the exporter as a separate party. A validator-less bundle is refused
     # (_verify_exported_validators requires one root), so a signed graph cannot
     # be stripped to a digest-only bundle that skips per-claim verification.
-    verified_validators, trust_root = _verify_exported_validators(
+    verified_validators, validator_types, trust_root = _verify_exported_validators(
         predicate.get("mare:validators") or []
     )
     if keyid != trust_root:
@@ -566,7 +583,7 @@ def verify_bundle(
         level = node.get("supportLevel", "PRELIMINARY")
         if verified_validators and level == "ESTABLISHED":
             _verify_established_level(
-                node, claim_id, verified_validators, _signing,
+                node, claim_id, verified_validators, validator_types, _signing,
             )
         elif verified_validators and level == "REPLICATED":
             corroborated = any(
