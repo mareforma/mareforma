@@ -269,6 +269,28 @@ class TestDiagnose:
         assert doc["grounding"] is not None
         assert doc["grounding"]["grounding"] == "GROUNDED"
 
+    def test_self_instrumented_target_still_reports_its_reads(
+        self, tmp_path: Path,
+    ) -> None:
+        # The target opens its own observe() block. diagnose wraps it in an
+        # outer scope, so its reads must still reach the report instead of
+        # printing a confident UNGROUNDED with no reads at all.
+        data = tmp_path / "data.csv"
+        data.write_text("a,b\n1,2\n")
+        script = self._script(
+            tmp_path,
+            "import mareforma.observe as obs\n"
+            f"with obs.observe(cites={str(data)!r}):\n"
+            f"    open({str(data)!r}).read()\n",
+        )
+        r = CliRunner()
+        res = r.invoke(
+            cli, ["diagnose", "--json", "--cites", str(data), "--", str(script)])
+        assert res.exit_code == 0, res.output
+        doc = json.loads(res.output)
+        assert any(str(data) in rr["identifier"] for rr in doc["reads"])
+        assert doc["grounding"]["grounding"] == "GROUNDED"
+
     def test_target_crash_partial_report_and_exit_code(
         self, tmp_path: Path,
     ) -> None:

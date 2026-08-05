@@ -47,6 +47,45 @@ def test_nested_scopes_restore_the_outer(data_files):
     assert _scope.current_scope() is None
 
 
+def test_nested_scope_evidence_replays_into_the_outer(data_files):
+    # A helper that opens its own observe() must not blind the caller's scope:
+    # the read happened inside the outer span, so the outer verdict sees it.
+    def helper():
+        with obs.observe(cites=data_files["data"]):
+            open(data_files["data"]).read()
+
+    with obs.observe(cites=data_files["data"]) as outer:
+        helper()
+    assert outer.verdict.grounding is OG.GROUNDED
+    assert any(data_files["data"] in r.identifier for r in outer.verdict.reads)
+
+
+def test_nested_scope_seam_replays_into_the_outer(data_files):
+    # Seams cross the same way: an unseeable hand-off inside the inner scope
+    # floors the outer verdict to OPAQUE instead of a confident UNGROUNDED.
+    def helper():
+        with obs.observe(cites=data_files["data"]):
+            _scope.current_scope().record_seam("subprocess", "handed off")
+
+    with obs.observe(cites=data_files["data"]) as outer:
+        helper()
+    assert outer.verdict.grounding is OG.OPAQUE
+    assert any(s.kind == "subprocess" for s in outer.verdict.seams)
+
+
+def test_nested_scope_error_replays_into_the_outer(data_files):
+    # An observer-internal error inside the inner scope means the outer scope
+    # cannot trust its own observation either.
+    def helper():
+        with obs.observe(cites=data_files["data"]):
+            _scope.current_scope().mark_error("wrapper blew up")
+
+    with obs.observe(cites=data_files["data"]) as outer:
+        helper()
+    assert outer.verdict.grounding is OG.OPAQUE
+    assert "wrapper blew up" in outer.verdict.reason
+
+
 def test_exception_inside_scope_does_not_leak_the_scope(data_files):
     with pytest.raises(ValueError):
         with obs.observe(cites=data_files["data"]) as h:

@@ -150,6 +150,8 @@ def test_send_non_2xx_records_no_lineage(httpx_mock):
 def test_aiohttp_request_captures_model():
     # litellm's default transport is aiohttp; ClientSession._request exposes the
     # JSON body in kwargs, so the model is captured without consuming the stream.
+    # A stub _request is a producer-controlled stack, so the capture is a
+    # declaration (PROXY); COMPUTED needs aiohttp's own network call.
     pytest.importorskip("aiohttp")
 
     from mareforma.observe import _loaders
@@ -173,7 +175,7 @@ def test_aiohttp_request_captures_model():
 
     lineage = asyncio.run(go())
     assert lineage is not None
-    assert lineage.tier is ModelLineageTier.COMPUTED
+    assert lineage.tier is ModelLineageTier.PROXY
     assert lineage.model_id == "claude-3-5-sonnet-20241022"
 
 

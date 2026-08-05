@@ -104,6 +104,10 @@ class Scope:
         self.models: list = []
         self._error: str | None = None
         self._token = None
+        # The scope this one was opened inside, if any. A nested scope holds the
+        # contextvar for its whole span, so every read the parent would have seen
+        # lands here instead; exit() replays them into the parent.
+        self._parent: "Scope | None" = None
         # (normalized identifier, ReadRecord) for each read, computed once and
         # reused across every classify pass. The post-hoc auditor shares this so
         # a corpus audit normalizes the shared reads once, not once per finding.
@@ -404,15 +408,36 @@ class Scope:
 def enter(cited: tuple[str, ...], *, content_address: bool = False) -> Scope:
     """Push a new scope onto the current context and return it."""
     scope = Scope(cited, content_address=content_address)
+    scope._parent = _active.get()
     scope._token = _active.set(scope)
     return scope
 
 
 def exit(scope: Scope) -> None:
-    """Pop *scope*, restoring the prior context (supports nesting)."""
-    if scope._token is not None:
-        _active.reset(scope._token)
-        scope._token = None
+    """Pop *scope*, replaying its evidence into the parent (supports nesting).
+
+    Everything the inner scope captured happened inside the outer span too, so
+    the outer scope inherits it. Without the replay the outer scope would
+    classify against an empty evidence set and return a confident false
+    UNGROUNDED for reads it never had a chance to see.
+    """
+    if scope._token is None:
+        return
+    _active.reset(scope._token)
+    scope._token = None
+    parent = scope._parent
+    scope._parent = None
+    if parent is None:
+        return
+    parent.reads.extend(scope.reads)
+    parent.seams.extend(scope.seams)
+    parent.opens.extend(scope.opens)
+    parent.failed_opens.extend(scope.failed_opens)
+    parent.models.extend(scope.models)
+    if scope._error is not None:
+        parent.mark_error(scope._error)
+    # The parent's read set grew, so any memoized normalization is stale.
+    parent._norm_reads = None
 
 
 # -- the single ingress-recording chokepoint --------------------------------

@@ -798,7 +798,7 @@ def _make_http_method_wrapper(real, *, streaming_kw, method_arg=False):
                 )
             else:
                 rec_args = args[1:] if method_arg else args
-                _record_http_response(scope, rec_args, kwargs, result)
+                _record_http_response(scope, rec_args, kwargs, result, self)
         except BaseException as exc:  # noqa: BLE001
             scope.mark_error(f"http loader wrapper failed: {type(exc).__name__}")
         return result
@@ -849,7 +849,7 @@ def _make_async_http_method_wrapper(real, *, streaming):
                     "socket", "streaming HTTP response; byte flow not observed"
                 )
             else:
-                _record_http_response(scope, args, kwargs, result)
+                _record_http_response(scope, args, kwargs, result, self)
         except BaseException as exc:  # noqa: BLE001
             scope.mark_error(f"http loader wrapper failed: {type(exc).__name__}")
         return result
@@ -857,9 +857,19 @@ def _make_async_http_method_wrapper(real, *, streaming):
     return wrapper
 
 
-def _record_http_response(scope, args, kwargs, result) -> None:
-    url = _resp_source(args, kwargs, result)
+def _record_http_response(scope, args, kwargs, result, client=None) -> None:
+    url = _resp_source(args, kwargs, result, client)
     if not url:
+        return
+    if not _is_http_url(url):
+        # An identifier with no scheme normalizes into the local file namespace,
+        # where a network read could bind a file citation the call never touched.
+        # Record the gap instead of the read: the cited source floors to OPAQUE,
+        # never a forged GROUNDED or a confident false UNGROUNDED.
+        scope.record_seam(
+            "coverage-gap",
+            "HTTP read whose target could not be resolved to an absolute URL",
+        )
         return
     content_address = None
     if scope.content_address:
@@ -959,7 +969,8 @@ def _make_aiohttp_request_wrapper(real):
     aiohttp streams the response body (read in host code after we return), so the
     response is recorded as a socket seam, never a grounding read. But the request
     JSON body is available in kwargs without touching the stream, so a model call
-    over aiohttp still yields COMPUTED lineage (2xx-gated like every seam).
+    over aiohttp yields lineage, tiered by the same transport gate as the httpx
+    seams: COMPUTED only when aiohttp's own network stack answered.
     """
 
     async def wrapper(self, *args, **kwargs):
@@ -973,7 +984,13 @@ def _make_aiohttp_request_wrapper(real):
             )
             body = _request_json_body(kwargs)
             if isinstance(body, dict):
-                _record_model_lineage(scope, body, _aiohttp_url(args, kwargs), result)
+                _record_model_lineage(
+                    scope,
+                    body,
+                    _aiohttp_url(args, kwargs),
+                    result,
+                    networked=_aiohttp_is_networked(self, real, result),
+                )
         except BaseException as exc:  # noqa: BLE001
             scope.mark_error(f"http loader wrapper failed: {type(exc).__name__}")
         return result
@@ -1002,14 +1019,17 @@ def _record_http_post(scope, client, args, kwargs, result) -> None:
             "socket", "streaming HTTP response; byte flow not observed"
         )
     else:
-        _record_http_response(scope, args, kwargs, result)
+        _record_http_response(scope, args, kwargs, result, client)
 
 
 def _record_model_from_request(scope, client, args, kwargs, body, result) -> None:
     if not isinstance(body, dict):
         return
     url = _resp_source(args, kwargs, None)
-    _record_model_lineage(scope, body, url, result, client=client)
+    _record_model_lineage(
+        scope, body, url, result,
+        networked=_transport_is_networked(client, url),
+    )
 
 
 def _transport_is_networked(client, url) -> bool:
@@ -1020,12 +1040,9 @@ def _transport_is_networked(client, url) -> bool:
     in-process transport (``httpx.MockTransport``, WSGI/ASGI, or a custom class)
     answers ``200`` offline and certifies no model call. Only httpx's own network
     transports earn COMPUTED, an ALLOWLIST, so an unknown transport fails safe to
-    producer-controlled (PROXY) rather than being trusted. ``client is None`` (a
-    seam with no httpx client, e.g. aiohttp) reads as networked: this gate governs
-    the httpx transport path only.
+    producer-controlled (PROXY) rather than being trusted. The aiohttp seam has
+    its own gate, :func:`_aiohttp_is_networked`; every seam passes one.
     """
-    if client is None:
-        return True
     try:
         import httpx
 
@@ -1039,7 +1056,32 @@ def _transport_is_networked(client, url) -> bool:
         return True
 
 
-def _record_model_lineage(scope, body, url, result, *, client=None) -> None:
+def _aiohttp_is_networked(session, real, result) -> bool:
+    """Whether an aiohttp seam was answered by aiohttp's own network stack.
+
+    The same allowlist as the httpx gate, on the transport aiohttp exposes. The
+    observer wraps whatever ``ClientSession._request`` is bound when the scope
+    opens, so a producer whose mock is patched in first hands us a genuine
+    session, connector and all, in front of a call that never left the process.
+    The wrapped callable is therefore the thing that must be aiohttp's own.
+    Anything else, including aiohttp being absent or its shape having changed,
+    is a producer declaration (PROXY).
+    """
+    try:
+        import aiohttp
+
+        return (
+            getattr(real, "__module__", "") == "aiohttp.client"
+            and isinstance(
+                getattr(session, "_connector", None), aiohttp.TCPConnector
+            )
+            and isinstance(result, aiohttp.ClientResponse)
+        )
+    except BaseException:  # noqa: BLE001 - aiohttp absent or shape changed
+        return False
+
+
+def _record_model_lineage(scope, body, url, result, *, networked) -> None:
     """Resolve and record lineage from a parsed model-call body + request URL.
 
     Shared tail for every model-call seam (``.post``, ``.send``, aiohttp). Gated
@@ -1049,18 +1091,18 @@ def _record_model_lineage(scope, body, url, result, *, client=None) -> None:
     than a downgraded record, which would collapse a later successful retry of
     the same model to UNVERIFIABLE.
 
-    ``client`` is the httpx client behind the seam, when there is one. A
-    producer-controlled transport (a local ``MockTransport``, WSGI/ASGI, or a
-    custom class) authors its own 2xx, so it certifies no real model call: the
-    lineage is recorded as a producer DECLARATION (PROXY), never COMPUTED, so an
-    offline transport cannot forge verified cross-model independence.
+    ``networked`` is the seam's transport gate, which every caller must state. A
+    producer-controlled stack (a local ``MockTransport``, WSGI/ASGI, a custom
+    class, a patched-in aiohttp mock) authors its own 2xx, so it certifies no
+    real model call: the lineage is recorded as a producer DECLARATION (PROXY),
+    never COMPUTED, so an offline transport cannot forge verified cross-model
+    independence.
     """
     if not isinstance(body, dict) or _response_ok(result) is not True:
         return
     model_id = body.get("model")
     if not isinstance(model_id, str) or not model_id:
         return
-    networked = _transport_is_networked(client, url)
     provider = _provider_of(url)
     # A local inference server (no recognized remote host) can be content-
     # addressed by the served weights' digest, a verifiable distinct identity a
@@ -1112,7 +1154,10 @@ def _record_model_from_httpx_request(scope, client, request, result) -> None:
     except (ValueError, TypeError):
         return
     url = str(getattr(request, "url", "") or "")
-    _record_model_lineage(scope, body, url, result, client=client)
+    _record_model_lineage(
+        scope, body, url, result,
+        networked=_transport_is_networked(client, url),
+    )
 
 
 def _request_json_body(kwargs):
@@ -1555,13 +1600,40 @@ def _df_nonempty(result) -> bool:
         return result is not None
 
 
-def _resp_source(args, kwargs, result) -> str:
+def _resp_source(args, kwargs, result, client=None) -> str:
+    """The absolute URL an HTTP call fetched, as the read identifier.
+
+    The caller's own argument wins when it is already absolute: that is the
+    pre-redirect identity the finding cited, which a followed redirect must not
+    rewrite. A relative target (the ``base_url`` idiom) is resolved from the
+    response's URL, falling back to a join against the client's ``base_url``, so
+    the read is never recorded under a bare path that would land in the local
+    file namespace.
+    """
     url = kwargs.get("url")
     if url is None and args:
         url = args[0]
-    if url is not None:
-        return _path_str(url) or str(url)
-    return str(getattr(result, "url", "")) or ""
+    if url is None:
+        return str(getattr(result, "url", "")) or ""
+    raw = _path_str(url) or str(url)
+    if _is_http_url(raw):
+        return raw
+    final = str(getattr(result, "url", "")) or ""
+    if _is_http_url(final):
+        return final
+    base = str(getattr(client, "base_url", "")) or ""
+    if _is_http_url(base):
+        from urllib.parse import urljoin
+
+        return urljoin(base, raw)
+    return raw
+
+
+def _is_http_url(identifier: str) -> bool:
+    """Whether an identifier is an absolute http / https / ftp location."""
+    from ._citation import citation_kind
+
+    return citation_kind(identifier) == "url"
 
 
 def _response_ok(result):

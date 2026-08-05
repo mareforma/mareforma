@@ -37,7 +37,8 @@ def test_redirect_body_does_not_ground_a_read(code: int) -> None:
 @pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
 def test_redirected_model_post_mints_no_lineage(code: int) -> None:
     scope = _scope.Scope(cited=())
-    _loaders._record_model_lineage(scope, _BODY, _MODEL_URL, _FakeResp(code))
+    _loaders._record_model_lineage(
+        scope, _BODY, _MODEL_URL, _FakeResp(code), networked=True)
     assert scope.models == []
 
 
@@ -46,5 +47,5 @@ def test_2xx_still_reads_as_success() -> None:
     assert _loaders._response_ok(ok) is True
     assert _loaders._resp_nonempty(ok) is True
     scope = _scope.Scope(cited=())
-    _loaders._record_model_lineage(scope, _BODY, _MODEL_URL, ok)
+    _loaders._record_model_lineage(scope, _BODY, _MODEL_URL, ok, networked=True)
     assert scope.models  # a real 2xx model call still mints lineage

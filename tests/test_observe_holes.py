@@ -310,6 +310,125 @@ def test_httpx_async_client_get_is_recorded(httpx_mock):
     assert asyncio.run(go()) is OG.GROUNDED
 
 
+def test_httpx_base_url_relative_get_grounds_the_absolute_url(httpx_mock):
+    # The modal httpx idiom: a client with base_url and a relative path. The
+    # read must be recorded under the absolute URL that was fetched, so a
+    # finding citing that URL is GROUNDED instead of a false OPAQUE.
+    import httpx
+
+    httpx_mock.add_response(url="https://example.org/data.csv", text="col\n1\n")
+    client = httpx.Client(base_url="https://example.org")
+    with obs.observe(cites="https://example.org/data.csv") as h:
+        client.get("/data.csv")
+    client.close()
+    assert h.verdict.grounding is OG.GROUNDED
+    assert [r.identifier for r in h.verdict.reads] == [
+        "https://example.org/data.csv"
+    ]
+
+
+def test_httpx_async_base_url_relative_get_grounds_the_absolute_url(httpx_mock):
+    import asyncio
+
+    import httpx
+
+    httpx_mock.add_response(url="https://example.org/data.csv", text="col\n1\n")
+
+    async def go():
+        client = httpx.AsyncClient(base_url="https://example.org")
+        with obs.observe(cites="https://example.org/data.csv") as h:
+            await client.get("/data.csv")
+        await client.aclose()
+        return h.verdict
+
+    verdict = asyncio.run(go())
+    assert verdict.grounding is OG.GROUNDED
+    assert [r.identifier for r in verdict.reads] == [
+        "https://example.org/data.csv"
+    ]
+
+
+def test_http_read_never_binds_a_file_citation(tmp_path):
+    # A network read must not live in the local-file namespace: fetching a path
+    # that looks like the cited file is not a read of that file, so it cannot
+    # ground the finding.
+    import httpx
+
+    p = str(tmp_path / "trial.csv")
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, text="col\n1\n")
+    )
+    client = httpx.Client(transport=transport, base_url="https://example.org")
+    with obs.observe(cites=p) as h:
+        client.get(p)
+    client.close()
+    assert h.verdict.grounding is not OG.GROUNDED
+    assert all(r.identifier.startswith("https://") for r in h.verdict.reads)
+
+
+def test_mock_transport_does_not_ground_the_cited_url():
+    # The gate the lineage axis applies, on the data axis: an in-process
+    # transport answers 200 offline, so the cited URL was never fetched. The
+    # citation must floor to OPAQUE with the gap named, not read as GROUNDED.
+    import httpx
+
+    url = "https://example.org/trial-data.csv"
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, text="arm,outcome\nA,1\n")
+        )
+    )
+    with obs.observe(cites=url) as h:
+        client.get(url)
+    client.close()
+    assert h.verdict.grounding is OG.OPAQUE
+    assert h.verdict.reads == ()
+    assert any(
+        s.kind == "coverage-gap" and "transport" in s.detail
+        for s in h.verdict.seams
+    )
+
+
+def test_mock_transport_post_does_not_ground_the_cited_url():
+    # The same response the lineage axis reads as PROXY. The two axes must not
+    # disagree about one offline response: a model-provider URL the producer
+    # answered itself grounds nothing.
+    import httpx
+
+    url = "https://api.openai.com/v1/chat/completions"
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"ok": True})
+        )
+    )
+    with obs.observe(cites=url) as h:
+        client.post(url, json={"model": "gpt-4o-2024-08-06", "messages": []})
+    client.close()
+    assert h.verdict.grounding is OG.OPAQUE
+    assert h.verdict.reads == ()
+
+
+def test_unresolvable_http_read_is_a_coverage_gap_not_a_file_read():
+    # No response URL and no client base_url: the observer cannot say what was
+    # fetched, so it records nothing and names the gap. The cited file then
+    # floors to OPAQUE rather than being bound by a network read.
+    from mareforma.observe import _loaders
+
+    class Response:
+        status_code = 200
+        content = b"col\n1\n"
+
+    def fake_get(self, *a, **k):
+        return Response()
+
+    wrapper = _loaders._make_http_method_wrapper(fake_get, streaming_kw=None)
+    with obs.observe(cites="/no/such/file.csv") as h:
+        wrapper(object(), "/no/such/file.csv")
+    assert h.verdict.grounding is OG.OPAQUE
+    assert h.verdict.reads == ()
+    assert any(s.kind == "coverage-gap" for s in h.verdict.seams)
+
+
 def test_aiohttp_request_records_a_socket_seam():
     # aiohttp streams the body (read in host code after our wrapper returns), so
     # the wrapper records a socket seam rather than a header-based read, a pooled
