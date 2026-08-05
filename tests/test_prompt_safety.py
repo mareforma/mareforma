@@ -6,6 +6,8 @@ Covers:
   - sanitize_for_llm caps oversized inputs with a visible marker
   - sanitize_for_llm is idempotent
   - sanitize_for_llm handles None and rejects non-strings
+  - sanitize_for_llm matches a codepoint-by-codepoint reference everywhere
+  - query_for_llm stays cheap on rows carrying large payload columns
   - wrap_untrusted neutralises forged opening/closing tags
   - wrap_untrusted is case-insensitive and whitespace-tolerant on forged tags
   - wrap_untrusted rejects malformed custom tags
@@ -172,6 +174,25 @@ class TestSanitizeForLLM:
     def test_non_string_rejected(self) -> None:
         with pytest.raises(TypeError):
             sanitize_for_llm(123)  # type: ignore[arg-type]
+
+    def test_matches_the_codepoint_reference_everywhere(self) -> None:
+        """Every codepoint, every kept whitespace character and both sides
+        of the length cap: the output must equal what a character-by-
+        character walk of the forbidden tables produces."""
+        space = [chr(cp) for cp in range(0x110000) if not 0xD800 <= cp <= 0xDFFF]
+        corpus = [
+            "".join(space[i:i + 10_000]) for i in range(0, len(space), 10_000)
+        ]
+        corpus += [
+            "plain ascii text",
+            "line1\nline2\tcol2",
+            "x" * _MAX_FIELD_LEN,
+            "x" * (_MAX_FIELD_LEN + 1),
+            # Stripping drops it back under the cap: no truncation.
+            "\x07" * 100 + "x" * _MAX_FIELD_LEN,
+        ]
+        for text in corpus:
+            assert sanitize_for_llm(text) == _reference_sanitize(text)
 
 
 # ---------------------------------------------------------------------------

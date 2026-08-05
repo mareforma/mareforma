@@ -384,6 +384,7 @@ class RekorInclusionError(SigningError):
       - ``"checkpoint_missing"``:   signed-note text not supplied
       - ``"checkpoint_malformed"``: signed-note doesn't match the format
       - ``"checkpoint_root_mismatch"``: checkpoint's root != proof's root
+      - ``"checkpoint_origin_mismatch"``: note's origin != the pinned log identity
       - ``"checkpoint_unsigned"``:  no signature lines in the note
       - ``"checkpoint_bad_sig"``:   ECDSA/Ed25519 verify failed
       - ``"unsupported_key"``:      log pubkey is neither Ed25519 nor ECDSA P-256
@@ -681,12 +682,14 @@ def verify_rekor_checkpoint(
     *,
     expected_root_hash: Optional[bytes] = None,
     expected_tree_size: Optional[int] = None,
+    expected_origin: Optional[str] = None,
 ) -> bool:
     """Verify the signed-note signature on a Rekor checkpoint.
 
     Returns ``True`` iff at least one signature line in the note
     verifies against *log_pubkey_pem* AND (when supplied) the
-    checkpoint's root hash + tree size match the expected values.
+    checkpoint's root hash, tree size and origin match the expected
+    values.
 
     Parameters
     ----------
@@ -706,12 +709,22 @@ def verify_rekor_checkpoint(
         controlled the proof block could swap in a SIGNED note from a
         DIFFERENT moment in the log's history (so the signature
         verifies) whose root happens to match a forged proof.
+    expected_origin:
+        Optional cross-check on the note's first body line, the log's
+        own identity. Root hash and tree size bind the note to a moment
+        in *a* log's history; the origin binds it to a place in the log
+        namespace. Without it, one operator key that signs several logs
+        or shards makes "this entry is in the log you named" mean only
+        "this entry is in some log that key signs". Left unset the
+        origin is not checked, callers who have not recorded their
+        log's origin string keep verifying as before.
 
     Raises
     ------
     RekorInclusionError
         With ``reason`` in ``{"checkpoint_malformed", "checkpoint_unsigned",
-        "checkpoint_root_mismatch", "unsupported_key", "checkpoint_bad_sig"}``.
+        "checkpoint_root_mismatch", "checkpoint_origin_mismatch",
+        "unsupported_key", "checkpoint_bad_sig"}``.
     """
     try:
         public_key = serialization.load_pem_public_key(log_pubkey_pem)
@@ -741,6 +754,13 @@ def verify_rekor_checkpoint(
 
     parsed = parse_rekor_checkpoint(checkpoint_text)
 
+    if expected_origin is not None and parsed["origin"] != expected_origin:
+        raise RekorInclusionError(
+            f"checkpoint's origin ({parsed['origin']!r}) does not match the "
+            f"pinned log identity ({expected_origin!r}); this note was "
+            "signed for a different log",
+            reason="checkpoint_origin_mismatch",
+        )
     if expected_root_hash is not None and parsed["root_hash"] != expected_root_hash:
         raise RekorInclusionError(
             "checkpoint's root hash does not match the inclusion proof's "

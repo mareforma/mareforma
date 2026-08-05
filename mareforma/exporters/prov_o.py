@@ -114,8 +114,12 @@ def build_prov_o(root: Path, claim_id: str | None = None) -> dict[str, Any]:
         If no graph database exists at the expected path.
     ValueError
         If *claim_id* is supplied but does not exist in the graph.
+    UnverifiedClaimError
+        If any exported claim failed verify-on-read.
     """
-    from mareforma.db import open_db, list_claims, get_claim
+    from mareforma.db import (
+        open_db, list_claims, get_claim, refuse_unverified_claims,
+    )
 
     db_path = root / ".mareforma" / "graph.db"
     if not db_path.exists():
@@ -164,6 +168,7 @@ def build_prov_o(root: Path, claim_id: str | None = None) -> dict[str, Any]:
             )
     finally:
         conn.close()
+    refuse_unverified_claims(claims)
 
     graph: list[dict[str, Any]] = []
     seen_agents: set[str] = set()

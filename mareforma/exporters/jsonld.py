@@ -113,18 +113,20 @@ class JSONLDExporter:
         """
         from mareforma.db import open_db, list_claims, refuse_unverified_claims
 
-        db_path = self._root / ".mareforma" / "graph.db"
-        if not db_path.exists():
-            raise FileNotFoundError(
-                f"No epistemic graph found at {db_path}. "
-                "Run `mareforma bootstrap` to initialize one."
-            )
+        if claims is None:
+            db_path = self._root / ".mareforma" / "graph.db"
+            if not db_path.exists():
+                raise FileNotFoundError(
+                    f"No epistemic graph found at {db_path}. "
+                    "Run `mareforma bootstrap` to initialize one."
+                )
 
-        conn = open_db(self._root)
-        try:
-            claims = list_claims(conn)
-        finally:
-            conn.close()
+            conn = open_db(self._root)
+            try:
+                claims = list_claims(conn)
+            finally:
+                conn.close()
+        refuse_unverified_claims(claims)
 
         graph: list[dict[str, Any]] = [
             self._claim_node(c) for c in claims

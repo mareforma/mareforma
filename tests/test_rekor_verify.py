@@ -410,6 +410,41 @@ class TestCheckpointSignatureEd25519:
             )
         assert exc_info.value.reason == "checkpoint_root_mismatch"
 
+    def test_origin_mismatch_refused(self) -> None:
+        """One key signing two logs must not let one stand in for the other.
+
+        Both notes carry the same root and tree size, so every other
+        cross-check passes; only the origin says which log's namespace
+        the entry lives in.
+        """
+        key = Ed25519PrivateKey.generate()
+        root = b"\x22" * 32
+        pinned = "rekor.test - 0001"
+        foreign = _sign_checkpoint_ed25519(
+            origin="attacker.shard.test - 0001", tree_size=10,
+            root_hash=root, signer_name="rekor.test", key=key,
+        )
+        with pytest.raises(_signing.RekorInclusionError) as exc_info:
+            _signing.verify_rekor_checkpoint(
+                foreign, _pubkey_pem(key),
+                expected_root_hash=root, expected_tree_size=10,
+                expected_origin=pinned,
+            )
+        assert exc_info.value.reason == "checkpoint_origin_mismatch"
+
+    def test_matching_origin_verifies(self) -> None:
+        key = Ed25519PrivateKey.generate()
+        root = b"\x22" * 32
+        text = _sign_checkpoint_ed25519(
+            origin="rekor.test - 0001", tree_size=10,
+            root_hash=root, signer_name="rekor.test", key=key,
+        )
+        assert _signing.verify_rekor_checkpoint(
+            text, _pubkey_pem(key),
+            expected_root_hash=root, expected_tree_size=10,
+            expected_origin="rekor.test - 0001",
+        ) is True
+
 
 # ---------------------------------------------------------------------------
 # Checkpoint signature verification, ECDSA-P256

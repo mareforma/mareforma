@@ -55,6 +55,25 @@ class TestSsrfRadixAndEmbeddedBypasses:
         with pytest.raises(_signing.SigningError):
             _signing.validate_rekor_url(url)
 
+    @pytest.mark.parametrize("separator", [
+        "。",  # ideographic full stop
+        "．",  # fullwidth full stop
+        "｡",  # halfwidth ideographic full stop
+    ])
+    @pytest.mark.parametrize("quad", ["127.0.0.1", "169.254.169.254"])
+    def test_unicode_label_separators_rejected(self, separator, quad):
+        # IDNA maps these three to '.', so httpx resolves the dotted quad
+        # the guard never saw unless it normalizes first.
+        host = quad.replace(".", separator)
+        with pytest.raises(_signing.SigningError):
+            _signing.validate_rekor_url(f"https://{host}/api/v1/log/entries")
+
+    def test_unparseable_url_raises_the_callers_error_type(self):
+        # urlsplit raises ValueError on an unclosed IPv6 bracket. The guard
+        # documents one error type, so the parse must be inside it.
+        with pytest.raises(_signing.SigningError):
+            _signing.validate_rekor_url("https://[::1/x")
+
     def test_public_hostname_still_accepted(self):
         # A normal public DNS host must keep passing (no false positive,
         # no network resolution).
@@ -67,6 +86,30 @@ class TestSsrfRadixAndEmbeddedBypasses:
         # not an SSRF target; the guard blocks internal addresses, not all
         # numeric forms.
         _signing.validate_rekor_url("https://0x08080808/api/v1/log/entries")
+
+
+# ---------------------------------------------------------------------------
+# the inet_aton radix parser, reachable on its own
+# ---------------------------------------------------------------------------
+
+class TestNumericShortcutParser:
+    @pytest.mark.parametrize("host", [
+        "0x7f000001",   # hex, one part
+        "2130706433",   # decimal, one part
+        "127.1",        # two parts, the tail is the low 24 bits
+        "0177.0.0.1",   # octal first part
+    ])
+    def test_shortcut_forms_resolve_to_loopback(self, host):
+        assert str(_numeric_shortcut_ipv4(host)) == "127.0.0.1"
+
+    @pytest.mark.parametrize("host", [
+        "256.1.1.1",    # part out of range
+        "0x",           # hex marker with no body
+        "08",           # leading zero, not octal
+        "rekor.sigstore.dev",
+    ])
+    def test_non_numeric_forms_return_none(self, host):
+        assert _numeric_shortcut_ipv4(host) is None
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +127,19 @@ class TestSubmitToRekorValidatesUrl:
             envelope,
             key.public_key(),
             rekor_url="http://169.254.169.254/api/v1/log/entries",
+        )
+
+        assert logged is False
+        assert entry is None
+        assert httpx_mock.get_requests() == []
+
+    def test_unparseable_url_returns_false_without_posting(self, httpx_mock):
+        # submit_to_rekor promises (False, None) for any bad rekor_url and
+        # guards on SigningError, so the parse failure must arrive as one.
+        envelope, key = _sample_envelope()
+
+        logged, entry = _signing.submit_to_rekor(
+            envelope, key.public_key(), rekor_url="https://[::1/x",
         )
 
         assert logged is False

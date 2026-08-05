@@ -213,8 +213,13 @@ def build_crate(
         An RO-Crate 1.2 metadata document, ready for ``json.dumps`` or
         for writing to ``ro-crate-metadata.json`` inside an RO-Crate
         directory.
+
+    Raises
+    ------
+    UnverifiedClaimError
+        If any exported claim failed verify-on-read.
     """
-    from mareforma.db import open_db, list_claims
+    from mareforma.db import open_db, list_claims, refuse_unverified_claims
 
     # A license entity with an empty @id is a dangling reference that breaks
     # any RO-Crate consumer resolving the license; refuse it rather than emit
@@ -236,6 +241,7 @@ def build_crate(
         claims = list_claims(conn)
     finally:
         conn.close()
+    refuse_unverified_claims(claims)
 
     # datePublished must be non-null for a spec-conformant crate. Prefer
     # the latest claim's timestamp; fall back to the export instant for an

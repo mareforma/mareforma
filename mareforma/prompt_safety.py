@@ -93,15 +93,29 @@ _FORBIDDEN_RANGES: Final = (
 )
 
 
-def _is_forbidden_codepoint(cp: int) -> bool:
-    """True if *cp* is a zero-width / bidi / tag-lookalike / steganographic
-    codepoint we strip from LLM-bound text."""
-    if cp in _FORBIDDEN_CODEPOINTS:
-        return True
-    for lo, hi in _FORBIDDEN_RANGES:
-        if lo <= cp <= hi:
-            return True
-    return False
+def _build_forbidden_re() -> re.Pattern[str]:
+    """Compile the tables above, plus the control ranges, into one
+    character class.
+
+    ``sanitize_for_llm`` runs on every string of every row a query hands
+    to an LLM, including the payload and signature columns, so the strip
+    has to cost a scan of the bytes rather than a Python loop over each
+    one of them. The class is derived from the tables so the two cannot
+    drift; tests/test_prompt_safety.py checks it against a
+    codepoint-by-codepoint walk over the whole codepoint space.
+    """
+    parts = [
+        r"\x00-\x08",  # C0 controls, keeping \t (0x09) and \n (0x0A)
+        r"\x0b-\x1f",
+        r"\x7f-\x9f",  # DEL and the C1 controls
+    ]
+    parts += [f"\\U{lo:08X}-\\U{hi:08X}" for lo, hi in _FORBIDDEN_RANGES]
+    parts += [f"\\U{cp:08X}" for cp in sorted(_FORBIDDEN_CODEPOINTS)]
+    return re.compile("[" + "".join(parts) + "]")
+
+
+_FORBIDDEN_RE: Final = _build_forbidden_re()
+
 
 def _forged_tag_re(tag: str) -> re.Pattern[str]:
     """Compile a case-insensitive regex that matches opening or closing
@@ -176,24 +190,7 @@ def sanitize_for_llm(text: str | None) -> str | None:
             f"sanitize_for_llm expects str or None, got {type(text).__name__}"
         )
 
-    out: list[str] = []
-    for ch in text:
-        cp = ord(ch)
-        if _is_forbidden_codepoint(cp):
-            continue
-        # C0 controls (0x00-0x1F) and DEL (0x7F) and C1 controls
-        # (0x80-0x9F). Keep \n (0x0A) and \t (0x09) — legitimate
-        # in claim text.
-        if cp < 0x20:
-            if cp in (0x09, 0x0A):
-                out.append(ch)
-            # else: drop
-            continue
-        if 0x7F <= cp <= 0x9F:
-            continue
-        out.append(ch)
-
-    sanitized = "".join(out)
+    sanitized = _FORBIDDEN_RE.sub("", text)
     if len(sanitized) > _MAX_FIELD_LEN:
         sanitized = sanitized[:_MAX_FIELD_LEN] + _TRUNCATION_MARKER
     return sanitized
