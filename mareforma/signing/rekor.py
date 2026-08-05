@@ -18,10 +18,13 @@ Two independent guarantees
 2. **Merkle inclusion + checkpoint signature** (opt-in via
    ``rekor_log_pubkey_pem`` at :func:`mareforma.open`).
    :func:`verify_rekor_inclusion` re-derives the leaf hash, walks the
-   audit path, and verifies the signed checkpoint over the resulting
-   root. Closes the gap where submit-time response binding alone proves
+   audit path, verifies the signed checkpoint over the resulting root,
+   and binds the proven entry to the envelope it is meant to witness.
+   Closes the gap where submit-time response binding alone proves
    "Rekor returned an entry recording OUR hash + sig" but NOT "the log
    committed the entry and didn't mutate / remove / reposition it after."
+   The binding is what stops a log from answering the re-fetch with some
+   other genuinely included entry, whose proof would otherwise verify.
 
 SSRF defense
 ------------
@@ -924,9 +927,56 @@ def verify_rekor_checkpoint(
     )
 
 
+def rekor_entry_binds_to_envelope(
+    rekor_body: dict[str, Any],
+    envelope: dict[str, Any],
+) -> bool:
+    """Whether a Rekor entry's ``hashedrekord`` records THIS envelope's
+    signed material.
+
+    The logged record carries the ``sha256(payload)`` and the signature
+    that were submitted. Both must equal the envelope's own. An inclusion
+    proof only shows its body is a leaf of the log, so without this check
+    any genuinely included entry witnesses any claim.
+
+    Signatures are compared as raw bytes: a log may canonicalize the
+    base64 differently than we sent it (URL-safe alphabet, padding), and
+    the bytes are the signature. Returns False on any missing or
+    malformed field (fail closed).
+    """
+    try:
+        payload_hash = hashlib.sha256(
+            base64.standard_b64decode(envelope["payload"]),
+        ).hexdigest()
+        envelope_sig = envelope["signatures"][0]["sig"]
+    except (KeyError, IndexError, TypeError, ValueError, binascii.Error):
+        return False
+    try:
+        record = json.loads(
+            base64.standard_b64decode(rekor_body["body"]).decode("utf-8"),
+        )
+        spec = record["spec"]
+        record_hash = spec["data"]["hash"]["value"]
+        record_sig = spec["signature"]["content"]
+    except (
+        KeyError, TypeError, ValueError, UnicodeDecodeError, binascii.Error,
+    ):
+        return False
+    if not isinstance(record_hash, str) or record_hash.lower() != payload_hash:
+        return False
+    record_sig_bytes = _b64_decode_tolerant(record_sig)
+    return (
+        record_sig_bytes is not None
+        and record_sig_bytes == _b64_decode_tolerant(envelope_sig)
+    )
+
+
 def verify_rekor_inclusion(
     rekor_body: dict[str, Any],
     log_pubkey_pem: bytes,
+    envelope: dict[str, Any],
+    *,
+    expected_origin: Optional[str] = None,
 ) -> bool:
     """Verify a Rekor entry's full inclusion proof end-to-end.
 
@@ -935,6 +985,8 @@ def verify_rekor_inclusion(
     field (base64-encoded canonical record) AND a
     ``verification.inclusionProof`` block with ``logIndex``,
     ``treeSize``, ``hashes``, ``rootHash``, and ``checkpoint``.
+    *envelope* is the signed claim envelope the entry is supposed to
+    witness; the proven body must record its payload hash + signature.
 
     The function:
 
@@ -943,11 +995,14 @@ def verify_rekor_inclusion(
       3. Walks the audit path; refuses on root mismatch.
       4. Verifies the checkpoint's signature with *log_pubkey_pem*,
          cross-checking root + tree size between the proof and the
-         signed note.
+         signed note, and the note's origin against *expected_origin*
+         when the caller has pinned one.
+      5. Binds the proven body to *envelope*; a valid proof over some
+         other entry witnesses nothing about this claim.
 
     Raises :class:`RekorInclusionError` (with a specific ``reason``)
-    on any failure. Returns ``True`` only when both Merkle inclusion
-    AND checkpoint signature succeed.
+    on any failure. Returns ``True`` only when Merkle inclusion,
+    checkpoint signature AND the envelope binding all succeed.
     """
     if not isinstance(rekor_body, dict):
         raise RekorInclusionError(
@@ -1037,43 +1092,54 @@ def verify_rekor_inclusion(
             reason="merkle_root_mismatch",
         )
 
+    if not isinstance(checkpoint, str):
+        raise RekorInclusionError(
+            "inclusionProof.checkpoint is missing or not a string",
+            reason="checkpoint_missing",
+        )
+
     # The checkpoint may itself be base64-encoded on some Rekor versions.
     # Try as-is first; fall back to base64-decode if the as-is parse fails.
-    if isinstance(checkpoint, str):
-        checkpoint_text = checkpoint
+    try:
+        verify_rekor_checkpoint(
+            checkpoint,
+            log_pubkey_pem,
+            expected_root_hash=claimed_root,
+            expected_tree_size=tree_size,
+            expected_origin=expected_origin,
+        )
+    except RekorInclusionError as exc:
+        if exc.reason != "checkpoint_malformed":
+            raise
+        # Fallback: some Rekor versions return the checkpoint
+        # itself base64-encoded. Decode and retry. If the decode
+        # ALSO fails, re-raise the ORIGINAL ``checkpoint_malformed``
+        #, not the raw ValueError/binascii.Error, so callers
+        # relying on the documented RekorInclusionError-only
+        # contract never see a leaked decode exception.
         try:
-            verify_rekor_checkpoint(
-                checkpoint_text,
-                log_pubkey_pem,
-                expected_root_hash=claimed_root,
-                expected_tree_size=tree_size,
-            )
-            return True
-        except RekorInclusionError as exc:
-            if exc.reason != "checkpoint_malformed":
-                raise
-            # Fallback: some Rekor versions return the checkpoint
-            # itself base64-encoded. Decode and retry. If the decode
-            # ALSO fails, re-raise the ORIGINAL ``checkpoint_malformed``
-            #, not the raw ValueError/binascii.Error, so callers
-            # relying on the documented RekorInclusionError-only
-            # contract never see a leaked decode exception.
-            try:
-                checkpoint_text = base64.standard_b64decode(checkpoint).decode("utf-8")
-            except (ValueError, binascii.Error, UnicodeDecodeError):
-                raise exc
-            verify_rekor_checkpoint(
-                checkpoint_text,
-                log_pubkey_pem,
-                expected_root_hash=claimed_root,
-                expected_tree_size=tree_size,
-            )
-            return True
+            checkpoint_text = base64.standard_b64decode(checkpoint).decode("utf-8")
+        except (ValueError, binascii.Error, UnicodeDecodeError):
+            raise exc
+        verify_rekor_checkpoint(
+            checkpoint_text,
+            log_pubkey_pem,
+            expected_root_hash=claimed_root,
+            expected_tree_size=tree_size,
+            expected_origin=expected_origin,
+        )
 
-    raise RekorInclusionError(
-        "inclusionProof.checkpoint is missing or not a string",
-        reason="checkpoint_missing",
-    )
+    # Last gate: the proven entry must be about this claim. Everything
+    # above holds for ANY entry the log has committed, including one the
+    # log substituted for ours after the submit.
+    if not rekor_entry_binds_to_envelope(rekor_body, envelope):
+        raise RekorInclusionError(
+            "the proven Rekor entry does not bind to this claim's signed "
+            "payload; the log returned an entry recording different "
+            "material",
+            reason="entry_claim_mismatch",
+        )
+    return True
 
 
 def fetch_inclusion_proof(
@@ -1187,14 +1253,23 @@ def fetch_inclusion_proof(
             f"Rekor GET {fetch_url} returned empty or non-object body",
             reason="malformed_proof",
         )
-    # Body shape: {uuid: entry}. Return the entry side.
+    # Body shape: {uuid: entry}. The key must be the uuid we asked for,
+    # a log answering with some other entry is answering a question we
+    # did not ask.
     try:
-        return next(iter(parsed.values()))
+        returned_uuid = next(iter(parsed))
     except StopIteration as exc:
         raise RekorInclusionError(
             f"Rekor GET {fetch_url} returned an empty map",
             reason="malformed_proof",
         ) from exc
+    if returned_uuid != uuid:
+        raise RekorInclusionError(
+            f"Rekor GET {fetch_url} returned entry {returned_uuid!r}, not "
+            f"the requested {uuid!r}",
+            reason="entry_claim_mismatch",
+        )
+    return parsed[returned_uuid]
 
 
 def fetch_log_pubkey(

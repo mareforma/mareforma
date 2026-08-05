@@ -403,6 +403,74 @@ class TestSignedFieldsAppendOnly:
             )
             g._conn.commit()
 
+    def test_de_signing_update_blocked(self, tmp_path: Path) -> None:
+        """Nulling signature_bundle on a signed row would disarm both the
+        laundering trigger and claims_signed_no_delete, so the trigger
+        watches its own guard column."""
+        cid, g = self._signed_claim(tmp_path)
+        try:
+            with pytest.raises(sqlite3.IntegrityError, match="signed_field_locked"):
+                g._conn.execute(
+                    "UPDATE claims SET signature_bundle = NULL WHERE claim_id = ?",
+                    (cid,),
+                )
+        finally:
+            g.close()
+
+    def test_asserter_keyid_update_blocked(self, tmp_path: Path) -> None:
+        """asserter_keyid is the independence axis of REPLICATED. It is a
+        denormalisation of the bundle's signer, so the row may not contradict
+        the envelope it was derived from."""
+        cid, g = self._signed_claim(tmp_path)
+        try:
+            with pytest.raises(sqlite3.IntegrityError, match="signed_field_locked"):
+                g._conn.execute(
+                    "UPDATE claims SET asserter_keyid = ? WHERE claim_id = ?",
+                    ("0123456789abcdef", cid),
+                )
+        finally:
+            g.close()
+
+    def test_bundle_rewrite_still_allowed(self, tmp_path: Path) -> None:
+        """Rekor inclusion-proof attachment rewrites signature_bundle in
+        place. Non-NULL to non-NULL stays legal."""
+        cid, g = self._signed_claim(tmp_path)
+        try:
+            bundle = g._conn.execute(
+                "SELECT signature_bundle FROM claims WHERE claim_id = ?", (cid,),
+            ).fetchone()[0]
+            rewritten = json.dumps({**json.loads(bundle), "rekor": {"logIndex": 1}})
+            g._conn.execute(
+                "UPDATE claims SET signature_bundle = ? WHERE claim_id = ?",
+                (rewritten, cid),
+            )
+            g._conn.commit()
+            after = g._conn.execute(
+                "SELECT signature_bundle FROM claims WHERE claim_id = ?", (cid,),
+            ).fetchone()[0]
+            assert json.loads(after)["rekor"] == {"logIndex": 1}
+        finally:
+            g.close()
+
+    def test_delete_still_refused_after_attempted_de_signing(
+        self, tmp_path: Path,
+    ) -> None:
+        """The de-signing UPDATE is the disarm step of the delete attack:
+        once it is refused, claims_signed_no_delete stays armed."""
+        from mareforma.db import delete_claim as _delete
+        cid, g = self._signed_claim(tmp_path)
+        try:
+            with pytest.raises(sqlite3.IntegrityError):
+                g._conn.execute(
+                    "UPDATE claims SET signature_bundle = NULL WHERE claim_id = ?",
+                    (cid,),
+                )
+            with pytest.raises(SignedClaimImmutableError, match="cannot be deleted"):
+                _delete(g._conn, tmp_path, cid)
+            assert g.get_claim(cid) is not None
+        finally:
+            g.close()
+
     def test_status_only_update_passes_on_signed_row(
         self, tmp_path: Path,
     ) -> None:
@@ -497,5 +565,45 @@ class TestSignedDeleteAppendOnly:
                 _bulk(g._conn, tmp_path, generated_by=g.get_claim(cid)["generated_by"])
             # Row still present after the failed bulk delete.
             assert g.get_claim(cid) is not None
+        finally:
+            g.close()
+
+    def test_refused_delete_leaves_no_open_transaction(
+        self, tmp_path: Path,
+    ) -> None:
+        """The refusal must release the transaction it opened.
+
+        RAISE(ABORT) backs the statement out but leaves the transaction open,
+        and every write helper reads ``conn.in_transaction`` to decide who owns
+        the commit. On a poisoned connection they all skip BEGIN IMMEDIATE, the
+        commit and the claims.toml backup, so the documented "catch the typed
+        error and keep writing" path silently discards every later claim.
+        """
+        from mareforma.db import delete_claim as _delete
+        cid, g = self._signed_claim(tmp_path)
+        try:
+            with pytest.raises(SignedClaimImmutableError):
+                _delete(g._conn, tmp_path, cid)
+            assert g._conn.in_transaction is False
+            later = g.assert_claim("a finding asserted after the refusal")
+            other = open_db(tmp_path)
+            try:
+                assert _db.get_claim(other, later) is not None
+            finally:
+                other.close()
+            assert later in (tmp_path / "claims.toml").read_text()
+        finally:
+            g.close()
+
+    def test_refused_bulk_delete_leaves_no_open_transaction(
+        self, tmp_path: Path,
+    ) -> None:
+        """The bulk helper has the same hole and the same contract."""
+        from mareforma.db import delete_claims_by_generated_by as _bulk
+        cid, g = self._signed_claim(tmp_path)
+        try:
+            with pytest.raises(SignedClaimImmutableError):
+                _bulk(g._conn, tmp_path, generated_by=g.get_claim(cid)["generated_by"])
+            assert g._conn.in_transaction is False
         finally:
             g.close()

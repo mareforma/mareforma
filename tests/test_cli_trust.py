@@ -15,7 +15,6 @@ from click.testing import CliRunner
 import mareforma
 from mareforma import signing
 from mareforma.cli import cli, _claim_bound_sources
-from mareforma.db import open_db
 
 
 def _bootstrap_default_key() -> None:
@@ -334,10 +333,10 @@ class TestVerifyGroundingBinding:
             assert res.exit_code == 0, res.output
 
     def test_disjoint_binding_is_tamper_exit_1(self, tmp_path: Path) -> None:
-        # Tamper the UNSIGNED observed_grounding column to a GROUNDED verdict whose
-        # grounded set is disjoint from the finding's signed data_sources. The
-        # signature still verifies (observed_grounding is not signed), so the
-        # binding re-check is the only thing that can catch it, and it must.
+        # A GROUNDED verdict whose grounded set is disjoint from the finding's
+        # signed data_sources. The producer signed both, so the signature
+        # verifies; the binding re-check is the only thing that can catch it,
+        # and it must.
         r = CliRunner()
         with r.isolated_filesystem(temp_dir=tmp_path):
             _bootstrap_default_key()
@@ -345,15 +344,8 @@ class TestVerifyGroundingBinding:
                 cid = g.assert_claim(
                     "grounded finding", classification="ANALYTICAL",
                     predicate_payload={"data_sources": [_REAL], "data_ids": []},
-                    observed_grounding=_grounded_record([_REAL]),
+                    observed_grounding=_grounded_record([_DECOY]),
                 )
-            conn = open_db(Path("."))
-            conn.execute(
-                "UPDATE claims SET observed_grounding=? WHERE claim_id=?",
-                (json.dumps(_grounded_record([_DECOY])), cid),
-            )
-            conn.commit()
-            conn.close()
             res = r.invoke(cli, ["verify", cid, "--json"])
             assert res.exit_code == 1, res.output
             assert "grounding binding violation" in res.output

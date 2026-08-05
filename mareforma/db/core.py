@@ -27,7 +27,11 @@ from ._schema_sql import (  # noqa: F401
     _ADDITIVE_TABLES_SQL,
     _CLAIM_COLUMNS,
     _CLAIM_SELECT,
+    _MANAGED_TRIGGERS,
+    _PROMOTION_MARKER_TABLE,
     _SCHEMA_SQL,
+    _SIGNED_FIELDS_TRIGGER_NAME,
+    _SIGNED_FIELDS_TRIGGER_SQL,
 )
 from .errors import (  # noqa: F401
     MareformaError,
@@ -237,6 +241,8 @@ def open_db(root: Path) -> sqlite3.Connection:
         if version == 0:
             conn.executescript(_SCHEMA_SQL)
             conn.executescript(_ADDITIVE_TABLES_SQL)
+            _ensure_supports_revision_row(conn)
+            _ensure_managed_triggers(conn)
             conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             conn.commit()
             _attach_supports_cache(conn, root)
@@ -315,6 +321,10 @@ def open_db(root: Path) -> sqlite3.Connection:
         # otherwise an existing legacy graph.db lacks them and the first
         # trust-layer write raises 'no such table'.
         conn.executescript(_ADDITIVE_TABLES_SQL)
+        # Same reason the additive tables re-run here: _SCHEMA_SQL never runs
+        # again on an initialised db, so a trigger whose definition changed
+        # shape only reaches it through this drop-and-recreate script.
+        conn.executescript(_SIGNED_FIELDS_TRIGGER_SQL)
         _ensure_evidence_lines_columns(conn)
         conn.commit()
         return conn
@@ -370,6 +380,7 @@ def open_db_from_db_path(db_path: "str | Path") -> sqlite3.Connection:
         else:
             conn.executescript(_ADDITIVE_TABLES_SQL)
             _ensure_evidence_lines_columns(conn)
+        conn.executescript(_SIGNED_FIELDS_TRIGGER_SQL)
         conn.commit()
         # Attach the rebuildable supports cache just like open_db does. Without
         # it add_claim's unconditional supports-edge maintenance hits
@@ -718,8 +729,12 @@ def _validate_claim_text(text: str) -> str:
             "and link them via supports=[]."
         )
     from mareforma import prompt_safety as _ps
-    cleaned = _ps.sanitize_for_llm(text.strip())
-    if not cleaned or not cleaned.strip():
+    # Strip AFTER sanitizing too: none of the codepoints the sanitizer deletes
+    # are Python whitespace, so the first strip cannot reach the whitespace they
+    # hide. Re-stripping keeps one canonical string flowing to the column, the
+    # signature and every comparison.
+    cleaned = _ps.sanitize_for_llm(text.strip()).strip()
+    if not cleaned:
         raise ValueError(
             "Claim text became empty after stripping zero-width / control "
             "characters. The input contained no visible content."
@@ -1032,7 +1047,7 @@ def _reconcile_idempotency_row(
     expected_supports = json.dumps(supports or [])
     expected_contradicts = json.dumps(contradicts or [])
     mismatches: list[str] = []
-    if row["text"] != text.strip():
+    if row["text"] != text:
         mismatches.append("text")
     if row["classification"] != classification:
         mismatches.append("classification")
@@ -1298,7 +1313,7 @@ def add_claim(
         from mareforma import _statement as _stmt
         claim_fields = {
             "claim_id": claim_id,
-            "text": text.strip(),
+            "text": text,
             "classification": classification,
             "generated_by": generated_by,
             "supports": supports or [],
@@ -2939,6 +2954,7 @@ def _attempt_rekor_saga(
     # Re-fetch the entry by uuid (one extra GET) and run the full
     # verifier. Skipped when the caller hasn't supplied a log pubkey
     #, current trust posture is "trust submit-time response."
+    proof_entry = None
     if rekor_log_pubkey_pem is not None:
         uuid = entry.get("uuid")
         if not isinstance(uuid, str) or not uuid:
@@ -2951,7 +2967,10 @@ def _attempt_rekor_saga(
             return 0
         try:
             full_body = _signing.fetch_inclusion_proof(uuid, rekor_url)
-            _signing.verify_rekor_inclusion(full_body, rekor_log_pubkey_pem)
+            _signing.verify_rekor_inclusion(
+                full_body, rekor_log_pubkey_pem, envelope,
+            )
+            proof_entry = full_body
         except _signing.RekorInclusionError as exc:
             if require_rekor:
                 raise _signing.SigningError(
@@ -2976,7 +2995,10 @@ def _attempt_rekor_saga(
     # will re-submit and create a duplicate, which is the only recovery
     # path when no sidecar exists. _record_rekor_inclusion emits a
     # warning on that path; we honor its return value.
-    if not _record_rekor_inclusion(conn, claim_id, entry):
+    if not _record_rekor_inclusion(
+        conn, claim_id, entry,
+        proof_entry=proof_entry, own_transaction=own_transaction,
+    ):
         return 0
 
     # Step 4: augment the row's bundle with the Rekor coords and flip
@@ -3019,6 +3041,8 @@ def _record_rekor_inclusion(
     conn: sqlite3.Connection,
     claim_id: str,
     entry: dict,
+    proof_entry: dict | None = None,
+    own_transaction: bool = True,
 ) -> bool:
     """Step 3 of the Rekor saga: persist a successful inclusion.
 
@@ -3026,11 +3050,16 @@ def _record_rekor_inclusion(
     before the claims-row UPDATE. The sidecar is the durable record of
     "Rekor witnessed this claim"; when the row UPDATE later fails,
     :meth:`refresh_unsigned` consults this table to replay the UPDATE
-    instead of re-submitting.
+    from the coordinate columns instead of re-submitting.
 
-    Stores the full Rekor response (base64-encoded UTF-8 JSON) so the
-    recovery path can reconstruct the augmented signature bundle byte-
-    identically to what the original UPDATE would have written.
+    *entry* carries the submit-response coordinates (uuid, logIndex,
+    integratedTime) that populate those columns. *proof_entry* is the
+    re-fetched full entry, with ``body`` and ``verification``, verified
+    against the pinned log key; when present it is what lands in
+    ``raw_response_b64``, in the ``{uuid: entry}`` shape Rekor returns
+    and :func:`mareforma.restore` re-verifies. Without a pinned log key
+    there is no proof to store and the coordinates are stored instead,
+    so such a row cannot be re-verified at restore time.
 
     Returns ``True`` on success. On failure, emits a WARNING and returns
     ``False``: the caller skips the subsequent UPDATE so we don't end
@@ -3042,7 +3071,13 @@ def _record_rekor_inclusion(
     record of the original inclusion).
     """
     try:
-        raw_json = json.dumps(entry, sort_keys=True, separators=(",", ":"))
+        uuid = entry.get("uuid")
+        stored = (
+            {uuid: proof_entry}
+            if proof_entry is not None and isinstance(uuid, str)
+            else entry
+        )
+        raw_json = json.dumps(stored, sort_keys=True, separators=(",", ":"))
         raw_b64 = base64.standard_b64encode(
             raw_json.encode("utf-8"),
         ).decode("ascii")
@@ -3090,14 +3125,19 @@ def _record_rekor_inclusion(
             "ON CONFLICT(claim_id) DO NOTHING",
             (
                 claim_id,
-                entry.get("uuid"),
+                uuid,
                 log_index_int,
                 integrated_time_int,
                 raw_b64,
                 _now(),
             ),
         )
-        conn.commit()
+        # Same rule as the claims-row UPDATE one step later: commit only
+        # when the saga owns the transaction. Committing here while joined
+        # to a caller's open transaction would flush its in-flight writes,
+        # so a later rollback could no longer discard the signed claim.
+        if own_transaction:
+            conn.commit()
         return True
     except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
         warnings.warn(
@@ -3116,29 +3156,31 @@ def get_rekor_inclusion(
     conn: sqlite3.Connection,
     claim_id: str,
 ) -> dict | None:
-    """Return the stored Rekor inclusion entry for a claim, if any.
+    """Return the stored Rekor coordinates for a claim, if any.
 
     Used by the recovery path in :meth:`refresh_unsigned` to detect
     "Rekor ACK persisted, claims-row UPDATE pending" and replay the
     UPDATE from stored coords instead of re-submitting.
 
-    Returns the original Rekor response dict (uuid, logIndex,
-    integratedTime, etc.) parsed back from the base64 storage form, or
-    ``None`` when no sidecar row exists for this claim.
+    Returns the (uuid, integratedTime, logIndex) dict in the shape
+    :func:`signing.submit_to_rekor` returns, so the replayed bundle
+    matches what the original UPDATE would have written. The coords
+    come from the sidecar's own columns; ``raw_response_b64`` holds the
+    inclusion proof for restore-time verification, not these values.
+    Returns ``None`` when no sidecar row exists for this claim.
     """
     row = conn.execute(
-        "SELECT raw_response_b64 FROM rekor_inclusions WHERE claim_id = ?",
+        "SELECT uuid, log_index, integrated_time FROM rekor_inclusions "
+        "WHERE claim_id = ?",
         (claim_id,),
     ).fetchone()
     if row is None:
         return None
-    try:
-        raw_json = base64.standard_b64decode(
-            row["raw_response_b64"],
-        ).decode("utf-8")
-        return json.loads(raw_json)
-    except (ValueError, TypeError, json.JSONDecodeError):
-        return None
+    return {
+        "uuid": row["uuid"],
+        "integratedTime": row["integrated_time"],
+        "logIndex": row["log_index"],
+    }
 
 
 def list_unlogged_claims(conn: sqlite3.Connection) -> list[dict]:
@@ -3186,11 +3228,12 @@ def mark_claim_logged(
     4. The supplied bundle's ``payload``, ``payloadType``, and
        ``signatures`` fields must be byte-identical to the row's
        existing ``signature_bundle``. The trigger
-       ``claims_signed_fields_no_laundering`` intentionally does NOT
-       watch ``signature_bundle`` (the Rekor attachment legitimately
-       rewrites it), so this function is the sole defense against a
-       caller substituting a different envelope wholesale (different
-       signer, different payload, different keyid). Only the optional
+       ``claims_signed_fields_no_laundering`` refuses only a de-signing
+       write to ``signature_bundle`` (non-NULL to NULL) and leaves the
+       non-NULL rewrite legal, because the Rekor attachment needs it, so
+       this function is the sole defense against a caller substituting a
+       different envelope wholesale (different signer, different
+       payload, different keyid). Only the optional
        top-level ``rekor`` block may differ between the existing and
        new bundles.
 
@@ -3245,8 +3288,8 @@ def mark_claim_logged(
     # top-level ``rekor`` block may differ. Without this check, a caller
     # could pass any DSSE-shaped envelope (different signer, freshly
     # forged signatures, same predicate.claim_id) and mareforma
-    # would persist it, since the claims_signed_fields_no_laundering
-    # trigger intentionally does not watch signature_bundle.
+    # would persist it: the claims_signed_fields_no_laundering trigger
+    # refuses only a de-signing write, not a non-NULL substitution.
     try:
         existing_envelope = json.loads(existing_bundle_raw)
     except json.JSONDecodeError as exc:
@@ -3415,12 +3458,18 @@ def update_claim(
     if existing is None:
         raise ClaimNotFoundError(f"Claim '{claim_id}' not found.")
 
+    # Same empty / cap / sanitize-on-write gate add_claim applies, so an edit
+    # cannot re-introduce an injection payload, blow past the cap, or leak an
+    # unsanitized string into the FTS index via the update trigger. Runs before
+    # the signed-surface diff so both compare the canonical stored string.
+    clean_text = _validate_claim_text(text) if text is not None else None
+
     # Refuse signed-surface mutations on signed claims. text/supports/
     # contradicts are the only signed-surface fields currently exposed by
     # update_claim's parameter list.
     if existing.get("signature_bundle") is not None:
         signed_field_changes: list[str] = []
-        if text is not None and text.strip() != existing.get("text"):
+        if clean_text is not None and clean_text != existing.get("text"):
             signed_field_changes.append("text")
         if supports is not None:
             old_supports = json.loads(existing.get("supports_json") or "[]")
@@ -3448,11 +3497,8 @@ def update_claim(
     if status is not None:
         validate_status(status)
         new_status = status
-    if text is not None:
-        # Same empty / cap / sanitize-on-write gate add_claim applies, so an
-        # edit cannot re-introduce an injection payload, blow past the cap, or
-        # leak an unsanitized string into the FTS index via the update trigger.
-        new_text = _validate_claim_text(text)
+    if clean_text is not None:
+        new_text = clean_text
     if supports is not None:
         new_supports_json = json.dumps(supports)
     if contradicts is not None:
@@ -3556,16 +3602,29 @@ def delete_claim(conn: sqlite3.Connection, root: Path, claim_id: str) -> None:
     """
     if get_claim(conn, claim_id) is None:
         raise ClaimNotFoundError(f"Claim '{claim_id}' not found.")
+    # Own the transaction the same way add_claim does. The append-only trigger's
+    # RAISE(ABORT) backs out the statement but leaves the transaction open, and
+    # every write helper reads conn.in_transaction to decide who commits, so a
+    # caller that catches the documented refusal and keeps writing would lose
+    # every later claim without an error.
+    _own_transaction = not conn.in_transaction
     try:
+        if _own_transaction:
+            conn.execute("BEGIN IMMEDIATE")
         conn.execute("DELETE FROM claims WHERE claim_id = ?", (claim_id,))
         # Drop the row's cache edges in the same transaction so downstream and
         # upstream walks stop surfacing a dangling claim before the next open.
         from mareforma import _supports
         _supports.remove_claim_edges(conn, claim_id)
-        conn.commit()
+        if _own_transaction:
+            conn.commit()
     except sqlite3.IntegrityError as exc:
+        if _own_transaction:
+            conn.rollback()
         raise _signed_delete_error(exc, claim_id) from exc
     except sqlite3.OperationalError as exc:
+        if _own_transaction:
+            conn.rollback()
         raise DatabaseError(f"Failed to delete claim '{claim_id}': {exc}") from exc
 
     _backup_claims_toml(conn, root)
@@ -3585,19 +3644,50 @@ def delete_claim(conn: sqlite3.Connection, root: Path, claim_id: str) -> None:
 #     enrolled validator (revocation is out of scope, so a legitimately-signed
 #     row's key persists through key rotation). A keyid absent from the
 #     validators table, or a signature that does not verify, is a forgery and
-#     the row is excluded.
+#     the row is excluded. An ESTABLISHED row also carries the asserter bundle,
+#     so the participant check below runs on it too.
 #   * REPLICATED (participant side): the asserter need not be an enrolled
 #     validator. When the asserter keyid IS enrolled, the bundle signature is
 #     verified against that pubkey and a forged signature excludes the row.
 #     When it is NOT enrolled there is no pubkey to check against (the lean
 #     model carries no participant registry), so the row is verify-exempt:
 #     detection where a key is available, never a false exclusion. Legacy
-#     REPLICATED rows (NULL asserter_keyid, no bundle) are always exempt.
+#     rows (NULL asserter_keyid, no bundle) are always exempt.
+#
+# Both tiers hold the bundle's signed predicate against the row's signed
+# fields, not against its claim_id alone. A signature that verifies over a
+# predicate nobody compares to the served content is decorative.
+#
+# A genuine signature over the right content still says nothing about the rung
+# the row sits on, because the level is not part of what was signed. Both tiers
+# therefore also hold the stored level against the signed evidence that earns
+# it (:class:`_CorroborationIndex`); a row that cannot show it is not served as
+# verified, exactly as a signature mismatch is not.
 #
 # The cache is a caller-owned dict keyed on (tier, keyid, digest): one
-# verification per distinct signature within a bulk query. It is passed in
-# and scoped to a single query on purpose, a bulk read must not persist
-# signature-verification results past the rows it was called for.
+# verification per distinct signature within a bulk query, one validators
+# lookup per distinct keyid, plus the one corroboration index the gated rows
+# share. It is passed in and scoped to a single query on purpose, a bulk read
+# must not persist verification results past the rows it was called for.
+
+_CORROBORATION_CACHE_KEY = "corroboration_index"
+
+
+def _cached_validator(conn: sqlite3.Connection, cache: dict, keyid: str):
+    """The validators row for *keyid*, read once per caller's read.
+
+    Every pubkey the read path needs comes through here. The lookup is keyed on
+    the keyid alone, unlike the signature entries, because the answer does not
+    depend on the row being checked; it is still scoped to the caller's cache,
+    so an enrollment written after this read is picked up by the next one.
+    Without it a bulk read costs one validators SELECT per row checked, and the
+    corroboration index costs one per peer it verifies.
+    """
+    ck = ("K", keyid)
+    if ck not in cache:
+        from mareforma import validators as _validators
+        cache[ck] = _validators.get_validator(conn, keyid)
+    return cache[ck]
 
 def _row_verified_on_read(
     conn: sqlite3.Connection, row: dict, cache: dict,
@@ -3608,11 +3698,18 @@ def _row_verified_on_read(
     enrolled-generator filter in query_claims) and pass through True.
     """
     level = row.get("support_level")
-    if level == "ESTABLISHED":
-        return _verify_validation_on_read(conn, row, cache)
-    if level == "REPLICATED":
-        return _verify_participant_bundle_on_read(conn, row, cache)
-    return True
+    if level not in ("REPLICATED", "ESTABLISHED"):
+        return True
+    if level == "ESTABLISHED" and not _verify_validation_on_read(conn, row, cache):
+        # An ESTABLISHED row carries both envelopes. The validation signature
+        # attests the promotion; the asserter bundle attests the content. Check
+        # both, or a validated row's text could be rewritten under a validation
+        # envelope that binds nothing but the claim id.
+        return False
+    return (
+        _verify_participant_bundle_on_read(conn, row, cache)
+        and _corroboration_backs_level(conn, row, cache)
+    )
 
 
 def _trust_domain_disclosure(conn: sqlite3.Connection) -> tuple[bool, str | None]:
@@ -3685,17 +3782,60 @@ def _verify_validation_on_read(
     return ok
 
 
+def _signed_field_mismatch(pred: dict, row: dict) -> str | None:
+    """Name the first SIGNED_FIELDS value the row and its predicate disagree on.
+
+    Returns None when the signed predicate binds this row's content exactly.
+    Binding the claim_id alone leaves the signature decorative: the row's text,
+    classification, provenance and links can all be rewritten under an envelope
+    that still verifies. Shared by the read-path gate and the audit path so the
+    two cannot drift apart.
+    """
+    from mareforma import signing as _signing
+    expected = {
+        "claim_id": row.get("claim_id"),
+        "text": row.get("text"),
+        "classification": row.get("classification"),
+        "generated_by": row.get("generated_by"),
+        "supports": _json_list(row.get("supports_json")),
+        "contradicts": _json_list(row.get("contradicts_json")),
+        "source_name": row.get("source_name"),
+        "artifact_hash": row.get("artifact_hash"),
+        "created_at": row.get("created_at"),
+    }
+    for field in _signing.SIGNED_FIELDS:
+        if pred.get(field) != expected[field]:
+            return field
+    # The evidence vector and the observed-grounding verdict are signed and
+    # chained too, but they live outside SIGNED_FIELDS (one is a nested dict,
+    # the other is optional), so restore checks them by hand. Do the same here
+    # or a rewritten verdict reads clean and unlocks the promotion the real
+    # verdict blocked. Both sides are parsed so key ordering cannot fake a
+    # mismatch; absent on both sides is the pre-observer case and passes.
+    if pred.get("evidence") != _json_object(row.get("evidence_json"), {}):
+        return "evidence"
+    if pred.get("observed_grounding") != _json_object(row.get("observed_grounding")):
+        return "observed_grounding"
+    return None
+
+
 def _verify_participant_bundle_on_read(
     conn: sqlite3.Connection, row: dict, cache: dict,
 ) -> bool:
     """Re-verify a REPLICATED row's asserter bundle (participant side).
 
-    Legacy (NULL asserter_keyid / no bundle) rows are verify-exempt. Otherwise
-    the bundle's signed predicate MUST name THIS claim (claim_id binding) and be
+    Legacy (no bundle, no keyid) rows are verify-exempt, they carry no envelope
+    to check. A row with a keyid but no bundle is not legacy: the keyid is
+    derived from the bundle on the only honest write path, so that pair means
+    the bundle was cleared by direct SQL, and the row is refused. Otherwise the
+    bundle's signed predicate MUST match THIS row on every signed field and be
     subject/predicate-consistent. That binding holds even when the asserter is
     not an enrolled validator, so a genuine bundle copied off another claim
-    cannot be stapled onto this row and a junk bundle is rejected, with no
-    pubkey needed. When the asserter IS enrolled the bundle signature is
+    cannot be stapled onto this row, a rewritten field cannot hide under a valid
+    envelope, and a junk bundle is rejected, with no pubkey needed. The signer is
+    read out of the bundle, never off the row: ``asserter_keyid`` is an unsigned
+    denormalisation, so a row that disagrees with its own envelope is refused
+    rather than trusted. When the signer IS enrolled the bundle signature is
     additionally verified against that pubkey; a forged or tampered signature
     excludes the row. When it is not enrolled there is no pubkey in the lean
     model, so a claim-bound bundle is served (exempt on authenticity, never on
@@ -3703,8 +3843,8 @@ def _verify_participant_bundle_on_read(
     """
     ak = row.get("asserter_keyid")
     bundle_json = row.get("signature_bundle")
-    if ak is None or not bundle_json:
-        return True
+    if not bundle_json:
+        return ak is None
     # claim_id is part of the key: the binding check below depends on the row,
     # so two rows sharing one bundle (a copy attack) must not share a cache
     # entry or the first-evaluated row poisons the second (same reasoning as
@@ -3720,13 +3860,21 @@ def _verify_participant_bundle_on_read(
     ok = False
     try:
         env = json.loads(bundle_json)
-        # Structural binding (no pubkey needed): the signed predicate must name
-        # THIS claim. claim_predicate_from_envelope also enforces
-        # subject-vs-predicate consistency, so a junk or internally-inconsistent
-        # bundle raises and is excluded.
+        # The signer the bundle itself names. A missing or malformed signatures
+        # array raises and is excluded.
+        signer = env["signatures"][0]["keyid"]
+        # asserter_keyid is an unsigned denormalisation of that signer. A row
+        # that contradicts its own envelope was written outside the signing
+        # path, so refuse it rather than let the column pick the pubkey.
+        keyid_agrees = ak is None or ak == signer
+        # Content binding (no pubkey needed): the signed predicate must match
+        # THIS row on every signed field, not just its claim_id.
+        # claim_predicate_from_envelope also enforces subject-vs-predicate
+        # consistency, so a junk or internally-inconsistent bundle raises and is
+        # excluded.
         pred = _signing.claim_predicate_from_envelope(env)
-        if pred.get("claim_id") == row.get("claim_id"):
-            signer_row = _validators.get_validator(conn, ak)
+        if keyid_agrees and _signed_field_mismatch(pred, row) is None:
+            signer_row = _cached_validator(conn, cache, signer)
             if signer_row is None:
                 # Non-enrolled asserter: no pubkey in the lean model. The
                 # binding above is the integrity we can offer; serve it.
@@ -3809,16 +3957,20 @@ def verify_claim_signatures(
     ``(ok, reason)``; ``reason`` is empty on success.
 
     An unsigned claim returns ``(True, "")``, there is no signature to break;
-    its lack of attribution is reported by the trust map, not failed here. A
-    non-enrolled asserter cannot have its signature checked against a pubkey in
-    the lean model, so the claim-binding (predicate names this row, signed fields
-    match) is the integrity floor offered.
+    its lack of attribution is reported by the trust map, not failed here. A row
+    that kept its ``asserter_keyid`` but lost its bundle is not unsigned, it was
+    de-signed by direct SQL, and fails. A non-enrolled asserter cannot have its
+    signature checked against a pubkey in the lean model, so the claim-binding
+    (predicate names this row, signed fields match) is the integrity floor
+    offered.
     """
     from mareforma import signing as _signing
     from mareforma import validators as _validators
 
     bundle_json = row.get("signature_bundle")
     if not bundle_json:
+        if row.get("asserter_keyid") is not None:
+            return (False, "signature bundle was removed from a signed claim")
         return (True, "")
     try:
         env = json.loads(bundle_json)
@@ -3832,20 +3984,9 @@ def verify_claim_signatures(
     if pred.get("claim_id") != row.get("claim_id"):
         return (False, "signed predicate does not bind this claim id")
 
-    expected = {
-        "claim_id": row.get("claim_id"),
-        "text": row.get("text"),
-        "classification": row.get("classification"),
-        "generated_by": row.get("generated_by"),
-        "supports": _json_list(row.get("supports_json")),
-        "contradicts": _json_list(row.get("contradicts_json")),
-        "source_name": row.get("source_name"),
-        "artifact_hash": row.get("artifact_hash"),
-        "created_at": row.get("created_at"),
-    }
-    for field in _signing.SIGNED_FIELDS:
-        if pred.get(field) != expected[field]:
-            return (False, f"signed field {field!r} does not match the row (tampered)")
+    mismatch = _signed_field_mismatch(pred, row)
+    if mismatch is not None:
+        return (False, f"signed field {mismatch!r} does not match the row (tampered)")
 
     keyid = _extract_signature_bundle_keyid(bundle_json) or row.get("asserter_keyid")
     if keyid is not None:
@@ -3862,6 +4003,23 @@ def verify_claim_signatures(
     if not _verify_role_signatures(conn, env):
         return (False, "a role signature failed verification")
     return (True, "")
+
+
+def _json_object(value, empty=None):
+    """Parse a JSON-object column into a dict; ``None``/empty → *empty*.
+
+    A malformed value is returned as-is, so it can never compare equal to a
+    signed predicate value and the row reads as tampered rather than clean.
+    """
+    if value is None or value == "":
+        return empty
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(value)
+    except (ValueError, TypeError):
+        return value
+    return parsed if isinstance(parsed, dict) else value
 
 
 def _json_list(value) -> list:
@@ -3944,6 +4102,9 @@ def delete_claims_by_generated_by(
 
     Returns the number of claims deleted.
     """
+    # Same transaction ownership as delete_claim: a refusal must not leave the
+    # connection in-transaction for the next writer to inherit.
+    _own_transaction = not conn.in_transaction
     try:
         rows = conn.execute(
             "SELECT claim_id FROM claims WHERE generated_by = ?",
@@ -3952,6 +4113,8 @@ def delete_claims_by_generated_by(
         claim_ids = [r[0] for r in rows]
         if not claim_ids:
             return 0
+        if _own_transaction:
+            conn.execute("BEGIN IMMEDIATE")
         placeholders = ",".join("?" * len(claim_ids))
         conn.execute(
             f"DELETE FROM claims WHERE claim_id IN ({placeholders})", claim_ids
@@ -3962,10 +4125,15 @@ def delete_claims_by_generated_by(
         for deleted_id in claim_ids:
             _supports.remove_claim_edges(conn, deleted_id, count_delta=0)
         _supports._bump_source_count(conn, delta=-len(claim_ids))
-        conn.commit()
+        if _own_transaction:
+            conn.commit()
     except sqlite3.IntegrityError as exc:
+        if _own_transaction:
+            conn.rollback()
         raise _signed_delete_error(exc) from exc
     except sqlite3.OperationalError as exc:
+        if _own_transaction:
+            conn.rollback()
         raise DatabaseError(f"Failed to delete claims: {exc}") from exc
 
     _backup_claims_toml(conn, root)

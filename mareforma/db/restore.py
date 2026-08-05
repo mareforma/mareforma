@@ -15,7 +15,6 @@ the live path proves "what is being written is being signed."
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import sqlite3
 import warnings
@@ -108,36 +107,16 @@ def _verify_grounding_binding_on_read(claim_id, record, predicate) -> None:
         )
 
 
-def _rekor_body_binds_to_claim(entry_val: dict, claim: dict) -> bool:
-    """Whether a Rekor entry's hashedrekord records THIS claim's signed
-    material.
-
-    The logged ``hashedrekord`` carries ``sha256(payload)`` and the signature
-    that were submitted (see :func:`mareforma.signing.submit_to_rekor`). Both
-    must equal the claim's own bundle payload hash and signature. An inclusion
-    proof only shows its body is in the log; this binds that body to the claim,
-    so a valid proof copied from another claim cannot confer witnessed state
-    here. Returns False on any missing/malformed field (fail closed).
-    """
+def _claim_envelope(claim: dict) -> dict | None:
+    """Parse a claim's signature bundle, or None when it has none."""
     bundle_json = claim.get("signature_bundle")
     if not bundle_json:
-        return False
+        return None
     try:
         bundle = json.loads(bundle_json)
-        claim_hash = hashlib.sha256(
-            base64.standard_b64decode(bundle["payload"])
-        ).hexdigest()
-        claim_sig = bundle["signatures"][0]["sig"]
-    except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError):
-        return False
-    try:
-        record = json.loads(base64.standard_b64decode(entry_val["body"]))
-        spec = record["spec"]
-        body_hash = spec["data"]["hash"]["value"]
-        body_sig = spec["signature"]["content"]
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-        return False
-    return body_hash == claim_hash and body_sig == claim_sig
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return bundle if isinstance(bundle, dict) else None
 
 
 def _restore_predicate_payload(c: dict, claim_id: str) -> str:
@@ -782,13 +761,30 @@ def restore(
                             f"unparseable: {exc}",
                             kind="rekor_inclusion_invalid",
                         ) from exc
+                    # A row recorded without a pinned log key holds the entry
+                    # coordinates only, no proof to check. Name that instead of
+                    # falling through to the binding refusal, which would blame
+                    # the backup for a gap in how the row was written.
+                    if not isinstance(entry_val, dict) or not entry_val.get("body"):
+                        raise RestoreError(
+                            f"Rekor inclusion entry for claim {cid!r} carries no "
+                            "inclusion proof; it was recorded without a pinned "
+                            "log key, so there is nothing to verify. Restore "
+                            "without rekor_log_pubkey_pem to accept the sidecar "
+                            "coordinates unverified.",
+                            kind="rekor_inclusion_invalid",
+                        )
+                    from mareforma.signing import (
+                        rekor_entry_binds_to_envelope, verify_rekor_inclusion,
+                    )
                     # Bind the entry to THIS claim before trusting its proof: a
                     # valid inclusion proof only shows its body is in the log,
                     # not that the body is about this claim. Without this a real
                     # proof copied from another claim would confer witnessed
                     # state on a row it never covered.
-                    if not _rekor_body_binds_to_claim(
-                        entry_val, claims_section[cid],
+                    envelope = _claim_envelope(claims_section[cid])
+                    if envelope is None or not rekor_entry_binds_to_envelope(
+                        entry_val, envelope,
                     ):
                         raise RestoreError(
                             f"Rekor inclusion proof for claim {cid!r} does not "
@@ -797,8 +793,9 @@ def restore(
                             kind="rekor_inclusion_invalid",
                         )
                     try:
-                        from mareforma.signing import verify_rekor_inclusion
-                        verify_rekor_inclusion(entry_val, rekor_log_pubkey_pem)
+                        verify_rekor_inclusion(
+                            entry_val, rekor_log_pubkey_pem, envelope,
+                        )
                     except Exception as exc:
                         raise RestoreError(
                             f"Rekor inclusion proof verification failed for "

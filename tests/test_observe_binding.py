@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -550,3 +551,79 @@ def test_declared_classification_untouched_by_observed_axis(tmp_path):
     assert json.loads(row["observed_grounding"])["grounding"] == "GROUNDED"
     # The two axes never share a value space.
     assert row["classification"] not in ("GROUNDED", "UNGROUNDED", "OPAQUE")
+
+
+# -- row-vs-envelope binding of the verdict ----------------------------------
+
+FORGED = '{"grounding":"GROUNDED","reason":"forged"}'
+
+
+def _ungrounded_claim(g):
+    return g.assert_claim(
+        "a finding the observer refused to ground",
+        observed_grounding=_ungrounded().to_signed_dict(),
+    )
+
+
+def test_direct_verdict_update_is_refused(tmp_path):
+    # The verdict is signed, chained and gates promotion, so a signed row may
+    # not have it rewritten by direct SQL any more than its evidence vector.
+    with open_graph(tmp_path) as g:
+        cid = _ungrounded_claim(g)
+        with pytest.raises(sqlite3.IntegrityError, match="signed_field_locked"):
+            g._conn.execute(
+                "UPDATE claims SET observed_grounding = ? WHERE claim_id = ?",
+                (FORGED, cid),
+            )
+
+
+def test_forged_verdict_fails_the_audit(tmp_path):
+    # A database tampered while the trigger was disarmed must still fail
+    # `mareforma verify`: the envelope is canonical, the column must match it.
+    from mareforma.db import verify_claim_signatures
+
+    with open_graph(tmp_path) as g:
+        cid = _ungrounded_claim(g)
+        g._conn.execute(
+            "DROP TRIGGER IF EXISTS claims_signed_fields_no_laundering"
+        )
+        g._conn.execute(
+            "UPDATE claims SET observed_grounding = ? WHERE claim_id = ?",
+            (FORGED, cid),
+        )
+        g._conn.commit()
+        row = dict(
+            g._conn.execute(
+                "SELECT * FROM claims WHERE claim_id = ?", (cid,),
+            ).fetchone()
+        )
+        ok, reason = verify_claim_signatures(g._conn, row)
+    assert ok is False
+    assert "observed_grounding" in reason
+
+
+def test_forged_verdict_is_unverified_on_the_replicated_read_path(tmp_path):
+    # The ordinary read path, not only an explicit verify, must refuse a row
+    # whose verdict disagrees with the envelope it was signed under.
+    key_b = _bootstrap_validator_key(tmp_path)
+    verdict = _grounded().to_signed_dict()
+    with open_graph(tmp_path) as g:
+        anchor = g.assert_claim("established anchor", seed=True)
+        cid = g.assert_claim(
+            "converged", supports=[anchor], observed_grounding=verdict,
+        )
+    with mareforma.open(tmp_path, key_path=key_b) as g2:
+        g2.assert_claim(
+            "converged", supports=[anchor], observed_grounding=verdict,
+        )
+    with open_graph(tmp_path) as g:
+        assert g.get_claim(cid)["support_level"] == "REPLICATED"
+        g._conn.execute(
+            "DROP TRIGGER IF EXISTS claims_signed_fields_no_laundering"
+        )
+        g._conn.execute(
+            "UPDATE claims SET observed_grounding = ? WHERE claim_id = ?",
+            (FORGED, cid),
+        )
+        g._conn.commit()
+        assert g.get_claim(cid)["verified"] is False

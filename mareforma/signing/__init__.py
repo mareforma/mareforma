@@ -89,6 +89,7 @@ from .rekor import (
     compute_rekor_leaf_hash,
     parse_rekor_checkpoint,
     verify_rekor_checkpoint,
+    rekor_entry_binds_to_envelope,
     verify_rekor_inclusion,
     _verify_with_pubkey,
     # Fetchers.
@@ -152,6 +153,7 @@ __all__ = [
     "compute_rekor_leaf_hash",
     "parse_rekor_checkpoint",
     "verify_rekor_checkpoint",
+    "rekor_entry_binds_to_envelope",
     "verify_rekor_inclusion",
     # Fetchers.
     "fetch_inclusion_proof",

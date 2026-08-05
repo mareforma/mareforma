@@ -47,15 +47,28 @@ def _enroll_extra(graph: mareforma.EpistemicGraph, key_path: Path,
     )
 
 
-def _seed_two_claims(tmp_path: Path) -> tuple[Path, Path, str, str, str, str]:
+def _seed_two_claims(
+    tmp_path: Path,
+    grounding_a: dict | None = None,
+    grounding_b: dict | None = None,
+) -> tuple[Path, Path, str, str, str, str]:
     """Bootstrap two keys, enroll the second, return both claim_ids
-    and both keyids."""
+    and both keyids.
+
+    The optional verdicts are bound at assert time, the only way a row and its
+    signed envelope agree on one: observed_grounding is signed, so setting it
+    afterwards by direct SQL is the tamper the append-only trigger refuses.
+    """
     root_key = _bootstrap(tmp_path, "root.key")
     issuer_key = _bootstrap(tmp_path, "issuer.key")
     with mareforma.open(tmp_path, key_path=root_key) as g:
         issuer_keyid = _enroll_extra(g, issuer_key, identity="issuer")
-        a = g.assert_claim("alpha", generated_by="A")
-        b = g.assert_claim("beta", generated_by="B")
+        a = g.assert_claim(
+            "alpha", generated_by="A", observed_grounding=grounding_a,
+        )
+        b = g.assert_claim(
+            "beta", generated_by="B", observed_grounding=grounding_b,
+        )
     root_keyid = _signing.public_key_id(
         _signing.load_private_key(root_key).public_key(),
     )
@@ -133,23 +146,15 @@ class TestVerdictPromotionGates:
     issuer must not be able to launder an UNGROUNDED or unsigned claim into
     the trust ladder."""
 
-    def _set_grounding(self, tmp_path: Path, root_key: Path,
-                       claim_id: str, verdict: str) -> None:
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            g._conn.execute(
-                "UPDATE claims SET observed_grounding = ? WHERE claim_id = ?",
-                (json.dumps({"grounding": verdict}), claim_id),
-            )
-            g._conn.commit()
-
     def test_ungrounded_claim_not_promoted_by_verdict(
         self, tmp_path: Path,
     ) -> None:
-        root_key, issuer_key, a, b, _, _ = _seed_two_claims(tmp_path)
         # Execution observed 'a' as UNGROUNDED: no real data flowed. A
         # replication verdict must not ride it into REPLICATED, while its
         # grounded peer 'b' (NULL verdict) still promotes.
-        self._set_grounding(tmp_path, root_key, a, "UNGROUNDED")
+        root_key, issuer_key, a, b, _, _ = _seed_two_claims(
+            tmp_path, grounding_a={"grounding": "UNGROUNDED"},
+        )
         with mareforma.open(tmp_path, key_path=issuer_key) as g:
             g.record_replication_verdict(
                 verdict_id="rv_ung", cluster_id="cl_ung",
@@ -163,8 +168,9 @@ class TestVerdictPromotionGates:
             assert g.replication_verdicts(member_claim_id=a)
 
     def test_opaque_claim_not_promoted_by_verdict(self, tmp_path: Path) -> None:
-        root_key, issuer_key, a, _, _, _ = _seed_two_claims(tmp_path)
-        self._set_grounding(tmp_path, root_key, a, "OPAQUE")
+        root_key, issuer_key, a, _, _, _ = _seed_two_claims(
+            tmp_path, grounding_a={"grounding": "OPAQUE"},
+        )
         with mareforma.open(tmp_path, key_path=issuer_key) as g:
             g.record_replication_verdict(
                 verdict_id="rv_op", cluster_id="cl_op",
@@ -179,8 +185,13 @@ class TestVerdictPromotionGates:
     ) -> None:
         root_key, issuer_key, a, b, _, _ = _seed_two_claims(tmp_path)
         # Strip 'a' of its asserter_keyid: an unsigned / legacy row is not a
-        # valid distinct signer and must not be laundered to REPLICATED.
+        # valid distinct signer and must not be laundered to REPLICATED. The
+        # append-only trigger guards that column, so drop it for the setup;
+        # the next open recreates it.
         with mareforma.open(tmp_path, key_path=root_key) as g:
+            g._conn.execute(
+                "DROP TRIGGER IF EXISTS claims_signed_fields_no_laundering"
+            )
             g._conn.execute(
                 "UPDATE claims SET asserter_keyid = NULL WHERE claim_id = ?",
                 (a,),
@@ -201,9 +212,11 @@ class TestVerdictPromotionGates:
     ) -> None:
         # A recorded GROUNDED verdict must NOT block promotion, the gate is
         # additive, not a new hurdle for honestly grounded claims.
-        root_key, issuer_key, a, b, _, _ = _seed_two_claims(tmp_path)
-        self._set_grounding(tmp_path, root_key, a, "GROUNDED")
-        self._set_grounding(tmp_path, root_key, b, "GROUNDED")
+        root_key, issuer_key, a, b, _, _ = _seed_two_claims(
+            tmp_path,
+            grounding_a={"grounding": "GROUNDED"},
+            grounding_b={"grounding": "GROUNDED"},
+        )
         with mareforma.open(tmp_path, key_path=issuer_key) as g:
             g.record_replication_verdict(
                 verdict_id="rv_g", cluster_id="cl_g",

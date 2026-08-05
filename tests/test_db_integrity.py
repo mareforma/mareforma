@@ -193,3 +193,74 @@ def test_literal_path_open_can_write_a_claim(tmp_path: Path) -> None:
         assert get_claim(conn, cid2) is not None
     finally:
         conn.close()
+
+
+def test_sanitized_text_is_signed_and_stored_as_one_string(
+    tmp_path: Path,
+) -> None:
+    """Sanitize-on-write must leave no whitespace the signature then strips.
+
+    strip() runs before sanitize_for_llm, so a zero-width space in front of a
+    real space survived the strip and sanitized to a leading blank. The INSERT
+    bound that value while the signature covered text.strip(), so an honest
+    write verified as tampered and restore refused to rebuild the graph.
+    """
+    import base64
+    import json
+
+    import mareforma
+    from mareforma.db import verify_claim_signatures
+    from tests._helpers import _bootstrap_key
+
+    key_path = _bootstrap_key(tmp_path, "root.key")
+    # U+200B (zero-width space) followed by an ordinary space: the usual
+    # copy-paste residue from a web page or a PDF.
+    text = "​ a finding pasted from a web page"
+
+    with mareforma.open(tmp_path, key_path=key_path) as g:
+        cid = g.assert_claim(text)
+        row = g.get_claim(cid)
+        bundle = json.loads(row["signature_bundle"])
+        payload = json.loads(base64.b64decode(bundle["payload"]))
+        assert payload["predicate"]["text"] == row["text"]
+        assert verify_claim_signatures(g._conn, row) == (True, "")
+
+    db_dir = tmp_path / ".mareforma"
+    for f in db_dir.iterdir():
+        f.unlink()
+    db_dir.rmdir()
+    assert mareforma.restore(tmp_path)["claims_restored"] == 1
+
+
+def test_text_of_only_invisible_characters_is_refused(tmp_path: Path) -> None:
+    """Zero-width plus whitespace has no visible content and must not store."""
+    (tmp_path / ".mareforma").mkdir(parents=True, exist_ok=True)
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="no visible content"):
+            add_claim(conn, tmp_path, "​ ​")
+    finally:
+        conn.close()
+
+
+def test_sanitized_text_compares_equal_on_retry_and_signed_edit(
+    tmp_path: Path,
+) -> None:
+    """The stored text is what idempotency and signed-immutability compare.
+
+    Both compared the caller's text.strip() against the row, so a genuine
+    retry of the same string raised IdempotencyConflictError and re-supplying
+    the original text to update_claim wrongly tripped the immutability guard.
+    """
+    import mareforma
+    from tests._helpers import _bootstrap_key
+
+    key_path = _bootstrap_key(tmp_path, "root.key")
+    text = "​ a finding pasted from a web page"
+
+    with mareforma.open(tmp_path, key_path=key_path) as g:
+        cid = g.assert_claim(text, idempotency_key="k1")
+        assert g.assert_claim(text, idempotency_key="k1") == cid
+        # Re-supplying the original text is a no-op edit, not a mutation.
+        update_claim(g._conn, tmp_path, cid, text=text, status="contested")
+        assert g.get_claim(cid)["status"] == "contested"

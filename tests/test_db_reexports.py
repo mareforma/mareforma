@@ -56,6 +56,7 @@ def test_restore_name_reexported(name: str) -> None:
 def test_all_lists_only_public_names() -> None:
     underscore_in_all = [n for n in db_pkg.__all__ if n.startswith("_")]
     assert all(n in ("_SCHEMA_SQL", "_ADDITIVE_TABLES_SQL",
+                      "_SIGNED_FIELDS_TRIGGER_SQL",
                       "_CLAIM_COLUMNS", "_CLAIM_SELECT",
                       "_backup_claims_toml", "_now")
                for n in underscore_in_all), (

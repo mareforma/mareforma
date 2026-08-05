@@ -375,6 +375,38 @@ def test_restore_rejects_a_rekor_proof_copied_from_another_claim(
     assert "does not bind" in str(exc.value)
 
 
+def test_restore_names_a_sidecar_that_carries_no_proof(tmp_path: Path) -> None:
+    """A sidecar recorded without a pinned log key holds the entry coordinates
+    only. Restoring it under a pinned key must refuse, and say the row has no
+    proof rather than accuse the backup of carrying another claim's entry."""
+    import base64
+
+    root_key = _bootstrap_key(tmp_path, "root.key")
+    with mareforma.open(tmp_path, key_path=root_key) as g:
+        cid = g.assert_claim("witnessed without a pinned key", generated_by="x")
+
+    coords = {"uuid": "aa01bb02", "logIndex": 5, "integratedTime": 1700000000}
+    toml_path = tmp_path / "claims.toml"
+    data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+    data["rekor_inclusions"] = {
+        cid: {
+            "uuid": "aa01bb02",
+            "log_index": 5,
+            "raw_response_b64": base64.b64encode(
+                json.dumps(coords).encode("utf-8"),
+            ).decode("ascii"),
+            "recorded_at": "2026-05-27T01:00:00Z",
+        }
+    }
+    toml_path.write_text(tomli_w.dumps(data), encoding="utf-8")
+
+    _wipe_graph_db(tmp_path)
+    log_pubkey = _pem_of(_bootstrap_key(tmp_path, "log.key"))
+    with pytest.raises(RestoreError) as exc:
+        mareforma.restore(tmp_path, rekor_log_pubkey_pem=log_pubkey)
+    assert "no inclusion proof" in str(exc.value)
+
+
 def test_restore_preserves_the_full_trust_layer(tmp_path: Path) -> None:
     """Round-trip a graph carrying every trust-layer state promotion reads , 
     REPLICATED level, contradiction invalidation, signer identity, transparency

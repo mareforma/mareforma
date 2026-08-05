@@ -237,59 +237,6 @@ BEGIN
     END;
 END;
 
--- Append-only over the signed predicate. The Statement v1 envelope
--- + signature binds every SIGNED_FIELDS value plus the evidence
--- vector + the statement_cid anchor. Without this trigger,
--- a direct `UPDATE claims SET ev_risk_of_bias = 0 WHERE …` would
--- silently retroactively upgrade a claim's evidence quality , 
--- signature verification on the unchanged envelope would still
--- pass, but the row no longer matches what was signed. Refuse the
--- mutation at the SQL layer; the envelope is the canonical source.
---
--- The trigger refuses only when (a) the row is signed
--- (signature_bundle IS NOT NULL) AND (b) at least one of the watched
--- columns actually changed (OLD ≠ NEW). A pure status-only update
--- that re-emits the same text + supports + evidence values via a
--- multi-column UPDATE passes through unblocked.
---
--- Note: signature_bundle itself is NOT watched. The system path
--- legitimately rewrites it on Rekor inclusion-proof attachment
--- (the rekor block is metadata, the payload + signatures stay
--- byte-equal). If an adversary edits signature_bundle directly,
--- restore's signature-vs-row binding catches the divergence.
-CREATE TRIGGER IF NOT EXISTS claims_signed_fields_no_laundering
-BEFORE UPDATE OF
-    text, classification, generated_by,
-    supports_json, contradicts_json,
-    source_name, artifact_hash,
-    ev_risk_of_bias, ev_inconsistency, ev_indirectness,
-    ev_imprecision, ev_pub_bias,
-    evidence_json, statement_cid,
-    prev_hash, created_at
-ON claims
-WHEN OLD.signature_bundle IS NOT NULL
-  AND (
-        OLD.text IS NOT NEW.text
-     OR OLD.classification IS NOT NEW.classification
-     OR OLD.generated_by IS NOT NEW.generated_by
-     OR OLD.supports_json IS NOT NEW.supports_json
-     OR OLD.contradicts_json IS NOT NEW.contradicts_json
-     OR OLD.source_name IS NOT NEW.source_name
-     OR OLD.artifact_hash IS NOT NEW.artifact_hash
-     OR OLD.ev_risk_of_bias IS NOT NEW.ev_risk_of_bias
-     OR OLD.ev_inconsistency IS NOT NEW.ev_inconsistency
-     OR OLD.ev_indirectness IS NOT NEW.ev_indirectness
-     OR OLD.ev_imprecision IS NOT NEW.ev_imprecision
-     OR OLD.ev_pub_bias IS NOT NEW.ev_pub_bias
-     OR OLD.evidence_json IS NOT NEW.evidence_json
-     OR OLD.statement_cid IS NOT NEW.statement_cid
-     OR OLD.prev_hash IS NOT NEW.prev_hash
-     OR OLD.created_at IS NOT NEW.created_at
-  )
-BEGIN
-    SELECT RAISE(ABORT, 'mareforma:append_only:signed_field_locked');
-END;
-
 -- A signed claim cannot be deleted. The signature + Rekor entry + chain
 -- hash collectively attest "this claim was asserted by this signer at
 -- this time"; allowing a delete would let a process with DB access wipe
@@ -525,6 +472,147 @@ CREATE TABLE IF NOT EXISTS validators (
 );
 
 """
+
+
+# Append-only over the signed predicate, reconciled on every open_db() call
+# (both fresh and already-initialised dbs). Lives outside _SCHEMA_SQL, which
+# runs only on a fresh db: a db written by an earlier build still carries the
+# earlier trigger, and CREATE TRIGGER IF NOT EXISTS would leave it in place.
+# open_db compares this text against sqlite_master and rewrites only on a
+# mismatch, so an already-current graph is never left without the guard and
+# never has to take the write lock to open. DROP plus CREATE is a durable
+# write to sqlite_master, not a free operation.
+# The text below is stored verbatim in sqlite_master.sql, which is what makes
+# that comparison exact: keep it a single CREATE statement with no trailing
+# semicolon and no leading blank line.
+#
+# The Statement v1 envelope + signature binds every SIGNED_FIELDS value plus
+# the evidence vector, the observed-grounding verdict and the statement_cid
+# anchor. observed_grounding is watched for the same reason as the evidence
+# vector, one step sharper: it gates support-level promotion, so a single
+# UPDATE flipping it to GROUNDED lifts exactly the claims the observer refused
+# to promote. Without this trigger, a
+# direct `UPDATE claims SET ev_risk_of_bias = 0 WHERE …` would silently
+# retroactively upgrade a claim's evidence quality , signature verification on
+# the unchanged envelope would still pass, but the row no longer matches what
+# was signed. Refuse the mutation at the SQL layer; the envelope is the
+# canonical source.
+#
+# The trigger refuses only when (a) the row is signed (signature_bundle IS NOT
+# NULL) AND (b) at least one of the watched columns actually changed
+# (OLD ≠ NEW), or the update de-signs the row. A pure status-only update that
+# re-emits the same text + supports + evidence values via a multi-column
+# UPDATE passes through unblocked.
+#
+# signature_bundle is watched for one transition only: non-NULL to NULL.
+# Nulling it on a signed row clears this trigger's own guard and the guard of
+# claims_signed_no_delete, so three statements (null, rewrite a signed field,
+# put the original bundle back) would leave a valid envelope over substituted
+# content, and two would delete a Rekor-logged claim outright. The system path
+# rewrites the bundle non-NULL to non-NULL on Rekor inclusion-proof
+# attachment, which stays legal; an adversarial non-NULL edit is caught by
+# restore's signature-vs-row binding.
+#
+# asserter_keyid is watched for the same reason, one step removed. It is an
+# unsigned denormalisation of the bundle's signer that the REPLICATED promotion
+# query and the trust-layer independence count both read, so a row that
+# contradicts its own envelope inflates the distinct-signer count.
+_SIGNED_FIELDS_TRIGGER_SQL = """
+DROP TRIGGER IF EXISTS claims_signed_fields_no_laundering;
+
+CREATE TRIGGER claims_signed_fields_no_laundering
+BEFORE UPDATE OF
+    text, classification, generated_by,
+    supports_json, contradicts_json,
+    source_name, artifact_hash,
+    ev_risk_of_bias, ev_inconsistency, ev_indirectness,
+    ev_imprecision, ev_pub_bias,
+    evidence_json, observed_grounding, statement_cid,
+    prev_hash, created_at, signature_bundle, asserter_keyid
+ON claims
+WHEN OLD.signature_bundle IS NOT NULL
+  AND (
+        NEW.signature_bundle IS NULL
+     OR OLD.text IS NOT NEW.text
+     OR OLD.classification IS NOT NEW.classification
+     OR OLD.generated_by IS NOT NEW.generated_by
+     OR OLD.supports_json IS NOT NEW.supports_json
+     OR OLD.contradicts_json IS NOT NEW.contradicts_json
+     OR OLD.source_name IS NOT NEW.source_name
+     OR OLD.artifact_hash IS NOT NEW.artifact_hash
+     OR OLD.ev_risk_of_bias IS NOT NEW.ev_risk_of_bias
+     OR OLD.ev_inconsistency IS NOT NEW.ev_inconsistency
+     OR OLD.ev_indirectness IS NOT NEW.ev_indirectness
+     OR OLD.ev_imprecision IS NOT NEW.ev_imprecision
+     OR OLD.ev_pub_bias IS NOT NEW.ev_pub_bias
+     OR OLD.evidence_json IS NOT NEW.evidence_json
+     OR OLD.observed_grounding IS NOT NEW.observed_grounding
+     OR OLD.statement_cid IS NOT NEW.statement_cid
+     OR OLD.prev_hash IS NOT NEW.prev_hash
+     OR OLD.created_at IS NOT NEW.created_at
+     OR OLD.asserter_keyid IS NOT NEW.asserter_keyid
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:signed_field_locked');
+END"""
+
+
+# support_level is the trust ladder, and it is the one column the honest paths
+# rewrite after signing, so it cannot join the list above: the level is derived
+# state, promoted later than the signature that binds the claim's content. What
+# it can be held to is the writer. The two transitions the state machine permits
+# (PRELIMINARY -> REPLICATED, REPLICATED -> ESTABLISHED) are legal only inside a
+# promotion window, and only ``core._promotion_window`` opens one. A statement
+# from anywhere else is refused, on a signed row, for the same reason the
+# laundering trigger refuses one: the row carries a commitment the writer did
+# not make. The marker is a temp table, so it is per connection: a co-resident
+# process opening graph.db with plain sqlite3 has no temp schema of its own to
+# find it in and is refused.
+#
+# The marker has to be state, not a connection-scoped SQL function. Trigger text
+# is durable schema and SQLite resolves the names in it when it compiles the
+# UPDATE, so a function only this release registers makes support_level
+# unwritable by every other connection that opens the file, an older mareforma
+# included, instead of refusing the two guarded transitions. A temp table cannot
+# be named directly from a trigger (cross-schema references are refused at CREATE
+# time), so the WHEN clause probes for it through pragma_table_info, a
+# table-valued pragma any connection can compile since SQLite 3.16, well under
+# the 3.30 floor open_db enforces.
+#
+# The marker is a speed bump, not the guarantee: a writer with SQL access can
+# create the same temp table, or drop this trigger outright. The guarantee is on
+# the read path, where a level above PRELIMINARY has to be backed by the signed
+# evidence that earns it (``core._CorroborationIndex``). This trigger keeps a
+# stray write from reaching that check at all.
+#
+# Reconciled onto existing graphs by the same sqlite_master comparison as the
+# laundering trigger, so keep the text a single CREATE statement.
+_PROMOTION_MARKER_TABLE = "mareforma_promotion_open"
+
+_PROMOTION_TRIGGER_NAME = "claims_signed_promotion_backed"
+
+_PROMOTION_TRIGGER_SQL = f"""\
+CREATE TRIGGER {_PROMOTION_TRIGGER_NAME}
+BEFORE UPDATE OF support_level ON claims
+WHEN OLD.signature_bundle IS NOT NULL
+  AND (
+        (OLD.support_level = 'PRELIMINARY' AND NEW.support_level = 'REPLICATED')
+     OR (OLD.support_level = 'REPLICATED' AND NEW.support_level = 'ESTABLISHED')
+  )
+  AND NOT EXISTS (
+        SELECT 1 FROM pragma_table_info('{_PROMOTION_MARKER_TABLE}', 'temp')
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:promotion_unmarked');
+END"""
+
+
+# The triggers open_db reconciles against sqlite_master on every open, name
+# first so a definition that changed shape reaches an existing graph.
+_MANAGED_TRIGGERS = (
+    (_SIGNED_FIELDS_TRIGGER_NAME, _SIGNED_FIELDS_TRIGGER_SQL),
+    (_PROMOTION_TRIGGER_NAME, _PROMOTION_TRIGGER_SQL),
+)
 
 
 # Additive tables created on every open_db() call (both fresh and

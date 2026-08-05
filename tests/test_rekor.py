@@ -561,6 +561,29 @@ class TestAssertClaimWithRekor:
         envelope = json.loads(claim["signature_bundle"])
         assert "rekor" not in envelope
 
+    def test_saga_does_not_commit_a_caller_owned_transaction(
+        self, tmp_path: Path, httpx_mock,
+    ) -> None:
+        """A claim asserted inside a caller's own BEGIN IMMEDIATE must roll
+        back with it, sidecar row included. The saga joined that transaction,
+        so none of its writes may commit on their own."""
+        _mirror_rekor(httpx_mock, uuid_prefix="saga")
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(
+            tmp_path, key_path=key_path, rekor_url=_TEST_REKOR_URL,
+        ) as graph:
+            conn = graph._conn
+            conn.execute("BEGIN IMMEDIATE")
+            graph.assert_claim("rolled back under rekor")
+            conn.rollback()
+
+            claims = conn.execute("SELECT COUNT(*) AS n FROM claims").fetchone()
+            sidecar = conn.execute(
+                "SELECT COUNT(*) AS n FROM rekor_inclusions",
+            ).fetchone()
+        assert claims["n"] == 0
+        assert sidecar["n"] == 0
+
     def test_unsigned_claim_stays_transparency_logged_true(
         self, tmp_path: Path, httpx_mock,
     ) -> None:

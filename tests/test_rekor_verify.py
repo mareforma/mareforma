@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 
 import httpx
 import pytest
@@ -430,6 +431,35 @@ class TestCheckpointSignatureECDSA:
 # ---------------------------------------------------------------------------
 
 
+# The entry under test must record the envelope it is supposed to witness:
+# verify_rekor_inclusion binds the proven body to that envelope. Only the
+# payload hash and the signature are read, so a hand-built envelope is enough.
+_ENVELOPE = {
+    "payload": base64.standard_b64encode(b"the claim payload").decode("ascii"),
+    "signatures": [
+        {"sig": base64.standard_b64encode(b"the claim signature").decode("ascii")},
+    ],
+}
+
+
+def _bound_leaf() -> bytes:
+    """The canonical hashedrekord record Rekor logs for ``_ENVELOPE``."""
+    record = {
+        "apiVersion": "0.0.1",
+        "kind": "hashedrekord",
+        "spec": {
+            "data": {"hash": {"algorithm": "sha256", "value": hashlib.sha256(
+                base64.standard_b64decode(_ENVELOPE["payload"]),
+            ).hexdigest()}},
+            "signature": {
+                "content": _ENVELOPE["signatures"][0]["sig"],
+                "publicKey": {"content": "<not-checked>"},
+            },
+        },
+    }
+    return json.dumps(record, separators=(",", ":")).encode("utf-8")
+
+
 def _build_rekor_response(
     *,
     leaves: list[bytes],
@@ -439,6 +469,10 @@ def _build_rekor_response(
     origin: str = "rekor.test - 0001",
     signer_name: str = "rekor.test",
 ) -> dict:
+    # The target leaf is always the entry for _ENVELOPE; the fillers only
+    # give the audit path something to walk.
+    leaves = list(leaves)
+    leaves[target_index] = _bound_leaf()
     root = _merkle_root(leaves)
     path = _merkle_inclusion_path(leaves, target_index)
     checkpoint = sign_fn(
@@ -468,7 +502,7 @@ class TestFullResponseVerification:
         key = Ed25519PrivateKey.generate()
         leaves = [f"e{i}".encode() for i in range(11)]
         resp = _build_rekor_response(leaves=leaves, target_index=7, log_key=key)
-        assert _signing.verify_rekor_inclusion(resp, _pubkey_pem(key)) is True
+        assert _signing.verify_rekor_inclusion(resp, _pubkey_pem(key), _ENVELOPE) is True
 
     def test_happy_path_ecdsa(self) -> None:
         key = ec.generate_private_key(ec.SECP256R1())
@@ -477,13 +511,13 @@ class TestFullResponseVerification:
             leaves=leaves, target_index=7, log_key=key,
             sign_fn=_sign_checkpoint_ecdsa,
         )
-        assert _signing.verify_rekor_inclusion(resp, _pubkey_pem(key)) is True
+        assert _signing.verify_rekor_inclusion(resp, _pubkey_pem(key), _ENVELOPE) is True
 
     def test_tree_size_one(self) -> None:
         key = Ed25519PrivateKey.generate()
         leaves = [b"only"]
         resp = _build_rekor_response(leaves=leaves, target_index=0, log_key=key)
-        assert _signing.verify_rekor_inclusion(resp, _pubkey_pem(key)) is True
+        assert _signing.verify_rekor_inclusion(resp, _pubkey_pem(key), _ENVELOPE) is True
 
     def test_root_mismatch_proof_vs_checkpoint_refused(self) -> None:
         key = Ed25519PrivateKey.generate()
@@ -491,7 +525,7 @@ class TestFullResponseVerification:
         resp = _build_rekor_response(leaves=leaves, target_index=3, log_key=key)
         resp["verification"]["inclusionProof"]["rootHash"] = "ff" * 32
         with pytest.raises(_signing.RekorInclusionError) as exc_info:
-            _signing.verify_rekor_inclusion(resp, _pubkey_pem(key))
+            _signing.verify_rekor_inclusion(resp, _pubkey_pem(key), _ENVELOPE)
         # Either the merkle walk reaches a different root, or the
         # checkpoint cross-check refuses.
         assert exc_info.value.reason in (
@@ -504,7 +538,7 @@ class TestFullResponseVerification:
         resp = _build_rekor_response(leaves=leaves, target_index=3, log_key=key)
         resp["body"] = base64.standard_b64encode(b"forged").decode("ascii")
         with pytest.raises(_signing.RekorInclusionError) as exc_info:
-            _signing.verify_rekor_inclusion(resp, _pubkey_pem(key))
+            _signing.verify_rekor_inclusion(resp, _pubkey_pem(key), _ENVELOPE)
         assert exc_info.value.reason == "merkle_root_mismatch"
 
     def test_missing_verification_block_refused(self) -> None:
@@ -513,7 +547,7 @@ class TestFullResponseVerification:
         resp = _build_rekor_response(leaves=leaves, target_index=0, log_key=key)
         del resp["verification"]
         with pytest.raises(_signing.RekorInclusionError) as exc_info:
-            _signing.verify_rekor_inclusion(resp, _pubkey_pem(key))
+            _signing.verify_rekor_inclusion(resp, _pubkey_pem(key), _ENVELOPE)
         assert exc_info.value.reason == "missing_proof"
 
     def test_unsigned_checkpoint_refused(self) -> None:
@@ -523,7 +557,7 @@ class TestFullResponseVerification:
         leaves = [f"e{i}".encode() for i in range(8)]
         resp = _build_rekor_response(leaves=leaves, target_index=2, log_key=attacker)
         with pytest.raises(_signing.RekorInclusionError) as exc_info:
-            _signing.verify_rekor_inclusion(resp, _pubkey_pem(real_key))
+            _signing.verify_rekor_inclusion(resp, _pubkey_pem(real_key), _ENVELOPE)
         assert exc_info.value.reason == "checkpoint_bad_sig"
 
     def test_log_index_mismatch_refused(self) -> None:
@@ -532,7 +566,7 @@ class TestFullResponseVerification:
         resp = _build_rekor_response(leaves=leaves, target_index=3, log_key=key)
         resp["verification"]["inclusionProof"]["logIndex"] = 5
         with pytest.raises(_signing.RekorInclusionError) as exc_info:
-            _signing.verify_rekor_inclusion(resp, _pubkey_pem(key))
+            _signing.verify_rekor_inclusion(resp, _pubkey_pem(key), _ENVELOPE)
         assert exc_info.value.reason == "merkle_root_mismatch"
 
     def test_tree_size_mismatch_proof_vs_checkpoint_refused(self) -> None:
@@ -541,7 +575,7 @@ class TestFullResponseVerification:
         resp = _build_rekor_response(leaves=leaves, target_index=3, log_key=key)
         resp["verification"]["inclusionProof"]["treeSize"] = 12
         with pytest.raises(_signing.RekorInclusionError) as exc_info:
-            _signing.verify_rekor_inclusion(resp, _pubkey_pem(key))
+            _signing.verify_rekor_inclusion(resp, _pubkey_pem(key), _ENVELOPE)
         # Either merkle walk fails or checkpoint tree_size mismatch fires.
         assert exc_info.value.reason in (
             "merkle_root_mismatch", "checkpoint_root_mismatch",
@@ -553,7 +587,7 @@ class TestFullResponseVerification:
         resp = _build_rekor_response(leaves=leaves, target_index=0, log_key=key)
         del resp["body"]
         with pytest.raises(_signing.RekorInclusionError) as exc_info:
-            _signing.verify_rekor_inclusion(resp, _pubkey_pem(key))
+            _signing.verify_rekor_inclusion(resp, _pubkey_pem(key), _ENVELOPE)
         assert exc_info.value.reason == "malformed_proof"
 
 
@@ -614,7 +648,7 @@ class TestL2StrictIntegerParsing:
         resp = self._build(key)
         resp["verification"]["inclusionProof"]["logIndex"] = 3.5
         with pytest.raises(_signing.RekorInclusionError) as exc_info:
-            _signing.verify_rekor_inclusion(resp, _pubkey_pem(key))
+            _signing.verify_rekor_inclusion(resp, _pubkey_pem(key), _ENVELOPE)
         assert exc_info.value.reason == "malformed_proof"
 
     def test_bool_log_index_refused(self) -> None:
@@ -622,7 +656,7 @@ class TestL2StrictIntegerParsing:
         resp = self._build(key)
         resp["verification"]["inclusionProof"]["logIndex"] = True
         with pytest.raises(_signing.RekorInclusionError) as exc_info:
-            _signing.verify_rekor_inclusion(resp, _pubkey_pem(key))
+            _signing.verify_rekor_inclusion(resp, _pubkey_pem(key), _ENVELOPE)
         assert exc_info.value.reason == "malformed_proof"
 
     def test_float_tree_size_refused(self) -> None:
@@ -630,7 +664,7 @@ class TestL2StrictIntegerParsing:
         resp = self._build(key)
         resp["verification"]["inclusionProof"]["treeSize"] = 8.0
         with pytest.raises(_signing.RekorInclusionError) as exc_info:
-            _signing.verify_rekor_inclusion(resp, _pubkey_pem(key))
+            _signing.verify_rekor_inclusion(resp, _pubkey_pem(key), _ENVELOPE)
         assert exc_info.value.reason == "malformed_proof"
 
 
@@ -720,6 +754,22 @@ class TestM4UuidValidation:
         assert exc_info.value.reason == "missing_proof"
 
 
+class TestFetchedEntryIdentity:
+    """The re-fetch asks for one uuid. A log that answers with a different
+    entry is answering a question we did not ask, however real that entry is."""
+
+    def test_returned_uuid_mismatch_refused(self, httpx_mock) -> None:
+        asked = "deadbeef" * 4
+        base = "https://rekor.test.example/api/v1/log/entries"
+        httpx_mock.add_response(
+            method="GET", url=f"{base}/{asked}",
+            json={"some-other-uuid": {"body": "irrelevant"}},
+        )
+        with pytest.raises(_signing.RekorInclusionError) as exc_info:
+            _signing.fetch_inclusion_proof(asked, base)
+        assert exc_info.value.reason == "entry_claim_mismatch"
+
+
 class TestL1RekorUrlRevalidation:
     """L1: fetch_inclusion_proof + fetch_log_pubkey re-validate
     rekor_url against the SSRF / scheme defense, not just rely on
@@ -780,7 +830,7 @@ class TestH1ExceptionContract:
         # Must raise RekorInclusionError, never ValueError /
         # binascii.Error / UnicodeDecodeError leaking from the fallback.
         with pytest.raises(_signing.RekorInclusionError) as exc_info:
-            _signing.verify_rekor_inclusion(resp, _pubkey_pem(key))
+            _signing.verify_rekor_inclusion(resp, _pubkey_pem(key), _ENVELOPE)
         # The reason should be checkpoint_malformed (from the inner
         # parser), preserving the original failure type rather than
         # masquerading as a decode error.

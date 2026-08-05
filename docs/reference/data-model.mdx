@@ -75,21 +75,23 @@ All persistent state lives in a single SQLite file at `<project_root>/.mareforma
 Two `BEFORE` triggers enforce the support-level state machine at the storage layer. Defense in depth: a tampered Python interpreter cannot relax these rules.
 
 **`claims_insert_state_check`**: rejects:
-- `support_level` outside `{PRELIMINARY, ESTABLISHED}` (REPLICATED can only be reached via UPDATE)
-- `support_level = 'ESTABLISHED'` without a `validation_signature` (only the seed-claim path satisfies this, since seeds carry a signed seed envelope)
-- `support_level = 'PRELIMINARY'` with `validated_by` or `validated_at` set
+- `support_level` outside `{PRELIMINARY, ESTABLISHED}` (REPLICATED can only be reached via UPDATE): `mareforma:state:insert_invalid_level`
+- `support_level = 'ESTABLISHED'` without a `validation_signature` (only the seed-claim path satisfies this, since seeds carry a signed seed envelope): `mareforma:state:insert_established_without_validation`
+- `support_level = 'PRELIMINARY'` with `validated_by` or `validated_at` set: `mareforma:state:insert_preliminary_with_validation`
 
 **`claims_update_state_check`**: rejects:
-- `PRELIMINARY → ESTABLISHED` (must pass through REPLICATED first)
-- `REPLICATED → PRELIMINARY`
-- Any transition out of `ESTABLISHED`
-- `→ ESTABLISHED` without a `validation_signature`
+- `PRELIMINARY → ESTABLISHED` (must pass through REPLICATED first): `mareforma:state:illegal_transition:from_preliminary`
+- `REPLICATED → PRELIMINARY`: `mareforma:state:illegal_transition:from_replicated`
+- Any transition out of `ESTABLISHED`: `mareforma:state:illegal_transition:from_established`
+- `→ ESTABLISHED` without a `validation_signature`: `mareforma:state:established_without_validation`
 
-Trigger errors carry `mareforma:state:<from>-><to>` codes that Python translates to `IllegalStateTransitionError`.
+Every code is a static suffix, not a from/to pair: `RAISE()` cannot concatenate a column value below SQLite 3.46. Python translates any `mareforma:state:` code to `IllegalStateTransitionError`, carrying the suffix.
 
 **`claims_update_status_terminal`**: `retracted` is terminal. Any UPDATE that transitions a row out of `retracted` raises `mareforma:state:retracted_is_terminal`. To resurrect a withdrawn finding, assert a new claim citing the old via `contradicts=[<old_claim_id>]`.
 
-**`claims_signed_fields_no_laundering`**: append-only over the signed predicate. Refuses any direct-SQL UPDATE that changes a signed-predicate value (`text`, `classification`, `generated_by`, `supports_json`, `contradicts_json`, `source_name`, `artifact_hash`, `ev_*`, `evidence_json`, `statement_cid`, `prev_hash`, `created_at`) on a row whose `signature_bundle IS NOT NULL`. Value-comparison fires only when something actually changed, so multi-column UPDATEs that re-emit unchanged values (e.g. status-only edits via `update_claim`) pass through. Raises `mareforma:append_only:signed_field_locked`.
+**`claims_signed_fields_no_laundering`**: append-only over the signed predicate. It lives in `_SIGNED_FIELDS_TRIGGER_SQL` rather than `_SCHEMA_SQL`, so every `open_db()` drops and re-creates it and an existing database gains the current watch list. Refuses any direct-SQL UPDATE that changes a signed-predicate value (`text`, `classification`, `generated_by`, `supports_json`, `contradicts_json`, `source_name`, `artifact_hash`, `ev_*`, `evidence_json`, `statement_cid`, `prev_hash`, `created_at`), the `asserter_keyid` denormalisation, the `observed_grounding` verdict, or the `predicate_payload` the audit path re-checks a GROUNDED verdict against, on a row whose `signature_bundle IS NOT NULL`. Value-comparison fires only when something actually changed, so multi-column UPDATEs that re-emit unchanged values (e.g. status-only edits via `update_claim`) pass through. It also refuses to set `signature_bundle` back to NULL on a signed row, because that one write would clear the guard on this trigger and on `claims_signed_no_delete`; the Rekor attachment's non-NULL rewrite stays legal. Raises `mareforma:append_only:signed_field_locked`.
+
+**`claims_signed_promotion_backed`**: `support_level` is derived state, promoted after the signature that binds the claim's content, so it cannot join the watch list above. What it is held to is the writer: on a row whose `signature_bundle IS NOT NULL`, the two transitions the state machine permits (`PRELIMINARY → REPLICATED`, `REPLICATED → ESTABLISHED`) are legal only inside a promotion window, which only the library's promotion paths open. Anything else raises `mareforma:append_only:promotion_unmarked`. The marker is a temp table, so it is per connection: a co-resident process that opened `graph.db` with plain sqlite3 has no temp schema of its own to hold it and is refused. Trigger text is durable schema and every connection that opens the file has to be able to compile it, so the marker cannot be a name only one release puts on its connections. It is a speed bump, not the guarantee: the guarantee is on the read path, where a level above PRELIMINARY has to be backed by the signed evidence that earns it (a signature-verified replication verdict, or distinct-signer convergence on a shared ESTABLISHED anchor). A row that cannot show that evidence is served `verified=False` and dropped from `query(min_support=...)`, exactly like a signature mismatch.
 
 **`claims_signed_no_delete`**: the delete-side twin of `claims_signed_fields_no_laundering`. BEFORE DELETE on a row whose `signature_bundle IS NOT NULL`, raises `mareforma:append_only:signed_claim_no_delete`. A signed claim cannot be wiped from the local graph while its Rekor entry and chain hash persist. Unsigned claims (legacy / no-key mode) carry no cryptographic commitment and stay deletable.
 

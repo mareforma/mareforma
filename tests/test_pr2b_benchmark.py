@@ -78,18 +78,18 @@ def test_pr2b_verify_count_is_bounded(
         # Every REPLICATED row was served verified (cache reports per row).
         assert all(r.get("verified", True) for r in replicated)
 
-        # Cache bound, MEASURED: at most one verification per high-trust row
-        # served — never the 2x+ that a missing cache would allow if a row were
+        # Cache bound, MEASURED: at most one verification per envelope served —
+        # never the 2x+ that a missing cache would allow if an envelope were
         # re-checked across the query's internal batches. Each distinct claim
-        # has a distinct (keyid, digest), so the count tracks the row count.
-        high_trust = [
-            r for r in rows
-            if r["support_level"] in ("REPLICATED", "ESTABLISHED")
-        ]
+        # has a distinct (keyid, digest), so the count tracks the envelope
+        # count. A REPLICATED row carries the asserter bundle; an ESTABLISHED
+        # row carries the validation envelope on top of it, so it counts twice.
+        established = [r for r in rows if r["support_level"] == "ESTABLISHED"]
+        bound = len(replicated) + 2 * len(established)
         assert calls["n"] >= 1, "expected the read path to verify signatures"
-        assert calls["n"] <= len(high_trust), (
+        assert calls["n"] <= bound, (
             f"verify cache did not bound checks: {calls['n']} checks for "
-            f"{len(high_trust)} high-trust rows"
+            f"a bound of {bound} envelopes"
         )
 
 

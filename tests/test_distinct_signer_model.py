@@ -581,6 +581,10 @@ class TestParticipantBundleBinding:
         conn = sqlite3.connect(str(_db_path(tmp_path)))
         conn.row_factory = sqlite3.Row
         try:
+            # The adversary in scope holds DB write access, so the append-only
+            # trigger is theirs to drop. The read path is the defence under test.
+            conn.execute("DROP TRIGGER IF EXISTS claims_signed_fields_no_laundering")
+            conn.execute("DROP TRIGGER IF EXISTS claims_signed_promotion_backed")
             r = conn.execute(
                 "SELECT signature_bundle, asserter_keyid FROM claims "
                 "WHERE claim_id = ?", (rep,),
@@ -605,6 +609,83 @@ class TestParticipantBundleBinding:
             assert victim not in ids                     # excluded from query
             assert rep in ids                            # genuine row still served
 
+    def test_copied_bundle_with_null_keyid_excluded(self, tmp_path: Path) -> None:
+        """asserter_keyid is an unsigned denormalisation, so the read path must
+        derive the signer from the bundle instead of letting the column decide
+        whether the check runs. NULLing it must not buy the legacy exemption."""
+        sa, sb = _two_signers(tmp_path)
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        pem_a = _signing.public_key_to_pem(sa.public_key())
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            g.enroll_validator(pem_a, identity="a")
+            up = g.assert_claim("anchor", generated_by="seed", seed=True)
+            rep = g.assert_claim("A", supports=[up], generated_by="lab_a", signer=sa)
+            g.assert_claim("B", supports=[up], generated_by="lab_b", signer=sb)
+            victim = g.assert_claim("totally fabricated", generated_by="x")
+
+        conn = sqlite3.connect(str(_db_path(tmp_path)))
+        conn.row_factory = sqlite3.Row
+        try:
+            # The adversary in scope holds DB write access, so the append-only
+            # trigger is theirs to drop. The read path is the defence under test.
+            conn.execute("DROP TRIGGER IF EXISTS claims_signed_fields_no_laundering")
+            conn.execute("DROP TRIGGER IF EXISTS claims_signed_promotion_backed")
+            bundle = conn.execute(
+                "SELECT signature_bundle FROM claims WHERE claim_id = ?", (rep,),
+            ).fetchone()["signature_bundle"]
+            conn.execute(
+                "UPDATE claims SET signature_bundle = ?, asserter_keyid = NULL, "
+                "support_level = 'REPLICATED' WHERE claim_id = ?",
+                (bundle, victim),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            assert g.get_claim(victim)["verified"] is False
+            ids = {row["claim_id"]
+                   for row in g.query(min_support="REPLICATED", limit=99)}
+            assert victim not in ids
+            assert rep in ids
+
+    def test_keyid_disagreeing_with_bundle_excluded(self, tmp_path: Path) -> None:
+        """Rewriting asserter_keyid to a non-enrolled string must not skip the
+        signature check: the row is refused when it contradicts its bundle."""
+        sa, sb = _two_signers(tmp_path)
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        pem_a = _signing.public_key_to_pem(sa.public_key())
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            g.enroll_validator(pem_a, identity="a")
+            up = g.assert_claim("anchor", generated_by="seed", seed=True)
+            rep = g.assert_claim("A", supports=[up], generated_by="lab_a", signer=sa)
+            g.assert_claim("B", supports=[up], generated_by="lab_b", signer=sb)
+            assert g.get_claim(rep)["support_level"] == "REPLICATED"
+
+        conn = sqlite3.connect(str(_db_path(tmp_path)))
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("DROP TRIGGER IF EXISTS claims_signed_fields_no_laundering")
+            env = json.loads(conn.execute(
+                "SELECT signature_bundle FROM claims WHERE claim_id = ?", (rep,),
+            ).fetchone()["signature_bundle"])
+            sig = env["signatures"][0]["sig"]
+            env["signatures"][0]["sig"] = ("B" if sig[0] != "B" else "C") + sig[1:]
+            conn.execute(
+                "UPDATE claims SET signature_bundle = ?, "
+                "asserter_keyid = '0123456789abcdef' WHERE claim_id = ?",
+                (json.dumps(env), rep),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            assert g.get_claim(rep)["verified"] is False
+            ids = {row["claim_id"]
+                   for row in g.query(min_support="REPLICATED", limit=99)}
+            assert rep not in ids
+
     def test_junk_bundle_unenrolled_keyid_excluded(self, tmp_path: Path) -> None:
         """A non-enrolled keyid with a non-claim bundle no longer slips through
         the exempt path: the structural binding rejects it."""
@@ -613,6 +694,10 @@ class TestParticipantBundleBinding:
             victim = g.assert_claim("fabricated", generated_by="x")
         conn = sqlite3.connect(str(_db_path(tmp_path)))
         try:
+            # The adversary in scope holds DB write access, so the append-only
+            # trigger is theirs to drop. The read path is the defence under test.
+            conn.execute("DROP TRIGGER IF EXISTS claims_signed_fields_no_laundering")
+            conn.execute("DROP TRIGGER IF EXISTS claims_signed_promotion_backed")
             conn.execute(
                 "UPDATE claims SET signature_bundle = ?, asserter_keyid = ?, "
                 "support_level = 'REPLICATED' WHERE claim_id = ?",
@@ -626,6 +711,179 @@ class TestParticipantBundleBinding:
             ids = {row["claim_id"]
                    for row in g.query(min_support="REPLICATED", limit=99)}
             assert victim not in ids
+
+
+class TestPublishingSurfacesGateHighTrustRows:
+    """``list_claims`` and the exports behind it gate a high-trust row too.
+
+    The interop exports are the one read path that leaves the machine, so a
+    forged support level does the most damage there. ``list_claims`` flags the
+    row and the exports refuse to publish it.
+    """
+
+    def _forged_replicated_row(self, tmp_path: Path) -> tuple[Path, str, str]:
+        """Build a graph where *victim* wears a bundle copied off *rep*."""
+        sa, sb = _two_signers(tmp_path)
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        pem_a = _signing.public_key_to_pem(sa.public_key())
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            g.enroll_validator(pem_a, identity="a")
+            up = g.assert_claim("anchor", generated_by="seed", seed=True)
+            rep = g.assert_claim("A", supports=[up], generated_by="lab_a", signer=sa)
+            g.assert_claim("B", supports=[up], generated_by="lab_b", signer=sb)
+            victim = g.assert_claim("totally fabricated", generated_by="x")
+            assert g.get_claim(rep)["support_level"] == "REPLICATED"
+
+        conn = sqlite3.connect(str(_db_path(tmp_path)))
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("DROP TRIGGER IF EXISTS claims_signed_fields_no_laundering")
+            conn.execute("DROP TRIGGER IF EXISTS claims_signed_promotion_backed")
+            r = conn.execute(
+                "SELECT signature_bundle, asserter_keyid FROM claims "
+                "WHERE claim_id = ?", (rep,),
+            ).fetchone()
+            conn.execute(
+                "UPDATE claims SET signature_bundle = ?, asserter_keyid = ?, "
+                "support_level = 'REPLICATED' WHERE claim_id = ?",
+                (r["signature_bundle"], r["asserter_keyid"], victim),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return root_key, rep, victim
+
+    def test_list_claims_flags_the_forged_row(self, tmp_path: Path) -> None:
+        root_key, rep, victim = self._forged_replicated_row(tmp_path)
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            by_id = {c["claim_id"]: c for c in list_claims(g._conn)}
+        assert by_id[victim]["support_level"] == "REPLICATED"
+        assert by_id[victim]["verified"] is False
+        assert by_id[rep]["verified"] is True
+
+    def test_exports_refuse_to_publish_the_forged_row(self, tmp_path: Path) -> None:
+        from mareforma.export_bundle import build_statement
+        from mareforma.exporters.jsonld import JSONLDExporter
+        from mareforma.exporters.prov_o import build_prov_o
+        from mareforma.exporters.ro_crate import build_crate
+
+        _, _, victim = self._forged_replicated_row(tmp_path)
+        for build in (
+            lambda: JSONLDExporter(tmp_path).export(),
+            lambda: build_prov_o(tmp_path),
+            lambda: build_crate(tmp_path),
+            lambda: build_statement(tmp_path),
+        ):
+            with pytest.raises(UnverifiedClaimError) as exc:
+                build()
+            assert victim in str(exc.value)
+
+    def test_rows_that_never_saw_verify_on_read_are_refused(
+        self, tmp_path: Path,
+    ) -> None:
+        """A row fetched with a plain select carries no ``verified`` key, so a
+        flag test alone reads it as clean. The gate refuses it instead: the
+        only way past is a row that verify-on-read passed."""
+        from mareforma.db import refuse_unverified_claims
+
+        root_key, rep, _ = self._forged_replicated_row(tmp_path)
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            unflagged = [
+                {k: v for k, v in c.items() if k != "verified"}
+                for c in list_claims(g._conn)
+            ]
+        with pytest.raises(UnverifiedClaimError) as exc:
+            refuse_unverified_claims(unflagged)
+        assert rep in str(exc.value)
+
+    def test_claim_list_marks_the_forged_row(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        from click.testing import CliRunner
+
+        from mareforma.cli import cli
+
+        _, _, victim = self._forged_replicated_row(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        res = CliRunner().invoke(cli, ["claim", "list"])
+        assert res.exit_code == 0, res.output
+        marked = [
+            line for line in res.output.splitlines()
+            if "UNVERIFIED" in line and "totally fabricated" in line
+        ]
+        assert marked, res.output
+        assert victim in res.output
+
+
+class TestVerifyOnReadContentBinding:
+    """Verify-on-read binds the signature to the CONTENT, not only the claim id.
+
+    A process with DB write access is in scope for this gate, so it may drop the
+    append-only trigger first. Rewriting ``text`` under a genuine bundle, or
+    clearing the bundle and then rewriting ``text``, must both leave the row
+    unverified at every gated tier.
+    """
+
+    def _launder(self, tmp_path: Path, claim_id: str, *, drop_bundle: bool) -> None:
+        conn = sqlite3.connect(str(_db_path(tmp_path)))
+        try:
+            conn.execute("DROP TRIGGER IF EXISTS claims_signed_fields_no_laundering")
+            if drop_bundle:
+                conn.execute(
+                    "UPDATE claims SET signature_bundle = NULL WHERE claim_id = ?",
+                    (claim_id,),
+                )
+            conn.execute(
+                "UPDATE claims SET text = 'LAUNDERED' WHERE claim_id = ?",
+                (claim_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _replicated(self, tmp_path: Path) -> tuple[Path, str]:
+        sa, sb = _two_signers(tmp_path)
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            g.enroll_validator(_signing.public_key_to_pem(sa.public_key()),
+                               identity="a")
+            up = g.assert_claim("anchor", generated_by="seed", seed=True)
+            rep = g.assert_claim("A", supports=[up], generated_by="lab_a", signer=sa)
+            g.assert_claim("B", supports=[up], generated_by="lab_b", signer=sb)
+            assert g.get_claim(rep)["support_level"] == "REPLICATED"
+        return root_key, rep
+
+    def _assert_unverified(
+        self, tmp_path: Path, root_key: Path, claim_id: str, level: str,
+    ) -> None:
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            assert g.get_claim(claim_id)["verified"] is False
+            ids = {r["claim_id"] for r in g.query(min_support=level, limit=99)}
+            assert claim_id not in ids
+
+    def test_replicated_text_rewrite_excluded(self, tmp_path: Path) -> None:
+        root_key, rep = self._replicated(tmp_path)
+        self._launder(tmp_path, rep, drop_bundle=False)
+        self._assert_unverified(tmp_path, root_key, rep, "REPLICATED")
+
+    def test_replicated_text_rewrite_without_bundle_excluded(
+        self, tmp_path: Path,
+    ) -> None:
+        root_key, rep = self._replicated(tmp_path)
+        self._launder(tmp_path, rep, drop_bundle=True)
+        self._assert_unverified(tmp_path, root_key, rep, "REPLICATED")
+
+    def test_established_text_rewrite_excluded(self, tmp_path: Path) -> None:
+        root_key, _, rep, _ = _build_established(tmp_path)
+        self._launder(tmp_path, rep, drop_bundle=False)
+        self._assert_unverified(tmp_path, root_key, rep, "ESTABLISHED")
+
+    def test_established_text_rewrite_without_bundle_excluded(
+        self, tmp_path: Path,
+    ) -> None:
+        root_key, _, rep, _ = _build_established(tmp_path)
+        self._launder(tmp_path, rep, drop_bundle=True)
+        self._assert_unverified(tmp_path, root_key, rep, "ESTABLISHED")
 
 
 class TestPromotionDataAxis:
@@ -672,9 +930,12 @@ class TestGrandfatherMigration:
             assert g.get_claim(rep)["support_level"] == "REPLICATED"
 
         # Simulate a pre-asserter_keyid (v0.3.6) graph.db: drop the index + column
-        # so the genuine REPLICATED rows look legacy (NULL keyid) on reopen.
+        # so the genuine REPLICATED rows look legacy (NULL keyid) on reopen. The
+        # append-only trigger references the column, so it goes first; open_db
+        # recreates it after the upgrade re-adds the column.
         conn = sqlite3.connect(str(_db_path(tmp_path)))
         try:
+            conn.execute("DROP TRIGGER IF EXISTS claims_signed_fields_no_laundering")
             conn.execute("DROP INDEX IF EXISTS idx_claims_asserter_keyid")
             conn.execute("ALTER TABLE claims DROP COLUMN asserter_keyid")
             conn.commit()

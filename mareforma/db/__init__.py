@@ -20,6 +20,12 @@ internal organisation, not a public API change.
 from ._schema_sql import (
     _ADDITIVE_TABLES_SQL,
     _SCHEMA_SQL,
+    _SIGNED_FIELDS_TRIGGER_NAME,
+    _SIGNED_FIELDS_TRIGGER_SQL,
+    _PROMOTION_MARKER_TABLE,
+    _PROMOTION_TRIGGER_NAME,
+    _PROMOTION_TRIGGER_SQL,
+    _MANAGED_TRIGGERS,
     _CLAIM_COLUMNS,
     _CLAIM_SELECT,
 )
@@ -141,7 +147,9 @@ from .core import (
     refutation_status,
     verify_claim_signatures,
     _verify_role_signatures,
+    _signed_field_mismatch,
     _json_list,
+    _json_object,
     query_claims,
     search_claims,
     _read_scan_ceiling,
@@ -172,7 +180,7 @@ from .core import (
 )
 from .restore import (
     restore,
-    _rekor_body_binds_to_claim,
+    _claim_envelope,
     _restore_predicate_payload,
     _restore_original_signature_bundle,
     _parse_observed_grounding,
@@ -192,6 +200,7 @@ __all__ = [
     # Schema.
     "_SCHEMA_SQL",
     "_ADDITIVE_TABLES_SQL",
+    "_SIGNED_FIELDS_TRIGGER_SQL",
     "_CLAIM_COLUMNS",
     "_CLAIM_SELECT",
     # Exceptions.

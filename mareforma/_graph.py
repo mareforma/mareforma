@@ -2580,6 +2580,7 @@ class EpistemicGraph:
                 # entry and cryptographically verify before persisting.
                 # On verification failure, the entry stays unlogged
                 # (the operator can retry once they investigate).
+                proof_entry = None
                 if self._rekor_log_pubkey_pem is not None:
                     entry_uuid = entry.get("uuid")
                     if not isinstance(entry_uuid, str) or not entry_uuid:
@@ -2596,8 +2597,9 @@ class EpistemicGraph:
                             entry_uuid, self._rekor_url,
                         )
                         _signing.verify_rekor_inclusion(
-                            full_body, self._rekor_log_pubkey_pem,
+                            full_body, self._rekor_log_pubkey_pem, envelope,
                         )
+                        proof_entry = full_body
                     except _signing.RekorInclusionError as exc:
                         warnings.warn(
                             f"Claim {cid} inclusion-proof verification "
@@ -2617,7 +2619,9 @@ class EpistemicGraph:
                 # Rekor entry. Writing the sidecar first lets the next
                 # refresh route through the saved_entry replay path
                 # above instead.
-                if not _db._record_rekor_inclusion(self._conn, cid, entry):
+                if not _db._record_rekor_inclusion(
+                    self._conn, cid, entry, proof_entry=proof_entry,
+                ):
                     # Sidecar write itself failed (rare; emits its own
                     # warning). Leave the row unlogged, refresh_unsigned
                     # will retry, accepting the duplicate-Rekor-entry

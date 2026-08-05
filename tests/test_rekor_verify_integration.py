@@ -566,3 +566,120 @@ class TestH2SidecarBeforeMarkClaim:
                 "can route through the saved-entry replay path"
             )
             assert "uuid" in entry
+
+
+# ---------------------------------------------------------------------------
+# The sidecar must carry a proof restore can verify
+# ---------------------------------------------------------------------------
+
+
+class TestSidecarHoldsTheInclusionProof:
+    """The sidecar is what claims.toml carries into restore. When the graph
+    was opened with a pinned log key, the proof it verified must be the thing
+    stored, or restore under the same pinned key cannot verify anything."""
+
+    def test_restore_verifies_the_sidecar_under_a_pinned_log_key(
+        self, tmp_path, httpx_mock,
+    ):
+        log_key = Ed25519PrivateKey.generate()
+        log_pem = _pubkey_pem(log_key)
+        _wire_rekor_mock(httpx_mock, log_key=log_key)
+
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(
+            tmp_path,
+            key_path=key_path,
+            rekor_url=_TEST_REKOR_URL,
+            trust_insecure_rekor=True,
+            rekor_log_pubkey_pem=log_pem,
+        ) as graph:
+            cid = graph.assert_claim("witnessed finding", classification="ANALYTICAL")
+            assert graph.get_claim(cid)["transparency_logged"] == 1
+
+        db_dir = tmp_path / ".mareforma"
+        for f in db_dir.iterdir():
+            f.unlink()
+        db_dir.rmdir()
+
+        mareforma.restore(tmp_path, rekor_log_pubkey_pem=log_pem)
+
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            assert graph.get_claim(cid)["transparency_logged"] == 1
+
+
+# ---------------------------------------------------------------------------
+# The proof must be about THIS claim
+# ---------------------------------------------------------------------------
+
+
+def _wire_foreign_entry_mock(
+    httpx_mock, *, log_key, uuid: str = "abc01deadbeef02", log_index: int = 5,
+) -> None:
+    """POST mirrors the submission, so submit_to_rekor accepts it. The GET
+    answers with a DIFFERENT entry that is genuinely in the log: a real audit
+    path under a checkpoint signed by the real log key, recording material
+    that belongs to another claim. This is what a hostile or compromised log
+    returns to make a claim look witnessed after mutating its entry."""
+    import httpx
+
+    def post_callback(request: httpx.Request) -> httpx.Response:
+        spec = json.loads(request.content)["spec"]
+        return httpx.Response(201, json=_build_rekor_post_response(
+            payload_hash=spec["data"]["hash"]["value"],
+            sig_b64=spec["signature"]["content"],
+            uuid=uuid, log_index=log_index,
+        ))
+
+    def get_callback(request: httpx.Request) -> httpx.Response:
+        foreign = _build_rekor_post_response(
+            payload_hash="ab" * 32, sig_b64="Zm9yZWlnbi1zaWduYXR1cmU=",
+            uuid=uuid, log_index=log_index,
+        )
+        return httpx.Response(200, json=_build_rekor_get_response_with_proof(
+            post_body_dict=foreign, log_key=log_key,
+            tree_leaves=11, target_index=log_index,
+        ))
+
+    httpx_mock.add_callback(
+        post_callback, method="POST", url=_TEST_REKOR_URL,
+        is_reusable=True, is_optional=True,
+    )
+    httpx_mock.add_callback(
+        get_callback, method="GET", url=f"{_TEST_REKOR_URL}/{uuid}",
+        is_reusable=True, is_optional=True,
+    )
+
+
+class TestProofMustBindToTheClaim:
+    def test_foreign_entry_leaves_the_claim_unlogged(self, tmp_path, httpx_mock):
+        log_key = Ed25519PrivateKey.generate()
+        _wire_foreign_entry_mock(httpx_mock, log_key=log_key)
+
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(
+            tmp_path,
+            key_path=key_path,
+            rekor_url=_TEST_REKOR_URL,
+            trust_insecure_rekor=True,
+            rekor_log_pubkey_pem=_pubkey_pem(log_key),
+        ) as graph:
+            with pytest.warns(UserWarning, match="inclusion-proof verification failed"):
+                cid = graph.assert_claim("substituted", classification="ANALYTICAL")
+            claim = graph.get_claim(cid)
+        assert claim["transparency_logged"] == 0
+
+    def test_require_rekor_raises_on_a_foreign_entry(self, tmp_path, httpx_mock):
+        log_key = Ed25519PrivateKey.generate()
+        _wire_foreign_entry_mock(httpx_mock, log_key=log_key)
+
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(
+            tmp_path,
+            key_path=key_path,
+            rekor_url=_TEST_REKOR_URL,
+            trust_insecure_rekor=True,
+            rekor_log_pubkey_pem=_pubkey_pem(log_key),
+            require_rekor=True,
+        ) as graph:
+            with pytest.raises(_signing.SigningError, match="verification failed"):
+                graph.assert_claim("substituted", classification="ANALYTICAL")

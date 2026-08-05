@@ -500,7 +500,8 @@ cannot bypass them.
 | INSERT at any level | `claims_insert_state_check` | ESTABLISHED without `validation_signature`; PRELIMINARY with `validated_by` set; non-PRELIMINARY non-ESTABLISHED birth states |
 | PRELIMINARY → REPLICATED → ESTABLISHED (one-way) | `claims_update_state_check` | downgrades; bypass of REPLICATED via PRELIMINARY → ESTABLISHED |
 | status = 'retracted' is terminal | `claims_update_status_terminal` | the resurrection attack where a born-retracted ESTABLISHED seed is later flipped to 'open' |
-| signed claims are append-only over the predicate | `claims_signed_fields_no_laundering` | direct-SQL UPDATE of `text` / `classification` / `generated_by` / `supports_json` / `contradicts_json` / `source_name` / `artifact_hash` / `ev_*` / `evidence_json` / `statement_cid` / `prev_hash` / `created_at` on a row with `signature_bundle IS NOT NULL` |
+| signed claims are append-only over the predicate | `claims_signed_fields_no_laundering` | direct-SQL UPDATE of `text` / `classification` / `generated_by` / `supports_json` / `contradicts_json` / `source_name` / `artifact_hash` / `ev_*` / `evidence_json` / `observed_grounding` / `statement_cid` / `prev_hash` / `created_at` / `asserter_keyid` / `predicate_payload` on a row with `signature_bundle IS NOT NULL`, and any UPDATE that sets `signature_bundle` back to NULL on such a row |
+| a signed claim is promoted only by a promotion path | `claims_signed_promotion_backed` | direct-SQL UPDATE of `support_level` on a row with `signature_bundle IS NOT NULL` outside a promotion window; the level itself is re-derived from signed evidence on every read, so a row promoted after the trigger is dropped is served `verified=False` |
 | signed claims cannot be deleted | `claims_signed_no_delete` | the wipe-and-rewrite attack where a Rekor-logged ESTABLISHED claim is deleted from `graph.db` and `claims.toml` is regenerated as if it never existed |
 
 ### Append-only sidecars
@@ -570,10 +571,12 @@ this is the consolidated view.
 | Validator who didn't review the cited evidence | `_verify_evidence_seen`, each cited claim_id must exist in the graph with `created_at <= validated_at` |
 | Forged validation envelope (different signer, same claim_id) | `db.validate_claim` `verify_envelope`s against the claimed signer's pubkey from the validators table before any gate fires |
 | Replay of a validation envelope onto a different claim | envelope payload-field equality check refuses `claim_id` mismatch |
-| Direct-SQL forgery of a high-trust row served from the read path | verify-on-read: `get_claim` / `query` / `query_provenance` re-verify the validation envelope (ESTABLISHED) and the asserter bundle (REPLICATED, enrolled asserter); a forged or tampered signature is excluded from `query` and flagged `verified=false` from `get_claim`, never raising. Legacy unsigned REPLICATED rows are verify-exempt |
+| Direct-SQL forgery of a high-trust row served from the read path | verify-on-read: `get_claim` / `query` / `query_provenance` re-verify the asserter bundle (REPLICATED and ESTABLISHED) plus the validation envelope (ESTABLISHED), and hold the bundle's signed predicate against every signed field on the row, so a rewritten field cannot hide under an envelope that still verifies; a forged, tampered or removed signature is excluded from `query` and flagged `verified=false` from `get_claim`, never raising. Legacy unsigned rows (no bundle, no `asserter_keyid`) are verify-exempt |
+| Direct-SQL promotion of a row whose signature still verifies | `support_level` is not signed, so the read path re-derives it: a stored REPLICATED (and the rung an ESTABLISHED climbed through) must show a signature-verified replication verdict naming the claim, or distinct-signer convergence on a shared ESTABLISHED anchor. The same rule refuses the row on restore. A row that cannot show it is excluded and flagged exactly like a signature mismatch |
 | Tampered TOML in restore (any signed field, any verdict field, any evidence value) | restore re-derives canonical bytes and refuses on mismatch |
 | SQL-injected parallel root validator | singleton-root invariant: any second self-signed root breaks `is_enrolled` for every key |
 | Rekor log operator mutates / removes / repositions an entry after submit | opt-in inclusion-proof verification re-derives the Merkle root and checks against the log's signed checkpoint |
+| Hostile Rekor answers the re-fetch with a different entry it really did log | `fetch_inclusion_proof` requires the returned uuid to be the one asked for, and `verify_rekor_inclusion` binds the proven body to the claim's payload hash + signature (`entry_claim_mismatch`) |
 | Hostile Rekor returns a `uuid` with path-traversal or query-string characters | `fetch_inclusion_proof` validates uuid against a hex regex before URL substitution |
 | Hostile Rekor returns a `logIndex` / `treeSize` that's a float or bool | strict int parsing surfaces as `malformed_proof` |
 | `rekor_url` pointing at loopback / private IP / non-HTTPS | `validate_rekor_url` SSRF defense; also called by `fetch_inclusion_proof` and `fetch_log_pubkey` |
@@ -611,7 +614,8 @@ For the reader who wants to read the actual enforcement:
   `_verify_and_insert_contradiction_verdict` in [`mareforma/db/restore.py`](mareforma/db/restore.py)
 - **Rekor inclusion verification**: `verify_rekor_inclusion`,
   `verify_merkle_inclusion_proof`, `verify_rekor_checkpoint`,
-  `fetch_inclusion_proof`, `fetch_log_pubkey` in
+  `rekor_entry_binds_to_envelope`, `fetch_inclusion_proof`,
+  `fetch_log_pubkey` in
   [`mareforma/signing/rekor.py`](mareforma/signing/rekor.py)
 - **TOFU pubkey pinning**: `_pem_canonical_der` +
   `O_CREAT|O_EXCL` write in [`mareforma/__init__.py`](mareforma/__init__.py)
