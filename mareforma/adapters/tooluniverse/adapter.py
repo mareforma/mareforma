@@ -7,7 +7,8 @@ Wraps any object satisfying the :class:`Tool` protocol so each
 The adapter supports a sync path against in-process Python tools,
 cache-hit-as-fresh-claim semantics and the ``mareforma-tu`` CLI,
 ``.call_async`` for TaskManager-shaped async tools, and hardening
-against adversarial inputs with selective wrapping.
+against adversarial inputs. Which tools get wrapped is the caller's
+decision: every tool handed to the adapter is recorded.
 """
 
 from __future__ import annotations

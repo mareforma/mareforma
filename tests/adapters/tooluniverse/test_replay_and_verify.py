@@ -224,6 +224,70 @@ def test_replay_flags_tool_version_drift(graph):
     assert "tool_version" in result.diff_fields
 
 
+class _DriftedResult(OpenTargetsSearchTargetsMock):
+    """Same version, different answer: the drift replay exists to catch."""
+
+    def call(self, **kwargs) -> dict:
+        result = super().call(**kwargs)
+        result["data"]["search"]["total"] = 99
+        return result
+
+
+def test_replay_flags_result_digest_drift(graph):
+    cid = _record_call(graph)
+    key, _ = _registry_key(graph, cid)
+
+    result = replay_from_claim(graph, cid, {key: _DriftedResult()})
+
+    assert result.ok is False
+    assert "result_digest" in result.diff_fields
+    assert "tool_version" not in result.diff_fields
+    assert result.observed_result_digest != result.expected_result_digest
+
+
+def test_replay_flags_tool_config_fingerprint_drift(graph):
+    cid = _record_call(graph)
+    key, _ = _registry_key(graph, cid)
+
+    result = replay_from_claim(
+        graph, cid, {key: OpenTargetsSearchTargetsMock()},
+        expected_tool_config_fingerprint="sha256:" + "0" * 64,
+    )
+
+    assert result.ok is False
+    assert result.diff_fields == ("tool_config_fingerprint",)
+
+
+def test_replay_accepts_the_pinned_tool_config_fingerprint(graph):
+    cid = _record_call(graph)
+    key, predicate = _registry_key(graph, cid)
+
+    result = replay_from_claim(
+        graph, cid, {key: OpenTargetsSearchTargetsMock()},
+        expected_tool_config_fingerprint=predicate["tool_config_fingerprint"],
+    )
+
+    assert result.ok is True
+    assert result.diff_fields == ()
+
+
+def test_replay_flags_arguments_edited_after_the_fact(graph):
+    """Stored canonical args that no longer hash to the pinned digest."""
+    cid = _record_call(graph)
+    key, predicate = _registry_key(graph, cid)
+    predicate["arguments_canonical"] = {"target": "BRAF"}
+    edited = graph.assert_claim(
+        encode_predicate_into_text(predicate, "a re-encoded tool call"),
+    )
+
+    result = replay_from_claim(
+        graph, edited, {key: OpenTargetsSearchTargetsMock()},
+    )
+
+    assert result.ok is False
+    assert "arguments_digest" in result.diff_fields
+
+
 # --- verify_tool_call_envelope -------------------------------------------
 
 def test_verify_envelope_extracts_predicate(graph, tmp_path: Path):

@@ -147,6 +147,41 @@ class TestContentTruncation:
         # The digest binds the FULL content even though the body was truncated.
         assert captured[0]["data"]["content_digest_sha256"].startswith("sha256:")
 
+    def test_near_boundary_content_is_not_truncated(self, monkeypatch):
+        """A post whose char-count estimate exceeds the cap but whose
+        encoded length does not must pass through whole, with the digest
+        over the full bytes."""
+        from mareforma.adapters.clawinstitute import event_hook as eh_mod
+        monkeypatch.setattr(eh_mod, "_MAX_CONTENT_BYTES", 64)
+
+        hook = EventHook()
+        h, captured = _captured_handler()
+        hook.subscribe(h)
+        # 32 ASCII chars: the 4-bytes-per-char estimate says 128, over
+        # the cap; the encoded body is 32 bytes, under it.
+        content = "x" * 32
+        hook.dispatch({"id": "p", "content": content})
+
+        assert captured[0]["data"]["content_truncated"] is False
+        assert captured[0]["data"]["content_digest_sha256"] == (
+            "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
+        )
+
+    def test_no_dead_byte_cap_fast_path(self):
+        """The cap check encodes once, unconditionally.
+
+        A guard whose two arms encode the same bytes buys nothing, and
+        its comment claimed a saving the digest below already spends.
+        The `else` arm also hard-coded the too-big answer instead of
+        measuring it, so a later edit could break it in silence.
+        """
+        import inspect
+
+        from mareforma.adapters.clawinstitute import event_hook as eh_mod
+
+        src = inspect.getsource(eh_mod.EventHook._to_payload)
+        assert "char_estimate_bytes" not in src
+
     def test_sanitize_char_cap_signal_propagates(self, monkeypatch):
         """sanitize_for_llm has its own 100k-char cap; truncation there
         must set content_truncated=True with reason 'sanitize_char_cap'."""

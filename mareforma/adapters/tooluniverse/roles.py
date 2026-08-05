@@ -1,16 +1,21 @@
-"""Role attestations: per-actor signed sub-attestations on a tool-call envelope.
+"""Role attestations: per-actor signed sub-attestations for a tool call.
 
 Each tool-call envelope carries a primary DSSE signature from the
-calling identity. Roles attach SECONDARY signed attestations as a
-sidecar field (``role_attestations``), each one a `(role, payload,
-signature)` triple signed by the role's own key.
+calling identity. A role attestation is a SECONDARY `(role, payload,
+signature)` triple signed by the role's own key. This module signs and
+verifies those triples; where a caller carries them is the caller's
+choice, and mareforma's own read path reports the roles recorded in the
+envelope's ``signatures[]`` entries instead.
 
 The signed bytes for a role attestation are::
 
-    DSSE-PAE("application/x-mareforma-role+json", canonical-bytes(payload))
+    DSSE-PAE("application/x-mareforma-role+json", sorted-key-json(payload))
 
 so the signing covers the role+payload pair, not raw payload bytes,
-preventing role-confusion across attestation types.
+preventing role-confusion across attestation types. The PAE wrap is
+:func:`mareforma.signing.dsse_pae`, the same one the claim envelopes
+use. The payload bytes are a local sorted-key JSON form, not the JCS
+canonicaliser behind :func:`mareforma.signing.canonical_statement`.
 
 This module defines four roles, mirroring the provenance-aware
 execution package's ``claim-with-roles/v1`` predicate variant:
@@ -43,7 +48,6 @@ __all__ = [
     "InvalidRoleAttestationError",
     "sign_role_attestation",
     "verify_role_attestation",
-    "attach_role_attestation",
 ]
 
 
@@ -66,36 +70,18 @@ class InvalidRoleAttestationError(ValueError):
 def _canonical_payload_bytes(role: str, payload: dict[str, Any]) -> bytes:
     """Canonicalise the role-attestation payload to deterministic bytes.
 
-    Uses JSON-with-sorted-keys (the same byte-stable shape mareforma's
-    own signed predicate uses). NaN/Inf rejected: we want the same
-    finiteness guarantees as the rest of the package.
+    A local JSON-with-sorted-keys form, deliberately not the RFC 8785
+    JCS canonicaliser behind ``signing.canonical_statement``: the two
+    emit different bytes for the same input, and changing these bytes
+    would invalidate every attestation already signed. NaN/Inf
+    rejected: we want the same finiteness guarantees as the rest of
+    the package.
     """
 
     body = {"role": role, "payload": payload}
     return json.dumps(
         body, sort_keys=True, separators=(",", ":"), allow_nan=False,
     ).encode("utf-8")
-
-
-def _dsse_pae(payload_type: str, payload: bytes) -> bytes:
-    """DSSE Pre-Authentication Encoding.
-
-    Matches mareforma's own DSSE-PAE shape: ``"DSSEv1 " + len(type) +
-    " " + type + " " + len(payload) + " " + payload``. Means a
-    signature on (type_a, payload) cannot be replayed as (type_b,
-    payload).
-    """
-
-    return (
-        b"DSSEv1 "
-        + str(len(payload_type)).encode("ascii")
-        + b" "
-        + payload_type.encode("ascii")
-        + b" "
-        + str(len(payload)).encode("ascii")
-        + b" "
-        + payload
-    )
 
 
 def sign_role_attestation(
@@ -114,7 +100,7 @@ def sign_role_attestation(
             )
         )
     payload_bytes = _canonical_payload_bytes(role, payload)
-    pae = _dsse_pae(ROLE_ATTESTATION_PAYLOAD_TYPE, payload_bytes)
+    pae = mf_signing.dsse_pae(ROLE_ATTESTATION_PAYLOAD_TYPE, payload_bytes)
     sig = signer.sign(pae)
     return {
         "role": role,
@@ -148,7 +134,7 @@ def verify_role_attestation(attestation: dict[str, Any], public_key: Any) -> dic
         raise InvalidRoleAttestationError(
             f"role attestation has invalid base64: {exc}"
         ) from exc
-    pae = _dsse_pae(ROLE_ATTESTATION_PAYLOAD_TYPE, payload_bytes)
+    pae = mf_signing.dsse_pae(ROLE_ATTESTATION_PAYLOAD_TYPE, payload_bytes)
     try:
         public_key.verify(sig, pae)
     except Exception as exc:
@@ -177,21 +163,3 @@ def verify_role_attestation(attestation: dict[str, Any], public_key: Any) -> dic
             "role attestation payload role mismatch"
         )
     return body["payload"]
-
-
-def attach_role_attestation(
-    envelope: dict[str, Any], attestation: dict[str, Any]
-) -> dict[str, Any]:
-    """Append ``attestation`` to ``envelope["role_attestations"]``.
-
-    Returns a new envelope dict (does not mutate the input). The outer
-    DSSE-signed bytes (``payload``, ``signatures``) are untouched:
-    role attestations live on a sidecar key, so attaching one cannot
-    break the outer signature.
-    """
-
-    new_env = dict(envelope)
-    existing = list(envelope.get("role_attestations") or [])
-    existing.append(attestation)
-    new_env["role_attestations"] = existing
-    return new_env

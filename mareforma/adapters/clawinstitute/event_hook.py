@@ -141,17 +141,8 @@ class EventHook:
                 f"got {type(raw_content).__name__}"
             )
 
-        # Cheap upper bound: UTF-8 is ≤4 bytes/char, so any string
-        # whose char-count * 4 fits in the cap is guaranteed to fit.
-        # Only allocate the full encoded bytes when we're close to the
-        # boundary, OR when we need them for the digest.
-        char_estimate_bytes = len(raw_content) * 4
-        if char_estimate_bytes > _MAX_CONTENT_BYTES:
-            raw_bytes = raw_content.encode("utf-8", errors="replace")
-            actual_too_big = len(raw_bytes) > _MAX_CONTENT_BYTES
-        else:
-            raw_bytes = raw_content.encode("utf-8", errors="replace")
-            actual_too_big = False
+        raw_bytes = raw_content.encode("utf-8", errors="replace")
+        actual_too_big = len(raw_bytes) > _MAX_CONTENT_BYTES
 
         # SHA-256 of the FULL raw bytes — content-addressable. A
         # downstream verifier can re-fetch the post body and confirm

@@ -7,16 +7,24 @@ Conceptual clusters:
   recorded claim shape.
 - :class:`TestIdentitySanitization` — the tool name, role and
   namespace are scrubbed before they are signed.
+- :class:`TestResultSizeCap` — over-cap results are refused, never
+  truncated into a digest no replayer can re-derive.
+- :class:`TestMissingToolVersion` — a version-less tool warns and
+  records `unknown`.
 - :class:`TestExecClassClaim` — exec-class tools attest only the
   execution environment they actually reported.
 - :class:`TestCacheLineage` — a callee's declared cache origin is
   recorded, never turned into a graph edge.
+- :class:`TestAsyncCall` — the async path records the task id and
+  writes no claim when the call fails.
 - :class:`TestToolCallRecorder` — coexistence convention shim.
 - :class:`TestImportHygiene` — import-time registry pollution check.
 """
 
 from __future__ import annotations
 
+import asyncio
+import importlib
 import json
 from pathlib import Path
 from typing import Any
@@ -116,6 +124,66 @@ class TestIdentitySanitization:
         assert row["generated_by"] == "adapter/executor/PlainTool"
         assert row["source_name"] == "registry/PlainTool"
         assert "​" not in row["text"]
+
+    def test_non_string_tool_name_is_recorded_as_text(self, graph):
+        from mareforma.adapters.tooluniverse import ProvenanceToolAdapter
+        pta = ProvenanceToolAdapter(tool=_NamedMock(1234), graph=graph)
+        claim_id = pta.call()["metadata"]["mareforma_claim_id"]
+
+        assert graph.get_claim(claim_id)["source_name"] == "tooluniverse/1234"
+
+    def test_tool_name_that_scrubs_to_nothing_is_refused(self, graph):
+        from mareforma.adapters.tooluniverse import ProvenanceToolAdapter
+        with pytest.raises(ValueError, match="tool.name sanitised to empty"):
+            ProvenanceToolAdapter(tool=_NamedMock("​"), graph=graph)
+
+
+class _OversizeMock:
+    """Tool whose canonical result overruns any modest byte cap."""
+
+    name = "bulk_fetch"
+    version = "1.0.0"
+
+    def call(self, **kwargs: Any) -> dict[str, Any]:
+        return {"data": {"rows": ["x" * 256]}, "metadata": {}}
+
+
+class TestResultSizeCap:
+    def test_refuses_to_sign_an_over_cap_result(self, graph):
+        from mareforma.adapters.tooluniverse import (
+            ProvenanceToolAdapter, ResultTooLargeError,
+        )
+        pta = ProvenanceToolAdapter(
+            tool=_OversizeMock(), graph=graph, max_result_bytes=64,
+        )
+        with pytest.raises(ResultTooLargeError, match="cap is 64"):
+            pta.call()
+        assert graph.query(include_unverified=True) == []
+
+
+class _VersionlessMock:
+    """Tool that reports no version at all."""
+
+    name = "versionless_tool"
+
+    def call(self, **kwargs: Any) -> dict[str, Any]:
+        return {"data": {"ok": True}, "metadata": {}}
+
+
+class TestMissingToolVersion:
+    def test_warns_and_records_unknown(self, graph):
+        from mareforma.adapters.tooluniverse import (
+            MissingToolVersionWarning, ProvenanceToolAdapter,
+        )
+        from mareforma.adapters.tooluniverse.predicate import (
+            decode_predicate_from_text,
+        )
+        with pytest.warns(MissingToolVersionWarning, match="versionless_tool"):
+            pta = ProvenanceToolAdapter(tool=_VersionlessMock(), graph=graph)
+
+        claim_id = pta.call()["metadata"]["mareforma_claim_id"]
+        predicate = decode_predicate_from_text(graph.get_claim(claim_id)["text"])
+        assert predicate["tool_version"] == "unknown"
 
 
 class _PythonExecMock:
@@ -241,6 +309,81 @@ class TestCacheLineage:
             predicate = decode_predicate_from_text(row["text"])
             assert predicate["cache_original_claim_id"] == anchor
 
+    def test_only_the_operator_parent_becomes_a_supports_edge(self, graph):
+        from mareforma.adapters.tooluniverse import ProvenanceToolAdapter
+        from mareforma.adapters.tooluniverse.predicate import (
+            decode_predicate_from_text,
+        )
+        parent = graph.assert_claim("the step that decided to call the tool")
+        origin = graph.assert_claim("the finding the cache says it served")
+        pta = ProvenanceToolAdapter(
+            tool=_CacheHitMock(origin), graph=graph, parent_claim_id=parent,
+        )
+        result = pta.call(target="EGFR")
+
+        row = graph.get_claim(result["metadata"]["mareforma_claim_id"])
+        assert json.loads(row["supports_json"]) == [parent]
+        predicate = decode_predicate_from_text(row["text"])
+        assert predicate["parent_claim_id"] == parent
+        assert predicate["cache_original_claim_id"] == origin
+
+
+class _TaskManagerMock:
+    """TaskManager shape: ``start_call`` hands back a task id and an awaitable."""
+
+    name = "async_search"
+    version = "2.0.0"
+
+    def __init__(self, fail_at: str | None = None) -> None:
+        self.task_id = "task-42"
+        self._fail_at = fail_at
+
+    async def start_call(self, **kwargs: Any) -> tuple[str, Any]:
+        if self._fail_at == "start":
+            raise RuntimeError("task manager refused the call")
+
+        async def _await_result() -> dict[str, Any]:
+            if self._fail_at == "await":
+                raise RuntimeError("task failed after dispatch")
+            return {"data": {"args_echo": dict(kwargs)}, "metadata": {}}
+
+        return self.task_id, _await_result()
+
+
+class TestAsyncCall:
+    def test_records_the_task_id_as_the_tool_call_id(self, graph):
+        from mareforma.adapters.tooluniverse import ProvenanceToolAdapter
+        from mareforma.adapters.tooluniverse.predicate import (
+            decode_predicate_from_text,
+        )
+        tool = _TaskManagerMock()
+        pta = ProvenanceToolAdapter(tool=tool, graph=graph)
+        result = asyncio.run(pta.call_async(target="EGFR"))
+
+        assert result["metadata"]["tool_call_id"] == tool.task_id
+        row = graph.get_claim(result["metadata"]["mareforma_claim_id"])
+        predicate = decode_predicate_from_text(row["text"])
+        assert predicate["tool_call_id"] == tool.task_id
+        assert predicate["arguments_canonical"] == {"target": "EGFR"}
+
+    def test_a_refused_dispatch_writes_no_claim(self, graph):
+        from mareforma.adapters.tooluniverse import ProvenanceToolAdapter
+        pta = ProvenanceToolAdapter(
+            tool=_TaskManagerMock(fail_at="start"), graph=graph,
+        )
+        with pytest.raises(ToolCallError, match="start_call raised"):
+            asyncio.run(pta.call_async(target="EGFR"))
+        assert graph.query(include_unverified=True) == []
+
+    def test_a_failed_await_writes_no_claim(self, graph):
+        from mareforma.adapters.tooluniverse import ProvenanceToolAdapter
+        pta = ProvenanceToolAdapter(
+            tool=_TaskManagerMock(fail_at="await"), graph=graph,
+        )
+        with pytest.raises(ToolCallError, match="await raised"):
+            asyncio.run(pta.call_async(target="EGFR"))
+        assert graph.query(include_unverified=True) == []
+
 
 class TestToolCallRecorder:
     def test_emits_claim(self, graph):
@@ -260,3 +403,23 @@ class TestToolCallRecorder:
 class TestImportHygiene:
     def test_import_does_not_pollute_predicate_registry(self):
         assert _import_registry_delta("mareforma.adapters.tooluniverse") == 0
+
+
+class TestSelectiveWrappingRemoved:
+    """The adapter wraps whatever tool the caller hands it, and says so."""
+
+    def test_selectors_module_gone(self):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module("mareforma.adapters.tooluniverse.selectors")
+
+    def test_docstring_promises_no_selector(self):
+        from mareforma.adapters.tooluniverse import adapter
+        assert "selective wrapping" not in (adapter.__doc__ or "")
+
+
+class TestTelemetryRemoved:
+    """The adapter has one jsonl writer, `mareforma.health`, not two."""
+
+    def test_telemetry_module_gone(self):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module("mareforma.adapters.tooluniverse.telemetry")
