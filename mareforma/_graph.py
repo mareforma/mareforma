@@ -133,6 +133,7 @@ class EpistemicGraph:
         trust_insecure_rekor: bool = False,
         rekor_log_pubkey_pem: bytes | None = None,
         strict_promotion: bool = False,
+        validator_type: str = "human",
     ) -> None:
         self._conn = conn
         self._root = root
@@ -187,19 +188,33 @@ class EpistemicGraph:
                 self._conn,
                 signer,
                 identity=signer_identity or "root",
+                validator_type=validator_type,
                 root=self._root,
             )
             keyid = _signing.public_key_id(signer.public_key())
             if not _validators.is_enrolled(self._conn, keyid):
                 import warnings as _warnings
-                _warnings.warn(
-                    f"Opened project with key {keyid[:12]}… but this key "
-                    "is not an enrolled validator (a different key holds "
-                    "the root). graph.validate() will refuse until this "
-                    "key is enrolled by an existing validator via "
-                    "`mareforma validator add`.",
-                    stacklevel=2,
+                prefix = (
+                    f"Opened project with key {keyid[:12]}… but this key is "
+                    "not an enrolled validator"
                 )
+                roots = _validators.enrollment_roots(self._conn)
+                if len(roots) == 1:
+                    msg = (
+                        f"{prefix} (a different key holds the root). "
+                        "graph.validate() will refuse until this key is "
+                        "enrolled by an existing validator via "
+                        "`mareforma validator add`."
+                    )
+                else:
+                    # Without a single root no chain verifies, for any key.
+                    msg = (
+                        f"{prefix}: the validators table carries {len(roots)} "
+                        "self-signed roots, so no enrollment chain verifies. "
+                        "graph.validate() will refuse for every key until the "
+                        "table is repaired; run `mareforma validator list`."
+                    )
+                _warnings.warn(msg, stacklevel=2)
 
     # ------------------------------------------------------------------
     # Core API
@@ -981,6 +996,9 @@ class EpistemicGraph:
                 "frame_id": proposition.frame_id(),
                 "plan_id": plan_id,
                 **prediction.to_dict(),
+                # The store's word, written last so the attestation can only
+                # restate the predictions row this call is about to write.
+                "preregistered": True,
             },
         )
 
@@ -1347,7 +1365,7 @@ class EpistemicGraph:
                 self._root, "submit_finding",
                 bearing=primary_bearing.direction.value, idempotent=True,
             )
-            view = _store.proposition_status(self._conn, cid)
+            view = _store.proposition_status(self._conn, cid, disclose=self._skips)
             return {
                 "finding_id": existing["finding_id"],
                 "content_id": cid,
@@ -1541,7 +1559,7 @@ class EpistemicGraph:
             # Read the derived status inside the transaction so the returned dict
             # is an isolated snapshot of the graph immediately after this write,
             # not a post-commit read that a concurrent finding could have moved.
-            view = _store.proposition_status(conn, cid)
+            view = _store.proposition_status(conn, cid, disclose=self._skips)
             if _own_txn:
                 conn.commit()
                 # add_claim ran inside this transaction (own_transaction=False),
@@ -1765,7 +1783,7 @@ class EpistemicGraph:
             if isinstance(proposition_or_content_id, str)
             else proposition_or_content_id.content_id()
         )
-        return _store.proposition_status(self._conn, cid)
+        return _store.proposition_status(self._conn, cid, root=self._root)
 
     def get_proposition(self, content_id: str) -> dict | None:
         """Return the stored proposition row as a dict, or None."""
@@ -1791,7 +1809,9 @@ class EpistemicGraph:
             if isinstance(frame_id_or_proposition, str)
             else frame_id_or_proposition.frame_id()
         )
-        return _store.query_frame(self._conn, fid, min_status=min_status)
+        return _store.query_frame(
+            self._conn, fid, min_status=min_status, disclose=self._skips
+        )
 
     def query_for_llm(
         self,
@@ -2074,10 +2094,15 @@ class EpistemicGraph:
         )
 
     def list_validators(self) -> list[dict]:
-        """Return all enrolled validators ordered by enrollment time."""
+        """Return the validator rows, ordered by enrollment time.
+
+        Each row carries ``verified``: False when its enrollment chain does not
+        walk back to the project's single self-signed root, so a planted row is
+        never reported as an enrollment.
+        """
         self._check_open()
         from mareforma import validators as _validators
-        return _validators.list_validators(self._conn)
+        return _validators.list_validators_verified(self._conn)
 
     @_synchronized
     def refresh_convergence(self) -> dict[str, int]:

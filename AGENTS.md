@@ -869,15 +869,25 @@ self-declared `validator_type` field (`'human'` default, or `'llm'`),
 bound into the signed enrollment envelope. This is an honesty signal,
 not a security gate. There is no external attestation of whether a
 key is "really" a human or "really" a bot. Mareforma uses it for
-one rule: a validator with `validator_type='llm'` may sign validation
-envelopes, but mareforma refuses to promote a claim to ESTABLISHED
-on its signature alone. Both via `graph.validate()` (raises
+two rules. First, a validator with `validator_type='llm'` may sign
+validation envelopes, but mareforma refuses to promote a claim to
+ESTABLISHED on its signature alone. Both via `graph.validate()` (raises
 `LLMValidatorPromotionError`) and via the seed-claim bootstrap (same
 exception). To promote, an enrolled `human` validator must co-sign
 or re-sign. Mareforma also refuses self-validation when the
 calling signer's keyid equals the claim's `signature_bundle` signing
 keyid (raises `SelfValidationError`). Promotion is always an
 external-witnessing event, regardless of validator type.
+
+Second, the status ladder's independence count reads a supporting
+finding with no observed model call, signed by a `human` validator, on
+its own human axis: a human is not a model, so it needs no distinct
+model. The trust map's per-finding independence disclosure does **not**
+follow that re-key. Because the field is self-declared, defaults to
+`'human'`, and no person attested to the finding itself, an unobserved
+line is soft on the map and reads `UNVERIFIABLE`. Pass
+`mareforma.open(validator_type='llm')` when an agent bootstraps its own
+project, so the root is labelled honestly.
 
 The signal is **self-declared by each validator about itself**. The
 parent's type does not constrain the child's type. An LLM-typed root

@@ -26,6 +26,11 @@ from .core import (
     open_db,
     _compute_prev_hash,
     _is_claim_id,
+    _observed_grounding_promotes,
+    _refuse_llm_contradiction_issuer,
+    _refuse_llm_validator,
+    _refuse_self_validation,
+    _refuse_self_verdict,
     _extract_validation_signer_keyid,
     _extract_signature_bundle_keyid,
     _serialize_observed_grounding,
@@ -772,10 +777,19 @@ def restore(
                 # empty body would slip past verification below (the pinned-key
                 # block is guarded on a truthy raw) while the claim still counts
                 # as witnessed by presence, forging convergence-eligible state.
-                if not r_uuid or not r_raw:
+                # log_index and recorded_at are NOT NULL in the sidecar table.
+                # Left to the INSERT they would be dropped without a word while
+                # the claim already counts as witnessed by presence, leaving the
+                # recovered graph disagreeing with itself and no way back: the
+                # refresh_unsigned retry only revisits transparency_logged=0.
+                if (
+                    not r_uuid or not r_raw
+                    or not isinstance(r_log_index, int) or not r_recorded
+                ):
                     raise RestoreError(
                         f"rekor_inclusions entry for {cid!r} is missing "
-                        "required fields (uuid, raw_response_b64)",
+                        "required fields (uuid, raw_response_b64, "
+                        "log_index as an integer, recorded_at)",
                         kind="rekor_inclusion_invalid",
                     )
                 if rekor_log_pubkey_pem is not None and r_raw:
@@ -830,13 +844,20 @@ def restore(
                             f"claim {cid!r}: {exc}",
                             kind="rekor_inclusion_invalid",
                         ) from exc
-                conn.execute(
-                    "INSERT OR IGNORE INTO rekor_inclusions "
-                    "(claim_id, uuid, log_index, integrated_time, "
-                    "raw_response_b64, recorded_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (cid, r_uuid, r_log_index, r_itime, r_raw, r_recorded),
-                )
+                try:
+                    conn.execute(
+                        "INSERT INTO rekor_inclusions "
+                        "(claim_id, uuid, log_index, integrated_time, "
+                        "raw_response_b64, recorded_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (cid, r_uuid, r_log_index, r_itime, r_raw, r_recorded),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    raise RestoreError(
+                        f"rekor_inclusions entry for {cid!r} could not be "
+                        f"restored: {exc}",
+                        kind="rekor_inclusion_invalid",
+                    ) from exc
 
             if has_rekor_section and rekor_logged_claim_ids:
                 from .errors import RekorSidecarEntryMissingWarning
@@ -1078,75 +1099,141 @@ def _verify_replicated_corroboration(conn: sqlite3.Connection) -> None:
 
     A REPLICATED level is legitimate on either of the two paths that produce it:
 
-    (a) An enrolled validator's signed replication verdict names the claim.
-        Restore verifies each verdict's signature before insert, so a verdict
-        present in the table is itself the verifiable material backing the level.
+    (a) An enrolled validator's signed replication verdict names the claim AND
+        the claim passes the terms that verdict path promotes on. Restore
+        verifies each verdict's signature before insert, but membership proves
+        only that a verdict named the claim: the live path records the verdict
+        for every member of a cluster and promotes the qualifying ones, so a
+        claim that is named and not promoted is normal. ``_promotion_gates_pass``
+        is the difference between the two.
     (b) Automatic convergence: the claim shares an ESTABLISHED anchor in its
         signed ``supports`` with a peer carrying a distinct, non-NULL
-        asserter_keyid.
+        asserter_keyid, a different artifact hash, and a grounding verdict that
+        permits promotion (on both sides).
 
     Path (b) checks durable, signed facts only. It deliberately does NOT re-apply
     the live promotion's point-in-time filters (peer/anchor still ``open``, peer
-    ``t_invalid`` NULL, transparency / grounding gates): those conditions can
-    change AFTER a genuine promotion, the peer can be contradicted or the anchor
-    retracted later, and re-applying them would false-reject an honest
-    REPLICATED that was invalidated or whose anchor was withdrawn after it earned
-    the level. Forgery is still blocked: a lone flipped claim cannot conjure a
-    second real signature on a shared ESTABLISHED anchor, and ESTABLISHED itself
-    is gated by a signed validation envelope restore verifies. Legacy REPLICATED
-    rows predate the asserter_keyid rule and carry a NULL asserter_keyid; they
-    are grandfathered elsewhere and skipped here.
+    ``t_invalid`` NULL, transparency): those conditions can change AFTER a
+    genuine promotion, the peer can be contradicted or the anchor retracted
+    later, and re-applying them would false-reject an honest REPLICATED that was
+    invalidated or whose anchor was withdrawn after it earned the level. The
+    artifact-hash collapse and the observed-grounding gate are different in kind
+    and ARE re-applied: both columns are bound into the signed statement and no
+    code path rewrites either, so a claim that satisfied them at promotion time
+    still satisfies them now. Forgery is still blocked: a lone flipped claim
+    cannot conjure a second real signature on a shared ESTABLISHED anchor, and
+    ESTABLISHED itself is gated by a signed validation envelope restore verifies.
+    Legacy REPLICATED rows predate the asserter_keyid rule and carry a NULL
+    asserter_keyid; they are grandfathered elsewhere and skipped here.
     """
     rows = conn.execute(
-        "SELECT claim_id, asserter_keyid, supports_json FROM claims "
+        "SELECT claim_id, asserter_keyid, supports_json, artifact_hash, "
+        "observed_grounding FROM claims "
         "WHERE support_level = 'REPLICATED' AND asserter_keyid IS NOT NULL"
     ).fetchall()
+    if not rows:
+        return
+    # Both probes are answered once for the whole graph rather than once per
+    # row: neither has an index that can serve it, so per-row probing costs a
+    # full scan each time and restore's cost becomes quadratic in graph size.
+    verdict_claim_ids = {
+        cid
+        for v in conn.execute(
+            "SELECT member_claim_id, other_claim_id FROM replication_verdicts"
+        )
+        for cid in (v["member_claim_id"], v["other_claim_id"])
+        if cid is not None
+    }
+    # Every ESTABLISHED anchor mapped to the (keyid, artifact_hash) pairs of
+    # the promotion-eligible claims citing it. A keyid other than the row's own
+    # necessarily belongs to another claim, so this subsumes the old "peer is a
+    # different claim" guard. The grounding gate mirrors the live peer clause.
+    peers_by_anchor: dict[str, set[tuple[str, str | None]]] = {}
+    for e in conn.execute(
+        "SELECT j.value AS anchor_id, c.asserter_keyid AS keyid, "
+        "c.artifact_hash AS artifact_hash "
+        "FROM claims c, json_each(c.supports_json) j "
+        "JOIN claims a ON a.claim_id = j.value "
+        "AND a.support_level = 'ESTABLISHED' "
+        "WHERE c.asserter_keyid IS NOT NULL "
+        "AND (c.observed_grounding IS NULL OR ("
+        "  CASE WHEN json_valid(c.observed_grounding) "
+        "  THEN json_extract(c.observed_grounding, '$.grounding') "
+        "  ELSE NULL END) = 'GROUNDED')"
+    ):
+        peers_by_anchor.setdefault(e["anchor_id"], set()).add(
+            (e["keyid"], e["artifact_hash"])
+        )
     for r in rows:
         claim_id = r["claim_id"]
-        asserter_keyid = r["asserter_keyid"]
-        # (a) Named in a signature-verified replication verdict.
-        if conn.execute(
-            "SELECT 1 FROM replication_verdicts "
-            "WHERE member_claim_id = ? OR other_claim_id = ? LIMIT 1",
-            (claim_id, claim_id),
-        ).fetchone() is not None:
+        # (a) Named in a signature-verified replication verdict, and promotable
+        # on the terms that path applies before it lifts a member.
+        if claim_id in verdict_claim_ids and _promotion_gates_pass(r):
             continue
         try:
             supports = json.loads(r["supports_json"]) or []
         except (ValueError, TypeError):
             supports = []
-        # (b) Automatic convergence on a shared ESTABLISHED anchor.
-        corroborated = False
-        if supports:
-            sup_ph = ",".join("?" * len(supports))
-            anchors = [
-                a["claim_id"] for a in conn.execute(
-                    f"SELECT claim_id FROM claims "
-                    f"WHERE claim_id IN ({sup_ph}) "
-                    f"AND support_level = 'ESTABLISHED'",
-                    supports,
-                ).fetchall()
-            ]
-            if anchors:
-                anc_ph = ",".join("?" * len(anchors))
-                peer = conn.execute(
-                    f"SELECT 1 FROM claims c, json_each(c.supports_json) j "
-                    f"WHERE j.value IN ({anc_ph}) "
-                    f"AND c.claim_id != ? "
-                    f"AND c.asserter_keyid IS NOT NULL "
-                    f"AND c.asserter_keyid != ? "
-                    f"LIMIT 1",
-                    (*anchors, claim_id, asserter_keyid),
-                ).fetchone()
-                corroborated = peer is not None
+        # (b) Automatic convergence on a shared ESTABLISHED anchor. A peer that
+        # produced byte-identical output is the same result twice, not
+        # corroboration, so an equal non-NULL artifact_hash disqualifies it.
+        own_keyid = r["asserter_keyid"]
+        own_hash = r["artifact_hash"]
+        corroborated = _observed_grounding_promotes(
+            r["observed_grounding"]
+        ) and any(
+            keyid != own_keyid
+            and (artifact_hash is None or own_hash is None
+                 or artifact_hash != own_hash)
+            for anchor in supports
+            for keyid, artifact_hash in peers_by_anchor.get(anchor, ())
+        )
         if not corroborated:
             raise RestoreError(
-                f"Claim {claim_id} is stored as REPLICATED but no distinct-signer "
-                "corroboration on a shared ESTABLISHED anchor backs it. The "
-                "support level is not a signed field; this one is unverifiable "
-                "and the backup may be tampered.",
+                f"Claim {claim_id} is stored as {r['support_level']} but no "
+                "distinct-signer corroboration on a shared ESTABLISHED anchor "
+                "backs the REPLICATED rung it stands on: a peer "
+                "must carry a different artifact hash, and neither side may "
+                "carry a non-promoting grounding verdict. A replication verdict "
+                "naming the claim does not settle it either: a verdict names "
+                "every member of its cluster and promotes only the qualifying "
+                "ones. The support level is not a signed field; this one is "
+                "unverifiable and the backup may be tampered.",
                 kind="claim_unverified",
             )
+
+
+def _gate_replayed_verdict_issuer(
+    conn: sqlite3.Connection,
+    issuer_keyid: str,
+    claims: tuple[tuple[str, str], ...],
+    *,
+    verdict_kind: str,
+    ctx: str,
+    refuse_llm_issuer: bool = False,
+) -> None:
+    """Hold a replayed verdict to the issuer-identity gates the live path runs.
+
+    *claims* pairs each referenced claim_id with its relation name. A verified
+    signature proves the issuer signed the verdict; these gates decide whether
+    that issuer was entitled to. ``refuse_llm_issuer`` adds the llm ceiling the
+    contradiction path carries, since a contradiction invalidates the older
+    claim through the insert trigger. Both refusals become RestoreError, the
+    failure mode restore's callers handle.
+    """
+    try:
+        if refuse_llm_issuer:
+            _refuse_llm_contradiction_issuer(conn, issuer_keyid)
+        for claim_id, relation in claims:
+            _refuse_self_verdict(
+                conn, issuer_keyid, claim_id,
+                relation=relation, verdict_kind=verdict_kind,
+            )
+    except (LLMValidatorPromotionError, VerdictIssuerError) as exc:
+        raise RestoreError(
+            f"{ctx} was issued by a key the live path refuses: {exc}",
+            kind="claim_unverified",
+        ) from exc
 
 
 def _verify_and_insert_replication_verdict(

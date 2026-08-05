@@ -100,7 +100,10 @@ mareforma validator add --pubkey ./bot.pub.pem --identity reviewer-bot --type ll
 
 ### validator list
 
-List enrolled validators in the order they were added.
+List the project's validators in the order they were added. Each row is
+checked against the enrollment chain: a row that does not chain back to the
+single self-signed root is marked `UNVERIFIED` (`"verified": false` under
+`--json`) and the command exits 1.
 
 ```bash
 mareforma validator list [OPTIONS]

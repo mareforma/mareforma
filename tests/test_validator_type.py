@@ -69,6 +69,22 @@ class TestEnrollmentDefault:
         assert row is not None
         assert row["validator_type"] == "human"
 
+    def test_open_can_declare_an_llm_root(self, tmp_path: Path) -> None:
+        """An autonomous agent bootstrapping its own project must be able to
+        label itself honestly; without this the root is always 'human'."""
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        with mareforma.open(
+            tmp_path, key_path=root_key, validator_type="llm",
+        ) as g:
+            keyid = _signing.public_key_id(g._signer.public_key())
+            row = _validators.get_validator(g._conn, keyid)
+        assert row["validator_type"] == "llm"
+
+    def test_open_refuses_an_unknown_root_type(self, tmp_path: Path) -> None:
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        with pytest.raises(_validators.InvalidValidatorTypeError):
+            mareforma.open(tmp_path, key_path=root_key, validator_type="robot")
+
     def test_enroll_validator_defaults_to_human(self, tmp_path: Path) -> None:
         root_key = _bootstrap_key(tmp_path, "root.key")
         other_key = _bootstrap_key(tmp_path, "other.key")

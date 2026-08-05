@@ -75,7 +75,6 @@ class Prediction:
     # equivalence only (the null is bracketed by [lower, upper])
     equivalence_lower: float | None = None
     equivalence_upper: float | None = None
-    preregistered: bool = False
     inference_regime: InferenceRegime = InferenceRegime.FREQUENTIST
 
     def __post_init__(self) -> None:
@@ -95,8 +94,16 @@ class Prediction:
                 DirectionOfInterest(self.direction_of_interest),
             )
 
-        if not (0.0 < self.alpha < 1.0):
-            raise ValueError("alpha must be in (0, 1)")
+        # The gate is one-sided at alpha over a two-sided (1 - 2*alpha) CI (see
+        # :func:`mareforma.trust.bearing.compute_bearing`), so alpha >= 0.5 marks
+        # every p-value significant on the p path and demands a CI level of zero
+        # or less on the other. A rule that cannot discriminate is not a rule.
+        if not (0.0 < self.alpha < 0.5):
+            raise ValueError(
+                "alpha must be in (0, 0.5): the gate is one-sided at alpha over "
+                "a (1 - 2*alpha) CI, so alpha >= 0.5 makes every p-value "
+                "significant and leaves no valid CI level"
+            )
 
         if self.test_type is TestType.SUPERIORITY:
             if self.direction_of_interest is None:
@@ -134,6 +141,5 @@ class Prediction:
             ),
             "equivalence_lower": self.equivalence_lower,
             "equivalence_upper": self.equivalence_upper,
-            "preregistered": self.preregistered,
             "inference_regime": self.inference_regime.value,
         }

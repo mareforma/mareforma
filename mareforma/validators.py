@@ -394,6 +394,22 @@ def list_validators(conn: sqlite3.Connection) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def list_validators_verified(conn: sqlite3.Connection) -> list[dict]:
+    """Every validator row plus ``verified``: does its chain walk back to the root?
+
+    :func:`list_validators` is the raw mirror the backup and the export bundle
+    need, and it answers "what is in the table". This answers the operator's
+    question, "who may promote claims here", so it runs the same chain walk
+    every enforcement path runs: a row planted by direct sqlite INSERT, or any
+    row at all once a second self-signed root exists, is reported unverified
+    rather than shown as a healthy enrollment.
+    """
+    return [
+        {**row, "verified": _verify_chain(conn, row["keyid"])}
+        for row in list_validators(conn)
+    ]
+
+
 def count_validators(conn: sqlite3.Connection) -> int:
     """Return the number of enrolled validators."""
     row = conn.execute("SELECT COUNT(*) AS n FROM validators").fetchone()

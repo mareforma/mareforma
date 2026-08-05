@@ -24,6 +24,7 @@ import hashlib
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 
 import mareforma
@@ -212,11 +213,33 @@ class TestSubmitToRekor:
 # Streaming response body (oversized aborts mid-read, not after full buffer)
 # ---------------------------------------------------------------------------
 
-class TestSubmitToRekorStreaming:
-    def test_oversized_chunked_body_aborts_during_read(self, httpx_mock):
-        """No Content-Length, 256 KB of garbage past the 64 KB cap.
-        submit_to_rekor must reject without buffering the whole body
-       , the streaming accumulator is the only line of defense."""
+class _CountingByteStream(httpx.SyncByteStream):
+    """Emit ``chunks`` blocks of ``size`` bytes, counting the ones pulled.
+
+    Passing this as ``httpx.Response(stream=...)`` produces a response with
+    no Content-Length, so the header pre-check cannot fire. A reader that
+    aborts mid-body leaves ``consumed`` below ``chunks``; one that buffers
+    the whole answer drains every block.
+    """
+
+    def __init__(self, chunks: int = 4, size: int = 64 * 1024) -> None:
+        self.chunks = chunks
+        self.size = size
+        self.consumed = 0
+
+    def __iter__(self):
+        for _ in range(self.chunks):
+            self.consumed += 1
+            yield b"X" * self.size
+
+
+class TestRekorStreamingSizeCap:
+    """A chunked response omits Content-Length, so the streaming
+    accumulator is the only line of defense against a hostile or buggy
+    log server. It must stop reading past the cap, not after the body
+    fully lands."""
+
+    def test_submit_aborts_during_read(self, httpx_mock):
         key = _signing.generate_keypair()
         envelope = _signing.sign_claim(
             {"claim_id": "c", "text": "x", "classification": "INFERRED",
@@ -224,20 +247,34 @@ class TestSubmitToRekorStreaming:
              "source_name": None, "created_at": "2026-05-12T00:00:00+00:00"},
             key,
         )
-        huge = b"X" * (256 * 1024)
-        httpx_mock.add_response(
-            method="POST", url=_TEST_REKOR_URL, status_code=201,
-            content=huge,
+        stream = _CountingByteStream()
+        httpx_mock.add_callback(
+            lambda request: httpx.Response(201, stream=stream),
+            method="POST", url=_TEST_REKOR_URL,
         )
         logged, entry = _signing.submit_to_rekor(
             envelope, key.public_key(), rekor_url=_TEST_REKOR_URL,
         )
         assert logged is False
         assert entry is None
+        assert 0 < stream.consumed < stream.chunks
+
+    def test_fetch_inclusion_proof_aborts_during_read(self, httpx_mock):
+        stream = _CountingByteStream()
+        httpx_mock.add_callback(
+            lambda request: httpx.Response(200, stream=stream),
+            method="GET",
+        )
+        with pytest.raises(_signing.RekorInclusionError) as exc_info:
+            _signing.fetch_inclusion_proof(
+                "ab" * 32, "https://rekor.test.example/api/v1/log/entries",
+            )
+        assert exc_info.value.reason == "malformed_proof"
+        assert 0 < stream.consumed < stream.chunks
 
 
 # ---------------------------------------------------------------------------
-# Rekor response size cap (header pre-check + actual bytes)
+# Rekor response size cap (header pre-check)
 # ---------------------------------------------------------------------------
 
 class TestRekorResponseSizeCap:
@@ -253,27 +290,6 @@ class TestRekorResponseSizeCap:
             method="POST", url=_TEST_REKOR_URL, status_code=201,
             content=b"{}",
             headers={"content-length": "10485760"},  # 10 MiB
-        )
-        logged, _ = _signing.submit_to_rekor(
-            envelope, key.public_key(), rekor_url=_TEST_REKOR_URL,
-        )
-        assert logged is False
-
-    def test_oversized_actual_body_rejected(self, httpx_mock):
-        """No Content-Length header, the streaming accumulator must abort
-        once it has read past the cap, before the body fully lands."""
-        key = _signing.generate_keypair()
-        envelope = _signing.sign_claim(
-            {"claim_id": "c", "text": "x", "classification": "INFERRED",
-             "generated_by": "a", "supports": [], "contradicts": [],
-             "source_name": None, "created_at": "2026-05-12T00:00:00+00:00"},
-            key,
-        )
-        # 256 KB filler, well past the 64 KB cap.
-        huge = b"X" * (256 * 1024)
-        httpx_mock.add_response(
-            method="POST", url=_TEST_REKOR_URL, status_code=201,
-            content=huge,
         )
         logged, _ = _signing.submit_to_rekor(
             envelope, key.public_key(), rekor_url=_TEST_REKOR_URL,

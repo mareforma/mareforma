@@ -38,34 +38,75 @@ def _tamper_one_line(conn, root: str) -> None:
     conn.commit()
 
 
-def _forge_bundle_nonenrolled(conn, data_id: str, lineage_json: str) -> None:
-    """Re-point one finding's SIGNED lineage to a distinct model under a
-    non-enrolled, unverifiable signature.
+def _donor_prop():
+    """A proposition distinct from ``_prop()``, for the cross-claim staple."""
+    from mareforma.trust import Direction, Proposition
 
-    The strongest producer forge: rewrite the bundle payload's
-    ``model_lineage``, stamp a non-enrolled keyid, and leave the signature
-    stale. The read must treat an unverifiable bundle as soft, never trust it.
-    Also updates the denormalized column so the two agree.
-    """
-    import base64 as _b64
-    row = conn.execute(
-        "SELECT f.claim_id, f.finding_id, c.signature_bundle "
+    return Proposition(
+        subject="TP53", relation="affects", object="apoptosis",
+        direction=Direction.INCREASES,
+        scope={"population": "TNBC", "condition": "in vitro"},
+    )
+
+
+def _finding_row(conn, data_id: str):
+    """The signed claim row behind the finding that carries *data_id*."""
+    return conn.execute(
+        "SELECT f.claim_id, f.finding_id, c.signature_bundle, c.asserter_keyid, "
+        " el.model_lineage "
         "FROM findings f JOIN claims c ON c.claim_id = f.claim_id "
         "JOIN evidence_lines el ON el.finding_id = f.finding_id "
         "WHERE el.data_id = ? AND c.signature_bundle IS NOT NULL LIMIT 1",
         (data_id,),
     ).fetchone()
+
+
+def _forge_bundle(conn, data_id: str, lineage_json: str,
+                  *, keyid: str | None = None) -> None:
+    """Re-point one finding's SIGNED lineage to a distinct model, leaving the
+    signature stale.
+
+    The producer forge: rewrite the bundle payload's ``model_lineage`` and the
+    denormalized column so the two agree. ``keyid`` stamps a fabricated,
+    non-enrolled signer id (the outsider, whose bundle cannot be verified at
+    all); left None the genuine signer id stays in place, so an enrolled peer
+    editing its own payload is stopped by the signature check alone. Either way
+    the read must treat the lineage as soft, never a counted distinct model.
+    """
+    import base64 as _b64
+    row = _finding_row(conn, data_id)
     env = json.loads(row["signature_bundle"])
     payload = json.loads(_b64.standard_b64decode(env["payload"]))
     payload["predicate"]["observed_grounding"]["model_lineage"] = json.loads(
         lineage_json)
     env["payload"] = _b64.standard_b64encode(
         json.dumps(payload).encode()).decode()
-    env["signatures"][0]["keyid"] = "deadbeef-not-enrolled-fabricated"
+    if keyid is not None:
+        env["signatures"][0]["keyid"] = keyid
     conn.execute("UPDATE claims SET signature_bundle = ? WHERE claim_id = ?",
                  (json.dumps(env), row["claim_id"]))
     conn.execute("UPDATE evidence_lines SET model_lineage = ? WHERE finding_id = ?",
                  (lineage_json, row["finding_id"]))
+    conn.commit()
+
+
+def _staple_bundle(conn, data_id: str, donor_data_id: str) -> None:
+    """Staple the donor finding's genuine, verifying bundle onto this finding's
+    claim, keyid and lineage column included.
+
+    The cross-claim staple: every part of the stapled material is authentic, it
+    was just issued for another claim. Only the claim-binding check stands
+    between the donor's signed lineage and this finding's model axis.
+    """
+    donor = _finding_row(conn, donor_data_id)
+    target = _finding_row(conn, data_id)
+    conn.execute(
+        "UPDATE claims SET signature_bundle = ?, asserter_keyid = ? "
+        "WHERE claim_id = ?",
+        (donor["signature_bundle"], donor["asserter_keyid"], target["claim_id"]),
+    )
+    conn.execute("UPDATE evidence_lines SET model_lineage = ? WHERE finding_id = ?",
+                 (donor["model_lineage"], target["finding_id"]))
     conn.commit()
 
 
@@ -141,12 +182,69 @@ class TestSignedLineageBinding:
                 prop, pred, _est(), data_id="ds2", generated_by="run2",
                 grounding=_verdict(_CLAUDE),
             )
-            _forge_bundle_nonenrolled(g._conn, "ds2", _FORGED_COMPUTED)
+            _forge_bundle(g._conn, "ds2", _FORGED_COMPUTED,
+                          keyid="deadbeef-not-enrolled-fabricated")
             eff = effective_independence(g._conn, cid)
         # The forged bundle does not verify (non-enrolled signer), so its
         # lineage reads soft and cannot mint a distinct model. Count stays 1.
         assert eff["number"] == 1
         assert eff["soft"] is True
+
+    def test_enrolled_signer_forge_does_not_count(self, tmp_path: Path) -> None:
+        """The peer forge: a second lab already ENROLLED as a validator rewrites
+        its own bundle payload's model lineage to a distinct model and leaves its
+        real keyid in place, so the signer resolves to a real pubkey and the read
+        runs the crypto check. The stale signature no longer covers the edited
+        payload, so the lineage is unauthenticated and reads soft: the same-model
+        pair stays collapsed at one."""
+        ka = _bootstrap_key(tmp_path, "ka.key")
+        kb = _bootstrap_key(tmp_path, "kb.key")
+        _enroll_key(tmp_path, ka, kb)
+        prop, pred = _prop(), _pred()
+        cid = prop.content_id()
+        with mareforma.open(tmp_path, key_path=ka) as g:
+            g.assert_finding(
+                prop, pred, _est(), data_id="ds1", generated_by="run1",
+                grounding=_verdict(_CLAUDE),
+            )
+        with mareforma.open(tmp_path, key_path=kb) as g:
+            g.assert_finding(
+                prop, pred, _est(), data_id="ds2", generated_by="run2",
+                grounding=_verdict(_CLAUDE),
+            )
+            _forge_bundle(g._conn, "ds2", _FORGED_COMPUTED)
+            eff = effective_independence(g._conn, cid)
+        assert eff == {"number": 1, "soft": True}
+
+    def test_cross_claim_staple_does_not_count(self, tmp_path: Path) -> None:
+        """A genuine, verifying bundle lifted from ANOTHER claim authenticates
+        nothing here: the envelope binds a different claim_id, so its distinct
+        model belongs to that claim, not this one. The stapled line reads soft
+        and the same-model pair stays collapsed at one."""
+        ka = _bootstrap_key(tmp_path, "ka.key")
+        kb = _bootstrap_key(tmp_path, "kb.key")
+        _enroll_key(tmp_path, ka, kb)
+        prop, pred = _prop(), _pred()
+        cid = prop.content_id()
+        with mareforma.open(tmp_path, key_path=ka) as g:
+            g.assert_finding(
+                prop, pred, _est(), data_id="ds1", generated_by="run1",
+                grounding=_verdict(_CLAUDE),
+            )
+        with mareforma.open(tmp_path, key_path=kb) as g:
+            g.assert_finding(
+                prop, pred, _est(), data_id="ds2", generated_by="run2",
+                grounding=_verdict(_CLAUDE),
+            )
+            # The donor: a genuine gpt-4o finding on an unrelated proposition,
+            # signed by the same enrolled key, so only the claim binding differs.
+            g.assert_finding(
+                _donor_prop(), pred, _est(), data_id="ds3", generated_by="run3",
+                grounding=_verdict(_GPT),
+            )
+            _staple_bundle(g._conn, "ds2", "ds3")
+            eff = effective_independence(g._conn, cid)
+        assert eff == {"number": 1, "soft": True}
 
 
 def _same_model_pair(tmp_path: Path) -> str:

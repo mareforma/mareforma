@@ -17,7 +17,7 @@ from pathlib import Path
 
 import mareforma
 from mareforma.observe._lineage import resolve_lineage
-from mareforma.trust._store import effective_independence
+from mareforma.trust._store import effective_independence, independence_counts
 from tests._helpers import (
     _bootstrap_key, _enroll_key, _est, _pred, _prop, _verdict,
 )
@@ -192,18 +192,19 @@ class TestEffectiveIndependenceNumber:
 
 
 # ---------------------------------------------------------------------------
-# Human check: the highest-value independent source
+# Human check: counted by the status ladder, not certified by the map
 # ---------------------------------------------------------------------------
 
 class TestHumanIndependence:
     def test_human_independence_counts(self, tmp_path: Path) -> None:
         """A human check (no observed model call, signed by an enrolled human
-        validator) is the highest-value independent source: it counts on its own
-        axis and is never collapsed away as a same-model duplicate.
+        validator) counts on its own axis in the status ladder: it needs no
+        distinct model, so a human check plus a model check reads as two where
+        two same-model checks read as one.
 
-        A human check plus a model check yields effective 2, where two same-model
-        checks yield 1, so the human axis lifts effective independence above the
-        same-model floor.
+        The per-finding map disclosure does not follow. ``validator_type`` is
+        self-declared and defaults to 'human', so an unobserved line under a
+        human signer is soft there and the map reads UNVERIFIABLE.
         """
         # Scenario A: human check + model check on one proposition. The human
         # signer opens the project first, so it auto-enrolls as the human root.
@@ -222,7 +223,7 @@ class TestHumanIndependence:
                 prop, pred, _est(), data_id="ds2", generated_by="run2",
                 grounding=_verdict(_CLAUDE),  # a model check
             )
-            assert effective_independence(g._conn, cid)["number"] == 2
+            assert independence_counts(g._conn, cid)[0] == 2
         # A second, same-model check does NOT collapse the human check away: the
         # duplicate model folds to one, the human unit still stands -> still 2.
         kc = _bootstrap_key(a, "model2.key")
@@ -232,13 +233,17 @@ class TestHumanIndependence:
                 prop, pred, _est(), data_id="ds3", generated_by="run3",
                 grounding=_verdict(_CLAUDE),  # same root as the kb model check
             )
+            ladder_a = independence_counts(g._conn, cid)[0]
             eff_a = effective_independence(g._conn, cid)
             tmap = g.trust_map(r["claim_id"])
-        assert eff_a["number"] == 2
-        assert eff_a["soft"] is False
-        assert tmap.get("independence").value == "2"
+        assert ladder_a == 2
+        # The map does not certify the human line: nothing was observed and the
+        # 'human' type is self-declared, so the disclosure reads UNVERIFIABLE.
+        assert eff_a["number"] == 1
+        assert eff_a["soft"] is True
+        assert tmap.get("independence").value == "UNVERIFIABLE"
 
-        # Scenario B: two same-model checks, no human check -> effective 1.
+        # Scenario B: two same-model checks, no human check -> ladder 1.
         b = tmp_path / "b"
         b.mkdir()
         kd = _bootstrap_key(b, "d.key")
@@ -254,11 +259,11 @@ class TestHumanIndependence:
                 prop2, pred2, _est(), data_id="ds2", generated_by="run2",
                 grounding=_verdict(_CLAUDE),
             )
-            eff_b = effective_independence(g._conn, prop2.content_id())
-        assert eff_b["number"] == 1
+            ladder_b = independence_counts(g._conn, prop2.content_id())[0]
+        assert ladder_b == 1
 
-        # The human axis lifts effective independence above the same-model floor.
-        assert eff_a["number"] > eff_b["number"]
+        # The human axis lifts the ladder above the same-model floor.
+        assert ladder_a > ladder_b
 
 
 class TestForgedComputedIsRejected:

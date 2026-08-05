@@ -102,3 +102,31 @@ class TestAbsentLineageIsUnverifiable:
             rec = effective_independence_receipt(g._conn, prop.content_id())
         assert rec["soft"] is True
         assert rec["number"] == 1
+
+    def test_declared_human_signer_does_not_certify_independence(
+        self, tmp_path: Path,
+    ) -> None:
+        """A human signer is self-declared, never observed, so it cannot lift an
+        unobserved line to a confident unit in the per-finding disclosure.
+
+        ``validator_type`` defaults to ``'human'`` and the root's type cannot be
+        chosen at all, so every fresh graph would otherwise print a confident
+        count for a body where no model call was observed and no person attested
+        to anything.
+        """
+        ka = _bootstrap_key(tmp_path, "ka.key")
+        kb = _bootstrap_key(tmp_path, "kb.key")
+        _enroll_key(tmp_path, ka, kb)
+        prop, pred = _prop(), _pred()
+        cid = prop.content_id()
+        with mareforma.open(tmp_path, key_path=ka) as g:
+            g.assert_finding(prop, pred, _est(), data_id="ds1", generated_by="run1")
+        with mareforma.open(tmp_path, key_path=kb) as g:
+            r = g.assert_finding(
+                prop, pred, _est(), data_id="ds2", generated_by="run2",
+            )
+            eff = effective_independence(g._conn, cid)
+            tmap = g.trust_map(r["claim_id"])
+        assert eff["soft"] is True
+        assert eff["number"] == 1
+        assert tmap.get("independence").value == "UNVERIFIABLE"

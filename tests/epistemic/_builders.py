@@ -6,8 +6,8 @@ graphs with a bootstrapped signing key; ``_prop``/``_superiority``/``_smd``
 construct the trust-layer value objects the finding tests build on.
 
 The ``_superiority`` and ``_smd`` factories are the SUPERSET forms: the
-``preregistered=`` flag and the ``n=`` keyword default to a no-op, so they
-also serve the narrower call sites that never pass them.
+``n=`` keyword defaults to a no-op, so they also serve the narrower call
+sites that never pass it.
 """
 
 from __future__ import annotations
@@ -86,13 +86,11 @@ def _prop(direction: Direction = Direction.DECREASES, **scope) -> Proposition:
 def _superiority(
     direction: DirectionOfInterest = DirectionOfInterest.DECREASE,
     alpha: float = 0.05,
-    preregistered: bool = False,
 ) -> Prediction:
     return Prediction(
         TestType.SUPERIORITY,
         direction_of_interest=direction,
         alpha=alpha,
-        preregistered=preregistered,
     )
 
 

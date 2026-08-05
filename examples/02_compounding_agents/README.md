@@ -68,7 +68,7 @@ client = httpx.Client(
 # evidence into the other's count.
 plan = Prediction(
     test_type=TestType.SUPERIORITY,
-    direction_of_interest=DirectionOfInterest.INCREASE, alpha=0.05, preregistered=True)
+    direction_of_interest=DirectionOfInterest.INCREASE, alpha=0.05)
 prop_absence = Proposition(
     subject="cell type A", relation="gap-junction coupling onto", object="cell type C",
     direction=Direction.INCREASES, scope={"region": "cortex", "species": "mouse"})

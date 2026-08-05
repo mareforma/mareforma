@@ -242,7 +242,7 @@ The pre-registered plan, bound to one proposition. `plan_id` (PK) is content-add
 | `test_type` | TEXT | CHECK enum `superiority` / `equivalence` |
 | `direction_of_interest` | TEXT | CHECK enum `increase` / `decrease` (superiority only) |
 | `equivalence_lower` / `equivalence_upper` | REAL | Equivalence region (TOST only) |
-| `alpha` | REAL | CHECK `alpha > 0 AND alpha < 1` |
+| `alpha` | REAL | CHECK `alpha > 0 AND alpha < 1`. `Prediction` narrows it to `(0, 0.5)` on every write, because the gate is one-sided at alpha over a `1 - 2*alpha` CI |
 | `preregistered` | INTEGER | CHECK `IN (0, 1)` |
 | `registered_at` | TEXT | UTC ISO 8601 |
 

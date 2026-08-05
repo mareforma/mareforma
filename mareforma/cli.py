@@ -391,32 +391,44 @@ def validator_add(pubkey_arg: str, identity: str, validator_type: str) -> None:
 @click.option("--json", "as_json", is_flag=True, default=False,
               help="Emit JSON to stdout.")
 def validator_list(as_json: bool) -> None:
-    """List enrolled validators for the current project."""
+    """List the current project's validators, flagging unverified rows."""
     import mareforma
     from mareforma import validators as _validators
 
     with mareforma.open(_read_only_root(), load_key=False) as graph:
-        rows = _validators.list_validators(graph._conn)
+        rows = _validators.list_validators_verified(graph._conn)
+        roots = _validators.enrollment_roots(graph._conn)
 
     if as_json:
         click.echo(json.dumps(rows, indent=2))
-        return
-
-    if not rows:
+    elif not rows:
         _info("No validators enrolled. Run `mareforma bootstrap` and open "
               "the project once with that key to enroll the root validator.")
-        return
+    else:
+        for row in rows:
+            is_root = row["enrolled_by_keyid"] == row["keyid"]
+            marker = " (root)" if is_root else ""
+            type_tag = f" [{row['validator_type']}]"
+            flag = "" if row["verified"] else " UNVERIFIED"
+            click.echo(click.style(
+                f"  {row['identity']}{type_tag}{marker}{flag}", bold=True,
+                fg=None if row["verified"] else "red",
+            ))
+            click.echo(f"    keyid:       {row['keyid']}")
+            click.echo(f"    enrolled_by: {row['enrolled_by_keyid']}")
+            click.echo(f"    enrolled_at: {row['enrolled_at']}")
 
-    for row in rows:
-        is_root = row["enrolled_by_keyid"] == row["keyid"]
-        marker = " (root)" if is_root else ""
-        type_tag = f" [{row['validator_type']}]"
-        click.echo(click.style(
-            f"  {row['identity']}{type_tag}{marker}", bold=True,
-        ))
-        click.echo(f"    keyid:       {row['keyid']}")
-        click.echo(f"    enrolled_by: {row['enrolled_by_keyid']}")
-        click.echo(f"    enrolled_at: {row['enrolled_at']}")
+    # An unverified row is not an enrollment: it does not chain back to the
+    # project's single self-signed root, so say so and refuse to exit clean.
+    if rows and len(roots) != 1:
+        _err(f"{len(roots)} self-signed roots in the validators table. There "
+             "is no single root of trust here, so no enrollment verifies.")
+    unverified = [r for r in rows if not r["verified"]]
+    if unverified:
+        _err(f"{len(unverified)} of {len(rows)} listed validators do not "
+             "chain back to the root. They cannot promote claims, and the "
+             "rows were not written by `mareforma validator add`.")
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------

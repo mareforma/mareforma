@@ -46,6 +46,7 @@ def open(  # noqa: A001
     rekor_log_pubkey_pem: "bytes | None" = None,
     rekor_log_pubkey_path: "str | Path | None" = None,
     strict_promotion: bool = False,
+    validator_type: str = "human",
 ) -> "EpistemicGraph":
     """Open the epistemic graph at *path* and return an EpistemicGraph.
 
@@ -116,6 +117,13 @@ def open(  # noqa: A001
         distinct-signer axis alone; absent data never blocks). Opt-in and
         additive: it never loosens the default, only adds the data-presence
         requirement.
+    validator_type:
+        ``'human'`` or ``'llm'``, the self-declared type recorded if this key
+        auto-enrolls as the project's root validator. Ignored once a root
+        exists. An autonomous agent bootstrapping its own project should pass
+        ``'llm'``: an ``llm`` validator cannot promote a claim to ESTABLISHED on
+        its signature alone. The default is ``'human'`` for compatibility, and a
+        defaulted type carries no weight on the trust map's independence axis.
 
     Returns
     -------
@@ -302,6 +310,7 @@ def open(  # noqa: A001
         trust_insecure_rekor=trust_insecure_rekor,
         rekor_log_pubkey_pem=rekor_log_pubkey_pem,
         strict_promotion=strict_promotion,
+        validator_type=validator_type,
     )
 
 

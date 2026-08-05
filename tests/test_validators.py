@@ -232,6 +232,112 @@ class TestSingletonRoot:
 
 
 # ---------------------------------------------------------------------------
+# The listing verifies the chain it prints
+# ---------------------------------------------------------------------------
+
+def _plant_validator_row(
+    root: Path, identity: str, parent_keyid: str | None = None,
+) -> str:
+    """INSERT a validator row straight into sqlite, bypassing enrollment.
+
+    The envelope is signed by the planted key itself, so the row only ever
+    verifies when it claims to be its own parent. ``parent_keyid`` is the
+    parent the row claims (default: itself, an alternate self-signed root).
+    Returns the planted keyid.
+    """
+    import sqlite3
+
+    key = _signing.generate_keypair()
+    keyid = _signing.public_key_id(key.public_key())
+    pem_b64 = base64.standard_b64encode(
+        _signing.public_key_to_pem(key.public_key()),
+    ).decode("ascii")
+    now = "2026-05-12T00:00:00+00:00"
+    envelope = _signing.sign_validator_enrollment(
+        {
+            "keyid": keyid,
+            "pubkey_pem": pem_b64,
+            "identity": identity,
+            "enrolled_at": now,
+            "enrolled_by_keyid": parent_keyid or keyid,
+        },
+        key,
+    )
+    raw = sqlite3.connect(str(root / ".mareforma" / "graph.db"))
+    raw.execute(
+        "INSERT INTO validators "
+        "(keyid, pubkey_pem, identity, enrolled_at, "
+        " enrolled_by_keyid, enrollment_envelope) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            keyid, pem_b64, identity, now, parent_keyid or keyid,
+            json.dumps(envelope, sort_keys=True, separators=(",", ":")),
+        ),
+    )
+    raw.commit()
+    raw.close()
+    return keyid
+
+
+class TestListVerifiesTheChain:
+    """``who may promote claims here?`` must be answered by the chain walk.
+
+    A row planted by direct sqlite INSERT is refused by every enforcement
+    path, so the operator-facing listing is the one place it can still pass
+    for a healthy enrollment.
+    """
+
+    def _root_keyid(self, tmp_path: Path, key_path: Path) -> str:
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            return _signing.public_key_id(graph._signer.public_key())
+
+    def test_forged_child_row_is_listed_unverified(self, tmp_path: Path) -> None:
+        key_path = _bootstrap_key(tmp_path)
+        root_keyid = self._root_keyid(tmp_path, key_path)
+        planted = _plant_validator_row(tmp_path, "attacker", root_keyid)
+
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            rows = {r["keyid"]: r for r in graph.list_validators()}
+        assert rows[root_keyid]["verified"] is True
+        assert rows[planted]["verified"] is False
+
+    def test_alternate_root_lists_every_row_unverified(self, tmp_path: Path) -> None:
+        key_path = _bootstrap_key(tmp_path)
+        root_keyid = self._root_keyid(tmp_path, key_path)
+        _plant_validator_row(tmp_path, "attacker")
+
+        with pytest.warns(UserWarning, match="self-signed roots"):
+            with mareforma.open(tmp_path, key_path=key_path) as graph:
+                rows = graph.list_validators()
+        assert [r["verified"] for r in rows] == [False, False]
+        assert any(r["keyid"] == root_keyid for r in rows)
+
+    def test_cli_list_marks_and_refuses_a_forged_row(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        key_path = _bootstrap_key(tmp_path)
+        root_keyid = self._root_keyid(tmp_path, key_path)
+        _plant_validator_row(tmp_path, "attacker", root_keyid)
+
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(mareforma_cli, ["validator", "list"])
+        assert result.exit_code == 1, result.output
+        assert "UNVERIFIED" in result.output
+
+    def test_cli_list_names_the_root_count(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        key_path = _bootstrap_key(tmp_path)
+        self._root_keyid(tmp_path, key_path)
+        _plant_validator_row(tmp_path, "attacker")
+
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(mareforma_cli, ["validator", "list", "--json"])
+        assert result.exit_code == 1, result.output
+        assert "2 self-signed roots" in result.output
+
+
+# ---------------------------------------------------------------------------
 # enroll_validator (root signs B)
 # ---------------------------------------------------------------------------
 

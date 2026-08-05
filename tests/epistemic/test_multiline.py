@@ -280,6 +280,43 @@ class TestReadPathSurvivesUngateableRow:
         # The poisoned row is skipped; the valid run2/dB line still counts.
         assert status["independent_support"] == 1
         assert status["status"] == Status.PRELIMINARY.value
+        assert status["lines_skipped"] == 1
+
+    def test_dropped_refuting_line_is_counted_and_recorded(self, tmp_path: Path) -> None:
+        """Dropping a REFUTING line is not conservative, it manufactures
+        consensus: the read would report the same clean status as a proposition
+        that never carried a refutation. The line still drops (one un-gateable
+        row must not deny the read), but the drop is counted in the returned
+        view and recorded on the health channel."""
+        h = _prop()
+        with open_graph(tmp_path) as g:
+            g.assert_finding(h, _superiority(), _smd(-2.6, p=0.003), data_id="dA", generated_by="run1")
+            g.assert_finding(h, _superiority(), _smd(2.6, p=0.003), data_id="dB", generated_by="run2")
+            assert g.proposition_status(h)["status"] == Status.CONTESTED.value
+            g._conn.execute(
+                "UPDATE effect_estimates SET estimate_value = 'CORRUPT' "
+                "WHERE contrast_id IN ("
+                "  SELECT c.contrast_id FROM contrasts c "
+                "  JOIN evidence_lines el ON el.line_id = c.line_id "
+                "  WHERE el.data_id = 'dB')"
+            )
+            g._conn.commit()
+            status = g.proposition_status(h)
+        assert (status["independent_support"], status["independent_refute"]) == (1, 0)
+        assert status["lines_skipped"] == 1
+        skips = [e for e in _read_health(tmp_path) if e["op"] == "bearing_recompute_skipped"]
+        assert len(skips) == 1
+        assert skips[0]["content_id"] == h.content_id()
+        assert skips[0]["error"] == "TypeError"
+        assert skips[0]["outcome"] == "degraded"
+
+    def test_gateable_lines_report_no_skip(self, tmp_path: Path) -> None:
+        h = _prop()
+        with open_graph(tmp_path) as g:
+            g.assert_finding(h, _superiority(), _smd(-2.6, p=0.003), data_id="dA", generated_by="run1")
+            status = g.proposition_status(h)
+        assert status["lines_skipped"] == 0
+        assert not [e for e in _read_health(tmp_path) if e["op"] == "bearing_recompute_skipped"]
 
 
 class TestGeneratedByPrecondition:

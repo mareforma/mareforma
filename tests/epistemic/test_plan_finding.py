@@ -83,13 +83,34 @@ class TestRegisterPlan:
             # No finding yet: the proposition is a dangling (registered) plan.
             assert graph.proposition_status(h)["status"] == Status.UNTESTED.value
 
-    def test_plan_id_is_independent_of_preregistered_flag(self, tmp_path: Path) -> None:
+    def test_attestation_payload_restates_the_stored_flag(self, tmp_path: Path) -> None:
+        """The plan claim's payload cannot contradict the row the same call wrote.
+
+        ``preregistered`` is the store's word, not the caller's: the attestation
+        is the only machine-readable body of the plan claim, so an auditor
+        reading it must be told what ``predictions.preregistered`` says.
+        """
         h = _prop()
-        # Same rule, different preregistered flag -> same identity.
-        a = _superiority(preregistered=True)
-        b = _superiority(preregistered=False)
-        cid = h.content_id()
-        assert _store.compute_plan_id(cid, a) == _store.compute_plan_id(cid, b)
+        with open_graph(tmp_path) as graph:
+            plan_id = graph.register_plan(h, _superiority(), generated_by="lab_a")
+            row = graph._conn.execute(
+                "SELECT preregistered FROM predictions WHERE plan_id = ?", (plan_id,)
+            ).fetchone()
+            claim_id = _store.get_plan_claim_id(graph._conn, plan_id)
+            payload = json.loads(graph.get_claim(claim_id)["predicate_payload"])
+        assert row["preregistered"] == 1
+        assert payload["preregistered"] is True
+
+    def test_prediction_refuses_the_preregistered_keyword(self) -> None:
+        """The flag is provenance the store owns, so callers cannot assert it."""
+        from mareforma.trust import Prediction, TestType
+
+        with pytest.raises(TypeError):
+            Prediction(
+                TestType.SUPERIORITY,
+                direction_of_interest=DirectionOfInterest.DECREASE,
+                preregistered=True,
+            )
 
     def test_idempotent_reregister_no_duplicate(self, tmp_path: Path) -> None:
         h = _prop()

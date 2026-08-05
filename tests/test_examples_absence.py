@@ -68,7 +68,6 @@ def _plan() -> Prediction:
         test_type=TestType.SUPERIORITY,
         direction_of_interest=DirectionOfInterest.INCREASE,
         alpha=0.05,
-        preregistered=True,
     )
 
 

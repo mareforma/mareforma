@@ -159,7 +159,6 @@ plan = Prediction(
     test_type=TestType.SUPERIORITY,
     direction_of_interest=DirectionOfInterest.INCREASE,
     alpha=0.05,
-    preregistered=True,
 )
 prop_absence = Proposition(
     subject="cell type A",

@@ -605,14 +605,14 @@ Root-only and one-way (mirrors validator enrollment): only the project's single 
 
 ### `list_validators()`
 
-Return all enrolled validators for this project, ordered by `enrolled_at`.
+Return the project's validator rows, ordered by `enrolled_at`.
 
 ```python
 for row in graph.list_validators():
-    print(row["identity"], row["validator_type"], row["keyid"])
+    print(row["identity"], row["validator_type"], row["keyid"], row["verified"])
 ```
 
-**Returns** `list[dict]`: each dict carries `keyid`, `pubkey_pem`, `identity`, `validator_type`, `enrolled_at`, `enrolled_by_keyid`, `enrollment_envelope`.
+**Returns** `list[dict]`: each dict carries `keyid`, `pubkey_pem`, `identity`, `validator_type`, `enrolled_at`, `enrolled_by_keyid`, `enrollment_envelope`, and `verified`. `verified` is False when the row's enrollment chain does not walk back to the project's single self-signed root, so a row written straight into the database is never reported as an enrollment.
 
 ---
 
@@ -869,12 +869,14 @@ stored). `REGISTRABLE_DIRECTIONS` is the closed set of the five storable values.
 `normalize_token(s)` exposes the NFC + casefold + whitespace-collapse used at
 identity time.
 
-#### `Prediction(test_type, alpha=0.05, *, direction_of_interest=None, equivalence_lower=None, equivalence_upper=None, preregistered=False, inference_regime=InferenceRegime.FREQUENTIST)`
+#### `Prediction(test_type, alpha=0.05, *, direction_of_interest=None, equivalence_lower=None, equivalence_upper=None, inference_regime=InferenceRegime.FREQUENTIST)`
 
 The pre-registered decision rule. `TestType.SUPERIORITY` requires
 `direction_of_interest` (`DirectionOfInterest.INCREASE` / `DECREASE`);
-`TestType.EQUIVALENCE` requires `equivalence_lower < equivalence_upper`. Raises
-`ValueError` on an inconsistent combination.
+`TestType.EQUIVALENCE` requires `equivalence_lower < equivalence_upper`. `alpha`
+must be in `(0, 0.5)`: the gate is one-sided at alpha over a `1 - 2*alpha` CI, so
+a larger alpha marks every p-value significant and leaves no valid CI level.
+Raises `ValueError` on an inconsistent combination.
 
 #### `EffectEstimate(estimate_value, effect_type, scale=Scale.RAW, *, p_value=None, ci_lower=None, ci_upper=None, ci_level=None, n_total=None)`
 

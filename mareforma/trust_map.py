@@ -292,10 +292,12 @@ def _independence_property(
                 tier=Tier.COMPUTED,
                 value="UNVERIFIABLE",
                 residual=(
-                    "a supporting line's model lineage is PROXY/UNVERIFIABLE, so "
-                    "a distinct model cannot be certified; independent "
-                    "corroboration is unverifiable (per-finding model/data/signer "
-                    "axis)"
+                    "a supporting line's model lineage is PROXY/UNVERIFIABLE, or "
+                    "the line observed no model call at all, so a distinct model "
+                    "cannot be certified; a human signer does not lift it, "
+                    "validator_type is self-declared and no person attested to "
+                    "the finding; independent corroboration is unverifiable "
+                    "(per-finding model/data/signer axis)"
                 ),
             )
         residual = (

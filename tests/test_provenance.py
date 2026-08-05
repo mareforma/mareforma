@@ -680,9 +680,11 @@ class TestRestoreVerifiesEverySignatureInMultiSigEnvelope:
     ) -> None:
         # Restore must enforce the same role-uniqueness contract as
         # verify_envelope_multi. A tampered claims.toml that attaches
-        # two role='planner' signatures (both with enrolled keyids
-        # and valid bytes) would otherwise sneak past restore and
+        # two role='planner' signatures, each individually valid over
+        # the envelope payload, would otherwise sneak past restore and
         # land duplicate roles in query_provenance's attestation set.
+        # Both entries are really signed so the first one clears the
+        # cryptographic verify and the loop reaches the second.
         import base64 as _b64
         from mareforma.db import RestoreError
         asserter_key = tmp_path / "asserter.key"
@@ -706,13 +708,18 @@ class TestRestoreVerifiesEverySignatureInMultiSigEnvelope:
         )
         bundle_value = bundle_line.split(" = ", 1)[1].strip().strip('"')
         bundle = json.loads(bundle_value.encode().decode("unicode_escape"))
-        garbage = _b64.standard_b64encode(b"\x00" * 64).decode("ascii")
-        bundle["signatures"].append({
-            "keyid": planner_keyid, "sig": garbage, "role": "planner",
-        })
-        bundle["signatures"].append({
-            "keyid": planner_keyid, "sig": garbage, "role": "planner",
-        })
+        planner_sig = _b64.standard_b64encode(
+            _signing.load_private_key(planner_key).sign(
+                _signing.dsse_pae(
+                    _signing.PAYLOAD_TYPE_CLAIM,
+                    _b64.standard_b64decode(bundle["payload"]),
+                ),
+            ),
+        ).decode("ascii")
+        for _ in range(2):
+            bundle["signatures"].append({
+                "keyid": planner_keyid, "sig": planner_sig, "role": "planner",
+            })
         tampered = json.dumps(bundle).replace('"', '\\"')
         toml_path.write_text(
             text.replace(bundle_line, f'signature_bundle = "{tampered}"'),
@@ -724,6 +731,7 @@ class TestRestoreVerifiesEverySignatureInMultiSigEnvelope:
         with pytest.raises(RestoreError) as ei:
             mareforma.restore(tmp_path)
         assert ei.value.kind == "claim_unverified"
+        assert "duplicate role" in str(ei.value)
 
     def test_tampered_extra_signature_rejected_on_restore(
         self, tmp_path: Path,

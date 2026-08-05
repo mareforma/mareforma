@@ -251,11 +251,14 @@ Three rules:
    (PROXY or UNVERIFIABLE) cannot certify a distinct model and never earns a
    second line, and where a supporting line's lineage is soft the effective count
    the trust map surfaces reads `UNVERIFIABLE` rather than a confident number. A
-   **human check is the highest-value independent source**: a supporting finding
-   with no observed model call, signed by an enrolled human validator
-   (`validator_type='human'`), needs no distinct model (a human is not a model)
-   and is never folded into a model root, so a human check plus a model check
-   reads as two where two same-model checks read as one. One signer still
+   **human check counts on the status ladder but is not certified by the map**:
+   a supporting finding with no observed model call, signed by an enrolled
+   `validator_type='human'` validator, needs no distinct model on the ladder (a
+   human is not a model) and is never folded into a model root there. The
+   per-finding map disclosure holds it soft instead: the type is self-declared,
+   defaults to `'human'`, and no person attested to the finding, so the map
+   reads `UNVERIFIABLE` rather than certifying a line nothing observed. One
+   signer still
    contributes at most one support and one refute, and re-running the same
    dataset adds nothing. Where dataset bytes are supplied the `data_id` is
    content-addressed (`sha256:`); a string `data_id` stays a flagged fallback.
