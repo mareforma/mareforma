@@ -10,6 +10,7 @@ with claims.toml is restore's threat model.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest

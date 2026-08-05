@@ -1341,13 +1341,9 @@ def _verify_and_insert_replication_verdict(
         "method": method,
         "confidence": confidence_dict,
     }
-    payload = _verdict_canonical_payload(_REPLICATION_VERDICT_FIELDS, record)
-    pae = _signing.dsse_pae(
-        "application/vnd.mareforma.replication-verdict+json", payload,
-    )
     from cryptography.exceptions import InvalidSignature
     try:
-        pubkey.verify(signature_bytes, pae)
+        pubkey.verify(signature_bytes, _replication_verdict_pae(record))
     except InvalidSignature as exc:
         raise RestoreError(
             f"{ctx} signature verification failed, TOML tampered or "

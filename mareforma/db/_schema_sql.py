@@ -727,6 +727,40 @@ BEGIN
     SELECT RAISE(ABORT, 'mareforma:append_only:prediction_delete_blocked');
 END;
 
+-- A retired plan. A plan written by a release with a wider alpha bound can
+-- carry a rule the gates cannot run, and the row above can be neither corrected
+-- nor removed, so the evidence standing under it would count as nothing for
+-- good. Retirement is the operator's recovery: it names the plan, the plan that
+-- supersedes it (the same rule at an alpha the gates can run) and why, so the
+-- read path can gate that evidence under the replacement. It is recorded state,
+-- never a rewrite: the retired row stays exactly as it was registered. Both
+-- ends reference predictions, so a retirement can only point at rules the graph
+-- holds, and superseded_by is a different plan by CHECK. The claim is the
+-- signed retirement attestation, whose text renders the same triple the row
+-- carries, so restore re-derives the row from signed material.
+CREATE TABLE IF NOT EXISTS plan_retirements (
+    plan_id       TEXT PRIMARY KEY REFERENCES predictions(plan_id),
+    superseded_by TEXT NOT NULL REFERENCES predictions(plan_id)
+                      CHECK (superseded_by <> plan_id),
+    reason        TEXT NOT NULL,
+    claim_id      TEXT NOT NULL REFERENCES claims(claim_id),
+    retired_at    TEXT NOT NULL
+);
+
+-- A retirement is append-only like the plan it retires: an operator who could
+-- re-point or drop one could move a proposition's counts by rewriting which
+-- rule its evidence stands under, with nothing on the read saying so.
+CREATE TRIGGER IF NOT EXISTS plan_retirements_append_only
+BEFORE UPDATE ON plan_retirements
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:plan_retirement_locked');
+END;
+CREATE TRIGGER IF NOT EXISTS plan_retirements_no_delete
+BEFORE DELETE ON plan_retirements
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:plan_retirement_delete_blocked');
+END;
+
 -- A finding: one attestation (claim_id) plus its computed bearing_direction on
 -- a proposition under a plan. The direction is denormalised here for queryable
 -- Status counting; the gate inputs are persisted on the estimate so any reader

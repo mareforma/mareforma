@@ -68,6 +68,7 @@ from .core import (
     SUPPORT_TYPE_EXTERNAL,
     _VALID_SUPPORT_TYPES,
     _VALID_REPLICATION_METHODS,
+    _REPLICATION_VERDICT_PAYLOAD_TYPE,
     _REPLICATION_VERDICT_FIELDS,
     _CONTRADICTION_VERDICT_FIELDS,
     # Connection management.
@@ -148,6 +149,7 @@ from .core import (
     mark_claim_logged,
     # Verdict protocol.
     _verdict_canonical_payload,
+    _replication_verdict_pae,
     _require_enrolled_issuer,
     _require_claim_exists,
     record_replication_verdict,

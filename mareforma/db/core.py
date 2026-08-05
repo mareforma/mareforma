@@ -4343,10 +4343,9 @@ def _verify_validation_on_read(
     if ck in cache:
         return cache[ck]
     from mareforma import signing as _signing
-    from mareforma import validators as _validators
     ok = False
     if declared in (_signing.PAYLOAD_TYPE_VALIDATION, _signing.PAYLOAD_TYPE_SEED):
-        signer_row = _validators.get_validator(conn, keyid)
+        signer_row = _cached_validator(conn, cache, keyid)
         if signer_row is not None:
             try:
                 pem = base64.standard_b64decode(signer_row["pubkey_pem"])
@@ -4444,7 +4443,6 @@ def _verify_participant_bundle_on_read(
     if ck in cache:
         return cache[ck]
     from mareforma import signing as _signing
-    from mareforma import validators as _validators
     ok = False
     try:
         env = json.loads(bundle_json)
@@ -4621,13 +4619,23 @@ def _json_list(value) -> list:
     return parsed if isinstance(parsed, list) else []
 
 
-def get_claim(conn: sqlite3.Connection, claim_id: str) -> dict | None:
+def get_claim(
+    conn: sqlite3.Connection,
+    claim_id: str,
+    *,
+    verify_cache: dict | None = None,
+) -> dict | None:
     """Return a claim dict or None if not found.
 
     High-trust rows (REPLICATED / ESTABLISHED) carry a ``verified`` boolean:
     the read path re-verifies the row's signatures and flags the result rather
     than excluding the row, so an auditor can still see a tampered row and know
     it failed. PRELIMINARY rows are always ``verified=True`` here.
+
+    *verify_cache* lets a caller reading several claims share one cache, the
+    way :func:`list_claims` shares one across its rows: the peer evidence
+    behind a promoted row is verified once for the caller's whole read instead
+    of once per claim. A fresh cache when it is omitted.
     """
     try:
         row = conn.execute(
@@ -4639,7 +4647,9 @@ def get_claim(conn: sqlite3.Connection, claim_id: str) -> dict | None:
     if not row:
         return None
     d = dict(row)
-    d["verified"] = _row_verified_on_read(conn, d, {})
+    d["verified"] = _row_verified_on_read(
+        conn, d, {} if verify_cache is None else verify_cache,
+    )
     if d.get("support_level") == "ESTABLISHED":
         std, root_kid = _trust_domain_disclosure(conn)
         d["single_trust_domain"] = std
@@ -4788,6 +4798,10 @@ _VALID_REPLICATION_METHODS = (
 )
 
 
+_REPLICATION_VERDICT_PAYLOAD_TYPE = (
+    "application/vnd.mareforma.replication-verdict+json"
+)
+
 _REPLICATION_VERDICT_FIELDS = (
     "verdict_id",
     "cluster_id",
@@ -4821,6 +4835,20 @@ def _verdict_canonical_payload(
     from .._canonical import canonicalize
     payload = {name: record.get(name) for name in fields}
     return canonicalize(payload)
+
+
+def _replication_verdict_pae(record: dict) -> bytes:
+    """The DSSE PAE a replication verdict's signature is made and checked over.
+
+    Signing on the live path, restore's verify-before-INSERT and the read
+    path's re-verification all build the signed bytes here, so the canonical
+    form cannot drift into one version per caller.
+    """
+    from mareforma import signing as _signing
+    return _signing.dsse_pae(
+        _REPLICATION_VERDICT_PAYLOAD_TYPE,
+        _verdict_canonical_payload(_REPLICATION_VERDICT_FIELDS, record),
+    )
 
 
 def _require_enrolled_issuer(
@@ -4928,11 +4956,7 @@ def record_replication_verdict(
         "method": method,
         "confidence": confidence_dict,
     }
-    payload = _verdict_canonical_payload(_REPLICATION_VERDICT_FIELDS, record)
-    pae = _signing.dsse_pae(
-        "application/vnd.mareforma.replication-verdict+json", payload,
-    )
-    signature = signer.sign(pae)
+    signature = signer.sign(_replication_verdict_pae(record))
     created_at = _now()
     # Verdict INSERT + promotion UPDATE run in one BEGIN IMMEDIATE
     # transaction so a concurrent contradiction verdict cannot land
@@ -6037,6 +6061,13 @@ _TRUST_TABLE_BACKUP: tuple = (
     ("effect_estimates", "effect_estimates", "estimate_id", (
         "contrast_id", "estimate_value", "effect_type", "scale", "p_value",
         "ci_lower", "ci_upper", "ci_level", "n_total",
+    )),
+    # Last: a retirement references two predictions rows and a claim, so both
+    # parents are already replayed by the time it lands. The triple it carries
+    # is re-derived from its signed attestation after the replay (see
+    # restore._verify_plan_retirement_binding).
+    ("plan_retirements", "plan_retirements", "plan_id", (
+        "superseded_by", "reason", "claim_id", "retired_at",
     )),
 )
 

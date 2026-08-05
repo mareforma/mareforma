@@ -163,6 +163,11 @@ class EpistemicGraph:
     ) -> None:
         self._conn = conn
         self._root = root
+        # The health-channel side of the read-path skipped-line disclosure.
+        # One per handle: a dropped line is a state, so it is recorded once,
+        # not once per read (see trust._store.SkipDisclosure).
+        from mareforma.trust import _store as _trust_store
+        self._skips = _trust_store.SkipDisclosure(root)
         # Re-entrant lock serializing graph mutations across threads. See
         # _synchronized: the connection is shareable across threads, so writers
         # must not race on transaction ownership.
@@ -1122,6 +1127,250 @@ class EpistemicGraph:
         return plan_id
 
     @_synchronized
+    def retire_plan(self, plan_id: str, *, alpha: float, reason: str) -> dict:
+        """Retire a plan the gates cannot run and re-register its evidence.
+
+        A plan written by a release with a wider alpha bound can carry a rule no
+        gate can discriminate at (alpha at or above 0.5 marks every p-value
+        significant and asks for a confidence level of zero or less). The graph
+        still restores, but every evidence line under that plan drops out of the
+        counts and the proposition reads UNTESTED. The ``predictions`` row is
+        append-only and cannot be deleted, so there is nothing to correct in
+        place. This is the way out, and it is the operator's call to make: a
+        plan never retires itself.
+
+        Three effects, in one transaction:
+
+        1. Registers the **replacement**: the retired plan's own rule repeated at
+           *alpha*. Only the alpha moves, so a repair cannot re-choose the side
+           of the null once the numbers are known. The row carries
+           ``preregistered=0`` and its claim states what it supersedes: it was
+           registered after the evidence, and the record says so rather than
+           reading as an original pre-registration.
+        2. Records the retirement (``plan_retirements``) with *reason*, and
+           writes its own signed **retirement attestation** whose text renders
+           the plan, the replacement and the reason, so restore re-derives the
+           record from signed material.
+        3. Leaves the retired row exactly as registered. Nothing is rewritten and
+           nothing is deleted; the read path gates the evidence that stood under
+           the retired plan against the replacement from here on.
+
+        Returns a receipt: ``plan_id``, ``superseded_by``, ``reason``,
+        ``retired_at``, ``claim_id`` (the retirement attestation),
+        ``plan_claim_id`` (the replacement's attestation) and ``lines_recovered``
+        (evidence lines that gate again under the replacement). Idempotent:
+        retiring the same plan at the same alpha returns the recorded receipt.
+
+        Raises :class:`NoRegisteredPlanError` when no such plan is registered,
+        and :class:`PlanNotRetirableError` when the plan's rule still runs (a
+        retirement is not a way to withdraw evidence a reader dislikes), when
+        the plan is already retired (a second retirement would let the operator
+        shop for the alpha that reads best), or when no line under the plan
+        would gate under the replacement, which would spend the one retirement
+        for nothing. An *alpha* outside ``(0, 0.5)`` raises ``ValueError``, from
+        the same bound every registration is held to.
+        """
+        self._check_open()
+        from mareforma.db.core import _now, _validate_claim_text
+        from mareforma.trust import (
+            NoRegisteredPlanError,
+            PlanNotRetirableError,
+            Proposition,
+            _store,
+        )
+
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError(
+                "reason must be a non-empty string: the retirement record is "
+                "what tells a later reader why the plan was retired"
+            )
+        # Clean the reason through the claim-text rule before it is stored, so
+        # the column holds the same string the signed attestation carries and
+        # restore's re-derivation compares like with like.
+        reason = _validate_claim_text(reason)
+
+        row = _store.get_plan_row(self._conn, plan_id)
+        if row is None:
+            raise NoRegisteredPlanError(
+                f"no registered plan with plan_id={plan_id[:12]}…; there is "
+                "nothing to retire"
+            )
+        try:
+            _store.prediction_from_row(row)
+        except ValueError:
+            pass
+        else:
+            raise PlanNotRetirableError(
+                f"plan {plan_id[:12]}… states a rule the gates can still run, "
+                "so it is not retirable. Retirement recovers evidence stranded "
+                "under an un-runnable rule; it is not a way to withdraw a "
+                "finding, which is what graph.update_claim(claim_id, "
+                "status='retracted') is for."
+            )
+
+        # The replacement repeats the retired rule at a gateable alpha. Building
+        # it applies the (0, 0.5) bound, so an alpha that would strand the
+        # evidence again is refused here, before anything is written.
+        replacement = _store.replacement_prediction(row, alpha)
+        superseded_by = _store.compute_plan_id(row["content_id"], replacement)
+
+        recorded = _store.plan_retirement(self._conn, plan_id)
+        if recorded is not None:
+            if recorded["superseded_by"] == superseded_by:
+                return self._retirement_receipt(recorded)
+            raise PlanNotRetirableError(
+                f"plan {plan_id[:12]}… is already retired and superseded by "
+                f"plan {recorded['superseded_by'][:12]}…. Re-pointing it at a "
+                "second alpha would be choosing the rule that reads best once "
+                "the numbers are known."
+            )
+
+        # How much evidence the replacement actually recovers. A line whose
+        # stored estimate is unreadable stays dropped either way, but a
+        # retirement that recovers nothing spends the one retirement this plan
+        # gets, so it is refused with the gate's own reason.
+        recovered, stranded, refusal = self._lines_recovered(
+            plan_id, replacement,
+        )
+        if stranded and not recovered:
+            raise PlanNotRetirableError(
+                f"retiring plan {plan_id[:12]}… at alpha={alpha} would recover "
+                f"none of its {stranded} evidence line(s): {refusal}. "
+                "A plan is retired once, so a retirement that recovers nothing "
+                "is refused rather than spent."
+            )
+
+        prop_row = _store.get_proposition_row(self._conn, row["content_id"])
+        proposition = Proposition.from_dict({
+            "subject": prop_row["subject"],
+            "relation": prop_row["relation"],
+            "object": prop_row["object"],
+            "direction": prop_row["direction"],
+            "scope": json.loads(prop_row["scope_json"] or "{}"),
+            "magnitude": prop_row["magnitude"],
+        })
+        retirement_text = _store.retirement_claim_text(
+            plan_id, superseded_by, reason,
+        )
+
+        # Both claims and both rows land together: a committed replacement with
+        # no retirement record would leave the evidence stranded under a plan
+        # the graph now reads as live.
+        now = _now()
+        conn = self._conn
+        _own_txn = not conn.in_transaction
+        if _own_txn:
+            conn.execute("BEGIN IMMEDIATE")
+        try:
+            plan_claim_id = self.assert_claim(
+                proposition.text(),
+                idempotency_key=f"plan:{superseded_by}",
+                predicate_payload={
+                    "trust": "plan/v1",
+                    "content_id": row["content_id"],
+                    "frame_id": proposition.frame_id(),
+                    "plan_id": superseded_by,
+                    **replacement.to_dict(),
+                    # The store's word: this plan was registered to take over
+                    # evidence already in the graph, so it claims no
+                    # pre-registration and names what it replaces.
+                    "preregistered": False,
+                    "supersedes": plan_id,
+                    "supersedes_reason": reason,
+                },
+            )
+            _store.register_plan(
+                conn, row["content_id"], replacement, now, preregistered=False,
+            )
+            claim_id = self.assert_claim(
+                retirement_text,
+                supports=[plan_claim_id],
+                idempotency_key=f"plan-retirement:{plan_id}",
+                predicate_payload={
+                    "trust": "plan-retirement/v1",
+                    "content_id": row["content_id"],
+                    "plan_id": plan_id,
+                    "superseded_by": superseded_by,
+                    "reason": reason,
+                },
+            )
+            _store.retire_plan(
+                conn, plan_id, superseded_by, reason, claim_id, now,
+            )
+            if _own_txn:
+                conn.commit()
+                from mareforma.db.core import _backup_claims_toml
+                _backup_claims_toml(conn, self._root)
+        except BaseException:
+            if _own_txn:
+                conn.rollback()
+            raise
+
+        from mareforma import health as _health
+        _health.append_health_event(
+            self._root, "retire_plan", plan_id=plan_id,
+            superseded_by=superseded_by, lines_recovered=recovered,
+        )
+        return {
+            "plan_id": plan_id,
+            "superseded_by": superseded_by,
+            "reason": reason,
+            "retired_at": now,
+            "claim_id": claim_id,
+            "plan_claim_id": plan_claim_id,
+            "lines_recovered": recovered,
+        }
+
+    def _lines_recovered(self, plan_id: str, replacement) -> tuple:
+        """``(recovered, stranded, first refusal)`` for *plan_id* under *replacement*.
+
+        A stranded line is recovered when the replacement can gate its stored
+        estimate. One that still cannot be gated (an unreadable estimate, a CI
+        at a level this alpha does not read) stays dropped, and its refusal is
+        carried back so the caller can name why.
+        """
+        from mareforma.trust import _store, compute_bearing
+
+        recovered = 0
+        refusal = None
+        estimates = _store.plan_estimates(self._conn, plan_id)
+        for est_row in estimates:
+            try:
+                compute_bearing(_store.estimate_from_row(est_row), replacement)
+            except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+                refusal = refusal or exc
+                continue
+            recovered += 1
+        return recovered, len(estimates), refusal
+
+    def _retirement_receipt(self, row) -> dict:
+        """The receipt for a retirement already on record (idempotent replay).
+
+        ``lines_recovered`` is recomputed rather than stored, so a replay
+        reports the graph as it stands and the key means the same thing on both
+        paths: the retired plan's lines that gate under the replacement.
+        """
+        from mareforma.trust import _store
+
+        replacement = _store.prediction_from_row(
+            _store.get_plan_row(self._conn, row["superseded_by"])
+        )
+        recovered, _stranded, _refusal = self._lines_recovered(
+            row["plan_id"], replacement,
+        )
+        return {
+            "plan_id": row["plan_id"],
+            "superseded_by": row["superseded_by"],
+            "reason": row["reason"],
+            "retired_at": row["retired_at"],
+            "claim_id": row["claim_id"],
+            "plan_claim_id": _store.get_plan_claim_id(
+                self._conn, row["superseded_by"],
+            ),
+            "lines_recovered": recovered,
+        }
+
+    @_synchronized
     def assert_finding(
         self,
         proposition: "Proposition",
@@ -1455,7 +1704,12 @@ class EpistemicGraph:
                     "the submitted datasets already span more than one finding"
                 )
             (row,) = touched.values()
-            if row["plan_id"] != plan_id:
+            # A retired plan's datasets stand under the plan that superseded it,
+            # which is what the read path counts them under, so a re-submission
+            # under the replacement is the same finding, not a fork.
+            retirement = _store.plan_retirement(conn, row["plan_id"])
+            superseded_by = retirement["superseded_by"] if retirement else None
+            if row["plan_id"] != plan_id and superseded_by != plan_id:
                 raise _fork_error(
                     f"its datasets already stand under plan {row['plan_id'][:12]}…, "
                     f"but the prediction now passed resolves to plan {plan_id[:12]}…"
@@ -2474,7 +2728,16 @@ class EpistemicGraph:
                 "build lineage."
             )
 
-        focal = _db.get_claim(self._conn, claim_id)
+        # query_provenance is an audit surface, so it FLAGS each high-trust
+        # row's verify-on-read result rather than excluding a tampered row:
+        # an auditor must be able to see a forged ESTABLISHED/REPLICATED row
+        # and know it failed verification. One cache for the whole walk, the
+        # focal row included, so a signature is checked once per call.
+        prov_verify_cache: dict = {}
+
+        focal = _db.get_claim(
+            self._conn, claim_id, verify_cache=prov_verify_cache,
+        )
         if focal is None:
             raise _db.ClaimNotFoundError(
                 f"Claim '{claim_id}' not found; cannot build lineage."
@@ -2512,12 +2775,6 @@ class EpistemicGraph:
             _supports.walk_downstream(self._conn, claim_id, depth=depth)
             if depth >= 1 else []
         )
-
-        # query_provenance is an audit surface, so it FLAGS each high-trust
-        # row's verify-on-read result rather than excluding a tampered row:
-        # an auditor must be able to see a forged ESTABLISHED/REPLICATED row
-        # and know it failed verification. One cache for the whole walk.
-        prov_verify_cache: dict = {}
 
         def _hydrate(edges: list[dict]) -> list[dict]:
             if not edges:

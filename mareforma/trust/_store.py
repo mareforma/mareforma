@@ -222,6 +222,144 @@ def register_plan(
     return plan_id
 
 
+def prediction_from_row(row) -> Prediction:
+    """Rebuild the decision rule a stored ``predictions`` row (or join) carries.
+
+    The one place the persisted columns become a :class:`Prediction` again:
+    the read path gates every line through it, and the retirement path asks it
+    whether a plan's rule can still be run at all. It applies the live write-time
+    invariants, so a row a release with a wider bound wrote (an alpha at or above
+    0.5, which no gate can discriminate at) raises here rather than gating at a
+    rule that decides nothing. :func:`superseding_prediction` is the supported
+    way out of that state.
+    """
+    return Prediction(
+        test_type=row["test_type"],
+        alpha=row["alpha"],
+        direction_of_interest=row["direction_of_interest"],
+        equivalence_lower=row["equivalence_lower"],
+        equivalence_upper=row["equivalence_upper"],
+        inference_regime=row["inference_regime"],
+    )
+
+
+def replacement_prediction(row, alpha: float) -> Prediction:
+    """The retired row's rule, repeated at *alpha*.
+
+    Only the alpha moves. Everything the gate reads to decide direction
+    (``test_type``, ``direction_of_interest``, the equivalence margins, the
+    regime) is carried over from the registration, so a repair cannot re-choose
+    the rule once the numbers are known: an operator who could also flip
+    ``direction_of_interest`` would be picking the side of the null that the
+    results already landed on.
+    """
+    return Prediction(
+        test_type=row["test_type"],
+        alpha=alpha,
+        direction_of_interest=row["direction_of_interest"],
+        equivalence_lower=row["equivalence_lower"],
+        equivalence_upper=row["equivalence_upper"],
+        inference_regime=row["inference_regime"],
+    )
+
+
+def get_plan_row(conn: sqlite3.Connection, plan_id: str) -> Optional[sqlite3.Row]:
+    """The full ``predictions`` row for *plan_id*, or None."""
+    return conn.execute(
+        "SELECT * FROM predictions WHERE plan_id = ?", (plan_id,)
+    ).fetchone()
+
+
+def plan_retirement(
+    conn: sqlite3.Connection, plan_id: str
+) -> Optional[sqlite3.Row]:
+    """The retirement record for *plan_id*, or None if the plan is live."""
+    return conn.execute(
+        "SELECT * FROM plan_retirements WHERE plan_id = ?", (plan_id,)
+    ).fetchone()
+
+
+def superseding_prediction(
+    conn: sqlite3.Connection, plan_id: str
+) -> Optional[Prediction]:
+    """The rule a retired plan's evidence now stands under, or None.
+
+    Read only for a plan whose own stored rule cannot be run (see
+    :func:`prediction_from_row`), so resolution can never move a line that
+    counts today: the lines it reaches are the ones counting zero. Raises if the
+    superseding row is itself un-gateable, which the caller treats like any other
+    un-gateable line and skips.
+    """
+    row = conn.execute(
+        "SELECT p.test_type, p.alpha, p.direction_of_interest, "
+        " p.equivalence_lower, p.equivalence_upper, p.inference_regime "
+        "FROM plan_retirements r JOIN predictions p ON p.plan_id = r.superseded_by "
+        "WHERE r.plan_id = ?",
+        (plan_id,),
+    ).fetchone()
+    return None if row is None else prediction_from_row(row)
+
+
+def plan_estimates(conn: sqlite3.Connection, plan_id: str) -> list[sqlite3.Row]:
+    """Every stored effect estimate on an evidence line under *plan_id*."""
+    return conn.execute(
+        "SELECT est.estimate_value, est.effect_type, est.scale, est.p_value, "
+        " est.ci_lower, est.ci_upper, est.ci_level, est.n_total "
+        "FROM findings f "
+        "JOIN evidence_lines el ON el.finding_id = f.finding_id "
+        "JOIN contrasts c ON c.line_id = el.line_id "
+        "JOIN effect_estimates est ON est.contrast_id = c.contrast_id "
+        "WHERE f.plan_id = ?",
+        (plan_id,),
+    ).fetchall()
+
+
+def estimate_from_row(row) -> EffectEstimate:
+    """Rebuild the stored estimate a gate reads from a persisted row."""
+    return EffectEstimate(
+        estimate_value=row["estimate_value"],
+        effect_type=row["effect_type"],
+        scale=row["scale"],
+        p_value=row["p_value"],
+        ci_lower=row["ci_lower"],
+        ci_upper=row["ci_upper"],
+        ci_level=row["ci_level"],
+        n_total=row["n_total"],
+    )
+
+
+def retirement_claim_text(plan_id: str, superseded_by: str, reason: str) -> str:
+    """The text the retirement attestation signs.
+
+    The row's three fields are unsigned columns, and a retirement decides which
+    rule a proposition's evidence is gated under, so the triple is rendered into
+    the claim text, which is signed and chained. Restore rebuilds this string
+    from the replayed row and compares it against the verified claim, so an
+    edited backup cannot re-point a retirement or rewrite its reason.
+    """
+    return (
+        f"Retired plan {plan_id}, superseded by plan {superseded_by}. "
+        f"Reason: {reason}"
+    )
+
+
+def retire_plan(
+    conn: sqlite3.Connection,
+    plan_id: str,
+    superseded_by: str,
+    reason: str,
+    claim_id: str,
+    now: str,
+) -> None:
+    """Record the retirement of *plan_id* in favour of *superseded_by*."""
+    conn.execute(
+        "INSERT INTO plan_retirements "
+        "(plan_id, superseded_by, reason, claim_id, retired_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (plan_id, superseded_by, reason, claim_id, now),
+    )
+
+
 def insert_finding(
     conn: sqlite3.Connection,
     content_id: str,

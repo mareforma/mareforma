@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -36,6 +37,16 @@ from mareforma.db import (
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+_UPDATE_OF_RE = re.compile(r"UPDATE\s+OF\s+(.+?)\s+ON\s", re.IGNORECASE | re.DOTALL)
+
+
+def _watched_columns(trigger_sql: str) -> list[str]:
+    """The columns a ``BEFORE UPDATE OF ...`` trigger fires on."""
+    match = _UPDATE_OF_RE.search(trigger_sql)
+    assert match is not None, trigger_sql
+    return [col.strip() for col in match.group(1).split(",")]
 
 
 # ---------------------------------------------------------------------------
