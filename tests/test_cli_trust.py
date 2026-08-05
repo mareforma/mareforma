@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import subprocess
+import textwrap
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -152,6 +155,56 @@ class TestVerifyExitCodes:
             assert doc["verdict"] == "verified"
             assert doc["exit_code"] == 0
             assert doc["trust_map"]["subject_id"] == cid
+
+
+_CI_README = (
+    Path(__file__).resolve().parents[1] / "examples" / "06_ci_verify" / "README.md"
+)
+
+
+def _recipe_body(marker: str) -> str:
+    """The shell body of the CI README step whose name contains *marker*."""
+    step = _CI_README.read_text(encoding="utf-8")
+    step = step[step.index(marker):]
+    body = step[step.index("run: |") + len("run: |"):]
+    return textwrap.dedent(body[: body.index("env:")])
+
+
+def _run_recipe(body: str, tmp_path: Path, verify_exit: int, **env) -> int:
+    """Run a recipe body under ``bash -e`` with ``mareforma verify`` stubbed."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    stub = bin_dir / "mareforma"
+    stub.write_text(f"#!/bin/sh\nexit {verify_exit}\n")
+    stub.chmod(0o755)
+    script = tmp_path / "step.sh"
+    script.write_text(body)
+    return subprocess.run(
+        ["bash", "-e", str(script)], cwd=tmp_path,
+        env={"PATH": f"{bin_dir}:{os.environ['PATH']}", **env},
+        capture_output=True, text=True,
+    ).returncode
+
+
+class TestCiRecipeHonorsTheExitCodeContract:
+    """The shipped CI recipe must fail on every code that is not a verdict."""
+
+    def test_usage_error_fails_the_gate(self, tmp_path: Path) -> None:
+        # Exit 3 is a typo'd flag, not a verdict, so the gate cannot pass on it.
+        body = _recipe_body("split tamper vs unverifiable")
+        assert _run_recipe(body, tmp_path, 3, CLAIM_ID="claim-1") != 0
+        assert _run_recipe(body, tmp_path, 0, CLAIM_ID="claim-1") == 0
+
+    def test_unset_claim_id_fails_the_gate(self, tmp_path: Path) -> None:
+        # An unconfigured repo variable is a misconfigured gate, not a pass.
+        for marker in ("name: verify claim\n", "split tamper vs unverifiable"):
+            body = _recipe_body(marker)
+            assert _run_recipe(body, tmp_path, 0) != 0, marker
+
+    def test_exit_code_tables_list_the_usage_code(self) -> None:
+        assert "| `3` |" in _CI_README.read_text(encoding="utf-8")
+        index = (_CI_README.parents[1] / "README.md").read_text(encoding="utf-8")
+        assert "3 usage error" in index
 
 
 class TestVerifyBundleMode:

@@ -372,6 +372,46 @@ class TestApiVersion:
                 c.close()
 
 
+class TestBaseUrlTransportGuard:
+    """The base URL carries the Bearer token, so it must be public https."""
+
+    @pytest.mark.parametrize("url", [
+        "http://api.example.invalid",              # no TLS at all
+        "https://169.254.169.254",                 # link-local metadata
+        "https://127.0.0.1:8080",                  # loopback literal
+        "https://localhost:8080",                  # loopback DNS alias
+        "https://2130706433",                      # numeric shortcut
+        "https://127。0。0。1",                       # ideographic full stop
+        "https://169．254．169．254",                 # fullwidth full stop
+        "https://127｡0｡0｡1",                       # halfwidth ideographic
+        "https://[::1/x",                          # unclosed IPv6 bracket
+    ])
+    def test_insecure_base_url_refused(self, url):
+        with pytest.raises(AuthError):
+            HttpxClient(base_url=url, token="t")
+
+    def test_env_base_url_is_validated(self, monkeypatch):
+        monkeypatch.setenv("CLAWINSTITUTE_BASE_URL", "http://169.254.169.254")
+        monkeypatch.setenv("CLAWINSTITUTE_TOKEN", "secret-abc")
+        with pytest.raises(AuthError):
+            HttpxClient()
+
+    @pytest.mark.parametrize("url", [
+        "http://api.example.invalid",
+        "https://169.254.169.254",
+    ])
+    def test_opt_in_allows_insecure_base_url(self, url):
+        c = HttpxClient(base_url=url, token="t", trust_insecure_base_url=True)
+        try:
+            assert c._base_url == url
+        finally:
+            c.close()
+
+    def test_public_https_base_url_accepted(self):
+        c = HttpxClient(base_url="https://api.example.invalid", token="t")
+        c.close()
+
+
 class TestExceptionTaxonomy:
     def test_typed_exceptions_share_parent(self):
         """Callers can catch every client failure with one except clause."""

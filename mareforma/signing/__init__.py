@@ -15,6 +15,7 @@ importable at this level after the split: the submodule layout is an
 internal organisation, not a public API change.
 """
 
+from .._urlguard import _LOOPBACK_DNS_NAMES
 from .core import (
     # Payload-type constants.
     PAYLOAD_TYPE_CLAIM,
@@ -71,7 +72,6 @@ from .rekor import (
     _REKOR_USER_AGENT,
     _MAX_REKOR_RESPONSE_SIZE,
     _NUMERIC_HOSTNAME_RE,
-    _LOOPBACK_DNS_NAMES,
     _RFC6962_LEAF_PREFIX,
     _RFC6962_NODE_PREFIX,
     _UUID_HEX_RE,

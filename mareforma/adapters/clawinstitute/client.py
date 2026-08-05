@@ -15,6 +15,8 @@ import os
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import quote
 
+from ..._urlguard import validate_public_https_url
+
 
 __all__ = [
     "ApiVersionError",
@@ -116,7 +118,10 @@ class HttpxClient:
 
     Reads token + base URL from constructor args, falling back to
     ``CLAWINSTITUTE_TOKEN`` and ``CLAWINSTITUTE_BASE_URL`` environment
-    variables. Per-call timeout defaults to 30 s; override with
+    variables. The base URL must be ``https://`` to a public host, or
+    the token would travel in cleartext; pass
+    ``trust_insecure_base_url=True`` for a self-hosted instance on an
+    internal address. Per-call timeout defaults to 30 s; override with
     ``timeout=`` at construction time. Use as a context manager to
     release the connection pool at scope exit:
 
@@ -130,6 +135,7 @@ class HttpxClient:
         base_url: str | None = None,
         token: str | None = None,
         timeout: float = 30.0,
+        trust_insecure_base_url: bool = False,
     ) -> None:
         # Import httpx at construction time, not per-request — the
         # extras-install hint surfaces here instead of inside every
@@ -154,6 +160,20 @@ class HttpxClient:
                 "ClawInstitute API token not supplied and "
                 "CLAWINSTITUTE_TOKEN is not set in the environment"
             )
+        # The base URL decides whether the Bearer token below travels
+        # under TLS to a public host, so it is a precondition, not a
+        # preference: a plain-http or internal address in a non-secret
+        # config knob would hand the credential to whoever set it.
+        validate_public_https_url(
+            resolved_url,
+            param_name="ClawInstitute base URL",
+            error_cls=AuthError,
+            bypass_hint=(
+                "Pass trust_insecure_base_url=True if this is intentional "
+                "(e.g. a self-hosted ClawInstitute on an internal network)."
+            ),
+            allow_insecure=trust_insecure_base_url,
+        )
         self._base_url = resolved_url.rstrip("/")
         self._timeout = float(timeout)
 

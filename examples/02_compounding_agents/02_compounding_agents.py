@@ -9,17 +9,19 @@ Two failure modes an honest trust layer has to catch, shown end to end.
    behind the number. A finding whose step DID run and read its data reads
    GROUNDED on that source.
 
-2. Overcounted convergence. Two agents on the same model that reach the same
-   answer are one line of evidence, not two. Distinct signing keys and distinct
-   datasets do not change that: the instrument keeps effective independence at 1
-   until a genuinely different model checks the result, and only then raises it.
+2. Uncertified convergence. Two agents on the same model that reach the same
+   answer are one line of evidence, not two, and distinct signing keys and
+   distinct datasets do not change that. This run shows the stricter half of
+   the rule: the model calls answer from a transport the producer supplied, so
+   the model behind each line is declared rather than observed, and the
+   instrument returns UNVERIFIABLE in place of a count.
 
 Run:
     python 02_compounding_agents.py
 
-No API key and no network required. The model calls run through an in-memory
-httpx transport, so the model capture at the socket boundary is real while the
-example stays offline. The datasets are small CSV files in a temp directory.
+No API key and no network required. The model calls answer from an in-memory
+httpx transport, so nothing leaves the process. That is also why no model call
+is certified here. The datasets are small CSV files in a temp directory.
 """
 
 import tempfile
@@ -58,9 +60,9 @@ def _offline_client() -> httpx.Client:
     """An httpx client whose transport answers locally, no network, no key.
 
     The observer wraps ``httpx.Client.post`` and parses the request body for the
-    model field. That capture happens at the socket boundary regardless of where
-    the response comes from, so a canned transport gives a real COMPUTED lineage
-    while the example runs anywhere.
+    model field, but the 200 comes from a transport this script supplied, so it
+    certifies no model call. The lineage is recorded as a producer declaration
+    (PROXY), which is what leaves the independence axis UNVERIFIABLE below.
     """
     return httpx.Client(
         transport=httpx.MockTransport(lambda req: httpx.Response(200, json={}))
@@ -74,8 +76,8 @@ def model_check(client: httpx.Client, url: str, model: str, csv_path: Path):
     captured at the POST boundary and the grounding verdict for the file read.
     """
     with observe(cites=str(csv_path)) as handle:
-        # The model call. Its body names the model; the observer reads it off the
-        # socket boundary, which the producer does not control (COMPUTED).
+        # The model call. Its body names the model and the observer reads it off
+        # the POST boundary, but on this transport the name is only declared.
         client.post(
             url,
             json={
@@ -238,7 +240,7 @@ print(f"    {grounded_map.get('grounding').residual}")
 # distinct key and distinct dataset, reaches the same answer, but on the same
 # model. The instrument does not read that as a second independent line.
 
-sep("2. Two agents, same model, effective independence stays 1")
+sep("2. Two agents, same model, no count is certified")
 
 verdict_a = model_check(
     client, _ANTHROPIC_URL, "claude-3-5-sonnet-20241022", datasets["alpha"]
@@ -274,15 +276,17 @@ show("effective independence", map_b.get("independence").value)
 print(f"    {map_b.get('independence').residual}")
 
 print()
-print("  Distinct in every legacy axis, signer and dataset, but one model.")
-print("  Two same-model checks are one line of evidence, so the count holds at 1.")
+print("  Distinct in every legacy axis, signer and dataset, but one model, and")
+print("  that model was never observed. Two same-model checks would be one line")
+print("  of evidence; here the instrument cannot even certify that much, so it")
+print("  reports UNVERIFIABLE instead of a number.")
 
 
 # ---------------------------------------------------------------------------
-# 3. A different model raises the count
+# 3. A different model name does not raise the count either
 # ---------------------------------------------------------------------------
 
-sep("3. A different model checks the result, independence rises")
+sep("3. A different model name, still nothing to count")
 
 verdict_c = model_check(
     client, _OPENAI_URL, "gpt-4o-2024-08-06", datasets["gamma"]
@@ -302,9 +306,11 @@ show("effective independence", map_c.get("independence").value)
 print(f"    {map_c.get('independence').residual}")
 
 print()
-print("  A genuinely different model is a second line. The count moves from 1")
-print("  to 2 only when the evidence is independent in the axis that matters , ")
-print("  the model, not merely in the key that signed it.")
+print("  A genuinely different model would be a second line, but a name in a")
+print("  request body this script answered itself proves nothing. The axis that")
+print("  matters is the model, not the key that signed it, and it is counted")
+print("  only when the call is observed against a recognized provider host.")
+print("  tests/test_examples_absence.py pins that path, where the count is 2.")
 
 
 # ---------------------------------------------------------------------------

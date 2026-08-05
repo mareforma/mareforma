@@ -149,6 +149,10 @@ class ProvenanceToolAdapter:
             getattr(tool, "name", "<unnamed>"), field="tool.name",
         )
         self._sanitized_tool_version = _resolve_tool_version(tool)
+        self._sanitized_role = _sanitize_identity(role, field="role")
+        self._sanitized_namespace = _sanitize_identity(
+            tool_namespace, field="tool_namespace",
+        )
 
     def call(self, **kwargs: Any) -> ToolResult:
         """Synchronously invoke the wrapped tool and sign a claim.
@@ -315,9 +319,13 @@ class ProvenanceToolAdapter:
         claim_id = self.graph.assert_claim(
             claim_text,
             classification="ANALYTICAL",
-            generated_by=f"adapter/{self.role}/{self.tool.name}",
+            generated_by=(
+                f"adapter/{self._sanitized_role}/{self._sanitized_tool_name}"
+            ),
             supports=supports if supports else None,
-            source_name=f"{self.tool_namespace}/{self.tool.name}",
+            source_name=(
+                f"{self._sanitized_namespace}/{self._sanitized_tool_name}"
+            ),
             artifact_hash=result_digest_hex,
         )
 
@@ -354,7 +362,7 @@ class ProvenanceToolAdapter:
         )
 
         predicate = build_tool_call_predicate(
-            tool_namespace=self.tool_namespace,
+            tool_namespace=self._sanitized_namespace,
             tool_name=self._sanitized_tool_name,
             tool_version=self._sanitized_tool_version,
             tool_config_fingerprint=self._tool_config_fingerprint,
@@ -377,7 +385,7 @@ class ProvenanceToolAdapter:
         )
 
         summary = (
-            f"tool_call {self.tool_namespace}/{self._sanitized_tool_name} "
+            f"tool_call {self._sanitized_namespace}/{self._sanitized_tool_name} "
             f"args={arguments_digest[:19]} result={result_digest[:19]}"
         )
         claim_text = encode_predicate_into_text(predicate, summary)
@@ -419,7 +427,7 @@ class ProvenanceToolAdapter:
             )
 
         predicate = build_container_exec_predicate(
-            tool_namespace=self.tool_namespace,
+            tool_namespace=self._sanitized_namespace,
             tool_name=self._sanitized_tool_name,
             tool_version=self._sanitized_tool_version,
             tool_config_fingerprint=self._tool_config_fingerprint,
@@ -441,7 +449,8 @@ class ProvenanceToolAdapter:
         )
 
         summary = (
-            f"container_exec {self.tool_namespace}/{self._sanitized_tool_name} "
+            f"container_exec {self._sanitized_namespace}/"
+            f"{self._sanitized_tool_name} "
             f"args={arguments_digest[:19]} result={result_digest[:19]}"
         )
         claim_text = encode_container_exec_predicate_into_text(
@@ -482,7 +491,8 @@ def _sanitize_identity(value: str, *, field: str) -> str:
     Uses mareforma's `sanitize_for_llm` for the substantive cleanup
     (zero-width, bidi overrides, control chars), then additionally
     refuses NUL bytes that `sanitize_for_llm` leaves in place. The
-    identity strings (`tool_name`, `tool_version`) appear in:
+    identity strings (`tool_name`, `tool_version`, `role`,
+    `tool_namespace`) appear in:
 
     - the signed predicate's text
     - the core-level `source_name` and `generated_by` fields

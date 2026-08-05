@@ -5,6 +5,8 @@ Conceptual clusters:
 - :class:`TestUriForm` — every URI exposed by the adapter is URN-form.
 - :class:`TestProvenanceToolAdapter` — wrap a tool, verify the
   recorded claim shape.
+- :class:`TestIdentitySanitization` — the tool name, role and
+  namespace are scrubbed before they are signed.
 - :class:`TestExecClassClaim` — exec-class tools attest only the
   execution environment they actually reported.
 - :class:`TestCacheLineage` — a callee's declared cache origin is
@@ -54,6 +56,48 @@ class TestProvenanceToolAdapter:
         result = pta.call(target="EGFR")
         assert "mareforma_claim_id" in result["metadata"]
         assert result["data"]["args_echo"]["target"] == "EGFR"
+
+
+class _NamedMock:
+    """Minimal tool whose reported name is caller-chosen."""
+
+    version = "0.1.0"
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def call(self, **kwargs: Any) -> dict[str, Any]:
+        return {"data": {"ok": True}, "metadata": {}}
+
+
+class TestIdentitySanitization:
+    """The identity a tool reports is untrusted, and it gets signed."""
+
+    def test_tool_name_scrubbed_in_signed_identity(self, graph):
+        from mareforma.adapters.tooluniverse import ProvenanceToolAdapter
+        pta = ProvenanceToolAdapter(
+            tool=_NamedMock("Evil​Tool"), graph=graph,
+        )
+        claim_id = pta.call()["metadata"]["mareforma_claim_id"]
+
+        row = graph.get_claim(claim_id)
+        assert row["generated_by"] == "adapter/executor/EvilTool"
+        assert row["source_name"] == "tooluniverse/EvilTool"
+
+    def test_role_and_namespace_scrubbed(self, graph):
+        from mareforma.adapters.tooluniverse import ProvenanceToolAdapter
+        pta = ProvenanceToolAdapter(
+            tool=_NamedMock("PlainTool"),
+            graph=graph,
+            role="exec​utor",
+            tool_namespace="regis​try",
+        )
+        claim_id = pta.call()["metadata"]["mareforma_claim_id"]
+
+        row = graph.get_claim(claim_id)
+        assert row["generated_by"] == "adapter/executor/PlainTool"
+        assert row["source_name"] == "registry/PlainTool"
+        assert "​" not in row["text"]
 
 
 class _PythonExecMock:

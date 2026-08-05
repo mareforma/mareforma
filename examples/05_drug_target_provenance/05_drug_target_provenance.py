@@ -157,12 +157,10 @@ def stage_data():
         sys.exit(1)
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    expected = {"compass", "depmap_24q2", "pinnacle_embeds", "transcriptformer_embedding"}
-    present = {d.name for d in DATA_DIR.iterdir() if d.is_dir()} if DATA_DIR.exists() else set()
-    if expected.issubset(present):
-        print("MedeaDB already downloaded, skipping.")
-        return
 
+    # Always ask hf: it skips files that match their recorded etag and resumes
+    # partial ones. The directories exist from the first file on, so their
+    # presence says a download started, not that it finished.
     run([
         str(VENV_HF), "download", "mims-harvard/MedeaDB",
         "--repo-type", "dataset",

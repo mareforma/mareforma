@@ -1,0 +1,55 @@
+"""Example 05's data stage, pinned so a partial download is never called done.
+
+huggingface_hub creates each file's parent directory before it writes any
+bytes, so the top-level directory names exist minutes into a multi-hour
+transfer. Completeness read off those names would report a truncated dataset
+as finished and never resume it.
+"""
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+from types import ModuleType
+
+_EXAMPLE = (
+    Path(__file__).resolve().parents[1]
+    / "examples"
+    / "05_drug_target_provenance"
+    / "05_drug_target_provenance.py"
+)
+
+
+def _load() -> ModuleType:
+    """The example imported as a module, its name being no identifier."""
+    spec = importlib.util.spec_from_file_location("example_05", _EXAMPLE)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        del sys.modules[spec.name]
+    return module
+
+
+def test_stage_data_downloads_over_empty_expected_directories(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """Directories with no files in them are a started download, not a done one."""
+    module = _load()
+    data_dir = tmp_path / "raw"
+    for name in ("compass", "depmap_24q2", "pinnacle_embeds", "transcriptformer_embedding"):
+        (data_dir / name).mkdir(parents=True)
+    hf = tmp_path / "hf"
+    hf.touch()
+
+    commands = []
+    monkeypatch.setattr(module, "DATA_DIR", data_dir)
+    monkeypatch.setattr(module, "VENV_HF", hf)
+    monkeypatch.setattr(module, "run", lambda cmd, **kwargs: commands.append(cmd))
+
+    module.stage_data()
+    capsys.readouterr()
+
+    assert commands, "stage_data returned without invoking hf download"
+    assert commands[0][:2] == [str(hf), "download"]

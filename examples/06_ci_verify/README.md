@@ -8,6 +8,7 @@ Its exit codes are stable, so a CI job can branch on them without parsing text:
 | `0` | verified | pass |
 | `1` | tamper or binding violation | fail the build |
 | `2` | unverifiable (missing material) | fail, or warn (your call) |
+| `3` | usage error (bad flag or missing argument) | fail the build |
 
 The workflow below verifies a claim on every push. Copy it to
 `.github/workflows/verify.yml` and set `CLAIM_ID` to the claim your pipeline
@@ -29,7 +30,9 @@ jobs:
       # The claim id your pipeline recorded. A run that regenerates the
       # graph would assert claims first, then verify them here.
       - name: verify claim
-        run: mareforma verify "$CLAIM_ID"
+        run: |
+          : "${CLAIM_ID:?CLAIM_ID is not set}"
+          mareforma verify "$CLAIM_ID"
         env:
           CLAIM_ID: ${{ vars.CLAIM_ID }}
 ```
@@ -45,6 +48,7 @@ code directly and use `--json` for the details:
 ```yaml
       - name: verify claim (split tamper vs unverifiable)
         run: |
+          : "${CLAIM_ID:?CLAIM_ID is not set}"
           set +e
           mareforma verify "$CLAIM_ID" --json > verdict.json
           code=$?
@@ -55,6 +59,9 @@ code directly and use `--json` for the details:
           elif [ "$code" = "2" ]; then
             echo "::warning::claim unverifiable in this environment"
             exit 0
+          elif [ "$code" != "0" ]; then
+            echo "::error::mareforma verify usage error (exit $code)"
+            exit 1
           fi
         env:
           CLAIM_ID: ${{ vars.CLAIM_ID }}

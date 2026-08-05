@@ -216,3 +216,46 @@ def test_api_compute_status_counts_independence_by_signer():
     assert "counted by distinct run (`generated_by`)" not in collapsed, (
         "compute_status must not name generated_by as the primary independence axis"
     )
+
+
+def test_example_05_promotion_prose_matches_the_signer_gate(tmp_path):
+    """example 05 must state the gate it would actually meet, and promise no more.
+
+    Promotion keys on distinct non-NULL ``asserter_keyid`` values over a shared
+    ESTABLISHED upstream; ``generated_by`` is a display label. The script writes
+    both forks through one open handle with no ``supports``, so both stay
+    PRELIMINARY and the run report must not promise a promotion.
+    """
+    from mareforma import signing as _signing
+
+    ka = _bootstrap_key(tmp_path, "root.key")
+    with mareforma.open(tmp_path, key_path=ka) as g:
+        # The way run_experiment.py writes: one key, no upstream.
+        ra = g.assert_claim("RA target", generated_by="medea/gpt-4o/ra_cd4")
+        sle = g.assert_claim("SLE target", generated_by="medea/gpt-4o/sle_cd4")
+        assert g.get_claim(ra)["support_level"] == "PRELIMINARY"
+        assert g.get_claim(sle)["support_level"] == "PRELIMINARY"
+
+        # The gate the README must describe: distinct keys, shared anchor.
+        sa = _signing.load_private_key(_bootstrap_key(tmp_path, "a.key"))
+        sb = _signing.load_private_key(_bootstrap_key(tmp_path, "b.key"))
+        up = g.assert_claim("anchor", generated_by="seed", seed=True)
+        a = g.assert_claim("A", supports=[up], generated_by="lab_a", signer=sa)
+        assert g.get_claim(a)["support_level"] == "PRELIMINARY"
+        b = g.assert_claim("B", supports=[up], generated_by="lab_b", signer=sb)
+        assert g.get_claim(b)["support_level"] == "REPLICATED"
+
+    example = ROOT / "examples" / "05_drug_target_provenance"
+    readme = (example / "README.md").read_text(encoding="utf-8")
+    section = " ".join(_section(readme, "## Promoting a finding").split())
+    assert "asserter_keyid" in section, (
+        "example 05 must state promotion in signer (asserter_keyid) terms"
+    )
+    assert "different `generated_by` fork" not in section, (
+        "example 05 names generated_by as the independence axis; it is a label"
+    )
+
+    script = (example / "run_experiment.py").read_text(encoding="utf-8")
+    assert "REPLICATED fires automatically" not in script, (
+        "the run report promises a promotion these single-key writes cannot reach"
+    )

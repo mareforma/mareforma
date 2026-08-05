@@ -134,19 +134,26 @@ rep_2 = graph.assert_claim(
 ## Q1: Independent data paths?
 
 ```python
-all_claims = graph.query("Target T")
-sources = {c.get("source_name") for c in all_claims if c.get("source_name")}
-agents  = {c.get("generated_by") for c in all_claims if c.get("generated_by")}
-# Independent iff >1 distinct source AND >1 distinct label.
+# The claims with a dataset behind them; the ESTABLISHED seed is the shared
+# upstream, not one of the paths being compared.
+paths = [c for c in graph.query("Target T") if c.get("source_name")]
+sources = {c["source_name"] for c in paths}
+keyids  = {c["asserter_keyid"] for c in paths if c.get("asserter_keyid")}
+# Independent iff >1 distinct source AND >1 distinct signing key. generated_by
+# is a display label the producer picks, so it is printed, never gated on.
 ```
 
 ```
   distinct source_names          ['private_dataset_A', 'private_dataset_B']
-  distinct generated_by          ['agent_seed/literature', 'lab_a/model-a', 'lab_b/model-b']
+  distinct signing keys          ['51584981…', '9f7cb1a0…']
+  generated_by (display)         ['lab_a/model-a', 'lab_b/model-b']
 
   ✓ Two independent data sources, two distinct signing keys.
     If they converged, the finding is not a dataset artifact.
 ```
+
+Two labs under one key writing two labels would fail this check, which is the
+point: the label is free text, the signature is not.
 
 ## Q2: Genuinely reproducible?
 
@@ -172,8 +179,30 @@ for c in graph.query("Target T"):
 ## Q3: Provenance distance, and the spurious-replication trap
 
 Provenance distance measures how far a conclusion is from raw data: short chains
-of ANALYTICAL steps are strong; long chains of INFERRED steps are fragile. Both
-labs' chains are anchored in ANALYTICAL findings from independent sources.
+of ANALYTICAL steps are strong; long chains of INFERRED steps are fragile. The
+example walks each chain from `supports_json` instead of drawing it by hand:
+
+```python
+def chain(claim_id):          # first cited support per hop, oldest first
+    hops = []
+    while claim_id:
+        claim = graph.get_claim(claim_id)
+        hops.append(f"{claim['classification']} ({claim_id[:8]}…)")
+        supports = json.loads(claim.get("supports_json") or "[]")
+        claim_id = supports[0] if supports else None
+    return " → ".join(reversed(hops))
+```
+
+```
+  Lab A, step_2:  DERIVED (e7fa3392…) → ANALYTICAL (5d642ff6…) → ANALYTICAL (5f18031c…)
+  Lab B, rep_1:   DERIVED (e7fa3392…) → ANALYTICAL (fa868fbb…)
+  Lab B, rep_2:   DERIVED (e7fa3392…) → ANALYTICAL (5d642ff6…) → ANALYTICAL (5f18031c…) → ANALYTICAL (407307ad…)
+```
+
+`rep_1` hangs off the prior literature alone, so it is an independent path: the
+only node it shares with Lab A is the seed both labs cite. `rep_2` cites Lab A's
+`step_2`, so it descends through Lab A's private-dataset chain. That branch is
+corroboration built on Lab A, not a second path.
 
 The contrast that makes the example worth reading: two distinct keys repeating
 the same LLM prior with **no data behind either**:

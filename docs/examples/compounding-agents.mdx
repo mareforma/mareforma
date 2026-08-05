@@ -18,9 +18,9 @@ cd examples/02_compounding_agents
 python 02_compounding_agents.py
 ```
 
-No API key and no network required. The model calls run through an in-memory
-`httpx` transport, so the model capture at the socket boundary is real while the
-example runs anywhere.
+No API key and no network required. The model calls answer from an in-memory
+`httpx` transport, so nothing leaves the process. That is also why no model call
+is certified here.
 
 ## 1. Absence: a number with no observed execution
 
@@ -64,31 +64,35 @@ verdict_b = model_check(client, ANTHROPIC_URL, "claude-3-5-sonnet-20241022", bet
 line_b = agent_graphs["agent-b"].assert_finding(
     prop, plan, estimate, data_id="dataset_beta",
     data_source=str(beta_csv), generated_by="agent-b", grounding=verdict_b)
-graph.trust_map(line_b["claim_id"]).get("independence").value   # "1"
+graph.trust_map(line_b["claim_id"]).get("independence").value   # "UNVERIFIABLE"
 ```
 
-Distinct in every legacy axis, signer and dataset, but one model. Two same-model
-checks are one line of evidence, so effective independence holds at 1.
+Distinct in every legacy axis, signer and dataset, but one model, and that model
+was never observed. Two same-model checks would be one line of evidence; here the
+instrument cannot certify even that, so it reports `UNVERIFIABLE`.
 
-## 3. A different model raises the count
+## 3. A different model name, still nothing to count
 
 ```python
 verdict_c = model_check(client, OPENAI_URL, "gpt-4o-2024-08-06", gamma_csv)
 line_c = agent_graphs["agent-c"].assert_finding(
     prop, plan, estimate, data_id="dataset_gamma",
     data_source=str(gamma_csv), generated_by="agent-c", grounding=verdict_c)
-graph.trust_map(line_c["claim_id"]).get("independence").value   # "2"
+graph.trust_map(line_c["claim_id"]).get("independence").value   # "UNVERIFIABLE"
 ```
 
-A genuinely different model is a second line. The count moves from 1 to 2 only when
-the evidence is independent in the axis that matters, the model, not merely in the
-key that signed it.
+A genuinely different model would be a second line, but a name in a request body
+the script answered itself proves nothing. The axis that matters is the model, not
+the key that signed it, and it is counted only when the call is observed against a
+recognized provider host.
 
 ## Where the numbers come from
 
-The model is read off the request body at the socket boundary, which the producer
-does not control, so the lineage is `COMPUTED`. The grounding verdict comes from
-watching the scope for a read of the cited source. Both ride into the signed
-finding through `grounding=`, and the trust map places each on its own axis:
-grounding, and effective independence. Neither is a label the agent chose. See
-[Findings](/concepts/findings) and [Grounding](/concepts/grounding).
+The model is read off the request body at the POST boundary. That capture earns
+`COMPUTED` only when `httpx`'s own network transport answered a recognized provider
+host; an in-process transport is a producer declaration (`PROXY`), and one soft
+supporting lineage is enough to make the count `UNVERIFIABLE`. The grounding
+verdict comes from watching the scope for a read of the cited source. Both ride
+into the signed finding through `grounding=`, and the trust map places each on its
+own axis: grounding, and effective independence. Neither is a label the agent
+chose. See [Findings](/concepts/findings) and [Grounding](/concepts/grounding).
