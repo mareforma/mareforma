@@ -1,9 +1,9 @@
 """
-examples/04_private_data_public_findings.py, Private data, public findings.
+04_private_data_public_findings.py, Private data, public findings.
 
 Run:
     pip install langchain-core
-    python examples/04_private_data_public_findings.py
+    python 04_private_data_public_findings.py
 
 No API key required.
 

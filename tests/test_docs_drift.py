@@ -38,8 +38,15 @@ from mareforma.cli import (
     cli,
 )
 from mareforma.observe.oracle import perturbation_oracle
-from mareforma.trust import STATUS_POLICY
-from tests._helpers import _bootstrap_key, _est, _pred, _prop, _requires_repo_checkout
+from mareforma.trust import STATUS_POLICY, Status
+from tests._helpers import (
+    _bootstrap_key,
+    _est,
+    _example_files,
+    _pred,
+    _prop,
+    _requires_repo_checkout,
+)
 from tests.test_distinct_signer_model import _build_established
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -2184,6 +2191,84 @@ def test_query_parameters_documented_in_both_references():
         if missing:
             absent[name] = missing
     assert not absent, f"query() parameters missing from the docs: {absent}"
+
+
+_INDEX_ROW_RE = re.compile(r"^\| \d+ \| \[[^\]]+\]\((\S+?)/\) \| (.+?) \|$", re.MULTILINE)
+
+
+def test_examples_index_names_no_status_the_example_never_computes():
+    """Each index row must describe its example in the vocabulary that example prints.
+
+    A ``Status`` comes from ``compute_status`` and nowhere else. A row that
+    promises a ladder value from an example which only reports the trust axes
+    teaches the ladder and effective independence as one thing.
+    """
+    rows = _INDEX_ROW_RE.findall((ROOT / "examples" / "README.md").read_text())
+    directories = sorted(p.name for p in (ROOT / "examples").iterdir() if p.is_dir())
+    assert sorted(name for name, _ in rows) == directories
+
+    ladder = {status.value for status in Status}
+    scripts = _example_files()
+    for name, description in rows:
+        example = ROOT / "examples" / name
+        source = "\n".join(
+            p.read_text(encoding="utf-8") for p in scripts if example in p.parents
+        )
+        if "compute_status" in source:
+            continue
+        named = ladder & set(re.findall(r"[A-Z]{4,}", description))
+        assert not named, f"row {name} names {sorted(named)}, which it never computes"
+
+
+_BANNER_RE = re.compile(r'sep\("(\d+)\.\s+([^"]+)"\)')
+_COVERS_ENTRY_RE = re.compile(r"^(\d+)\. \*\*(.+?)\*\*", re.MULTILINE)
+
+
+def test_walkthrough_page_lists_every_section_the_script_prints():
+    """the docs page index must carry the sections the run prints.
+
+    The script's own docstring index is pinned against its banners in
+    ``tests/test_examples_docstrings.py``; the page is the other index, and a
+    reader who never sees a section listed never learns it exists.
+    """
+    script = (
+        ROOT / "examples" / "01_api_walkthrough" / "01_api_walkthrough.py"
+    ).read_text(encoding="utf-8")
+    page = (DOCS / "examples" / "api-walkthrough.mdx").read_text(encoding="utf-8")
+    banners = _BANNER_RE.findall(script)
+    entries = _COVERS_ENTRY_RE.findall(_section(page, "## What it covers"))
+
+    assert [number for number, _ in entries] == [number for number, _ in banners]
+    for (_, label), (number, title) in zip(entries, banners):
+        assert title.startswith(label), (
+            f"page entry {number} reads {label!r}, the banner reads {title!r}"
+        )
+
+
+def test_agents_lists_every_trust_map_property(tmp_path):
+    """the AGENTS list must name every axis the map returns.
+
+    ``build_trust_map`` emits faithfulness on every build, at the COMPUTED
+    tier reading ``not present`` when no re-execution record is supplied. Code
+    that iterates the documented names skips the axis the list omits.
+    """
+    key = _bootstrap_key(tmp_path, "lab_a.key")
+    with mareforma.open(tmp_path, key_path=key) as graph:
+        claim_id = graph.assert_claim("observed axis coverage", generated_by="agent/a")
+        emitted = [prop.name for prop in graph.trust_map(claim_id).properties]
+
+    listed = re.search(
+        r"it places every trust property \(([^)]+)\)",
+        " ".join((ROOT / "AGENTS.md").read_text(encoding="utf-8").split()),
+    )
+    assert listed is not None, "AGENTS.md no longer lists the trust properties"
+    documented = [
+        name.strip().replace(" ", "_").replace("-", "_")
+        for name in listed.group(1).split(",")
+    ]
+    assert documented == emitted, (
+        f"the AGENTS.md trust-property list drifted from the map: {documented}"
+    )
 
 
 _GRAPH_CALL_RE = re.compile(r"graph\.([A-Za-z_][A-Za-z0-9_]*)\(")

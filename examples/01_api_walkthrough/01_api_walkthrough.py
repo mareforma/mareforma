@@ -1,20 +1,21 @@
 """
-examples/01_api_walkthrough.py, Full EpistemicGraph API walkthrough.
+01_api_walkthrough.py, Full EpistemicGraph API walkthrough.
 
 Run:
-    python examples/01_api_walkthrough.py
+    python 01_api_walkthrough.py
 
 No external dependencies. Uses a temporary directory, safe to run anywhere.
 
 Sections
 --------
-  1. Open           zero setup, context manager
-  2. Assert         INFERRED, ANALYTICAL, DERIVED
-  3. Query          text, min_support, classification, limit
-  4. Idempotency    retry-safe writes
-  5. REPLICATED     automatic when two independent agents converge
-  6. ESTABLISHED    human validation, requires REPLICATED first
-  7. Anti-patterns  what breaks the epistemic model silently
+  1. Open                  zero setup, context manager
+  2. Assert                INFERRED, ANALYTICAL, DERIVED
+  3. Query                 text, min_support, classification, limit
+  4. Idempotency           retry-safe writes
+  5. REPLICATED            automatic when two independent agents converge
+  6. ESTABLISHED           human validation, requires REPLICATED first
+  7. Operational surfaces  health(), classify_supports()
+  8. Anti-patterns         what breaks the epistemic model silently
 """
 
 import tempfile

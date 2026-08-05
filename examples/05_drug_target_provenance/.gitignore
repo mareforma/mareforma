@@ -5,8 +5,8 @@ ontology.jsonld
 agent.log
 pip_install*.log
 
-# MedeaDB — download separately with:
-# huggingface-cli download psui3905/MedeaDB --local-dir data/medeadb/raw/
+# MedeaDB, download separately with:
+# hf download mims-harvard/MedeaDB --repo-type dataset --local-dir data/medeadb/raw/
 data/medeadb/raw/
 
 # Environments and cloned deps

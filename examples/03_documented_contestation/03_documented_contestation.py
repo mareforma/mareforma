@@ -1,9 +1,9 @@
 """
-examples/03_documented_contestation.py, Documented contestation.
+03_documented_contestation.py, Documented contestation.
 
 Run:
     pip install langchain-core
-    python examples/03_documented_contestation.py
+    python 03_documented_contestation.py
 
 No API key required.
 

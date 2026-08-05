@@ -1,5 +1,5 @@
 """
-examples/02_compounding_agents.py, What the instrument refuses to count.
+02_compounding_agents.py, What the instrument refuses to count.
 
 Two failure modes an honest trust layer has to catch, shown end to end.
 
