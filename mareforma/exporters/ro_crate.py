@@ -4,7 +4,8 @@ Core-level adapter. Produces an ``ro-crate-metadata.json`` JSON-LD
 document describing the whole graph as a Dataset of CreateAction
 entities (one per claim assertion). Each claim's signature envelope is
 attached to the CreateAction's ``signature`` property so signatures
-travel with the package.
+travel with the package, as the DSSE envelope object itself
+(``payloadType``, ``payload``, ``signatures``), not as a JSON string.
 
 Downstream consumers: Galaxy, EuroScienceGateway, FAIR-EASE, any
 RO-Crate-aware FAIR-research tooling.
@@ -26,6 +27,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 
 __all__ = [
@@ -59,19 +61,18 @@ _UUID_RE = re.compile(
 )
 # generated_by is allowed slashes ("model/version/context") and dashes,
 # but `#`, whitespace, or shell-meta chars would break JSON-LD @id.
-_AGENT_SAFE_RE = re.compile(r"^[A-Za-z0-9._/\-]+$")
+_AGENT_SAFE_CHARS = "._/-"
 
 
 def _safe_agent_id(agent: str) -> str:
     """Coerce an agent identifier into a JSON-LD-@id-safe form.
 
-    Replaces any character outside ``[A-Za-z0-9._/-]`` with ``_`` so the
-    resulting ``#agent/<sanitised>`` fragment parses correctly in every
-    JSON-LD consumer. Idempotent.
+    Percent-encodes any character outside ``[A-Za-z0-9._/-]`` so the
+    resulting ``#agent/<escaped>`` fragment parses correctly in every
+    JSON-LD consumer. The escape is reversible, so two producers whose
+    names differ only in an unsafe character keep distinct ids.
     """
-    if _AGENT_SAFE_RE.match(agent):
-        return agent
-    return re.sub(r"[^A-Za-z0-9._/\-]", "_", agent)
+    return quote(agent, safe=_AGENT_SAFE_CHARS)
 
 
 def _claim_to_create_action(claim: dict) -> dict[str, Any]:
@@ -160,8 +161,14 @@ def _claim_to_create_action(claim: dict) -> dict[str, Any]:
         action["object"] = object_refs
 
     # Attach the signed envelope so signatures travel with the package.
-    if claim.get("signature_bundle"):
-        action["signature"] = claim["signature_bundle"]
+    # The column is serialised JSON; a hand-edited malformed bundle is
+    # omitted rather than shipped as an opaque string.
+    bundle = claim.get("signature_bundle")
+    if bundle:
+        try:
+            action["signature"] = json.loads(bundle)
+        except (ValueError, TypeError):
+            pass
     return action
 
 
@@ -188,20 +195,19 @@ def _claim_to_media_object(claim: dict) -> dict[str, Any]:
 def _agent_entities(claims: list[dict]) -> list[dict[str, Any]]:
     """Distinct asserting agents → SoftwareApplication entities.
 
-    Agent identifiers are sanitised via :func:`_safe_agent_id` so a
+    Agent identifiers are escaped via :func:`_safe_agent_id` so a
     foreign or malformed ``generated_by`` value can't poison the
-    JSON-LD @id space.
+    JSON-LD @id space. Distinct raw names stay distinct entities.
     """
     seen: set[str] = set()
     entities: list[dict[str, Any]] = []
     for c in claims:
         raw = c.get("generated_by", "agent") or "agent"
-        agent = _safe_agent_id(raw)
-        if agent in seen:
+        if raw in seen:
             continue
-        seen.add(agent)
+        seen.add(raw)
         entities.append({
-            "@id": f"#agent/{agent}",
+            "@id": f"#agent/{_safe_agent_id(raw)}",
             "@type": "SoftwareApplication",
             "name": raw,
         })

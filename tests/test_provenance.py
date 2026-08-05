@@ -526,6 +526,25 @@ class TestProvOExport:
         ids = " ".join(n.get("@id", "") for n in doc["@graph"])
         assert "#" not in ids.replace("@id", "")
 
+    def test_agents_differing_only_in_escaped_chars_stay_distinct(
+        self, tmp_path: Path
+    ) -> None:
+        from mareforma.exporters.prov_o import build_prov_o
+        with mareforma.open(tmp_path) as graph:
+            spaced = graph.assert_claim("a", generated_by="lab alpha")
+            scored = graph.assert_claim("b", generated_by="lab_alpha")
+        doc = build_prov_o(tmp_path)
+        agents = [n for n in doc["@graph"] if n.get("@type") == "prov:Agent"]
+        by_label = {a["rdfs:label"]: a["@id"] for a in agents}
+        assert set(by_label) == {"lab alpha", "lab_alpha"}
+        assert len(set(by_label.values())) == 2
+        for claim_id, label in ((spaced, "lab alpha"), (scored, "lab_alpha")):
+            entity = next(
+                n for n in doc["@graph"]
+                if n.get("@id") == f"mareforma:claim:{claim_id}"
+            )
+            assert entity["prov:wasAttributedTo"]["@id"] == by_label[label]
+
     def test_validate_catches_orphan_entity(self) -> None:
         from mareforma.exporters.prov_o import (
             validate_prov_o, ProvOValidationError,

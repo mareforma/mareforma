@@ -41,6 +41,8 @@ EXPORT_MEDIA_TYPE = "application/x-mareforma-graph+json"
 
 
 _CONTEXT = {
+    # 1.1 is required for the ``@json`` type used by ``evidence`` below.
+    "@version": 1.1,
     "schema": "https://schema.org/",
     "mare":   "urn:mareforma:ns:",
     "xsd":    "http://www.w3.org/2001/XMLSchema#",
@@ -71,6 +73,10 @@ _CONTEXT = {
     "validatedBy":     "mare:validatedBy",
     "usedSource":      "mare:usedSource",
     "artifactHash":    "mare:artifactHash",
+    # The evidence vector is an open object: GRADE domains, upgrade flags
+    # and grounding fields. ``@json`` keeps it whole through expansion,
+    # where a plain term mapping would drop every key inside it.
+    "evidence":        {"@id": "mare:evidence", "@type": "@json"},
 }
 
 
@@ -86,9 +92,31 @@ class JSONLDExporter:
     def __init__(self, root: Path) -> None:
         self._root = root
 
-    def export(self) -> dict[str, Any]:
-        """Build and return the full JSON-LD document as a Python dict."""
-        from mareforma.db import open_db, list_claims
+    def export(self, claims: "list[dict] | None" = None) -> dict[str, Any]:
+        """Build and return the full JSON-LD document as a Python dict.
+
+        ``claims`` lets a caller that already holds the graph's rows hand them
+        over instead of paying a second open and a second verify-on-read pass
+        over every row (that flag costs a signature re-verification and a
+        corroboration probe per high-trust claim). The rows must come from
+        :func:`mareforma.db.list_claims`; ``refuse_unverified_claims`` rejects
+        any that carry no verify-on-read result, so this cannot become a way
+        around the gate below. Defaults to reading them here.
+
+        Raises ``FileNotFoundError`` if *root* holds no graph: ``open_db``
+        would otherwise create one and return an empty export as success.
+        Raises ``UnverifiedClaimError`` if any claim failed verify-on-read: an
+        export carries the support level off the machine, so it must not
+        publish a level the signature no longer backs.
+        """
+        from mareforma.db import open_db, list_claims, refuse_unverified_claims
+
+        db_path = self._root / ".mareforma" / "graph.db"
+        if not db_path.exists():
+            raise FileNotFoundError(
+                f"No epistemic graph found at {db_path}. "
+                "Run `mareforma bootstrap` to initialize one."
+            )
 
         conn = open_db(self._root)
         try:

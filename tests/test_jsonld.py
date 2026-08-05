@@ -6,6 +6,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from mareforma.db import add_claim, open_db
 from mareforma.exporters.jsonld import JSONLDExporter
 
@@ -21,7 +23,13 @@ def _open(tmp_path: Path) -> sqlite3.Connection:
 
 
 class TestContextAndStructure:
+    def test_missing_graph_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError, match="No epistemic graph found"):
+            JSONLDExporter(tmp_path).export()
+        assert (tmp_path / ".mareforma").exists() is False
+
     def test_context_present(self, tmp_path: Path) -> None:
+        _open(tmp_path).close()
         doc = JSONLDExporter(tmp_path).export()
         assert "@context" in doc
         ctx = doc["@context"]
@@ -34,12 +42,14 @@ class TestContextAndStructure:
 
     def test_export_media_type(self, tmp_path: Path) -> None:
         from mareforma.exporters.jsonld import EXPORT_MEDIA_TYPE
+        _open(tmp_path).close()
         doc = JSONLDExporter(tmp_path).export()
         assert doc["@type"] == "mare:Graph"
         assert doc["mare:mediaType"] == EXPORT_MEDIA_TYPE
         assert EXPORT_MEDIA_TYPE == "application/x-mareforma-graph+json"
 
     def test_context_has_claim_vocabulary(self, tmp_path: Path) -> None:
+        _open(tmp_path).close()
         doc = JSONLDExporter(tmp_path).export()
         ctx = doc["@context"]
         assert "claimText" in ctx
@@ -47,12 +57,40 @@ class TestContextAndStructure:
         assert "supportLevel" in ctx
         assert "claimStatus" in ctx
 
+    def test_every_claim_node_key_survives_expansion(self, tmp_path: Path) -> None:
+        # A key that is neither @-prefixed, defined in @context, nor an IRI
+        # with a prefix is dropped by a JSON-LD processor.
+        conn = _open(tmp_path)
+        try:
+            add_claim(conn, tmp_path, "Target T is elevated in condition C")
+        finally:
+            conn.close()
+        doc = JSONLDExporter(tmp_path).export()
+        ctx = doc["@context"]
+        node = doc["@graph"][0]
+        undefined = [
+            k for k in node
+            if not k.startswith("@") and k not in ctx and ":" not in k
+        ]
+        assert undefined == []
+
+    def test_evidence_is_typed_json(self, tmp_path: Path) -> None:
+        # Without @json the object survives but every key inside it that
+        # the context does not define is dropped on expansion.
+        _open(tmp_path).close()
+        doc = JSONLDExporter(tmp_path).export()
+        ctx = doc["@context"]
+        assert ctx["@version"] == 1.1
+        assert ctx["evidence"]["@type"] == "@json"
+
     def test_graph_present(self, tmp_path: Path) -> None:
+        _open(tmp_path).close()
         doc = JSONLDExporter(tmp_path).export()
         assert "@graph" in doc
         assert isinstance(doc["@graph"], list)
 
     def test_empty_graph_when_no_claims(self, tmp_path: Path) -> None:
+        _open(tmp_path).close()
         doc = JSONLDExporter(tmp_path).export()
         assert doc["@graph"] == []
 
@@ -128,22 +166,26 @@ class TestClaimNodes:
 
 class TestFileOutput:
     def test_write_creates_file(self, tmp_path: Path) -> None:
+        _open(tmp_path).close()
         path = JSONLDExporter(tmp_path).write()
         assert path.exists()
         assert path.name == "ontology.jsonld"
 
     def test_written_file_is_valid_json(self, tmp_path: Path) -> None:
+        _open(tmp_path).close()
         path = JSONLDExporter(tmp_path).write()
         doc = json.loads(path.read_text(encoding="utf-8"))
         assert "@context" in doc
         assert "@graph" in doc
 
     def test_custom_output_path(self, tmp_path: Path) -> None:
+        _open(tmp_path).close()
         custom = tmp_path / "exports" / "my_ontology.jsonld"
         path = JSONLDExporter(tmp_path).write(custom)
         assert path == custom
         assert custom.exists()
 
     def test_write_returns_path(self, tmp_path: Path) -> None:
+        _open(tmp_path).close()
         result = JSONLDExporter(tmp_path).write()
         assert isinstance(result, Path)

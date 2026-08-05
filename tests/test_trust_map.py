@@ -364,7 +364,7 @@ class TestHtmlRender:
         assert ">grounding<" in html
         assert ">GROUNDED<" in html
         assert ">DEFERRED<" in html
-        # A None value renders as the "n/a" placeholder, never "None"
+        # A None value renders as the shared "n/a" placeholder, never "None"
         # and never a blank cell an auditor would read as a broken render.
         assert ">None<" not in html
         assert ">n/a<" in html

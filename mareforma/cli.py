@@ -99,6 +99,7 @@ _TIER_FG = {"COMPUTED": "green", "PROXIED": "yellow", "DEFERRED": "white"}
 
 def _trust_map_plaintext(tmap) -> str:
     """Unstyled text rendering of a TrustMap, for writing to a file (no ANSI)."""
+    from mareforma.trust_map import display_value
     lines = [
         "TRUST MAP",
         f"  {tmap.subject_kind} {tmap.subject_id}",
@@ -106,15 +107,33 @@ def _trust_map_plaintext(tmap) -> str:
         "",
     ]
     for p in tmap.properties:
-        val = ", " if p.value is None else str(p.value)
-        lines.append(f"  {p.name:24} [{p.tier.value:8}] {val}")
+        lines.append(f"  {p.name:24} [{p.tier.value:8}] {display_value(p.value)}")
         lines.append(f"      {p.residual}")
         lines.append("")
     return "\n".join(lines)
 
 
+def _write_trust_map(output: str, text: str) -> None:
+    """Write a rendered trust map to *output*, creating the parent directory.
+
+    Writing into a build directory that does not exist yet is the normal case
+    for a CI job, and a write that still fails is reported as one line, the way
+    the export branches report theirs, never as a traceback.
+    """
+    path = Path(output)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        _err(f"Could not write {output}: {exc}")
+        sys.exit(1)
+    _ok(f"Wrote trust map → {output}")
+
+
 def _echo_trust_map(tmap, *, redact_home: bool = False) -> None:
     """Print a TrustMap as a human-readable ledger."""
+    from mareforma.trust_map import display_value
+
     def out(line: str) -> None:
         click.echo(_redact_home(line) if redact_home else line)
 
@@ -124,12 +143,11 @@ def _echo_trust_map(tmap, *, redact_home: bool = False) -> None:
     click.echo("")
     for p in tmap.properties:
         color = _TIER_FG.get(p.tier.value, "white")
-        val = ", " if p.value is None else str(p.value)
         click.echo(
             "  " + click.style(f"{p.name:24}", bold=True) + " "
             + click.style(f"[{p.tier.value:8}]", fg=color) + " "
         )
-        out(f"      {val}")
+        out(f"      {display_value(p.value)}")
         out(f"      {p.residual}")
         click.echo("")
 
@@ -499,7 +517,7 @@ def status_cmd(as_json: bool) -> None:
 @cli.command("activity")
 @click.option("--json", "as_json", is_flag=True, default=False,
               help="Emit JSON to stdout instead of a formatted table.")
-@click.option("--last", "last_n", type=int, default=None,
+@click.option("--last", "last_n", type=click.IntRange(min=1), default=None,
               help="Aggregate only the last N events. Default: all events.")
 def activity_cmd(as_json: bool, last_n: int | None) -> None:
     """Show rolling operational rates from the activity log.
@@ -561,7 +579,7 @@ def activity_cmd(as_json: bool, last_n: int | None) -> None:
 
 @cli.command("stats", hidden=True, deprecated=True)
 @click.option("--json", "as_json", is_flag=True, default=False)
-@click.option("--last", "last_n", type=int, default=None)
+@click.option("--last", "last_n", type=click.IntRange(min=1), default=None)
 @click.pass_context
 def stats_cmd(ctx: click.Context, as_json: bool, last_n: int | None) -> None:
     """Deprecated alias of ``mareforma activity``.
@@ -590,7 +608,8 @@ def stats_cmd(ctx: click.Context, as_json: bool, last_n: int | None) -> None:
 @click.option("--output", default=None,
               help="Output path. Default depends on --format / --bundle.")
 @click.option("--json", "as_json", is_flag=True, default=False,
-              help="Print JSON to stdout instead of writing a file.")
+              help="Print JSON to stdout instead of writing a file. "
+                   "Mutually exclusive with --bundle.")
 @click.option("--bundle", is_flag=True, default=False,
               help="Produce a SCITT-style signed bundle (in-toto Statement "
                    "v1 + DSSE envelope). Requires a loaded signing key.")
@@ -633,6 +652,13 @@ def export(
             "--bundle and --format are mutually exclusive. --bundle produces "
             "a signed in-toto v1 envelope; --format selects an unsigned "
             "export shape. Choose one."
+        )
+        sys.exit(1)
+
+    if bundle and as_json:
+        _err(
+            "--bundle and --json are mutually exclusive. --bundle writes a "
+            "signed envelope to a file; use --output to choose the path."
         )
         sys.exit(1)
 
@@ -1326,8 +1352,7 @@ def map_cmd(claim_id: str, as_html: bool, as_json: bool,
         if redact_home:
             html = _redact_home(html)
         if output:
-            Path(output).write_text(html, encoding="utf-8")
-            _ok(f"Wrote trust map → {output}")
+            _write_trust_map(output, html)
         else:
             click.echo(html, nl=False)
         return
@@ -1337,8 +1362,7 @@ def map_cmd(claim_id: str, as_html: bool, as_json: bool,
         if redact_home:
             text = _redact_home(text)
         if output:
-            Path(output).write_text(text + "\n", encoding="utf-8")
-            _ok(f"Wrote trust map → {output}")
+            _write_trust_map(output, text + "\n")
         else:
             click.echo(text)
         return
@@ -1347,8 +1371,7 @@ def map_cmd(claim_id: str, as_html: bool, as_json: bool,
         text = _trust_map_plaintext(tmap)
         if redact_home:
             text = _redact_home(text)
-        Path(output).write_text(text, encoding="utf-8")
-        _ok(f"Wrote trust map → {output}")
+        _write_trust_map(output, text)
         return
 
     _echo_trust_map(tmap, redact_home=redact_home)
@@ -1736,10 +1759,11 @@ def reexec_cmd(run_path: Path, as_json: bool, map_claim: str | None) -> None:
             _err(f"{verdict}: re-execution produced a different number")
         else:
             _err(f"{verdict}: the pipeline could not be re-executed")
-        if result.reproduced_value is not None:
-            _info(f"recorded: {result.recorded_value}  reproduced: {result.reproduced_value}")
-        else:
-            _info(f"recorded: {result.recorded_value}  reproduced: , ")
+        from mareforma.trust_map import display_value
+        _info(
+            f"recorded: {result.recorded_value}  "
+            f"reproduced: {display_value(result.reproduced_value)}"
+        )
         _info(f"tolerance: abs={result.tolerance}  rel={result.rel_tolerance}")
         _info(f"residual: {result.residual}")
 

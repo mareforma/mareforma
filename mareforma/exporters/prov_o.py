@@ -41,6 +41,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 
 __all__ = [
@@ -62,7 +63,7 @@ PROV_CONTEXT = {
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
-_AGENT_SAFE_RE = re.compile(r"^[A-Za-z0-9._/\-]+$")
+_AGENT_SAFE_CHARS = "._/-"
 
 
 class ProvOValidationError(ValueError):
@@ -74,9 +75,12 @@ class ProvOValidationError(ValueError):
 
 
 def _safe_agent_id(agent: str) -> str:
-    if _AGENT_SAFE_RE.match(agent):
-        return agent
-    return re.sub(r"[^A-Za-z0-9._/\-]", "_", agent)
+    """Percent-encode an agent id into a JSON-LD-@id-safe form.
+
+    The escape is reversible, so two producers whose names differ only
+    in an unsafe character keep distinct ``mareforma:agent:`` ids.
+    """
+    return quote(agent, safe=_AGENT_SAFE_CHARS)
 
 
 def _require_uuid_claim_id(claim_id: str) -> str:
@@ -192,15 +196,14 @@ def build_prov_o(root: Path, claim_id: str | None = None) -> dict[str, Any]:
     for claim in claims:
         cid = claim["claim_id"]
         agent = claim.get("generated_by") or "agent"
-        agent_safe = _safe_agent_id(agent)
 
-        if agent_safe not in seen_agents:
+        if agent not in seen_agents:
             graph.append({
                 "@id": _agent_id(agent),
                 "@type": "prov:Agent",
                 "rdfs:label": agent,
             })
-            seen_agents.add(agent_safe)
+            seen_agents.add(agent)
 
         # Entity: the claim itself.
         entity: dict[str, Any] = {

@@ -54,7 +54,8 @@ PRE_BINDING_GROUNDED_LABEL = "GROUNDED (pre-binding axis; citation binding not c
 NOT_PRESENT = "not present"
 
 # The placeholder every renderer substitutes for an absent value, so a blank
-# cell always means a rendering failure and never an absent value. A golden-file
+# cell always means a rendering failure and never an absent value. One spelling
+# for every renderer, so the text and HTML views of one map agree. A golden-file
 # test pins this exact text; do not reword without updating it.
 ABSENT_VALUE = "n/a"
 
@@ -161,6 +162,15 @@ def parse_grounding_record(value) -> "dict | None":
             return None
         return parsed if isinstance(parsed, dict) else None
     return None
+
+
+def display_value(value) -> str:
+    """Render a property value for a reader, an absent one as ``n/a``.
+
+    One placeholder for every renderer of a map, text and HTML alike, so two
+    views of the same property cannot disagree on how absence reads.
+    """
+    return ABSENT_VALUE if value is None else str(value)
 
 
 def _short(keyid: str | None) -> str:

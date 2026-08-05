@@ -96,10 +96,20 @@ def build_statement(root: Path) -> dict[str, Any]:
 
     The Statement is unsigned: call :func:`sign_bundle` to produce
     the DSSE envelope.
+
+    Raises ``FileNotFoundError`` if *root* holds no graph: ``open_db``
+    would otherwise create one and sign an empty statement.
     """
     from mareforma.db import open_db, list_claims
     from mareforma.exporters.jsonld import JSONLDExporter
     from mareforma import validators as _validators
+
+    db_path = root / ".mareforma" / "graph.db"
+    if not db_path.exists():
+        raise FileNotFoundError(
+            f"No epistemic graph found at {db_path}. "
+            "Run `mareforma bootstrap` to initialize one."
+        )
 
     conn = open_db(root)
     try:

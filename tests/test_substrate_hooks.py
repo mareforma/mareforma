@@ -460,6 +460,27 @@ class TestExportFormats:
         assert text_obj["@type"] == "MediaObject"
         assert text_obj["text"] == "test claim for export"
 
+    def test_ro_crate_keeps_agents_differing_only_in_escaped_chars(
+        self, tmp_path: Path
+    ) -> None:
+        from mareforma.exporters.ro_crate import build_crate
+        with mareforma.open(tmp_path) as graph:
+            spaced = graph.assert_claim("a", generated_by="lab alpha")
+            scored = graph.assert_claim("b", generated_by="lab_alpha")
+        entities = build_crate(tmp_path)["@graph"]
+        agents = [
+            e for e in entities if e["@type"] == "SoftwareApplication"
+        ]
+        by_name = {a["name"]: a["@id"] for a in agents}
+        assert set(by_name) == {"lab alpha", "lab_alpha"}
+        assert len(set(by_name.values())) == 2
+        for claim_id, name in ((spaced, "lab alpha"), (scored, "lab_alpha")):
+            action = next(
+                e for e in entities
+                if e["@id"] == f"urn:mareforma:claim:{claim_id}"
+            )
+            assert action["agent"]["@id"] == by_name[name]
+
     def test_ro_crate_empty_graph_handles_gracefully(
         self, tmp_path: Path
     ) -> None:
@@ -691,12 +712,43 @@ class TestRoCrateInputValidation:
         from mareforma.exporters.ro_crate import _safe_agent_id
         # Slash + dash + dot OK (model/version/context convention).
         assert _safe_agent_id("openai/gpt-4o/v1.0") == "openai/gpt-4o/v1.0"
-        # Hash sign → underscore (breaks JSON-LD @id fragment otherwise).
+        # Hash sign escaped (breaks JSON-LD @id fragment otherwise).
         assert "#" not in _safe_agent_id("evil#agent")
-        # Whitespace → underscore.
+        # Whitespace escaped.
         assert " " not in _safe_agent_id("agent with spaces")
-        # Other shell-meta → underscore.
+        # Other shell-meta escaped.
         assert ";" not in _safe_agent_id("agent;rm")
+
+    def test_agent_ids_are_injective(self) -> None:
+        from mareforma.exporters.ro_crate import _safe_agent_id
+        assert _safe_agent_id("lab alpha") != _safe_agent_id("lab_alpha")
+
+    def test_signature_is_the_dsse_envelope_object(self, tmp_path: Path) -> None:
+        from mareforma import signing as _signing
+        from mareforma.exporters.ro_crate import build_crate
+        key_path = tmp_path / "asserter.key"
+        _signing.save_private_key(_signing.generate_keypair(), key_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            claim_id = graph.assert_claim("signed claim")
+        action = next(
+            e for e in build_crate(tmp_path)["@graph"]
+            if e["@id"] == f"urn:mareforma:claim:{claim_id}"
+        )
+        assert isinstance(action["signature"], dict)
+        assert "payload" in action["signature"]
+        assert "signatures" in action["signature"]
+
+    def test_malformed_signature_bundle_is_omitted(self) -> None:
+        # A hand-edited bundle must not crash the export or ship a bare
+        # string where consumers expect the envelope object.
+        import uuid
+        from mareforma.exporters.ro_crate import _claim_to_create_action
+        action = _claim_to_create_action({
+            "claim_id": str(uuid.uuid4()),
+            "generated_by": "agent",
+            "signature_bundle": "{not json",
+        })
+        assert "signature" not in action
 
     def test_supports_json_dict_does_not_iterate_keys(
         self, tmp_path: Path

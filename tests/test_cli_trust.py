@@ -19,7 +19,7 @@ from click.testing import CliRunner
 
 import mareforma
 from mareforma import signing
-from mareforma.cli import cli, _claim_bound_sources
+from mareforma.cli import cli, _claim_bound_sources, _trust_map_plaintext
 from mareforma.db import open_db
 
 
@@ -67,6 +67,25 @@ class TestMapCommand:
             assert "independence" in res.output
             assert "UNVERIFIABLE" in res.output
 
+    def test_map_renders_an_absent_value_as_na(self, tmp_path: Path) -> None:
+        """leakage is DEFERRED with no value on every map, so both text
+        renderers show a placeholder. It must be the "n/a" the HTML render
+        uses, not a bare comma that reads as truncated output."""
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            with mareforma.open(".") as g:
+                cid = g.assert_claim("m", classification="ANALYTICAL")
+                text = _trust_map_plaintext(g.trust_map(cid))
+            res = r.invoke(cli, ["map", cid])
+        leakage = next(
+            ln for ln in text.splitlines() if ln.strip().startswith("leakage")
+        )
+        assert leakage.endswith("n/a")
+        assert res.exit_code == 0, res.output
+        assert "n/a" in res.output
+        assert not any(ln.strip() == "," for ln in res.output.splitlines())
+
     def test_map_json(self, tmp_path: Path) -> None:
         r = CliRunner()
         with r.isolated_filesystem(temp_dir=tmp_path):
@@ -90,6 +109,39 @@ class TestMapCommand:
             html = Path("tm.html").read_text()
             assert html.startswith("<!DOCTYPE html>")
             assert "https://" not in html and "<script" not in html.lower()
+
+    def test_map_output_creates_the_parent_directory(
+        self, tmp_path: Path,
+    ) -> None:
+        """A CI job writing the map into a build directory must not have to
+        create it first, the way export already does not."""
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            with mareforma.open(".") as g:
+                cid = g.assert_claim("m", classification="ANALYTICAL")
+            for flag, target in (
+                ([], "text/map.txt"),
+                (["--json"], "json/map.json"),
+                (["--html"], "html/map.html"),
+            ):
+                res = r.invoke(cli, ["map", cid, *flag, "--output", target])
+                assert res.exit_code == 0, res.output
+                assert res.exception is None
+                assert Path(target).read_text()
+
+    def test_map_output_reports_an_unwritable_path(self, tmp_path: Path) -> None:
+        """An OSError on the write is a one-line error, never a traceback."""
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            with mareforma.open(".") as g:
+                cid = g.assert_claim("m", classification="ANALYTICAL")
+            Path("afile").write_text("not a directory")
+            res = r.invoke(cli, ["map", cid, "--output", "afile/map.txt"])
+            assert res.exit_code == 1
+            assert res.exception is None or isinstance(res.exception, SystemExit)
+            assert "Could not write afile/map.txt" in res.output
 
     def test_map_missing_claim_exits_1(self, tmp_path: Path) -> None:
         r = CliRunner()

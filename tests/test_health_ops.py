@@ -359,6 +359,20 @@ class TestActivityCommand:
         assert "provenance_query" in result.output
         assert "No operational events recorded yet." not in result.output
 
+    def test_activity_last_below_one_is_a_usage_error(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        # --last promises a window; a non-positive N used to fall through to a
+        # whole-history scan reported as that window. Refuse instead.
+        with mareforma.open(tmp_path) as graph:
+            a = graph.assert_claim("a")
+            graph.query_provenance(a)
+        monkeypatch.chdir(tmp_path)
+        for value in ("0", "-5"):
+            result = CliRunner().invoke(_cli, ["activity", f"--last={value}"])
+            assert result.exit_code == 2, result.output
+            assert "provenance_query" not in result.output
+
     def test_activity_without_a_project_exits_nonzero(
         self, tmp_path: Path, monkeypatch,
     ) -> None:
@@ -385,6 +399,19 @@ class TestStatsDeprecationAlias:
         # The alias still produces the same output as the renamed cmd.
         assert result.exit_code == 0
         assert "provenance_query" in result.output
+
+    def test_stats_alias_rejects_last_below_one(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        # The alias carries its own copy of --last, and ctx.invoke does not
+        # re-run conversion, so the floor has to be on this option too.
+        with mareforma.open(tmp_path) as graph:
+            a = graph.assert_claim("a")
+            graph.query_provenance(a)
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(_cli, ["stats", "--last=0"])
+        assert result.exit_code == 2, result.output
+        assert "provenance_query" not in result.output
 
     def test_stats_alias_emits_deprecation_warning(
         self, tmp_path: Path, monkeypatch,

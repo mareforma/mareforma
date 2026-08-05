@@ -335,6 +335,9 @@ class TestCli:
         res = CliRunner().invoke(cli, ["reexec", str(path)])
         assert res.exit_code == 2, res.output
         assert "COULD_NOT_REEXECUTE" in res.output
+        # No reproduced number exists; say so with the same placeholder every
+        # other renderer uses.
+        assert "reproduced: n/a" in res.output
 
     def test_json_output(self, tmp_path: Path) -> None:
         run = _run(

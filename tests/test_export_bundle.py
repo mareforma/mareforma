@@ -53,6 +53,11 @@ def _bootstrap(tmp_path: Path):
 
 
 class TestStatementShape:
+    def test_missing_graph_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError, match="No epistemic graph found"):
+            build_statement(tmp_path)
+        assert (tmp_path / ".mareforma").exists() is False
+
     def test_statement_has_intoto_type(self, tmp_path: Path) -> None:
         key_path, _ = _bootstrap(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as g:
@@ -225,6 +230,21 @@ class TestCLI:
             assert result.exit_code == 0, result.output
             assert "signed bundle" in result.output
             assert Path("mareforma-bundle.json").exists()
+
+    def test_export_bundle_refuses_json(self, tmp_path: Path) -> None:
+        """--json asks for stdout, --bundle writes a signed file. Dropping the
+        flag would hand a caller redirecting stdout a banner instead of an
+        envelope, and leave a file it never asked for."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            self._ensure_xdg(tmp_path)
+            import mareforma
+            with mareforma.open() as g:
+                g.assert_claim("seeded", generated_by="seed", seed=True)
+            result = runner.invoke(cli, ["export", "--bundle", "--json"])
+            assert result.exit_code == 1, result.output
+            assert "mutually exclusive" in result.output
+            assert not Path("mareforma-bundle.json").exists()
 
     def test_verify_bundle_round_trip(self, tmp_path: Path) -> None:
         runner = CliRunner()

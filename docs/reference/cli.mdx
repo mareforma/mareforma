@@ -308,7 +308,7 @@ mareforma export [OPTIONS]
 |---|---|---|
 | `--format [jsonld\|in-toto-v1\|ro-crate-1.2\|prov-o]` | `jsonld` | Export format. Mutually exclusive with `--bundle` |
 | `--output PATH` | `./ontology.jsonld` (varies by `--format`; `./mareforma-bundle.json` with `--bundle`) | Output file path |
-| `--json` | `False` | Print JSON-LD to stdout instead of writing a file (no effect with `--bundle`) |
+| `--json` | `False` | Print JSON-LD to stdout instead of writing a file. Mutually exclusive with `--bundle` |
 | `--bundle` | `False` | Produce a SCITT-style signed bundle (in-toto Statement v1 + DSSE) |
 
 **Examples**
