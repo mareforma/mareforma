@@ -19,7 +19,16 @@ from dataclasses import dataclass, field
 from typing import Iterable
 
 from ._citation import read_norm_matches
-from ._verdict import GroundingVerdict, ObservedGrounding
+from ._verdict import (
+    GROUNDING_AXIS_VERSION,
+    GroundingVerdict,
+    ObservedGrounding,
+    as_int,
+)
+
+
+class GroundingAxisMismatchError(ValueError):
+    """A receipt was written under a different grounding-axis version."""
 
 
 @dataclass(frozen=True)
@@ -282,19 +291,6 @@ class IndependenceReport:
         return lead
 
 
-def _as_int(value: object) -> int:
-    """Coerce a receipt field to a non-negative int, defaulting to 0.
-
-    A hand-authored or older record may carry a missing, null, or non-numeric
-    field; the independence arm degrades it to 0 rather than raising, so one bad
-    record never denies the whole report.
-    """
-    try:
-        return max(0, int(value))  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return 0
-
-
 def summarize_independence(records: Iterable[dict]) -> IndependenceReport:
     """Aggregate per-finding independence records into the independence report.
 
@@ -308,8 +304,8 @@ def summarize_independence(records: Iterable[dict]) -> IndependenceReport:
     unverifiable = naive_total = collapsed_total = 0
     for rec in records:
         total += 1
-        number = _as_int(rec.get("number"))
-        naive = _as_int(rec.get("naive"))
+        number = as_int(rec.get("number"))
+        naive = as_int(rec.get("naive"))
         if bool(rec.get("soft")):
             unverifiable += 1
         if number <= 0:

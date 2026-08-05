@@ -82,6 +82,33 @@ class ObservedGrounding(str, Enum):
         return self is ObservedGrounding.GROUNDED
 
 
+def as_int(value: object) -> int:
+    """Coerce a persisted record field to a non-negative int, defaulting to 0.
+
+    A hand-authored, older, or truncated record may carry a missing, null, or
+    non-numeric field; it degrades to 0 rather than raising, so one bad record
+    never denies the whole report.
+    """
+    try:
+        return max(0, int(value))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
+def _read_grounding(value: object, reason: str) -> tuple["ObservedGrounding", str]:
+    """Coerce a receipt's grounding field, degrading an unknown state to OPAQUE.
+
+    A future axis state, a typo, or an explicit null reads as OPAQUE (the
+    conservative, non-promoting bucket) with the unreadable value named in the
+    reason, so the blind spot is stated rather than either abandoned or promoted.
+    """
+    try:
+        return ObservedGrounding(value), reason
+    except ValueError:
+        note = f"unrecognized grounding {value!r}, read as OPAQUE"
+        return ObservedGrounding.OPAQUE, f"{note}: {reason}" if reason else note
+
+
 @dataclass(frozen=True)
 class ReadRecord:
     """One data-ingress event captured inside an observed scope.
@@ -232,12 +259,17 @@ class GroundingVerdict:
         seam kind. This rebuilds a verdict from one so the same summarize path
         serves both live verdicts and persisted receipts. Unknown / missing
         fields degrade to their defaults rather than raise, so a hand-authored or
-        older receipt still summarizes.
+        older receipt still summarizes: an unreadable grounding state reads as
+        OPAQUE (named in the reason) and unreadable coverage counts read as 0,
+        never GROUNDED, so a malformed record cannot promote itself.
         """
         cov = receipt.get("coverage") or {}
+        grounding, reason = _read_grounding(
+            receipt.get("grounding", "OPAQUE"), receipt.get("reason", "")
+        )
         return cls(
-            grounding=ObservedGrounding(receipt.get("grounding", "OPAQUE")),
-            reason=receipt.get("reason", ""),
+            grounding=grounding,
+            reason=reason,
             cited_sources=tuple(receipt.get("cited_sources") or ()),
             grounded_sources=tuple(receipt.get("grounded_sources") or ()),
             reads=tuple(
@@ -255,8 +287,8 @@ class GroundingVerdict:
             ),
             matched_identifier=receipt.get("matched_identifier"),
             version=receipt.get("version", GROUNDING_AXIS_VERSION),
-            reads_seen=int(cov.get("reads_seen", 0)),
-            opens_detected=int(cov.get("opens_detected", 0)),
+            reads_seen=as_int(cov.get("reads_seen")),
+            opens_detected=as_int(cov.get("opens_detected")),
         )
 
     def read_coverage_fraction(self) -> float | None:

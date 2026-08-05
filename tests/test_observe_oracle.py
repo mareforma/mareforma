@@ -348,6 +348,32 @@ def test_summarize_receipts_matches_live_verdicts():
     assert live == from_receipts
 
 
+def test_summarize_receipts_degrades_a_malformed_record_to_opaque():
+    """One bad record must not deny the whole report (it buckets OPAQUE)."""
+    from mareforma.observe.measure import summarize_receipts
+
+    report = summarize_receipts([
+        {"grounding": "GROUNDED", "coverage": {"reads_seen": 1, "opens_detected": 1}},
+        {"grounding": "PARTIAL"},
+        {"grounding": None},
+        {"grounding": "GROUNDED", "coverage": {"reads_seen": "x", "opens_detected": 2}},
+    ])
+    assert report.total == 4
+    assert report.grounded == 2
+    assert report.opaque == 2
+    # The unreadable coverage field degrades to 0 reads over 2 detected opens.
+    assert report.mean_read_coverage == 0.5
+
+
+def test_from_receipt_names_the_unparsable_grounding_in_the_reason():
+    from mareforma.observe import GroundingVerdict
+
+    verdict = GroundingVerdict.from_receipt({"grounding": "PARTIAL", "reason": "why"})
+    assert verdict.grounding is OG.OPAQUE
+    assert "PARTIAL" in verdict.reason
+    assert "why" in verdict.reason
+
+
 def test_closing_sentence_names_the_dominant_seam():
     from mareforma.observe import GroundingVerdict, SeamEvent
 

@@ -162,6 +162,68 @@ def test_late_import_pandas_is_wrapped(cited_file):
     assert h.verdict.grounding is OG.GROUNDED
 
 
+def test_late_import_via_importlib_is_wrapped(tmp_path, cited_file, monkeypatch):
+    # importlib.import_module does not go through builtins.__import__, so a
+    # loader resolved by name (a plugin backend, an optional-dependency shim)
+    # would finish importing with the late-import hook never firing. Its reads
+    # then go through native I/O the open hook never sees, and the finding reads
+    # as a confident false UNGROUNDED with no seam admitting the blind spot.
+    import importlib
+    import sys
+
+    from mareforma.observe import _loaders
+
+    # A stand-in for a reader whose I/O happens in a C core: nothing the open
+    # hook can see, so only the polars wrapper can record the read.
+    (tmp_path / "polars.py").write_text("def read_csv(source):\n    return [1]\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    for key in [k for k in _loaders._reals if k.startswith("polars.")]:
+        monkeypatch.delitem(_loaders._reals, key)
+    real_polars = sys.modules.pop("polars", None)
+    try:
+        with obs.observe(cites=cited_file) as h:
+            polars = importlib.import_module("polars")  # never reaches __import__
+
+            polars.read_csv(cited_file)
+    finally:
+        sys.modules.pop("polars", None)
+        if real_polars is not None:
+            sys.modules["polars"] = real_polars
+    assert h.verdict.grounding is OG.GROUNDED
+
+
+def test_late_import_wrap_survives_a_nested_wrappable_import(monkeypatch):
+    # A lazy host module (PEP 562 __getattr__, lazy_loader, a test double) can
+    # import a second wrappable name the moment the wrap pass reads the attribute
+    # it wraps. That re-enters the install lock on the same thread, so a
+    # non-reentrant lock hangs the host forever inside a plain import, with no
+    # traceback and nothing pointing at the observer.
+    import sys
+    import threading
+    import types
+
+    lazy = types.ModuleType("h5py")
+
+    def _lazy_getattr(name):
+        if name == "File":
+            import netCDF4  # noqa: F401  a second wrappable top-level name
+        raise AttributeError(name)
+
+    lazy.__getattr__ = _lazy_getattr
+    monkeypatch.setitem(sys.modules, "h5py", lazy)
+    monkeypatch.setitem(sys.modules, "netCDF4", types.ModuleType("netCDF4"))
+
+    done = threading.Event()
+
+    def host():
+        with obs.observe(cites="/no/such/cited/source"):
+            import h5py  # noqa: F401  imported inside the open scope
+        done.set()
+
+    threading.Thread(target=host, daemon=True).start()
+    assert done.wait(timeout=10), "the late-import wrap deadlocked on the install lock"
+
+
 def test_late_import_h5py_is_wrapped(tmp_path):
     h5py = pytest.importorskip("h5py")
     path = str(tmp_path / "d.h5")
@@ -473,11 +535,14 @@ def test_unresolvable_http_read_is_a_coverage_gap_not_a_file_read():
 
 def test_aiohttp_request_records_a_socket_seam():
     # aiohttp streams the body (read in host code after our wrapper returns), so
-    # the wrapper records a socket seam rather than a header-based read, a pooled
-    # aiohttp GET of a cited URL therefore lands OPAQUE, never false UNGROUNDED.
-    # Driven through the wrapper directly with a stub coroutine so the test needs
-    # no live network (aioresponses does not track current aiohttp).
-    pytest.importorskip("aiohttp")
+    # the wrapper records a socket seam rather than a header-based read. On a
+    # content-address citation that seam is the only thing standing between a
+    # pooled aiohttp fetch and a false UNGROUNDED: a pooled connection reuses its
+    # socket and fires no socket.connect audit event, so nothing else marks the
+    # blind spot. A URL citation reads OPAQUE either way, through the cited-URL
+    # coverage gap, so it discriminates nothing.
+    # Driven through the shipped wrapper directly with a stub coroutine so the
+    # test needs no live network (aioresponses does not track current aiohttp).
     import asyncio
 
     from mareforma.observe import _loaders
@@ -485,10 +550,10 @@ def test_aiohttp_request_records_a_socket_seam():
     async def fake_request(self, *a, **k):
         return "response"
 
-    wrapper = _loaders._make_async_http_method_wrapper(fake_request, streaming=True)
+    wrapper = _loaders._make_aiohttp_request_wrapper(fake_request)
 
     async def go():
-        with obs.observe(cites="https://example.org/data.csv") as h:
+        with obs.observe(cites="sha256:" + "a" * 64, content_address=True) as h:
             await wrapper(object(), "GET", "https://example.org/data.csv")
         return h.verdict
 
@@ -640,6 +705,24 @@ def test_polars_read_csv_is_grounded(tmp_path):
     with obs.observe(cites=p) as h:
         pl.read_csv(p)
     assert h.verdict.grounding is OG.GROUNDED
+
+
+def test_pandas_keyword_named_source_is_recorded():
+    # The five wrapped pandas readers name their source four ways:
+    # filepath_or_buffer, path, path_or_buf, io. For a URL this record is the
+    # only observation, pandas fetches URLs with urlopen and no wrapper sees
+    # that, so dropping a keyword-named source turns a GROUNDED finding OPAQUE
+    # on nothing but the caller's choice of positional or keyword.
+    from mareforma.observe import _loaders
+
+    url = "https://example.org/trial.json"
+    read = _loaders._make_return_value_wrapper(
+        lambda **kwargs: [1], "pandas", _loaders._df_source, _loaders._df_nonempty
+    )
+    for key in ("filepath_or_buffer", "path", "path_or_buf", "io"):
+        with obs.observe(cites=url) as h:
+            read(**{key: url})
+        assert h.verdict.grounding is OG.GROUNDED, key
 
 
 def test_polars_lazy_scan_collect_is_opaque_not_ungrounded(tmp_path):

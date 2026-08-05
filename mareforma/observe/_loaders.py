@@ -80,6 +80,10 @@ _READ_MODE_HINT = ("r", "+")
 _installed = False
 _reals: dict[str, Any] = {}
 _install_lock = threading.Lock()
+# Set for the duration of a third-party wrap pass on the running thread, so a
+# nested import triggered from inside that pass skips the lock instead of
+# deadlocking on it. See _wrap_third_party_locked.
+_in_wrap = threading.local()
 
 
 # Third-party top-level modules the observer can wrap once the host imports them.
@@ -127,12 +131,7 @@ def refresh_third_party() -> None:
     """
     if not _installed:
         return
-    # Same lock as the one-time install: two threads entering observe()
-    # concurrently after a late import could otherwise both pass the
-    # ``key in _reals`` guard and one capture the other's wrapper as the real,
-    # double-wrapping the loader permanently. Serialize the re-scan too.
-    with _install_lock:
-        _wrap_third_party_if_present()
+    _wrap_third_party_locked()
 
 
 # -- stdlib: always ----------------------------------------------------------
@@ -476,18 +475,45 @@ def _mark_thread_seam(detail: str) -> None:
 
 # -- third-party: only if already imported -----------------------------------
 
+def _wrap_third_party_locked() -> None:
+    """Run the third-party wrap pass under the install lock, re-entry safe.
+
+    Two threads racing the pass could otherwise both pass a ``key in _reals``
+    guard and one capture the other's wrapper as the real, double-wrapping the
+    loader permanently, so the pass is serialized.
+
+    It is not reentrant, and it has to survive re-entry: the pass reads host
+    attributes (``getattr(h5py, "File", None)``) and a lazily loading module can
+    import another wrappable name from inside that read, which arrives back here
+    through the import hook on the same thread. Taking the lock again would hang
+    the host forever inside an ordinary import. The nested pass is skipped
+    instead, which loses nothing: the outer pass wraps the module that triggered
+    it.
+    """
+    if getattr(_in_wrap, "active", False):
+        return
+    with _install_lock:
+        _wrap_third_party_if_present()
+
+
 def _wrap_third_party_if_present() -> None:
-    _wrap_pandas_if_present()
-    _wrap_httpx_if_present()
-    _wrap_requests_if_present()
-    _wrap_requests_session_if_present()
-    _wrap_httpx_clients_if_present()
-    _wrap_aiohttp_if_present()
-    _wrap_h5py_if_present()
-    _wrap_pyarrow_if_present()
-    _wrap_netcdf4_if_present()
-    _wrap_polars_if_present()
-    _wrap_duckdb_if_present()
+    # Callers hold _install_lock. The flag marks this thread as inside the pass
+    # so a nested import skips the lock rather than deadlocking on it.
+    _in_wrap.active = True
+    try:
+        _wrap_pandas_if_present()
+        _wrap_httpx_if_present()
+        _wrap_requests_if_present()
+        _wrap_requests_session_if_present()
+        _wrap_httpx_clients_if_present()
+        _wrap_aiohttp_if_present()
+        _wrap_h5py_if_present()
+        _wrap_pyarrow_if_present()
+        _wrap_netcdf4_if_present()
+        _wrap_polars_if_present()
+        _wrap_duckdb_if_present()
+    finally:
+        _in_wrap.active = False
 
 
 # -- late-import hook: wrap a loader imported while a scope is open -----------
@@ -512,19 +538,39 @@ def _wrap_import_hook() -> None:
     @functools.wraps(real_import)
     def observed_import(name, *args, **kwargs):
         module = real_import(name, *args, **kwargs)  # host import unchanged
-        if _scope.current_scope() is not None and name:
-            top = name.split(".", 1)[0]
-            if top in _WRAPPABLE_TOP_LEVEL:
-                try:
-                    with _install_lock:
-                        _wrap_third_party_if_present()
-                except BaseException:  # noqa: BLE001
-                    scope = _scope.current_scope()
-                    if scope is not None:
-                        scope.mark_error("late-import wrap failed")
+        _rewrap_for_import(name)
         return module
 
     builtins.__import__ = observed_import
+
+    real_import_module = importlib.import_module
+    _reals["importlib.import_module"] = real_import_module
+
+    @functools.wraps(real_import_module)
+    def observed_import_module(name, package=None):
+        module = real_import_module(name, package)  # host import unchanged
+        _rewrap_for_import(name)
+        return module
+
+    importlib.import_module = observed_import_module
+
+
+def _rewrap_for_import(name) -> None:
+    """Re-run the third-party wrap if ``name`` is a wrappable module, in-scope.
+
+    The single rule both import entry points converge on. Never raises: a wrap
+    failure marks the scope opaque rather than breaking the host's import.
+    """
+    if _scope.current_scope() is None or not name:
+        return
+    if name.split(".", 1)[0] not in _WRAPPABLE_TOP_LEVEL:
+        return
+    try:
+        _wrap_third_party_locked()
+    except BaseException:  # noqa: BLE001
+        scope = _scope.current_scope()
+        if scope is not None:
+            scope.mark_error("late-import wrap failed")
 
 
 _PANDAS_READERS = ("read_csv", "read_parquet", "read_table", "read_json", "read_excel")
@@ -801,7 +847,7 @@ def _wrap_httpx_clients_if_present() -> None:
         real = getattr(AsyncClient, "get", None)
         if real is not None:
             _reals["httpx.AsyncClient.get"] = real
-            AsyncClient.get = _make_async_http_method_wrapper(real, streaming=False)
+            AsyncClient.get = _make_async_http_method_wrapper(real)
     if AsyncClient is not None and "httpx.AsyncClient.post" not in _reals:
         real = getattr(AsyncClient, "post", None)
         if real is not None:
@@ -893,10 +939,8 @@ def _make_http_func_wrapper(real, *, streaming_kw):
     return wrapper
 
 
-def _make_async_http_method_wrapper(real, *, streaming):
-    """Wrap an async HTTP method. ``streaming`` True records a socket seam (the
-    body is never materialized in the observer frame); False records the read.
-    """
+def _make_async_http_method_wrapper(real):
+    """Wrap an async HTTP method, recording the response it returns as a read."""
 
     @functools.wraps(real)
     async def wrapper(self, *args, **kwargs):
@@ -905,12 +949,7 @@ def _make_async_http_method_wrapper(real, *, streaming):
         if scope is None:
             return result
         try:
-            if streaming:
-                scope.record_seam(
-                    "socket", "streaming HTTP response; byte flow not observed"
-                )
-            else:
-                _record_http_response(scope, args, kwargs, result, self)
+            _record_http_response(scope, args, kwargs, result, self)
         except BaseException as exc:  # noqa: BLE001
             scope.mark_error(f"http loader wrapper failed: {type(exc).__name__}")
         return result
@@ -1721,7 +1760,14 @@ def _reads_cited(scope, identifier: str) -> bool:
 
 
 def _df_source(args, kwargs, result) -> str:
-    src = kwargs.get("filepath_or_buffer")
+    # The wrapped pandas readers name the source four different ways:
+    # read_csv/read_table take filepath_or_buffer, read_parquet path,
+    # read_json path_or_buf, read_excel io.
+    src = None
+    for key in ("filepath_or_buffer", "path", "path_or_buf", "io"):
+        if key in kwargs:
+            src = kwargs[key]
+            break
     if src is None and args:
         src = args[0]
     return _path_str(src) if src is not None else ""
