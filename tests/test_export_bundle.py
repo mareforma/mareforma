@@ -19,8 +19,14 @@ Covers:
 from __future__ import annotations
 
 import base64
+import contextlib
+import errno
+import io
 import json
+import os
+import stat
 from pathlib import Path
+from unittest import mock
 
 import pytest
 from click.testing import CliRunner
@@ -896,3 +902,248 @@ class TestExportedValidatorChain:
             BundleVerificationError, match="must be signed by its root",
         ):
             verify_bundle(bundle_path, val_pk.public_key())
+
+    def test_validator_set_with_no_self_parented_root_is_refused(
+        self, tmp_path: Path,
+    ) -> None:
+        """Reparenting the root leaves a validator set with no anchor. Every
+        per-claim check downstream reads the returned set as chain-verified, so
+        a set that anchors nowhere has to be refused before any of them run."""
+        root_pk, _ = self._root_and_validator(tmp_path)
+        statement = build_statement(tmp_path)
+        for v in statement["predicate"]["mare:validators"]:
+            if v["keyid"] == v["enrolled_by_keyid"]:
+                v["enrolled_by_keyid"] = "ca" * 32
+                break
+        bundle_path = self._write(tmp_path, statement, root_pk)
+        with pytest.raises(
+            BundleVerificationError, match="exactly one root of trust, found 0",
+        ):
+            verify_bundle(bundle_path, root_pk.public_key())
+
+    def test_claim_stripped_of_its_signature_bundle_is_refused(
+        self, tmp_path: Path,
+    ) -> None:
+        """A verified bundle always carries a chain-verified validator set, so
+        every claim in it must carry its asserter signature. Dropping one is how
+        an exporter would smuggle a row nothing but itself vouches for."""
+        root_pk, _ = self._root_and_validator(tmp_path)
+        statement = build_statement(tmp_path)
+        stripped = ""
+        for node in statement["predicate"]["@graph"]:
+            if node.get("signatureBundle"):
+                del node["signatureBundle"]
+                stripped = node["@id"].split("mare:claim/")[-1]
+                break
+        assert stripped, "no claim node carried a signature bundle"
+        bundle_path = self._write(tmp_path, statement, root_pk)
+        with pytest.raises(
+            BundleVerificationError,
+            match=f"claim:{stripped} carries no signature bundle",
+        ):
+            verify_bundle(bundle_path, root_pk.public_key())
+
+
+# ---------------------------------------------------------------------------
+# Durable writes (a failed export keeps the previous artifact)
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _disk_full():
+    """Every file opened for writing inside the block fails with ENOSPC on its
+    first write, the way a full disk fails an export that already opened its
+    target."""
+    real_open = io.open
+
+    class _Full:
+        def __init__(self, f):
+            self._f = f
+
+        def write(self, data):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._f.close()
+            return False
+
+        def __getattr__(self, name):
+            return getattr(self._f, name)
+
+    def _open(file, mode="r", *args, **kwargs):
+        f = real_open(file, mode, *args, **kwargs)
+        return _Full(f) if ("w" in mode or "a" in mode) else f
+
+    with mock.patch("io.open", _open):
+        yield
+
+
+class TestDurableExportWrite:
+    """An export that fails partway must leave the artifact it was overwriting
+    exactly as it was. A truncated bundle on a path a third party already pulls
+    from reads as tampering, and the CLI message says the export did not
+    happen."""
+
+    def test_failed_bundle_rewrite_keeps_the_previous_bundle(
+        self, tmp_path: Path,
+    ) -> None:
+        key_path, pk = _bootstrap(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as g:
+            g.assert_claim("first export claim", generated_by="a")
+        bundle_path = tmp_path / "bundle.json"
+        write_bundle(tmp_path, bundle_path, pk)
+        original = bundle_path.read_bytes()
+
+        with mareforma.open(tmp_path, key_path=key_path) as g:
+            g.assert_claim("second export claim", generated_by="a")
+        with _disk_full(), pytest.raises(OSError) as exc:
+            write_bundle(tmp_path, bundle_path, pk)
+        assert exc.value.errno == errno.ENOSPC
+
+        assert bundle_path.read_bytes() == original
+        statement = verify_bundle(bundle_path, pk.public_key())
+        assert len(statement["subject"]) == 1
+        assert not list(tmp_path.glob(".bundle.json.*.tmp"))
+
+    @pytest.mark.parametrize(
+        "args, name",
+        [
+            ([], "ontology.jsonld"),
+            (["--format=in-toto-v1"], "mareforma-statement.json"),
+            (["--format=ro-crate-1.2"], "ro-crate-metadata.json"),
+            (["--format=prov-o"], "mareforma-prov-o.jsonld"),
+        ],
+    )
+    def test_failed_export_keeps_the_previous_artifact(
+        self, tmp_path: Path, monkeypatch, args: list[str], name: str,
+    ) -> None:
+        key_path, _ = _bootstrap(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as g:
+            g.assert_claim("first export claim", generated_by="a")
+        monkeypatch.chdir(tmp_path)
+        out_path = tmp_path / name
+        runner = CliRunner()
+        result = runner.invoke(cli, ["export", *args])
+        assert result.exit_code == 0, result.output
+        original = out_path.read_bytes()
+
+        with mareforma.open(tmp_path, key_path=key_path) as g:
+            g.assert_claim("second export claim", generated_by="a")
+        with _disk_full():
+            result = runner.invoke(cli, ["export", *args])
+        assert result.exit_code == 1, result.output
+
+        assert out_path.read_bytes() == original
+        assert b"second export claim" not in original
+        assert not list(tmp_path.glob(f".{name}.*.tmp"))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+class TestExportedArtifactPermissions:
+    """An export is what someone else reads, so it lands with the permissions
+    an ordinary write would have given it: the umask for a new file, its own
+    mode for one that already exists. The temp file the atomic replace goes
+    through is created 0o600, and that mode must not ride across the rename."""
+
+    @pytest.fixture
+    def umask_022(self):
+        previous = os.umask(0o022)
+        try:
+            yield
+        finally:
+            os.umask(previous)
+
+    def _export(self, tmp_path: Path) -> Path:
+        runner = CliRunner()
+        result = runner.invoke(cli, ["export"])
+        assert result.exit_code == 0, result.output
+        return tmp_path / "ontology.jsonld"
+
+    def test_new_export_follows_the_umask(
+        self, tmp_path: Path, monkeypatch, umask_022,
+    ) -> None:
+        key_path, _ = _bootstrap(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as g:
+            g.assert_claim("first export claim", generated_by="a")
+        monkeypatch.chdir(tmp_path)
+        out_path = self._export(tmp_path)
+        mode = stat.S_IMODE(out_path.stat().st_mode)
+        assert mode == 0o644, f"expected 0o644, got {oct(mode)}"
+
+    def test_re_export_keeps_the_mode_the_target_had(
+        self, tmp_path: Path, monkeypatch, umask_022,
+    ) -> None:
+        key_path, _ = _bootstrap(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as g:
+            g.assert_claim("first export claim", generated_by="a")
+        monkeypatch.chdir(tmp_path)
+        out_path = self._export(tmp_path)
+        out_path.chmod(0o640)
+
+        with mareforma.open(tmp_path, key_path=key_path) as g:
+            g.assert_claim("second export claim", generated_by="a")
+        self._export(tmp_path)
+
+        mode = stat.S_IMODE(out_path.stat().st_mode)
+        assert mode == 0o640, f"expected 0o640, got {oct(mode)}"
+
+    def test_a_caller_asking_for_0o600_still_gets_it(
+        self, tmp_path: Path, umask_022,
+    ) -> None:
+        """The private key writes through the same helper and must not pick up
+        the umask."""
+        path = tmp_path / "secret"
+        atomic_write_text(path, "x", mode=0o600)
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    def test_a_write_never_touches_the_process_umask(
+        self, tmp_path: Path, monkeypatch, umask_022,
+    ) -> None:
+        """The umask is process-wide and has no reader, so probing it clears it
+        for every other thread in the host process. A host thread creating a
+        file in that window gets none of the host's masking, on a file that is
+        not ours and that we never report. No write path may call it."""
+        calls: list[int] = []
+        real_umask = os.umask
+
+        def recording_umask(mask: int) -> int:
+            calls.append(mask)
+            return real_umask(mask)
+
+        existing = tmp_path / "existing.json"
+        existing.write_text("{}")
+        monkeypatch.setattr(os, "umask", recording_umask)
+
+        atomic_write_text(tmp_path / "new.json", "{}")
+        atomic_write_text(existing, "{}")
+        atomic_write_text(tmp_path / "keyed.json", "{}", mode=0o600)
+        atomic_write_bytes(tmp_path / "bytes.toml", b"x")
+
+        assert calls == [], f"os.umask called with {[oct(m) for m in calls]}"
+
+    def test_a_new_file_follows_a_umask_set_after_import(
+        self, tmp_path: Path,
+    ) -> None:
+        """Sampling the umask once at import would pass under the usual 0o022
+        and be wrong for any process that sets its own, which daemons do after
+        their imports. The mode has to come from the umask in force now."""
+        previous = os.umask(0o077)
+        try:
+            path = tmp_path / "strict.json"
+            atomic_write_text(path, "{}")
+            mode = stat.S_IMODE(path.stat().st_mode)
+        finally:
+            os.umask(previous)
+        assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
+
+    def test_bytes_writes_stay_owner_only_by_default(
+        self, tmp_path: Path, umask_022,
+    ) -> None:
+        """claims.toml and the private key go through atomic_write_bytes and
+        are not made readable by the umask default the exports use."""
+        path = tmp_path / "claims.toml"
+        atomic_write_bytes(path, b"x")
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600

@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from mareforma import __version__
+from mareforma._atomic import atomic_write_text
 
 
 # Media type for the exported graph. Distinct from PROV-O, see module
@@ -147,9 +148,8 @@ class JSONLDExporter:
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         doc = self.export()
-        output_path.write_text(
-            json.dumps(doc, indent=2, ensure_ascii=False),
-            encoding="utf-8",
+        atomic_write_text(
+            output_path, json.dumps(doc, indent=2, ensure_ascii=False),
         )
         return output_path
 

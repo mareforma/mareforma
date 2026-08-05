@@ -31,6 +31,10 @@ Regression guards for the packaging issues:
 - a test fixture that needs SQL newer than the declared SQLite floor
        carries a version skipif, so it skips instead of erroring on a
        build inside the supported window.
+- every exporter module uses each name it imports (``sqlite3`` sat unused
+       in the RO-Crate exporter, implying it owned a connection).
+- no test module keeps its own copy of a helper ``tests/_helpers.py``
+       already exports, so the shared fixture has one definition to edit.
 
 Each guard fails on the pre-fix tree.
 """
@@ -506,6 +510,92 @@ def test_above_floor_sql_in_tests_carries_a_version_skipif():
     assert not unguarded, (
         f"these tests use SQL newer than the SQLite floor mareforma declares "
         f"and carry no {_ABOVE_FLOOR_MARKER} skipif: {sorted(unguarded)}"
+    )
+
+
+def _top_level_definitions(path):
+    """Map every top-level ``def``/``class`` in *path* to its shape.
+
+    The shape is the syntax tree with the docstring dropped, so a copy
+    that lost the original's docstring still compares equal to it.
+    """
+    shapes = {}
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        body = node.body
+        if ast.get_docstring(node) is not None:
+            body = body[1:]
+        shapes[node.name] = ast.dump(ast.Module(body=body, type_ignores=[]))
+    return shapes
+
+
+def test_no_test_module_redefines_a_shared_helper():
+    """a fixture the shared helpers already export must not also live in a
+    test module: the next person to change the canonical proposition edits
+    ``tests/_helpers.py``, sees the importing siblings follow, and never
+    learns that one module quietly kept the old one.
+    """
+    shared = _top_level_definitions(TESTS_DIR / "_helpers.py")
+    copies = {}
+    for path in sorted(TESTS_DIR.rglob("*.py")):
+        if path.name == "_helpers.py":
+            continue
+        duplicated = sorted(
+            name for name, shape in _top_level_definitions(path).items()
+            if shared.get(name) == shape
+        )
+        if duplicated:
+            copies[str(path.relative_to(REPO_ROOT))] = duplicated
+    assert not copies, (
+        f"these modules redefine helpers tests/_helpers.py already exports; "
+        f"import them instead: {copies}"
+    )
+
+
+def _unused_import_names(path):
+    """Names *path* imports and then never mentions again.
+
+    ``from __future__`` bindings are compiler directives rather than
+    names, so they are excluded.
+    """
+    source = path.read_text(encoding="utf-8")
+    imported = []
+    import_lines = set()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        import_lines.update(range(node.lineno, node.end_lineno + 1))
+        if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+            continue
+        imported.extend(a.asname or a.name.split(".")[0] for a in node.names)
+    body = "\n".join(
+        line for n, line in enumerate(source.splitlines(), 1)
+        if n not in import_lines
+    )
+    return [
+        name for name in imported
+        if not re.search(rf"\b{re.escape(name)}\b", body)
+    ]
+
+
+def test_exporters_import_only_what_they_use():
+    """an import a module never uses misstates what the module does:
+    ``import sqlite3`` in the RO-Crate exporter implied it opened its own
+    connection, when it borrows one from ``mareforma.db``. CI runs tests
+    and no lint step, so nothing else catches F401. Scoped to the
+    exporters; ``__init__`` is skipped because it exists to re-export.
+    """
+    offenders = {}
+    for path in sorted((PACKAGE_DIR / "exporters").glob("*.py")):
+        if path.name == "__init__.py":
+            continue
+        unused = _unused_import_names(path)
+        if unused:
+            offenders[path.name] = unused
+    assert not offenders, (
+        f"exporter modules importing names they never use, which reads as a "
+        f"dependency the module does not have: {offenders}"
     )
 
 

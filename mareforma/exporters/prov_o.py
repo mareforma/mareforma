@@ -38,10 +38,14 @@ consumer needs to walk the document without nil-pointer surprises.
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+
+from mareforma.exporters._ids import (
+    UUID_RE,
+    require_uuid_claim_id,
+    safe_agent_id,
+)
 
 
 __all__ = [
@@ -60,12 +64,6 @@ PROV_CONTEXT = {
 }
 
 
-_UUID_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-)
-_AGENT_SAFE_CHARS = "._/-"
-
-
 class ProvOValidationError(ValueError):
     """Raised when a PROV-O document violates the four export invariants."""
 
@@ -74,43 +72,17 @@ class ProvOValidationError(ValueError):
         self.invariant = invariant
 
 
-def _safe_agent_id(agent: str) -> str:
-    """Percent-encode an agent id into a JSON-LD-@id-safe form.
-
-    The escape is reversible, so two producers whose names differ only
-    in an unsafe character keep distinct ``mareforma:agent:`` ids.
-    """
-    return quote(agent, safe=_AGENT_SAFE_CHARS)
-
-
-def _require_uuid_claim_id(claim_id: str) -> str:
-    """Guard against non-UUID claim_ids being spliced into URN @ids.
-
-    Federation imports can land non-UUID identifiers in the graph;
-    those must be remapped to UUIDs before export; otherwise we emit
-    malformed JSON-LD ``@id`` values that downstream PROV-O tooling
-    cannot parse. Mirror the RO-Crate exporter's posture: refuse,
-    don't sanitise.
-    """
-    if not isinstance(claim_id, str) or not _UUID_RE.match(claim_id):
-        raise ValueError(
-            f"PROV-O export refuses non-UUID claim_id: {claim_id!r}. "
-            "Federation-imported foreign IDs must be remapped to UUIDs "
-            "before export."
-        )
-    return claim_id
-
-
 def _entity_id(claim_id: str) -> str:
-    return f"mareforma:claim:{_require_uuid_claim_id(claim_id)}"
+    return f"mareforma:claim:{require_uuid_claim_id(claim_id, 'PROV-O')}"
 
 
 def _activity_id(claim_id: str, kind: str) -> str:
-    return f"mareforma:activity:{kind}:{_require_uuid_claim_id(claim_id)}"
+    checked = require_uuid_claim_id(claim_id, "PROV-O")
+    return f"mareforma:activity:{kind}:{checked}"
 
 
 def _agent_id(generated_by: str) -> str:
-    return f"mareforma:agent:{_safe_agent_id(generated_by)}"
+    return f"mareforma:agent:{safe_agent_id(generated_by)}"
 
 
 def _validator_id(keyid: str) -> str:
@@ -175,10 +147,12 @@ def build_prov_o(root: Path, claim_id: str | None = None) -> dict[str, Any]:
                 for ref in refs:
                     if (
                         isinstance(ref, str)
-                        and _UUID_RE.match(ref)
+                        and UUID_RE.match(ref)
                         and ref not in claims_by_id
                     ):
-                        ancestor = get_claim(conn, ref)
+                        ancestor = get_claim(
+                            conn, ref, verify_cache=verify_cache,
+                        )
                         if ancestor is not None:
                             claims_by_id[ref] = ancestor
                             frontier.append(ref)
@@ -224,7 +198,7 @@ def build_prov_o(root: Path, claim_id: str | None = None) -> dict[str, Any]:
             derivations = [
                 {"@id": _entity_id(r)}
                 for r in refs
-                if isinstance(r, str) and _UUID_RE.match(r)
+                if isinstance(r, str) and UUID_RE.match(r)
             ]
             if derivations:
                 entity["prov:wasDerivedFrom"] = derivations

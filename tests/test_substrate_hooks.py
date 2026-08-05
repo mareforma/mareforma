@@ -723,19 +723,19 @@ class TestRoCrateInputValidation:
             })
 
     def test_unsafe_agent_id_sanitized(self) -> None:
-        from mareforma.exporters.ro_crate import _safe_agent_id
+        from mareforma.exporters._ids import safe_agent_id
         # Slash + dash + dot OK (model/version/context convention).
-        assert _safe_agent_id("openai/gpt-4o/v1.0") == "openai/gpt-4o/v1.0"
+        assert safe_agent_id("openai/gpt-4o/v1.0") == "openai/gpt-4o/v1.0"
         # Hash sign escaped (breaks JSON-LD @id fragment otherwise).
-        assert "#" not in _safe_agent_id("evil#agent")
+        assert "#" not in safe_agent_id("evil#agent")
         # Whitespace escaped.
-        assert " " not in _safe_agent_id("agent with spaces")
+        assert " " not in safe_agent_id("agent with spaces")
         # Other shell-meta escaped.
-        assert ";" not in _safe_agent_id("agent;rm")
+        assert ";" not in safe_agent_id("agent;rm")
 
     def test_agent_ids_are_injective(self) -> None:
-        from mareforma.exporters.ro_crate import _safe_agent_id
-        assert _safe_agent_id("lab alpha") != _safe_agent_id("lab_alpha")
+        from mareforma.exporters._ids import safe_agent_id
+        assert safe_agent_id("lab alpha") != safe_agent_id("lab_alpha")
 
     def test_signature_is_the_dsse_envelope_object(self, tmp_path: Path) -> None:
         from mareforma import signing as _signing
@@ -802,6 +802,58 @@ class TestRoCrateInputValidation:
         assert action["object"] == [
             {"@id": f"urn:mareforma:claim:{other_uuid}"}
         ]
+
+
+class TestExporterIdRulesAreShared:
+    """One @id-safety rule, one implementation. Both exporters write
+    claim_ids and agent ids into the same URN space, so a copy in each
+    module lets a tightening land on one side only and the two exports
+    of one graph then disagree on which claims can leave.
+    """
+
+    def test_both_exporters_use_the_shared_helpers(self) -> None:
+        from mareforma.exporters import _ids, prov_o, ro_crate
+        for module in (prov_o, ro_crate):
+            assert module.safe_agent_id is _ids.safe_agent_id
+            assert module.require_uuid_claim_id is _ids.require_uuid_claim_id
+            assert module.UUID_RE is _ids.UUID_RE
+
+    @pytest.mark.parametrize("agent", [
+        "openai/gpt-4o/v1.0",
+        "evil#agent",
+        "agent with spaces",
+        "lab_alpha",
+        "lab alpha",
+    ])
+    def test_exporters_sanitise_agents_identically(self, agent: str) -> None:
+        import uuid
+        from mareforma.exporters.prov_o import _agent_id
+        from mareforma.exporters.ro_crate import _claim_to_create_action
+        action = _claim_to_create_action({
+            "claim_id": str(uuid.uuid4()),
+            "generated_by": agent,
+        })
+        escaped = action["agent"]["@id"].removeprefix("#agent/")
+        assert _agent_id(agent) == f"mareforma:agent:{escaped}"
+
+    @pytest.mark.parametrize("claim_id", [
+        "not-a-uuid",
+        "10.1038/s41586-026-10652-y",
+        "",
+        # Surrounding whitespace: the graph keys these as ids distinct
+        # from the bare UUID, and a consumer that trims IRIs merges the
+        # two entities back into one. Refuse rather than export both.
+        "123e4567-e89b-12d3-a456-426614174000\n",
+        "123e4567-e89b-12d3-a456-426614174000\r",
+        " 123e4567-e89b-12d3-a456-426614174000",
+    ])
+    def test_exporters_refuse_the_same_claim_ids(self, claim_id: str) -> None:
+        from mareforma.exporters.prov_o import _entity_id
+        from mareforma.exporters.ro_crate import _claim_to_create_action
+        with pytest.raises(ValueError, match="non-UUID claim_id"):
+            _entity_id(claim_id)
+        with pytest.raises(ValueError, match="non-UUID claim_id"):
+            _claim_to_create_action({"claim_id": claim_id, "generated_by": "a"})
 
 
 class TestRestoreTypeSafety:

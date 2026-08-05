@@ -30,6 +30,7 @@ if sys.platform == "win32":
             _stream.reconfigure(encoding="utf-8")
 
 from mareforma import __version__, __description__
+from mareforma._atomic import atomic_write_text
 
 
 # ---------------------------------------------------------------------------
@@ -683,9 +684,9 @@ def export(
             out_path = (
                 Path(output) if output else root / "mareforma-statement.json"
             )
-            out_path.write_text(
+            atomic_write_text(
+                out_path,
                 json.dumps(statement, indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
             )
             _ok(f"Exported in-toto Statement v1 → {_display_path(out_path)}")
         except Exception as exc:
@@ -703,9 +704,9 @@ def export(
             out_path = (
                 Path(output) if output else root / "ro-crate-metadata.json"
             )
-            out_path.write_text(
+            atomic_write_text(
+                out_path,
                 json.dumps(crate, indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
             )
             _ok(f"Exported RO-Crate 1.2 → {_display_path(out_path)}")
         except Exception as exc:
@@ -723,9 +724,9 @@ def export(
             out_path = (
                 Path(output) if output else root / "mareforma-prov-o.jsonld"
             )
-            out_path.write_text(
+            atomic_write_text(
+                out_path,
                 json.dumps(doc, indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
             )
             _ok(f"Exported PROV-O JSON-LD → {_display_path(out_path)}")
         except Exception as exc:

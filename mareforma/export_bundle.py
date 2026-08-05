@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from mareforma import __version__
+from mareforma._atomic import atomic_write_text
 
 
 STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
@@ -263,9 +264,8 @@ def write_bundle(root: Path, output_path: Path, private_key) -> Path:
         )
     bundle = sign_bundle(statement, private_key)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        json.dumps(bundle, indent=2, ensure_ascii=False),
-        encoding="utf-8",
+    atomic_write_text(
+        output_path, json.dumps(bundle, indent=2, ensure_ascii=False),
     )
     return output_path
 
@@ -535,9 +535,11 @@ def verify_bundle(
     # single root of trust. The bundle must then be signed BY that root, so the
     # public key the caller pins is the same key every per-claim asserter chains
     # to — the whole bundle anchors to one key the caller chose to trust, not to
-    # the exporter as a separate party. A validator-less bundle is refused
-    # (_verify_exported_validators requires one root), so a signed graph cannot
-    # be stripped to a digest-only bundle that skips per-claim verification.
+    # the exporter as a separate party. This is the precondition every check
+    # below rests on: a bundle either carries a single-rooted, chain-verified
+    # validator set or it is refused here, so nothing downstream has to ask
+    # whether the bundle is anchored. A signed graph cannot be stripped to a
+    # digest-only bundle that skips per-claim verification.
     verified_validators, validator_types, trust_root = _verify_exported_validators(
         predicate.get("mare:validators") or []
     )
@@ -582,85 +584,80 @@ def verify_bundle(
         # carry its bundle, so a stripped signature cannot hide an unsigned row.
         sig_bundle = node.get("signatureBundle")
         if sig_bundle is None:
-            if verified_validators:
-                raise BundleVerificationError(
-                    f"claim:{claim_id} carries no signature bundle but the "
-                    "graph is signed"
-                )
-        else:
-            try:
-                asserter_keyid = sig_bundle["signatures"][0]["keyid"]
-            except (KeyError, IndexError, TypeError) as exc:
-                raise BundleVerificationError(
-                    f"claim:{claim_id} signature bundle is malformed"
-                ) from exc
-            asserter_pub = verified_validators.get(asserter_keyid)
-            if asserter_pub is None:
-                raise BundleVerificationError(
-                    f"claim:{claim_id} asserter {str(asserter_keyid)[:12]}… is "
-                    "not a chain-verified validator in the bundle"
-                )
-            try:
-                sig_ok = _signing.verify_envelope(sig_bundle, asserter_pub)
-            except _signing.InvalidEnvelopeError as exc:
-                raise BundleVerificationError(
-                    f"claim:{claim_id} signature bundle is structurally "
-                    f"invalid: {exc}"
-                ) from exc
-            if not sig_ok:
-                raise BundleVerificationError(
-                    f"claim:{claim_id} asserter signature failed verification"
-                )
-            try:
-                bound = _signing.claim_predicate_from_envelope(sig_bundle)
-            except _signing.InvalidEnvelopeError as exc:
-                raise BundleVerificationError(
-                    f"claim:{claim_id} signature payload is unparseable: {exc}"
-                ) from exc
-            if bound.get("claim_id") != claim_id:
-                raise BundleVerificationError(
-                    f"claim:{claim_id} signature binds a different claim_id "
-                    f"({bound.get('claim_id')!r})"
-                )
-            # Bind the asserter signature to the CONTENT, not just the claim_id:
-            # re-derive the subject digest from the validator-signed fields and
-            # require it equals the bundle's subject digest. Without this the
-            # asserter signs only an id while the exporter alone vouches for the
-            # displayed text/evidence — the signature would be decorative.
-            asserter_digest = hashlib.sha256(
-                _signing.canonical_statement({
-                    "claim_id": claim_id,
-                    "text": bound.get("text"),
-                    "classification": bound.get("classification"),
-                    "generated_by": bound.get("generated_by"),
-                    "supports": bound.get("supports") or [],
-                    "contradicts": bound.get("contradicts") or [],
-                    "source_name": bound.get("source_name"),
-                    "artifact_hash": bound.get("artifact_hash"),
-                    "created_at": bound.get("created_at"),
-                }, bound.get("evidence") or {})
-            ).hexdigest()
-            if asserter_digest != subjects.get(subject_name):
-                raise BundleVerificationError(
-                    f"claim:{claim_id} asserter signature does not cover the "
-                    "presented content — text or evidence differs from what "
-                    "was signed"
-                )
+            raise BundleVerificationError(
+                f"claim:{claim_id} carries no signature bundle but the "
+                "graph is signed"
+            )
+        try:
+            asserter_keyid = sig_bundle["signatures"][0]["keyid"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise BundleVerificationError(
+                f"claim:{claim_id} signature bundle is malformed"
+            ) from exc
+        asserter_pub = verified_validators.get(asserter_keyid)
+        if asserter_pub is None:
+            raise BundleVerificationError(
+                f"claim:{claim_id} asserter {str(asserter_keyid)[:12]}… is "
+                "not a chain-verified validator in the bundle"
+            )
+        try:
+            sig_ok = _signing.verify_envelope(sig_bundle, asserter_pub)
+        except _signing.InvalidEnvelopeError as exc:
+            raise BundleVerificationError(
+                f"claim:{claim_id} signature bundle is structurally "
+                f"invalid: {exc}"
+            ) from exc
+        if not sig_ok:
+            raise BundleVerificationError(
+                f"claim:{claim_id} asserter signature failed verification"
+            )
+        try:
+            bound = _signing.claim_predicate_from_envelope(sig_bundle)
+        except _signing.InvalidEnvelopeError as exc:
+            raise BundleVerificationError(
+                f"claim:{claim_id} signature payload is unparseable: {exc}"
+            ) from exc
+        if bound.get("claim_id") != claim_id:
+            raise BundleVerificationError(
+                f"claim:{claim_id} signature binds a different claim_id "
+                f"({bound.get('claim_id')!r})"
+            )
+        # Bind the asserter signature to the CONTENT, not just the claim_id:
+        # re-derive the subject digest from the validator-signed fields and
+        # require it equals the bundle's subject digest. Without this the
+        # asserter signs only an id while the exporter alone vouches for the
+        # displayed text/evidence — the signature would be decorative.
+        asserter_digest = hashlib.sha256(
+            _signing.canonical_statement({
+                "claim_id": claim_id,
+                "text": bound.get("text"),
+                "classification": bound.get("classification"),
+                "generated_by": bound.get("generated_by"),
+                "supports": bound.get("supports") or [],
+                "contradicts": bound.get("contradicts") or [],
+                "source_name": bound.get("source_name"),
+                "artifact_hash": bound.get("artifact_hash"),
+                "created_at": bound.get("created_at"),
+            }, bound.get("evidence") or {})
+        ).hexdigest()
+        if asserter_digest != subjects.get(subject_name):
+            raise BundleVerificationError(
+                f"claim:{claim_id} asserter signature does not cover the "
+                "presented content — text or evidence differs from what "
+                "was signed"
+            )
         # Support level: verify the DISPLAYED level is backed by signed
         # material, so the exporter cannot inflate it. ESTABLISHED needs a
         # validator-signed validation envelope for this claim; REPLICATED needs
         # distinct-signer corroboration on a shared upstream. Editorial status
         # (retracted/contested) and comparison summaries are NOT attested here —
         # they carry no signature in the data model (see the module docstring).
-        # Only meaningful in signed mode: an unsigned bundle has no trust chain
-        # to attest a level against, and legacy grandfathered REPLICATED rows
-        # carry no bundle — attesting a level there would false-reject.
         level = node.get("supportLevel", "PRELIMINARY")
-        if verified_validators and level == "ESTABLISHED":
+        if level == "ESTABLISHED":
             _verify_established_level(
                 node, claim_id, verified_validators, validator_types, _signing,
             )
-        elif verified_validators and level == "REPLICATED":
+        elif level == "REPLICATED":
             corroborated = any(
                 len(support_asserters.get(sup, set())) >= 2
                 for sup in _string_supports(node.get("supports"))

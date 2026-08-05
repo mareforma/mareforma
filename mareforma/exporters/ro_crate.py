@@ -22,12 +22,15 @@ work:
 from __future__ import annotations
 
 import json
-import re
-import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+
+from mareforma.exporters._ids import (
+    UUID_RE,
+    require_uuid_claim_id,
+    safe_agent_id,
+)
 
 
 __all__ = [
@@ -52,29 +55,6 @@ DEFAULT_LICENSE_ID = "https://creativecommons.org/licenses/by/4.0/"
 DEFAULT_LICENSE_NAME = "Creative Commons Attribution 4.0 International"
 
 
-# UUID-shape claim_ids only. Federation imports preserve foreign IDs in
-# the graph; this exporter refuses to splice non-UUID values into
-# `urn:mareforma:claim:<id>` URIs because they would silently break
-# downstream URN parsing and JSON-LD @id resolution.
-_UUID_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-)
-# generated_by is allowed slashes ("model/version/context") and dashes,
-# but `#`, whitespace, or shell-meta chars would break JSON-LD @id.
-_AGENT_SAFE_CHARS = "._/-"
-
-
-def _safe_agent_id(agent: str) -> str:
-    """Coerce an agent identifier into a JSON-LD-@id-safe form.
-
-    Percent-encodes any character outside ``[A-Za-z0-9._/-]`` so the
-    resulting ``#agent/<escaped>`` fragment parses correctly in every
-    JSON-LD consumer. The escape is reversible, so two producers whose
-    names differ only in an unsafe character keep distinct ids.
-    """
-    return quote(agent, safe=_AGENT_SAFE_CHARS)
-
-
 def _claim_to_create_action(claim: dict) -> dict[str, Any]:
     """Map a mareforma claim row to an RO-Crate CreateAction entity.
 
@@ -87,14 +67,8 @@ def _claim_to_create_action(claim: dict) -> dict[str, Any]:
     into ``urn:mareforma:claim:<id>`` URIs would silently break URN /
     JSON-LD @id parsing downstream.
     """
-    claim_id = claim["claim_id"]
-    if not isinstance(claim_id, str) or not _UUID_RE.match(claim_id):
-        raise ValueError(
-            f"RO-Crate export refuses non-UUID claim_id: {claim_id!r}. "
-            "Federation-imported foreign IDs must be remapped to UUIDs "
-            "before export."
-        )
-    agent = _safe_agent_id(claim.get("generated_by", "agent") or "agent")
+    claim_id = require_uuid_claim_id(claim["claim_id"], "RO-Crate")
+    agent = safe_agent_id(claim.get("generated_by", "agent") or "agent")
     action: dict[str, Any] = {
         "@id": f"urn:mareforma:claim:{claim_id}",
         "@type": "CreateAction",
@@ -153,7 +127,7 @@ def _claim_to_create_action(claim: dict) -> dict[str, Any]:
             decoded = None
         if isinstance(decoded, list):
             for ref in decoded:
-                if isinstance(ref, str) and _UUID_RE.match(ref):
+                if isinstance(ref, str) and UUID_RE.match(ref):
                     object_refs.append(
                         {"@id": f"urn:mareforma:claim:{ref}"}
                     )
@@ -195,7 +169,7 @@ def _claim_to_media_object(claim: dict) -> dict[str, Any]:
 def _agent_entities(claims: list[dict]) -> list[dict[str, Any]]:
     """Distinct asserting agents → SoftwareApplication entities.
 
-    Agent identifiers are escaped via :func:`_safe_agent_id` so a
+    Agent identifiers are escaped via :func:`safe_agent_id` so a
     foreign or malformed ``generated_by`` value can't poison the
     JSON-LD @id space. Distinct raw names stay distinct entities.
     """
@@ -207,7 +181,7 @@ def _agent_entities(claims: list[dict]) -> list[dict[str, Any]]:
             continue
         seen.add(raw)
         entities.append({
-            "@id": f"#agent/{_safe_agent_id(raw)}",
+            "@id": f"#agent/{safe_agent_id(raw)}",
             "@type": "SoftwareApplication",
             "name": raw,
         })

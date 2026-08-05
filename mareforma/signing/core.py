@@ -98,6 +98,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
+from .._atomic import atomic_write_bytes, fsync_parent as _fsync_parent
+
 
 # Claim envelopes carry an in-toto Statement v1 as the signed payload.
 # payloadType is the IANA-style media type used by Sigstore / SLSA /
@@ -251,22 +253,6 @@ def generate_keypair() -> Ed25519PrivateKey:
     return Ed25519PrivateKey.generate()
 
 
-def _fsync_parent(path: Path) -> None:
-    """Best-effort fsync of *path*'s directory, so the directory entry for a
-    freshly created or renamed key survives a crash. A no-op on platforms
-    without ``O_DIRECTORY``."""
-    if not hasattr(os, "O_DIRECTORY"):
-        return
-    try:
-        dir_fd = os.open(str(path.parent), os.O_DIRECTORY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
-    except OSError:
-        pass
-
-
 def save_private_key(
     key: Ed25519PrivateKey,
     path: Path,
@@ -333,35 +319,11 @@ def save_private_key(
         _fsync_parent(path)
         return
 
-    # Rotation path. Mirror the durable atomic write the claims.toml backup
-    # uses: an unpredictable temp name in the key's own directory (two
-    # concurrent overwrites cannot share and clobber one predictable temp),
-    # fsync the data before the rename (a power loss in the writeback window
-    # cannot leave path pointing at an empty or truncated key once os.replace
-    # has already destroyed the old one), then a best-effort directory fsync so
-    # the rename itself survives a crash.
-    import tempfile
-
-    fd, tmp_name = tempfile.mkstemp(
-        prefix="." + path.name + ".", suffix=".tmp", dir=str(path.parent),
-    )
-    try:
-        with os.fdopen(fd, "wb") as f:
-            # fdopen now owns fd, so it is closed even if fchmod raises.
-            # mkstemp already creates at 0o600; fchmod restates the intent so
-            # the key never exists with looser perms even if the umask changes.
-            os.fchmod(f.fileno(), 0o600)
-            f.write(pem)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_name, path)
-    except BaseException:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
-    _fsync_parent(path)
+    # Rotation path. A power loss in the writeback window cannot leave path
+    # pointing at an empty or truncated key once the rename has destroyed the
+    # old one, so the write lands through a temp file in the key's own
+    # directory.
+    atomic_write_bytes(path, pem, mode=0o600)
 
 
 def load_private_key(path: Path) -> Ed25519PrivateKey:
