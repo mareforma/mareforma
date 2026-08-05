@@ -649,6 +649,7 @@ Methods: `register_proposition(proposition)`,
 `register_plan(proposition, prediction)`,
 `submit_finding(proposition, prediction, estimate, *, data_id, ...)`,
 `assert_finding(proposition, prediction, estimate, *, data_id, ...)`,
+`retire_plan(plan_id, *, alpha, reason)`,
 `proposition_status(proposition_or_content_id)`, `get_proposition(content_id)`,
 `query_frame(frame_id_or_proposition, *, min_status=None)`. `assert_finding` is
 idempotent on `(content_id, data_id)`. You can split the one-shot

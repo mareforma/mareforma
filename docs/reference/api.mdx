@@ -1107,6 +1107,47 @@ Returns the content-addressed `plan_id`. Idempotent: re-registering the same
 prediction is a no-op on both the row and the claim. Raises
 `NonFalsifiablePropositionError` on a non-falsifiable proposition.
 
+#### `retire_plan(plan_id, *, alpha, reason) -> dict`
+
+Retire a plan the gates cannot run and re-register its evidence under an alpha
+they can. A plan written by a release with a wider alpha bound can state a rule
+that decides nothing (alpha at or above 0.5 marks every p-value significant and
+asks for a confidence level of zero or less). The graph still restores, but
+every evidence line under that plan drops out of the counts and the proposition
+reads `UNTESTED` with `lines_skipped` non-zero. The `predictions` row is
+append-only and cannot be deleted, so there is nothing to correct in place.
+
+The drop names the plan to pass here: it is recorded on
+`.mareforma/health.jsonl` as `ungateable_plan_skipped` with the `plan_id`.
+
+One call, one transaction, three effects:
+
+1. Registers the **replacement**: the retired plan's own rule at `alpha`. Only
+   the alpha moves, so a repair cannot re-choose the side of the null once the
+   numbers are known. The row carries `preregistered=0` and its attestation
+   names what it supersedes and why: it was registered after the evidence, and
+   the record says so rather than reading as an original pre-registration.
+2. Records the retirement in `plan_retirements` and writes a signed **retirement
+   attestation** whose text renders the plan, the replacement and the reason, so
+   `restore` re-derives the record from signed material.
+3. Leaves the retired row exactly as registered. The read path gates the
+   evidence that stood under it against the replacement from here on, so the
+   lines count again.
+
+**Returns** `dict` with `plan_id`, `superseded_by`, `reason`, `retired_at`,
+`claim_id` (the retirement attestation), `plan_claim_id` (the replacement's
+attestation) and `lines_recovered`. Idempotent: retiring the same plan at the
+same alpha returns the recorded receipt.
+
+Retirement is the operator's call and never automatic. It is not a way to
+withdraw evidence: only a plan whose rule cannot be run is retirable, and those
+lines already count zero, so a retirement can recover a dropped line and never
+drop a counted one. Raises `NoRegisteredPlanError` when no such plan exists, and
+`PlanNotRetirableError` when the plan's rule still runs, when it is already
+retired (a second retirement would let the operator shop for the alpha that
+reads best), or when nothing would be recovered. An `alpha` outside `(0, 0.5)`
+raises `ValueError`, the same bound every registration is held to.
+
 #### `submit_finding(proposition, prediction, estimate=None, *, data_id=None, data_bytes=None, data_source=None, lines=None, generated_by=None, control_type=None, modality=None, provenance_id=None, design_type=None, code_ref=None, idempotency_key=None, grounding=None, grounding_strict=False) -> dict`
 
 Submit a finding against an already-registered plan. Same shape and return as

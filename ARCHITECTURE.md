@@ -215,7 +215,7 @@ semantics and property placement live in `mareforma/trust_map.py`.
 
 The trust ladder above derives a claim's `support_level` from provenance. The
 trust layer (`mareforma.trust`) adds a parallel, structured model for a single
-content-addressed proposition. It is additive: six new tables, schema stays at
+content-addressed proposition. It is additive: seven new tables, schema stays at
 v1, and every finding still rides a signed claim.
 
 ```
@@ -228,6 +228,14 @@ Proposition (content_id, frame_id)
 A finding carries one evidence line or many. The single-line case is the common
 one; a multi-line finding records several datasets or arms under one proposition
 and prediction.
+
+A prediction is append-only, so a plan written by a release with a wider alpha
+bound can state a rule no gate can run and strand its evidence for good.
+`retire_plan` is the way out: it records the retirement (`plan_retirements`)
+and registers the same rule at an alpha the gate can run, both as signed
+attestations, and leaves the retired row exactly as registered. Only a plan
+whose rule cannot be run is retirable, and those lines count zero as they
+stand, so retirement recovers a dropped line and never drops a counted one.
 
 Three rules:
 
@@ -418,9 +426,9 @@ Tables:
 - `claims_fts`: FTS5 virtual table (independent of `claims`, not
   `content=` linked) for substring + tokenized search.
 
-The six trust-layer tables (`propositions`, `predictions`, `findings`,
-`evidence_lines`, `contrasts`, `effect_estimates`) are described in the
-Trust layer section above.
+The seven trust-layer tables (`propositions`, `predictions`,
+`plan_retirements`, `findings`, `evidence_lines`, `contrasts`,
+`effect_estimates`) are described in the Trust layer section above.
 
 SQL triggers enforce the state machine, the append-only invariants on
 signed predicate fields, the no-delete rule on signed claims, the

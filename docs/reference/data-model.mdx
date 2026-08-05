@@ -271,6 +271,22 @@ The pre-registered plan, bound to one proposition. `plan_id` (PK) is content-add
 
 A registered plan is **append-only**: `predictions_append_only` (BEFORE UPDATE of every immutable column) and `predictions_no_delete` (BEFORE DELETE) raise `mareforma:append_only:prediction_locked` / `prediction_delete_blocked`, so the gap between registration and evidence is a real pre-registration guarantee.
 
+### plan_retirements table
+
+A plan written by a release with a wider alpha bound can state a rule no gate can run, and the row above can be neither corrected nor removed. `graph.retire_plan(plan_id, alpha=..., reason=...)` records the way out: the plan, the plan that supersedes it (the same rule at an alpha the gate can run), and why. The read path then gates that plan's evidence under the replacement, so the lines count again instead of dropping.
+
+| Field | Type | Notes |
+|---|---|---|
+| `plan_id` | TEXT (PK) | FK to `predictions(plan_id)`, the retired plan. One retirement per plan |
+| `superseded_by` | TEXT | FK to `predictions(plan_id)`, the replacement. CHECK `superseded_by <> plan_id` |
+| `reason` | TEXT | Why the plan was retired, supplied by the operator |
+| `claim_id` | TEXT | FK to `claims(claim_id)`, the signed retirement attestation |
+| `retired_at` | TEXT | UTC ISO 8601 |
+
+A retirement is **append-only** like the plan it retires: `plan_retirements_append_only` (BEFORE UPDATE) and `plan_retirements_no_delete` (BEFORE DELETE) raise `mareforma:append_only:plan_retirement_locked` / `plan_retirement_delete_blocked`.
+
+None of these columns is signed, so `restore` re-derives the row from the attestation: the claim's text renders plan, replacement and reason, and a row its claim does not render fails the restore with `kind='claim_unverified'`. Resolution on the read is reached only from a plan whose own rule cannot be run, and those lines count zero as they stand, so a planted retirement can recover a dropped line but never drop a counted one.
+
 ### findings table
 
 One attestation plus its computed bearing on a proposition under a plan.
