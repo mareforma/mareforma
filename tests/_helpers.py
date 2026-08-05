@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import subprocess
+import sys
 from pathlib import Path
 
 
@@ -172,6 +174,36 @@ def _verdict(model_id: str, *, source: str = "socket"):
         grounding=ObservedGrounding.OPAQUE, reason="test lineage",
         model_lineage=lineage,
     )
+
+
+def _import_registry_delta(package: str) -> int:
+    """Import *package* in a clean interpreter and return how many
+    predicate URIs that import registered.
+
+    Snapshotting the registry around an in-process ``import`` measures
+    nothing: pytest has already imported the adapters during collection,
+    so the statement is a dict lookup that runs no module code, and any
+    URI the body would seize sits in both snapshots. A fresh interpreter
+    runs the body for the first time, submodule side effects included.
+    """
+    probe = (
+        "import importlib\n"
+        "from mareforma.predicate_types import predicates\n"
+        "before = len(predicates())\n"
+        f"importlib.import_module({package!r})\n"
+        "print(len(predicates()) - before)\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=Path(__file__).resolve().parent.parent,
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise AssertionError(
+            f"importing {package} in a clean interpreter failed:\n"
+            f"{proc.stderr}"
+        )
+    return int(proc.stdout.strip())
 
 
 def _module_level_names(source_path: Path) -> list[str]:

@@ -210,10 +210,10 @@ def main():
     args = parser.parse_args()
 
     run_all = not any([args.install, args.data, args.run])
-    uv = find_uv()
 
+    # uv builds the environment and nothing else, so only this stage needs it.
     if args.install or run_all:
-        stage_install(uv)
+        stage_install(find_uv())
     if args.data or run_all:
         stage_data()
     if args.run or run_all:

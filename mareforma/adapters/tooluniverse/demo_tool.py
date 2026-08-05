@@ -13,6 +13,7 @@ the package for runtime use.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 
@@ -67,12 +68,14 @@ class OpenTargetsSearchTargetsMock:
         target = kwargs.get("target")
         if not isinstance(target, str) or not target:
             raise ValueError("target is required and must be non-empty")
-        payload = dict(MOCK_OPEN_TARGETS_PAYLOAD)
         return {
             "data": {
-                "search": payload["search"],
+                # Deep copy: a caller that post-processes the result in
+                # place must not edit the pinned payload every later
+                # call reads from.
+                "search": deepcopy(MOCK_OPEN_TARGETS_PAYLOAD["search"]),
                 "args_echo": dict(sorted(kwargs.items())),
             },
             "metadata": {"observed_at_call_time": True},
-            "source_version": payload["_source_version"],
+            "source_version": MOCK_OPEN_TARGETS_PAYLOAD["_source_version"],
         }

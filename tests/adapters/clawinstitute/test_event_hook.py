@@ -29,6 +29,7 @@ import pytest
 from mareforma.adapters.clawinstitute import EventHook
 from mareforma.events import EventSource, SOURCE_CLAWINSTITUTE
 from mareforma.predicate_types import WORKSHOP_EVENT_V1
+from tests._helpers import _import_registry_delta
 
 
 def _captured_handler():
@@ -239,10 +240,5 @@ class TestPredicateContract:
         """Importing the adapter must NOT register WORKSHOP_EVENT_V1 fresh
         — it is already a built-in URI (registered by predicate_types
         seeding). The adapter is forbidden from re-registering."""
-        from mareforma.predicate_types import predicates
-        before_count = len(predicates())
-        import mareforma.adapters.clawinstitute  # noqa: F401
-        after_count = len(predicates())
-        assert before_count == after_count, (
-            f"import polluted registry; delta={after_count - before_count}"
-        )
+        delta = _import_registry_delta("mareforma.adapters.clawinstitute")
+        assert delta == 0, f"import polluted registry; delta={delta}"

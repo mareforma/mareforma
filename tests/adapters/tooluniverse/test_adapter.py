@@ -26,7 +26,9 @@ import pytest
 import mareforma
 from mareforma.predicate_types import TOOL_CALL_V1
 from mareforma.tools import ToolCallError
-from tests._helpers import _bootstrap_key, _two_signers
+from tests._helpers import (
+    _bootstrap_key, _import_registry_delta, _two_signers,
+)
 
 
 class TestUriForm:
@@ -56,6 +58,22 @@ class TestProvenanceToolAdapter:
         result = pta.call(target="EGFR")
         assert "mareforma_claim_id" in result["metadata"]
         assert result["data"]["args_echo"]["target"] == "EGFR"
+
+
+class TestDemoToolPayloadIsolation:
+    """The pinned payload stays pinned however a caller treats the result."""
+
+    def test_call_does_not_hand_out_the_module_constant(self):
+        from mareforma.adapters.tooluniverse.demo_tool import (
+            MOCK_OPEN_TARGETS_PAYLOAD,
+            OpenTargetsSearchTargetsMock,
+        )
+        result = OpenTargetsSearchTargetsMock().call(target="EGFR")
+        search = result["data"]["search"]
+        assert search is not MOCK_OPEN_TARGETS_PAYLOAD["search"]
+        search["total"] = 999
+        fresh = OpenTargetsSearchTargetsMock().call(target="EGFR")
+        assert fresh["data"]["search"]["total"] == 2
 
 
 class _NamedMock:
@@ -152,6 +170,22 @@ class TestExecClassClaim:
         for field, value in _OBSERVED_ENVIRONMENT.items():
             assert predicate[field] == value
 
+    def test_refuses_a_close_tag_smuggled_through_arguments(self, graph):
+        """The code an exec-class tool runs is signed verbatim.
+
+        A caller who plants the close marker in it would otherwise
+        split the claim text into a second, caller-written predicate
+        block.
+        """
+        from mareforma.adapters.tooluniverse import ProvenanceToolAdapter
+        from mareforma.tools import PredicateBoundaryError
+        pta = ProvenanceToolAdapter(
+            tool=_PythonExecMock(_OBSERVED_ENVIRONMENT), graph=graph,
+        )
+        with pytest.raises(PredicateBoundaryError):
+            pta.call(code="print('</predicate>')")
+        assert graph.query(include_unverified=True) == []
+
 
 class _CacheHitMock:
     """Retrieval tool that declares a cache hit against a claim it names."""
@@ -225,8 +259,4 @@ class TestToolCallRecorder:
 
 class TestImportHygiene:
     def test_import_does_not_pollute_predicate_registry(self):
-        from mareforma.predicate_types import predicates
-        before = len(predicates())
-        import mareforma.adapters.tooluniverse  # noqa: F401
-        after = len(predicates())
-        assert before == after
+        assert _import_registry_delta("mareforma.adapters.tooluniverse") == 0

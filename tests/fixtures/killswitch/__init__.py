@@ -9,7 +9,7 @@ seeded dissociation fixtures with known ground truth, not a prevalence estimate.
 
 The six failures:
 
-1. a silent zero-row fallback , a cited read that returned nothing must not be GROUNDED;
+1. a silent zero-row fallback , a cited read that returned nothing is seen, never GROUNDED;
 2. an excluded partition      , a cited source that was never read is named, not hidden;
 3. a same-model corroboration , two checks on one model stay effective-independence 1;
 4. a number with no execution , a finding with no observed cited read is UNGROUNDED (empty provenance);
@@ -28,6 +28,7 @@ import httpx
 
 import mareforma
 from mareforma.observe import ObservedGrounding, observe
+from mareforma.observe._citation import normalize_identifier
 from mareforma.observe._lineage import ModelLineageTier
 from mareforma.observe.measure import summarize
 from mareforma.trust._store import effective_independence_receipt
@@ -89,11 +90,19 @@ def silent_zero_row_fallback(tmp_path: Path) -> KillSwitchOutcome:
     with observe(cites=str(data)) as h:
         open(str(data)).read()  # the read happens but carries nothing
     v = h.verdict
-    caught = v.grounding is not ObservedGrounding.GROUNDED
+    # The honest shape, not merely "not GROUNDED": the observer saw the one
+    # read and saw that it carried nothing. A blind seam records no read and
+    # lands OPAQUE, which must not read as a catch.
+    caught = (
+        v.grounding is ObservedGrounding.UNGROUNDED
+        and len(v.reads) == 1
+        and not v.reads[0].nonempty
+    )
     return KillSwitchOutcome(
         "silent_zero_row_fallback",
-        "a zero-row cited read is never GROUNDED",
-        v.grounding.value, caught,
+        "a zero-row cited read is observed and is never GROUNDED",
+        f"{v.grounding.value}, nonempty={[r.nonempty for r in v.reads]}",
+        caught,
     )
 
 
@@ -105,14 +114,20 @@ def excluded_partition(tmp_path: Path) -> KillSwitchOutcome:
     with observe(cites=[str(part_a), str(part_b)]) as h:
         open(str(part_a)).read()  # partition B is silently excluded
     v = h.verdict
-    excluded = set(v.cited_sources) - set(v.grounded_sources)
-    # The excluded partition is named even though A grounded the finding: the
-    # cited-but-ungrounded set is non-empty, so the absence is legible.
-    caught = bool(excluded)
+    grounded = set(v.grounded_sources)
+    excluded = set(v.cited_sources) - grounded
+    # The excluded partition is named even though A grounded the finding, so
+    # check both halves against the verdict's own normalized identifiers. A
+    # binder that never binds reports BOTH partitions excluded, which is a
+    # blind observer, not a catch.
+    caught = (
+        grounded == {normalize_identifier(str(part_a))}
+        and excluded == {normalize_identifier(str(part_b))}
+    )
     return KillSwitchOutcome(
         "excluded_partition",
         "a cited partition that was never read is named (cited minus grounded)",
-        f"excluded={sorted(excluded)}", caught,
+        f"grounded={sorted(grounded)}, excluded={sorted(excluded)}", caught,
     )
 
 
@@ -155,6 +170,10 @@ def number_with_no_execution(tmp_path: Path) -> KillSwitchOutcome:
     with observe(cites=str(data)) as h:
         _ = 2 + 2  # a number produced with no observed cited read: empty provenance
     v = h.verdict
+    # Blind-equivalent by construction: the scope contains no read, so a blind
+    # observer reports the same empty provenance. What makes this UNGROUNDED
+    # worth reading is the read-axis control in tests/test_killswitch_pilot.py,
+    # which proves the seam was live for the run.
     caught = v.grounding is ObservedGrounding.UNGROUNDED and len(v.reads) == 0
     return KillSwitchOutcome(
         "number_with_no_execution",

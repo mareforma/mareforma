@@ -11,8 +11,13 @@ updates:
   # Python deps are declared in pyproject.toml. No lockfile is committed,
   # so Dependabot's pip ecosystem reads pyproject directly and opens one
   # PR per outdated direct dependency (transitive pins are not tracked).
+  # increase-if-necessary keeps a floor alone while the new release still
+  # satisfies it. The default rewrites every lower bound on every release,
+  # which bakes a floor nothing needs into published metadata and breaks
+  # installs in pipelines holding an older working version.
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
       interval: "weekly"
+    versioning-strategy: increase-if-necessary
     open-pull-requests-limit: 5

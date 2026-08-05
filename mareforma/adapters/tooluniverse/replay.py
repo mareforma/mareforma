@@ -20,6 +20,7 @@ from typing import Any, Mapping
 
 from mareforma.tools import ReplayResult, Tool, ToolCallError
 from mareforma.canonicalize import canonicalize, digest_bytes
+from .exec_routing import CE_TAG_OPEN
 from .predicate import decode_predicate_from_text
 
 
@@ -27,6 +28,7 @@ __all__ = [
     "replay_from_claim",
     "MissingToolError",
     "MalformedClaimError",
+    "UnsupportedPredicateFamilyError",
 ]
 
 
@@ -42,6 +44,15 @@ class MissingToolError(LookupError):
 
 class MalformedClaimError(ValueError):
     """Raised when the claim's text doesn't decode to a tool-call/v1 predicate."""
+
+
+class UnsupportedPredicateFamilyError(ValueError):
+    """Raised when the claim carries a predicate family replay can't re-execute.
+
+    Distinct from :class:`MalformedClaimError`: the claim is well
+    formed and carries provenance, this replayer just does not answer
+    the reproducibility question for that family.
+    """
 
 
 def replay_from_claim(
@@ -71,10 +82,10 @@ def replay_from_claim(
     3. The tool's ``.call(**canonical_args)`` returns a ToolResult
        whose canonical bytes hash to the pinned ``result_digest``.
 
-    Raises only on missing-tool (LookupError) or malformed-claim
-    (ValueError). Digest mismatches are *signal* (returned in the
-    ReplayResult) not failure modes; callers decide what to do with
-    them.
+    Raises only on missing-tool (LookupError), malformed-claim, or a
+    predicate family this replayer does not handle (both ValueError).
+    Digest mismatches are *signal* (returned in the ReplayResult) not
+    failure modes; callers decide what to do with them.
     """
 
     claim = graph.get_claim(claim_id)
@@ -82,6 +93,16 @@ def replay_from_claim(
         raise MalformedClaimError(f"claim {claim_id!r} not found in graph")
 
     text = claim.get("text") or ""
+    if text.startswith(CE_TAG_OPEN):
+        # Re-running the tool would compare result digests while
+        # ignoring the image, runtime and variance_mode the predicate
+        # pins, so an ok=True would claim more than was checked.
+        raise UnsupportedPredicateFamilyError(
+            f"claim {claim_id!r} carries a container-exec/v1 predicate; "
+            "this replayer re-executes tool-call/v1 only and does not "
+            "compare the execution environment a container-exec claim "
+            "attests."
+        )
     try:
         predicate = decode_predicate_from_text(text)
     except ValueError as exc:

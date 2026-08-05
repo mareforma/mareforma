@@ -7,18 +7,32 @@ Regression guards for the packaging issues:
        shipped choice, so this pins the complete tree.
 - no dead ``[git]`` optional-dependency extra and no ``gitpython``
        in the dev extra (nothing imports it).
-- the Dependabot config produces real updates and never advertises a
-       lockfile that is not committed.
+- every core dependency is imported somewhere under ``mareforma/``
+       (``rich`` outlived the subcommands it was added for).
+- the Dependabot config produces real updates, never advertises a
+       lockfile that is not committed, and does not ratchet the pip version
+       floors up on every upstream release.
 - a PEP 639 string ``project.license`` requires a setuptools>=77 build
        floor; the floor must not permit versions that reject the string form.
+- the ``dev`` extra declares the build backend the sdist guard imports, so
+       that guard runs instead of skipping on interpreters without setuptools.
 - the ``test-heavy`` extra installs exactly the loader libs the grounding
        tests skip on, and carries no heavy dep no test references.
+- every optional dep a test skips on behind a module-level ``HAS_*`` flag
+       is installed by an extra some workflow leg names, or the test runs
+       nowhere (``rdkit`` was skipped on all four legs).
+- ``mareforma.__version__`` matches the version the build publishes; the
+       two literals are independent and nothing else compares them.
+- every marker ``addopts`` deselects is selected back by some workflow
+       step, so a marked test has a job that runs it.
 
 Each guard fails on the pre-fix tree.
 """
 
 from __future__ import annotations
 
+import ast
+import functools
 import os
 import pathlib
 import re
@@ -35,7 +49,9 @@ import pytest
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 DEPENDABOT = REPO_ROOT / ".github" / "dependabot.yml"
+WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 TESTS_DIR = REPO_ROOT / "tests"
+PACKAGE_DIR = REPO_ROOT / "mareforma"
 
 # ``setuptools`` is a build backend, not a heavy loader; tests importorskip it
 # to build the sdist, and it never belongs in the test-heavy runtime extra.
@@ -44,7 +60,6 @@ _BUILD_ONLY_IMPORTS = frozenset({"setuptools"})
 # Files whose absence from an sdist turns the shipped suite into an
 # unrunnable pile of imports.
 _REQUIRED_SDIST_TEST_FILES = ("tests/conftest.py", "tests/_helpers.py")
-_REQUIRED_SDIST_TEST_SUBDIRS = ("tests/adapters/", "tests/epistemic/", "tests/integration/")
 
 _KNOWN_LOCKFILES = ("uv.lock", "poetry.lock", "Pipfile.lock", "pdm.lock", "pixi.lock")
 
@@ -52,10 +67,9 @@ _KNOWN_LOCKFILES = ("uv.lock", "poetry.lock", "Pipfile.lock", "pdm.lock", "pixi.
 def _build_sdist_names():
     """Build the sdist in-process (no network, no build frontend) and
     return the archive member paths relative to the sdist root."""
-    # setuptools is a BUILD-system dependency (pyproject [build-system].requires),
-    # not a runtime or test dependency, and modern pip no longer seeds it into a
-    # venv. Skip rather than hard-fail when a clean environment lacks it, the
-    # PEP 517 build supplies it at build time regardless.
+    # The dev extra declares setuptools, so every CI leg and every documented
+    # dev install runs this guard. Skip rather than hard-fail for the one case
+    # left, a bare environment installed without the dev extra.
     build_meta = pytest.importorskip("setuptools.build_meta")
 
     cwd = os.getcwd()
@@ -71,15 +85,41 @@ def _build_sdist_names():
     return {m.split("/", 1)[1] for m in members if "/" in m}
 
 
+def _required_sdist_test_subdirs():
+    """Every test subpackage, as an sdist member prefix.
+
+    Read from the tree rather than listed, so a subpackage added later cannot
+    ship untested.
+    """
+    return sorted(
+        f"{path.parent.relative_to(REPO_ROOT).as_posix()}/"
+        for path in TESTS_DIR.rglob("__init__.py")
+        if path.parent != TESTS_DIR
+    )
+
+
 def test_sdist_ships_complete_runnable_suite():
     """conftest + helpers + every test subpackage ride in the sdist."""
     names = _build_sdist_names()
     missing = [f for f in _REQUIRED_SDIST_TEST_FILES if f not in names]
     assert not missing, f"sdist omits runnable-suite files: {missing}"
-    for subdir in _REQUIRED_SDIST_TEST_SUBDIRS:
+    for subdir in _required_sdist_test_subdirs():
         assert any(n.startswith(subdir) for n in names), (
             f"sdist omits the {subdir} test subpackage, suite is not runnable"
         )
+
+
+def test_every_test_subpackage_is_required_in_the_sdist():
+    """the guard above promises every test subpackage, so the set it walks must
+    come from the tree. A hardcoded list goes stale on the next subpackage:
+    ``tests/fixtures/killswitch`` landed after it and rode in on ``graft tests``
+    alone, with nothing left to fail if a prune line dropped it.
+    """
+    required = set(_required_sdist_test_subdirs())
+    assert "tests/fixtures/killswitch/" in required, (
+        "tests/test_killswitch_pilot.py imports tests.fixtures.killswitch, but "
+        f"the sdist guard does not require it: {sorted(required)}"
+    )
 
 
 def test_no_dead_git_extra_and_no_gitpython_dev():
@@ -120,6 +160,56 @@ def test_license_string_requires_setuptools_77_floor():
     )
 
 
+def test_dev_extra_declares_the_build_backend():
+    """the sdist guard builds with ``setuptools.build_meta``, and pip no longer
+    seeds setuptools into a venv, so a dev extra that does not declare it leaves
+    the only sdist guard skipped on every interpreter without the ensurepip copy.
+    """
+    data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    dev = data["project"]["optional-dependencies"]["dev"]
+    build_floor = _setuptools_floor(data["build-system"]["requires"])
+    dev_floor = _setuptools_floor(dev)
+    assert dev_floor is not None and dev_floor >= build_floor, (
+        f"the dev extra declares setuptools {dev_floor}, the build floor is "
+        f"{build_floor}; without it the sdist guard skips instead of running"
+    )
+
+
+def test_version_literals_agree():
+    """``mareforma.__version__`` is a second literal the build never reads, so a
+    bump that touches only pyproject still produces a correctly named wheel. The
+    drifted value is stamped into signed export bundles and JSON-LD exports,
+    which cannot be corrected after the fact.
+    """
+    import mareforma
+
+    declared = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]["version"]
+    assert mareforma.__version__ == declared, (
+        f"mareforma.__version__ is {mareforma.__version__} but pyproject publishes "
+        f"{declared}; exports would carry a version that was never released"
+    )
+
+
+def test_deselected_markers_have_a_job_that_selects_them():
+    """a marker deselected by ``addopts`` and selected by no workflow step is
+    dead weight: no invocation reaches it, ``-k`` cannot override the marker
+    filter, and the tests behind it rot uncompiled while reading as coverage.
+    """
+    ini = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["tool"]["pytest"]["ini_options"]
+    excluded = set(re.findall(r"not\s+([A-Za-z_]\w*)", ini.get("addopts", "")))
+    workflows = "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted(WORKFLOWS_DIR.glob("*.yml"))
+    )
+    unreachable = sorted(
+        marker
+        for marker in excluded
+        if not re.search(rf"-m\s+[\"']?{re.escape(marker)}\b", workflows)
+    )
+    assert not unreachable, (
+        f"addopts deselects markers no workflow step selects back: {unreachable}"
+    )
+
+
 def _requirement_name(req):
     """Return the base distribution name of a requirement string.
 
@@ -137,17 +227,66 @@ def _importorskipped_modules():
     return modules
 
 
-def _tests_reference(name):
-    """True when the distribution name is used by a test under ``tests/``.
+@functools.lru_cache(maxsize=1)
+def _tests_use_modules():
+    """Every top-level module the test suite imports or gates on.
 
-    This packaging module is skipped: it names every heavy dep in prose (docstrings,
-    assertion messages), so counting it would let any extra reference itself.
+    Read from the syntax tree, not the source text: every heavy dep is named in
+    prose somewhere (docstrings, comments, assertion messages), so a substring
+    scan counts a dep nothing imports as used.
     """
-    this_file = pathlib.Path(__file__).resolve()
-    return any(
-        name in path.read_text(encoding="utf-8")
-        for path in TESTS_DIR.rglob("*.py")
-        if path.resolve() != this_file
+    modules = set(_importorskipped_modules())
+    for path in TESTS_DIR.rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                modules.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                modules.add(node.module.split(".")[0])
+    return frozenset(modules)
+
+
+def _tests_reference(name):
+    """True when the distribution is imported by a test under ``tests/``.
+
+    Every current pin's import name is its distribution name; a pin whose two
+    names differ needs an explicit alias here.
+    """
+    return name.replace("-", "_") in _tests_use_modules()
+
+
+def _package_imports():
+    """Every top-level module name imported anywhere under ``mareforma/``.
+
+    Matches indented imports too: the optional-stdlib fallbacks sit inside
+    ``try`` blocks and function bodies.
+    """
+    names = set()
+    for path in PACKAGE_DIR.rglob("*.py"):
+        names.update(
+            re.findall(
+                r"^\s*(?:import|from)\s+([A-Za-z_]\w*)",
+                path.read_text(encoding="utf-8"),
+                re.M,
+            )
+        )
+    return names
+
+
+def test_every_core_dependency_is_imported():
+    """a core dependency nothing imports is supply-chain surface every
+    ``pip install mareforma`` pays for and no code path uses. The extras carry
+    an unreferenced-dep guard; ``[project] dependencies`` carried none, which
+    is how ``rich`` outlived the subcommands it shipped for.
+    """
+    data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    imported = _package_imports()
+    unused = sorted(
+        name for name in map(_requirement_name, data["project"]["dependencies"])
+        if name.replace("-", "_") not in imported
+    )
+    assert not unused, (
+        f"core dependencies nothing under mareforma/ imports, so every install "
+        f"carries them and their transitive deps for no code path: {unused}"
     )
 
 
@@ -175,6 +314,68 @@ def test_test_heavy_extra_matches_the_loaders_it_exercises():
     )
 
 
+def _flag_gated_modules():
+    """Every optional dep the suite skips on via a module-level ``HAS_*`` flag.
+
+    The other gate shape is ``pytest.importorskip``; a test that imports
+    ``HAS_RDKIT`` and skips on it is invisible to a scan for that one.
+    """
+    this_file = pathlib.Path(__file__).resolve()
+    modules = set()
+    for path in TESTS_DIR.rglob("*.py"):
+        if path.resolve() == this_file:
+            continue
+        text = path.read_text(encoding="utf-8")
+        modules.update(name.lower() for name in _HAS_FLAG.findall(text))
+    return modules
+
+
+def _workflow_installed_extras():
+    """Every optional-dependency extra some workflow leg installs."""
+    extras = set()
+    for path in WORKFLOWS_DIR.glob("*.yml"):
+        for command in re.findall(r"pip install[^\n]*", path.read_text(encoding="utf-8")):
+            extras |= _extras_named(command)
+    return extras
+
+
+def test_flag_gated_deps_are_installed_by_a_workflow_leg():
+    """a test gated on a ``HAS_*`` flag runs only where the dep behind it is
+    installed. rdkit sat in the ``chem`` extra no leg named, so the form's
+    refusal test and its canonicalisation test were both decided by the same
+    absent import and neither proved the form produces the bytes it promises.
+    """
+    extras = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"][
+        "optional-dependencies"
+    ]
+    installed = {
+        _requirement_name(req).replace("-", "_").lower()
+        for name in _workflow_installed_extras()
+        for req in extras.get(name, ())
+    }
+    missing = sorted(_flag_gated_modules() - installed)
+    assert not missing, (
+        f"these deps gate a test behind a HAS_* flag and no workflow leg "
+        f"installs the extra that provides them, so the test skips "
+        f"everywhere: {missing}"
+    )
+
+
+def test_dep_use_is_measured_by_imports_not_prose():
+    """direction 2 above delegates to ``_tests_reference``. A scan over test
+    source text counts comments and docstrings, so a pin named only in prose
+    reads as used and the unreferenced-dep guard reports a success it never
+    earned (``aioresponses`` was named in one comment saying it is unused).
+    """
+    assert _tests_reference("responses"), (
+        "the HTTP mocking tests import responses; a use scan must see it"
+    )
+    assert not _tests_reference("aioresponses"), (
+        "no test imports aioresponses; a scan that counts prose as use guards "
+        "nothing, since any name in a comment satisfies it"
+    )
+
+
 def test_dependabot_produces_real_updates():
     """both ecosystems scheduled, and no uncommitted lockfile claim."""
     text = DEPENDABOT.read_text(encoding="utf-8")
@@ -191,3 +392,28 @@ def test_dependabot_produces_real_updates():
             assert (REPO_ROOT / lockfile).exists(), (
                 f"dependabot.yml references {lockfile} but it is not committed"
             )
+
+
+def _dependabot_entry(ecosystem):
+    """Return the text of the update entry for one package ecosystem, or None."""
+    text = DEPENDABOT.read_text(encoding="utf-8")
+    for block in re.split(r"^\s*- package-ecosystem:", text, flags=re.M)[1:]:
+        head, _, rest = block.partition("\n")
+        if head.strip().strip("\"'") == ecosystem:
+            return rest
+    return None
+
+
+def test_dependabot_pip_does_not_ratchet_version_floors():
+    """the pip entry must pin a versioning strategy that leaves satisfied
+    constraints alone. Without it Dependabot rewrites the lower bound on every
+    upstream release, so a floor no call site needs (cryptography>=48) ships in
+    immutable PyPI metadata and makes the install unsolvable for pipelines
+    holding an older but perfectly working version.
+    """
+    entry = _dependabot_entry("pip")
+    assert entry is not None, "dependabot.yml declares no pip update entry"
+    assert re.search(r"versioning-strategy:\s*[\"']?increase-if-necessary", entry), (
+        "the pip entry must declare versioning-strategy: increase-if-necessary, "
+        "or every upstream release ratchets the declared floors"
+    )

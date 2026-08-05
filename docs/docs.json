@@ -27,7 +27,6 @@
   "styling": {
     "codeblocks": "dark"
   },
-  "customCSS": "/style.css",
   "navbar": {
     "links": [
       {

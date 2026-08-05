@@ -53,3 +53,25 @@ def test_stage_data_downloads_over_empty_expected_directories(
 
     assert commands, "stage_data returned without invoking hf download"
     assert commands[0][:2] == [str(hf), "download"]
+
+
+def test_run_stage_does_not_resolve_the_installer(monkeypatch, capsys) -> None:
+    """``--run`` repeats the experiment against a venv that already exists.
+
+    uv builds that venv and does nothing else, so a box where uv is gone (or
+    lives somewhere ``find_uv`` does not probe) must still reach stage 3.
+    """
+    module = _load()
+
+    def _no_uv():
+        raise AssertionError("--run resolved uv, which only the install stage uses")
+
+    stages = []
+    monkeypatch.setattr(sys, "argv", [str(_EXAMPLE), "--run"])
+    monkeypatch.setattr(module, "find_uv", _no_uv)
+    monkeypatch.setattr(module, "stage_run", lambda: stages.append("run"))
+
+    module.main()
+    capsys.readouterr()
+
+    assert stages == ["run"]

@@ -188,11 +188,18 @@ show("after validate()", established["support_level"] if established else "n/a")
 
 sep("New agent, larger analysis, different result")
 
+# The tool wraps claim text in <untrusted_data> so an LLM reading it cannot
+# mistake the text for instructions. A human console has no such risk, so it
+# prints the claim without the delimiters.
+def _for_console(text: str) -> str:
+    return text.removeprefix("<untrusted_data>\n").removesuffix("\n</untrusted_data>")
+
+
 # Step 1: query the graph, what is already established on this topic?
 prior = json.loads(query_graph.invoke({"topic": "Treatment X", "min_support": "ESTABLISHED"}))
 print(f"  query_graph('Treatment X', min_support='ESTABLISHED') → {len(prior)} claims")
 for c in prior:
-    print(f"    [{c['support_level']:12}] {c['text'][:65]}…")
+    print(f"    [{c['support_level']:12}] {_for_console(c['text'])[:65]}…")
 
 established_ids = [c["claim_id"] for c in prior]
 

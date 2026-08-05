@@ -24,6 +24,19 @@ class TestVerifyRoleAttestation:
         )
         assert verify_role_attestation(att, signer.public_key()) == {"name": "demo"}
 
+    def test_rewritten_keyid_raises_typed_error(self) -> None:
+        # keyid is outside the signed bytes, so any intermediary can
+        # rewrite it on an otherwise genuine attestation. A verifier
+        # that accepts it hands the caller the wrong attester.
+        signer = _signing.generate_keypair()
+        other = _signing.generate_keypair()
+        att = sign_role_attestation(
+            role=ROLE_TOOL, payload={"name": "demo"}, signer=signer,
+        )
+        att["keyid"] = _signing.public_key_id(other.public_key())
+        with pytest.raises(InvalidRoleAttestationError, match="keyid"):
+            verify_role_attestation(att, signer.public_key())
+
     def test_non_json_payload_raises_typed_error(self) -> None:
         # A valid signature covering non-JSON bytes (a signer that bypasses
         # sign_role_attestation and signs raw bytes) must surface the

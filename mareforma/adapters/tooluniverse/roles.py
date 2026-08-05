@@ -129,7 +129,8 @@ def verify_role_attestation(attestation: dict[str, Any], public_key: Any) -> dic
 
     Raises :class:`InvalidRoleAttestationError` on any failure: bad
     shape, bad base64, bad signature, role not in the allowed enum,
-    payload not a JSON object.
+    keyid naming a key other than the verifying one, payload not a
+    JSON object.
     """
 
     for key in ("role", "payload_b64", "signature_b64", "keyid"):
@@ -154,6 +155,13 @@ def verify_role_attestation(attestation: dict[str, Any], public_key: Any) -> dic
         raise InvalidRoleAttestationError(
             "role attestation signature did not verify"
         ) from exc
+    # keyid is outside the signed bytes, so a genuine attestation can
+    # reach a verifier advertising someone else's key. Bind it to the
+    # key that actually verified rather than let it be recorded as-is.
+    if attestation["keyid"] != mf_signing.public_key_id(public_key):
+        raise InvalidRoleAttestationError(
+            "role attestation keyid does not match the verifying key"
+        )
     try:
         body = json.loads(payload_bytes.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:

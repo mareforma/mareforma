@@ -22,13 +22,12 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 dependencies = [
-    "click>=8.3.3",
+    "click>=8.1",
     "tomli-w>=1.0",
     "tomli>=2.0; python_version < '3.11'",
     "httpx>=0.27",
-    "cryptography>=48.0.0",
+    "cryptography>=42",
     "rfc8785>=0.1",
-    "rich>=13.0",
 ]
 
 [project.urls]
@@ -42,19 +41,22 @@ Issues = "https://github.com/mareforma/mareforma/issues"
 # adapter needs. mareforma core stays slim; users opt into the
 # platforms they actually integrate with.
 clawinstitute = []  # httpx is already a core dep
-tooluniverse = []   # rich + rfc8785 already core deps
+tooluniverse = []   # rfc8785 is already a core dep
 gemini = []          # read-only ingest, no platform SDK
 dev = [
     "pytest>=9.0.3",
     "pytest-cov",
     "pytest-httpx>=0.36.2",
+    # the packaging guard builds the sdist in-process with the build backend,
+    # and pip no longer seeds setuptools into a venv. Matches the build floor.
+    "setuptools>=77",
 ]
 # Heavy scientific + networking loaders exercised by the grounding tests. Gated
 # behind an extra so the default dev install stays fast and the main matrix does
 # not carry native wheels that may not build on every Python; the grounding
 # tests skip these paths when the libs are absent (pytest.importorskip). Run on
 # ONE pinned CI leg (see the test-heavy job). HTTP tests mock with
-# responses / aioresponses / pytest-httpx, never live network.
+# responses / pytest-httpx, never live network.
 test-heavy = [
     "h5py>=3.8",
     "pandas>=2.0",
@@ -64,7 +66,6 @@ test-heavy = [
     "aiohttp>=3.9",
     "requests>=2.31",
     "responses>=0.24",
-    "aioresponses>=0.7",
 ]
 docs = []
 
@@ -83,9 +84,8 @@ mareforma = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v --tb=short -m 'not slow'"
+addopts = "-v --tb=short"
 markers = [
-    "slow: long-running test (perf pins at 50k claims, network-backed adapters)",
     "adapters: tests exercising the mareforma.adapters.* namespace",
 ]
 

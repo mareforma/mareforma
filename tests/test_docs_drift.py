@@ -12,8 +12,10 @@ fall behind a future change, not just today's drift.
 
 from __future__ import annotations
 
+import json
 import pathlib
 import re
+import shutil
 
 import click
 
@@ -39,6 +41,30 @@ _POLICY_PAGES = (
 )
 
 _POLICY_STAMP_RE = re.compile(r"status_policy@v\d+")
+
+# Root keys the Mintlify docs.json schema accepts. Every branch of that schema
+# sets ``additionalProperties: false``, so anything else is a setting the docs
+# build never reads. Transcribed here to keep the guard offline.
+_DOCS_JSON_ROOT_KEYS = frozenset(
+    {
+        "$schema", "api", "appearance", "background", "banner", "colors",
+        "contextual", "description", "errors", "favicon", "fonts", "footer",
+        "icons", "integrations", "interaction", "logo", "markdown", "metadata",
+        "name", "navbar", "navigation", "public", "redirects", "search", "seo",
+        "styling", "theme", "thumbnails", "variables",
+    }
+)
+
+
+def test_docs_json_keys_are_in_the_declared_schema():
+    """docs.json declares a schema; a key outside it is dead config that
+    schema-aware editors flag and the docs build silently ignores.
+    """
+    config = json.loads((DOCS / "docs.json").read_text(encoding="utf-8"))
+    stray = sorted(set(config) - _DOCS_JSON_ROOT_KEYS)
+    assert not stray, (
+        f"docs.json sets keys its declared schema forbids: {stray}"
+    )
 
 
 def _export_format_choices():
@@ -259,3 +285,78 @@ def test_example_05_promotion_prose_matches_the_signer_gate(tmp_path):
     assert "REPLICATED fires automatically" not in script, (
         "the run report promises a promotion these single-key writes cannot reach"
     )
+
+
+def test_example_05_recorded_run_is_out_of_the_backup_writer_reach(tmp_path):
+    """the recorded Case B claims must survive a run of the example.
+
+    ``assert_claim`` backs the project up to ``claims.toml`` in the project
+    root, so a recorded run parked there is overwritten by the first write the
+    README's ``--run`` step makes. The recorded file lives under ``recorded/``,
+    which no writer targets.
+    """
+    example = ROOT / "examples" / "05_drug_target_provenance"
+    recorded = example / "recorded" / "case_b.claims.toml"
+    assert recorded.is_file(), "the recorded Case B run must be committed"
+    assert not (example / "claims.toml").exists(), (
+        "a committed claims.toml in the project root is the backup writer's target"
+    )
+
+    project = tmp_path / "ex05"
+    (project / "recorded").mkdir(parents=True)
+    shutil.copy2(recorded, project / "recorded" / "case_b.claims.toml")
+    before = recorded.read_bytes()
+
+    with mareforma.open(project) as graph:
+        graph.assert_claim(
+            "RA target", generated_by="medea/gpt-4o/ra_cd4", source_name="medeadb"
+        )
+
+    assert (project / "recorded" / "case_b.claims.toml").read_bytes() == before, (
+        "a run of the example rewrote the recorded Case B claims"
+    )
+
+
+def test_example_05_recorded_run_restores_as_the_readme_describes(tmp_path):
+    """the README must state how the recorded capture restores.
+
+    The capture predates signing, so ``restore`` rebuilds four unsigned claims
+    that the default ``query`` drops. That is only honest if the README says
+    so rather than presenting the file as a working recovery source.
+    """
+    example = ROOT / "examples" / "05_drug_target_provenance"
+    recorded = example / "recorded" / "case_b.claims.toml"
+
+    project = tmp_path / "restored"
+    project.mkdir()
+    shutil.copy2(recorded, project / "claims.toml")
+    assert mareforma.restore(project)["claims_restored"] == 4
+
+    with mareforma.open(project) as graph:
+        assert graph.query("target") == []
+        assert len(graph.query("target", include_unverified=True)) == 4
+
+    section = " ".join(
+        _section((example / "README.md").read_text(encoding="utf-8"), "## What this caught").split()
+    )
+    assert "recorded/case_b.claims.toml" in section, (
+        "the README must point at the recorded capture by path"
+    )
+    assert "include_unverified=True" in section, (
+        "the README must state that the capture is unsigned and needs include_unverified"
+    )
+
+
+def test_examples_carry_no_config_file_the_package_never_reads():
+    """examples must not ship a project file no parser reads.
+
+    claims.toml is the package's only TOML reader, and root discovery keys on
+    ``.mareforma/graph.db`` rather than a marker file. A project.toml beside an
+    example teaches a configuration mechanism mareforma does not have.
+    """
+    stray = sorted(
+        str(p.relative_to(ROOT))
+        for p in _example_files(".toml")
+        if not p.name.endswith("claims.toml")
+    )
+    assert stray == [], f"no reader parses {stray}"

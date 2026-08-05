@@ -24,9 +24,18 @@ from mareforma.adapters.tooluniverse.predicate import (
     encode_predicate_into_text,
     verify_tool_call_envelope,
 )
+from mareforma.adapters.tooluniverse.exec_routing import (
+    CE_TAG_CLOSE,
+    CE_TAG_OPEN,
+    CONTAINER_EXEC_PREDICATE_TYPE,
+    build_container_exec_predicate,
+    decode_container_exec_predicate,
+    encode_container_exec_predicate_into_text,
+)
 from mareforma.adapters.tooluniverse.replay import (
     MalformedClaimError,
     MissingToolError,
+    UnsupportedPredicateFamilyError,
     replay_from_claim,
 )
 
@@ -81,6 +90,68 @@ def test_decode_rejects_missing_required_field():
         decode_predicate_from_text(text)
 
 
+# --- decode_container_exec_predicate -------------------------------------
+
+def _container_exec_predicate() -> dict:
+    return build_container_exec_predicate(
+        tool_namespace="tu",
+        tool_name="python_exec",
+        tool_version="1.0.0",
+        tool_config_fingerprint="fp",
+        arguments_canonical={"code": "print(1)"},
+        arguments_digest="sha256:aaa",
+        result_canonical_form="json-c14n-v1",
+        result_digest="sha256:bbb",
+        result_bytes_size=3,
+        started_at="2026-01-01T00:00:00+00:00",
+        completed_at="2026-01-01T00:00:01+00:00",
+        tool_call_id="call-1",
+        image_digest="sha256:ccc",
+        source_digest="sha256:ddd",
+        runtime="gvisor",
+    )
+
+
+def test_container_exec_decode_round_trips_encode():
+    text = encode_container_exec_predicate_into_text(
+        _container_exec_predicate(), "a summary line",
+    )
+    decoded = decode_container_exec_predicate(text)
+    assert decoded["predicate_type"] == CONTAINER_EXEC_PREDICATE_TYPE
+    assert decoded["runtime"] == "gvisor"
+
+
+def test_container_exec_decode_rejects_missing_open_tag():
+    with pytest.raises(ValueError, match="predicate header"):
+        decode_container_exec_predicate("no tags here")
+
+
+def test_container_exec_decode_rejects_missing_close_tag():
+    with pytest.raises(ValueError, match="close tag"):
+        decode_container_exec_predicate(CE_TAG_OPEN + '{"a":1}')
+
+
+def test_container_exec_decode_rejects_non_object():
+    with pytest.raises(ValueError, match="JSON object"):
+        decode_container_exec_predicate(CE_TAG_OPEN + "[1,2]" + CE_TAG_CLOSE)
+
+
+def test_container_exec_decode_rejects_missing_required_field():
+    p = _container_exec_predicate()
+    del p["image_digest"]
+    text = CE_TAG_OPEN + json.dumps(p) + CE_TAG_CLOSE
+    with pytest.raises(ValueError, match="missing required fields"):
+        decode_container_exec_predicate(text)
+
+
+def test_container_exec_decode_rejects_foreign_predicate_type():
+    p = _container_exec_predicate()
+    p["predicate_type"] = PREDICATE_TYPE_V1
+    text = CE_TAG_OPEN + json.dumps(p) + CE_TAG_CLOSE
+    with pytest.raises(ValueError, match="is not"):
+        decode_container_exec_predicate(text)
+
+
 # --- replay_from_claim ---------------------------------------------------
 
 def _record_call(graph):
@@ -101,6 +172,32 @@ def test_replay_reproduces_the_recorded_call(graph):
     assert result.ok is True
     assert result.observed_result_digest == result.expected_result_digest
     assert result.diff_fields == ()
+
+
+class _ExecClassMock:
+    """Exec-class tool reporting the environment its claim attests."""
+
+    name = "python_exec"
+    version = "0.1.0"
+    category = "python_exec"
+
+    def call(self, **kwargs) -> dict:
+        return {
+            "data": {"stdout": "1\n"},
+            "metadata": {
+                "image_digest": "sha256:" + "a" * 64,
+                "source_digest": "sha256:" + "b" * 64,
+                "runtime": "gvisor",
+                "variance_mode": "deterministic",
+            },
+        }
+
+
+def test_replay_refuses_a_container_exec_claim(graph):
+    pta = ProvenanceToolAdapter(tool=_ExecClassMock(), graph=graph)
+    cid = pta.call(code="print(1)")["metadata"]["mareforma_claim_id"]
+    with pytest.raises(UnsupportedPredicateFamilyError, match="container-exec"):
+        replay_from_claim(graph, cid, {"tooluniverse/python_exec": _ExecClassMock()})
 
 
 def test_replay_missing_tool_raises(graph):

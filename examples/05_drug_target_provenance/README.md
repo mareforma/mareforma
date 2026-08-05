@@ -51,6 +51,9 @@ cp Medea/env_template.txt .env
 python 05_drug_target_provenance.py --run
 ```
 
+`--run` writes this directory's `claims.toml`, the backup of the live graph.
+The recorded Case B run is kept apart from it, under `recorded/`.
+
 ## Query-before-assert
 
 ```python
@@ -124,6 +127,14 @@ differently, but both came from LLM prior knowledge, not MedeaDB. mareforma
 recorded both as `INFERRED`, making the silent failure visible immediately,
 before anyone acted on the results. That led directly to a bug report in MEDEA's
 EFO ID lookup: [mims-harvard/Medea#6](https://github.com/mims-harvard/Medea/pull/6).
+
+The four claims of that run are kept at
+[`recorded/case_b.claims.toml`](recorded/case_b.claims.toml). It is a 0.3.0
+capture, taken before claims were signed, so it carries no signature bundles and
+its `generated_by` reads `medea/gpt-4o` rather than the per-fork label the script
+writes today. `mareforma.restore()` reads it and rebuilds the four claims, but
+they come back unsigned, which the default `query()` drops. Pass
+`include_unverified=True` to read them.
 
 ## Promoting a finding
 
