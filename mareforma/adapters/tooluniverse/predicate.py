@@ -89,6 +89,7 @@ def build_tool_call_predicate(
     data_source_version: str | None = None,
     parent_claim_id: str | None = None,
     cache_origin: str | None = None,
+    cache_original_claim_id: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the `tool-call/v1` predicate dict.
 
@@ -117,6 +118,10 @@ def build_tool_call_predicate(
         "data_source_version": data_source_version,
         "parent_claim_id": parent_claim_id,
         "cache_origin": cache_origin,
+        # The claim the tool says it served from cache. Recorded as the
+        # tool's own assertion, attributable and inert: it never becomes
+        # a supports edge, which only the operator writes.
+        "cache_original_claim_id": cache_original_claim_id,
     }
     return predicate
 

@@ -27,6 +27,7 @@ from mareforma.canonicalize import (
     fingerprint_tool_config,
 )
 from .exec_routing import (
+    CE_ENVIRONMENT_FIELDS,
     build_container_exec_predicate,
     encode_container_exec_predicate_into_text,
     is_exec_class,
@@ -372,6 +373,7 @@ class ProvenanceToolAdapter:
                 else None
             ),
             parent_claim_id=self.parent_claim_id,
+            cache_original_claim_id=cache_original_claim_id,
         )
 
         summary = (
@@ -380,11 +382,13 @@ class ProvenanceToolAdapter:
         )
         claim_text = encode_predicate_into_text(predicate, summary)
 
+        # supports edges come from the operator's own parent claim only.
+        # A callee that names a claim gets its declaration recorded in
+        # the predicate, never an edge: lineage and REPLICATED promotion
+        # read this list, and the wrapped tool is not trusted to write it.
         supports: list[str] = []
         if self.parent_claim_id:
             supports.append(self.parent_claim_id)
-        if cache_original_claim_id and cache_original_claim_id not in supports:
-            supports.append(cache_original_claim_id)
         return claim_text, supports
 
     def _build_container_exec_claim(
@@ -399,6 +403,21 @@ class ProvenanceToolAdapter:
         completed_at: str,
         tool_call_id: str,
     ) -> tuple[str, list[str], dict[str, Any]]:
+        # The environment fields are observed by whatever ran the
+        # container, never by this adapter. Substituting a default for
+        # an absent one would sign an environment nobody saw, so a tool
+        # that reports none of them gets no attestation at all.
+        environment = {f: metadata.get(f) for f in CE_ENVIRONMENT_FIELDS}
+        unreported = [f for f, value in environment.items() if value is None]
+        if unreported:
+            raise ToolCallError(
+                f"exec-class tool {self.tool.name!r} reported no "
+                f"{', '.join(unreported)} in its metadata; the "
+                "container-exec predicate attests the execution "
+                "environment and mareforma will not sign fields the "
+                "tool did not observe."
+            )
+
         predicate = build_container_exec_predicate(
             tool_namespace=self.tool_namespace,
             tool_name=self._sanitized_tool_name,
@@ -412,10 +431,7 @@ class ProvenanceToolAdapter:
             started_at=started_at,
             completed_at=completed_at,
             tool_call_id=tool_call_id,
-            image_digest=metadata.get("image_digest", "unknown"),
-            source_digest=metadata.get("source_digest", "sha256:" + "0" * 64),
-            runtime=metadata.get("runtime", "runc"),
-            variance_mode=metadata.get("variance_mode", "deterministic"),
+            **environment,
             runtime_version=metadata.get("runtime_version"),
             executor_version=metadata.get("executor_version"),
             parent_claim_id=self.parent_claim_id,

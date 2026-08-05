@@ -37,6 +37,7 @@ from mareforma.tools import PredicateBoundaryError
 __all__ = [
     "CONTAINER_EXEC_PREDICATE_TYPE",
     "EXEC_CLASS_CATEGORIES",
+    "CE_ENVIRONMENT_FIELDS",
     "CE_TAG_OPEN",
     "CE_TAG_CLOSE",
     "is_exec_class",
@@ -59,6 +60,17 @@ CE_TAG_OPEN = "<predicate container-exec v1>"
 CE_TAG_CLOSE = "</predicate>"
 
 
+# The execution environment the predicate attests. Only the tool that
+# ran the container observes these, so a caller that cannot report
+# them has nothing to attest.
+CE_ENVIRONMENT_FIELDS = (
+    "image_digest",
+    "source_digest",
+    "runtime",
+    "variance_mode",
+)
+
+
 _CE_REQUIRED_FIELDS = (
     "predicate_type",
     "tool_namespace",
@@ -73,11 +85,7 @@ _CE_REQUIRED_FIELDS = (
     "started_at",
     "completed_at",
     "tool_call_id",
-    "image_digest",
-    "source_digest",
-    "runtime",
-    "variance_mode",
-)
+) + CE_ENVIRONMENT_FIELDS
 
 
 def is_exec_class(tool: Any) -> bool:
