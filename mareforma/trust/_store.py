@@ -650,6 +650,21 @@ def _gateable_prediction(conn: sqlite3.Connection, row) -> tuple[Prediction, boo
             superseding = None
         if superseding is None:
             raise _UngateablePlan(str(exc)) from exc
+        # A retirement carries the retired rule over unchanged except its alpha:
+        # it recovers evidence stranded under an un-gateable alpha, it does not
+        # re-choose the side of the null once the numbers are known. That
+        # identity is a property of the read, not only the write (finding 4): a
+        # direct writer who re-points ``plan_retirements.superseded_by`` at
+        # another registered plan whose rule differs would otherwise reflip the
+        # line's bearing under a rule the retirement never sanctioned. Rebuild
+        # the retired rule at the replacement's alpha and refuse a replacement
+        # that does not reproduce it.
+        if superseding != replacement_prediction(row, superseding.alpha):
+            raise _UngateablePlan(
+                "the replacement rule differs from the retired rule beyond its "
+                "alpha; a retirement may only re-register the same rule at a "
+                "gateable alpha"
+            ) from exc
         return superseding, True
 
 
@@ -736,9 +751,12 @@ def _independence_units(
     the ``memo`` (read back as ``lines_skipped``, see
     :func:`proposition_status`) and, when ``disclose`` is given, recorded once
     per line on the ``.mareforma/health.jsonl`` channel as
-    ``bearing_recompute_skipped``, ``ungateable_plan_skipped`` (the repairable
-    case, whose event names the plan :meth:`EpistemicGraph.retire_plan` takes)
-    and ``withdrawn_line_skipped`` (see :class:`SkipDisclosure`).
+    ``bearing_recompute_skipped``, ``plan_rebind_skipped`` (the finding's
+    ``plan_id`` column no longer matches the plan its claim records),
+    ``plan_rule_rebind_skipped`` (a ``predictions`` rule column no longer hashes
+    to the plan_id keying it), ``ungateable_plan_skipped`` (the repairable case,
+    whose event names the plan :meth:`EpistemicGraph.retire_plan` takes) and
+    ``withdrawn_line_skipped`` (see :class:`SkipDisclosure`).
 
     ``memo`` is an optional per-read-call cache. It carries the shared
     :class:`mareforma.trust._gate.GateCache` so a claim's signature verifies once

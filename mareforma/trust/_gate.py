@@ -36,23 +36,30 @@ from ._store import (
     INDEPENDENCE_COUNTS_SQL,
     _UngateablePlan,
     _gateable_prediction,
+    compute_plan_id,
     estimate_from_row,
+    plan_retirement,
 )
 
 # Skip reasons. A line the verifier cannot count is tagged with one of these.
-# ``BEARING_RECOMPUTE`` and ``PLAN_REBIND`` are the corruption cases: a row whose
-# stored estimate and prediction no longer reconstruct into a gateable bearing,
-# and a finding whose ``plan_id`` column no longer matches the plan its own claim
-# records. The other two are legitimate lifecycle states, a claim editorially
-# withdrawn or invalidated, and a plan whose rule no gate can run and nothing
-# supersedes. The restore entry point refuses only on corruption: a valid backup
-# can legitimately carry a retracted claim or a stranded plan, and refusing those
-# would cost the operator a recovery over honest state.
+# ``BEARING_RECOMPUTE``, ``PLAN_REBIND`` and ``PLAN_RULE_REBIND`` are the
+# corruption cases: a row whose stored estimate and prediction no longer
+# reconstruct into a gateable bearing, a finding whose ``plan_id`` column no
+# longer matches the plan its own claim records, and a ``predictions`` row whose
+# rule columns no longer hash to the ``plan_id`` keying them. The other two are
+# legitimate lifecycle states, a claim editorially withdrawn or invalidated, and
+# a plan whose rule no gate can run and nothing supersedes. The restore entry
+# point refuses only on corruption: a valid backup can legitimately carry a
+# retracted claim or a stranded plan, and refusing those would cost the operator
+# a recovery over honest state.
 _WITHDRAWN = "withdrawn_line_skipped"
 _UNGATEABLE = "ungateable_plan_skipped"
 _BEARING_RECOMPUTE = "bearing_recompute_skipped"
 _PLAN_REBIND = "plan_rebind_skipped"
-_CORRUPTION_REASONS = frozenset({_BEARING_RECOMPUTE, _PLAN_REBIND})
+_PLAN_RULE_REBIND = "plan_rule_rebind_skipped"
+_CORRUPTION_REASONS = frozenset(
+    {_BEARING_RECOMPUTE, _PLAN_REBIND, _PLAN_RULE_REBIND}
+)
 
 
 class GateInputRefused(Exception):
@@ -490,6 +497,33 @@ def _derive_units(
                 )
             )
             continue
+        # Re-derive the plan_id the gated rule hashes to and confirm it matches
+        # the plan_id keying it. A plan_id is content-addressed over its rule
+        # (test_type, direction_of_interest, the equivalence margins, alpha,
+        # inference_regime; see :func:`compute_plan_id`), so a rewrite of any
+        # rule-bearing ``predictions`` column re-points the row at a rule whose
+        # hash is a different plan_id. The read query gates on the row's columns,
+        # not that binding, so a direct writer could otherwise flip a line's
+        # bearing (a SUPPORTS to a REFUTES) by editing the rule in place. This is
+        # the predictions-table parallel of the ``findings.plan_id`` re-derivation
+        # above: the row the gate runs must be the rule its plan_id names. For a
+        # line gated under a retirement's replacement, the binding checked is the
+        # replacement's own plan_id; the retirement record (restore-verified
+        # against its signed attestation) names it.
+        gated_plan_id = r["plan_id"]
+        if superseded:
+            retirement = plan_retirement(conn, r["plan_id"])
+            gated_plan_id = retirement["superseded_by"] if retirement else None
+        if gated_plan_id is None or (
+            compute_plan_id(content_id, prediction) != gated_plan_id
+        ):
+            skipped.append(
+                _SkippedLine(
+                    r["line_id"], _PLAN_RULE_REBIND,
+                    {"plan_id": r["plan_id"], "gated_plan_id": gated_plan_id},
+                )
+            )
+            continue
         run_token, model_key = _resolve_signer_and_model(conn, r, cache)
         # The count rests on a post-hoc plan when the line's own plan was not
         # pre-registered (a one-shot plan) or a retirement resolved it to a
@@ -540,6 +574,14 @@ def verify_gate_inputs_or_refuse(
                 f"the plan its own claim records "
                 f"({s.detail.get('committed_plan_id')}); the recovered graph "
                 "would silently drop it."
+            )
+        if s.op == _PLAN_RULE_REBIND:
+            raise GateInputRefused(
+                f"proposition {content_id} carries an evidence line whose "
+                f"prediction rule no longer hashes to the plan_id keying it "
+                f"(plan {s.detail.get('plan_id')}); a rule-bearing predictions "
+                "column was rewritten, and the recovered graph would silently "
+                "drop the line."
             )
         raise GateInputRefused(
             f"proposition {content_id} carries an evidence line whose stored "
