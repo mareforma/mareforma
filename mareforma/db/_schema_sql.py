@@ -615,11 +615,79 @@ BEGIN
 END"""
 
 
+# findings and evidence_lines are the two gate-input tables the read path reads
+# to derive a proposition's status, and neither carried a write guard: an UPDATE
+# could re-point a finding's plan or rewrite a line's data_id, and a DELETE could
+# drop a refuting line so the survivors read as consensus. No honest path updates
+# or deletes either table (a finding is written once by submit_finding and read
+# forever after), so both are append-only and no-delete, mirroring the guards
+# predictions and plan_retirements already carry.
+#
+# These go through _MANAGED_TRIGGERS rather than a CREATE TRIGGER IF NOT EXISTS
+# in _ADDITIVE_TABLES_SQL for the reason the learning
+# schema-if-not-exists-hides-constraint-change names: the tables already exist in
+# graphs written by an earlier release, and IF NOT EXISTS is a no-op the moment a
+# trigger of the same name is present, so a later change to the body would never
+# reach an existing graph. The managed path compares the stored text against the
+# wanted text and drop-and-recreates on a mismatch, so a definition that changes
+# shape reconciles onto every graph on open. Keep each SQL a single CREATE
+# statement with no trailing semicolon and no leading blank line: the text is
+# compared verbatim against sqlite_master.sql. The bodies name no per-connection
+# SQL function so a connection that registered none can still compile an UPDATE
+# against the guarded table (the trigger refuses the write, it does not make the
+# table unwritable to an older release).
+_FINDINGS_APPEND_ONLY_TRIGGER_NAME = "findings_append_only"
+
+_FINDINGS_APPEND_ONLY_TRIGGER_SQL = """\
+CREATE TRIGGER findings_append_only
+BEFORE UPDATE ON findings
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:finding_locked');
+END"""
+
+_FINDINGS_NO_DELETE_TRIGGER_NAME = "findings_no_delete"
+
+_FINDINGS_NO_DELETE_TRIGGER_SQL = """\
+CREATE TRIGGER findings_no_delete
+BEFORE DELETE ON findings
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:finding_delete_blocked');
+END"""
+
+_EVIDENCE_LINES_APPEND_ONLY_TRIGGER_NAME = "evidence_lines_append_only"
+
+_EVIDENCE_LINES_APPEND_ONLY_TRIGGER_SQL = """\
+CREATE TRIGGER evidence_lines_append_only
+BEFORE UPDATE ON evidence_lines
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:evidence_line_locked');
+END"""
+
+_EVIDENCE_LINES_NO_DELETE_TRIGGER_NAME = "evidence_lines_no_delete"
+
+_EVIDENCE_LINES_NO_DELETE_TRIGGER_SQL = """\
+CREATE TRIGGER evidence_lines_no_delete
+BEFORE DELETE ON evidence_lines
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:evidence_line_delete_blocked');
+END"""
+
+
 # The triggers open_db reconciles against sqlite_master on every open, name
 # first so a definition that changed shape reaches an existing graph.
 _MANAGED_TRIGGERS = (
     (_SIGNED_FIELDS_TRIGGER_NAME, _SIGNED_FIELDS_TRIGGER_SQL),
     (_PROMOTION_TRIGGER_NAME, _PROMOTION_TRIGGER_SQL),
+    (_FINDINGS_APPEND_ONLY_TRIGGER_NAME, _FINDINGS_APPEND_ONLY_TRIGGER_SQL),
+    (_FINDINGS_NO_DELETE_TRIGGER_NAME, _FINDINGS_NO_DELETE_TRIGGER_SQL),
+    (
+        _EVIDENCE_LINES_APPEND_ONLY_TRIGGER_NAME,
+        _EVIDENCE_LINES_APPEND_ONLY_TRIGGER_SQL,
+    ),
+    (
+        _EVIDENCE_LINES_NO_DELETE_TRIGGER_NAME,
+        _EVIDENCE_LINES_NO_DELETE_TRIGGER_SQL,
+    ),
 )
 
 

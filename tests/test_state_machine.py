@@ -40,6 +40,11 @@ def _now_iso() -> str:
 
 
 _UPDATE_OF_RE = re.compile(r"UPDATE\s+OF\s+(.+?)\s+ON\s", re.IGNORECASE | re.DOTALL)
+_UPDATE_ALL_RE = re.compile(r"BEFORE\s+UPDATE\s+ON\s+(\w+)", re.IGNORECASE)
+_DELETE_RE = re.compile(r"BEFORE\s+DELETE\s+ON\s+(\w+)", re.IGNORECASE)
+_UPDATE_OF_TABLE_RE = re.compile(
+    r"UPDATE\s+OF\s+.+?\s+ON\s+(\w+)", re.IGNORECASE | re.DOTALL
+)
 
 
 def _watched_columns(trigger_sql: str) -> list[str]:
@@ -47,6 +52,41 @@ def _watched_columns(trigger_sql: str) -> list[str]:
     match = _UPDATE_OF_RE.search(trigger_sql)
     assert match is not None, trigger_sql
     return [col.strip() for col in match.group(1).split(",")]
+
+
+def _noop_dml_for_trigger(trigger_sql: str) -> list[str]:
+    """No-op DML statements that attach a managed trigger's subprogram.
+
+    SQLite compiles a trigger's body when it compiles a DML statement on the
+    trigger's table and event, so exercising each managed trigger means running
+    the matching statement with ``WHERE 0`` (no row touched, the body still
+    compiles). Covers the three managed-trigger shapes: ``BEFORE UPDATE OF
+    <cols>`` (one statement per watched column), a whole-table ``BEFORE UPDATE``
+    (append-only guards), and ``BEFORE DELETE`` (no-delete guards).
+    """
+    of_table = _UPDATE_OF_TABLE_RE.search(trigger_sql)
+    if of_table is not None:
+        table = of_table.group(1)
+        return [
+            f"UPDATE {table} SET {col} = {col} WHERE 0"
+            for col in _watched_columns(trigger_sql)
+        ]
+    update_all = _UPDATE_ALL_RE.search(trigger_sql)
+    if update_all is not None:
+        table = update_all.group(1)
+        col = _any_column(table)
+        return [f"UPDATE {table} SET {col} = {col} WHERE 0"]
+    delete = _DELETE_RE.search(trigger_sql)
+    assert delete is not None, trigger_sql
+    return [f"DELETE FROM {delete.group(1)} WHERE 0"]
+
+
+def _any_column(table: str) -> str:
+    """One column name of *table*, for a whole-table no-op UPDATE."""
+    return {
+        "findings": "content_id",
+        "evidence_lines": "data_id",
+    }[table]
 
 
 # ---------------------------------------------------------------------------
@@ -634,10 +674,8 @@ class TestSignedPromotionBacked:
         observer = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
         try:
             for _, sql in _MANAGED_TRIGGERS:
-                for column in _watched_columns(sql):
-                    observer.execute(
-                        f"UPDATE claims SET {column} = {column} WHERE 0"
-                    )
+                for statement in _noop_dml_for_trigger(sql):
+                    observer.execute(statement)
         finally:
             observer.close()
 

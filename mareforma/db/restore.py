@@ -991,6 +991,11 @@ def restore(
             # signed text, the same posture as the REPLICATED re-derivation below.
             _verify_finding_proposition_binding(conn)
 
+            # Refuse a recovery whose gate inputs a later read would silently
+            # drop, running the one verifier the live read path uses so both
+            # paths agree on the same graph.
+            _verify_gate_inputs_reconstruct(conn)
+
             # Refuse a REPLICATED level no distinct-signer corroboration backs.
             # support_level is not signed, so this runs after the full graph +
             # verdicts are in place and re-derives the promotion invariant from
@@ -1185,6 +1190,35 @@ def _verify_finding_proposition_binding(conn: sqlite3.Connection) -> None:
                 "claims.toml was rewritten.",
                 kind="claim_unverified",
             )
+
+
+def _verify_gate_inputs_reconstruct(conn: sqlite3.Connection) -> None:
+    """Refuse a recovery whose gate inputs a later read would silently drop.
+
+    The live read path and restore share one verifier
+    (:mod:`mareforma.trust._gate`). Here restore runs it over every restored
+    proposition and holds its stricter posture: a line whose stored estimate no
+    longer reconstructs into a gateable bearing is corruption the read path would
+    drop and disclose, and restore refuses the whole recovery rather than commit
+    a graph that reads short. Legitimate lifecycle states, a withdrawn claim or a
+    stranded (un-runnable, unsuperseded) plan, are accepted, so an honest backup
+    that carries either still restores. Running the same verifier both paths use
+    is what makes "read and restore agree on the same graph" a property of one
+    boundary rather than two copies of a rule that can drift.
+    """
+    from mareforma.trust._gate import (
+        GateInputRefused,
+        GateCache,
+        verify_gate_inputs_or_refuse,
+    )
+
+    cache = GateCache()
+    rows = conn.execute("SELECT DISTINCT content_id FROM findings").fetchall()
+    for r in rows:
+        try:
+            verify_gate_inputs_or_refuse(conn, r["content_id"], cache=cache)
+        except GateInputRefused as exc:
+            raise RestoreError(str(exc), kind="claim_unverified") from exc
 
 
 def _verify_replicated_corroboration(conn: sqlite3.Connection) -> None:

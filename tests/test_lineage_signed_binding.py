@@ -28,8 +28,23 @@ _FORGED_COMPUTED = (
 )
 
 
+def _bypass_write_guard(conn) -> None:
+    """Model an adversary with raw SQL access to graph.db.
+
+    ``evidence_lines`` carries an append-only trigger, but that guard is durable
+    schema a writer with database access can drop outright, so a tamper test
+    drops it before rewriting the unsigned column. The read-path re-derivation,
+    not the write trigger, is what every test here asserts still catches the
+    forgery: the trigger raises the cost of writing the bad row, it is not the
+    guarantee.
+    """
+    conn.execute("DROP TRIGGER IF EXISTS evidence_lines_append_only")
+    conn.execute("DROP TRIGGER IF EXISTS evidence_lines_no_delete")
+
+
 def _tamper_one_line(conn, root: str) -> None:
     """Rewrite exactly one evidence line's unsigned model_lineage column."""
+    _bypass_write_guard(conn)
     line_id = conn.execute("SELECT line_id FROM evidence_lines LIMIT 1").fetchone()[0]
     conn.execute(
         "UPDATE evidence_lines SET model_lineage = ? WHERE line_id = ?",
@@ -74,6 +89,7 @@ def _forge_bundle(conn, data_id: str, lineage_json: str,
     the read must treat the lineage as soft, never a counted distinct model.
     """
     import base64 as _b64
+    _bypass_write_guard(conn)
     row = _finding_row(conn, data_id)
     env = json.loads(row["signature_bundle"])
     payload = json.loads(_b64.standard_b64decode(env["payload"]))
@@ -98,6 +114,7 @@ def _staple_bundle(conn, data_id: str, donor_data_id: str) -> None:
     was just issued for another claim. Only the claim-binding check stands
     between the donor's signed lineage and this finding's model axis.
     """
+    _bypass_write_guard(conn)
     donor = _finding_row(conn, donor_data_id)
     target = _finding_row(conn, data_id)
     conn.execute(
@@ -302,6 +319,7 @@ class TestErasedColumn:
         pair stays collapsed."""
         cid = _same_model_pair(tmp_path)
         with mareforma.open(tmp_path, key_path=tmp_path / "ka.key") as g:
+            _bypass_write_guard(g._conn)
             g._conn.execute("UPDATE evidence_lines SET model_lineage = NULL")
             g._conn.commit()
             assert independence_counts(g._conn, cid) == (1, 0)
@@ -346,6 +364,7 @@ class TestV1DowngradeGuard:
                 "JOIN evidence_lines el2 ON el2.finding_id = f.finding_id "
                 "WHERE el.data_id = 'ds2' LIMIT 1"
             ).fetchone()[0]
+            _bypass_write_guard(g._conn)
             g._conn.execute(
                 "UPDATE evidence_lines SET model_lineage = ? WHERE line_id = ?",
                 (forged_claude, line_id),
