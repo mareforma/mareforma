@@ -40,17 +40,19 @@ from ._store import (
 )
 
 # Skip reasons. A line the verifier cannot count is tagged with one of these.
-# ``BEARING_RECOMPUTE`` is the corruption case (a row whose stored estimate and
-# prediction no longer reconstruct into a gateable bearing); the other two are
-# legitimate lifecycle states, a claim editorially withdrawn or invalidated, and
-# a plan whose rule no gate can run and nothing supersedes. The restore entry
-# point refuses only on corruption: a valid backup can legitimately carry a
-# retracted claim or a stranded plan, and refusing those would cost the operator
-# a recovery over honest state.
+# ``BEARING_RECOMPUTE`` and ``PLAN_REBIND`` are the corruption cases: a row whose
+# stored estimate and prediction no longer reconstruct into a gateable bearing,
+# and a finding whose ``plan_id`` column no longer matches the plan its own claim
+# records. The other two are legitimate lifecycle states, a claim editorially
+# withdrawn or invalidated, and a plan whose rule no gate can run and nothing
+# supersedes. The restore entry point refuses only on corruption: a valid backup
+# can legitimately carry a retracted claim or a stranded plan, and refusing those
+# would cost the operator a recovery over honest state.
 _WITHDRAWN = "withdrawn_line_skipped"
 _UNGATEABLE = "ungateable_plan_skipped"
 _BEARING_RECOMPUTE = "bearing_recompute_skipped"
-_CORRUPTION_REASONS = frozenset({_BEARING_RECOMPUTE})
+_PLAN_REBIND = "plan_rebind_skipped"
+_CORRUPTION_REASONS = frozenset({_BEARING_RECOMPUTE, _PLAN_REBIND})
 
 
 class GateInputRefused(Exception):
@@ -110,13 +112,17 @@ class _GateLine:
     ``direction`` is the recomputed per-line bearing, ``run_token`` the distinct
     signer axis (``k:``/``g:`` namespaced), ``data_id`` the distinct-dataset key
     and ``model_key`` the distinct-model/method axis, all read from verified or
-    signed material by :func:`_derive_units`.
+    signed material by :func:`_derive_units`. ``post_hoc`` is True when the plan
+    this line is gated under was not pre-registered (a one-shot plan or the
+    replacement a retirement resolved it to), so a count that rests on it can be
+    disclosed as post-hoc rather than passing for a pre-registered gate.
     """
 
     direction: BearingDirection
     run_token: str
     data_id: str
     model_key: tuple
+    post_hoc: bool
 
 
 @dataclass(frozen=True)
@@ -171,6 +177,38 @@ def _bundle_digest(bundle_json: "str | None") -> str:
     if not bundle_json:
         return "0"
     return hashlib.sha256(bundle_json.encode("utf-8")).hexdigest()
+
+
+def _committed_plan_id(
+    payload_json: "str | None", claim_id: str, cache: GateCache,
+) -> "str | None":
+    """The plan_id the finding's own claim records, or None.
+
+    A finding binds the plan it was filed under into its claim's ``finding/v2``
+    record (``predicate_payload``, written since v0.3.10). The read query gates
+    on the ``findings.plan_id`` column, which nothing in that record covers, so a
+    direct writer can re-point it at another rule to flip a REFUTED line to
+    SUPPORTS. Reading the plan_id back from the claim's own record lets the
+    caller catch that: the column must match what the finding recorded.
+
+    Returns the recorded plan_id, or None when the claim carries no record or no
+    ``plan_id`` in it (a pre-v0.3.10 finding, or an unparseable payload). The
+    resolution is a property of the claim, identical across a multi-line
+    finding's lines, so it is memoized once per claim in the shared cache.
+    """
+    digest = _bundle_digest(payload_json)
+
+    def compute() -> "str | None":
+        if not payload_json:
+            return None
+        try:
+            payload = json.loads(payload_json)
+        except (ValueError, TypeError):
+            return None
+        pid = payload.get("plan_id") if isinstance(payload, dict) else None
+        return pid if isinstance(pid, str) else None
+
+    return cache.resolve("finding_plan", claim_id, digest, compute)  # type: ignore[return-value]
 
 
 def _authentic_signer_keyid(
@@ -406,6 +444,26 @@ def _derive_units(
                 )
             )
             continue
+        # Re-derive the plan the line is gated under. The read query gates on the
+        # unsigned ``findings.plan_id`` column, but the finding recorded the plan
+        # it was filed under in its own claim, so the column must match that
+        # record. A mismatch (a direct writer re-pointed the line at another rule
+        # to flip its bearing) or a claim that records no plan is dropped rather
+        # than gated on the column: a repointed REFUTING line would otherwise
+        # read as consensus.
+        committed = _committed_plan_id(r["predicate_payload"], r["claim_id"], cache)
+        if committed != r["plan_id"]:
+            skipped.append(
+                _SkippedLine(
+                    r["line_id"], _PLAN_REBIND,
+                    {
+                        "claim_id": r["claim_id"],
+                        "plan_id": r["plan_id"],
+                        "committed_plan_id": committed,
+                    },
+                )
+            )
+            continue
         # Recompute the per-line bearing from stored inputs. A row that no longer
         # reconstructs into a gateable bearing (drift, corruption, or a
         # direct/foreign writer landing a non-numeric column) is skipped rather
@@ -415,7 +473,7 @@ def _derive_units(
         # reaching math.isfinite), or InconsistentEstimateError (the gate).
         try:
             estimate = estimate_from_row(r)
-            prediction = _gateable_prediction(conn, r)
+            prediction, superseded = _gateable_prediction(conn, r)
             direction = compute_bearing(estimate, prediction).direction
         except _UngateablePlan as exc:
             skipped.append(
@@ -433,7 +491,13 @@ def _derive_units(
             )
             continue
         run_token, model_key = _resolve_signer_and_model(conn, r, cache)
-        units.append(_GateLine(direction, run_token, r["data_id"], model_key))
+        # The count rests on a post-hoc plan when the line's own plan was not
+        # pre-registered (a one-shot plan) or a retirement resolved it to a
+        # replacement, whose alpha was chosen with the estimates in view.
+        post_hoc = superseded or not r["preregistered"]
+        units.append(
+            _GateLine(direction, run_token, r["data_id"], model_key, post_hoc)
+        )
     return units, skipped
 
 
@@ -467,11 +531,20 @@ def verify_gate_inputs_or_refuse(
     """
     units, skipped = _derive_units(conn, content_id, cache)
     for s in skipped:
-        if s.op in _CORRUPTION_REASONS:
+        if s.op not in _CORRUPTION_REASONS:
+            continue
+        if s.op == _PLAN_REBIND:
             raise GateInputRefused(
-                f"proposition {content_id} carries an evidence line whose stored "
-                f"estimate no longer reconstructs into a gateable bearing "
-                f"({s.detail.get('error', 'unknown')}); the recovered graph "
+                f"proposition {content_id} carries an evidence line whose "
+                f"plan_id column ({s.detail.get('plan_id')}) no longer matches "
+                f"the plan its own claim records "
+                f"({s.detail.get('committed_plan_id')}); the recovered graph "
                 "would silently drop it."
             )
+        raise GateInputRefused(
+            f"proposition {content_id} carries an evidence line whose stored "
+            f"estimate no longer reconstructs into a gateable bearing "
+            f"({s.detail.get('error', 'unknown')}); the recovered graph "
+            "would silently drop it."
+        )
     return GateInputs(content_id, tuple(units), tuple(skipped), cache, _ISSUED)

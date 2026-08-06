@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -45,15 +46,23 @@ def _legacy(alpha: float = 0.7) -> Prediction:
 
 
 def _seed_legacy_finding(tmp_path: Path, *, alpha: float = 0.7):
-    """Write one finding under a legacy-alpha plan; return (prop, plan_id)."""
+    """Write one finding under a legacy-alpha plan; return (prop, plan_id).
+
+    A legacy alpha can only reach the predictions row from a release before the
+    ``(0, 0.5)`` write-boundary guard, so registering it is what that older
+    release did. The guard is suspended for the seed write to reproduce that
+    row; the guard itself is exercised directly in
+    ``test_the_write_boundary_still_refuses_the_alpha``.
+    """
     h = _prop()
     pred = _legacy(alpha)
     with open_graph(tmp_path) as graph:
-        plan_id = graph.register_plan(h, pred, generated_by="legacy-run")
-        graph.submit_finding(
-            h, pred, _smd(-0.8, p=0.01), data_id="dataset-A",
-            generated_by="legacy-run",
-        )
+        with mock.patch("mareforma.trust.prediction.validate_alpha", lambda a: None):
+            plan_id = graph.register_plan(h, pred, generated_by="legacy-run")
+            graph.submit_finding(
+                h, pred, _smd(-0.8, p=0.01), data_id="dataset-A",
+                generated_by="legacy-run",
+            )
     return h, plan_id
 
 

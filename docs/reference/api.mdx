@@ -1213,10 +1213,15 @@ The retrieval view for one proposition. Accepts a `content_id` or a
 
 **Returns** `dict` with `content_id`, `frame_id`, `direction`, `status`,
 `independent_support`, `independent_refute`, `frame_status`, `status_policy`,
-and `lines_skipped`, the count of this proposition's evidence lines that no
+`lines_skipped`, the count of this proposition's evidence lines that no
 longer reconstruct into a gateable bearing and were therefore left out of the
-counts. A dropped refutation reads as consensus, so read this next to the two
-counts.
+counts, and `post_hoc`. A dropped refutation reads as consensus, so read
+`lines_skipped` next to the two counts.
+
+`post_hoc` is `true` when the count rests on a plan that was not
+pre-registered, either a one-shot plan or the replacement `retire_plan`
+resolved a stranded line to, whose alpha was chosen with the estimates already
+in view. It lets a reader tell a post-hoc gate from a pre-registered one.
 
 A line dropped because its plan states a rule no gate can run is recoverable;
 see `retire_plan` above.

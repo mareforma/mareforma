@@ -598,11 +598,13 @@ INDEPENDENCE_COUNTS_SQL = (
     " cl.generated_by AS generated_by, "
     " cl.asserter_keyid AS asserter_keyid, cl.claim_id AS claim_id, "
     " cl.signature_bundle AS signature_bundle, "
+    " cl.predicate_payload AS predicate_payload, "
     " cl.status AS claim_status, cl.t_invalid AS t_invalid, "
     " est.estimate_value, est.effect_type, est.scale, est.p_value, "
     " est.ci_lower, est.ci_upper, est.ci_level, est.n_total, "
     " pr.test_type, pr.direction_of_interest, pr.equivalence_lower, "
-    " pr.equivalence_upper, pr.alpha, pr.inference_regime "
+    " pr.equivalence_upper, pr.alpha, pr.inference_regime, "
+    " pr.preregistered AS preregistered "
     "FROM findings f "
     "JOIN evidence_lines el ON el.finding_id = f.finding_id "
     "JOIN contrasts c ON c.line_id = el.line_id "
@@ -621,18 +623,24 @@ class _UngateablePlan(Exception):
     """
 
 
-def _gateable_prediction(conn: sqlite3.Connection, row) -> Prediction:
-    """The rule a stored line is gated under, resolving a retired plan.
+def _gateable_prediction(conn: sqlite3.Connection, row) -> tuple[Prediction, bool]:
+    """The rule a stored line is gated under, and whether it was superseded.
 
-    Normally the line's own plan. When that plan's stored rule cannot be run,
-    the line is gated under the plan that supersedes it, which an operator
-    registered explicitly through :meth:`EpistemicGraph.retire_plan`. Resolution
-    is reached only from that failure, so a retirement record can only ever
-    reach lines that count zero as they stand: it can recover a dropped line,
-    never drop a counted one, whatever a direct writer plants in the table.
+    Normally the line's own plan (``superseded`` False). When that plan's stored
+    rule cannot be run, the line is gated under the plan that supersedes it,
+    which an operator registered explicitly through
+    :meth:`EpistemicGraph.retire_plan` (``superseded`` True). Resolution is
+    reached only from that failure, so a retirement record can only ever reach
+    lines that count zero as they stand: it can recover a dropped line, never
+    drop a counted one, whatever a direct writer plants in the table.
+
+    The ``superseded`` flag rides back so the caller can mark the count as
+    resting on a replacement (post-hoc) plan: a replacement is registered after
+    the estimates are visible, so a reader must be able to tell it from a
+    pre-registered gate.
     """
     try:
-        return prediction_from_row(row)
+        return prediction_from_row(row), False
     except ValueError as exc:
         try:
             superseding = superseding_prediction(conn, row["plan_id"])
@@ -642,7 +650,7 @@ def _gateable_prediction(conn: sqlite3.Connection, row) -> Prediction:
             superseding = None
         if superseding is None:
             raise _UngateablePlan(str(exc)) from exc
-        return superseding
+        return superseding, True
 
 
 class SkipDisclosure:
@@ -750,6 +758,15 @@ def _independence_units(
         cache = GateCache()
 
     gate_inputs = verified_gate_inputs(conn, content_id, cache=cache)
+    # A proposition depends on a replacement (post-hoc) plan when any counted
+    # line is gated under a plan that was not pre-registered: either the finding's
+    # own one-shot plan or the replacement a retirement resolved it to. Recorded
+    # here, next to the skip tally, so proposition_status can surface it (see
+    # its ``post_hoc`` field).
+    if memo is not None:
+        memo.setdefault("post_hoc", {})[content_id] = any(
+            line.post_hoc for line in gate_inputs.units
+        )
     for line in gate_inputs.skipped:
         skipped[content_id] = skipped.get(content_id, 0) + 1
         if disclose is not None:
@@ -959,6 +976,13 @@ def proposition_status(
     dropped refutation reads as consensus. ``disclose`` is the health channel
     the drop is also recorded on, once per line (see :class:`SkipDisclosure`).
 
+    ``post_hoc`` is True when the count rests on a replacement (post-hoc) plan:
+    any counted line gated under a plan that was not pre-registered, either a
+    one-shot finding's own plan or the replacement a retirement resolved a
+    stranded line to. The alpha of such a plan was chosen with the estimates in
+    view, so the view is not shape-identical to a pre-registered result; this
+    flag is what lets a reader tell the two apart.
+
     ``memo`` is an optional per-read-call cache shared between the own-status
     count and the frame-contest count so each proposition's counts (and each
     claim's signature verify) are computed once per call. Defaults to a fresh
@@ -985,6 +1009,7 @@ def proposition_status(
         "independent_support": support,
         "independent_refute": refute,
         "lines_skipped": memo.get("skipped", {}).get(content_id, 0),
+        "post_hoc": memo.get("post_hoc", {}).get(content_id, False),
         "frame_status": frame_status.value,
         "status_policy": STATUS_POLICY,
     }

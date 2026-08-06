@@ -1086,6 +1086,7 @@ class EpistemicGraph:
         self._check_open()
         from mareforma.db.core import _now
         from mareforma.trust import NonFalsifiablePropositionError, _store
+        from mareforma.trust.prediction import validate_alpha
 
         if not proposition.is_falsifiable():
             raise NonFalsifiablePropositionError(
@@ -1093,6 +1094,13 @@ class EpistemicGraph:
                 f"got direction={proposition.direction.value}, "
                 f"scope={dict(proposition.scope)!r}"
             )
+
+        # Re-validate the alpha at the write boundary, not only at Prediction
+        # construction: a Prediction built off the normal route (e.g. a frozen
+        # field set past __post_init__) must not be able to persist an
+        # un-gateable plan through here. This is what keeps the stranded state
+        # provably legacy-only, which retire_plan's docstring assumes.
+        validate_alpha(prediction.alpha)
 
         cid = proposition.content_id()
         plan_id = _store.compute_plan_id(cid, prediction)
@@ -1225,17 +1233,39 @@ class EpistemicGraph:
                 "the numbers are known."
             )
 
+        # The replacement must be a fresh registration. If a plan with this
+        # exact rule + alpha already exists (someone pre-registered it earlier,
+        # or it stands as another retirement's replacement), the write below
+        # would reuse that plan's attestation via the idempotency key and leave
+        # its predictions row as it stands. A pre-registered row (preregistered=1)
+        # would then record this post-hoc repair as a pre-registration and drop
+        # the supersedes disclosure silently. This retirement is not on record
+        # (recorded is None above), so an existing replacement here is never this
+        # retirement's own: refuse, naming it, rather than laundering the choice.
+        if _store.plan_exists(self._conn, superseded_by):
+            raise PlanNotRetirableError(
+                f"retiring plan {plan_id[:12]}… at alpha={alpha} would reuse the "
+                f"already-registered plan {superseded_by[:12]}… as its "
+                "replacement. That plan may be a pre-registration; adopting it "
+                "here would record a post-hoc repair as one and drop the "
+                "supersedes disclosure. Retire at an alpha whose replacement "
+                "plan does not already exist."
+            )
+
         # How much evidence the replacement actually recovers. A line whose
         # stored estimate is unreadable stays dropped either way, but a
         # retirement that recovers nothing spends the one retirement this plan
-        # gets, so it is refused with the gate's own reason.
+        # gets, so it is refused with the gate's own reason. The guard fires on
+        # recovered==0 alone: a plan with no evidence at all (stranded==0) must
+        # not spend its one retirement either.
         recovered, stranded, refusal = self._lines_recovered(
             plan_id, replacement,
         )
-        if stranded and not recovered:
+        if not recovered:
+            detail = f": {refusal}" if refusal is not None else ""
             raise PlanNotRetirableError(
                 f"retiring plan {plan_id[:12]}… at alpha={alpha} would recover "
-                f"none of its {stranded} evidence line(s): {refusal}. "
+                f"none of its {stranded} evidence line(s){detail}. "
                 "A plan is retired once, so a retirement that recovers nothing "
                 "is refused rather than spent."
             )

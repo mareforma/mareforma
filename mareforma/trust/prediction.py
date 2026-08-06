@@ -52,6 +52,27 @@ class DirectionOfInterest(str, Enum):
     DECREASE = "decrease"
 
 
+def validate_alpha(alpha: float) -> None:
+    """Enforce the gate-discriminable alpha bound ``(0, 0.5)``.
+
+    The gate is one-sided at alpha over a two-sided ``(1 - 2*alpha)`` CI (see
+    :func:`mareforma.trust.bearing.compute_bearing`), so ``alpha >= 0.5`` marks
+    every p-value significant on the p path and demands a CI level of zero or
+    less on the other. A rule that cannot discriminate is not a rule.
+
+    Called from :meth:`Prediction.__post_init__` (every construction) and again
+    at the write boundary in :meth:`mareforma.EpistemicGraph.register_plan`, so
+    a Prediction built off the normal route cannot persist an un-gateable plan.
+    Raises :class:`ValueError` with the shared message on a bound violation.
+    """
+    if not (0.0 < alpha < 0.5):
+        raise ValueError(
+            "alpha must be in (0, 0.5): the gate is one-sided at alpha over "
+            "a (1 - 2*alpha) CI, so alpha >= 0.5 makes every p-value "
+            "significant and leaves no valid CI level"
+        )
+
+
 @dataclass(frozen=True)
 class Prediction:
     """A pre-registered decision rule bound (at registration) to one proposition.
@@ -94,16 +115,9 @@ class Prediction:
                 DirectionOfInterest(self.direction_of_interest),
             )
 
-        # The gate is one-sided at alpha over a two-sided (1 - 2*alpha) CI (see
-        # :func:`mareforma.trust.bearing.compute_bearing`), so alpha >= 0.5 marks
-        # every p-value significant on the p path and demands a CI level of zero
-        # or less on the other. A rule that cannot discriminate is not a rule.
-        if not (0.0 < self.alpha < 0.5):
-            raise ValueError(
-                "alpha must be in (0, 0.5): the gate is one-sided at alpha over "
-                "a (1 - 2*alpha) CI, so alpha >= 0.5 makes every p-value "
-                "significant and leaves no valid CI level"
-            )
+        # A rule that cannot discriminate is not a rule. The same bound is
+        # re-applied at the register_plan write boundary (see validate_alpha).
+        validate_alpha(self.alpha)
 
         if self.test_type is TestType.SUPERIORITY:
             if self.direction_of_interest is None:
