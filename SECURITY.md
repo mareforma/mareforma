@@ -122,6 +122,13 @@ trust boundaries:
 - Sigstore-Rekor inclusion is opt-in (`rekor_url=` parameter on
   `mareforma.open`). Without it, claims are signed but not
   transparency-logged.
+- A support level above `PRELIMINARY` is derived, not asserted: it is
+  served as verified only when the signed evidence behind it verifies,
+  and a direct write to the column is refused unless a promotion window
+  is open. The window is a per-connection marker that only this library
+  opens, so a process that can both load mareforma and write to your
+  `graph.db` holds promotion authority. Local write access to the graph
+  is the boundary, the same residual as the signing key above.
 - A local model's lineage is the served weights' digest, resolved from
   the producer's own inference server through a scope-detached probe
   that never follows a redirect off the loopback host and accepts only
