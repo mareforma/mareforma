@@ -6460,12 +6460,29 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
             "supports_revision": _supports.supports_revision(conn),
         }
 
+        # Rotate the previous backup aside before overwriting it. graph.db is
+        # authoritative, so the threat this addresses is not a torn write (the
+        # atomic replace below already rules that out) but the loss of the only
+        # recovery copy: a bug in the serialisation above, or a graph.db and
+        # claims.toml lost together, leaves nothing to restore from. Keeping one
+        # generation behind means a bad rewrite still has a recovery point behind
+        # it. Constant work relative to the backup already being written (one
+        # file copy, no per-row signature verification), and the .prev write is
+        # atomic too, so a crash mid-rotation cannot corrupt either file.
+        toml_path = root / "claims.toml"
+        try:
+            prior = toml_path.read_bytes()
+        except OSError:
+            prior = None
+        if prior is not None:
+            atomic_write_bytes(root / "claims.toml.prev", prior)
+
         # Atomic write: a crash during the rewrite must not destroy the sole DR
         # artifact on the exact crash class it exists for. A failure anywhere
         # before the rename leaves the previous good claims.toml untouched,
         # never truncated or empty.
         atomic_write_bytes(
-            root / "claims.toml", tomli_w.dumps(data).encode("utf-8"),
+            toml_path, tomli_w.dumps(data).encode("utf-8"),
         )
 
     except Exception as exc:  # noqa: BLE001

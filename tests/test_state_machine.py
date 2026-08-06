@@ -86,6 +86,10 @@ def _any_column(table: str) -> str:
     return {
         "findings": "content_id",
         "evidence_lines": "data_id",
+        "propositions": "subject",
+        "contrasts": "control_type",
+        "effect_estimates": "estimate_value",
+        "validators": "pubkey_pem",
     }[table]
 
 

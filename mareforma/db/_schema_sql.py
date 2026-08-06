@@ -673,6 +673,124 @@ BEGIN
 END"""
 
 
+# propositions, contrasts and effect_estimates are the remaining gate-input
+# tables the read path reads to derive a proposition's status, and none carried
+# a write guard: a direct UPDATE could flip an estimate's value (the demonstrated
+# convergent-to-refuted attack) or rewrite a proposition's text so the evidence
+# now backs a different sentence, and a DELETE could drop a contrast or estimate
+# so a refutation reads as consensus. validators is guarded too: swapping a row's
+# pubkey_pem makes a forged signature verify, and dropping a row rewrites who the
+# graph will trust. None of the four carries a legitimate post-insert mutation
+# (a proposition is content-addressed and frozen, an estimate and contrast are
+# written once by insert_finding, and enrollment is one-way), so each is
+# append-only and no-delete. Idempotent re-registration uses ON CONFLICT DO
+# NOTHING, which fires neither trigger.
+#
+# These join _MANAGED_TRIGGERS for the same reason findings and evidence_lines
+# do (see the note above): the tables already exist in graphs written by an
+# earlier release, so a CREATE TRIGGER IF NOT EXISTS in _ADDITIVE_TABLES_SQL
+# would never reach an existing graph if a later change altered the body. The
+# managed path drop-and-recreates on a text mismatch, so a definition change
+# reconciles onto every graph on open. Keep each SQL a single CREATE statement
+# with no trailing semicolon and no leading blank line: the text is compared
+# verbatim against sqlite_master.sql. The bodies name no per-connection SQL
+# function, so a connection that registered none (an older release, a co-resident
+# reader) can still compile an UPDATE against the guarded table with foreign keys
+# off; the trigger refuses the write rather than making the table unwritable.
+_PROPOSITIONS_APPEND_ONLY_TRIGGER_NAME = "propositions_append_only"
+
+_PROPOSITIONS_APPEND_ONLY_TRIGGER_SQL = """\
+CREATE TRIGGER propositions_append_only
+BEFORE UPDATE ON propositions
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:proposition_locked');
+END"""
+
+_PROPOSITIONS_NO_DELETE_TRIGGER_NAME = "propositions_no_delete"
+
+_PROPOSITIONS_NO_DELETE_TRIGGER_SQL = """\
+CREATE TRIGGER propositions_no_delete
+BEFORE DELETE ON propositions
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:proposition_delete_blocked');
+END"""
+
+_CONTRASTS_APPEND_ONLY_TRIGGER_NAME = "contrasts_append_only"
+
+_CONTRASTS_APPEND_ONLY_TRIGGER_SQL = """\
+CREATE TRIGGER contrasts_append_only
+BEFORE UPDATE ON contrasts
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:contrast_locked');
+END"""
+
+_CONTRASTS_NO_DELETE_TRIGGER_NAME = "contrasts_no_delete"
+
+_CONTRASTS_NO_DELETE_TRIGGER_SQL = """\
+CREATE TRIGGER contrasts_no_delete
+BEFORE DELETE ON contrasts
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:contrast_delete_blocked');
+END"""
+
+_EFFECT_ESTIMATES_APPEND_ONLY_TRIGGER_NAME = "effect_estimates_append_only"
+
+_EFFECT_ESTIMATES_APPEND_ONLY_TRIGGER_SQL = """\
+CREATE TRIGGER effect_estimates_append_only
+BEFORE UPDATE ON effect_estimates
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:effect_estimate_locked');
+END"""
+
+_EFFECT_ESTIMATES_NO_DELETE_TRIGGER_NAME = "effect_estimates_no_delete"
+
+_EFFECT_ESTIMATES_NO_DELETE_TRIGGER_SQL = """\
+CREATE TRIGGER effect_estimates_no_delete
+BEFORE DELETE ON effect_estimates
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:effect_estimate_delete_blocked');
+END"""
+
+_VALIDATORS_APPEND_ONLY_TRIGGER_NAME = "validators_append_only"
+
+_VALIDATORS_APPEND_ONLY_TRIGGER_SQL = """\
+CREATE TRIGGER validators_append_only
+BEFORE UPDATE ON validators
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:validator_locked');
+END"""
+
+_VALIDATORS_NO_DELETE_TRIGGER_NAME = "validators_no_delete"
+
+_VALIDATORS_NO_DELETE_TRIGGER_SQL = """\
+CREATE TRIGGER validators_no_delete
+BEFORE DELETE ON validators
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:validator_delete_blocked');
+END"""
+
+
+# predictions is append-only too, and its guard already exists, but it watched
+# every immutable column EXCEPT plan_id, the primary key. Rewriting plan_id
+# re-points a whole rule at a different identity and makes every line of
+# evidence gated under it vanish from the count with nothing disclosed, so
+# plan_id joins the watch list. The guard moves out of _ADDITIVE_TABLES_SQL and
+# into the managed set for exactly the reason above: this body change reaches an
+# existing graph only through the drop-and-recreate reconciliation. The message
+# stays 'prediction_locked' so callers keying off it are unaffected.
+_PREDICTIONS_APPEND_ONLY_TRIGGER_NAME = "predictions_append_only"
+
+_PREDICTIONS_APPEND_ONLY_TRIGGER_SQL = """\
+CREATE TRIGGER predictions_append_only
+BEFORE UPDATE OF
+    plan_id, content_id, inference_regime, test_type, direction_of_interest,
+    equivalence_lower, equivalence_upper, alpha, preregistered, registered_at
+ON predictions
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:prediction_locked');
+END"""
+
+
 # The triggers open_db reconciles against sqlite_master on every open, name
 # first so a definition that changed shape reaches an existing graph.
 _MANAGED_TRIGGERS = (
@@ -687,6 +805,27 @@ _MANAGED_TRIGGERS = (
     (
         _EVIDENCE_LINES_NO_DELETE_TRIGGER_NAME,
         _EVIDENCE_LINES_NO_DELETE_TRIGGER_SQL,
+    ),
+    (
+        _PROPOSITIONS_APPEND_ONLY_TRIGGER_NAME,
+        _PROPOSITIONS_APPEND_ONLY_TRIGGER_SQL,
+    ),
+    (_PROPOSITIONS_NO_DELETE_TRIGGER_NAME, _PROPOSITIONS_NO_DELETE_TRIGGER_SQL),
+    (_CONTRASTS_APPEND_ONLY_TRIGGER_NAME, _CONTRASTS_APPEND_ONLY_TRIGGER_SQL),
+    (_CONTRASTS_NO_DELETE_TRIGGER_NAME, _CONTRASTS_NO_DELETE_TRIGGER_SQL),
+    (
+        _EFFECT_ESTIMATES_APPEND_ONLY_TRIGGER_NAME,
+        _EFFECT_ESTIMATES_APPEND_ONLY_TRIGGER_SQL,
+    ),
+    (
+        _EFFECT_ESTIMATES_NO_DELETE_TRIGGER_NAME,
+        _EFFECT_ESTIMATES_NO_DELETE_TRIGGER_SQL,
+    ),
+    (_VALIDATORS_APPEND_ONLY_TRIGGER_NAME, _VALIDATORS_APPEND_ONLY_TRIGGER_SQL),
+    (_VALIDATORS_NO_DELETE_TRIGGER_NAME, _VALIDATORS_NO_DELETE_TRIGGER_SQL),
+    (
+        _PREDICTIONS_APPEND_ONLY_TRIGGER_NAME,
+        _PREDICTIONS_APPEND_ONLY_TRIGGER_SQL,
     ),
 )
 
@@ -778,17 +917,13 @@ CREATE TABLE IF NOT EXISTS predictions (
 );
 CREATE INDEX IF NOT EXISTS idx_pred_content ON predictions(content_id);
 
--- A registered plan is append-only: refuse any UPDATE of its immutable columns
--- and any DELETE, so the gap between registration and evidence is a real
--- pre-registration guarantee. Mirrors the verdict tables' append-only protection.
-CREATE TRIGGER IF NOT EXISTS predictions_append_only
-BEFORE UPDATE OF
-    content_id, inference_regime, test_type, direction_of_interest,
-    equivalence_lower, equivalence_upper, alpha, preregistered, registered_at
-ON predictions
-BEGIN
-    SELECT RAISE(ABORT, 'mareforma:append_only:prediction_locked');
-END;
+-- A registered plan is append-only: refuse any DELETE, so the gap between
+-- registration and evidence is a real pre-registration guarantee. Mirrors the
+-- verdict tables' append-only protection. The UPDATE half (predictions_append_only)
+-- is a managed trigger in _MANAGED_TRIGGERS: it watches plan_id as well as the
+-- other immutable columns, and a managed definition reaches an existing graph
+-- whose trigger predates the plan_id addition, which an IF NOT EXISTS here would
+-- not.
 CREATE TRIGGER IF NOT EXISTS predictions_no_delete
 BEFORE DELETE ON predictions
 BEGIN

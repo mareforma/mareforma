@@ -504,6 +504,16 @@ def status_cmd(as_json: bool) -> None:
             )
         )
 
+    if report.convergence_retry_pending:
+        click.echo(
+            "  " + click.style(
+                f"Convergence retry pending: {report.convergence_retry_pending} "
+                "(a promotion check was swallowed; run "
+                "graph.refresh_convergence() to re-run it)",
+                fg="yellow",
+            )
+        )
+
     click.echo("  " + "-" * 50)
     light_colors = {"green": "green", "yellow": "yellow", "red": "red"}
     color = light_colors.get(report.traffic_light, "white")

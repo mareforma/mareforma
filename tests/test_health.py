@@ -279,6 +279,37 @@ class TestCounts:
             conn.close()
         assert report.support_level_breakdown.get("PRELIMINARY", 0) == 2
 
+    def test_convergence_retry_pending_is_zero_on_a_clean_graph(
+        self, tmp_path: Path,
+    ) -> None:
+        conn = _open(tmp_path)
+        try:
+            add_claim(conn, tmp_path, "Claim 1")
+            report = compute_health(conn)
+        finally:
+            conn.close()
+        assert report.convergence_retry_pending == 0
+
+    def test_convergence_retry_pending_surfaces_flagged_claims(
+        self, tmp_path: Path,
+    ) -> None:
+        # A swallowed promotion check flags the claim (the common cause is a
+        # project one writer has upgraded: the older release's promotion trips
+        # the newer guard and is left for retry). The flag is an operational
+        # column, not signed material, so a direct write stands in for it here.
+        conn = _open(tmp_path)
+        try:
+            cid = add_claim(conn, tmp_path, "Stuck claim")
+            conn.execute(
+                "UPDATE claims SET convergence_retry_needed = 1 WHERE claim_id = ?",
+                (cid,),
+            )
+            conn.commit()
+            report = compute_health(conn)
+        finally:
+            conn.close()
+        assert report.convergence_retry_pending == 1
+
 
 # ---------------------------------------------------------------------------
 # Never-raises contract

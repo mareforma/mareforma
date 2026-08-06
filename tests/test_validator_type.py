@@ -162,8 +162,11 @@ class TestEnvelopeBindsValidatorType:
             )
             root_pem = _signing.public_key_to_pem(g._signer.public_key())
 
-        # Tamper.
+        # Tamper. The append-only guard is the adversary's first obstacle, so
+        # drop it: verify_enrollment's signature-vs-row binding is the guarantee
+        # under test, and it must refuse the row whether or not the trigger stood.
         raw = sqlite3.connect(tmp_path / ".mareforma" / "graph.db")
+        raw.execute("DROP TRIGGER IF EXISTS validators_append_only")
         raw.execute(
             "UPDATE validators SET validator_type = 'human' WHERE keyid = ?",
             (bot_row["keyid"],),

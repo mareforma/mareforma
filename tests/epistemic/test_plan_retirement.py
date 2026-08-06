@@ -244,7 +244,10 @@ class TestRefusals:
         h, plan_id = _seed_legacy_finding(tmp_path)
         with open_graph(tmp_path) as graph:
             # The line's stored estimate is unreadable (the direct/foreign
-            # writer case), so no alpha can gate it.
+            # writer case), so no alpha can gate it. Drop the append-only guard
+            # the write now carries; the retirement's recover-nothing refusal is
+            # the behaviour under test.
+            graph._conn.execute("DROP TRIGGER IF EXISTS effect_estimates_append_only")
             graph._conn.execute(
                 "UPDATE effect_estimates SET estimate_value = 'CORRUPT'"
             )

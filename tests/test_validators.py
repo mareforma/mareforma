@@ -564,8 +564,11 @@ class TestVerifyEnrollmentFullBinding:
             # Before tamper: verifies.
             assert _validators.verify_enrollment(row_before, pubkey_pem) is True
 
-        # Tamper: change identity in the row but not in the envelope.
+        # Tamper: change identity in the row but not in the envelope. Drop the
+        # append-only guard first (the adversary's move); the signature-vs-row
+        # binding is what must refuse the row, trigger or no trigger.
         raw = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
+        raw.execute("DROP TRIGGER IF EXISTS validators_append_only")
         raw.execute(
             "UPDATE validators SET identity = ? WHERE keyid = ?",
             ("attacker-renamed-the-root", root_keyid),

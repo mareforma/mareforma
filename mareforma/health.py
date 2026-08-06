@@ -44,6 +44,16 @@ class HealthReport:
     # this is the separate re-verification count, and the traffic light cannot
     # read green while it is non-zero.
     failed_verification: int = 0
+    # Claims a promotion check failed to run on and left flagged for retry
+    # (``convergence_retry_needed=1``). The failure is swallowed at write time so
+    # a promotion never crashes a write, but a swallowed failure leaves the claim
+    # stuck below the level its evidence earns until refresh_convergence() re-runs
+    # detection. The common cause is a project one writer has upgraded: a promotion
+    # under the older release trips the newer promotion guard and gets flagged, and
+    # only the newer release clears it. Surfaced here so that stuck state is visible
+    # on `mareforma status` rather than silent. Informational, not a defect, so it
+    # does not gate the traffic light.
+    convergence_retry_pending: int = 0
     traffic_light: str = "green"
     rationale: str = ""
 
@@ -111,6 +121,24 @@ def compute_health(conn: sqlite3.Connection) -> HealthReport:
         report.traffic_light = "error"
         report.rationale = (
             "Could not re-verify promoted claims in graph.db "
+            f"({type(exc).__name__}: {exc}). Run `mareforma restore` "
+            "(or `mareforma.restore(project_root)`) or "
+            "investigate the .mareforma/ directory; this is not the "
+            "same as an empty graph."
+        )
+        return report
+
+    # Claims a swallowed promotion failure left flagged for retry. One grouped
+    # count over the partial index, not a row materialisation.
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM claims WHERE convergence_retry_needed = 1"
+        ).fetchone()
+        report.convergence_retry_pending = int(row[0]) if row is not None else 0
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, DatabaseError) as exc:
+        report.traffic_light = "error"
+        report.rationale = (
+            "Could not read the convergence-retry queue in graph.db "
             f"({type(exc).__name__}: {exc}). Run `mareforma restore` "
             "(or `mareforma.restore(project_root)`) or "
             "investigate the .mareforma/ directory; this is not the "

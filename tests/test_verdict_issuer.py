@@ -444,8 +444,11 @@ class TestVerdictChainWalkEnforced:
         root_key, issuer_key, a, b, _, issuer_keyid = _seed_two_claims(tmp_path)
         # Tamper: clobber the issuer's enrollment_envelope so its
         # chain breaks. is_enrolled walks the chain, finds the
-        # tampered envelope, returns False.
+        # tampered envelope, returns False. The append-only guard now stands over
+        # validators, so drop it first (the SQL adversary's move): the chain-walk
+        # refusal is the guarantee under test, not the trigger.
         with mareforma.open(tmp_path, key_path=root_key) as g:
+            g._conn.execute("DROP TRIGGER IF EXISTS validators_append_only")
             g._conn.execute(
                 "UPDATE validators SET enrollment_envelope = ? WHERE keyid = ?",
                 ('{"payloadType":"x","payload":"","signatures":[]}', issuer_keyid),

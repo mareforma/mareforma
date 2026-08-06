@@ -146,6 +146,11 @@ class TestDeletionIsDisclosedAndRefused:
     def test_deleted_estimate_is_caught(self, tmp_path: Path) -> None:
         root, cid, _fid = _one_finding_graph(tmp_path)
         conn = _adversary_conn(tmp_path)
+        # The no-delete guard is the adversary's first obstacle; the read-path
+        # re-derivation is the guarantee, so drop the trigger and prove the
+        # deletion is still caught on read.
+        conn.execute("DROP TRIGGER IF EXISTS effect_estimates_no_delete")
+        conn.execute("DROP TRIGGER IF EXISTS effect_estimates_append_only")
         conn.execute("DELETE FROM effect_estimates")
         conn.commit()
         conn.close()
@@ -154,6 +159,8 @@ class TestDeletionIsDisclosedAndRefused:
     def test_deleted_contrast_is_caught(self, tmp_path: Path) -> None:
         root, cid, _fid = _one_finding_graph(tmp_path)
         conn = _adversary_conn(tmp_path)
+        conn.execute("DROP TRIGGER IF EXISTS contrasts_no_delete")
+        conn.execute("DROP TRIGGER IF EXISTS contrasts_append_only")
         conn.execute("DELETE FROM contrasts")
         conn.commit()
         conn.close()
@@ -200,6 +207,8 @@ class TestDeletionIsDisclosedAndRefused:
                 "independent_support"
             ] == 1
         conn = _adversary_conn(tmp_path)
+        conn.execute("DROP TRIGGER IF EXISTS effect_estimates_no_delete")
+        conn.execute("DROP TRIGGER IF EXISTS effect_estimates_append_only")
         conn.execute(
             "DELETE FROM effect_estimates WHERE estimate_id IN "
             "(SELECT estimate_id FROM effect_estimates LIMIT 1)"

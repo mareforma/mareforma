@@ -83,6 +83,8 @@ _COUNT_GATE_TABLES = (
     "propositions",
     "predictions",
     "plan_retirements",
+    "contrasts",
+    "effect_estimates",
 )
 
 # Every append-only / no-delete guard on a gate-input table. A SQL-access
@@ -99,6 +101,14 @@ _WRITE_GUARD_TRIGGERS = (
     "plan_retirements_no_delete",
     "replication_verdicts_append_only",
     "replication_verdicts_no_delete",
+    "propositions_append_only",
+    "propositions_no_delete",
+    "contrasts_append_only",
+    "contrasts_no_delete",
+    "effect_estimates_append_only",
+    "effect_estimates_no_delete",
+    "validators_append_only",
+    "validators_no_delete",
 )
 
 # CHECK-constrained columns and their full domain, so the sweep can pick a
@@ -115,6 +125,14 @@ _ENUM_DOMAINS = {
     ("predictions", "test_type"): ("superiority", "equivalence"),
     ("predictions", "direction_of_interest"): ("increase", "decrease"),
     ("predictions", "preregistered"): (0, 1),
+    ("contrasts", "control_type"): (
+        "positive", "negative", "vehicle", "sham", "comparative",
+    ),
+    ("effect_estimates", "effect_type"): (
+        "SMD", "Hedges_g", "OR", "logOR", "RR", "HR", "COR", "ZCOR",
+        "MD", "ROM", "beta", "log2FC", "GEN",
+    ),
+    ("effect_estimates", "scale"): ("raw", "log"),
 }
 
 # Columns whose *valid-target* forgery a dumb perturbation cannot express (it
@@ -379,6 +397,21 @@ def _row_cid(conn: sqlite3.Connection, table: str, pk_col: str, pk_val) -> str:
             "JOIN predictions p ON p.plan_id = r.plan_id WHERE r.plan_id = ?",
             (pk_val,),
         ).fetchone()["content_id"]
+    if table == "contrasts":
+        return conn.execute(
+            "SELECT f.content_id FROM findings f "
+            "JOIN evidence_lines el ON el.finding_id = f.finding_id "
+            "JOIN contrasts c ON c.line_id = el.line_id "
+            "WHERE c.contrast_id = ?", (pk_val,),
+        ).fetchone()["content_id"]
+    if table == "effect_estimates":
+        return conn.execute(
+            "SELECT f.content_id FROM findings f "
+            "JOIN evidence_lines el ON el.finding_id = f.finding_id "
+            "JOIN contrasts c ON c.line_id = el.line_id "
+            "JOIN effect_estimates est ON est.contrast_id = c.contrast_id "
+            "WHERE est.estimate_id = ?", (pk_val,),
+        ).fetchone()["content_id"]
     raise AssertionError(f"no content_id mapping for {table}")
 
 
@@ -388,6 +421,8 @@ _PRIMARY_KEY = {
     "propositions": "content_id",
     "predictions": "plan_id",
     "plan_retirements": "plan_id",
+    "contrasts": "contrast_id",
+    "effect_estimates": "estimate_id",
 }
 
 
@@ -593,7 +628,9 @@ class TestTriggersRefuseNaiveWrites:
         self, tmp_path: Path,
     ) -> None:
         """A guard reconciled onto the schema is what makes the naive edit cost
-        a trigger drop. The five append-only tables each carry both halves."""
+        a trigger drop. Every append-only gate-input table carries both halves,
+        including the four the read path leans on that carried none before this
+        release: propositions, contrasts, effect_estimates and validators."""
         state = _known_state(tmp_path)
         with mareforma.open(tmp_path, key_path=state["root"]) as g:
             names = {
@@ -604,10 +641,138 @@ class TestTriggersRefuseNaiveWrites:
             }
         for guarded in (
             "findings", "evidence_lines", "predictions", "plan_retirements",
-            "replication_verdicts",
+            "replication_verdicts", "propositions", "contrasts",
+            "effect_estimates", "validators",
         ):
             assert f"{guarded}_append_only" in names, guarded
             assert f"{guarded}_no_delete" in names, guarded
+
+    def test_predictions_plan_id_is_inside_its_own_write_guard(
+        self, tmp_path: Path,
+    ) -> None:
+        """Rewriting ``predictions.plan_id`` re-points a whole rule at another
+        identity and drops every line gated under it with nothing disclosed. The
+        primary key was missing from the append-only watch list; a naive UPDATE
+        of it must now be refused by the trigger."""
+        state = _known_state(tmp_path)
+        with mareforma.open(tmp_path, key_path=state["root"]) as g:
+            with pytest.raises(
+                sqlite3.IntegrityError, match="prediction_locked"
+            ):
+                g._conn.execute(
+                    "UPDATE predictions SET plan_id = plan_id WHERE content_id = ?",
+                    (state["main_cid"],),
+                )
+
+
+class TestNewlyGuardedTablesRefuseAdversaryWrites:
+    """propositions, contrasts, effect_estimates and validators carried no write
+    guard before this release, so a direct UPDATE flipped an estimate or a
+    proposition's text and a DELETE dropped a refutation.
+
+    The adversary these model is a co-resident process opening graph.db with
+    plain sqlite3: it registers no custom SQL functions and leaves foreign keys
+    at SQLite's default (OFF), so a DELETE of a referenced row is refused by the
+    guard trigger, not by a foreign key the attacker never turned on. Each table
+    is swept for both an UPDATE of a real column and a DELETE, and the message
+    is asserted so the refusal is the append-only guard and not an incidental
+    error.
+    """
+
+    # (table, a real column, a distinct value) for the UPDATE half.
+    _UPDATE_PROBE = (
+        ("propositions", "subject", "TAMPERED", "proposition_locked"),
+        ("contrasts", "control_type", "positive", "contrast_locked"),
+        ("effect_estimates", "estimate_value", 0.8, "effect_estimate_locked"),
+        ("validators", "pubkey_pem", "TAMPERED", "validator_locked"),
+    )
+
+    def _adversary(self, tmp_path: Path) -> sqlite3.Connection:
+        """A raw connection to graph.db with foreign keys OFF and no functions."""
+        conn = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
+        conn.execute("PRAGMA foreign_keys = OFF")
+        return conn
+
+    def test_update_of_each_guarded_table_is_refused(
+        self, tmp_path: Path,
+    ) -> None:
+        _known_state(tmp_path)
+        adv = self._adversary(tmp_path)
+        try:
+            for table, column, value, message in self._UPDATE_PROBE:
+                assert adv.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], (
+                    f"{table} has no rows for the guard to fire on"
+                )
+                with pytest.raises(sqlite3.IntegrityError, match=message):
+                    adv.execute(f"UPDATE {table} SET {column} = ?", (value,))
+        finally:
+            adv.close()
+
+    def test_delete_of_each_guarded_table_is_refused(
+        self, tmp_path: Path,
+    ) -> None:
+        _known_state(tmp_path)
+        adv = self._adversary(tmp_path)
+        try:
+            for table, *_ in self._UPDATE_PROBE:
+                with pytest.raises(
+                    sqlite3.IntegrityError, match="delete_blocked"
+                ):
+                    adv.execute(f"DELETE FROM {table}")
+        finally:
+            adv.close()
+
+    def test_the_demonstrated_estimate_flip_is_refused_at_the_write(
+        self, tmp_path: Path,
+    ) -> None:
+        """The attack the design opens on: ``UPDATE effect_estimates SET
+        estimate_value = 0.8`` flipped a proposition from convergent to refuted
+        with nothing disclosed. The read path re-derives the digest and catches
+        it, but the guard now refuses the write outright, so the careless edit
+        does not land in the first place."""
+        state = _known_state(tmp_path)
+        adv = self._adversary(tmp_path)
+        try:
+            with pytest.raises(
+                sqlite3.IntegrityError, match="effect_estimate_locked"
+            ):
+                adv.execute("UPDATE effect_estimates SET estimate_value = 0.8")
+        finally:
+            adv.close()
+        # The value did not change, so the proposition still reads as it did.
+        with mareforma.open(tmp_path, key_path=state["root"]) as g:
+            assert _status_tuple(
+                g.proposition_status(state["main_cid"])
+            ) == ("CONTESTED", 1, 1, 0)
+
+    def test_honest_writes_survive_the_new_guards(
+        self, tmp_path: Path,
+    ) -> None:
+        """A wrong full-table lock would refuse a legitimate write. The honest
+        lifecycle, enrolling a validator, registering a plan, and submitting
+        findings that write propositions, contrasts and estimates, must still
+        complete and read correctly with every guard installed."""
+        ka = _bootstrap_key(tmp_path, "ka.key")
+        kb = _bootstrap_key(tmp_path, "kb.key")
+        _enroll_key(tmp_path, ka, kb)
+        prop, pred = _prop(), _pred()
+        with mareforma.open(tmp_path, key_path=ka) as g:
+            g.register_plan(prop, pred)
+            g.submit_finding(
+                prop, pred, _est(), data_id="ds1", generated_by="run1",
+                grounding=_verdict(_CLAUDE),
+            )
+        with mareforma.open(tmp_path, key_path=kb) as g:
+            g.submit_finding(
+                prop, pred, EffectEstimate(-0.9, EffectType.SMD, p_value=0.001),
+                data_id="ds2", generated_by="run2", grounding=_verdict(_GPT),
+            )
+        with mareforma.open(tmp_path, key_path=ka) as g:
+            view = g.proposition_status(prop.content_id())
+            # Two distinct-signer supporting lines wrote through every guarded
+            # table and read back with nothing dropped.
+            assert view["independent_support"] == 2
+            assert view["lines_skipped"] == 0
 
 
 class TestValidRepointAttacks:

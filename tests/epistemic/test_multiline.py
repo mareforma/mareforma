@@ -269,7 +269,10 @@ class TestReadPathSurvivesUngateableRow:
             g.assert_finding(h, _superiority(), _smd(-2.4, p=0.01), data_id="dB", generated_by="run2")
             # Corrupt only run1's stored estimate to a non-numeric value (direct
             # SQL, the "foreign/direct writer" case the read-path guard exists
-            # for). math.isfinite on it raises TypeError on recompute.
+            # for). math.isfinite on it raises TypeError on recompute. The
+            # append-only trigger is the write-side speed bump a SQL adversary
+            # drops first; the read-path skip is the guarantee under test.
+            g._conn.execute("DROP TRIGGER IF EXISTS effect_estimates_append_only")
             g._conn.execute(
                 "UPDATE effect_estimates SET estimate_value = 'CORRUPT' "
                 "WHERE contrast_id IN ("
@@ -296,6 +299,7 @@ class TestReadPathSurvivesUngateableRow:
             g.assert_finding(h, _superiority(), _smd(-2.6, p=0.003), data_id="dA", generated_by="run1")
             g.assert_finding(h, _superiority(), _smd(2.6, p=0.003), data_id="dB", generated_by="run2")
             assert g.proposition_status(h)["status"] == Status.CONTESTED.value
+            g._conn.execute("DROP TRIGGER IF EXISTS effect_estimates_append_only")
             g._conn.execute(
                 "UPDATE effect_estimates SET estimate_value = 'CORRUPT' "
                 "WHERE contrast_id IN ("
