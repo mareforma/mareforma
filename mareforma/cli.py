@@ -495,6 +495,15 @@ def status_cmd(as_json: bool) -> None:
                 bar = "█" * min(count, 20)
                 click.echo(f"    {level:14} {bar}  {count}")
 
+    if report.failed_verification:
+        click.echo(
+            "  " + click.style(
+                f"Unverified promotions: {report.failed_verification} "
+                "(support level not backed by signed material)",
+                fg="red", bold=True,
+            )
+        )
+
     click.echo("  " + "-" * 50)
     light_colors = {"green": "green", "yellow": "yellow", "red": "red"}
     color = light_colors.get(report.traffic_light, "white")
@@ -1117,6 +1126,22 @@ def _verify_claim(target: str, as_json: bool, redact_home: bool) -> int:
             sig_ok, sig_reason = verify_claim_signatures(graph._conn, claim)
             if not sig_ok:
                 problems.append(sig_reason)
+            # Auditor mode verifies against enrolled validator pubkeys only. A
+            # signed claim whose named signer is not an enrolled validator cannot
+            # be authenticated from public material: verify_claim_signatures could
+            # only confirm the claim binding, never the signature. Reporting that
+            # as "verified" (exit 0) let a CI gate pass a forged all-zero signature
+            # under a keyid that was never enrolled, the sixth read surface that
+            # said something false about a rejected row. A named signer that does
+            # not authenticate is not a clean verdict.
+            if claim.get("signature_bundle") and claim.get("asserter_keyid"):
+                from mareforma.validators import is_enrolled
+
+                if not is_enrolled(graph._conn, claim["asserter_keyid"]):
+                    problems.append(
+                        "signer keyid is not an enrolled validator, so the "
+                        "signature cannot be authenticated from public material"
+                    )
 
             # Grounding→citation binding re-check. Bind on ``grounded_sources``
             # (the cited sources a read was actually observed for), not the

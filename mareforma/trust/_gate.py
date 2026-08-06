@@ -63,12 +63,26 @@ _PLAN_RULE_REBIND = "plan_rule_rebind_skipped"
 # deleted. It is a per-FINDING corruption (the digest is a property of the whole
 # line set), so every line of the finding is skipped under this one reason.
 _ESTIMATES_DIGEST_MISMATCH = "estimates_digest_skipped"
+# A line whose claim names a signer (non-NULL asserter_keyid) that does not
+# authenticate. Two causes, kept apart because they need different dispositions:
+#   * SIGNATURE_FAILED: the named signer IS an enrolled validator, but its
+#     signature does not verify (a stored pubkey was swapped or the signature
+#     forged). Corruption, refused on restore.
+#   * UNREGISTERED_SIGNER: the named signer is not an enrolled validator, or the
+#     bundle is absent / does not embed the keyid / does not bind this claim.
+#     The line counts on no axis (a forged claim controls generated_by too, so it
+#     must not fall back to the run axis), but it is not corruption: an honest
+#     backup can carry an unenrolled participant's finding, so restore accepts it
+#     and the read path merely discloses it.
+_SIGNATURE_FAILED = "signature_failed_skipped"
+_UNREGISTERED_SIGNER = "unregistered_signer_skipped"
 _CORRUPTION_REASONS = frozenset(
     {
         _BEARING_RECOMPUTE,
         _PLAN_REBIND,
         _PLAN_RULE_REBIND,
         _ESTIMATES_DIGEST_MISMATCH,
+        _SIGNATURE_FAILED,
     }
 )
 
@@ -273,46 +287,74 @@ def _committed_estimates_digest(
     return cache.resolve("finding_record", claim_id, digest, compute)  # type: ignore[return-value]
 
 
-def _authentic_signer_keyid(
+def _signer_axis(
     conn: sqlite3.Connection,
     claim_id: str,
     asserter_keyid: "str | None",
+    generated_by: str,
     bundle_json: "str | None",
-) -> "str | None":
-    """Return ``asserter_keyid`` only when the signed bundle authenticates it.
+) -> "tuple[str | None, str | None, str | None]":
+    """Classify a line's distinct-signer / run axis: ``(run_token, keyid, skip)``.
 
-    The denormalized ``asserter_keyid`` column is not itself part of the signed
-    envelope, so a direct/foreign writer can set it to any string to inflate the
-    independence count. We trust it as the WHO axis only when the claim's
-    ``signature_bundle`` (a) embeds that same keyid, (b) binds to this
-    ``claim_id``, and (c) verifies against the pubkey when the signer is an
-    enrolled validator. This mirrors the read-path verify gate. When it does not
-    authenticate, the caller falls back to the soft ``generated_by`` axis, which
-    is no weaker than the pre-keyid behaviour. Any structural failure returns
-    None (fall back), never raises: one un-authenticatable line must not deny the
-    whole proposition's count.
+    Exactly one of ``run_token`` / ``skip`` is set. ``keyid`` is the
+    authenticated signer keyid for the ``k:`` axis, else None.
+
+    The denormalized ``asserter_keyid`` column is not part of the signed
+    envelope, so a direct/foreign writer can set it to any string. The axis is
+    resolved so a forged signer can inflate no count:
+
+    - A claim with a **NULL** ``asserter_keyid`` is a pre-keyid legacy claim or a
+      genuinely unsigned finding. It keeps the retired ``g:generated_by`` run-axis
+      fallback (status_policy@v4), so a v0.3.10 graph and an unsigned-mode finding
+      still count. This is the ONLY grandfathered case, and the marker is the NULL
+      keyid, not the absence of a bundle.
+    - A claim that **names a signer** (non-NULL ``asserter_keyid``) counts on the
+      distinct-signer axis (``k:keyid``) only when its ``signature_bundle`` (a)
+      embeds that same keyid, (b) binds to this ``claim_id``, (c) is signed by an
+      enrolled validator, and (d) verifies against that validator's pubkey. A
+      named signer that does not authenticate does NOT fall back to the run axis:
+      a forged claim controls ``generated_by`` too, so a run-axis fallback would
+      let it manufacture support all the same (the measured no-bundle / fabricated
+      -signer forgery). It counts on no axis and its line is skipped:
+
+        * an enrolled signer whose signature FAILS to verify is corruption
+          (``_SIGNATURE_FAILED``): a stored pubkey was swapped or the signature
+          forged, which restore refuses;
+        * a signer that is not enrolled, a bundle absent under a named keyid, one
+          that does not embed the keyid, or one that binds another claim, is an
+          unregistered / unauthenticatable signer (``_UNREGISTERED_SIGNER``): the
+          honest cost of the registration rule, disclosed on read but accepted on
+          restore so an honest backup carrying an unenrolled participant's finding
+          still recovers.
+
+    Never raises: one un-authenticatable line must not deny the whole
+    proposition's count. A structural failure reads as an unregistered signer (it
+    could not be authenticated), the fail-closed disposition.
     """
-    if asserter_keyid is None or not bundle_json:
-        return None
+    if asserter_keyid is None:
+        return (f"g:{generated_by}", None, None)
+    if not bundle_json:
+        return (None, None, _UNREGISTERED_SIGNER)
     try:
         from .. import signing as _signing
         from .. import validators as _validators
 
         env = json.loads(bundle_json)
         if env["signatures"][0]["keyid"] != asserter_keyid:
-            return None
+            return (None, None, _UNREGISTERED_SIGNER)
         pred = _signing.claim_predicate_from_envelope(env)
         if pred.get("claim_id") != claim_id:
-            return None
+            return (None, None, _UNREGISTERED_SIGNER)
         signer_row = _validators.get_validator(conn, asserter_keyid)
-        if signer_row is not None:
-            pem = base64.standard_b64decode(signer_row["pubkey_pem"])
-            pub = _signing.public_key_from_pem(pem)
-            if not _signing.verify_envelope(env, pub):
-                return None
-        return asserter_keyid
+        if signer_row is None:
+            return (None, None, _UNREGISTERED_SIGNER)
+        pem = base64.standard_b64decode(signer_row["pubkey_pem"])
+        pub = _signing.public_key_from_pem(pem)
+        if not _signing.verify_envelope(env, pub):
+            return (None, None, _SIGNATURE_FAILED)
+        return (f"k:{asserter_keyid}", asserter_keyid, None)
     except Exception:
-        return None
+        return (None, None, _UNREGISTERED_SIGNER)
 
 
 def _is_human_signer(conn: sqlite3.Connection, keyid: str) -> bool:
@@ -324,7 +366,7 @@ def _is_human_signer(conn: sqlite3.Connection, keyid: str) -> bool:
     verifies each enrollment envelope, and the envelope binds ``validator_type``
     (see :func:`mareforma.validators.verify_enrollment`), so a row whose type was
     flipped by a direct SQL UPDATE fails the chain and is not treated as human.
-    Only an authenticated signer keyid (see :func:`_authentic_signer_keyid`) ever
+    Only an authenticated signer keyid (see :func:`_signer_axis`) ever
     reaches here, so an unbacked keyid cannot claim the human axis. Any structural
     failure returns False: one un-resolvable signer must not deny the whole
     proposition's count.
@@ -416,7 +458,7 @@ def _authentic_model_key(
       unsigned claim, or a bundle that does not verify) reads ``("soft",)``, a
       distinct model that cannot be certified, never counted.
 
-    This is the model-axis parallel of :func:`_authentic_signer_keyid`.
+    This is the model-axis parallel of :func:`_signer_axis`.
     """
     # Lazy import: ``mareforma.observe`` imports ``trust._store`` (for
     # ``is_content_addressed``), so importing the lineage helper at module top
@@ -431,25 +473,30 @@ def _authentic_model_key(
 
 def _resolve_signer_and_model(
     conn: sqlite3.Connection, row, cache: GateCache,
-) -> tuple[str, tuple]:
-    """The (run_token, model_key) for a line's claim, resolved once per claim.
+) -> "tuple[str | None, tuple, str | None]":
+    """(run_token, model_key, skip) for a line's claim, resolved once per claim.
 
     The signer and model axes are a property of the claim, not the line: the
     authenticating columns are written identically on every line of a finding,
     so the resolution is memoized in the shared cache keyed on the claim and its
     bundle bytes. A frame read that walks the same claim for a proposition and
     again as a contrary therefore verifies the signature once.
+
+    ``skip`` is set (and ``run_token`` None) when the claim names a signer that
+    does not authenticate (see :func:`_signer_axis`): the line counts on no axis
+    and the caller drops it under that reason. A counted line returns its
+    ``run_token`` and ``model_key`` with ``skip`` None.
     """
     claim_id = row["claim_id"]
     digest = _bundle_digest(row["signature_bundle"])
 
-    def compute() -> tuple[str, tuple]:
-        keyid = _authentic_signer_keyid(
-            conn, claim_id, row["asserter_keyid"], row["signature_bundle"],
+    def compute() -> "tuple[str | None, tuple, str | None]":
+        run_token, keyid, skip = _signer_axis(
+            conn, claim_id, row["asserter_keyid"], row["generated_by"],
+            row["signature_bundle"],
         )
-        run_token = (
-            f"k:{keyid}" if keyid is not None else f"g:{row['generated_by']}"
-        )
+        if skip is not None:
+            return (None, (), skip)
         model_key = _authentic_model_key(
             conn, claim_id, row["model_lineage"], row["signature_bundle"],
         )
@@ -462,7 +509,7 @@ def _resolve_signer_and_model(
             conn, keyid,
         ):
             model_key = ("human",)
-        return (run_token, model_key)
+        return (run_token, model_key, None)
 
     return cache.resolve("claims", claim_id, digest, compute)  # type: ignore[return-value]
 
@@ -638,7 +685,25 @@ def _derive_units(
                     )
                 )
                 continue
-            run_token, model_key = _resolve_signer_and_model(conn, r, cache)
+            run_token, model_key, signer_skip = _resolve_signer_and_model(
+                conn, r, cache,
+            )
+            # A line whose claim names a signer that does not authenticate counts
+            # on no axis: an enrolled signer whose signature fails is corruption,
+            # an unregistered signer is the registration rule's honest cost, and
+            # neither may fall back to the run axis (a forged claim controls
+            # generated_by). The line is dropped and disclosed rather than counted.
+            if signer_skip is not None:
+                skipped.append(
+                    _SkippedLine(
+                        r["line_id"], signer_skip,
+                        {
+                            "claim_id": r["claim_id"],
+                            "asserter_keyid": r["asserter_keyid"],
+                        },
+                    )
+                )
+                continue
             # The count rests on a post-hoc plan when the line's own plan was not
             # pre-registered (a one-shot plan) or a retirement resolved it to a
             # replacement, whose alpha was chosen with the estimates in view.
@@ -704,6 +769,14 @@ def verify_gate_inputs_or_refuse(
                 "the digest its own claim signed; an estimate, contrast, or "
                 "evidence line was altered or deleted, and the recovered graph "
                 "would silently drop the finding's lines."
+            )
+        if s.op == _SIGNATURE_FAILED:
+            raise GateInputRefused(
+                f"proposition {content_id} carries an evidence line whose claim "
+                f"is signed by an enrolled validator "
+                f"({s.detail.get('asserter_keyid')}) but the signature no longer "
+                "verifies; a stored pubkey was swapped or the signature forged, "
+                "and the recovered graph would silently drop the line."
             )
         raise GateInputRefused(
             f"proposition {content_id} carries an evidence line whose stored "

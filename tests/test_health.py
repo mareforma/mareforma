@@ -126,6 +126,52 @@ class TestTrafficLight:
         assert report.traffic_light != "green"
         assert "contradiction" in report.rationale
 
+    def test_not_green_when_a_promotion_does_not_reverify(
+        self, tmp_path: Path,
+    ) -> None:
+        # support_level is not a signed field: a direct writer can tamper a
+        # promoted row's envelope while the census still counts it as standing.
+        # The census counts levels as recorded; the separate re-verification count
+        # catches the tampered promotion, and the light cannot read green over it.
+        import mareforma
+        from tests._helpers import _bootstrap_key, _pem_of, _two_signers
+        sa, sb = _two_signers(tmp_path)
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        val_key = _bootstrap_key(tmp_path, "val.key")
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            g.enroll_validator(_pem_of(val_key), identity="v")
+            up = g.assert_claim("anchor", generated_by="seed", seed=True)
+            rep = g.assert_claim("A", supports=[up], generated_by="a", signer=sa)
+            g.assert_claim("B", supports=[up], generated_by="b", signer=sb)
+        with mareforma.open(tmp_path, key_path=val_key) as g:
+            g.validate(rep)
+            assert g.get_claim(rep)["support_level"] == "ESTABLISHED"
+
+        # Forge the promotion: corrupt the validation envelope directly in sqlite,
+        # the way a process with DB write access would.
+        conn = sqlite3.connect(tmp_path / ".mareforma" / "graph.db")
+        try:
+            conn.execute(
+                "UPDATE claims SET validation_signature = ? WHERE claim_id = ?",
+                ('{"payloadType":"forged","payload":"x","signatures":[]}', rep),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        conn = _open(tmp_path)
+        try:
+            report = compute_health(conn)
+        finally:
+            conn.close()
+        # The census still shows the ESTABLISHED rows (the seed anchor plus the
+        # promoted claim), but the tampered promotion no longer re-verifies, so the
+        # light is barred from green and the failed count is surfaced.
+        assert report.support_level_breakdown["ESTABLISHED"] == 2
+        assert report.failed_verification == 1
+        assert report.traffic_light != "green"
+        assert "re-verify" in report.rationale
+
 
 # ---------------------------------------------------------------------------
 # Per-status + per-support-level counters

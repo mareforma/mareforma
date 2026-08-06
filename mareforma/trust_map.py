@@ -318,6 +318,16 @@ def _independence_property(
     """
     if effective is not None:
         number = int(effective.get("number", 0))
+        # A line the shared verifier dropped (an unauthenticated signer, a
+        # withdrawn claim, an un-gateable or repointed line) is not in the number.
+        # Surface the count so the independence axis is not read as confident off a
+        # line set that silently lost lines.
+        skipped = int(effective.get("lines_skipped", 0))
+        skip_note = (
+            f"; {skipped} evidence line(s) were dropped from the count and "
+            "disclosed (unauthenticated signer, withdrawn claim, or un-gateable "
+            "line)" if skipped else ""
+        )
         if effective.get("soft") and number < 2:
             return TrustProperty(
                 name="independence",
@@ -329,14 +339,14 @@ def _independence_property(
                     "cannot be certified; a human signer does not lift it, "
                     "validator_type is self-declared and no person attested to "
                     "the finding; independent corroboration is unverifiable "
-                    "(per-finding model/data/signer axis)"
+                    "(per-finding model/data/signer axis)" + skip_note
                 ),
             )
         residual = (
             f"{number} pairwise-distinct (model, data, signer) supporting "
             "check(s); coarse by design: distinct-model is binary this "
             "release, the graded cross-model residual is DEFERRED, not "
-            "computed"
+            "computed" + skip_note
         )
         # Operator-Sybil disclosure: under a single trust root the operator owns
         # every enrolled key, so every axis of distinctness is operator-assertable,
@@ -464,13 +474,18 @@ def build_trust_map(
     claim_id: str,
     *,
     reexec_record: "dict | None" = None,
+    disclose=None,
 ) -> "TrustMap | None":
     """Build the trust map for a stored claim, or ``None`` if it does not exist.
 
     ``conn`` is an open graph connection. ``reexec_record`` optionally carries
     a re-execution faithfulness verdict (from :meth:`mareforma.reexec.ReexecResult.to_map_record`)
     to place on the map's PROXY-tier faithfulness axis; when omitted the axis
-    reads ``not present``.
+    reads ``not present``. ``disclose`` optionally carries the graph's
+    :class:`mareforma.trust._store.SkipDisclosure` so a line the independence axis
+    drops is recorded on the health channel, the same disclosure the read path
+    threads; when omitted the axis still counts and reports ``lines_skipped`` but
+    emits no health event.
     """
     from mareforma.db import get_claim
 
@@ -499,7 +514,7 @@ def build_trust_map(
         # pubkey (the lean model has no key to check it against). Tell the two
         # apart so the map does not claim "re-verified" for a binding-only pass.
         asserter_enrolled = is_enrolled(conn, claim["asserter_keyid"])
-    effective = _effective_independence(conn, claim_id)
+    effective = _effective_independence(conn, claim_id, disclose=disclose)
     return _assemble(
         claim, n_roots, has_inclusion,
         sig_verified=sig_verified, asserter_enrolled=asserter_enrolled,
@@ -508,14 +523,15 @@ def build_trust_map(
     )
 
 
-def _effective_independence(conn, claim_id: str) -> "dict | None":
+def _effective_independence(conn, claim_id: str, *, disclose=None) -> "dict | None":
     """The effective-independence record for a finding claim, or None.
 
     A claim is a finding when a ``findings`` row binds it to a proposition; the
     independence axis then reports the per-finding effective number over that
     proposition's evidence lines. A plain claim (no finding row, or a graph whose
     schema predates the evidence tree) has no such number, so the axis falls back
-    to the validator-topology disclosure.
+    to the validator-topology disclosure. ``disclose`` threads the health channel
+    through so a line the independence count drops is recorded there.
     """
     import sqlite3
 
@@ -530,7 +546,7 @@ def _effective_independence(conn, claim_id: str) -> "dict | None":
         return None
     from mareforma.trust._store import effective_independence
 
-    return effective_independence(conn, row["content_id"])
+    return effective_independence(conn, row["content_id"], disclose=disclose)
 
 
 def _has_rekor_inclusion(conn, claim_id: str) -> bool:

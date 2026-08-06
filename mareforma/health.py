@@ -37,6 +37,13 @@ class HealthReport:
     # invalid by a signed contradiction verdict. The breakdown above is the
     # full census and counts a retracted claim like any other.
     standing_promoted: int = 0
+    # REPLICATED / ESTABLISHED rows whose signed material does not back the
+    # level they claim on read: a lone claim flipped to a high level by direct
+    # SQL, or a promoted row whose envelope was tampered. The census above counts
+    # levels as recorded and cannot tell a forged promotion from a genuine one;
+    # this is the separate re-verification count, and the traffic light cannot
+    # read green while it is non-zero.
+    failed_verification: int = 0
     traffic_light: str = "green"
     rationale: str = ""
 
@@ -92,6 +99,25 @@ def compute_health(conn: sqlite3.Connection) -> HealthReport:
         if level in ("REPLICATED", "ESTABLISHED"):
             report.standing_promoted += r["n_standing"]
 
+    # Re-verify the promoted rows (only those; see count_unverified_promoted) so a
+    # forged support level cannot read green. Kept separate from the grouped
+    # census: the census counts levels as recorded, this counts the ones the
+    # signed material does not back.
+    try:
+        from mareforma.db import DatabaseError, count_unverified_promoted
+
+        report.failed_verification = count_unverified_promoted(conn)
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, DatabaseError) as exc:
+        report.traffic_light = "error"
+        report.rationale = (
+            "Could not re-verify promoted claims in graph.db "
+            f"({type(exc).__name__}: {exc}). Run `mareforma restore` "
+            "(or `mareforma.restore(project_root)`) or "
+            "investigate the .mareforma/ directory; this is not the "
+            "same as an empty graph."
+        )
+        return report
+
     report.traffic_light, report.rationale = _compute_traffic_light(report)
     return report
 
@@ -110,6 +136,17 @@ def _compute_traffic_light(report: HealthReport) -> tuple[str, str]:
         return "yellow", (
             "Every replicated or validated claim has been retracted or "
             "invalidated by a signed contradiction verdict."
+        )
+
+    # A promoted row whose signed material does not back its level bars green: the
+    # stored count says the project has standing evidence, but at least one of
+    # those promotions does not re-verify, so it is not evidence of anything.
+    if report.failed_verification > 0:
+        return "yellow", (
+            f"{report.failed_verification} promoted claim(s) do not re-verify on "
+            "read: the stored REPLICATED/ESTABLISHED level is not backed by signed "
+            "material (a forged level or a tampered envelope). Run "
+            "`mareforma verify <claim_id>` to see which, then retract or repair."
         )
 
     return "green", "At least one independently replicated or validated claim."

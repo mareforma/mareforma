@@ -4,7 +4,7 @@ The model-distinct axis reads ``evidence_lines.model_lineage``, a denormalised,
 unsigned column. Binding the lineage into the signed observed record (the same
 carrier as the grounding verdict) and rerouting the independence read to that
 signed copy closes the forge: a column edited out of band no longer moves the
-count. This mirrors the WHO-axis re-authentication ``_authentic_signer_keyid``
+count. This mirrors the WHO-axis re-authentication ``_signer_axis``
 already applies to the signer column.
 """
 from __future__ import annotations
@@ -182,9 +182,10 @@ class TestSignedLineageBinding:
     def test_nonenrolled_signed_forge_does_not_count(self, tmp_path: Path) -> None:
         """The strongest producer forge is blocked: re-pointing a finding's
         SIGNED lineage to a distinct model under a non-enrolled, unverifiable
-        signature must NOT inflate the count. An unverifiable bundle reads soft
-        (fail closed), never a trusted distinct model, so two same-model
-        findings stay collapsed even when one bundle is forged."""
+        signature must NOT inflate the count. A line whose signer is not an
+        enrolled validator counts on no axis: it is dropped and disclosed, never
+        trusted as a distinct model, so two same-model findings stay collapsed
+        even when one bundle is forged, and the drop shows in ``lines_skipped``."""
         ka = _bootstrap_key(tmp_path, "ka.key")
         kb = _bootstrap_key(tmp_path, "kb.key")
         prop, pred = _prop(), _pred()
@@ -202,18 +203,21 @@ class TestSignedLineageBinding:
             _forge_bundle(g._conn, "ds2", _FORGED_COMPUTED,
                           keyid="deadbeef-not-enrolled-fabricated")
             eff = effective_independence(g._conn, cid)
-        # The forged bundle does not verify (non-enrolled signer), so its
-        # lineage reads soft and cannot mint a distinct model. Count stays 1.
+        # The unenrolled signer's line does not count on any axis: it is skipped
+        # and disclosed, not soft-counted, so the count stays 1 and the drop is
+        # visible in lines_skipped.
         assert eff["number"] == 1
-        assert eff["soft"] is True
+        assert eff["soft"] is False
+        assert eff["lines_skipped"] == 1
 
     def test_enrolled_signer_forge_does_not_count(self, tmp_path: Path) -> None:
         """The peer forge: a second lab already ENROLLED as a validator rewrites
         its own bundle payload's model lineage to a distinct model and leaves its
         real keyid in place, so the signer resolves to a real pubkey and the read
         runs the crypto check. The stale signature no longer covers the edited
-        payload, so the lineage is unauthenticated and reads soft: the same-model
-        pair stays collapsed at one."""
+        payload, so it fails to verify under an enrolled signer: the line is a
+        disclosed corruption skip, dropped from the count, and the same-model pair
+        stays at one."""
         ka = _bootstrap_key(tmp_path, "ka.key")
         kb = _bootstrap_key(tmp_path, "kb.key")
         _enroll_key(tmp_path, ka, kb)
@@ -231,13 +235,14 @@ class TestSignedLineageBinding:
             )
             _forge_bundle(g._conn, "ds2", _FORGED_COMPUTED)
             eff = effective_independence(g._conn, cid)
-        assert eff == {"number": 1, "soft": True}
+        assert eff == {"number": 1, "soft": False, "lines_skipped": 1}
 
     def test_cross_claim_staple_does_not_count(self, tmp_path: Path) -> None:
         """A genuine, verifying bundle lifted from ANOTHER claim authenticates
-        nothing here: the envelope binds a different claim_id, so its distinct
-        model belongs to that claim, not this one. The stapled line reads soft
-        and the same-model pair stays collapsed at one."""
+        nothing here: the envelope binds a different claim_id, so it names another
+        claim's signer, not this line's. The stapled line does not authenticate as
+        a registered signer of THIS claim, so it is dropped and disclosed, and the
+        same-model pair stays at one."""
         ka = _bootstrap_key(tmp_path, "ka.key")
         kb = _bootstrap_key(tmp_path, "kb.key")
         _enroll_key(tmp_path, ka, kb)
@@ -261,7 +266,7 @@ class TestSignedLineageBinding:
             )
             _staple_bundle(g._conn, "ds2", "ds3")
             eff = effective_independence(g._conn, cid)
-        assert eff == {"number": 1, "soft": True}
+        assert eff == {"number": 1, "soft": False, "lines_skipped": 1}
 
 
 def _same_model_pair(tmp_path: Path) -> str:

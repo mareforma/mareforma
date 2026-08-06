@@ -211,6 +211,37 @@ class TestVerifyExitCodes:
             assert doc["exit_code"] == 0
             assert doc["trust_map"]["subject_id"] == cid
 
+    def test_signed_claim_under_unregistered_key_does_not_verify(
+        self, tmp_path: Path,
+    ) -> None:
+        """A claim carrying a signature under a keyid that is not an enrolled
+        validator cannot be authenticated from public material. ``verify`` must
+        not exit 0 for it: auditor mode has no pubkey to check the signature
+        against, so a CI gate keyed on exit 0 would otherwise pass a forged
+        signature under a key that was never enrolled."""
+        from mareforma.cli import _VERIFY_FAIL
+
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            other = Path("other.key")
+            signing.bootstrap_key(other)
+            other_signer = signing.load_private_key(other)
+            with mareforma.open(".") as g:
+                # The graph's default key auto-enrolls as root; this claim is
+                # signed by a SEPARATE key that is never enrolled.
+                cid = g.assert_claim(
+                    "unregistered signer", classification="ANALYTICAL",
+                    signer=other_signer,
+                )
+            res = r.invoke(cli, ["verify", cid])
+            assert res.exit_code == _VERIFY_FAIL
+            assert "not an enrolled validator" in res.output
+            res_json = r.invoke(cli, ["verify", cid, "--json"])
+            doc = json.loads(res_json.output)
+            assert doc["verdict"] == "tampered"
+            assert doc["exit_code"] == _VERIFY_FAIL
+
 
 _CI_README = (
     Path(__file__).resolve().parents[1] / "examples" / "06_ci_verify" / "README.md"

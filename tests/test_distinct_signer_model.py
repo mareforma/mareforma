@@ -366,9 +366,14 @@ class TestTrustCounting:
 
     def test_distinct_signer_findings_corroborate(self, tmp_path: Path) -> None:
         """Each finding written through a graph handle opened with a DISTINCT
-        key carries a distinct signer -> two independent supports."""
+        key carries a distinct signer -> two independent supports.
+
+        Both signers are enrolled validators: a line counts on the distinct-signer
+        axis only when its signer is registered and its signature verifies, so the
+        second key is enrolled under the root before it signs."""
         ka = _bootstrap_key(tmp_path, "ka.key")
         kb = _bootstrap_key(tmp_path, "kb.key")
+        _enroll_key(tmp_path, ka, kb)
         prop, pred = _prop(), _pred()
         with mareforma.open(tmp_path, key_path=ka) as g:
             g.assert_finding(prop, pred, _est(), data_id="ds1", generated_by="run1")
@@ -564,6 +569,9 @@ class TestContentAddressing:
         prop, pred = _prop(), _pred()
         ka = _bootstrap_key(tmp_path, "ka.key")
         kb = _bootstrap_key(tmp_path, "kb.key")
+        # The second signer is enrolled: only a registered signer's line counts on
+        # the distinct-signer axis.
+        _enroll_key(tmp_path, ka, kb)
         with mareforma.open(tmp_path, key_path=ka) as g:
             g.assert_finding(
                 prop, pred, _est(), data_bytes=b"dataset-a", generated_by="run1",

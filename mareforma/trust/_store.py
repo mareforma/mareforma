@@ -901,7 +901,7 @@ def independence_counts(
     one signer yields at most one independent support and one independent refute,
     and two same-model checks no longer read as two independent lines. A keyid
     counts only when the claim's signature bundle authenticates it
-    (:func:`mareforma.trust._gate._authentic_signer_keyid`), so this axis is
+    (:func:`mareforma.trust._gate._signer_axis`), so this axis is
     not the unsigned column
     the REPLICATED promotion query reads; that query is a separate check under
     its own editorial filters, and the two answer different questions and can
@@ -952,7 +952,10 @@ def independence_counts(
     return result
 
 
-def effective_independence(conn: sqlite3.Connection, content_id: str) -> dict:
+def effective_independence(
+    conn: sqlite3.Connection, content_id: str,
+    *, memo: "dict | None" = None, disclose: "SkipDisclosure | None" = None,
+) -> dict:
     """The effective-independence number for a proposition, with a soft flag.
 
     ``number`` is the count of pairwise-distinct (model, data, signer) SUPPORTING
@@ -964,16 +967,33 @@ def effective_independence(conn: sqlite3.Connection, content_id: str) -> dict:
     (:func:`independence_counts`) is unchanged and still counts a human check on
     its own axis; this narrows only the per-finding disclosure.
 
+    ``lines_skipped`` is how many of the proposition's evidence lines the shared
+    verifier dropped (an unauthenticated signer, a withdrawn claim, an un-gateable
+    or repointed line): the same tally :func:`proposition_status` reports, surfaced
+    here so the independence axis does not read a confident number off a line set
+    that silently lost lines. ``memo`` / ``disclose`` thread the per-call cache and
+    the health channel through, so a dropped line is disclosed on this surface too,
+    not only on ``proposition_status``.
+
     Coarse by design: distinct-model is binary this release. The graded
-    cross-model residual (how *far apart* two distinct models are) is DEFERRED , 
+    cross-model residual (how *far apart* two distinct models are) is DEFERRED ,
     named here, not computed.
     """
-    supports, soft = _supporting_units(conn, content_id)
-    return {"number": _count_run_distinct(supports), "soft": soft}
+    if memo is None:
+        memo = {}
+    supports, soft = _supporting_units(
+        conn, content_id, memo=memo, disclose=disclose,
+    )
+    return {
+        "number": _count_run_distinct(supports),
+        "soft": soft,
+        "lines_skipped": memo.get("skipped", {}).get(content_id, 0),
+    }
 
 
 def _supporting_units(
-    conn: sqlite3.Connection, content_id: str
+    conn: sqlite3.Connection, content_id: str,
+    *, memo: "dict | None" = None, disclose: "SkipDisclosure | None" = None,
 ) -> tuple[list[tuple[str, str, tuple]], bool]:
     """The SUPPORTING ``(run, data, model)`` units for a proposition, plus soft.
 
@@ -993,11 +1013,15 @@ def _supporting_units(
     root a fresh graph auto-enrolls. Nothing was observed: the finding carries no
     model call and no person attested to it. A key the operator happens to hold
     must not turn an unobserved line into a certified independent one.
+
+    ``memo`` / ``disclose`` are threaded to :func:`_independence_units` so a line
+    the verifier drops is tallied in ``lines_skipped`` and disclosed on the health
+    channel here too, not silently lost the way this surface lost them before.
     """
     supports: list[tuple[str, str, tuple]] = []
     soft = False
     for direction, run_token, data_id, model_key in _independence_units(
-        conn, content_id
+        conn, content_id, memo=memo, disclose=disclose,
     ):
         if direction is BearingDirection.SUPPORTS:
             if model_key[0] in ("absent", "human"):
@@ -1009,7 +1033,8 @@ def _supporting_units(
 
 
 def effective_independence_receipt(
-    conn: sqlite3.Connection, content_id: str
+    conn: sqlite3.Connection, content_id: str,
+    *, memo: "dict | None" = None, disclose: "SkipDisclosure | None" = None,
 ) -> dict:
     """The per-finding independence record a measurement receipt carries.
 
@@ -1028,13 +1053,26 @@ def effective_independence_receipt(
     number=1`` (collapse of 1); a distinct-model pair reads ``naive=2, number=2``
     (no collapse); a soft-only body reads ``naive=0, number=1, soft=True``, not a
     collapse, an unverifiable count.
+
+    ``memo`` / ``disclose`` thread the per-call cache and the health channel
+    through :func:`_supporting_units`, so a line the verifier drops is tallied in
+    ``lines_skipped`` and disclosed on this surface too.
     """
-    supports, soft = _supporting_units(conn, content_id)
+    if memo is None:
+        memo = {}
+    supports, soft = _supporting_units(
+        conn, content_id, memo=memo, disclose=disclose,
+    )
     number = _count_run_distinct(supports)
     hard = [(run, data_id, mk) for run, data_id, mk in supports if mk[0] != "soft"]
     naive = _count_run_distinct(
         [(run, data_id, ("absent",)) for run, data_id, _mk in hard]
     )
+    # The receipt keeps its shape (number / naive / soft): it is aggregated into a
+    # measurement's independence arm and its schema is stable. The ``memo`` /
+    # ``disclose`` threaded above still route a dropped line to the health channel;
+    # the drop is surfaced as ``lines_skipped`` on proposition_status and
+    # effective_independence, the read views, not on this record.
     return {"number": number, "naive": naive, "soft": soft}
 
 

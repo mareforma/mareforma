@@ -4386,6 +4386,37 @@ def _row_verified_on_read(
     )
 
 
+def count_unverified_promoted(conn: sqlite3.Connection) -> int:
+    """Count REPLICATED / ESTABLISHED rows that do not re-verify on read.
+
+    ``support_level`` is not a signed field, so a direct writer can flip a lone
+    PRELIMINARY claim to REPLICATED, or tamper a promoted row's envelope, and the
+    stored level still reads high. The health surface counts levels as recorded
+    (one grouped aggregate), which cannot tell a genuine promotion from a forged
+    one; this pairs that census with the count of promoted rows whose signed
+    material does not back the level they claim, so ``mareforma status`` cannot
+    read green over a tampered graph.
+
+    It runs :func:`_row_verified_on_read` (the same gate ``get_claim`` /
+    ``query`` apply) over the promoted rows ONLY, not the whole graph: the traffic
+    light turns green solely on a standing REPLICATED / ESTABLISHED row, so the
+    promoted set is the only one whose verification can change the light, and it
+    is a small fraction of a graph dominated by PRELIMINARY rows. One shared
+    verify cache, so a bulk of promotions pays one verification per distinct
+    signature.
+    """
+    rows = conn.execute(
+        f"SELECT {_CLAIM_SELECT} FROM claims "
+        "WHERE support_level IN ('REPLICATED', 'ESTABLISHED')"
+    ).fetchall()
+    cache: dict = {}
+    unverified = 0
+    for row in rows:
+        if not _row_verified_on_read(conn, dict(row), cache):
+            unverified += 1
+    return unverified
+
+
 def _trust_domain_disclosure(conn: sqlite3.Connection) -> tuple[bool, str | None]:
     """(single_trust_domain, trust_domain_root) for this graph's validators.
 

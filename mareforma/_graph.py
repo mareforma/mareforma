@@ -1029,7 +1029,10 @@ class EpistemicGraph:
         self._check_open()
         from mareforma.trust_map import build_trust_map
 
-        return build_trust_map(self._conn, claim_id, reexec_record=reexec_record)
+        return build_trust_map(
+            self._conn, claim_id, reexec_record=reexec_record,
+            disclose=self._skips,
+        )
 
     # ------------------------------------------------------------------
     # Trust layer: propositions, findings, derived Status

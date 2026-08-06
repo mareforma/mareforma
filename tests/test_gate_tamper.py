@@ -968,12 +968,12 @@ class TestVerifyCacheHoldsNoNegative:
     def test_an_enrolment_after_a_soft_read_lifts_the_count(
         self, tmp_path: Path,
     ) -> None:
-        """Two distinct-model findings whose second signer is NOT yet enrolled
-        read soft: the second bundle cannot be verified, so its distinct model is
-        not certified and the effective count sits at one. Enrolling that signer
-        and reading again must lift the count to two: had the failed verify been
-        cached as 'not enrolled', the later read would still serve one, the exact
-        stale-negative the cache is built to avoid."""
+        """Two distinct-model findings whose second signer is NOT yet enrolled:
+        the second line counts on no axis (an unregistered signer is dropped and
+        disclosed), so the effective count sits at one and the drop shows in
+        lines_skipped. Enrolling that signer and reading again must lift the count
+        to two: had the miss been cached as 'not enrolled', the later read would
+        still serve one, the exact stale-negative the cache is built to avoid."""
         ka = _bootstrap_key(tmp_path, "ka.key")
         kb = _bootstrap_key(tmp_path, "kb.key")
         prop, pred = _prop(), _pred()
@@ -990,9 +990,10 @@ class TestVerifyCacheHoldsNoNegative:
             )
             eff = _store.effective_independence(g._conn, cid)
         assert eff["number"] == 1
-        assert eff["soft"] is True
+        assert eff["soft"] is False
+        assert eff["lines_skipped"] == 1
 
-        # Enroll the second signer; the same graph now certifies its model.
+        # Enroll the second signer; the same graph now counts its line.
         _enroll_key(tmp_path, ka, kb)
         with mareforma.open(tmp_path, key_path=ka) as g:
             eff = _store.effective_independence(g._conn, cid)

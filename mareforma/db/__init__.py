@@ -127,6 +127,7 @@ from .core import (
     get_claim,
     list_claims,
     refuse_unverified_claims,
+    count_unverified_promoted,
     delete_claims_by_generated_by,
     # Convergence detection.
     _claim_model_lineage,
@@ -293,6 +294,7 @@ __all__ = [
     "get_claim",
     "list_claims",
     "refuse_unverified_claims",
+    "count_unverified_promoted",
     "delete_claims_by_generated_by",
     # Convergence.
     "list_convergence_retry_claims",

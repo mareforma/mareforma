@@ -79,11 +79,14 @@ class TestAbsentLineageIsUnverifiable:
     def test_status_ladder_still_counts_distinct_signers(
         self, tmp_path: Path,
     ) -> None:
-        """The legacy status ladder is unchanged: absent distinct-signer findings
-        still corroborate to CONVERGENT. Only the per-finding map disclosure
-        narrows."""
+        """The legacy status ladder still counts distinct enrolled signers:
+        absent-lineage findings corroborate to CONVERGENT on the signer axis. Only
+        the per-finding map disclosure narrows. Both signers are enrolled, since a
+        line counts on the distinct-signer axis only when its signer is
+        registered."""
         ka = _bootstrap_key(tmp_path, "ka.key")
         kb = _bootstrap_key(tmp_path, "kb.key")
+        _enroll_key(tmp_path, ka, kb)
         prop, pred = _prop(), _pred()
         with mareforma.open(tmp_path, key_path=ka) as g:
             g.assert_finding(prop, pred, _est(), data_id="ds1", generated_by="run1")

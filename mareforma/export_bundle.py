@@ -462,6 +462,27 @@ def _verify_established_level(
             f"{str(payload.get('validator_keyid'))[:12]}… but is signed by "
             f"{str(val_keyid)[:12]}…"
         )
+    # Self-validation refusal, kept in step with the live read and restore paths
+    # (:func:`mareforma.db.core._refuse_self_validation`). A validator promotion
+    # needs a witnessing validator whose keyid does NOT appear on the claim's own
+    # envelope: the validator that signs the promotion must not also be the
+    # asserter or a role signer of the claim it promotes. This release added the
+    # refusal to restore and not here, so the detached verifier accepted a
+    # self-promoted ESTABLISHED row the other two paths refuse; the three rules
+    # must agree. SEED envelopes are exempt, exactly as restore exempts them: a
+    # born-ESTABLISHED claim is attested by its own asserter by design and never
+    # climbs the ladder.
+    if declared == _signing.PAYLOAD_TYPE_VALIDATION:
+        claim_sig = node.get("signatureBundle")
+        if isinstance(claim_sig, dict):
+            for entry in claim_sig.get("signatures") or []:
+                if isinstance(entry, dict) and entry.get("keyid") == val_keyid:
+                    role = entry.get("role") or "asserter"
+                    raise BundleVerificationError(
+                        f"claim:{claim_id} is shown ESTABLISHED but its validation "
+                        f"is signed by {str(val_keyid)[:12]}…, who also signed the "
+                        f"claim as {role!r}; self-promotion is refused"
+                    )
 
 
 def verify_bundle(

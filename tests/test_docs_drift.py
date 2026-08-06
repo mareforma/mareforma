@@ -41,6 +41,7 @@ from mareforma.observe.oracle import perturbation_oracle
 from mareforma.trust import STATUS_POLICY, Status
 from tests._helpers import (
     _bootstrap_key,
+    _enroll_key,
     _est,
     _example_files,
     _pred,
@@ -795,9 +796,10 @@ def test_findings_convergent_example_uses_a_distinct_signer(tmp_path):
     """the findings.mdx CONVERGENT recipe must reach CONVERGENT when run.
 
     The status counts independence by distinct signer, so two supporting lines
-    converge only when a second signing key backs the second finding. A recipe
-    that reuses one open graph (one key) stays PRELIMINARY, so the concept page
-    must show the second finding signed under a distinct ``key_path``.
+    converge only when a second, REGISTERED signing key backs the second finding.
+    A recipe that reuses one open graph (one key) stays PRELIMINARY, and an
+    unregistered second key does not count at all, so the concept page must show
+    the second finding signed under a distinct ``key_path`` whose key is enrolled.
     """
     prop, plan, est = _prop(), _pred(), _est()
 
@@ -810,19 +812,29 @@ def test_findings_convergent_example_uses_a_distinct_signer(tmp_path):
                          generated_by="analyst/model-b/lab_b")
         assert g.proposition_status(prop)["status"] == "PRELIMINARY"
 
-    # A distinct signer on a distinct dataset is the second independent line.
+    # A distinct, ENROLLED signer on a distinct dataset is the second independent
+    # line: a line counts on the distinct-signer axis only when its signer is a
+    # registered validator, so the second key is enrolled under the root first.
     kb = _bootstrap_key(tmp_path, "lab_b.key")
+    _enroll_key(tmp_path, ka, kb)
     with mareforma.open(tmp_path, key_path=kb) as g:
         g.assert_finding(prop, plan, est, data_id="dataset_gamma",
                          generated_by="analyst/model-c/lab_c")
         assert g.proposition_status(prop)["status"] == "CONVERGENT"
 
-    # The page's CONVERGENT snippet must show the distinct-signer form.
+    # The page's CONVERGENT snippet must show the distinct-signer form AND enroll
+    # that second signer, or the recipe would stay PRELIMINARY under the
+    # registration rule.
     findings = (DOCS / "concepts" / "findings.mdx").read_text(encoding="utf-8")
-    convergent = [b for b in _python_blocks(findings) if '"CONVERGENT"' in b]
+    blocks = _python_blocks(findings)
+    convergent = [b for b in blocks if '"CONVERGENT"' in b]
     assert convergent, "findings.mdx has no CONVERGENT example block"
     assert all("key_path" in b for b in convergent), (
         "the CONVERGENT example must open the graph under a second signing key"
+    )
+    assert any("enroll_validator" in b for b in blocks), (
+        "the findings page must show the second signer being enrolled, or the "
+        "CONVERGENT recipe stays PRELIMINARY under the registration rule"
     )
 
 

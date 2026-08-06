@@ -735,6 +735,49 @@ class TestSupportLevelAttestation:
         }
         assert levels["converged"] in ("ESTABLISHED", "REPLICATED")
 
+    def test_self_validated_established_is_refused(self, tmp_path: Path) -> None:
+        """The three self-validation rules must agree: the detached bundle verifier
+        refuses a self-promoted ESTABLISHED row, the same refusal restore
+        (``_refuse_self_validation``) and the live read apply. The validator that
+        signs the promotion may not also be a signer of the claim it promotes.
+
+        This release added the refusal to restore and NOT to the bundle verifier,
+        so the verifier accepted a promotion the other paths refuse; this test
+        fails if that drift returns. A SEED envelope is separately exempt (a
+        born-ESTABLISHED claim is attested by its own asserter by design), which
+        the genuine-promotion test covers, so this pins the VALIDATION case."""
+        root_key = tmp_path / "root.key"
+        _signing.bootstrap_key(root_key)
+        root_pk = _signing.load_private_key(root_key)
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            # Asserted by the root (the loaded key), which auto-enrolls as the
+            # graph's root validator, so its keyid is chain-verified in the bundle.
+            cid = g.assert_claim("self promoted", generated_by="a")
+        # A validation envelope for the claim signed by the SAME root key that
+        # asserted it: the self-validation the live validate() refuses.
+        envelope = _signing.sign_validation(
+            {
+                "claim_id": cid,
+                "validator_keyid": _signing.public_key_id(root_pk.public_key()),
+                "validated_at": "2026-01-01T00:00:00Z",
+                "evidence_seen": [],
+            },
+            root_pk,
+        )
+        statement = build_statement(tmp_path)
+        for node in statement["predicate"]["@graph"]:
+            if node.get("claimText") == "self promoted":
+                node["supportLevel"] = "ESTABLISHED"
+                node["validationSignature"] = envelope
+                break
+        bundle = sign_bundle(statement, root_pk)
+        bundle_path = tmp_path / "bundle.json"
+        bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+        with pytest.raises(
+            BundleVerificationError, match="self-promotion is refused",
+        ):
+            verify_bundle(bundle_path, root_pk.public_key())
+
     def test_validation_envelope_declaring_another_validator_fails(
         self, tmp_path: Path,
     ) -> None:

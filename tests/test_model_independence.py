@@ -118,9 +118,13 @@ class TestModelDistinctness:
 
     def test_absent_lineage_keeps_legacy_corroboration(self, tmp_path: Path) -> None:
         """A finding with no observed model call carries no model constraint:
-        two distinct-signer, distinct-data findings corroborate as before."""
+        two distinct-signer, distinct-data findings corroborate as before.
+
+        Both signers are enrolled: absent model lineage leaves the signer axis to
+        carry the count, and only a registered signer's line counts on it."""
         ka = _bootstrap_key(tmp_path, "ka.key")
         kb = _bootstrap_key(tmp_path, "kb.key")
+        _enroll_key(tmp_path, ka, kb)
         prop, pred = _prop(), _pred()
         with mareforma.open(tmp_path, key_path=ka) as g:
             g.assert_finding(prop, pred, _est(), data_id="ds1", generated_by="run1")
