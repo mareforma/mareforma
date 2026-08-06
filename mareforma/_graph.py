@@ -1465,6 +1465,7 @@ class EpistemicGraph:
             _store,
             compute_bearing,
         )
+        from mareforma.trust.prediction import validate_alpha
 
         if not proposition.is_falsifiable():
             raise NonFalsifiablePropositionError(
@@ -1523,6 +1524,14 @@ class EpistemicGraph:
         # against them. preregistered=0 marks this as a one-shot rather than a
         # genuine up-front pre-registration. ON CONFLICT DO NOTHING keeps it
         # idempotent and never upgrades an existing pre-registered plan's flag.
+        #
+        # Re-validate the alpha at this write boundary, the same bound
+        # register_plan holds. Prediction.__post_init__ already enforces it, but
+        # a rule reaching persistence off the normal route (a frozen-instance
+        # bypass, a future caller) must not mint a plan no gate can run: that is
+        # the stranded state retire_plan exists to repair, and it should only
+        # ever arise from a release that predates this bound.
+        validate_alpha(prediction.alpha)
         now = _now()
         with self._conn:
             _store.register_proposition(self._conn, proposition, now)

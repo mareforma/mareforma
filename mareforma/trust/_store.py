@@ -804,7 +804,8 @@ def independence_counts(
     one signer yields at most one independent support and one independent refute,
     and two same-model checks no longer read as two independent lines. A keyid
     counts only when the claim's signature bundle authenticates it
-    (:func:`_authentic_signer_keyid`), so this axis is not the unsigned column
+    (:func:`mareforma.trust._gate._authentic_signer_keyid`), so this axis is
+    not the unsigned column
     the REPLICATED promotion query reads; that query is a separate check under
     its own editorial filters, and the two answer different questions and can
     differ. So can this count and the trust map's number:

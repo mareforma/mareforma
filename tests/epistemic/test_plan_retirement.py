@@ -104,6 +104,21 @@ class TestTheDefect:
         with pytest.raises(ValueError, match=r"alpha must be in \(0, 0.5\)"):
             _superiority(alpha=0.7)
 
+    def test_assert_finding_refuses_a_bypassed_legacy_alpha(
+        self, tmp_path: Path
+    ) -> None:
+        """The one-shot write path re-validates alpha too. register_plan guards its
+        row; assert_finding synthesises its own plan, so a rule reaching it past the
+        constructor (a frozen-instance bypass, the shape a pre-bound release wrote)
+        must be refused there as well, or the un-gateable plan is minted anew rather
+        than staying legacy-only."""
+        with open_graph(tmp_path) as graph:
+            with pytest.raises(ValueError, match=r"alpha must be in \(0, 0.5\)"):
+                graph.assert_finding(
+                    _prop(), _legacy(), _smd(-0.8, p=0.01), data_id="dataset-A",
+                    generated_by="bypass-run",
+                )
+
 
 class TestRetireAndReRegister:
     def test_the_evidence_counts_again_under_the_replacement(

@@ -130,6 +130,19 @@ _READ_PATH_PROVEN_SEPARATELY = {
     ("plan_retirements", "superseded_by"): "TestPlanLifecycleKeyInteractions",
 }
 
+# Columns a gate reads for DISCLOSURE (not for the support/refute count) that the
+# read path cannot re-derive, so the only guard is the write trigger. ``preregistered``
+# feeds ``proposition_status.post_hoc`` (a reader telling a pre-registered gate from a
+# post-hoc one) but is deliberately excluded from ``compute_plan_id``: whether a plan
+# was registered before the numbers is a historical fact, not a property of the rule,
+# so nothing on read can reconstruct it. Its integrity rests on ``predictions_append_only``
+# (which watches ``preregistered``) alone — the same trigger-not-signature limit ``plan_id``
+# carries. The sweep therefore keeps the guard for such a column and proves the write is
+# refused, rather than dropping the guard and expecting a read-path drop that cannot exist.
+_WRITE_TRIGGER_PROTECTED_ONLY = {
+    ("predictions", "preregistered"): "predictions_append_only",
+}
+
 
 # ---------------------------------------------------------------------------
 # Known-state builders
@@ -288,7 +301,7 @@ def _drop_write_guards(conn: sqlite3.Connection) -> None:
 
 
 def _observe_mutation(
-    tmp_path: Path, root_key: Path, cid: str, mutate,
+    tmp_path: Path, root_key: Path, cid: str, mutate, *, drop_guards: bool = True,
 ) -> tuple[tuple, int]:
     """Apply *mutate(conn)* on a fresh handle inside a savepoint, read the
     proposition, roll back, and return (status_tuple, disclosures_this_read).
@@ -297,12 +310,19 @@ def _observe_mutation(
     re-emitted to the health channel every time and the per-read delta is a
     faithful "did this read disclose" signal. The savepoint is rolled back, so
     the mutation, and the dropped guards, never persist past the observation.
+
+    ``drop_guards`` models the SQL adversary's first move (drop the append-only
+    triggers so the read-path re-derivation, not the trigger, is what must catch
+    the forgery). A column with no read-path re-derivation keeps its guard
+    (``drop_guards=False``): the trigger is its only defence, and the mutation
+    must be refused rather than caught on read.
     """
     with mareforma.open(tmp_path, key_path=root_key) as g:
         conn = g._conn
         conn.execute("SAVEPOINT tamper")
         try:
-            _drop_write_guards(conn)
+            if drop_guards:
+                _drop_write_guards(conn)
             mutate(conn)
             before = _health_count(tmp_path)
             view = g.proposition_status(cid)
@@ -419,6 +439,16 @@ class TestSchemaColumnSweep:
                     )
 
                 swept += 1
+                if (table, name) in _WRITE_TRIGGER_PROTECTED_ONLY:
+                    # A disclosure column the read path cannot re-derive: its guard
+                    # is the write trigger, so keep the trigger in place and assert
+                    # the mutation is refused, rather than dropping the guard and
+                    # expecting a read-path drop that cannot exist for it.
+                    with pytest.raises(sqlite3.Error):
+                        _observe_mutation(
+                            tmp_path, root, cid, mutate, drop_guards=False,
+                        )
+                    continue
                 try:
                     after, disclosures = _observe_mutation(
                         tmp_path, root, cid, mutate
@@ -472,14 +502,59 @@ class TestSchemaColumnSweep:
                 assert column in cols, f"{table}.{column} is not a real column"
                 assert test_class in module, f"{test_class} is not defined"
 
+    def test_the_write_trigger_allowlist_names_real_columns_and_triggers(
+        self, tmp_path: Path,
+    ) -> None:
+        """Every column the sweep protects with a write trigger alone (no read-path
+        re-derivation) is named in ``_WRITE_TRIGGER_PROTECTED_ONLY`` with the trigger
+        that guards it. A named column must be a real column, and its trigger must be
+        installed after an open, so the allowlist cannot quietly excuse a column the
+        read path should have caught but does not."""
+        with mareforma.open(tmp_path, key_path=_bootstrap_key(tmp_path)) as g:
+            installed = {
+                r["name"]
+                for r in g._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+                ).fetchall()
+            }
+            for (table, column), trigger in _WRITE_TRIGGER_PROTECTED_ONLY.items():
+                cols = {
+                    r["name"]
+                    for r in g._conn.execute(
+                        f"PRAGMA table_info({table})"
+                    ).fetchall()
+                }
+                assert column in cols, f"{table}.{column} is not a real column"
+                assert trigger in installed, f"{trigger} is not installed"
+
+    def test_post_hoc_disclosure_rests_on_the_write_trigger(
+        self, tmp_path: Path,
+    ) -> None:
+        """``preregistered`` feeds ``post_hoc`` but is not re-derivable on read, so
+        its guard is ``predictions_append_only``. With the trigger in place the flip
+        that would relabel a post-hoc gate as pre-registered is refused; the schema
+        sweep proves the same for every predictions row. This pins the write-side
+        guarantee the disclosure integrity of ``post_hoc`` rests on."""
+        state = _known_state(tmp_path)
+        with mareforma.open(tmp_path, key_path=state["root"]) as g:
+            cid = state["main_cid"]
+            assert g.proposition_status(cid)["post_hoc"] is True
+            with pytest.raises(sqlite3.IntegrityError, match="prediction_locked"):
+                g._conn.execute(
+                    "UPDATE predictions SET preregistered = 1 "
+                    "WHERE content_id = ?",
+                    (cid,),
+                )
+
 
 class TestTriggersRefuseNaiveWrites:
     """The write-guard half: the append-only triggers refuse an in-place edit.
 
     Re-derivation is the guarantee, but the trigger is what a writer without SQL
-    access hits first. These assert the guards T2 added to ``findings`` and
-    ``evidence_lines`` (which carried none) refuse both an UPDATE and a DELETE,
-    and that every gate-input table carries its guards after an open.
+    access hits first. These assert the append-only guards on ``findings`` and
+    ``evidence_lines`` (which carried none before this release) refuse both an
+    UPDATE and a DELETE, and that every gate-input table carries its guards after
+    an open.
     """
 
     def test_findings_update_and_delete_are_refused(self, tmp_path: Path) -> None:
