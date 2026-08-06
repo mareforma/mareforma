@@ -76,6 +76,18 @@ _ESTIMATES_DIGEST_MISMATCH = "estimates_digest_skipped"
 #     and the read path merely discloses it.
 _SIGNATURE_FAILED = "signature_failed_skipped"
 _UNREGISTERED_SIGNER = "unregistered_signer_skipped"
+# A finding attached to a proposition its own claim does not attest. Neither
+# ``findings.content_id`` nor the ``propositions`` text columns are signed, so a
+# direct-SQL rewrite of either re-points a genuinely signed finding at a
+# different sentence (its estimates and bearing intact, the proposition now
+# reading "TP53 increases apoptosis" where the finding attests BRCA1). The edge
+# is re-derivable: a finding claim's signed ``text`` is the rendering of the
+# proposition it attests, so the live proposition row must render back to it.
+# The restore path already refused this; the read path re-derives it too, so a
+# rewrite drops the whole finding rather than counting evidence for a sentence it
+# never made. Both renderings are normalised, so a benign case/whitespace variant
+# of one proposition is not false-dropped.
+_PROPOSITION_REBIND = "proposition_rebind_skipped"
 _CORRUPTION_REASONS = frozenset(
     {
         _BEARING_RECOMPUTE,
@@ -83,6 +95,7 @@ _CORRUPTION_REASONS = frozenset(
         _PLAN_RULE_REBIND,
         _ESTIMATES_DIGEST_MISMATCH,
         _SIGNATURE_FAILED,
+        _PROPOSITION_REBIND,
     }
 )
 
@@ -285,6 +298,47 @@ def _committed_estimates_digest(
         return value if isinstance(value, str) else None
 
     return cache.resolve("finding_record", claim_id, digest, compute)  # type: ignore[return-value]
+
+
+def _proposition_normalized_text(
+    conn: sqlite3.Connection, content_id: str,
+) -> "str | None":
+    """The normalised rendering of the proposition row keyed by *content_id*.
+
+    A finding's claim ``text`` is the rendering of the proposition it attests, and
+    that edge is re-derivable from the stored proposition columns. Returning the
+    normalised text lets the caller compare it against each finding's signed claim
+    text and catch a row a direct-SQL rewrite re-pointed at a different sentence.
+    Normalisation (:meth:`Proposition.normalized_text`) collapses casefold and
+    whitespace, so a benign case variant of one proposition is not read as a
+    rewritten edge, exactly the equality the restore-side check uses.
+
+    Returns None when the proposition row is absent or its stored columns no
+    longer read back into a valid proposition (a rewrite that broke the row
+    itself); the caller drops every finding under it. Never raises: an unreadable
+    proposition must not deny the whole count.
+    """
+    from . import Proposition
+
+    row = conn.execute(
+        "SELECT subject, relation, object, direction, scope_json, magnitude "
+        "FROM propositions WHERE content_id = ?",
+        (content_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        proposition = Proposition.from_dict({
+            "subject": row["subject"],
+            "relation": row["relation"],
+            "object": row["object"],
+            "direction": row["direction"],
+            "scope": json.loads(row["scope_json"] or "{}"),
+            "magnitude": row["magnitude"],
+        })
+        return proposition.normalized_text()
+    except (ValueError, TypeError):
+        return None
 
 
 def _signer_axis(
@@ -538,9 +592,16 @@ def _derive_units(
     silent: a dropped REFUTING line would manufacture consensus, so every skip is
     returned for the caller's disposition.
     """
+    from . import normalize_token
+
     units: list[_GateLine] = []
     skipped: list[_SkippedLine] = []
     rows = conn.execute(INDEPENDENCE_COUNTS_SQL, (content_id,)).fetchall()
+    # The proposition every finding under this content_id attests, re-derived
+    # once from its stored columns. Each finding's signed claim text must render
+    # this same proposition; a mismatch is a rewritten edge, checked per finding
+    # below. Computed once because all findings here share the one content_id.
+    proposition_text = _proposition_normalized_text(conn, content_id)
     # Group the rows by finding, preserving first-seen order, so the digest can
     # be checked over each finding's full line set before its lines are counted.
     by_finding: dict[str, list] = {}
@@ -554,6 +615,26 @@ def _derive_units(
     for fid in finding_order:
         finding_rows = by_finding[fid]
         head = finding_rows[0]
+        # Per-finding proposition binding. The finding's claim text is the signed
+        # rendering of the proposition it attests, so the live proposition row
+        # must render back to it. A rewrite of the unsigned ``findings.content_id``
+        # column or the unsigned ``propositions`` text columns re-points a genuinely
+        # signed finding at a different sentence with its estimates and bearing
+        # intact; without this check the count would attest evidence for a claim
+        # the finding never made. Both sides are normalised, so a benign case or
+        # whitespace variant is not dropped. A proposition row that no longer reads
+        # back at all (``proposition_text is None``) drops every finding under it.
+        if proposition_text is None or (
+            normalize_token(head["claim_text"]) != proposition_text
+        ):
+            for r in finding_rows:
+                skipped.append(
+                    _SkippedLine(
+                        r["line_id"], _PROPOSITION_REBIND,
+                        {"claim_id": head["claim_id"], "finding_id": fid},
+                    )
+                )
+            continue
         # Per-finding digest check. The signer, plan and estimates_digest are a
         # property of the finding's one claim, so read the signed digest once and
         # recompute it over the finding's live rows. A valid-but-altered estimate
@@ -777,6 +858,14 @@ def verify_gate_inputs_or_refuse(
                 f"({s.detail.get('asserter_keyid')}) but the signature no longer "
                 "verifies; a stored pubkey was swapped or the signature forged, "
                 "and the recovered graph would silently drop the line."
+            )
+        if s.op == _PROPOSITION_REBIND:
+            raise GateInputRefused(
+                f"proposition {content_id} carries a finding "
+                f"({s.detail.get('finding_id')}) whose claim text does not render "
+                "the proposition it is attached to; the finding's content_id or "
+                "the proposition's stored text was rewritten, and the recovered "
+                "graph would attest evidence for a sentence the finding never made."
             )
         raise GateInputRefused(
             f"proposition {content_id} carries an evidence line whose stored "

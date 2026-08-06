@@ -697,6 +697,7 @@ INDEPENDENCE_COUNTS_SQL = (
     " cl.signature_bundle AS signature_bundle, "
     " cl.predicate_payload AS predicate_payload, "
     " cl.status AS claim_status, cl.t_invalid AS t_invalid, "
+    " cl.text AS claim_text, "
     " est.estimate_value, est.effect_type, est.scale, est.p_value, "
     " est.ci_lower, est.ci_upper, est.ci_level, est.n_total, "
     " pr.test_type, pr.direction_of_interest, pr.equivalence_lower, "

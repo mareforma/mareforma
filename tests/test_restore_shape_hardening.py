@@ -44,18 +44,80 @@ evidence_json = {json.dumps(evidence_json)}
 """)
 
 
-# Every section restore() reads out of claims.toml, and the subset that is a
-# table of tables (project_policy is a table of scalars). Parametrizing over
-# these keeps a newly added section from missing the guard silently.
+# Every section restore() runs _validate_section_shape over, and the subset that
+# is a table of tables. project_policy and graph_meta are tables of scalars
+# (fields, not rows), so they carry the section-shape guard but not the per-entry
+# one. Parametrizing over the full set keeps a newly added section from missing
+# the guard silently; test_section_list_matches_restore below fails if this list
+# drifts from what restore actually validates.
+SCALAR_FIELD_SECTIONS = ["project_policy", "graph_meta"]
 ALL_SECTIONS = [
     "validators",
     "claims",
     "replication_verdicts",
     "contradiction_verdicts",
     "rekor_inclusions",
-    "project_policy",
+    *SCALAR_FIELD_SECTIONS,
 ]
-TABLE_OF_TABLE_SECTIONS = [s for s in ALL_SECTIONS if s != "project_policy"]
+TABLE_OF_TABLE_SECTIONS = [s for s in ALL_SECTIONS if s not in SCALAR_FIELD_SECTIONS]
+
+
+def test_section_list_matches_restore() -> None:
+    """The parametrized list must be exactly the set restore validates. restore
+    calls ``_validate_section_shape`` once per section it reads out of
+    claims.toml; if a release adds a section there and not here, the new section
+    ships with no shape guard and a scalar planted in it leaks a raw
+    ``AttributeError`` past the documented ``RestoreError`` contract. Reading the
+    real call sites off the source keeps this list honest without a hand-sync."""
+    import ast
+    import importlib
+    from pathlib import Path as _Path
+
+    restore_module = importlib.import_module("mareforma.db.restore")
+    tree = ast.parse(
+        _Path(restore_module.__file__).read_text(encoding="utf-8")
+    )
+
+    def _calls_validate(node: ast.AST) -> bool:
+        return any(
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id == "_validate_section_shape"
+            for n in ast.walk(node)
+        )
+
+    def _strings(node: ast.AST) -> set[str]:
+        return {
+            n.value
+            for n in ast.walk(node)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+        }
+
+    validated: set[str] = set()
+    for node in ast.walk(tree):
+        # A literal call: _validate_section_shape(data.get("<section>"), ...).
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_validate_section_shape"
+            and node.args
+        ):
+            first = node.args[0]
+            if (
+                isinstance(first, ast.Call)
+                and isinstance(first.func, ast.Attribute)
+                and first.func.attr == "get"
+                and first.args
+                and isinstance(first.args[0], ast.Constant)
+            ):
+                validated.add(first.args[0].value)
+        # The loop that sweeps a tuple of section names through the same check.
+        if isinstance(node, ast.For) and _calls_validate(node):
+            validated |= _strings(node.iter)
+    assert validated == set(ALL_SECTIONS), (
+        f"restore validates {sorted(validated)} but the test covers "
+        f"{sorted(ALL_SECTIONS)}; a section drifted out of the shape sweep"
+    )
 
 
 @pytest.mark.parametrize("section", ALL_SECTIONS)
@@ -74,6 +136,21 @@ def test_integer_section_value_raises_toml_malformed(
     tmp_path: Path, section: str,
 ) -> None:
     _write_claims_toml(tmp_path, f"{section} = 5\n")
+    with pytest.raises(_db.RestoreError) as exc_info:
+        mareforma.restore(tmp_path)
+    assert exc_info.value.kind == "toml_malformed"
+    assert section in str(exc_info.value)
+
+
+@pytest.mark.parametrize("section", ALL_SECTIONS)
+def test_array_section_value_raises_toml_malformed(
+    tmp_path: Path, section: str,
+) -> None:
+    """A section set to a TOML array (a list, not a table) exercises the type
+    guard with a non-dict that is not a scalar: ``.items()`` on a list would
+    leak a raw ``AttributeError``. It must surface as the documented
+    ``RestoreError`` naming the section, the same as a scalar."""
+    _write_claims_toml(tmp_path, f"{section} = [1, 2]\n")
     with pytest.raises(_db.RestoreError) as exc_info:
         mareforma.restore(tmp_path)
     assert exc_info.value.kind == "toml_malformed"

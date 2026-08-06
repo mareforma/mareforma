@@ -850,10 +850,12 @@ class TestValidRepointAttacks:
         self, tmp_path: Path,
     ) -> None:
         """Repointing a foreign finding's ``content_id`` at this proposition
-        would plant a line the proposition never earned. The plan_id is hashed
-        over the content_id too, so the planted line's plan_id no longer hashes
-        under its new proposition: it drops as ``plan_rule_rebind_skipped`` and
-        the count does not inflate."""
+        would plant a line the proposition never earned. The planted finding's
+        signed claim text renders the donor proposition, not this one, so the
+        proposition-binding re-derivation drops it as ``proposition_rebind_skipped``
+        before it can count; the plan_id, hashed over content_id too, is a second
+        backstop (``plan_rule_rebind_skipped``) for a plant whose text coincides.
+        Either way the count does not inflate."""
         state = _known_state(tmp_path)
         cid = state["main_cid"]
         with mareforma.open(tmp_path, key_path=state["root"]) as g:
@@ -870,7 +872,10 @@ class TestValidRepointAttacks:
         assert after["independent_refute"] == before["independent_refute"]
         assert after["lines_skipped"] > before["lines_skipped"]
         ops = [e["op"] for e in _health_ops(tmp_path)]
-        assert "plan_rule_rebind_skipped" in ops
+        assert (
+            "proposition_rebind_skipped" in ops
+            or "plan_rule_rebind_skipped" in ops
+        )
 
     def test_content_id_move_away_is_refused_by_the_write_guard(
         self, tmp_path: Path,
