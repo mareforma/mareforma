@@ -236,6 +236,21 @@ class Proposition:
             f"{self.object}{mag}{scope_s}"
         )
 
+    def normalized_text(self) -> str:
+        """:meth:`text` run through :func:`normalize_token`, for identity-safe
+        comparison.
+
+        ``text`` renders the raw surface strings, so two agents who name one
+        proposition with different casing or whitespace converge on a single row
+        (identity normalises through casefold + whitespace-collapse) yet render
+        two different claim texts. Any check that compares a stored proposition's
+        rendering against a signed finding claim must normalise BOTH sides with
+        this same function, or a benign case variant reads as a rewritten edge and
+        false-refuses. Identity-neutral: it never participates in ``content_id``
+        and is not stored; it exists only for that comparison.
+        """
+        return normalize_token(self.text())
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "subject": self.subject,

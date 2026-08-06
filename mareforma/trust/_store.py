@@ -12,7 +12,7 @@ import json
 import sqlite3
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from mareforma._canonical import canonicalize
 
@@ -327,6 +327,68 @@ def estimate_from_row(row) -> EffectEstimate:
     )
 
 
+def estimates_digest(triples: "Iterable[tuple[str, str, dict]]") -> str:
+    """Digest over a finding's ``(data_id, control_type, estimate)`` content.
+
+    A finding binds this into its claim's signed record so a later read can
+    recompute it from the live rows and detect an altered or deleted estimate,
+    contrast, or evidence line: the digest commits to what the line set *should*
+    contain, so a removed row is caught rather than invisible to an inner join.
+
+    It commits to CONTENT, never to row ids. ``finding_id``, ``line_id``,
+    ``contrast_id``, and ``estimate_id`` are all minted inside
+    :func:`insert_finding` AFTER the claim is signed, so a digest over them could
+    never be reproduced on read.
+
+    A canonically SORTED multiset with explicit counts, not an ordered list.
+    ``evidence_lines`` carries no ordinal column, ``created_at`` is identical
+    across a finding's lines, and ``line_id`` is a random uuid, so write order is
+    not recoverable on read (it survives only as an accident of the query plan,
+    which ``ANALYZE`` changes). Duplicate lines are reachable through the public
+    API, so the per-tuple count is load-bearing: a set loses it and would permit
+    one silent deletion. Each tuple is keyed by its canonical bytes, the keys are
+    sorted, and the digest covers ``[[tuple, count], ...]``.
+    """
+    counts: dict[bytes, int] = {}
+    reps: dict[bytes, list] = {}
+    for data_id, control_type, estimate in triples:
+        rep = [data_id, control_type, estimate]
+        key = canonicalize(rep)
+        counts[key] = counts.get(key, 0) + 1
+        reps.setdefault(key, rep)
+    entries = [[reps[key], counts[key]] for key in sorted(counts)]
+    return hashlib.sha256(canonicalize(entries)).hexdigest()
+
+
+def estimates_digest_from_lines(lines: "Iterable[EvidenceLine]") -> str:
+    """The finding digest computed from its :class:`EvidenceLine` objects.
+
+    The write-time path. Serialises each line's estimate through
+    :meth:`EffectEstimate.to_dict`, the exact serialisation
+    :func:`estimates_digest_from_rows` rebuilds on read, so write and read agree
+    byte-for-byte.
+    """
+    return estimates_digest(
+        (line.data_id, line.contrast.control_type.value, line.estimate.to_dict())
+        for line in lines
+    )
+
+
+def estimates_digest_from_rows(rows: "Iterable[sqlite3.Row]") -> str:
+    """The finding digest recomputed from the live joined rows.
+
+    The read-time path. Rebuilds each estimate through
+    :func:`estimate_from_row` and serialises it with the same
+    :meth:`EffectEstimate.to_dict` the write path uses, so a digest recomputed
+    here equals the one signed at write time iff no estimate, contrast, or line
+    was altered or removed.
+    """
+    return estimates_digest(
+        (r["data_id"], r["control_type"], estimate_from_row(r).to_dict())
+        for r in rows
+    )
+
+
 def retirement_claim_text(plan_id: str, superseded_by: str, reason: str) -> str:
     """The text the retirement attestation signs.
 
@@ -594,6 +656,7 @@ def _count_run_distinct(units: list[tuple[str, str, tuple]]) -> int:
 # (see :func:`_independence_units`).
 INDEPENDENCE_COUNTS_SQL = (
     "SELECT el.line_id AS line_id, el.data_id AS data_id, "
+    " f.finding_id AS finding_id, c.control_type AS control_type, "
     " el.model_lineage AS model_lineage, f.plan_id AS plan_id, "
     " cl.generated_by AS generated_by, "
     " cl.asserter_keyid AS asserter_keyid, cl.claim_id AS claim_id, "

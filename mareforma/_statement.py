@@ -75,6 +75,7 @@ def build_statement(
     created_at: str,
     evidence: dict[str, Any],
     observed_grounding: Optional[dict[str, Any]] = None,
+    finding_record: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Assemble an unsigned in-toto Statement v1 for a claim.
 
@@ -114,6 +115,16 @@ def build_statement(
         never as tampering, a claim signed before this field existed still
         verifies. The declared ``classification`` above is untouched: the
         observed axis is additive and lives in a separate value space.
+    finding_record
+        Optional signed record of the verdict inputs a finding is computed
+        from: the proposition (``content_id``, ``frame_id``), the plan that
+        gated it (``plan_id``), the dataset(s) behind it (``data_ids``), the
+        ``bearing``, and an ``estimates_digest`` over the finding's line set.
+        Same OPTIONAL, VERSIONED posture as ``observed_grounding``: bound into
+        the signed predicate ONLY when present, so a plain claim and every
+        finding written before this field existed sign to byte-identical bytes
+        and keep verifying. Its absence is read as "a pre-record finding, or a
+        claim that is not a finding," never as tampering.
     """
     predicate = {
         "claim_id": claim_id,
@@ -132,6 +143,11 @@ def build_statement(
     # signature and chain hash) identical for every claim that carries none.
     if observed_grounding is not None:
         predicate["observed_grounding"] = observed_grounding
+    # Same conditional inclusion: a finding's verdict inputs enter the signed
+    # bytes only when the caller records them, so a non-finding claim and every
+    # legacy finding keep byte-identical bytes and their existing signatures.
+    if finding_record is not None:
+        predicate["finding_record"] = finding_record
     return {
         "_type": STATEMENT_TYPE,
         "subject": [

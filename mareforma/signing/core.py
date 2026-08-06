@@ -464,6 +464,8 @@ def canonical_statement(
         # Optional/versioned: present in the signed bytes only when the caller
         # recorded an observed verdict. Absent keys leave the bytes unchanged.
         observed_grounding=claim_fields.get("observed_grounding"),
+        # Same posture for a finding's signed verdict inputs.
+        finding_record=claim_fields.get("finding_record"),
     )
     from .._canonical import canonicalize
     return canonicalize(stmt)

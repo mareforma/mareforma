@@ -222,6 +222,7 @@ from .restore import (
     _restore_original_signature_bundle,
     _restore_evidence_domain,
     _parse_observed_grounding,
+    _finding_record_from_bundle,
     _verify_grounding_binding_on_read,
     _verify_replicated_corroboration,
     _validate_section_shape,

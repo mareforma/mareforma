@@ -83,6 +83,31 @@ def _parse_observed_grounding(value) -> dict | None:
     )
 
 
+def _finding_record_from_bundle(bundle_json: "str | None") -> dict | None:
+    """The signed finding record carried in a claim's envelope, or None.
+
+    A finding binds its verdict inputs into its claim's signed statement; unlike
+    ``observed_grounding`` the record has no TOML column of its own, so the chain
+    hash and statement_cid rebuild it from the bundle the signature covers. The
+    envelope's own signature is verified separately on restore
+    (:func:`_verify_claim_signatures_on_restore`), so a bare TOML edit cannot
+    reach this field. Returns None for an unsigned claim, a non-finding claim, a
+    pre-record finding, or a bundle that does not parse: in the last case the
+    rebuilt statement_cid will differ from the stored one and restore refuses.
+    """
+    if not bundle_json:
+        return None
+    try:
+        from mareforma import signing as _signing
+
+        env = json.loads(bundle_json)
+        pred = _signing.claim_predicate_from_envelope(env)
+    except Exception:
+        return None
+    record = pred.get("finding_record") if isinstance(pred, dict) else None
+    return record if isinstance(record, dict) else None
+
+
 def _verify_grounding_binding_on_read(claim_id, record, predicate) -> None:
     """Re-check a GROUNDED verdict's grounded set against the finding's citation.
 
@@ -581,6 +606,14 @@ def restore(
                 }
                 if observed_grounding is not None:
                     chain_fields["observed_grounding"] = observed_grounding
+                # The finding record is signed but has no column, so rebuild it
+                # from the claim's envelope. Absent for non-finding and legacy
+                # rows, keeping those chain links identical.
+                finding_record = _finding_record_from_bundle(
+                    c.get("signature_bundle")
+                )
+                if finding_record is not None:
+                    chain_fields["finding_record"] = finding_record
                 prev_hash = _compute_prev_hash(
                     conn, chain_fields, evidence_dict,
                 )
@@ -641,6 +674,7 @@ def restore(
                         created_at=c_created_at,
                         evidence=evidence_dict,
                         observed_grounding=observed_grounding,
+                        finding_record=finding_record,
                     )
                 ) if c.get("signature_bundle") else None
                 # transparency_logged gates convergence eligibility. Anchor it
@@ -1156,8 +1190,18 @@ def _verify_finding_proposition_binding(conn: sqlite3.Connection) -> None:
     rendering of the proposition it attests. A finding whose proposition does
     not render its own claim text is a rewritten edge and fails the whole
     restore (kind='claim_unverified').
+
+    Both renderings are normalised (:meth:`Proposition.normalized_text`) before
+    they are compared. Identity is content-addressed through casefold and
+    whitespace-collapse, so two agents naming one proposition with different
+    capitalisation converge on a single row whose stored strings are the first
+    writer's, while a later finding's claim text renders the second writer's: raw
+    equality would false-refuse that honest, tamper-free case. Normalising both
+    sides keeps the re-point attack caught (a different subject, relation, object,
+    direction, or magnitude still differs after normalisation) without refusing a
+    benign case variant.
     """
-    from mareforma.trust import Proposition
+    from mareforma.trust import Proposition, normalize_token
 
     rows = conn.execute(
         "SELECT f.finding_id, c.text AS claim_text, p.subject, p.relation, "
@@ -1176,14 +1220,18 @@ def _verify_finding_proposition_binding(conn: sqlite3.Connection) -> None:
                 "scope": json.loads(r["scope_json"] or "{}"),
                 "magnitude": r["magnitude"],
             })
-            expected = _validate_claim_text(proposition.text())
+            # Validate the raw rendering (catches an unreadable proposition), then
+            # compare the normalised forms so a benign case/whitespace variant of
+            # one proposition does not read as a rewritten edge.
+            _validate_claim_text(proposition.text())
+            expected = proposition.normalized_text()
         except (ValueError, TypeError) as exc:
             raise RestoreError(
                 f"The proposition finding {r['finding_id'][:12]}… points at "
                 f"cannot be read back: {exc}",
                 kind="claim_unverified",
             ) from exc
-        if expected != r["claim_text"]:
+        if expected != normalize_token(r["claim_text"]):
             raise RestoreError(
                 f"Finding {r['finding_id'][:12]}… points at a proposition its "
                 "attestation claim does not attest; the finding edge in "
@@ -1911,6 +1959,11 @@ def _verify_claim_signatures_on_restore(
         # field is caught here as a second defense after SIGNED_FIELDS.
         if c.get("statement_cid"):
             from mareforma import _statement as _stmt_mod
+            # The finding record lives only in the signed predicate (it has no
+            # row column of its own), so re-derive it from the verified envelope.
+            # The DSSE signature was checked above, so this predicate is signed
+            # material; a bare TOML edit cannot reach it, and its own digest is
+            # re-checked against the live rows by the gate verifier on restore.
             recomputed_cid = _stmt_mod.statement_cid(
                 _stmt_mod.build_statement(
                     claim_id=claim_id,
@@ -1924,6 +1977,7 @@ def _verify_claim_signatures_on_restore(
                     created_at=expected["created_at"],
                     evidence=row_evidence,
                     observed_grounding=row_grounding,
+                    finding_record=predicate.get("finding_record"),
                 )
             )
             if recomputed_cid != c["statement_cid"]:

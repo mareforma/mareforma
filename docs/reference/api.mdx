@@ -117,7 +117,7 @@ result = mareforma.restore("/path/to/project")
 
 Returned by `mareforma.open()`. Do not instantiate directly.
 
-### `assert_claim(text, *, classification, generated_by, supports, contradicts, source_name, idempotency_key, status, artifact_hash, evidence, seed, signer, predicate_payload, original_signature_bundle, grounding_sensor, observed_grounding)`
+### `assert_claim(text, *, classification, generated_by, supports, contradicts, source_name, idempotency_key, status, artifact_hash, evidence, seed, signer, predicate_payload, original_signature_bundle, grounding_sensor, observed_grounding, finding_record)`
 
 Assert a claim into the graph.
 
@@ -153,6 +153,7 @@ claim_id = graph.assert_claim(
 | `original_signature_bundle` | `str \| None` | `None` | Source-side DSSE envelope preserved by federation-import flows. Validated only for JSON well-formedness at write time, never re-verified. |
 | `grounding_sensor` | `object \| None` | `None` | Optional sensor scoring the claim text against its cited supports. Its result is a declaration: `grounding_score` and `grounding_rationale` bound into the signed evidence vector (`ev_*` / `evidence_json`), the same posture as the rest of that vector. It never writes the observed axis. The two never share a value space, so a reader cannot confuse a self-declaration with a computed result. |
 | `observed_grounding` | `dict \| None` | `None` | Observed-grounding record computed by `observe()` or by `submit_finding`. Bound into the signed statement and the chain hash, stored in the queryable `observed_grounding` column, re-checked on restore. `UNGROUNDED` or `OPAQUE` blocks promotion; absent is read as no verdict recorded and blocks nothing. Sets the grounding axis of `trust_map()`. |
+| `finding_record` | `dict \| None` | `None` | The signed record of a finding's verdict inputs (`content_id`, `frame_id`, `plan_id`, `data_ids`, `bearing`, and a digest over its estimate line set), passed by `submit_finding`. Bound into the signed statement and the chain hash only when present, so a plain claim signs to byte-identical bytes. A verdict re-derives against this copy on read; absent means the claim is not a finding, or predates the record. |
 
 **Returns** `str`: `claim_id` UUID
 

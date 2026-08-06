@@ -38,6 +38,7 @@ from ._store import (
     _gateable_prediction,
     compute_plan_id,
     estimate_from_row,
+    estimates_digest_from_rows,
     plan_retirement,
 )
 
@@ -57,8 +58,18 @@ _UNGATEABLE = "ungateable_plan_skipped"
 _BEARING_RECOMPUTE = "bearing_recompute_skipped"
 _PLAN_REBIND = "plan_rebind_skipped"
 _PLAN_RULE_REBIND = "plan_rule_rebind_skipped"
+# A finding whose signed estimates digest no longer matches the digest recomputed
+# from its live rows: an estimate, contrast, or evidence line was altered or
+# deleted. It is a per-FINDING corruption (the digest is a property of the whole
+# line set), so every line of the finding is skipped under this one reason.
+_ESTIMATES_DIGEST_MISMATCH = "estimates_digest_skipped"
 _CORRUPTION_REASONS = frozenset(
-    {_BEARING_RECOMPUTE, _PLAN_REBIND, _PLAN_RULE_REBIND}
+    {
+        _BEARING_RECOMPUTE,
+        _PLAN_REBIND,
+        _PLAN_RULE_REBIND,
+        _ESTIMATES_DIGEST_MISMATCH,
+    }
 )
 
 
@@ -216,6 +227,50 @@ def _committed_plan_id(
         return pid if isinstance(pid, str) else None
 
     return cache.resolve("finding_plan", claim_id, digest, compute)  # type: ignore[return-value]
+
+
+def _committed_estimates_digest(
+    bundle_json: "str | None", claim_id: str, cache: GateCache,
+) -> "str | None":
+    """The estimates digest the finding's own claim SIGNED, or None.
+
+    A finding binds the digest of its ``(data_id, control_type, estimate)`` line
+    set into its claim's signed statement (the optional, versioned
+    ``finding_record``). Reading it back lets the caller recompute the digest from
+    the live rows and catch an altered or deleted estimate the inner-join count
+    would otherwise miss.
+
+    Returns None when the claim carries no finding record (a non-finding claim, or
+    a finding written before the record existed, both grandfathered), when the
+    bundle is absent or unparseable, when the bundle binds a DIFFERENT claim_id (a
+    genuine envelope stapled from another claim vouches for that claim's line set,
+    not this one, so it is left to the signer/model binding checks to read soft),
+    or when the record names no digest. Never raises: one un-readable bundle must
+    not deny the whole proposition's count. The resolution is a property of the
+    claim, identical across a multi-line finding's rows, so it is memoized once per
+    claim in the shared cache.
+    """
+    digest = _bundle_digest(bundle_json)
+
+    def compute() -> "str | None":
+        if not bundle_json:
+            return None
+        try:
+            from .. import signing as _signing
+
+            env = json.loads(bundle_json)
+            pred = _signing.claim_predicate_from_envelope(env)
+        except Exception:
+            return None
+        if not isinstance(pred, dict) or pred.get("claim_id") != claim_id:
+            return None
+        record = pred.get("finding_record")
+        if not isinstance(record, dict):
+            return None
+        value = record.get("estimates_digest")
+        return value if isinstance(value, str) else None
+
+    return cache.resolve("finding_record", claim_id, digest, compute)  # type: ignore[return-value]
 
 
 def _authentic_signer_keyid(
@@ -417,121 +472,174 @@ def _derive_units(
 ) -> tuple[list[_GateLine], list[_SkippedLine]]:
     """The one verifier: verified lines and skipped lines for a proposition.
 
-    Both entry points call this. Per gated line the bearing is recomputed from
-    the stored estimate against the finding's stored prediction (the gate inputs
-    are persisted precisely so a reader can recompute and catch drift), and the
-    signer and model axes are read from signed material. Two kinds of line are
-    dropped: one whose claim is no longer live (editorially withdrawn, or
-    invalidated by a signed contradiction verdict), and one that no longer
-    reconstructs into a gateable bearing. A plan whose own rule cannot be run is
-    resolved through its retirement before the line is dropped, and its skip
-    names the plan the retirement takes. No drop is silent: a dropped REFUTING
-    line would manufacture consensus, so every skip is returned for the caller's
-    disposition.
+    Both entry points call this. The rows are grouped by finding, because one
+    check is a property of the whole finding, not a single line: the finding
+    binds a digest of its ``(data_id, control_type, estimate)`` line set into its
+    claim's signed record, and a mismatch against the digest recomputed from the
+    live rows (an altered estimate, or a deleted contrast, line, or estimate that
+    changes the multiset) drops every line of that finding. A finding whose claim
+    carries no signed digest predates the record and is grandfathered.
+
+    Per gated line the bearing is recomputed from the stored estimate against the
+    finding's stored prediction (the gate inputs are persisted precisely so a
+    reader can recompute and catch drift), and the signer and model axes are read
+    from signed material. Two kinds of line are dropped: one whose claim is no
+    longer live (editorially withdrawn, or invalidated by a signed contradiction
+    verdict), and one that no longer reconstructs into a gateable bearing. A plan
+    whose own rule cannot be run is resolved through its retirement before the
+    line is dropped, and its skip names the plan the retirement takes. No drop is
+    silent: a dropped REFUTING line would manufacture consensus, so every skip is
+    returned for the caller's disposition.
     """
     units: list[_GateLine] = []
     skipped: list[_SkippedLine] = []
     rows = conn.execute(INDEPENDENCE_COUNTS_SQL, (content_id,)).fetchall()
+    # Group the rows by finding, preserving first-seen order, so the digest can
+    # be checked over each finding's full line set before its lines are counted.
+    by_finding: dict[str, list] = {}
+    finding_order: list[str] = []
     for r in rows:
-        # A claim the graph no longer treats as live contributes no line, in
-        # BOTH directions. ``t_invalid`` moves only behind a signed contradiction
-        # verdict, but ``status`` is a plain column outside the signed payload
-        # that any handle holding the graph may rewrite, so a keyless writer
-        # flipping a refutation to contested would otherwise erase it from the
-        # count with nothing on the read saying so.
-        if r["claim_status"] != "open" or r["t_invalid"] is not None:
-            skipped.append(
-                _SkippedLine(
-                    r["line_id"], _WITHDRAWN,
-                    {
-                        "claim_id": r["claim_id"],
-                        "claim_status": r["claim_status"],
-                        "invalidated": r["t_invalid"] is not None,
-                    },
-                )
-            )
-            continue
-        # Re-derive the plan the line is gated under. The read query gates on the
-        # unsigned ``findings.plan_id`` column, but the finding recorded the plan
-        # it was filed under in its own claim, so the column must match that
-        # record. A mismatch (a direct writer re-pointed the line at another rule
-        # to flip its bearing) or a claim that records no plan is dropped rather
-        # than gated on the column: a repointed REFUTING line would otherwise
-        # read as consensus.
-        committed = _committed_plan_id(r["predicate_payload"], r["claim_id"], cache)
-        if committed != r["plan_id"]:
-            skipped.append(
-                _SkippedLine(
-                    r["line_id"], _PLAN_REBIND,
-                    {
-                        "claim_id": r["claim_id"],
-                        "plan_id": r["plan_id"],
-                        "committed_plan_id": committed,
-                    },
-                )
-            )
-            continue
-        # Recompute the per-line bearing from stored inputs. A row that no longer
-        # reconstructs into a gateable bearing (drift, corruption, or a
-        # direct/foreign writer landing a non-numeric column) is skipped rather
-        # than allowed to raise: one un-gateable line must not deny reads for the
-        # whole proposition. The catch is broad on purpose: the failure can
-        # surface as ValueError (enum / range), TypeError (non-numeric column
-        # reaching math.isfinite), or InconsistentEstimateError (the gate).
-        try:
-            estimate = estimate_from_row(r)
-            prediction, superseded = _gateable_prediction(conn, r)
-            direction = compute_bearing(estimate, prediction).direction
-        except _UngateablePlan as exc:
-            skipped.append(
-                _SkippedLine(
-                    r["line_id"], _UNGATEABLE,
-                    {"plan_id": r["plan_id"], "error": type(exc.__cause__).__name__},
-                )
-            )
-            continue
-        except Exception as exc:
-            skipped.append(
-                _SkippedLine(
-                    r["line_id"], _BEARING_RECOMPUTE, {"error": type(exc).__name__},
-                )
-            )
-            continue
-        # Re-derive the plan_id the gated rule hashes to and confirm it matches
-        # the plan_id keying it. A plan_id is content-addressed over its rule
-        # (test_type, direction_of_interest, the equivalence margins, alpha,
-        # inference_regime; see :func:`compute_plan_id`), so a rewrite of any
-        # rule-bearing ``predictions`` column re-points the row at a rule whose
-        # hash is a different plan_id. The read query gates on the row's columns,
-        # not that binding, so a direct writer could otherwise flip a line's
-        # bearing (a SUPPORTS to a REFUTES) by editing the rule in place. This is
-        # the predictions-table parallel of the ``findings.plan_id`` re-derivation
-        # above: the row the gate runs must be the rule its plan_id names. For a
-        # line gated under a retirement's replacement, the binding checked is the
-        # replacement's own plan_id; the retirement record (restore-verified
-        # against its signed attestation) names it.
-        gated_plan_id = r["plan_id"]
-        if superseded:
-            retirement = plan_retirement(conn, r["plan_id"])
-            gated_plan_id = retirement["superseded_by"] if retirement else None
-        if gated_plan_id is None or (
-            compute_plan_id(content_id, prediction) != gated_plan_id
-        ):
-            skipped.append(
-                _SkippedLine(
-                    r["line_id"], _PLAN_RULE_REBIND,
-                    {"plan_id": r["plan_id"], "gated_plan_id": gated_plan_id},
-                )
-            )
-            continue
-        run_token, model_key = _resolve_signer_and_model(conn, r, cache)
-        # The count rests on a post-hoc plan when the line's own plan was not
-        # pre-registered (a one-shot plan) or a retirement resolved it to a
-        # replacement, whose alpha was chosen with the estimates in view.
-        post_hoc = superseded or not r["preregistered"]
-        units.append(
-            _GateLine(direction, run_token, r["data_id"], model_key, post_hoc)
+        fid = r["finding_id"]
+        if fid not in by_finding:
+            by_finding[fid] = []
+            finding_order.append(fid)
+        by_finding[fid].append(r)
+    for fid in finding_order:
+        finding_rows = by_finding[fid]
+        head = finding_rows[0]
+        # Per-finding digest check. The signer, plan and estimates_digest are a
+        # property of the finding's one claim, so read the signed digest once and
+        # recompute it over the finding's live rows. A valid-but-altered estimate
+        # (the demonstrated ``UPDATE estimate_value`` that flips a verdict) still
+        # rebuilds, so it is caught here even when the bearing recomputes cleanly;
+        # a row that no longer rebuilds at all raises, and is left to the per-line
+        # bearing check below, which discloses it with its concrete error. A
+        # finding whose claim carries no signed digest is grandfathered.
+        signed_digest = _committed_estimates_digest(
+            head["signature_bundle"], head["claim_id"], cache,
         )
+        if signed_digest is not None:
+            try:
+                live_digest = estimates_digest_from_rows(finding_rows)
+            except Exception:
+                live_digest = None
+            if live_digest is not None and live_digest != signed_digest:
+                for r in finding_rows:
+                    skipped.append(
+                        _SkippedLine(
+                            r["line_id"], _ESTIMATES_DIGEST_MISMATCH,
+                            {"claim_id": head["claim_id"], "finding_id": fid},
+                        )
+                    )
+                continue
+        for r in finding_rows:
+            # A claim the graph no longer treats as live contributes no line, in
+            # BOTH directions. ``t_invalid`` moves only behind a signed
+            # contradiction verdict, but ``status`` is a plain column outside the
+            # signed payload that any handle holding the graph may rewrite, so a
+            # keyless writer flipping a refutation to contested would otherwise
+            # erase it from the count with nothing on the read saying so.
+            if r["claim_status"] != "open" or r["t_invalid"] is not None:
+                skipped.append(
+                    _SkippedLine(
+                        r["line_id"], _WITHDRAWN,
+                        {
+                            "claim_id": r["claim_id"],
+                            "claim_status": r["claim_status"],
+                            "invalidated": r["t_invalid"] is not None,
+                        },
+                    )
+                )
+                continue
+            # Re-derive the plan the line is gated under. The read query gates on
+            # the unsigned ``findings.plan_id`` column, but the finding recorded
+            # the plan it was filed under in its own claim, so the column must
+            # match that record. A mismatch (a direct writer re-pointed the line
+            # at another rule to flip its bearing) or a claim that records no plan
+            # is dropped rather than gated on the column: a repointed REFUTING
+            # line would otherwise read as consensus.
+            committed = _committed_plan_id(
+                r["predicate_payload"], r["claim_id"], cache,
+            )
+            if committed != r["plan_id"]:
+                skipped.append(
+                    _SkippedLine(
+                        r["line_id"], _PLAN_REBIND,
+                        {
+                            "claim_id": r["claim_id"],
+                            "plan_id": r["plan_id"],
+                            "committed_plan_id": committed,
+                        },
+                    )
+                )
+                continue
+            # Recompute the per-line bearing from stored inputs. A row that no
+            # longer reconstructs into a gateable bearing (drift, corruption, or a
+            # direct/foreign writer landing a non-numeric column) is skipped
+            # rather than allowed to raise: one un-gateable line must not deny
+            # reads for the whole proposition. The catch is broad on purpose: the
+            # failure can surface as ValueError (enum / range), TypeError
+            # (non-numeric column reaching math.isfinite), or
+            # InconsistentEstimateError (the gate).
+            try:
+                estimate = estimate_from_row(r)
+                prediction, superseded = _gateable_prediction(conn, r)
+                direction = compute_bearing(estimate, prediction).direction
+            except _UngateablePlan as exc:
+                skipped.append(
+                    _SkippedLine(
+                        r["line_id"], _UNGATEABLE,
+                        {
+                            "plan_id": r["plan_id"],
+                            "error": type(exc.__cause__).__name__,
+                        },
+                    )
+                )
+                continue
+            except Exception as exc:
+                skipped.append(
+                    _SkippedLine(
+                        r["line_id"], _BEARING_RECOMPUTE,
+                        {"error": type(exc).__name__},
+                    )
+                )
+                continue
+            # Re-derive the plan_id the gated rule hashes to and confirm it
+            # matches the plan_id keying it. A plan_id is content-addressed over
+            # its rule (test_type, direction_of_interest, the equivalence margins,
+            # alpha, inference_regime; see :func:`compute_plan_id`), so a rewrite
+            # of any rule-bearing ``predictions`` column re-points the row at a
+            # rule whose hash is a different plan_id. The read query gates on the
+            # row's columns, not that binding, so a direct writer could otherwise
+            # flip a line's bearing (a SUPPORTS to a REFUTES) by editing the rule
+            # in place. This is the predictions-table parallel of the
+            # ``findings.plan_id`` re-derivation above: the row the gate runs must
+            # be the rule its plan_id names. For a line gated under a retirement's
+            # replacement, the binding checked is the replacement's own plan_id;
+            # the retirement record (restore-verified against its signed
+            # attestation) names it.
+            gated_plan_id = r["plan_id"]
+            if superseded:
+                retirement = plan_retirement(conn, r["plan_id"])
+                gated_plan_id = retirement["superseded_by"] if retirement else None
+            if gated_plan_id is None or (
+                compute_plan_id(content_id, prediction) != gated_plan_id
+            ):
+                skipped.append(
+                    _SkippedLine(
+                        r["line_id"], _PLAN_RULE_REBIND,
+                        {"plan_id": r["plan_id"], "gated_plan_id": gated_plan_id},
+                    )
+                )
+                continue
+            run_token, model_key = _resolve_signer_and_model(conn, r, cache)
+            # The count rests on a post-hoc plan when the line's own plan was not
+            # pre-registered (a one-shot plan) or a retirement resolved it to a
+            # replacement, whose alpha was chosen with the estimates in view.
+            post_hoc = superseded or not r["preregistered"]
+            units.append(
+                _GateLine(direction, run_token, r["data_id"], model_key, post_hoc)
+            )
     return units, skipped
 
 
@@ -582,6 +690,14 @@ def verify_gate_inputs_or_refuse(
                 f"(plan {s.detail.get('plan_id')}); a rule-bearing predictions "
                 "column was rewritten, and the recovered graph would silently "
                 "drop the line."
+            )
+        if s.op == _ESTIMATES_DIGEST_MISMATCH:
+            raise GateInputRefused(
+                f"proposition {content_id} carries a finding "
+                f"({s.detail.get('finding_id')}) whose estimates no longer match "
+                "the digest its own claim signed; an estimate, contrast, or "
+                "evidence line was altered or deleted, and the recovered graph "
+                "would silently drop the finding's lines."
             )
         raise GateInputRefused(
             f"proposition {content_id} carries an evidence line whose stored "

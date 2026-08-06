@@ -1384,6 +1384,7 @@ def add_claim(
     predicate_payload: dict | None = None,
     original_signature_bundle: str | None = None,
     observed_grounding: dict | None = None,
+    finding_record: dict | None = None,
     strict_promotion: bool = False,
 ) -> str:
     """Insert a new claim and return its claim_id.
@@ -1611,6 +1612,11 @@ def add_claim(
         # statement and its cid are byte-identical to a pre-observer claim.
         if observed_grounding is not None:
             claim_fields["observed_grounding"] = observed_grounding
+        # Bind a finding's verdict inputs into the signed bytes only when the
+        # caller recorded them. Absent → the key never enters claim_fields, so a
+        # non-finding claim and a legacy finding sign to byte-identical bytes.
+        if finding_record is not None:
+            claim_fields["finding_record"] = finding_record
         envelope = _signing.sign_claim(
             claim_fields, signer, evidence=evidence_dict,
         )
@@ -1628,6 +1634,7 @@ def add_claim(
                 created_at=claim_fields["created_at"],
                 evidence=evidence_dict,
                 observed_grounding=observed_grounding,
+                finding_record=finding_record,
             )
         )
 
@@ -1660,6 +1667,11 @@ def add_claim(
     # claims (the chain input is the canonical statement, which omits the key).
     if observed_grounding is not None:
         chain_fields["observed_grounding"] = observed_grounding
+    # The chain binds the finding record the same way, so a finding's verdict
+    # inputs are tamper-evident on the append-only chain too. Absent when there
+    # is none, keeping the chain link identical for non-finding and legacy rows.
+    if finding_record is not None:
+        chain_fields["finding_record"] = finding_record
     # BEGIN IMMEDIATE is only valid when no transaction is currently
     # open. Python's default sqlite3 isolation_level='' auto-starts a
     # transaction before DML, so callers that already wrote within the

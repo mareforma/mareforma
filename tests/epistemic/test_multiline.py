@@ -11,12 +11,15 @@ from pathlib import Path
 
 import pytest
 
+import mareforma
 from mareforma.trust import (
     Contrast,
     ControlType,
+    Direction,
     EvidenceLine,
     FindingPlanForkError,
     InconsistentEstimateError,
+    Proposition,
     Status,
 )
 from mareforma.trust._store import _count_run_distinct
@@ -339,6 +342,51 @@ class TestGeneratedByPrecondition:
             g.assert_finding(h, _superiority(), _smd(-2.6, p=0.003), data_id="dA", generated_by="run1")
         events = _read_health(tmp_path)
         assert not any(e.get("generated_by_default") for e in events)
+
+
+class TestPropositionCaseVariantRestore:
+    def test_a_case_variant_proposition_still_restores(
+        self, tmp_path: Path,
+    ) -> None:
+        """Two agents name one proposition with different capitalisation.
+
+        Identity is content-addressed through casefold, so both findings attach
+        to a single proposition row whose stored strings are the first writer's,
+        while the second finding's claim text renders the second writer's. The
+        restore binding check must normalise both renderings, or it reads this
+        honest, tamper-free graph as a rewritten edge and refuses. No tampering:
+        the whole graph is written through the public API.
+        """
+        upper = Proposition(
+            "BRCA1", "affects", "tumour growth",
+            Direction.DECREASES, {"population": "TNBC"},
+        )
+        lower = Proposition(
+            "brca1", "AFFECTS", "Tumour Growth",
+            Direction.DECREASES, {"population": "tnbc"},
+        )
+        assert upper.content_id() == lower.content_id()
+        assert upper.text() != lower.text()
+        with open_graph(tmp_path) as g:
+            g.assert_finding(
+                upper, _superiority(), _smd(-2.6, p=0.003),
+                data_id="ds1", generated_by="run1",
+            )
+            g.assert_finding(
+                lower, _superiority(), _smd(-2.4, p=0.004),
+                data_id="ds2", generated_by="run2",
+            )
+        (tmp_path / ".mareforma" / "graph.db").unlink()
+        # Before the normalisation fix this raised RestoreError; the case variant
+        # must round-trip cleanly.
+        mareforma.restore(tmp_path)
+        with open_graph(tmp_path) as g:
+            view = g.proposition_status(upper)
+        # Both findings share one signer, so distinct-signer independence
+        # collapses to one; the point is that neither line was dropped by a
+        # false binding refusal on restore.
+        assert view["independent_support"] == 1
+        assert view["lines_skipped"] == 0
 
 
 class TestMultiLineIdempotencyAndFork:

@@ -288,6 +288,7 @@ class EpistemicGraph:
         original_signature_bundle: str | None = None,
         grounding_sensor: "object | None" = None,
         observed_grounding: dict | None = None,
+        finding_record: dict | None = None,
     ) -> str:
         # signer:
         #     Per-call override for the graph's loaded signer. When
@@ -395,6 +396,14 @@ class EpistemicGraph:
             ``observed_grounding`` column. ``UNGROUNDED`` or ``OPAQUE``
             blocks promotion; absent is read as no verdict recorded and
             blocks nothing.
+        finding_record:
+            The signed record of a finding's verdict inputs (content_id,
+            frame_id, plan_id, data_ids, bearing, and the estimates
+            digest), passed by ``submit_finding``. Bound into the signed
+            statement and the chain hash only when present, so a plain
+            claim signs to byte-identical bytes. A verdict re-derives
+            against this copy on read; absent means the claim is not a
+            finding, or predates the record.
 
         Returns
         -------
@@ -556,6 +565,7 @@ class EpistemicGraph:
             predicate_payload=predicate_payload,
             original_signature_bundle=original_signature_bundle,
             observed_grounding=observed_grounding,
+            finding_record=finding_record,
             strict_promotion=self._strict_promotion,
         )
 
@@ -1929,12 +1939,29 @@ class EpistemicGraph:
                     )
                 plan_claim_id = _store.get_plan_claim_id(conn, plan_id)
                 supports = [plan_claim_id] if plan_claim_id else None
+                # The finding's verdict inputs, bound into the SIGNED statement
+                # (see _statement.build_statement). The unsigned predicate_payload
+                # below stays for readers; this is the copy a verdict re-derives
+                # against. estimates_digest commits to the line set's CONTENT so
+                # an altered or deleted estimate is caught on read; it is computed
+                # here, at signing time, over the same lines insert_finding writes.
+                finding_record = {
+                    "content_id": cid,
+                    "frame_id": proposition.frame_id(),
+                    "plan_id": plan_id,
+                    "data_ids": sorted(data_id_set),
+                    "bearing": primary_bearing.direction.value,
+                    "estimates_digest": _store.estimates_digest_from_lines(
+                        evidence_lines
+                    ),
+                }
                 claim_id = self.assert_claim(
                     proposition.text(),
                     generated_by=generated_by,
                     supports=supports,
                     idempotency_key=finding_key,
                     observed_grounding=grounding_signed,
+                    finding_record=finding_record,
                     predicate_payload={
                         # v2 binds the model lineage into the signed observed
                         # record (see grounding_signed above); a v1 finding has
@@ -3091,6 +3118,20 @@ class EpistemicGraph:
                 )
                 if observed_grounding is not None:
                     live_fields["observed_grounding"] = observed_grounding
+                # A finding binds its verdict inputs into the signed payload too;
+                # the record has no row column, so re-derive it from the envelope
+                # itself. Absent for non-finding and pre-record claims, so their
+                # re-derivation stays byte-identical.
+                try:
+                    _pred = _signing.claim_predicate_from_envelope(envelope)
+                    finding_record = (
+                        _pred.get("finding_record") if isinstance(_pred, dict)
+                        else None
+                    )
+                except Exception:
+                    finding_record = None
+                if isinstance(finding_record, dict):
+                    live_fields["finding_record"] = finding_record
                 live_payload = _signing.canonical_statement(live_fields, evidence_dict)
                 if live_payload != payload_bytes:
                     warnings.warn(
