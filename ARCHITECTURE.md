@@ -297,7 +297,30 @@ produces outcomes, so `submit_finding` refuses a plan whose `registered_at`
 post-dates the run's first observed execution (its earliest prior finding under
 the same `generated_by` run token) with `PostHocPlanError`, rather than
 laundering a post-hoc plan as a pre-registration. A one-shot `assert_finding`
-synthesises its plan with no pre-registration claim and never raises it.
+synthesises its plan with no pre-registration claim and never raises it. Both
+write paths re-validate the plan's alpha against the same `(0, 0.5)` bound the
+`Prediction` constructor holds, so a rule reaching persistence past the
+constructor cannot mint an un-gateable plan; that stranded state stays the
+property of a release that predates the bound.
+
+**One boundary for every gate input.** A trust gate decides a proposition's
+status from database rows, and the rows the count reads are denormalized
+columns nothing signed. `mareforma/trust/_gate.py` owns their derivation: one
+verifier (`_derive_units`) reached through two entry points, `verified_gate_inputs`
+for the live read path and `verify_gate_inputs_or_refuse` for restore, so both
+answer from the same checks rather than drifting. It hands back a frozen
+`GateInputs` built behind a module-private token, so a caller cannot feed a raw
+row to the counter by constructing one. Per gated line it recomputes the
+bearing from the stored estimate, reads the signer and model axes from the
+claim's signed envelope, and re-derives the line's gate plan two ways: the
+`findings.plan_id` column must match the plan the finding's own claim recorded,
+and the `predictions` rule columns must hash to the `plan_id` keying them
+(`compute_plan_id`). A line that fails any check is dropped and disclosed on the
+health channel on the read path, and refuses the whole recovery on restore. A
+plan whose own rule cannot run is resolved through its retirement before the
+line drops. `proposition_status` carries a `post_hoc` flag naming a count that
+rests on a replacement or one-shot plan, so a reader can tell a pre-registered
+gate from one chosen after the numbers were seen.
 
 ## Contestation model
 
@@ -528,6 +551,8 @@ cannot bypass them.
 | `rekor_inclusions` | `rekor_inclusions_append_only` + `rekor_inclusions_no_delete` | any UPDATE or DELETE; once Rekor witnessed a claim, the saga's step-3 record is immutable; SQL writers cannot launder forged Rekor coords through the recovery path |
 | `replication_verdicts` | `replication_verdicts_append_only` + `replication_verdicts_no_delete` | UPDATE of signed columns; DELETE of any row; verdicts are signed evidence, not editable records |
 | `contradiction_verdicts` | `contradiction_verdicts_append_only` + `contradiction_verdicts_no_delete` | same; plus the `contradiction_invalidates_older` AFTER INSERT trigger that sets `t_invalid` on the older of two referenced claims (lex-tie-break, idempotent via `WHERE t_invalid IS NULL`) |
+| `findings` | `findings_append_only` + `findings_no_delete` | any UPDATE or DELETE; a finding's row (its `plan_id`, `content_id`, bearing) is written once and gates every evidence line under it, so an in-place edit is refused. These are reconciled onto an existing graph by the same `sqlite_master` text comparison the claims guards use, and their bodies name no per-connection function, so a connection that registered none still compiles an `UPDATE` against the table |
+| `evidence_lines` | `evidence_lines_append_only` + `evidence_lines_no_delete` | any UPDATE or DELETE; a line's `data_id` and model lineage are the distinctness axes the count reads, written once at submit |
 
 ### Signed-fields vs mutable-fields
 
@@ -590,6 +615,7 @@ this is the consolidated view.
 | Replay of a validation envelope onto a different claim | envelope payload-field equality check refuses `claim_id` mismatch |
 | Direct-SQL forgery of a high-trust row served from the read path | verify-on-read: `get_claim` / `query` / `query_provenance` re-verify the asserter bundle (REPLICATED and ESTABLISHED) plus the validation envelope (ESTABLISHED), and hold the bundle's signed predicate against every signed field on the row, so a rewritten field cannot hide under an envelope that still verifies; a forged, tampered or removed signature is excluded from `query` and flagged `verified=false` from `get_claim`, never raising. Legacy unsigned rows (no bundle, no `asserter_keyid`) are verify-exempt |
 | Direct-SQL promotion of a row whose signature still verifies | `support_level` is not signed, so the read path re-derives it: a stored REPLICATED (and the rung an ESTABLISHED climbed through) must show a signature-verified replication verdict naming the claim, or distinct-signer convergence on a shared ESTABLISHED anchor. The same rule refuses the row on restore. A row that cannot show it is excluded and flagged exactly like a signature mismatch |
+| Direct-SQL rewrite of a gate input the count reads (a finding's `plan_id`, a `predictions` rule column, a re-pointed `plan_retirements.superseded_by`) | the `_gate.py` boundary re-derives each on read: `findings.plan_id` against the plan the finding's own claim recorded, and the rule columns against the `compute_plan_id` that keys them. A single-column rewrite that would reflip a bearing drops the line and discloses it rather than moving the count in silence; restore refuses the recovery. The `findings` / `evidence_lines` append-only triggers refuse the naive UPDATE ahead of the read check |
 | Tampered TOML in restore (any signed field, any verdict field, any evidence value) | restore re-derives canonical bytes and refuses on mismatch |
 | SQL-injected parallel root validator | singleton-root invariant: any second self-signed root breaks `is_enrolled` for every key |
 | Rekor log operator mutates / removes / repositions an entry after submit | opt-in inclusion-proof verification re-derives the Merkle root and checks against the log's signed checkpoint |
@@ -601,6 +627,7 @@ this is the consolidated view.
 | Threat mareforma does NOT catch (deliberate scope) | Why |
 |---|---|
 | Colluding agents producing fake `REPLICATED` via two signing keys | distinct `asserter_keyid` is a cryptographic distinctness signal, not a proof of apparatus independence: one party can hold two keys. REPLICATED is a convergence signal, not a truth claim; the real trust anchor is human-validated ESTABLISHED. `single_trust_domain` discloses when all validators share one root, but does not prevent Sybils |
+| A gate input flipped consistently across every table that carries it, with the guarding triggers dropped first | `plan_id` and `preregistered` are not in `SIGNED_FIELDS`, so the read path re-derives `plan_id` against the value the finding's claim recorded (itself guarded only by `claims_signed_fields_no_laundering`) and cannot re-derive `preregistered` at all. A writer with SQL access who drops the append-only triggers and rewrites both `findings.plan_id` and the claim's recorded copy, or flips `preregistered` on a plan, defeats the read check: this binding rests on the triggers plus the claim signature, not on the gate input being a signed field. A single-column edit is still caught |
 | Misclassified `INFERRED` / `ANALYTICAL` / `DERIVED` | declared by the agent, not verified |
 | Colluding log operator publishing two checkpoints to different audiences | needs gossip / witness protocols, out of scope for the single-checkpoint trust model |
 | Compromised log signing key | mareforma trusts whichever pubkey the caller pinned via TOFU; rotation requires deleting the pin |

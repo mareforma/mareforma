@@ -681,9 +681,14 @@ side of the null cannot be re-chosen after the numbers are in), records the
 retirement with its reason, and writes both as signed attestations. The retired
 row is left exactly as registered, and the evidence that stood under it gates
 under the replacement from then on. The replacement is flagged
-`preregistered=0`, because it was registered after the evidence. Only a plan
-whose rule cannot be run is retirable, so retirement never withdraws a line that
-counts; `PlanNotRetirableError` says which rule refused. Full reference:
+`preregistered=0`, because it was registered after the evidence, and
+`proposition_status` reports `post_hoc=True` for any count that then rests on
+it, so a reader can tell a pre-registered gate from one chosen after the numbers
+were seen. Only a plan whose rule cannot be run is retirable, so retirement
+never withdraws a line that counts; `PlanNotRetirableError` says which rule
+refused, and also refuses a retirement that would recover no line at all, or one
+whose replacement plan already exists (which would drop the post-hoc
+disclosure). Full reference:
 [docs.mareforma.com](https://docs.mareforma.com/reference/api) and the
 [Findings](https://docs.mareforma.com/concepts/findings) concept page.
 
