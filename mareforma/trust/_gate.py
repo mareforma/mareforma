@@ -511,10 +511,16 @@ def _derive_units(
         # property of the finding's one claim, so read the signed digest once and
         # recompute it over the finding's live rows. A valid-but-altered estimate
         # (the demonstrated ``UPDATE estimate_value`` that flips a verdict) still
-        # rebuilds, so it is caught here even when the bearing recomputes cleanly;
-        # a row that no longer rebuilds at all raises, and is left to the per-line
-        # bearing check below, which discloses it with its concrete error. A
-        # finding whose claim carries no signed digest is grandfathered.
+        # rebuilds, so it is caught here even when the bearing recomputes cleanly.
+        # A deleted estimate, contrast, or evidence line surfaces as a
+        # NULL-downward row from the count query's LEFT JOINs, which
+        # ``estimates_digest_from_rows`` folds into the multiset as a ``None``
+        # estimate, so the recomputed digest differs and the whole finding is
+        # dropped here. A present estimate that no longer rebuilds at all
+        # (corruption other than deletion) makes the recompute raise, and is
+        # left to the per-line bearing check below, which discloses it with its
+        # concrete error. A finding whose claim carries no signed digest is
+        # grandfathered.
         signed_digest = _committed_estimates_digest(
             head["signature_bundle"], head["claim_id"], cache,
         )

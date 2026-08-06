@@ -382,9 +382,26 @@ def estimates_digest_from_rows(rows: "Iterable[sqlite3.Row]") -> str:
     :meth:`EffectEstimate.to_dict` the write path uses, so a digest recomputed
     here equals the one signed at write time iff no estimate, contrast, or line
     was altered or removed.
+
+    A row whose estimate is absent, an ``effect_estimates``/``contrasts``/
+    ``evidence_lines`` row deleted so the count query's LEFT JOINs yield NULLs
+    downward, contributes a ``None`` estimate in place of a rebuilt one. The
+    write path never signs a ``None`` estimate (a live finding always has its
+    full tree), so the recomputed digest necessarily differs from the signed
+    one and the deletion is caught as a mismatch over the whole finding rather
+    than slipping through: recomputing ``estimate_from_row`` on a NULL row would
+    raise, which would abandon the digest check and let the finding's surviving
+    lines count. ``estimate_value`` is ``NOT NULL`` in the schema, so a NULL
+    there is the reliable signal that the downward join found no estimate.
     """
     return estimates_digest(
-        (r["data_id"], r["control_type"], estimate_from_row(r).to_dict())
+        (
+            r["data_id"],
+            r["control_type"],
+            estimate_from_row(r).to_dict()
+            if r["estimate_value"] is not None
+            else None,
+        )
         for r in rows
     )
 
@@ -647,9 +664,26 @@ def _count_run_distinct(units: list[tuple[str, str, tuple]]) -> int:
 
 
 # The read query behind independence_counts. Kept as a module constant so a
-# regression test can pin its EXPLAIN QUERY PLAN (no full scan of
-# effect_estimates, the join stays keyed through idx_contrast_line and
-# idx_estimate_contrast).
+# regression test can pin its EXPLAIN QUERY PLAN: the count anchors on findings
+# through idx_find_content, and the join stays keyed through idx_contrast_line
+# and idx_estimate_contrast (no full scan of effect_estimates).
+#
+# The row is anchored on ``findings`` and joins DOWNWARD with LEFT JOINs to
+# evidence_lines, contrasts, and effect_estimates. The anchor matters: a finding
+# is the unit the signed estimates digest commits to, so enumerating from the
+# signed findings (rather than inner-joining up from the estimates) keeps a
+# finding visible even when its evidence rows were deleted. An inner join drops
+# the whole finding when any downward row is missing, and for a single-line
+# finding, the modal shape, that erases the finding before its digest can be
+# checked, so a deleted estimate reads as if the line never existed. The LEFT
+# JOINs keep one row per finding with NULLs downward instead, which the
+# per-finding digest check in :func:`mareforma.trust._gate._derive_units` sees
+# and refuses (:func:`estimates_digest_from_rows` handles the NULLs). On an
+# untampered graph every finding has its full line/contrast/estimate tree, so
+# the LEFT JOINs yield exactly the rows the inner joins did and nothing changes.
+# The ``predictions`` and ``claims`` joins stay INNER: they key off the
+# finding's own ``plan_id`` / ``claim_id`` columns, not the deletable downward
+# chain.
 #
 # The withdrawal columns are SELECTed, not filtered on: only a live claim
 # contributes a line, but the exclusion is disclosed rather than applied in SQL
@@ -669,9 +703,9 @@ INDEPENDENCE_COUNTS_SQL = (
     " pr.equivalence_upper, pr.alpha, pr.inference_regime, "
     " pr.preregistered AS preregistered "
     "FROM findings f "
-    "JOIN evidence_lines el ON el.finding_id = f.finding_id "
-    "JOIN contrasts c ON c.line_id = el.line_id "
-    "JOIN effect_estimates est ON est.contrast_id = c.contrast_id "
+    "LEFT JOIN evidence_lines el ON el.finding_id = f.finding_id "
+    "LEFT JOIN contrasts c ON c.line_id = el.line_id "
+    "LEFT JOIN effect_estimates est ON est.contrast_id = c.contrast_id "
     "JOIN predictions pr ON pr.plan_id = f.plan_id "
     "JOIN claims cl ON cl.claim_id = f.claim_id "
     "WHERE f.content_id = ?"

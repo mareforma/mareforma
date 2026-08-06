@@ -3999,102 +3999,126 @@ def _is_seed_attestation(validation_signature: str | None) -> bool:
     return payload_type == _signing.PAYLOAD_TYPE_SEED
 
 
-def _verified_verdict_members(
-    conn: sqlite3.Connection, cache: dict,
-) -> set[str]:
-    """Claim ids named by replication verdicts whose own signatures check out.
+def _gather_verdicts_by_claim(
+    conn: sqlite3.Connection,
+) -> dict[str, list[sqlite3.Row]]:
+    """Every replication verdict grouped by the claim ids it names.
 
-    The only route verdict evidence takes into :class:`_CorroborationIndex`.
-    The index reads the table through here instead of accepting a membership
-    set from its caller, so no caller can hand it rows nobody verified. Restore
-    verifies each verdict before inserting it, and that precondition does not
-    travel to the live read path, where ``replication_verdicts`` is whatever a
-    process with SQL access wrote. Each verdict is therefore held against its
-    issuer here: the keyid must be an enrolled validator whose chain verifies,
-    the bar the recording path applies, and the signature must verify over the
-    DSSE PAE rebuilt from the stored columns. A verdict that fails names nobody.
-
-    Never raises: a forged or unparseable verdict is not evidence, and a read
-    must degrade rather than crash. *cache* is the caller's verify cache, so
-    one issuer's pubkey is read once however many verdicts it signed.
+    One scan, no signature work: it groups the rows so a reader can verify only
+    the verdicts naming the claim in front of it. A single-row read verifies the
+    handful of verdicts that name its own claim rather than every verdict in the
+    graph, the order-N crypto that made a single ``get_claim`` verify one
+    signature per claim in the corroboration set. Grouping is cheap and is shared
+    across a bulk read; the verification is deferred to :func:`_verdict_verifies`
+    and memoized per claim on the index.
     """
-    from mareforma import signing as _signing
-    from mareforma import validators as _validators
-    members: set[str] = set()
+    by_claim: dict[str, list[sqlite3.Row]] = {}
     rows = conn.execute(
         "SELECT verdict_id, cluster_id, member_claim_id, other_claim_id, "
         "method, confidence_json, issuer_keyid, signature "
         "FROM replication_verdicts"
     ).fetchall()
     for v in rows:
-        signer_row = _cached_validator(conn, cache, v["issuer_keyid"])
-        if signer_row is None or not _validators.is_enrolled(
-            conn, v["issuer_keyid"],
-        ):
-            continue
-        record = {
-            "verdict_id": v["verdict_id"],
-            "cluster_id": v["cluster_id"],
-            "member_claim_id": v["member_claim_id"],
-            "other_claim_id": v["other_claim_id"],
-            "method": v["method"],
-        }
-        try:
-            record["confidence"] = json.loads(v["confidence_json"] or "{}")
-            pem = base64.standard_b64decode(signer_row["pubkey_pem"])
-            _signing.public_key_from_pem(pem).verify(
-                v["signature"], _replication_verdict_pae(record),
-            )
-        except Exception:
-            continue
-        members.update(
-            cid for cid in (v["member_claim_id"], v["other_claim_id"])
-            if cid is not None
+        for cid in (v["member_claim_id"], v["other_claim_id"]):
+            if cid is not None:
+                by_claim.setdefault(cid, []).append(v)
+    return by_claim
+
+
+def _verdict_verifies(
+    conn: sqlite3.Connection, cache: dict, v: sqlite3.Row,
+) -> bool:
+    """True iff verdict *v*'s issuer is enrolled and its signature checks out.
+
+    Restore verifies each verdict before inserting it, and that precondition
+    does not travel to the live read path, where ``replication_verdicts`` is
+    whatever a process with SQL access wrote. Each verdict is therefore held
+    against its issuer here: the keyid must be an enrolled validator whose chain
+    verifies, the bar the recording path applies, and the signature must verify
+    over the DSSE PAE rebuilt from the stored columns. A verdict that fails
+    names nobody.
+
+    Never raises: a forged or unparseable verdict is not evidence, and a read
+    must degrade rather than crash. *cache* is the caller's verify cache, so one
+    issuer's pubkey is read once however many verdicts it signed.
+    """
+    from mareforma import signing as _signing
+    from mareforma import validators as _validators
+    signer_row = _cached_validator(conn, cache, v["issuer_keyid"])
+    if signer_row is None or not _validators.is_enrolled(conn, v["issuer_keyid"]):
+        return False
+    record = {
+        "verdict_id": v["verdict_id"],
+        "cluster_id": v["cluster_id"],
+        "member_claim_id": v["member_claim_id"],
+        "other_claim_id": v["other_claim_id"],
+        "method": v["method"],
+    }
+    try:
+        record["confidence"] = json.loads(v["confidence_json"] or "{}")
+        pem = base64.standard_b64decode(signer_row["pubkey_pem"])
+        _signing.public_key_from_pem(pem).verify(
+            v["signature"], _replication_verdict_pae(record),
         )
-    return members
+    except Exception:
+        return False
+    return True
 
 
-def _verified_peers_by_anchor(
-    conn: sqlite3.Connection, cache: dict,
-) -> dict[str, set[tuple[str, str | None]]]:
-    """ESTABLISHED anchors mapped to the signed peers citing them.
+def _qualifying_peer_exists(
+    conn: sqlite3.Connection,
+    cache: dict,
+    anchor_id: str,
+    own_keyid: str,
+    own_hash: str | None,
+    strict_row: bool,
+) -> bool:
+    """True iff a signed, distinct peer on *anchor_id* backs the served row's rung.
 
-    The only route peer evidence takes into :class:`_CorroborationIndex`, for
-    the same reason the verdict half has one: ``asserter_keyid`` is an unsigned
-    TEXT column, so "a peer carrying a distinct, non-NULL keyid" is satisfied by
-    any string on a row nobody signed. A corroborating peer therefore clears the
-    bar the served row clears, :func:`_verify_participant_bundle_on_read`: the
-    bundle names the same keyid, binds this row's signed fields, and verifies
-    under an enrolled signer's pubkey when there is one. Restore is not exposed
-    to this (it refuses mixed-mode reconstruction before the index runs), and
-    that precondition does not travel to the live read path.
+    Path (b): the served row shares the ESTABLISHED *anchor_id* with a peer
+    carrying a distinct, non-NULL asserter_keyid, a different artifact hash, and
+    a grounding verdict that permits promotion, whose own bundle verifies. The
+    disqualifiers, the peer's keyid must differ from the served row's, its hash
+    must not be byte-identical (the same result twice is not corroboration), and
+    under a strict-promotion policy it must carry data, are pushed INTO the query
+    so a signature is verified only for a peer that already qualifies, and the
+    scan stops at the first peer whose bundle verifies. The old shape verified
+    every peer in the graph up front and applied these filters in Python after,
+    which turned one single-row read into order-N signature work.
 
-    Each anchor maps to the (keyid, artifact_hash) pairs of the eligible peers.
-    A keyid other than the row's own necessarily belongs to another claim, so
-    this subsumes a "peer is a different claim" guard. The grounding gate
-    mirrors the live peer clause; *cache* is the caller's verify cache, so a
+    ``asserter_keyid`` is an unsigned column, so a peer clears the same bar the
+    served row clears, :func:`_verify_participant_bundle_on_read`: its bundle
+    names the same keyid, binds its own signed fields, and verifies under an
+    enrolled signer's pubkey when there is one. Never raises: a peer that does
+    not verify is skipped, not fatal. *cache* is the caller's verify cache, so a
     peer that is also a served row is verified once.
     """
-    peers: dict[str, set[tuple[str, str | None]]] = {}
-    for e in conn.execute(
-        "SELECT c.*, j.value AS anchor_id "
-        "FROM claims c, json_each(c.supports_json) j "
+    # Non-row-specific filters (anchor is ESTABLISHED, peer is signed, peer's
+    # grounding promotes) and the row-specific disqualifiers (distinct keyid,
+    # distinct hash, strict-mode data) are both in SQL, so verification is the
+    # last filter. own_hash NULL keeps every peer on the hash clause (the served
+    # row carried no artifact to collide with), matching the Python original.
+    sql = (
+        "SELECT c.* FROM claims c, json_each(c.supports_json) j "
         "JOIN claims a ON a.claim_id = j.value "
         "AND a.support_level = 'ESTABLISHED' "
-        "WHERE c.asserter_keyid IS NOT NULL "
+        "WHERE j.value = ? "
+        "AND c.asserter_keyid IS NOT NULL "
         "AND c.signature_bundle IS NOT NULL "
+        "AND c.asserter_keyid != ? "
+        "AND (? IS NULL OR c.artifact_hash IS NULL OR c.artifact_hash != ?) "
         "AND (c.observed_grounding IS NULL OR ("
         "  CASE WHEN json_valid(c.observed_grounding) "
         "  THEN json_extract(c.observed_grounding, '$.grounding') "
         "  ELSE NULL END) = 'GROUNDED')"
-    ):
-        peer = dict(e)
-        if not _verify_participant_bundle_on_read(conn, peer, cache):
-            continue
-        peers.setdefault(peer["anchor_id"], set()).add(
-            (peer["asserter_keyid"], peer["artifact_hash"])
-        )
-    return peers
+    )
+    params: list[Any] = [anchor_id, own_keyid, own_hash, own_hash]
+    if strict_row:
+        sql += " AND c.artifact_hash IS NOT NULL"
+    for e in conn.execute(sql, params):
+        if _verify_participant_bundle_on_read(conn, dict(e), cache):
+            return True
+    return False
 
 
 class _CorroborationIndex:
@@ -4117,14 +4141,14 @@ class _CorroborationIndex:
         :func:`_claim_promotes` is the difference between the two, the same
         predicate the write applies, so a gate added there reaches this path.
         Neither "enrolled" nor "signed" is assumed of the table: the index
-        gathers its own evidence through :func:`_verified_verdict_members`,
-        which verifies every verdict it counts.
+        gathers its own evidence through :func:`_verdict_verifies`, which
+        verifies every verdict it counts.
     (b) Automatic convergence: the claim shares an ESTABLISHED anchor in its
         signed ``supports`` with a peer carrying a distinct, non-NULL
         asserter_keyid, a different artifact hash, and a grounding verdict that
         permits promotion (on both sides). The peer's keyid is not taken off
-        its column either: :func:`_verified_peers_by_anchor` holds every peer
-        against its own signature bundle first.
+        its column either: :func:`_qualifying_peer_exists` holds every peer it
+        examines against its own signature bundle first.
 
     Path (b) checks durable, signed facts only. It deliberately does NOT
     re-apply the live promotion's point-in-time filters (peer/anchor still
@@ -4145,9 +4169,14 @@ class _CorroborationIndex:
     grandfathered. Born-ESTABLISHED seed claims never climbed the ladder and are
     exempt too.
 
-    Both probes are answered once for the whole graph rather than once per row:
-    neither has an index that can serve it, so per-row probing costs a full scan
-    each time and the caller's cost becomes quadratic in graph size.
+    Both probes gather and verify only the evidence a served row needs, not the
+    whole graph. The verdict half groups the table once (one scan, no crypto)
+    and verifies only the verdicts naming the row's own claim, memoized per
+    claim. The peer half runs one narrowed, anchor-keyed query per (anchor, own
+    keyid, own hash, strict) it is asked about, with the disqualifiers pushed
+    into SQL and the signature verified last, memoized on that key. A single-row
+    read therefore verifies a handful of signatures instead of one per claim in
+    the corroboration set; a bulk read reuses the memos and stays amortised.
     """
 
     def __init__(self, conn: sqlite3.Connection, cache: dict) -> None:
@@ -4157,11 +4186,56 @@ class _CorroborationIndex:
         # written under the strict rule before the second declaration. The
         # helper answers None when the flag is undeclared, which is the same
         # "no cutoff" the level path needs.
+        self._conn = conn
+        self._cache = cache
         self._strict_since = project_policy_declared_at(
             get_project_policy(conn)
         )[1]
-        self._verdict_claim_ids = _verified_verdict_members(conn, cache)
-        self._peers_by_anchor = _verified_peers_by_anchor(conn, cache)
+        # Verdicts grouped by claim, gathered lazily on the first verdict check
+        # and verified per claim on demand. Peer qualification is memoized per
+        # (anchor, own_keyid, own_hash, strict_row): the disqualifiers are the
+        # only row-varying inputs, so the memo reuses a result across every row
+        # that shares them.
+        self._verdicts_by_claim: dict[str, list[sqlite3.Row]] | None = None
+        self._verdict_backs: dict[str, bool] = {}
+        self._peer_backs: dict[tuple[str, str, str | None, bool], bool] = {}
+
+    def _verdict_names_claim(self, claim_id: str) -> bool:
+        """True iff a verified replication verdict names *claim_id*.
+
+        The grouped table is gathered once (no crypto) and the verdicts naming
+        this claim are verified on first ask, memoized so a bulk read verifies
+        each claim's verdicts at most once.
+        """
+        cached = self._verdict_backs.get(claim_id)
+        if cached is not None:
+            return cached
+        if self._verdicts_by_claim is None:
+            self._verdicts_by_claim = _gather_verdicts_by_claim(self._conn)
+        result = any(
+            _verdict_verifies(self._conn, self._cache, v)
+            for v in self._verdicts_by_claim.get(claim_id, ())
+        )
+        self._verdict_backs[claim_id] = result
+        return result
+
+    def _anchor_has_qualifying_peer(
+        self,
+        anchor_id: str,
+        own_keyid: str,
+        own_hash: str | None,
+        strict_row: bool,
+    ) -> bool:
+        """Memoized path-(b) check for one anchor and one served row's terms."""
+        key = (anchor_id, own_keyid, own_hash, strict_row)
+        cached = self._peer_backs.get(key)
+        if cached is not None:
+            return cached
+        result = _qualifying_peer_exists(
+            self._conn, self._cache, anchor_id, own_keyid, own_hash, strict_row,
+        )
+        self._peer_backs[key] = result
+        return result
 
     def failure(self, row) -> str | None:
         """Name why *row*'s stored support_level is unbacked, or None if it is.
@@ -4185,7 +4259,7 @@ class _CorroborationIndex:
             self._strict_since is not None
             and row["created_at"] > self._strict_since
         )
-        if row["claim_id"] in self._verdict_claim_ids and _claim_promotes(
+        if self._verdict_names_claim(row["claim_id"]) and _claim_promotes(
             asserter_keyid=row["asserter_keyid"],
             transparency_logged=row["transparency_logged"],
             observed_grounding=row["observed_grounding"],
@@ -4200,17 +4274,17 @@ class _CorroborationIndex:
         except (ValueError, TypeError):
             supports = []
         # A peer that produced byte-identical output is the same result twice,
-        # not corroboration, so an equal non-NULL artifact_hash disqualifies it.
+        # not corroboration, so an equal non-NULL artifact_hash disqualifies it
+        # (pushed into the anchor query). The scan stops at the first anchor with
+        # a qualifying, verifying peer.
         own_keyid = row["asserter_keyid"]
         corroborated = _observed_grounding_promotes(
             row["observed_grounding"]
         ) and any(
-            keyid != own_keyid
-            and (not strict_row or artifact_hash is not None)
-            and (artifact_hash is None or own_hash is None
-                 or artifact_hash != own_hash)
+            self._anchor_has_qualifying_peer(
+                anchor, own_keyid, own_hash, strict_row,
+            )
             for anchor in supports
-            for keyid, artifact_hash in self._peers_by_anchor.get(anchor, ())
         )
         return None if corroborated else "uncorroborated"
 
@@ -4675,6 +4749,7 @@ def list_claims(
     status: str | None = None,
     source_name: str | None = None,
     generated_by: str | None = None,
+    limit: int | None = None,
 ) -> list[dict]:
     """Return all claims, optionally filtered, each carrying ``verified``.
 
@@ -4687,7 +4762,15 @@ def list_claims(
     the row must act on the flag; :func:`refuse_unverified_claims` is the shared
     gate for that. One verify cache per call, so a large graph pays one
     verification per distinct signature.
+
+    ``limit`` caps the number of rows returned (the newest by ``created_at``),
+    so a caller can bound the verify-on-read work on a large graph the way
+    ``query`` and ``search`` already do. Omitted, every matching row is returned
+    as before. A negative limit is a caller error and is refused; zero returns
+    no rows.
     """
+    if limit is not None:
+        _require_non_negative_limit(limit, "list_claims")
     conditions: list[str] = []
     params: list[Any] = []
     if status is not None:
@@ -4701,9 +4784,14 @@ def list_claims(
         params.append(generated_by)
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    limit_clause = ""
+    if limit is not None:
+        limit_clause = " LIMIT ?"
+        params.append(limit)
     try:
         rows = conn.execute(
-            f"SELECT {_CLAIM_SELECT} FROM claims {where} ORDER BY created_at DESC",
+            f"SELECT {_CLAIM_SELECT} FROM claims {where} "
+            f"ORDER BY created_at DESC{limit_clause}",
             params,
         ).fetchall()
     except sqlite3.OperationalError as exc:
