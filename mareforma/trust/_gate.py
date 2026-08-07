@@ -29,7 +29,7 @@ import hashlib
 import json
 import sqlite3
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, Callable
 
 from .bearing import BearingDirection, compute_bearing
 from ._store import (
@@ -341,12 +341,26 @@ def _proposition_normalized_text(
         return None
 
 
+def _row_get(row: Any, key: str, default: Any = None) -> Any:
+    """``row[key]`` when the row carries it, else *default*.
+
+    ``sqlite3.Row`` raises ``IndexError`` on an absent key rather than returning
+    None, and not every caller builds its rows from the same SELECT (restore
+    assembles its own). A column added for one path must not break another.
+    """
+    try:
+        return row[key]
+    except (IndexError, KeyError, TypeError):
+        return default
+
+
 def _signer_axis(
     conn: sqlite3.Connection,
     claim_id: str,
     asserter_keyid: "str | None",
     generated_by: str,
     bundle_json: "str | None",
+    statement_cid: "str | None" = None,
 ) -> "tuple[str | None, str | None, str | None]":
     """Classify a line's distinct-signer / run axis: ``(run_token, keyid, skip)``.
 
@@ -386,6 +400,16 @@ def _signer_axis(
     could not be authenticated), the fail-closed disposition.
     """
     if asserter_keyid is None:
+        # The legacy grandfather, but only for a claim that was never signed.
+        # ``statement_cid`` is written at signing time and is not cleared by
+        # nulling the keyid and the bundle, so it distinguishes "unsigned from
+        # birth" from "de-signed just now". Without this, the cheapest forgery on
+        # the whole read path was `UPDATE claims SET asserter_keyid=NULL,
+        # signature_bundle=NULL`: it converted a signed finding into a legacy one
+        # and every new check exempted it, measured taking a proposition from
+        # CONTESTED to a clean PRELIMINARY with nothing disclosed.
+        if statement_cid:
+            return (None, None, _UNREGISTERED_SIGNER)
         return (f"g:{generated_by}", None, None)
     if not bundle_json:
         return (None, None, _UNREGISTERED_SIGNER)
@@ -400,7 +424,13 @@ def _signer_axis(
         if pred.get("claim_id") != claim_id:
             return (None, None, _UNREGISTERED_SIGNER)
         signer_row = _validators.get_validator(conn, asserter_keyid)
-        if signer_row is None:
+        # Presence in the table is not enrolment. A row can be INSERTed directly;
+        # ``is_enrolled`` walks the chain back to the self-signed root, which is
+        # what "registered" means everywhere else in this codebase
+        # (``_verdict_verifies`` and the CLI both use it). Measured: one INSERT of
+        # a junk envelope took a proposition from PRELIMINARY to CONVERGENT
+        # without forging a single signature.
+        if signer_row is None or not _validators.is_enrolled(conn, asserter_keyid):
             return (None, None, _UNREGISTERED_SIGNER)
         pem = base64.standard_b64decode(signer_row["pubkey_pem"])
         pub = _signing.public_key_from_pem(pem)
@@ -409,6 +439,34 @@ def _signer_axis(
         return (f"k:{asserter_keyid}", asserter_keyid, None)
     except Exception:
         return (None, None, _UNREGISTERED_SIGNER)
+
+
+def signed_predicate(bundle_json: "str | None", claim_id: str) -> "dict | None":
+    """The claim's VERIFIED signed predicate, or None when there isn't one.
+
+    ``_signer_axis`` already parses this envelope and holds the predicate, then
+    discards it. Two checks downstream (the finding's plan and the proposition
+    rendering it attests) were re-deriving those values from ``predicate_payload``
+    and ``claims.text`` instead: unsigned columns sitting beside the signed copy.
+    Rewriting the column and its unsigned twin together defeated both. This
+    returns the signed side so a check can compare against what was actually
+    signed rather than against another mutable column.
+
+    Structural failure returns None, so a caller falls back to its previous
+    behaviour rather than raising on a legacy or unsigned claim.
+    """
+    if not bundle_json:
+        return None
+    try:
+        from .. import signing as _signing
+
+        env = json.loads(bundle_json)
+        pred = _signing.claim_predicate_from_envelope(env)
+        if pred.get("claim_id") != claim_id:
+            return None
+        return pred
+    except Exception:
+        return None
 
 
 def _is_human_signer(conn: sqlite3.Connection, keyid: str) -> bool:
@@ -547,7 +605,7 @@ def _resolve_signer_and_model(
     def compute() -> "tuple[str | None, tuple, str | None]":
         run_token, keyid, skip = _signer_axis(
             conn, claim_id, row["asserter_keyid"], row["generated_by"],
-            row["signature_bundle"],
+            row["signature_bundle"], _row_get(row, "statement_cid"),
         )
         if skip is not None:
             return (None, (), skip)
@@ -624,8 +682,20 @@ def _derive_units(
         # the finding never made. Both sides are normalised, so a benign case or
         # whitespace variant is not dropped. A proposition row that no longer reads
         # back at all (``proposition_text is None``) drops every finding under it.
+        #
+        # The finding's side comes from the SIGNED predicate, not from
+        # ``claims.text``. Both columns are mutable, so comparing one against the
+        # other only catches an attacker who rewrites one of them: rewriting the
+        # proposition row and ``claims.text`` together passed this check with the
+        # verdict intact and nothing disclosed. Falling back to the column when a
+        # claim carries no verifiable envelope keeps legacy and unsigned findings
+        # reading exactly as before.
+        _signed = signed_predicate(head["signature_bundle"], head["claim_id"])
+        _finding_text = (
+            _signed.get("text") if _signed is not None else head["claim_text"]
+        )
         if proposition_text is None or (
-            normalize_token(head["claim_text"]) != proposition_text
+            normalize_token(_finding_text or "") != proposition_text
         ):
             for r in finding_rows:
                 skipped.append(
@@ -649,23 +719,50 @@ def _derive_units(
         # left to the per-line bearing check below, which discloses it with its
         # concrete error. A finding whose claim carries no signed digest is
         # grandfathered.
+        #
+        # A row that no longer rebuilds must not exempt its SIBLINGS. Treating the
+        # recompute failure as "no live digest" left the signed digest unchecked
+        # for the whole finding, so corrupting one line bought a free edit of the
+        # rest: measured on a three-line finding, the refutation vanished and the
+        # only disclosure named a different line.
+        #
+        # Each row is digested on its own so one bad row cannot suppress the
+        # comparison. On a mismatch the row that actually failed is disclosed with
+        # its concrete error by the per-line bearing check below, and its siblings
+        # are dropped here. The reader needs both: which row broke, and that the
+        # finding as a whole no longer matches what was signed.
         signed_digest = _committed_estimates_digest(
             head["signature_bundle"], head["claim_id"], cache,
         )
         if signed_digest is not None:
+            unrebuildable = set()
+            for r in finding_rows:
+                try:
+                    estimates_digest_from_rows([r])
+                except Exception:
+                    unrebuildable.add(r["line_id"])
             try:
                 live_digest = estimates_digest_from_rows(finding_rows)
             except Exception:
                 live_digest = None
-            if live_digest is not None and live_digest != signed_digest:
-                for r in finding_rows:
+            if live_digest != signed_digest:
+                intact = [
+                    r for r in finding_rows if r["line_id"] not in unrebuildable
+                ]
+                for r in intact:
                     skipped.append(
                         _SkippedLine(
                             r["line_id"], _ESTIMATES_DIGEST_MISMATCH,
                             {"claim_id": head["claim_id"], "finding_id": fid},
                         )
                     )
-                continue
+                # Rows that failed to rebuild fall through so the bearing check
+                # names the concrete error. Nothing else in this finding counts.
+                finding_rows = [
+                    r for r in finding_rows if r["line_id"] in unrebuildable
+                ]
+                if not finding_rows:
+                    continue
         for r in finding_rows:
             # A claim the graph no longer treats as live contributes no line, in
             # BOTH directions. ``t_invalid`` moves only behind a signed
@@ -692,8 +789,20 @@ def _derive_units(
             # at another rule to flip its bearing) or a claim that records no plan
             # is dropped rather than gated on the column: a repointed REFUTING
             # line would otherwise read as consensus.
-            committed = _committed_plan_id(
-                r["predicate_payload"], r["claim_id"], cache,
+            # Prefer the SIGNED record. ``predicate_payload`` is an unsigned
+            # column sitting beside the signed copy, so comparing
+            # ``findings.plan_id`` against it only catches a writer who rewrites
+            # one of the two: rewriting both together re-pointed a refuting line
+            # at a supporting rule and read CONVERGENT with nothing disclosed.
+            # The unsigned payload stays the fallback for a finding written
+            # before the signed record existed.
+            _signed_rec = signed_predicate(r["signature_bundle"], r["claim_id"])
+            _signed_plan = (
+                (_signed_rec.get("finding_record") or {}).get("plan_id")
+                if _signed_rec is not None else None
+            )
+            committed = _signed_plan if _signed_plan is not None else (
+                _committed_plan_id(r["predicate_payload"], r["claim_id"], cache)
             )
             if committed != r["plan_id"]:
                 skipped.append(

@@ -248,8 +248,27 @@ class Proposition:
         this same function, or a benign case variant reads as a rewritten edge and
         false-refuses. Identity-neutral: it never participates in ``content_id``
         and is not stored; it exists only for that comparison.
+
+        Scope is ordered by the NORMALISED key, not the raw one. ``text`` sorts
+        raw, so ``{"Population": ..., "condition": ...}`` and
+        ``{"population": ..., "condition": ...}`` render their pairs in opposite
+        orders; normalising afterwards cannot undo an ordering, and the two
+        agree on ``content_id`` precisely because identity ignores case. Sorting
+        on the normalised key is what makes this function agree with the identity
+        it exists to defend.
         """
-        return normalize_token(self.text())
+        scope = ", ".join(
+            f"{normalize_token(k)}={normalize_token(v)}"
+            for k, v in sorted(
+                self.scope.items(), key=lambda kv: normalize_token(kv[0]),
+            )
+        )
+        mag = f" ({normalize_token(self.magnitude)})" if self.magnitude else ""
+        scope_s = f" [{scope}]" if scope else ""
+        return normalize_token(
+            f"{self.subject} {self.relation} {self.direction.value} "
+            f"{self.object}{mag}{scope_s}"
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {

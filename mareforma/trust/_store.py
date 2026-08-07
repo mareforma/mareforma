@@ -695,6 +695,10 @@ INDEPENDENCE_COUNTS_SQL = (
     " cl.generated_by AS generated_by, "
     " cl.asserter_keyid AS asserter_keyid, cl.claim_id AS claim_id, "
     " cl.signature_bundle AS signature_bundle, "
+    # Carries "this claim was signed once" independently of the bundle, so the
+    # signer axis can tell a genuinely unsigned legacy claim from one whose
+    # signature was stripped by a direct writer to reach the legacy grandfather.
+    " cl.statement_cid AS statement_cid, "
     " cl.predicate_payload AS predicate_payload, "
     " cl.status AS claim_status, cl.t_invalid AS t_invalid, "
     " cl.text AS claim_text, "
