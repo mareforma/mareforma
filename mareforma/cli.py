@@ -1100,13 +1100,26 @@ def _verify_claim(target: str, as_json: bool, redact_home: bool) -> int:
         text = json.dumps(payload, indent=2)
         click.echo(_redact_home(text) if redact_home else text)
 
-    def unverifiable(reason: str) -> int:
+    def unverifiable(reason: str, tmap=None) -> int:
+        # *tmap* is passed when the claim was located and only its signature
+        # could not be checked: the auditor gets the same map the verified and
+        # tampered paths print, because "who signed this and what backs it" is
+        # exactly what they need to decide whether to chase the missing key.
+        # The earlier exits (no project, claim not found) have no map to print.
         if as_json:
-            emit_json({"target": target, "target_kind": "claim",
-                       "verdict": "unverifiable",
-                       "exit_code": _VERIFY_UNVERIFIABLE, "reason": reason})
+            payload = {
+                "target": target, "target_kind": "claim",
+                "verdict": "unverifiable",
+                "exit_code": _VERIFY_UNVERIFIABLE, "reason": reason,
+            }
+            if tmap is not None:
+                payload["trust_map"] = tmap.to_dict()
+            emit_json(payload)
         else:
             _err(reason)
+            if tmap is not None:
+                _info("")
+                _echo_trust_map(tmap, redact_home=redact_home)
         return _VERIFY_UNVERIFIABLE
 
     root = _discover_root()
@@ -1124,7 +1137,12 @@ def _verify_claim(target: str, as_json: bool, redact_home: bool) -> int:
                     f"claim {target!r} not found in this project; cannot verify"
                 )
 
+            # Two lists, because the exit-code contract splits on exactly this:
+            # *problems* is a definite NO (exit 1), something was checked and
+            # failed; *unchecked* is missing material (exit 2), something could
+            # not be checked at all. A CI gate keys on the difference.
             problems: list[str] = []
+            unchecked: list[str] = []
             # Signature re-verification. Two complementary checks:
             #  (a) the tier-gated read flag (ESTABLISHED validation envelope /
             #      REPLICATED participant bundle), and
@@ -1144,13 +1162,21 @@ def _verify_claim(target: str, as_json: bool, redact_home: bool) -> int:
             # under a keyid that was never enrolled, the sixth read surface that
             # said something false about a rejected row. A named signer that does
             # not authenticate is not a clean verdict.
+            #
+            # It is not a tamper verdict either. Nothing was checked here, so
+            # nothing was caught: the auditor is missing the signer's pubkey,
+            # which is the exit-2 case, the same reading the bundle path gives a
+            # bundle it has no key for. Calling it exit 1 told a CI gate a claim
+            # was tampered on the strength of a key the project never enrolled.
             if claim.get("signature_bundle") and claim.get("asserter_keyid"):
                 from mareforma.validators import is_enrolled
 
                 if not is_enrolled(graph._conn, claim["asserter_keyid"]):
-                    problems.append(
+                    unchecked.append(
                         "signer keyid is not an enrolled validator, so the "
-                        "signature cannot be authenticated from public material"
+                        "signature cannot be authenticated from public "
+                        "material. This is unverifiable, not a failure; enroll "
+                        "the signer's key to reach a verdict."
                     )
 
             # Grounding→citation binding re-check. Bind on ``grounded_sources``
@@ -1179,6 +1205,10 @@ def _verify_claim(target: str, as_json: bool, redact_home: bool) -> int:
             tmap = build_trust_map(graph._conn, target)
             tmap_dict = tmap.to_dict() if tmap else None
 
+            # A definite NO outranks missing material: a claim that is both
+            # tampered and signed by an unenrolled key is tampered. Reporting
+            # the softer verdict would let a gate that warns on exit 2 wave
+            # through a failure the check actually caught.
             if problems:
                 if as_json:
                     emit_json({"target": target, "target_kind": "claim",
@@ -1190,6 +1220,9 @@ def _verify_claim(target: str, as_json: bool, redact_home: bool) -> int:
                     _info("")
                     _echo_trust_map(tmap, redact_home=redact_home)
                 return _VERIFY_FAIL
+
+            if unchecked:
+                return unverifiable("; ".join(unchecked), tmap)
 
             if as_json:
                 emit_json({"target": target, "target_kind": "claim",

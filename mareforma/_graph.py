@@ -206,6 +206,9 @@ class EpistemicGraph:
         # enumerating surfaces cannot return them, so without this counter a
         # tampered graph reads as a graph with fewer claims.
         self._read_verify_exclusions = 0
+        # The grounding record the finding path has already attested, held for
+        # the one nested assert_claim call it makes. See _attest_grounding.
+        self._attested_grounding: "dict | None" = None
 
         # Bootstrap-of-trust: the first key opened against a fresh project's
         # graph.db auto-enrolls as the root validator. This is silent and
@@ -391,11 +394,18 @@ class EpistemicGraph:
             score can never be read as a computed verdict.
         observed_grounding:
             Observed-grounding record computed by ``observe()`` or by
-            ``submit_finding``. Bound into the signed statement and the
-            chain hash and stored in the queryable
-            ``observed_grounding`` column. ``UNGROUNDED`` or ``OPAQUE``
-            blocks promotion; absent is read as no verdict recorded and
-            blocks nothing.
+            ``submit_finding``, as ``obs.verdict.to_signed_dict()``. Bound
+            into the signed statement and the chain hash and stored in the
+            queryable ``observed_grounding`` column. ``UNGROUNDED`` or
+            ``OPAQUE`` blocks promotion; absent is read as no verdict
+            recorded and blocks nothing.
+            The axis is written from what the observer computed, not from
+            this argument: the record is looked up by its receipt digest and
+            the OBSERVER'S copy is what gets signed, so an edited state on a
+            real digest is discarded. A record the observer did not produce
+            in this process is stored and reported as ``DECLARED`` and can
+            never occupy ``GROUNDED``, so a hand-built verdict cannot read as
+            a computed one on any surface.
         finding_record:
             The signed record of a finding's verdict inputs (content_id,
             frame_id, plan_id, data_ids, bearing, and the estimates
@@ -536,6 +546,20 @@ class EpistemicGraph:
         # carrying the citation, so a bound verdict is left alone and the marker
         # is never appended twice. A non-dict verdict is left untouched so
         # add_claim raises its own TypeError on it.
+        #
+        # Settle provenance before that: the observed axis is written from what
+        # the observer computed, never from the caller's dict. The finding path
+        # attested its verdict before it bound it, and binding can strip the
+        # receipt digest this keys on, so the record it hands down is passed
+        # through by identity rather than attested a second time (which would
+        # read the observer's own verdict back as a declaration).
+        if (
+            isinstance(observed_grounding, dict)
+            and observed_grounding is not self._attested_grounding
+        ):
+            observed_grounding = self._attest_grounding(
+                observed_grounding, observed_grounding,
+            )
         if isinstance(observed_grounding, dict) and not (
             predicate_citation_sources(predicate_payload)
         ):
@@ -1622,6 +1646,15 @@ class EpistemicGraph:
         must be per-run-unique; a default/None token is flagged as a health event
         because it collapses independence.
 
+        Grounding. ``grounding`` takes the verdict an ``observe()`` scope
+        computed, and only such a verdict writes the observed axis. A
+        :class:`~mareforma.observe.GroundingVerdict` a caller constructed is a
+        declaration, whatever its type says: it is stored and reported as
+        ``DECLARED`` and neutralised out of ``GROUNDED``, so it cannot promote
+        and cannot read as an execution mareforma watched. The verdict is
+        attested before it is bound to the finding's citation, so a declared one
+        cannot borrow a real citation either.
+
         All input validation (falsifiability, estimate consistency, each line's
         gate) runs before the signed claim is written, so a rejected finding
         never leaves an orphan claim. The authoritative existence check and the
@@ -1958,39 +1991,50 @@ class EpistemicGraph:
                         evidence_lines
                     ),
                 }
-                claim_id = self.assert_claim(
-                    proposition.text(),
-                    generated_by=generated_by,
-                    supports=supports,
-                    idempotency_key=finding_key,
-                    observed_grounding=grounding_signed,
-                    finding_record=finding_record,
-                    predicate_payload={
-                        # v2 binds the model lineage into the signed observed
-                        # record (see grounding_signed above); a v1 finding has
-                        # lineage on the evidence tree only, which the read side
-                        # treats as unverifiable rather than a distinct model.
-                        "trust": "finding/v2",
-                        "content_id": cid,
-                        "frame_id": proposition.frame_id(),
-                        "plan_id": plan_id,
-                        # Back-compat scalar for single-line readers; the full set
-                        # is always in data_ids.
-                        "data_id": next(iter(data_id_set)) if single_line else None,
-                        "data_ids": sorted(data_id_set),
-                        # Normalized read location(s) the finding declares, next
-                        # to data_ids so the read side re-checks the grounding
-                        # binding against the persisted citation set (this
-                        # column is unsigned; the append-only trigger locks it
-                        # on a signed row). Omitted (not an empty
-                        # list) when no line names a data_source, so a finding
-                        # without one is byte-identical to a pre-v0.3.9 finding.
-                        **({"data_sources": data_sources} if data_sources else {}),
-                        "code_ref": code_ref,
-                        "bearing": primary_bearing.direction.value,
-                        "bearings": [b.direction.value for b in bearings],
-                    },
-                )
+                predicate_payload = {
+                    # v2 binds the model lineage into the signed observed
+                    # record (see grounding_signed above); a v1 finding has
+                    # lineage on the evidence tree only, which the read side
+                    # treats as unverifiable rather than a distinct model.
+                    "trust": "finding/v2",
+                    "content_id": cid,
+                    "frame_id": proposition.frame_id(),
+                    "plan_id": plan_id,
+                    # Back-compat scalar for single-line readers; the full set
+                    # is always in data_ids.
+                    "data_id": next(iter(data_id_set)) if single_line else None,
+                    "data_ids": sorted(data_id_set),
+                    # Normalized read location(s) the finding declares, next
+                    # to data_ids so the read side re-checks the grounding
+                    # binding against the persisted citation set (this
+                    # column is unsigned; the append-only trigger locks it
+                    # on a signed row). Omitted (not an empty
+                    # list) when no line names a data_source, so a finding
+                    # without one is byte-identical to a pre-v0.3.9 finding.
+                    **({"data_sources": data_sources} if data_sources else {}),
+                    "code_ref": code_ref,
+                    "bearing": primary_bearing.direction.value,
+                    "bearings": [b.direction.value for b in bearings],
+                }
+                # This verdict was attested at bind time, on the caller's own
+                # object, before the binding rewrote it. Hand the exact record
+                # down so the claim write recognises it and does not attest it a
+                # second time: the bind step may have stripped the receipt digest
+                # the second pass would key on, which would read the observer's
+                # own verdict back as a caller declaration.
+                self._attested_grounding = grounding_signed
+                try:
+                    claim_id = self.assert_claim(
+                        proposition.text(),
+                        generated_by=generated_by,
+                        supports=supports,
+                        idempotency_key=finding_key,
+                        observed_grounding=grounding_signed,
+                        finding_record=finding_record,
+                        predicate_payload=predicate_payload,
+                    )
+                finally:
+                    self._attested_grounding = None
                 finding_id = _store.insert_finding(
                     conn, cid, plan_id, claim_id, bearings, evidence_lines, now,
                     model_lineage=model_lineage_json,
@@ -2139,6 +2183,58 @@ class EpistemicGraph:
         )
 
     @staticmethod
+    def _attest_grounding(supplied, record: dict) -> dict:
+        """The observed-grounding record to STORE, taken from the observer.
+
+        ``supplied`` is what the caller handed in (a verdict object on the
+        finding path, the record itself on the claim path) and ``record`` is that
+        value in signed-record shape.
+
+        The observed axis is the one signal on a claim that is not the producer's
+        own word, so this is where the write path stops taking it on the
+        producer's word. Three inputs, one rule:
+
+        - a :class:`~mareforma.observe.GroundingVerdict` the observer computed:
+          the SNAPSHOT taken when the observer minted it is stored. Not
+          ``record``, which is a re-serialization of the caller's live object:
+          the object is frozen, but ``object.__setattr__`` reaches through a
+          frozen dataclass, and a re-serialization would carry whatever it was
+          made to say. The snapshot cannot;
+        - a dict whose ``receipt_digest`` the observer emitted (the documented
+          ``obs.verdict.to_signed_dict()`` call): the OBSERVER'S record for that
+          digest is stored, not the caller's copy, so a hand-edited state on a
+          real digest is discarded rather than signed;
+        - anything else: a declaration. It is marked and its GROUNDED claim is
+          neutralised (see :func:`~mareforma.observe._verdict.declared_record`).
+
+        The boundary is this process, and it is drawn by the digest, not by the
+        process id: a record carried in from another process reads DECLARED
+        UNLESS its receipt digest matches a verdict THIS process minted, which
+        happens whenever both observed the same reads. Measured: a child process
+        observing a file the parent never touched reads DECLARED in the parent,
+        and the same record reads GROUNDED once the parent has observed that file
+        itself. So an observe-here / assert-there pipeline degrades to DECLARED,
+        and the digest is a bearer token within a process rather than a proof
+        that THIS claim is the one the observation was about.
+
+        This covers the write path only. :func:`mareforma.restore` writes
+        ``observed_grounding`` straight from ``claims.toml`` and does not pass
+        through here, so a record that was neutralised can be exported, edited,
+        re-signed by the producer's own key and restored as GROUNDED.
+        """
+        from mareforma.observe._verdict import (
+            declared_record,
+            minted_record,
+            minted_snapshot,
+        )
+
+        snapshot = minted_snapshot(supplied)
+        if snapshot is not None:
+            return snapshot
+        observed = minted_record(record)
+        return observed if observed is not None else declared_record(record)
+
+    @staticmethod
     def _annotate_unbound(record: dict) -> dict:
         """Mark a verdict that had no citation to bind against, at most once.
 
@@ -2167,10 +2263,15 @@ class EpistemicGraph:
         not at audit. A verdict that already matches, or a finding with no
         citation to bind, is returned unchanged (the latter annotated). The check
         is pure string comparison over the normalized identifiers.
+
+        Provenance is settled first, before any binding: what gets bound is the
+        record the OBSERVER wrote (see :meth:`_attest_grounding`), so a caller
+        cannot bind a verdict it authored itself onto a real citation.
         """
         record = self._normalize_grounding(grounding)
         if record is None:
             return None
+        record = self._attest_grounding(grounding, record)
 
         from mareforma.observe._binding import (
             DISJOINT_REASON,

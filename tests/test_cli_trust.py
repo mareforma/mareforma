@@ -211,15 +211,17 @@ class TestVerifyExitCodes:
             assert doc["exit_code"] == 0
             assert doc["trust_map"]["subject_id"] == cid
 
-    def test_signed_claim_under_unregistered_key_does_not_verify(
+    def test_signed_claim_under_unregistered_key_is_unverifiable_exit_2(
         self, tmp_path: Path,
     ) -> None:
         """A claim carrying a signature under a keyid that is not an enrolled
         validator cannot be authenticated from public material. ``verify`` must
         not exit 0 for it: auditor mode has no pubkey to check the signature
         against, so a CI gate keyed on exit 0 would otherwise pass a forged
-        signature under a key that was never enrolled."""
-        from mareforma.cli import _VERIFY_FAIL
+        signature under a key that was never enrolled. It must not exit 1
+        either: the signature was never checked, so nothing was caught, and
+        exit 1 is reserved for a definite NO."""
+        from mareforma.cli import _VERIFY_UNVERIFIABLE
 
         r = CliRunner()
         with r.isolated_filesystem(temp_dir=tmp_path):
@@ -235,12 +237,52 @@ class TestVerifyExitCodes:
                     signer=other_signer,
                 )
             res = r.invoke(cli, ["verify", cid])
-            assert res.exit_code == _VERIFY_FAIL
+            assert res.exit_code == _VERIFY_UNVERIFIABLE, res.output
             assert "not an enrolled validator" in res.output
+            assert "TRUST MAP" in res.output
+            res_json = r.invoke(cli, ["verify", cid, "--json"])
+            doc = json.loads(res_json.output)
+            assert doc["verdict"] == "unverifiable"
+            assert doc["exit_code"] == _VERIFY_UNVERIFIABLE
+            assert doc["trust_map"]["subject_id"] == cid
+
+    def test_failed_signature_is_still_tampered_exit_1(
+        self, tmp_path: Path,
+    ) -> None:
+        """The other half of the split. An enrolled signer whose signature does
+        not verify WAS checked and WAS caught, so it stays a definite NO. If
+        this drifted to exit 2 alongside the unenrolled case, the gate would
+        warn on a forgery it actually detected."""
+        from mareforma.cli import _VERIFY_FAIL
+
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            with mareforma.open(".") as g:
+                cid = g.assert_claim("enrolled signer", classification="ANALYTICAL")
+            # Replace the signature bytes and nothing else: the envelope still
+            # names the enrolled root key and still binds this row, so the
+            # signature check is the only thing that can fail.
+            conn = open_db(Path("."))
+            bundle = json.loads(conn.execute(
+                "SELECT signature_bundle FROM claims WHERE claim_id = ?", (cid,),
+            ).fetchone()[0])
+            bundle["signatures"][0]["sig"] = base64.standard_b64encode(
+                b"\x00" * 64).decode()
+            conn.execute(
+                "UPDATE claims SET signature_bundle = ? WHERE claim_id = ?",
+                (json.dumps(bundle), cid),
+            )
+            conn.commit()
+            conn.close()
+
+            res = r.invoke(cli, ["verify", cid])
+            assert res.exit_code == _VERIFY_FAIL, res.output
             res_json = r.invoke(cli, ["verify", cid, "--json"])
             doc = json.loads(res_json.output)
             assert doc["verdict"] == "tampered"
             assert doc["exit_code"] == _VERIFY_FAIL
+            assert "signature" in doc["reason"]
 
 
 _CI_README = (
@@ -371,20 +413,34 @@ class TestVerifyAuditorMode:
 
 
 class TestVerifyPreBindingLabel:
-    """An axis-v0.3.8 GROUNDED renders as pre-binding, not bound GROUNDED."""
+    """An axis-v0.3.8 GROUNDED renders as pre-binding, not bound GROUNDED.
 
-    def test_pre_binding_label_in_verify_output(self, tmp_path: Path) -> None:
-        r = CliRunner()
-        with r.isolated_filesystem(temp_dir=tmp_path):
-            _bootstrap_default_key()
-            with mareforma.open(".") as g:
-                cid = g.assert_claim(
-                    "v", classification="ANALYTICAL",
-                    observed_grounding=json.loads(_v038_grounded_record()),
-                )
-            res = r.invoke(cli, ["verify", cid])
-            assert res.exit_code == 0, res.output
-            assert "pre-binding axis; citation binding not checkable" in res.output
+    Asserted on the renderer rather than through a write, because the write path
+    can no longer produce this record and a test that pretended otherwise would
+    be asserting a fiction: a v0.3.8 record carries no ``grounded_sources``, and
+    today's observer always emits one, so the only way to hand this shape to
+    ``assert_claim`` is to author it by hand, which is a declaration and is
+    neutralised out of GROUNDED before it is stored. What still
+    needs pinning is the LABEL a graph written by v0.3.8 gets when it is read
+    today, and that is this function's input.
+    """
+
+    def test_pre_binding_label_on_a_legacy_record(self) -> None:
+        from mareforma.trust_map import PRE_BINDING_GROUNDED_LABEL, _assemble
+
+        from tests._helpers import _claim
+
+        tmap = _assemble(
+            _claim(observed_grounding=_v038_grounded_record()),
+            n_roots=1, has_inclusion=False,
+        )
+        grounding = next(
+            p for p in tmap.to_dict()["properties"] if p["name"] == "grounding"
+        )
+        assert grounding["value"] == PRE_BINDING_GROUNDED_LABEL
+        assert "pre-binding axis; citation binding not checkable" in (
+            grounding["value"]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -515,16 +571,28 @@ class TestDiagnose:
 # verify, grounding→citation binding re-check (the read-side gate)
 # ---------------------------------------------------------------------------
 
-_REAL = "/data/real.csv"
-_DECOY = "/data/decoy.csv"
+def _dataset(root: Path, name: str) -> Path:
+    """A real file the observer can watch being read."""
+    path = root / name
+    path.write_text("arm,outcome\ntreat,0.42\n")
+    return path
 
 
-def _grounded_record(grounded: list[str]) -> dict:
-    return {
-        "version": "v0.3.9", "grounding": "GROUNDED",
-        "reason": "cited read observed", "cited_sources": [_REAL],
-        "grounded_sources": grounded,
-    }
+def _observed_on(path: Path):
+    """A GROUNDED verdict the observer computed by watching *path* be read.
+
+    These tests are about the READ-side binding re-check, so the record they
+    plant has to be one the write path would actually store. A hand-authored
+    record is a declaration and never reaches GROUNDED, so the
+    verdict is earned: the scope cites the file and the file is read.
+    """
+    import mareforma.observe as obs
+    from mareforma.observe import ObservedGrounding as OG
+
+    with obs.observe(cites=str(path)) as handle:
+        path.read_text()
+    assert handle.verdict.grounding is OG.GROUNDED, handle.verdict.reason
+    return handle.verdict
 
 
 class TestVerifyGroundingBinding:
@@ -533,9 +601,10 @@ class TestVerifyGroundingBinding:
         # (nonexistent) data_source column. Reading the wrong place silently
         # no-ops the whole binding re-check.
         ca = "sha256:" + "a" * 64
+        real = "/data/real.csv"
         claim = {"predicate_payload": json.dumps(
-            {"data_sources": [_REAL], "data_ids": [ca, "string-token"]})}
-        assert _claim_bound_sources(claim) == (_REAL, ca)
+            {"data_sources": [real], "data_ids": [ca, "string-token"]})}
+        assert _claim_bound_sources(claim) == (real, ca)
         assert _claim_bound_sources({"data_source": "/x"}) == ()  # dead field ignored
         assert _claim_bound_sources({}) == ()
         assert _claim_bound_sources({"predicate_payload": "not json"}) == ()
@@ -547,10 +616,13 @@ class TestVerifyGroundingBinding:
         with r.isolated_filesystem(temp_dir=tmp_path):
             _bootstrap_default_key()
             with mareforma.open(".") as g:
+                real = _dataset(Path("."), "real.csv").resolve()
                 cid = g.assert_claim(
                     "grounded finding", classification="ANALYTICAL",
-                    predicate_payload={"data_sources": [_REAL], "data_ids": []},
-                    observed_grounding=_grounded_record([_REAL]),
+                    predicate_payload={
+                        "data_sources": [str(real)], "data_ids": [],
+                    },
+                    observed_grounding=_observed_on(real).to_signed_dict(),
                 )
             res = r.invoke(cli, ["verify", cid])
             assert res.exit_code == 0, res.output
@@ -564,10 +636,14 @@ class TestVerifyGroundingBinding:
         with r.isolated_filesystem(temp_dir=tmp_path):
             _bootstrap_default_key()
             with mareforma.open(".") as g:
+                real = _dataset(Path("."), "real.csv").resolve()
+                decoy = _dataset(Path("."), "decoy.csv").resolve()
                 cid = g.assert_claim(
                     "grounded finding", classification="ANALYTICAL",
-                    predicate_payload={"data_sources": [_REAL], "data_ids": []},
-                    observed_grounding=_grounded_record([_DECOY]),
+                    predicate_payload={
+                        "data_sources": [str(real)], "data_ids": [],
+                    },
+                    observed_grounding=_observed_on(decoy).to_signed_dict(),
                 )
             res = r.invoke(cli, ["verify", cid, "--json"])
             assert res.exit_code == 1, res.output
@@ -584,10 +660,14 @@ class TestVerifyGroundingBinding:
         with r.isolated_filesystem(temp_dir=tmp_path):
             _bootstrap_default_key()
             with mareforma.open(".") as g:
+                real = _dataset(Path("."), "real.csv").resolve()
+                decoy = _dataset(Path("."), "decoy.csv").resolve()
                 cid = g.assert_claim(
                     "grounded finding", classification="ANALYTICAL",
-                    predicate_payload={"data_sources": [_REAL], "data_ids": []},
-                    observed_grounding=_grounded_record([_DECOY]),
+                    predicate_payload={
+                        "data_sources": [str(real)], "data_ids": [],
+                    },
+                    observed_grounding=_observed_on(decoy).to_signed_dict(),
                 )
                 with pytest.raises(
                     sqlite3.IntegrityError, match="signed_field_locked",
