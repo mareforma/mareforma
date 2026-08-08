@@ -805,3 +805,96 @@ def test_dependabot_pip_does_not_ratchet_version_floors():
         "the pip entry must declare versioning-strategy: increase-if-necessary, "
         "or every upstream release ratchets the declared floors"
     )
+
+
+# The read-side model-lineage authentication. Independence keys the distinct-
+# model axis off the SIGNED lineage the claim's envelope binds, never the
+# denormalised, unsigned ``evidence_lines.model_lineage`` column. Without it a
+# direct or foreign writer rewrites that column to a fabricated distinct model
+# and a single-source proposition promotes to CONVERGENT (independence 2). A
+# built artifact that predates this authentication carries the inflation, so
+# any wheel or sdist in ``dist/`` lacking these functions must not pass the
+# pre-publish suite.
+#
+# Searched across the whole bundled package rather than one path. The original
+# guard pinned ``mareforma/trust/_store.py``, which is where both functions
+# lived when it was written; they now live in ``mareforma/trust/_gate.py``, so
+# a pinned path would clear a stale artifact and fail a correct one. What has
+# to be true is that the shipped code contains them, not where.
+_MODEL_LINEAGE_AUTH_MARKERS = ("_authentic_model_key", "_signed_model_lineage")
+
+
+def _bundled_package_defines(artifact: pathlib.Path, markers) -> "set | None":
+    """Which of *markers* the artifact's bundled package defines.
+
+    Returns None when the artifact ships no Python at all, so an unrelated
+    archive dropped in ``dist/`` cannot fail the guard.
+    """
+    import zipfile
+
+    found: set = set()
+    saw_python = False
+
+    def scan(name: str, blob: bytes) -> None:
+        nonlocal saw_python
+        if not name.endswith(".py"):
+            return
+        saw_python = True
+        text = blob.decode("utf-8", "replace")
+        for marker in markers:
+            if f"def {marker}" in text:
+                found.add(marker)
+
+    if artifact.name.endswith(".whl"):
+        with zipfile.ZipFile(artifact) as zf:
+            for member in zf.namelist():
+                scan(member, zf.read(member))
+    elif artifact.name.endswith(".tar.gz"):
+        with tarfile.open(artifact) as tf:
+            for member in tf.getmembers():
+                if not member.isfile():
+                    continue
+                fh = tf.extractfile(member)
+                if fh is not None:
+                    scan(member.name, fh.read())
+    else:
+        return None
+    return found if saw_python else None
+
+
+def test_built_artifacts_carry_model_lineage_authentication():
+    """Every wheel and sdist in ``dist/`` binds the model-lineage authentication.
+
+    A stale artifact, one built before the read-side authentication landed,
+    ships a trust layer that keys independence off the unsigned
+    ``evidence_lines.model_lineage`` column. A forged column then inflates a
+    single-source proposition to CONVERGENT, and ``verify`` passes it. This
+    runs in the pre-publish suite, with ``dist/`` populated by the release
+    build, and fails any artifact missing the authentication so the inflation
+    cannot ship. It skips cleanly when nothing is built.
+    """
+    dist_dir = REPO_ROOT / "dist"
+    if not dist_dir.is_dir():
+        pytest.skip("no dist/ built; nothing to check")
+    artifacts = sorted(
+        p for p in dist_dir.iterdir()
+        if p.name.endswith(".whl") or p.name.endswith(".tar.gz")
+    )
+    if not artifacts:
+        pytest.skip("dist/ holds no wheel or sdist to check")
+    stale = []
+    for artifact in artifacts:
+        defined = _bundled_package_defines(
+            artifact, _MODEL_LINEAGE_AUTH_MARKERS,
+        )
+        if defined is None:
+            continue
+        missing = [m for m in _MODEL_LINEAGE_AUTH_MARKERS if m not in defined]
+        if missing:
+            stale.append(f"{artifact.name} (missing {', '.join(missing)})")
+    assert not stale, (
+        "these built artifacts ship without the read-side model-lineage "
+        "authentication, so a forged unsigned model_lineage column inflates "
+        f"independence to CONVERGENT: {stale}. Rebuild dist/ from current "
+        "source before publishing."
+    )
