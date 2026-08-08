@@ -517,9 +517,7 @@ class TestRestoreRefusalMessageBranches:
         conn.commit()
         conn.close()
         with mareforma.open(tmp_path, key_path=root) as g:
-            with pytest.raises(
-                GateInputRefused, match="does not render the proposition",
-            ):
+            with pytest.raises(GateInputRefused, match="does not attest it"):
                 verify_gate_inputs_or_refuse(g._conn, cid, cache=GateCache())
 
     def test_failed_signature_under_enrolled_signer_names_the_signature(
@@ -590,8 +588,13 @@ def _v0310_available() -> bool:
     The test constructs the old graph with the OLD code, so it needs the commit
     reachable. It skips (rather than fails) from an unpacked sdist, which ships
     no .git, the same reason the repo-tree tests skip there.
+
+    A repository is present when .git exists at all: it is a directory in a
+    normal clone and a file holding a gitdir pointer in a worktree. Testing for
+    a directory silently skipped this test in every worktree, so the whole
+    cross-version claim went unchecked on the branches built there.
     """
-    if not (_REPO_ROOT / ".git").is_dir():
+    if not (_REPO_ROOT / ".git").exists():
         return False
     try:
         subprocess.run(

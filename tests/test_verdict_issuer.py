@@ -212,10 +212,22 @@ class TestVerdictPromotionGates:
     ) -> None:
         # A recorded GROUNDED verdict must NOT block promotion, the gate is
         # additive, not a new hurdle for honestly grounded claims.
+        #
+        # The verdict is one the observer computed, from a scope that watched a
+        # real file be read. A hand-authored ``{"grounding": "GROUNDED"}`` is a
+        # declaration, stored as OPAQUE, so it would test the gate
+        # against a claim that is not grounded at all.
+        import mareforma.observe as obs
+        from mareforma.observe import ObservedGrounding as OG
+
+        dataset = tmp_path / "trial.csv"
+        dataset.write_text("arm,outcome\ntreat,0.42\n")
+        with obs.observe(cites=str(dataset)) as handle:
+            dataset.read_text()
+        assert handle.verdict.grounding is OG.GROUNDED, handle.verdict.reason
+        record = handle.verdict.to_signed_dict()
         root_key, issuer_key, a, b, _, _ = _seed_two_claims(
-            tmp_path,
-            grounding_a={"grounding": "GROUNDED"},
-            grounding_b={"grounding": "GROUNDED"},
+            tmp_path, grounding_a=record, grounding_b=record,
         )
         with mareforma.open(tmp_path, key_path=issuer_key) as g:
             g.record_replication_verdict(

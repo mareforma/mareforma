@@ -27,7 +27,13 @@ from ._citation import (
     normalize_identifier,
     read_norm_matches,
 )
-from ._verdict import GroundingVerdict, ObservedGrounding, ReadRecord, SeamEvent
+from ._verdict import (
+    GroundingVerdict,
+    ObservedGrounding,
+    ReadRecord,
+    SeamEvent,
+    _mint,
+)
 
 # Which citation kinds a socket seam can hide a read of. A socket delivers bytes
 # over the network, so it is relevant to a URL or a content-address (whose bytes
@@ -260,7 +266,7 @@ class Scope:
         return len(opened & read_idents), len(opened)
 
     def classify(self) -> GroundingVerdict:
-        """Compute the verdict from captured reads, seams, and opens.
+        """Compute the verdict from captured reads, seams, and opens, and mint it.
 
         Order of decision:
           1. Any observer-internal error → OPAQUE (we cannot trust ourselves).
@@ -270,7 +276,18 @@ class Scope:
           4. Only when the scope was fully seen and no cited data arrived →
              UNGROUNDED. This is the sole path to UNGROUNDED, which is what
              makes UNGROUNDED trustworthy.
+
+        This is also the one place a verdict is minted (:func:`._verdict._mint`),
+        which is what lets the write path tell a computed verdict from a
+        declared one. Minting here rather than in ``observe()`` covers the
+        post-hoc auditor too, whose per-finding verdicts come from
+        :meth:`classify_against` and are just as observed.
         """
+        return _mint(self._decide())
+
+    def _decide(self) -> GroundingVerdict:
+        """The decision itself. Split out so the mint above covers every arm of
+        it: a new return path cannot ship an unminted verdict by omission."""
         cited = self.cited
         reads = tuple(self.reads)
         norm_reads = self._normalized_reads()

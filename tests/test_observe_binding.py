@@ -34,33 +34,67 @@ from tests._helpers import _two_signers  # noqa: E402
 
 from mareforma.observe._citation import normalize_identifier
 
+# Every verdict here is one the OBSERVER computed, from a real scope over a real
+# file. Only a minted verdict writes the observed axis; a hand-built one is a
+# declaration and is stored as DECLARED, neutralised out of GROUNDED.
+# So these tests cannot construct their premise, and must not try to: minting a
+# hand-built verdict is the attack the write path exists to refuse, not a way to
+# set up a test. Where a GROUNDED verdict is wanted, a scope reads a file.
+#
 # The modal honest workflow cites a PATH in observe(cites=...) while the finding's
 # data_id is a content address over the bytes. They are disjoint by construction,
 # so the finding must also carry data_source= naming the same path for the verdict
-# to bind. CITED_PATH is that shared path, normalized the way both sides normalize.
-CITED_PATH = normalize_identifier("/data/trial.csv")
+# to bind. ``_dataset`` is that shared path.
+
+_DEFAULT = object()
 
 
-def _grounded(reason="cited read returned data", cited=(CITED_PATH,), grounded=None):
-    # A GROUNDED verdict grounds on the sources it actually read. By default that
-    # is the cited set; the decoy case passes grounded= a subset (or ()) to model
-    # a read that did NOT cover the finding's own citation.
-    g = tuple(cited) if grounded is None else tuple(grounded)
-    return GroundingVerdict(
-        OG.GROUNDED, reason, cited_sources=tuple(cited), grounded_sources=g
-    )
+def _dataset(tmp_path, name="trial.csv"):
+    """A real file to cite and read, and the path both sides normalize."""
+    path = tmp_path / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("arm,outcome\ntreat,0.42\ncontrol,0.71\n")
+    return path
 
 
-def _ungrounded():
-    return GroundingVerdict(OG.UNGROUNDED, "no cited read", cited_sources=("/d.csv",))
+def _cited_path(tmp_path, name="trial.csv"):
+    """The normalized identifier for :func:`_dataset`, as both sides store it."""
+    return normalize_identifier(str(_dataset(tmp_path, name)))
+
+
+def _grounded(tmp_path, cites=None, reads=None):
+    """A GROUNDED verdict the observer computed, from reads it watched happen.
+
+    ``cites`` is what the scope declares, ``reads`` what actually gets read
+    (defaulting to all of it). The decoy case passes a ``reads`` subset, which is
+    how a genuine verdict comes to name a source in ``cited_sources`` but not in
+    ``grounded_sources``: the observer saw a read for one and not the other.
+    """
+    cites = [_dataset(tmp_path)] if cites is None else list(cites)
+    reads = cites if reads is None else list(reads)
+    with obs.observe(cites=[str(c) for c in cites]) as handle:
+        for path in reads:
+            Path(path).read_text()
+    assert handle.verdict.grounding is OG.GROUNDED, handle.verdict.reason
+    return handle.verdict
+
+
+def _ungrounded(tmp_path):
+    """An UNGROUNDED verdict the observer computed: cited, never read."""
+    with obs.observe(cites=str(_dataset(tmp_path, "unread.csv"))) as handle:
+        pass  # the step that would read the dataset never ran
+    assert handle.verdict.grounding is OG.UNGROUNDED
+    return handle.verdict
 
 
 def _finding(
-    graph, grounding=None, data_id="sha256:" + "a" * 64, generated_by="run/1",
-    data_source="/data/trial.csv",
+    graph, tmp_path, grounding=None, data_id="sha256:" + "a" * 64,
+    generated_by="run/1", data_source=_DEFAULT,
 ):
     # data_source defaults to the modal cited path so a GROUNDED verdict binds; a
     # test exercising the disjoint attack passes data_source=None.
+    if data_source is _DEFAULT:
+        data_source = str(_dataset(tmp_path))
     return graph.assert_finding(
         _prop(), _superiority(), _smd(-0.8, p=0.001),
         data_id=data_id, data_source=data_source, grounding=grounding,
@@ -72,7 +106,7 @@ def _finding(
 
 def test_verdict_bound_into_signed_envelope(tmp_path):
     with open_graph(tmp_path) as g:
-        res = _finding(g, _grounded())
+        res = _finding(g, tmp_path, _grounded(tmp_path))
         row = g._conn.execute(
             "SELECT observed_grounding, signature_bundle FROM claims "
             "WHERE claim_id = ?",
@@ -90,7 +124,7 @@ def test_no_verdict_leaves_signed_bytes_unchanged(tmp_path):
     # A claim asserted without the observer must omit the field entirely, so a
     # pre-observer claim and a no-verdict claim are byte-identical.
     with open_graph(tmp_path) as g:
-        res = _finding(g, grounding=None)
+        res = _finding(g, tmp_path, grounding=None)
         row = g._conn.execute(
             "SELECT observed_grounding, signature_bundle FROM claims "
             "WHERE claim_id = ?",
@@ -105,7 +139,7 @@ def test_absent_field_reads_as_not_present_not_tampered(tmp_path):
     # The optional/versioned contract: an envelope without the field verifies
     # cleanly (it is a valid pre-observer claim), never a tamper failure.
     with open_graph(tmp_path) as g:
-        res = _finding(g, grounding=None)
+        res = _finding(g, tmp_path, grounding=None)
         env = json.loads(
             g._conn.execute(
                 "SELECT signature_bundle FROM claims WHERE claim_id = ?",
@@ -130,7 +164,7 @@ def _pubkey_for(graph, keyid):
 
 def test_restore_round_trips_the_verdict(tmp_path):
     with open_graph(tmp_path) as g:
-        res = _finding(g, _grounded())
+        res = _finding(g, tmp_path, _grounded(tmp_path))
         cid = res["claim_id"]
     shutil.rmtree(tmp_path / ".mareforma", ignore_errors=True)
     report = mareforma.restore(tmp_path)
@@ -147,7 +181,7 @@ def test_restore_round_trips_a_non_grounded_verdict(tmp_path):
     # (UNGROUNDED here) must survive verify-on-read with its state intact, not
     # merely as "some verdict present."
     with open_graph(tmp_path) as g:
-        res = _finding(g, _ungrounded())
+        res = _finding(g, tmp_path, _ungrounded(tmp_path))
         cid = res["claim_id"]
     shutil.rmtree(tmp_path / ".mareforma", ignore_errors=True)
     report = mareforma.restore(tmp_path)
@@ -161,7 +195,7 @@ def test_restore_round_trips_a_non_grounded_verdict(tmp_path):
 
 def test_restore_rejects_a_tampered_verdict(tmp_path):
     with open_graph(tmp_path) as g:
-        _finding(g, _grounded())
+        _finding(g, tmp_path, _grounded(tmp_path))
     toml_path = tmp_path / "claims.toml"
     # The signed predicate rides inside the base64 DSSE bundle, so replacing the
     # literal "GROUNDED" flips only the denormalized observed_grounding column —
@@ -200,7 +234,7 @@ def _converge_on_anchor(tmp_path, subject_grounding):
         g.assert_claim(
             "peer from a distinct signer", supports=[anchor],
             generated_by="lab_b", signer=sb,
-            observed_grounding=_grounded().to_signed_dict(),
+            observed_grounding=_grounded(tmp_path).to_signed_dict(),
         )
         subject = g.assert_claim(
             "claim under test", supports=[anchor], generated_by="lab_a",
@@ -212,7 +246,7 @@ def _converge_on_anchor(tmp_path, subject_grounding):
 def test_grounded_finding_promotes_on_convergence(tmp_path):
     # Positive control: the fixture really is eligible, so the PRELIMINARY
     # results below are the gate talking and not a precondition that never held.
-    assert _converge_on_anchor(tmp_path, _grounded()) == "REPLICATED"
+    assert _converge_on_anchor(tmp_path, _grounded(tmp_path)) == "REPLICATED"
 
 
 @pytest.mark.parametrize("verdict", [OG.UNGROUNDED, OG.OPAQUE])
@@ -220,7 +254,7 @@ def test_non_grounded_finding_does_not_promote(tmp_path, verdict):
     # A finding whose execution shows it is not grounded must never ride into
     # REPLICATED, even when a distinct-signer peer would otherwise converge.
     grounding = GroundingVerdict(
-        verdict, "no cited read", cited_sources=(CITED_PATH,),
+        verdict, "no cited read", cited_sources=(_cited_path(tmp_path),),
     )
     assert _converge_on_anchor(tmp_path, grounding) == "PRELIMINARY"
 
@@ -232,16 +266,17 @@ def test_idempotent_replay_reports_the_stored_verdict(tmp_path):
     with open_graph(tmp_path) as g:
         prop, pred = _prop(), _superiority()
         g.register_plan(prop, pred)
+        src = str(_dataset(tmp_path))
         first = g.submit_finding(
             prop, pred, _smd(-0.8, p=0.001), data_id="dsA",
-            data_source="/data/trial.csv", generated_by="a",
-            grounding=_grounded(),
+            data_source=src, generated_by="a",
+            grounding=_grounded(tmp_path),
         )
         assert first["grounding"]["grounding"] == "GROUNDED"
         replay = g.submit_finding(
             prop, pred, _smd(-0.8, p=0.001), data_id="dsA",
-            data_source="/data/trial.csv", generated_by="a",
-            grounding=_ungrounded(),  # a different verdict on the replay
+            data_source=src, generated_by="a",
+            grounding=_ungrounded(tmp_path),  # a different verdict on the replay
         )
     assert replay["idempotent"] is True
     assert replay["grounding"]["grounding"] == "GROUNDED"  # stored, not the new one
@@ -254,15 +289,18 @@ def test_idempotent_replay_of_disjoint_verdict_fires_no_event_and_no_raise(tmp_p
     with open_graph(tmp_path) as g:
         prop, pred = _prop(), _superiority()
         g.register_plan(prop, pred)
+        src = str(_dataset(tmp_path))
         g.submit_finding(
             prop, pred, _smd(-0.8, p=0.001), data_id="sha256:" + "a" * 64,
-            data_source="/data/trial.csv", generated_by="a", grounding=_grounded(),
+            data_source=src, generated_by="a", grounding=_grounded(tmp_path),
         )
         # Replay with a disjoint GROUNDED and strict mode on: must not raise.
+        # The disjoint verdict is earned on a different real file, so it is a
+        # genuine observation of something the finding does not cite.
         replay = g.submit_finding(
             prop, pred, _smd(-0.8, p=0.001), data_id="sha256:" + "a" * 64,
-            data_source="/data/trial.csv", generated_by="a",
-            grounding=_grounded(cited=("/some/other/path.csv",)),
+            data_source=src, generated_by="a",
+            grounding=_grounded(tmp_path, cites=[_dataset(tmp_path, "other.csv")]),
             grounding_strict=True,
         )
     assert replay["idempotent"] is True
@@ -321,7 +359,7 @@ def test_disjoint_verdict_downgrades_to_opaque(tmp_path):
     # data_source, must NOT be stored as GROUNDED. Default mode downgrades to
     # OPAQUE with the disjoint reason.
     with open_graph(tmp_path) as g:
-        res = _finding(g, _grounded(), data_source=None)
+        res = _finding(g, tmp_path, _grounded(tmp_path), data_source=None)
     assert res["grounding"]["grounding"] == "OPAQUE"
     assert res["grounding"]["reason"] == (
         "verdict cited-set disjoint from finding citation"
@@ -335,7 +373,7 @@ def test_disjoint_verdict_raises_in_strict_mode(tmp_path):
         with pytest.raises(GroundingCitationMismatchError):
             g.assert_finding(
                 _prop(), _superiority(), _smd(-0.8, p=0.001),
-                data_id="sha256:" + "a" * 64, grounding=_grounded(),
+                data_id="sha256:" + "a" * 64, grounding=_grounded(tmp_path),
                 generated_by="run/1", grounding_strict=True,
             )
 
@@ -346,7 +384,7 @@ def test_modal_workflow_stays_grounded_through_round_trip(tmp_path):
     # store -> verify-on-read -> restore. This is the test the release fails
     # without: binding must not punish the honest producer.
     with open_graph(tmp_path) as g:
-        res = _finding(g, _grounded(), data_source="/data/trial.csv")
+        res = _finding(g, tmp_path, _grounded(tmp_path))
         cid = res["claim_id"]
     assert res["grounding"]["grounding"] == "GROUNDED"
     shutil.rmtree(tmp_path / ".mareforma", ignore_errors=True)
@@ -362,10 +400,22 @@ def test_modal_workflow_stays_grounded_through_round_trip(tmp_path):
 def test_content_address_citation_binds(tmp_path):
     # A finding that cites a sha256: data_id, with a verdict whose cited set is
     # that same content address, binds without any data_source.
-    ca = "sha256:" + "c" * 64
+    from mareforma.observe import _scope
+    from mareforma.trust._store import content_address_data_id
+
+    # A content address is matched on the DIGEST of the bytes that arrived, so it
+    # needs a read the observer can hash, which the plain file-open path cannot
+    # (it sees the open, not the bytes). The read is recorded through the same
+    # entry point a wrapped transport calls, so the verdict below is still one
+    # the observer's classifier computed from a read it was told about, not a
+    # conclusion written by hand.
+    ca = content_address_data_id(b"payload-bytes")
+    with obs.observe(cites=ca, content_address=True) as handle:
+        _scope.record_read("http", "https://api.example/x", True, content_address=ca)
+    assert handle.verdict.grounding is OG.GROUNDED, handle.verdict.reason
     with open_graph(tmp_path) as g:
         res = _finding(
-            g, _grounded(cited=(ca,)), data_id=ca, data_source=None,
+            g, tmp_path, handle.verdict, data_id=ca, data_source=None,
         )
     assert res["grounding"]["grounding"] == "GROUNDED"
 
@@ -381,7 +431,7 @@ def test_finding_without_matchable_citation_is_not_applicable(tmp_path):
         g.register_plan(prop, pred)
         res = g.submit_finding(
             prop, pred, _smd(-0.8, p=0.001), data_id="dsA", generated_by="a",
-            grounding=_grounded(cited=(CITED_PATH,)),
+            grounding=_grounded(tmp_path),
         )
     assert res["grounding"]["grounding"] == "GROUNDED"
     assert "no finding citation to bind" in res["grounding"]["reason"]
@@ -392,8 +442,8 @@ def test_empty_verdict_cited_set_downgrades(tmp_path):
     # a finding that cites data; it downgrades.
     with open_graph(tmp_path) as g:
         res = _finding(
-            g, GroundingVerdict(OG.GROUNDED, "hand-built", cited_sources=()),
-            data_source="/data/trial.csv",
+            g, tmp_path,
+            GroundingVerdict(OG.GROUNDED, "hand-built", cited_sources=()),
         )
     assert res["grounding"]["grounding"] == "OPAQUE"
 
@@ -424,12 +474,13 @@ def test_decoy_cite_does_not_bind_finding(tmp_path):
     # not the declared cites, so the finding whose OWN data was never read does
     # not earn GROUNDED — it downgrades to OPAQUE. If binding checked the declared
     # cited set (the v0.3.9 pre-fix bug) this would wrongly MATCH and promote.
-    decoy = normalize_identifier("/etc/hostname")
+    decoy = _dataset(tmp_path, "decoy.csv")
     with open_graph(tmp_path) as g:
         res = _finding(
-            g,
-            _grounded(cited=(CITED_PATH, decoy), grounded=(decoy,)),
-            data_source="/data/trial.csv",
+            g, tmp_path,
+            _grounded(
+                tmp_path, cites=[_dataset(tmp_path), decoy], reads=[decoy],
+            ),
         )
     assert res["grounding"]["grounding"] == "OPAQUE"
 
@@ -441,13 +492,15 @@ def test_assert_claim_verdict_is_marked_unbound(tmp_path):
     # store as a clean GROUNDED; it keeps the not-applicable annotation the
     # finding path already emits, so a reader can tell binding was never
     # exercised rather than passed.
-    decoy = normalize_identifier("/etc/hostname")
+    decoy = _dataset(tmp_path, "decoy.csv")
     with open_graph(tmp_path) as g:
         claim_id = g.assert_claim(
             "IL-21 elevated in SLE CD4+ T cells",
             classification="ANALYTICAL",
             source_name="medeadb",
-            observed_grounding=_grounded(cited=(decoy,)).to_signed_dict(),
+            observed_grounding=_grounded(
+                tmp_path, cites=[decoy],
+            ).to_signed_dict(),
         )
         stored = g._stored_grounding(claim_id)
     assert "no finding citation to bind" in stored["reason"]
@@ -461,7 +514,7 @@ def test_assert_finding_annotation_is_not_doubled(tmp_path):
         g.register_plan(prop, pred)
         res = g.submit_finding(
             prop, pred, _smd(-0.8, p=0.001), data_id="dsA", generated_by="a",
-            grounding=_grounded(cited=(CITED_PATH,)),
+            grounding=_grounded(tmp_path),
         )
         stored = g._stored_grounding(res["claim_id"])
     assert stored["reason"].count("no finding citation to bind") == 1
@@ -537,14 +590,14 @@ def test_bind_downgrade_fires_health_event(tmp_path):
     # Every bind-time downgrade appends a grounding_citation_mismatch health
     # event, so a misconfigured producer is visible when drift starts.
     with open_graph(tmp_path) as g:
-        _finding(g, _grounded(), data_source=None)
+        _finding(g, tmp_path, _grounded(tmp_path), data_source=None)
     ops = [e.get("op") for e in _health_ops(tmp_path)]
     assert "grounding_citation_mismatch" in ops
 
 
 def test_matched_bind_fires_no_mismatch_event(tmp_path):
     with open_graph(tmp_path) as g:
-        _finding(g, _grounded(), data_source="/data/trial.csv")
+        _finding(g, tmp_path, _grounded(tmp_path))
     ops = [e.get("op") for e in _health_ops(tmp_path)]
     assert "grounding_citation_mismatch" not in ops
 
@@ -555,14 +608,13 @@ def test_string_data_id_with_data_source_survives_restore(tmp_path):
     # restore: the write and read sides bind against the same identifiers
     # (content-addressed data_ids + data_sources), so a legitimately signed
     # GROUNDED round-trips.
-    src = "/data/trial.csv"
+    src = str(_dataset(tmp_path))
     with open_graph(tmp_path) as g:
         prop, pred = _prop(), _superiority()
         g.register_plan(prop, pred)
         res = g.submit_finding(
             prop, pred, _smd(-0.8, p=0.001), data_id="dsA", data_source=src,
-            generated_by="a",
-            grounding=_grounded(cited=(normalize_identifier(src),)),
+            generated_by="a", grounding=_grounded(tmp_path),
         )
         cid = res["claim_id"]
     assert res["grounding"]["grounding"] == "GROUNDED"
@@ -581,14 +633,16 @@ def test_read_side_binding_is_pure_string_no_filesystem(tmp_path):
     # filesystem access, so an honest claim whose cited path does not exist on
     # the verifier's host (a cross-host bundle) still restores clean. Simulate by
     # citing a path under a tmpdir that we delete before restore.
-    missing = tmp_path / "gone" / "trial.csv"
+    missing = _dataset(tmp_path / "gone", "trial.csv")
     with open_graph(tmp_path) as g:
         res = _finding(
-            g, _grounded(cited=(normalize_identifier(str(missing)),)),
+            g, tmp_path, _grounded(tmp_path, cites=[missing]),
             data_source=str(missing),
         )
         cid = res["claim_id"]
     assert res["grounding"]["grounding"] == "GROUNDED"
+    # The cited path is gone by the time the verifier looks, which is the point.
+    shutil.rmtree(tmp_path / "gone")
     shutil.rmtree(tmp_path / ".mareforma", ignore_errors=True)
     # The path never existed; restore must not touch the filesystem to check it.
     report = mareforma.restore(tmp_path)
@@ -610,7 +664,7 @@ def test_declared_classification_untouched_by_observed_axis(tmp_path):
         cid = g.assert_claim(
             "a declared-analytical claim",
             classification="ANALYTICAL",
-            observed_grounding=_grounded().to_signed_dict(),
+            observed_grounding=_grounded(tmp_path).to_signed_dict(),
         )
         row = g._conn.execute(
             "SELECT classification, observed_grounding FROM claims "
@@ -628,10 +682,10 @@ def test_declared_classification_untouched_by_observed_axis(tmp_path):
 FORGED = '{"grounding":"GROUNDED","reason":"forged"}'
 
 
-def _ungrounded_claim(g):
+def _ungrounded_claim(g, tmp_path):
     return g.assert_claim(
         "a finding the observer refused to ground",
-        observed_grounding=_ungrounded().to_signed_dict(),
+        observed_grounding=_ungrounded(tmp_path).to_signed_dict(),
     )
 
 
@@ -639,7 +693,7 @@ def test_direct_verdict_update_is_refused(tmp_path):
     # The verdict is signed, chained and gates promotion, so a signed row may
     # not have it rewritten by direct SQL any more than its evidence vector.
     with open_graph(tmp_path) as g:
-        cid = _ungrounded_claim(g)
+        cid = _ungrounded_claim(g, tmp_path)
         with pytest.raises(sqlite3.IntegrityError, match="signed_field_locked"):
             g._conn.execute(
                 "UPDATE claims SET observed_grounding = ? WHERE claim_id = ?",
@@ -653,7 +707,7 @@ def test_forged_verdict_fails_the_audit(tmp_path):
     from mareforma.db import verify_claim_signatures
 
     with open_graph(tmp_path) as g:
-        cid = _ungrounded_claim(g)
+        cid = _ungrounded_claim(g, tmp_path)
         g._conn.execute(
             "DROP TRIGGER IF EXISTS claims_signed_fields_no_laundering"
         )
@@ -676,7 +730,7 @@ def test_forged_verdict_is_unverified_on_the_replicated_read_path(tmp_path):
     # The ordinary read path, not only an explicit verify, must refuse a row
     # whose verdict disagrees with the envelope it was signed under.
     key_b = _bootstrap_validator_key(tmp_path)
-    verdict = _grounded().to_signed_dict()
+    verdict = _grounded(tmp_path).to_signed_dict()
     with open_graph(tmp_path) as g:
         anchor = g.assert_claim("established anchor", seed=True)
         cid = g.assert_claim(
