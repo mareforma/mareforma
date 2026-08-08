@@ -285,7 +285,9 @@ A plan written by a release with a wider alpha bound can state a rule no gate ca
 
 A retirement is **append-only** like the plan it retires: `plan_retirements_append_only` (BEFORE UPDATE) and `plan_retirements_no_delete` (BEFORE DELETE) raise `mareforma:append_only:plan_retirement_locked` / `plan_retirement_delete_blocked`.
 
-None of these columns is signed, so `restore` re-derives the row from the attestation: the claim's text renders plan, replacement and reason, and a row its claim does not render fails the restore with `kind='claim_unverified'`. Resolution on the read is reached only from a plan whose own rule cannot be run, and those lines count zero as they stand, so a planted retirement can recover a dropped line but never drop a counted one.
+None of these columns is signed, so both the read path and `restore` re-derive the row from the attestation: the claim's text renders plan, replacement and reason, a row its claim does not render resolves nothing on read and fails the restore with `kind='claim_unverified'`.
+
+Resolution is reached only from a plan whose own rule cannot be run, but that premise is suppliable: rewriting a live plan's alpha to a value no gate can discriminate at sends its lines into resolution, and a planted replacement at a stricter alpha re-gates a refutation to NEUTRAL, which is counted rather than skipped. That is why the attestation is checked on the read and not only on restore.
 
 ### findings table
 

@@ -197,10 +197,26 @@ enrolled and its signature verifies, so an unregistered key cannot manufacture a
 second independent line. Enroll the second key under the root, then sign with it:
 
 ```python
-# The root (the first key opened) enrolls lab_b's public half.
-graph.enroll_validator(lab_b_pubkey_pem, identity="lab_b")
+import mareforma
+from mareforma import signing
 
-with mareforma.open(path, key_path="lab_b.key") as graph_b:
+# lab_b's own key. The root (the first key opened) enrolls its public half.
+signing.bootstrap_key("lab_b.key")
+signer_b = signing.load_private_key("lab_b.key")
+graph.enroll_validator(
+    signing.public_key_to_pem(signer_b.public_key()),
+    identity="lab_b",
+)
+
+# lab_b's estimate, measured on its own dataset.
+est_beta = EffectEstimate(
+    estimate_value=0.37,
+    effect_type=EffectType.SMD,
+    ci_lower=0.11, ci_upper=0.63, ci_level=0.90,
+    n_total=615,
+)
+
+with mareforma.open(key_path="lab_b.key") as graph_b:
     graph_b.assert_finding(prop, plan, est_beta, data_id="dataset_beta",
                            generated_by="analyst/model-b/lab_b")
     graph_b.proposition_status(prop)["status"]   # "CONVERGENT"
