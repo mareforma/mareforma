@@ -118,12 +118,12 @@ rep_2 = graph.assert_claim(
 
   Claim:      Target T activity in condition C is specific to cell subtype…
   Source:     private_dataset_A  ← Lab B cannot access this
-  Supports:   ['f752301b-5f30-48a4-9d8a-b382bbd3f6ff']
+  Supports:   ['f752301b…']
   Class:      ANALYTICAL
 
   Claim:      Candidate target T shows elevated activity in condition C (p…
   Source:     private_dataset_A  ← Lab B cannot access this
-  Supports:   ['e7b323e1-3cf8-4f49-a664-8efaad569557']
+  Supports:   ['e7b323e1…']
   Class:      ANALYTICAL
 
   Lab B published 2 claims.

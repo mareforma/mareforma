@@ -2257,6 +2257,59 @@ def test_walkthrough_page_lists_every_section_the_script_prints():
         )
 
 
+# An output block is fenced with no language, or tagged as plain text. The
+# walk is line by line: a regex pairing fences across the whole file matches
+# one block's closing fence with the next block's opening one.
+_FENCE_RE = re.compile(r"^```(\w*)\s*$")
+_OUTPUT_LANGUAGES = {"", "text", "console", "output"}
+_FULL_UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}", re.I)
+_BARE_DATE_RE = re.compile(r"\b20\d{2}-[01]\d-[0-3]\d\b")
+
+
+def _output_blocks(text: str) -> list[list[str]]:
+    """Return the lines of every fenced block that holds console output."""
+    blocks: list[list[str]] = []
+    current: list[str] | None = None
+    language = ""
+    for line in text.splitlines():
+        fence = _FENCE_RE.match(line)
+        if fence and current is None:
+            current, language = [], fence.group(1)
+        elif fence:
+            if language in _OUTPUT_LANGUAGES:
+                blocks.append(current)
+            current = None
+        elif current is not None:
+            current.append(line)
+    return blocks
+
+
+def test_example_transcripts_elide_what_each_run_regenerates():
+    """A transcript must not print an id or a date the reader cannot get.
+
+    Claim ids are v4 UUIDs and ``validated_at`` is the day the run
+    happened, so a block that spells either in full tells the reader to
+    expect a value their own run never produces. The examples elide both
+    to a prefix and ``…``, and this guard keeps them that way.
+    """
+    literal = []
+    for readme in _example_files(".md"):
+        if readme.name != "README.md":
+            continue
+        for block in _output_blocks(readme.read_text(encoding="utf-8")):
+            for line in block:
+                found = _FULL_UUID_RE.search(line) or _BARE_DATE_RE.search(line)
+                if found:
+                    literal.append(
+                        f"{readme.relative_to(ROOT)}: {found.group(0)} in {line.strip()!r}"
+                    )
+
+    assert not literal, (
+        "example transcripts spell a value the reader's own run regenerates; "
+        "elide it to a prefix and '…': " + "; ".join(literal)
+    )
+
+
 def test_agents_lists_every_trust_map_property(tmp_path):
     """the AGENTS list must name every axis the map returns.
 
