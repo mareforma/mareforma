@@ -2,6 +2,387 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.11] - 2026-08-08
+
+A hardening release. An adversarial audit of the substrate found defects on every
+path a claim travels, and this closes them. The theme is that a claim is now
+trusted for what can be checked about it, not for what it says about itself.
+
+### Added
+
+- **Strict promotion is project state, not a caller's flag.** Opening a project
+  with `strict_promotion=True` records a root-signed, one-way policy that every
+  write path, the CLI and restore read. Before, the flag lived on the handle, so
+  a second opener promoted the rows the strict opener had refused, and nothing
+  recorded the bypass. Declaring the policy requires the root key; a keyless or
+  non-root caller is refused with a typed error. The policy envelope carries a
+  version, so envelopes signed before the field keep verifying.
+- **A supports revision counter.** `graph.db` records a counter bumped by every
+  claim insert and every supports-edge change, and the cache records the value
+  it was built from. A torn commit that loses the cache half of an in-place edge
+  edit is now detected and rebuilt instead of serving pre-edit lineage
+  indefinitely.
+- **A wrap-invariant FASTA canonical form**, and the rdkit SMILES form split from
+  its no-rdkit fallback. One recorded form name used to mean different bytes on
+  different hosts; the rdkit form now refuses without rdkit, the string form is
+  registered under its own name, and a `chem` extra installs rdkit.
+- **Retire a plan whose gates cannot run.** `graph.retire_plan(plan_id, alpha=,
+  reason=)` registers a replacement carrying the retired plan's own rule at a
+  usable alpha, records a signed retirement attestation, and re-gates the
+  stranded evidence under the replacement. Only the alpha may move, so a repair
+  cannot re-choose the side of the null once the numbers are known, and the
+  retired row keeps its original values. A release before the `(0, 0.5)` bound
+  could register a plan the gates cannot evaluate; its evidence lines dropped out
+  of every count with no way to recover them.
+- **A `post_hoc` flag on `proposition_status`.** A count resting on a plan chosen
+  after the estimates were in view, either a one-shot plan or the replacement a
+  retirement resolved a stranded line to, now says so. A reader can tell a
+  pre-registered gate from one picked once the numbers were known.
+- **Publishing gates on the test suite**, and the release job checks the packaged
+  version against the tag it is publishing.
+- **The trust map refuses to render when its engine version drifts from the
+  package.** Every map carries the engine version that computed it, so a stored
+  record names the build behind its tiers. That stamp is now bound to the package
+  version, and a build where the two disagree raises `TrustMapVersionError`
+  instead of emitting a map. A map whose tiers came from one engine while naming
+  another is worse than no map, because the name is what a later reader checks
+  the tiers against.
+- **The pre-publish suite fails an artifact missing the read-side lineage
+  authentication.** A wheel or sdist in `dist/` built before independence keyed
+  off the signed model lineage ships a trust layer a forged `model_lineage`
+  column can inflate to `CONVERGENT`. Any such artifact now fails the suite
+  rather than being published.
+
+### Breaking
+
+- **Enrolling a key stops a project counting the claims it wrote before that
+  key.** A project can start unsigned, and its claims count on a run axis keyed
+  on `generated_by`. The moment a validator enrols, that axis is withdrawn:
+  `generated_by` is a value the writer picks, so once a project signs, a writer
+  with database access can add an unsigned claim under any run token and the gate
+  cannot tell it from an honest pre-key one. That closed two measured bypasses,
+  stripping the signature off an existing claim and inserting a fabricated
+  unsigned tree, both of which read as convergent support with nothing disclosed.
+  The cost lands on an honest operator who enrolled late: those findings stay in
+  the graph and stop counting, the proposition reads `UNTESTED`, `lines_skipped`
+  rises, and each drop is named `unregistered_signer_skipped` in
+  `.mareforma/health.jsonl`. There is no un-enrol. Open a project with its key
+  from the first write, or keep it unsigned.
+- **`restore` accepts a recovery it used to refuse, and reports it.** A claim
+  with no signature in a project that enrols a validator no longer fails the
+  whole rebuild. One keyless write after enrolment, an unattended run or a
+  collaborator without the key, used to make every later backup unrestorable,
+  and nothing said so until recovery day. Such claims come back, the return value
+  carries `unsigned_in_signed_mode` counting them, and a warning names the first
+  few. They still count on no axis, so the read path and `restore` now describe
+  the same graph. A claim carrying a `statement_cid` with no `signature_bundle`
+  is still refused: it was signed once and the signature is gone, which is
+  tampering rather than a keyless write.
+- **A retirement resolves only behind a verified attestation.** The read path
+  re-derives a plan retirement from the signed record, so a graph carrying a
+  hand-planted `plan_retirements` row stops resolving stranded lines through it.
+  A row whose claim does not render the plan, replacement and reason it names
+  resolves nothing, and `restore` refuses it.
+- **Upgrade every writer on a project together.** Once a writer opens a project
+  with this release, an older release can still open it (the schema version is
+  not bumped), but its promotion now trips the newer promotion guard and is left
+  pending instead of landing. The older release used to swallow that failure and
+  lose the promotion in silence. `mareforma status` now names the stuck count as
+  `convergence_retry_pending`, and a writer on this release clears it. See the
+  migration note below.
+- **`mareforma verify <claim-id>` exits 2, not 0, for a signed claim whose signer
+  is not an enrolled validator.** Auditor-mode verification uses public material
+  only, so a signer that never enrolled cannot be authenticated: the claim's
+  binding is all that could be checked, never its signature. The old exit 0 let a
+  CI gate pass a 64-zero-byte signature under a keyid that was never enrolled.
+  Exit 2 is the unverifiable verdict, not a failure: enrol the signer's key and
+  the same claim reaches a definite one. A CI gate that treats any non-zero exit
+  as tampering will now fail on this, and should route 2 to "cannot tell yet."
+- **A signer that does not authenticate contributes no distinct-signer unit.** A
+  finding whose claim names a signer that is not an enrolled validator, or that
+  carries no signature bundle at all, counts on no axis, where before an
+  unenrolled or bundle-less signer still read as a distinct source. A project that
+  leaned on unenrolled participants for its independence count sees those lines
+  drop and disclosed as skipped; enroll the signer to count the line again.
+
+- **`Prediction` no longer accepts `preregistered`.** The constructor keyword is
+  gone and `to_dict()` no longer carries the key; the store owns the flag. Delete
+  the argument from any call site. The v0.3.10 reference documented it and the
+  shipped compounding example used it, so copied code needs the edit.
+- **`Prediction` refuses an alpha of 0.5 or above.** The bound narrowed from
+  `(0, 1)` to `(0, 0.5)`, so a plan that constructed on the previous release now
+  raises `ValueError` at construction. The gate is one-sided, and at an alpha of
+  half or more it cannot separate the sides, which is the state a release before
+  the bound could register and then fail to evaluate. Re-register any such plan
+  at a usable alpha, or retire it with `retire_plan`, which exists for the plans
+  already recorded above the bound.
+- **Receipts written before this release no longer summarize.** The grounding axis
+  version moved, so `summarize_receipts` raises `GroundingAxisMismatchError` on any
+  receipt from v0.3.9 or v0.3.10 and `mareforma measure` exits 1 on a stored
+  `receipts.jsonl`. Re-run the observation to produce receipts on the current axis.
+- **`perturbation_oracle` returns different verdicts for identical inputs.** The
+  effect size is now the largest single perturbation move rather than the pooled
+  mean, the multiple-comparison family includes the perturbation count, and thin
+  noise is reported at one repeat. An influence rate computed on v0.3.10 does not
+  carry over.
+- **`mareforma verify` reports a foreign-key bundle as unverifiable, not tampered.**
+  A bundle signed with a key other than the local one now exits 2 with verdict
+  `unverifiable`, where it exited 1 with `tampered`. A CI gate keyed on the
+  documented 1-versus-2 split takes the opposite branch. Pass `--key` to verify
+  against the signing key.
+- **`mareforma reexec` usage errors exit 3, not 2.** A missing file or an unknown
+  flag now returns the usage code rather than the could-not-re-execute code, so a
+  gate that treated 2 as inconclusive-and-continue aborts on 3.
+- **`claim add` writes to the nearest ancestor project.** `claim add`, `claim
+  update`, `claim validate` and `validator add` now join the project above the
+  current directory instead of creating a new one in place. The same command run
+  in a subdirectory writes to a different graph than it did before.
+- **`health.claims_contradicted` counts a different population.** It now counts
+  claims marked invalid by a signed contradiction verdict, where it counted claims
+  that assert a contradiction. Same name, same type, different number, so a
+  dashboard or gate reading it silently changes meaning.
+- **The exporters refuse a document rather than returning a partial one.** JSON-LD,
+  PROV-O and RO-Crate raise `UnverifiedClaimError` naming the claims when any row
+  fails verification, and `mareforma export` exits 1. They also raise
+  `FileNotFoundError` on a root with no graph instead of returning an empty
+  document, as does `export_bundle.build_statement`.
+- **The RO-Crate `signature` property is an object, not a string.** It is now the
+  parsed DSSE envelope where it was the envelope as a JSON string, so a consumer
+  calling `json.loads` on it raises. A malformed bundle is omitted rather than
+  passed through opaquely.
+- **Agent identifiers in the RO-Crate and PROV-O exports are percent-encoded.**
+  A model name carrying a colon now renders as `%3A` where it rendered as `_`, so
+  documents exported by different releases do not join on the agent node.
+- **`mareforma export --bundle --json` exits 1.** The combination was a documented
+  no-op and is now refused as mutually exclusive, so a script passing a blanket
+  `--json` to every export fails.
+- **`write_bundle` refuses projects it used to sign.** A signing key that is not
+  the graph's trust root, and any graph containing a claim with no asserter
+  signature, are both refused with `BundleExportError`. Projects whose earliest
+  claims predate their signing key are the common case.
+- **`register_canonicalizer` refuses a duplicate name.** Re-registering an existing
+  form now raises; pass `override=True` to replace it deliberately. A module that
+  registered a form and is then reloaded fails on the second import.
+- **The JSON-LD export declares `@version: 1.1`.** A JSON-LD 1.0 processor is
+  required to reject the document. The context also maps `evidence` as a JSON
+  literal, so it survives expansion where it was previously dropped.
+- **`mareforma validator list` can exit 1.** A read-only listing now fails when the
+  validator rows do not chain back to a single self-signed root, which aborts a
+  `set -e` script that only meant to list them.
+- **`mareforma audit --out` replaces the whole directory.** Envelopes from an
+  earlier run in the same output directory are deleted before the new ones are
+  written. The deleted artifacts are signed evidence, so point re-runs at a fresh
+  directory to keep them.
+- **`partial` is true for any non-zero exit.** In `diagnose --json`, audit receipts
+  and run records, a target that exits non-zero is now reported as a truncated
+  observation, where the flag was set only when the target raised.
+- **`is_doi` no longer trims whitespace and requires a stricter form.** A padded or
+  multi-token supports entry classifies as an external reference rather than a DOI,
+  which moves it between predicates in the JSON-LD export. `graph.classify_supports`
+  returns a different answer for unchanged stored data.
+- **Declaring the strict-promotion policy requires the project's root key.** Opening
+  with `strict_promotion=True` from a keyless or non-root caller raises
+  `ProjectPolicyError`, where the flag was previously accepted on any handle. This
+  is the enforcement half of the policy entry under Added.
+
+### Changed
+
+- `verify_claim_signatures` returns `False` for a row that carries a signer keyid
+  but no signature bundle, instead of exempting it as legacy.
+- A finding's verdict inputs are signed. The record it already carried, the
+  proposition it addresses, the plan that gated it, the datasets behind it, its
+  bearing, and a digest over its ordered estimate line set, is bound into the
+  claim's signed statement, and a verdict re-derives against that copy where it is
+  read. A finding written before the record carries none and signs to
+  byte-identical bytes, so every claim already on disk keeps verifying.
+- Altering or deleting an estimate, a contrast, or an evidence line is disclosed
+  on read and refused on restore. The independence count enumerates from the
+  signed finding and joins downward, so a removed row leaves the finding visible
+  and its signed digest catches the gap, instead of erasing the whole finding from
+  an inner join and reading a dropped refutation as consensus.
+- A rewritten proposition is caught where the verdict is read, not only on
+  restore. A finding's signed claim text is the rendering of the proposition it
+  attests, so the live proposition row must render back to it; a mismatch drops
+  the finding rather than counting evidence for a sentence the finding never made.
+  Both renderings are normalised, so two agents naming one proposition with
+  different capitalisation still read and restore without a false refusal.
+- A failed signature is distinct from an absent one. A finding signed by an
+  enrolled validator whose signature no longer verifies is a disclosed skip and a
+  restore refusal; a finding that never carried a signature keeps the previous
+  fallback. Before, a swapped stored pubkey changed a verdict with the skip
+  counter reading zero.
+- `mareforma status` cannot read green while a promoted claim fails
+  re-verification, and it reports the count of promotions left pending by a
+  swallowed convergence retry.
+- `effect_estimates`, `contrasts`, `propositions` and `validators` are
+  append-only and undeletable, and `predictions.plan_id`, the primary key, joins
+  its own trigger's watch list. A direct in-place edit or delete of any of them is
+  refused at the storage layer, the same guard `findings` and `evidence_lines`
+  already carried.
+- `claims.toml` keeps a `.prev` copy on each write. A bad rewrite, or a graph lost
+  along with its only backup, still leaves one recovery point, at constant cost
+  and with no per-write signature work.
+- The detached bundle verifier gained the self-validation refusal restore already
+  applied, so the live read, restore, and the bundle verifier agree on what a
+  promotion needs; a test fails if the three rules diverge again.
+- `list_claims` accepts a `limit`, so a caller can bound the verify-on-read work
+  on a large graph the way `query` and `search` already do.
+- `effective_independence` reports `lines_skipped`, so the independence axis does
+  not read a confident number off a line set that silently lost lines.
+- Omitting `generated_by` no longer exempts a submit from the pre-registration
+  gate. The write resolves it to the default run token and the gate asks about
+  that same token, so a project that never sets a run token raises
+  `PostHocPlanError` on a `preregistered=1` plan once any finding exists under
+  the default. Register the plan before the run executes, or submit under a
+  fresh run token.
+- A failed open of a cited source no longer floors the verdict to `OPAQUE`.
+  When the observed failures account for every open of the cited path, the open
+  provably returned no file object and nothing is left unexplained, so the scope
+  lands `UNGROUNDED` with the failure and its exception type named in the
+  reason. This reverses the 0.3.10 sentence below, which said a failed open
+  still floors to `OPAQUE`. One open more than the observed failures still lands
+  `OPAQUE` on the hidden-reader gap.
+- A support level above `PRELIMINARY` is served as verified only when the signed
+  evidence behind it verifies too: a signature-checked replication verdict naming
+  the claim, or distinct-signer convergence on a shared anchor. A row whose level
+  has no such backing reads `verified=False` and stays out of gated queries. The
+  live read path and restore share one derivation, so they cannot drift apart.
+- The project policy records when each rule was first declared, so extending it
+  with a second rule leaves the first rule's window where it was. A policy
+  envelope signed before this release still verifies and keeps its own date.
+- The export bundle is described as what it emits, an in-toto Statement v1 in a
+  DSSE envelope. Earlier releases called it SCITT-style; SCITT names a COSE
+  signed statement, which this package does not produce.
+- The trust map drops the topology flag no caller could act on, and
+  `TRUST_MAP_VERSION` is stamped for the new shape.
+- `compute_health` no longer takes the project root it never used.
+- `verify_rekor_inclusion` takes the signed claim envelope as a third argument,
+  so a call written against 0.3.10 raises `TypeError` until it passes the
+  envelope the entry is meant to witness.
+- The exceptions the API reference names are exported at the top level.
+- Dead surfaces are gone: the selective-wrapping selectors, the unreachable
+  telemetry writer, the unread role-attestation sidecar, an unauthenticated model
+  key helper, and a root identity parameter no caller could set. The `rich`
+  dependency was never imported and is dropped.
+- All four empty extras are gone: `clawinstitute`, `tooluniverse`, `gemini` and
+  `docs`. Every adapter runs on core dependencies, so an extra per adapter
+  installed nothing and still succeeded, reading as "already satisfied" to
+  anyone who ran it. Adapters are opt-in by import.
+
+### Fixed
+
+- `restore` reports a malformed trust-layer row instead of crashing. TOML can
+  hold arrays, inline tables, local times and integers wider than SQLite takes,
+  and a hand-edited backup carrying one raised `ProgrammingError`, or
+  `OverflowError`, straight out of `restore`. Every trust table now rejects a
+  non-scalar with `RestoreError(kind='trust_row_rejected')` naming the row and
+  the column, which is the documented error surface a recovery script catches.
+- Verify-on-read binds a signed claim's stored fields to its envelope. Rewritten
+  text, a copied bundle, a removed bundle and a forged signer keyid are all
+  refused at both gated levels instead of being served as verified, and the
+  append-only triggers watch the bundle and the keyid so the rewrite is refused
+  at the storage layer first.
+- A single statement can no longer forge a grounding verdict or promote a claim.
+- Every input a trust gate counts is re-derived where it is read. The read path
+  and restore share one verifier, so a finding's plan is checked against the plan
+  its own claim recorded, and a plan's rule columns against the identifier that
+  keys them. A direct-SQL rewrite that would reflip a bearing drops the line and
+  discloses it instead of moving the count in silence, and restore refuses the
+  recovery outright.
+- `findings` and `evidence_lines` are append-only and undeletable. A finding's
+  plan and bearing, and a line's data and model lineage, gate every count above
+  them, so an in-place edit is refused at the storage layer.
+- `retire_plan` refuses two repairs that used to succeed quietly: one that
+  recovers no evidence line at all, and one whose replacement plan already
+  exists, which would drop the disclosure the recovered count depends on.
+- A one-shot finding's synthesised plan is held to the same `(0, 0.5)` alpha
+  bound as a registered one, so no write path mints a plan the gates cannot
+  evaluate.
+- Restore verifies what it replays: a second self-signed root in `claims.toml`
+  cannot void the trust layer, an unsigned finding edge cannot replay as an
+  independent line, the durable promotion gates are re-applied to rebuilt rows,
+  and an incomplete Rekor sidecar entry is refused.
+- Independence counts only what can be authenticated. Withdrawn and invalidated
+  claims stop contributing, a null lineage column falls back to the signed record
+  rather than skipping re-authentication, and a defaulted validator type no
+  longer certifies an independent line.
+- The observer fails closed. The HTTP transport allowlist refuses an unknown
+  transport, a nested scope replays its evidence into its parent instead of
+  blinding it, reads are recorded under absolute urls with credentials stripped,
+  and an unreadable response floors to opaque.
+- A tool adapter signs only what it observed. Environment facts it did not watch
+  are refused, and callee cache metadata no longer writes a supports edge.
+- Read-only commands stay read-only: `verify` and `map` no longer enroll the
+  caller's key as the root validator, and an audited child process cannot reach
+  the corpus signing key.
+- Every read surface verifies a high-trust row, including `list_claims`, so the
+  JSON-LD, PROV-O and RO-Crate exporters and `mareforma claim list` no longer
+  publish a REPLICATED or ESTABLISHED row whose signature does not re-verify.
+- An enrolled validator is bound to its own key: a row whose keyid is not the
+  public key id of its own `pubkey_pem` is refused, so one key cannot hold two
+  identities on the independence axis.
+- Two paths that grounded a cited source without reading it are closed: an
+  in-process transport that answers without a socket, and a database connection
+  that creates the file it claims to read. The boundary stays the process rather
+  than the caller's honesty inside it, because the scope recorder is reachable
+  from the observer's own exports, so code in the same interpreter can still have
+  a verdict minted for a read that did not happen.
+- An audit receipt attests what the observer recorded, not what the run directory
+  held afterwards, so an audited target cannot rewrite its own verdict into the
+  auditor's signature.
+- Transactions end where they start. A refused delete releases its transaction
+  instead of discarding later writes, and the Rekor sidecar write stays inside
+  the caller's transaction.
+- Reads are bounded and serialized: a read truncated by the scan ceiling is
+  refused rather than served short, unbounded IN-lists bind as one json array,
+  the acyclicity walk runs in sql, and reads and close run under the graph lock.
+- An export bundle is refused unless the trust root signed it, bundle
+  verification checks the validation envelope's signer rather than its label, and
+  an exported artifact lands through an atomic replace so a failed write cannot
+  destroy the previous one.
+- A Rekor inclusion proof is bound to the claim it witnesses.
+  `verify_rekor_inclusion` refuses a proof whose proven body records another
+  entry's payload hash or signature, so a valid proof over some other claim no
+  longer verifies this one.
+- The insecure-Rekor flag reaches submit and fetch instead of being read once and
+  dropped, and the log-pubkey pin is written durably and checked when it is read.
+- `open()` resolves the project root once, so changing directory under a live
+  graph cannot split the signed corpus across two trees.
+- The documentation describes the shipped behavior. Every `open()` keyword, the
+  full oracle and `assert_claim` signatures, six undocumented graph methods, the
+  refusals `validate()` can raise, the restore signature and its error kinds, and
+  six CLI commands that had no section are now in the reference, and the
+  quickstart follows a path that reaches the established level.
+- The example walkthroughs print what a reader's own run prints. Two transcripts
+  carried a claim id and a validation date from the run that recorded them,
+  values no other run reproduces, and both are now elided the way the rest of
+  the transcripts already were.
+- The shipped sdist runs its own suite: the guards that read repository files
+  skip there instead of failing where those files do not exist.
+
+### Migration
+
+Upgrade every writer on a project to this release together. The schema version is
+not bumped, so a project stays openable in both directions, and a graph this
+release writes still reads under the older one. What changes is promotion: a
+convergence check run by the older release now trips the newer promotion guard and
+leaves the claim below the level its evidence earns, flagged for retry rather than
+lost. The older release swallowed that failure silently. Run `mareforma status` to
+see the pending count (`convergence_retry_pending`); a writer on this release
+re-runs the check and clears it. The retry has to come from this release: the
+older one reports the count in `health()` but its own `refresh_convergence()`
+promotes nothing and leaves the count where it was.
+
+A human validation is the harder case, and it is not queued. `validate()` called
+from the older release on an upgraded project raises
+`mareforma:append_only:promotion_unmarked`, the transaction rolls back whole, and
+the claim keeps its level with `validated_by` still empty and nothing added to
+the retry count. The validation is lost rather than deferred, and the message the
+older release prints is the internal sentinel with no remedy attached. Re-run the
+validation from this release. No data migration, no
+reindex, and no re-sign: the only action is to move the remaining writers onto
+this release.
+
 ## [0.3.10] - 2026-07-16
 
 ### Added
