@@ -64,6 +64,15 @@ No `mareforma init` required.
 Open the epistemic graph and return an `EpistemicGraph`. Use as a context
 manager to ensure the connection is closed.
 
+**Decide signed or unsigned before you write.** The first key opened against a
+project enrols as its root validator, and a project that signs does not count
+unsigned claims toward independence, including the ones written before the key.
+Those findings stay in the graph but stop counting: the proposition reads
+`UNTESTED`, `lines_skipped` rises, and each drop is named
+`unregistered_signer_skipped` in `.mareforma/health.jsonl`. There is no un-enrol.
+Open with the key from the first write, or pass `load_key=False` to read a
+project without enrolling anything.
+
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `path` | `str \| Path \| None` | `None` | Project root. Defaults to `cwd()`. Graph stored at `<path>/.mareforma/graph.db`. |

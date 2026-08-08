@@ -78,7 +78,8 @@ fail-all-or-nothing.
 
 ```python
 result = mareforma.restore("/path/to/project")
-# {'validators_restored': 3, 'claims_restored': 47}
+# {'validators_restored': 3, 'claims_restored': 47,
+#  'unsigned_in_signed_mode': 0}
 ```
 
 **Parameters**
@@ -90,7 +91,17 @@ result = mareforma.restore("/path/to/project")
 | `rekor_log_pubkey_pem` | `bytes \| None` | `None` | PEM-encoded Rekor log operator public key. When supplied, every `[rekor_inclusions]` entry's Merkle inclusion proof is cryptographically verified before replay, and each proof is bound to the claim it covers. Verification failure raises `RestoreError(kind='rekor_inclusion_invalid')`. When `None`, sidecar entries are replayed unverified. |
 | `enforce_rekor_policy` | `bool` | `False` | Assert this project requires transparency-log witnessing. Requires a valid root-signed `[project_policy]` and a pinned `rekor_log_pubkey_pem`; a signed claim is then marked convergence-eligible only when it carries a verified, claim-bound inclusion proof. Closes the strip-route where an edited claims.toml makes an unwitnessed claim look ready. Off by default (best-effort, matching the pinned-key opt-in posture). |
 
-**Returns** `dict` with `validators_restored` and `claims_restored` counts.
+**Returns** `dict` with `validators_restored`, `claims_restored`, and
+`unsigned_in_signed_mode`.
+
+`unsigned_in_signed_mode` counts claims that came back carrying no signature in
+a project that enrols a validator. Restore accepts them and warns; the read path
+does not count them and discloses each one in `lines_skipped`. A non-zero value
+means someone wrote to this project without its key. If those claims predate the
+enrolment, the count is the size of what enrolling cost you. A claim that carries
+a `statement_cid` but no `signature_bundle` is refused instead of counted here:
+it was signed once and the signature is gone, which is tampering rather than a
+keyless write.
 
 **Raises** `mareforma.db.RestoreError` with `.kind` field:
 
@@ -1214,10 +1225,30 @@ The retrieval view for one proposition. Accepts a `content_id` or a
 
 **Returns** `dict` with `content_id`, `frame_id`, `direction`, `status`,
 `independent_support`, `independent_refute`, `frame_status`, `status_policy`,
-`lines_skipped`, the count of this proposition's evidence lines that no
-longer reconstruct into a gateable bearing and were therefore left out of the
-counts, and `post_hoc`. A dropped refutation reads as consensus, so read
-`lines_skipped` next to the two counts.
+`lines_skipped`, the count of this proposition's evidence lines that were left
+out of the counts, and `post_hoc`. A dropped refutation reads as consensus, so
+read `lines_skipped` next to the two counts.
+
+Each skipped line records its reason once in `.mareforma/health.jsonl`, so a
+non-zero `lines_skipped` is always explainable. It is written once per handle,
+not once per read, so polling `proposition_status` does not grow the file:
+
+| Reason | What it means |
+|---|---|
+| `withdrawn_line_skipped` | The line's claim was retracted, or a signed contradiction verdict invalidated it. A lifecycle state, not damage. |
+| `ungateable_plan_skipped` | The line's plan carries a rule no gate can run, and nothing supersedes it. `retire_plan` is the way out. |
+| `unregistered_signer_skipped` | The claim names a signer no validator enrolled, or carries no signature at all in a project that signs. |
+| `signature_failed_skipped` | The signer is enrolled but the signature does not verify. A stored public key was swapped or a signature was forged. |
+| `bearing_recompute_skipped` | The stored estimate and prediction no longer reconstruct into a bearing. |
+| `plan_rebind_skipped` | The finding's `plan_id` column no longer matches the plan its own signed claim records. |
+| `plan_rule_rebind_skipped` | A `predictions` row's rule columns no longer hash to the `plan_id` keying them. |
+| `estimates_digest_skipped` | An estimate, contrast, or evidence line under the finding was altered or deleted, so the tree no longer matches the digest the claim signed. Every line of that finding is skipped together. |
+| `proposition_rebind_skipped` | The finding hangs off a proposition its own claim does not attest. |
+
+The first two are ordinary lifecycle. The rest mean a row was rewritten under
+the read path, and `restore` refuses a backup carrying any of them except
+`unregistered_signer_skipped`, which an honest backup can legitimately hold when
+it carries a participant's finding whose key this project never enrolled.
 
 `post_hoc` is `true` when the count rests on a plan that was not
 pre-registered, either a one-shot plan or the replacement `retire_plan`
