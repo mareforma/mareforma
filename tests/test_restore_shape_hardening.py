@@ -10,6 +10,7 @@ disaster-recovery user the module is written for.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import json
 from pathlib import Path
 
@@ -208,3 +209,42 @@ def test_unreadable_claims_toml_raises_restore_error(tmp_path: Path) -> None:
     with pytest.raises(_db.RestoreError) as exc_info:
         mareforma.restore(tmp_path)
     assert exc_info.value.kind == "toml_unreadable"
+
+
+@pytest.mark.parametrize(
+    "label,bad",
+    [
+        ("array", [1]),
+        ("inline_table", {"a": 1}),
+        ("local_time", _dt.time(1, 2, 3)),
+        ("oversized_int", 10 ** 32),
+    ],
+)
+def test_non_scalar_trust_row_value_raises_trust_row_rejected(
+    tmp_path: Path, label: str, bad: object,
+) -> None:
+    """Shape validation proves table-of-tables; it says nothing about VALUES.
+
+    TOML expresses arrays, inline tables, local times and integers wider than 64
+    bits. sqlite3 binds none of them, and the replay loop caught only
+    ``sqlite3.IntegrityError``, so a hand-edited backup raised ``ProgrammingError``
+    (and ``OverflowError``, which is not even a sqlite3 exception) straight out
+    of ``mareforma.restore``, past the documented ``RestoreError`` contract.
+
+    Checked on ``propositions`` because every trust table is replayed through
+    the one loop, so the guard belongs there rather than per-section.
+    """
+    conn = _db.open_db(tmp_path)
+    data = {
+        "propositions": {
+            "pid1": {
+                "subject": bad, "relation": "affects", "object": "x",
+                "direction": "DECREASES", "scope_json": "{}",
+                "content_id": "c", "frame_id": "f",
+            },
+        },
+    }
+    with pytest.raises(_db.RestoreError) as exc_info:
+        _db._restore_trust_tables(conn, data)
+    assert exc_info.value.kind == "trust_row_rejected"
+    assert "pid1" in str(exc_info.value)

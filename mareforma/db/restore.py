@@ -385,7 +385,11 @@ def restore(
     conn = open_db(root)
     try:
         signed_mode = bool(validators_section)
-
+        # Claims accepted with no signature in a signing graph. Collected rather
+        # than refused (see _verify_claim_signatures_on_restore) and reported to
+        # the operator at the end, because a recovery that silently comes back
+        # holding uncounted lines is the same surprise, moved.
+        unsigned_in_signed_mode: list[str] = []
         # Order validators by enrolled_at so the root (earliest) lands
         # first and chain-walk parent lookups always succeed in-table.
         ordered_validators = sorted(
@@ -559,7 +563,7 @@ def restore(
                 target_level = _required_field(c, "support_level", ctx_c)
                 _verify_claim_signatures_on_restore(
                     conn, claim_id, c, validators_section, signed_mode,
-                    _signing,
+                    _signing, unsigned_in_signed_mode,
                 )
                 # Reconstruct supports/contradicts JSON.
                 supports_list = c.get("supports", []) or []
@@ -1070,9 +1074,25 @@ def restore(
                 RuntimeWarning,
                 stacklevel=2,
             )
+        if unsigned_in_signed_mode:
+            # Say it plainly: these came back, and they do not count. Silence
+            # here would move the old surprise rather than remove it.
+            warnings.warn(
+                f"restore: {len(unsigned_in_signed_mode)} claim(s) carry no "
+                "signature in a project that enrols a validator. They were "
+                "restored, and a signing project does not count unsigned "
+                "claims toward independence, so their evidence lines are "
+                "skipped on read. If they predate this project's enrolment, "
+                "`mareforma validator cover-pre-signing` signs them under the "
+                "project's own key; otherwise they were written without the "
+                f"key. First: {', '.join(unsigned_in_signed_mode[:3])}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         return {
             "validators_restored": len(ordered_validators),
             "claims_restored": len(ordered_claims),
+            "unsigned_in_signed_mode": len(unsigned_in_signed_mode),
         }
     except BaseException:
         # Close first so the files are unlocked, then drop the residue.
@@ -1109,6 +1129,7 @@ def _restore_supports_revision(conn: sqlite3.Connection, section: Any) -> None:
 def _restore_trust_tables(conn: sqlite3.Connection, data: dict) -> None:
     """Replay the trust-layer finding tree from claims.toml.
 
+
     Walks ``_TRUST_TABLE_BACKUP`` in foreign-key order (parents before children)
     and inserts each populated section. NULL-valued columns were omitted from the
     backup, so each column reads with a NULL default. The section shapes are
@@ -1137,6 +1158,35 @@ def _restore_trust_tables(conn: sqlite3.Connection, data: dict) -> None:
         )
         for pk_value, entry in section_data.items():
             values = [pk_value, *(entry.get(col) for col in cols)]
+            # Shape validation proves this is a table of tables; it says nothing
+            # about the VALUE types. TOML expresses arrays, inline tables, local
+            # times and integers wider than 64 bits, and sqlite3 binds none of
+            # them: a hand-edited backup raised ProgrammingError (and, for a big
+            # integer, OverflowError, which is not even a sqlite3 exception)
+            # straight out of mareforma.restore, past the documented RestoreError
+            # contract. Every trust table is replayed through this one loop, so
+            # the check belongs here rather than per-section.
+            for col_name, value in zip(all_cols, values):
+                if value is not None and not isinstance(
+                    value, (str, int, float, bytes)
+                ):
+                    raise RestoreError(
+                        f"Trust-layer row {pk_value!r} in [{section}] has a "
+                        f"{type(value).__name__} in {col_name!r}; that column "
+                        f"stores a scalar. Correct or remove it in claims.toml "
+                        f"and run restore again.",
+                        kind="trust_row_rejected",
+                    )
+                if isinstance(value, int) and not isinstance(value, bool) and (
+                    value.bit_length() > 63
+                ):
+                    raise RestoreError(
+                        f"Trust-layer row {pk_value!r} in [{section}] has an "
+                        f"integer in {col_name!r} too large for this database. "
+                        f"Correct or remove it in claims.toml and run restore "
+                        f"again.",
+                        kind="trust_row_rejected",
+                    )
             try:
                 conn.execute(insert_sql, values)
             except sqlite3.IntegrityError as exc:
@@ -1185,26 +1235,34 @@ def _verify_finding_proposition_binding(conn: sqlite3.Connection) -> None:
 
     ``findings.content_id`` is not a signed field, so a tampered claims.toml can
     re-point a genuinely signed finding at a proposition it says nothing about
-    and inflate that proposition's independence count. The edge is still
-    re-derivable from signed material: a finding claim's ``text`` is the
-    rendering of the proposition it attests. A finding whose proposition does
-    not render its own claim text is a rewritten edge and fails the whole
-    restore (kind='claim_unverified').
+    and inflate that proposition's independence count. Two re-derivations close
+    it, and each is exact because both compare identity rather than prose:
 
-    Both renderings are normalised (:meth:`Proposition.normalized_text`) before
-    they are compared. Identity is content-addressed through casefold and
-    whitespace-collapse, so two agents naming one proposition with different
-    capitalisation converge on a single row whose stored strings are the first
-    writer's, while a later finding's claim text renders the second writer's: raw
-    equality would false-refuse that honest, tamper-free case. Normalising both
-    sides keeps the re-point attack caught (a different subject, relation, object,
-    direction, or magnitude still differs after normalisation) without refusing a
-    benign case variant.
+    * the proposition row must still hash to the ``content_id`` it is keyed
+      under, so a rewritten row is caught even when every finding under it is
+      legacy; and
+    * the finding's own signed ``finding_record`` must name that same
+      ``content_id``.
+
+    Either failure is a rewritten edge and fails the whole restore
+    (kind='claim_unverified').
+
+    A finding whose claim carries no verifiable envelope has no signed
+    content_id, and falls back to the rendering comparison this check has always
+    used: the proposition must render the claim's own text. A rendering orders
+    scope by the raw key while identity casefolds it, so the row is compared
+    against every order a writer of it could have emitted
+    (:meth:`Proposition.normalized_renderings`). That is exactly why it is the
+    fallback and not the rule. This is the same rule, in the same order, that
+    :mod:`mareforma.trust._gate` runs on the live read path.
     """
     from mareforma.trust import Proposition, normalize_token
+    from mareforma.trust._gate import verified_predicate
 
     rows = conn.execute(
-        "SELECT f.finding_id, c.text AS claim_text, p.subject, p.relation, "
+        "SELECT f.finding_id, f.content_id AS content_id, "
+        " c.claim_id AS claim_id, c.text AS claim_text, "
+        " c.signature_bundle AS signature_bundle, p.subject, p.relation, "
         " p.object, p.direction, p.scope_json, p.magnitude "
         "FROM findings f "
         "JOIN claims c ON c.claim_id = f.claim_id "
@@ -1220,18 +1278,36 @@ def _verify_finding_proposition_binding(conn: sqlite3.Connection) -> None:
                 "scope": json.loads(r["scope_json"] or "{}"),
                 "magnitude": r["magnitude"],
             })
-            # Validate the raw rendering (catches an unreadable proposition), then
-            # compare the normalised forms so a benign case/whitespace variant of
-            # one proposition does not read as a rewritten edge.
+            # Validate the raw rendering, which catches an unreadable proposition.
             _validate_claim_text(proposition.text())
-            expected = proposition.normalized_text()
+            expected = proposition.normalized_renderings()
+            rederived = proposition.content_id()
         except (ValueError, TypeError) as exc:
             raise RestoreError(
                 f"The proposition finding {r['finding_id'][:12]}… points at "
                 f"cannot be read back: {exc}",
                 kind="claim_unverified",
             ) from exc
-        if expected != normalize_token(r["claim_text"]):
+        if rederived != r["content_id"]:
+            raise RestoreError(
+                f"Proposition {r['content_id'][:12]}… no longer hashes to the "
+                "content_id it is stored under; the proposition row in "
+                "claims.toml was rewritten, and every finding filed against it "
+                "would attest a sentence none of them made.",
+                kind="claim_unverified",
+            )
+        predicate = verified_predicate(
+            conn, r["signature_bundle"], r["claim_id"],
+        )
+        signed_cid = (
+            (predicate.get("finding_record") or {}).get("content_id")
+            if predicate is not None else None
+        )
+        attests = (
+            signed_cid == r["content_id"] if signed_cid is not None
+            else normalize_token(r["claim_text"]) in expected
+        )
+        if not attests:
             raise RestoreError(
                 f"Finding {r['finding_id'][:12]}… points at a proposition its "
                 "attestation claim does not attest; the finding edge in "
@@ -1749,14 +1825,18 @@ def _verify_claim_signatures_on_restore(
     validators_section: dict,
     signed_mode: bool,
     _signing,
+    unsigned_in_signed_mode: list,
 ) -> None:
     """Verify a single claim's signatures during restore.
 
     Raises :class:`RestoreError` with the appropriate ``kind`` on
     any of: orphan signer keyid, signature_bundle verification
-    failure, validation_signature verification failure, or
-    mixed-mode (signed-mode graph with an unsigned claim that
-    isn't a benign PRELIMINARY-from-pre-signing-era row).
+    failure, or validation_signature verification failure.
+
+    An unsigned claim in a signed-mode graph is NOT one of those. It is appended
+    to *unsigned_in_signed_mode* and accepted: it counts on no axis, the read
+    path skips its line and discloses it, so refusing the recovery bought no
+    trust and cost the operator every finding in the backup.
     """
     sig_bundle_json = c.get("signature_bundle")
     if sig_bundle_json:
@@ -1987,13 +2067,34 @@ def _verify_claim_signatures_on_restore(
                     "TOML tampered.",
                     kind="claim_unverified",
                 )
-    elif signed_mode:
+    elif signed_mode and c.get("statement_cid"):
+        # A claim that was SIGNED ONCE and no longer carries its bundle. That is
+        # not a keyless write, it is a signature removed, and ``statement_cid``
+        # is the witness: it is written at signing time and nulling the bundle
+        # does not clear it. Still refused, because accepting it would let a
+        # tampered backup launder a de-signed claim through recovery.
+        #
+        # The read path draws the same line in ``_signer_axis``: a NULL-keyid
+        # claim carrying a statement_cid is never grandfathered.
         raise RestoreError(
-            f"Claim {claim_id} has no signature_bundle but the graph "
-            "is in signed mode (validators are enrolled). Restore "
-            "refuses mixed-mode reconstruction.",
+            f"Claim {claim_id} carries a statement_cid but no "
+            "signature_bundle: it was signed once and the signature is gone. "
+            "Restore refuses a de-signed claim.",
             kind="mode_inconsistent",
         )
+    elif signed_mode:
+        # Accepted, and reported. This used to refuse the whole recovery.
+        #
+        # The claim counts on no axis either way: a signing project does not
+        # count an unsigned claim, and the read path skips the line and
+        # discloses it. Refusing here bought no trust, and it cost the operator
+        # everything: one keyless write after enrolment (an unattended run, a CI
+        # job, a collaborator without the key) made every later backup
+        # unrestorable, and nothing said so until recovery day.
+        #
+        # Restore and the read path now agree about the same graph, which is
+        # what the design asked for. The claim comes back, uncounted and named.
+        unsigned_in_signed_mode.append(claim_id)
 
     val_sig = c.get("validation_signature")
     if val_sig:
