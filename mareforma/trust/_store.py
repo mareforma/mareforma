@@ -77,6 +77,18 @@ def register_proposition(conn: sqlite3.Connection, prop: Proposition, now: str) 
 
     Idempotent and concurrency-safe via ON CONFLICT DO NOTHING on the
     content_id primary key.
+
+    Scope is stored as the string TOKENS identity is computed over, not as the
+    caller's Python values. ``content_id`` hashes ``str(value)`` and ``text``
+    renders ``str(value)``, but ``json.dumps`` does not preserve every type it
+    accepts: a tuple comes back a list, a non-string key comes back a string.
+    A row written from such a proposition could not re-derive its own
+    ``content_id`` and did not render its own claim text, so the read path
+    dropped every finding under it and restore refused the operator's own
+    backup, on an untampered graph with no adversary anywhere. Writing the token
+    makes the row attest its own key by construction. Nothing moves for a
+    string-valued scope, which is every scope in the examples and the docs:
+    ``str(s) is s``, so the stored bytes are unchanged.
     """
     cid = prop.content_id()
     conn.execute(
@@ -92,7 +104,10 @@ def register_proposition(conn: sqlite3.Connection, prop: Proposition, now: str) 
             prop.relation,
             prop.object,
             prop.direction.value,
-            json.dumps(dict(prop.scope), sort_keys=True, ensure_ascii=False),
+            json.dumps(
+                {str(k): str(v) for k, v in prop.scope.items()},
+                sort_keys=True, ensure_ascii=False,
+            ),
             prop.magnitude,
             now,
         ),
@@ -229,8 +244,8 @@ def prediction_from_row(row) -> Prediction:
     whether a plan's rule can still be run at all. It applies the live write-time
     invariants, so a row a release with a wider bound wrote (an alpha at or above
     0.5, which no gate can discriminate at) raises here rather than gating at a
-    rule that decides nothing. :func:`superseding_prediction` is the supported
-    way out of that state.
+    rule that decides nothing. :meth:`mareforma.EpistemicGraph.retire_plan` is
+    the supported way out of that state.
     """
     return Prediction(
         test_type=row["test_type"],
@@ -269,6 +284,29 @@ def get_plan_row(conn: sqlite3.Connection, plan_id: str) -> Optional[sqlite3.Row
     ).fetchone()
 
 
+def plan_id_from_row(content_id: str, row) -> str:
+    """The plan_id a stored ``predictions`` row's rule hashes to.
+
+    :func:`compute_plan_id` needs a :class:`Prediction`, and a row whose rule no
+    gate can run cannot be built into one, which is exactly the row that needs
+    checking: a writer makes a plan un-runnable to send its lines into
+    retirement resolution. This hashes the same canonical shape
+    ``Prediction.to_dict`` produces, straight from the columns, so an
+    un-runnable row can still be held to the plan_id keying it.
+    """
+    return hashlib.sha256(
+        canonicalize({
+            "content_id": content_id,
+            "test_type": row["test_type"],
+            "alpha": row["alpha"],
+            "direction_of_interest": row["direction_of_interest"],
+            "equivalence_lower": row["equivalence_lower"],
+            "equivalence_upper": row["equivalence_upper"],
+            "inference_regime": row["inference_regime"],
+        })
+    ).hexdigest()
+
+
 def plan_retirement(
     conn: sqlite3.Connection, plan_id: str
 ) -> Optional[sqlite3.Row]:
@@ -276,27 +314,6 @@ def plan_retirement(
     return conn.execute(
         "SELECT * FROM plan_retirements WHERE plan_id = ?", (plan_id,)
     ).fetchone()
-
-
-def superseding_prediction(
-    conn: sqlite3.Connection, plan_id: str
-) -> Optional[Prediction]:
-    """The rule a retired plan's evidence now stands under, or None.
-
-    Read only for a plan whose own stored rule cannot be run (see
-    :func:`prediction_from_row`), so resolution can never move a line that
-    counts today: the lines it reaches are the ones counting zero. Raises if the
-    superseding row is itself un-gateable, which the caller treats like any other
-    un-gateable line and skips.
-    """
-    row = conn.execute(
-        "SELECT p.test_type, p.alpha, p.direction_of_interest, "
-        " p.equivalence_lower, p.equivalence_upper, p.inference_regime "
-        "FROM plan_retirements r JOIN predictions p ON p.plan_id = r.superseded_by "
-        "WHERE r.plan_id = ?",
-        (plan_id,),
-    ).fetchone()
-    return None if row is None else prediction_from_row(row)
 
 
 def plan_estimates(conn: sqlite3.Connection, plan_id: str) -> list[sqlite3.Row]:
@@ -725,16 +742,29 @@ class _UngateablePlan(Exception):
     """
 
 
-def _gateable_prediction(conn: sqlite3.Connection, row) -> tuple[Prediction, bool]:
+def _gateable_prediction(
+    conn: sqlite3.Connection, row, retirement=None,
+) -> tuple[Prediction, bool]:
     """The rule a stored line is gated under, and whether it was superseded.
 
     Normally the line's own plan (``superseded`` False). When that plan's stored
     rule cannot be run, the line is gated under the plan that supersedes it,
     which an operator registered explicitly through
-    :meth:`EpistemicGraph.retire_plan` (``superseded`` True). Resolution is
-    reached only from that failure, so a retirement record can only ever reach
-    lines that count zero as they stand: it can recover a dropped line, never
-    drop a counted one, whatever a direct writer plants in the table.
+    :meth:`EpistemicGraph.retire_plan` (``superseded`` True).
+
+    *retirement* is the retirement record the CALLER has already verified against
+    its own signed attestation, or None. It is a parameter rather than a lookup
+    because a lookup is what made this exploitable: resolution used to read the
+    raw ``plan_retirements`` row, on the reasoning that it is reached only from a
+    plan that cannot be run and so could only ever recover a line counting zero.
+    A writer supplies that premise. Rewriting a live plan's alpha to a value no
+    gate can discriminate at sends its lines into resolution, and a planted
+    replacement at a stricter alpha then re-gates a refutation to NEUTRAL, which
+    is COUNTED rather than skipped: measured, a refutation vanished with
+    ``lines_skipped`` still zero and nothing on the health channel. What the
+    caller verifies is the attestation ``retire_plan`` signs, which restore has
+    always re-derived, so both paths now resolve a retirement on the same
+    evidence.
 
     The ``superseded`` flag rides back so the caller can mark the count as
     resting on a replacement (post-hoc) plan: a replacement is registered after
@@ -744,12 +774,16 @@ def _gateable_prediction(conn: sqlite3.Connection, row) -> tuple[Prediction, boo
     try:
         return prediction_from_row(row), False
     except ValueError as exc:
-        try:
-            superseding = superseding_prediction(conn, row["plan_id"])
-        except ValueError:
-            # The superseding row cannot be run either (only reachable by a
-            # direct/foreign write): the line stays dropped, fail closed.
-            superseding = None
+        superseding = None
+        if retirement is not None:
+            replacement = get_plan_row(conn, retirement["superseded_by"])
+            if replacement is not None:
+                try:
+                    superseding = prediction_from_row(replacement)
+                except ValueError:
+                    # The superseding row cannot be run either (only reachable
+                    # by a direct/foreign write): stays dropped, fail closed.
+                    superseding = None
         if superseding is None:
             raise _UngateablePlan(str(exc)) from exc
         # A retirement carries the retired rule over unchanged except its alpha:

@@ -249,23 +249,54 @@ class Proposition:
         false-refuses. Identity-neutral: it never participates in ``content_id``
         and is not stored; it exists only for that comparison.
 
-        Scope is ordered by the NORMALISED key, not the raw one. ``text`` sorts
-        raw, so ``{"Population": ..., "condition": ...}`` and
-        ``{"population": ..., "condition": ...}`` render their pairs in opposite
-        orders; normalising afterwards cannot undo an ordering, and the two
-        agree on ``content_id`` precisely because identity ignores case. Sorting
-        on the normalised key is what makes this function agree with the identity
-        it exists to defend.
+        A rendering is not identity-stable, and no amount of normalising makes it
+        one: ``text`` orders scope by the RAW key, every uppercase byte sorts
+        before every lowercase one, and two propositions that share a
+        ``content_id`` (identity casefolds scope keys) can therefore render their
+        pairs in opposite orders. Normalising afterwards cannot undo an ordering.
+        That is why the finding-to-proposition binding does not rest on this
+        function: it compares the ``content_id`` the finding's own signed record
+        names, and falls back to a rendering only for a finding with no
+        verifiable record. That fallback compares against
+        :meth:`normalized_renderings`, not against this single string.
         """
+        return normalize_token(self.text())
+
+    def normalized_renderings(self) -> tuple[str, ...]:
+        """Every normalised rendering a writer of THIS proposition could produce.
+
+        Two agents naming one proposition converge on a single ``content_id``
+        because identity casefolds scope keys, and on a single stored row because
+        the first writer's strings win. Their CLAIM TEXTS are rendered from their
+        own objects, and :meth:`text` orders scope by the raw key, so an agent who
+        wrote ``Population`` and one who wrote ``population`` emit the pairs in
+        opposite orders. Comparing a stored row against one rendering therefore
+        drops an honest finding, measured on a single-writer graph that registered
+        its plan under one capitalisation and filed its finding under the other.
+
+        The two orders the raw key can take relative to the casefolded one are the
+        two returned here: sorted by the raw key, and sorted by the normalised
+        key. A comparison that accepts either counts both agents and still refuses
+        a genuinely different sentence, which differs under both orders.
+
+        Deduplicated, so the common case (scope keys already lowercase, or no
+        scope at all) returns exactly one string.
+        """
+        raw = normalize_token(self.text())
+        by_key = normalize_token(self._text_ordered_by_normalized_key())
+        return (raw,) if raw == by_key else (raw, by_key)
+
+    def _text_ordered_by_normalized_key(self) -> str:
+        """:meth:`text` with scope ordered by the normalised key."""
         scope = ", ".join(
-            f"{normalize_token(k)}={normalize_token(v)}"
+            f"{k}={v}"
             for k, v in sorted(
-                self.scope.items(), key=lambda kv: normalize_token(kv[0]),
+                self.scope.items(), key=lambda kv: normalize_token(str(kv[0])),
             )
         )
-        mag = f" ({normalize_token(self.magnitude)})" if self.magnitude else ""
+        mag = f" ({self.magnitude})" if self.magnitude else ""
         scope_s = f" [{scope}]" if scope else ""
-        return normalize_token(
+        return (
             f"{self.subject} {self.relation} {self.direction.value} "
             f"{self.object}{mag}{scope_s}"
         )

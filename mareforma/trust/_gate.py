@@ -39,7 +39,6 @@ from ._store import (
     compute_plan_id,
     estimate_from_row,
     estimates_digest_from_rows,
-    plan_retirement,
 )
 
 # Skip reasons. A line the verifier cannot count is tagged with one of these.
@@ -80,13 +79,13 @@ _UNREGISTERED_SIGNER = "unregistered_signer_skipped"
 # ``findings.content_id`` nor the ``propositions`` text columns are signed, so a
 # direct-SQL rewrite of either re-points a genuinely signed finding at a
 # different sentence (its estimates and bearing intact, the proposition now
-# reading "TP53 increases apoptosis" where the finding attests BRCA1). The edge
-# is re-derivable: a finding claim's signed ``text`` is the rendering of the
-# proposition it attests, so the live proposition row must render back to it.
-# The restore path already refused this; the read path re-derives it too, so a
-# rewrite drops the whole finding rather than counting evidence for a sentence it
-# never made. Both renderings are normalised, so a benign case/whitespace variant
-# of one proposition is not false-dropped.
+# reading "TP53 increases apoptosis" where the finding attests BRCA1). Two
+# re-derivations cover it: the proposition row must still hash to the
+# ``content_id`` it is keyed under, and the finding's own signed record must name
+# that same content_id. Both are exact, because content_id is what identity is;
+# an earlier version compared two RENDERINGS instead and dropped honest findings
+# whose scope keys sorted differently raw than casefolded. A finding with no
+# verifiable record keeps the rendering comparison, its only available lever.
 _PROPOSITION_REBIND = "proposition_rebind_skipped"
 _CORRUPTION_REASONS = frozenset(
     {
@@ -257,7 +256,10 @@ def _committed_plan_id(
 
 
 def _committed_estimates_digest(
-    bundle_json: "str | None", claim_id: str, cache: GateCache,
+    conn: sqlite3.Connection,
+    bundle_json: "str | None",
+    claim_id: str,
+    cache: GateCache,
 ) -> "str | None":
     """The estimates digest the finding's own claim SIGNED, or None.
 
@@ -269,54 +271,49 @@ def _committed_estimates_digest(
 
     Returns None when the claim carries no finding record (a non-finding claim, or
     a finding written before the record existed, both grandfathered), when the
-    bundle is absent or unparseable, when the bundle binds a DIFFERENT claim_id (a
-    genuine envelope stapled from another claim vouches for that claim's line set,
-    not this one, so it is left to the signer/model binding checks to read soft),
-    or when the record names no digest. Never raises: one un-readable bundle must
-    not deny the whole proposition's count. The resolution is a property of the
-    claim, identical across a multi-line finding's rows, so it is memoized once per
-    claim in the shared cache.
+    envelope does not verify against an enrolled validator (see
+    :func:`verified_predicate`: an unverified envelope is an attacker-chosen
+    digest, and a caller who could plant one would simply plant the digest its
+    edited rows recompute to), or when the record names no digest. Never raises:
+    one un-readable bundle must not deny the whole proposition's count.
     """
-    digest = _bundle_digest(bundle_json)
-
-    def compute() -> "str | None":
-        if not bundle_json:
-            return None
-        try:
-            from .. import signing as _signing
-
-            env = json.loads(bundle_json)
-            pred = _signing.claim_predicate_from_envelope(env)
-        except Exception:
-            return None
-        if not isinstance(pred, dict) or pred.get("claim_id") != claim_id:
-            return None
-        record = pred.get("finding_record")
-        if not isinstance(record, dict):
-            return None
-        value = record.get("estimates_digest")
-        return value if isinstance(value, str) else None
-
-    return cache.resolve("finding_record", claim_id, digest, compute)  # type: ignore[return-value]
+    pred = verified_predicate(conn, bundle_json, claim_id, cache)
+    if pred is None:
+        return None
+    record = pred.get("finding_record")
+    if not isinstance(record, dict):
+        return None
+    value = record.get("estimates_digest")
+    return value if isinstance(value, str) else None
 
 
 def _proposition_normalized_text(
     conn: sqlite3.Connection, content_id: str,
-) -> "str | None":
+) -> "tuple[str, ...] | None":
     """The normalised rendering of the proposition row keyed by *content_id*.
 
-    A finding's claim ``text`` is the rendering of the proposition it attests, and
-    that edge is re-derivable from the stored proposition columns. Returning the
-    normalised text lets the caller compare it against each finding's signed claim
-    text and catch a row a direct-SQL rewrite re-pointed at a different sentence.
-    Normalisation (:meth:`Proposition.normalized_text`) collapses casefold and
-    whitespace, so a benign case variant of one proposition is not read as a
-    rewritten edge, exactly the equality the restore-side check uses.
+    Two things happen here, and the second is the load-bearing one.
 
-    Returns None when the proposition row is absent or its stored columns no
-    longer read back into a valid proposition (a rewrite that broke the row
-    itself); the caller drops every finding under it. Never raises: an unreadable
-    proposition must not deny the whole count.
+    The row must first re-derive its OWN identity: ``content_id`` is a hash of the
+    proposition's normalised fields, so a row whose stored columns no longer hash
+    to the key they sit under has been rewritten, and every finding filed against
+    that key is now attached to a sentence none of them made. This is checked
+    without reference to any finding, so it holds for a proposition whose findings
+    are all legacy as well as one whose findings are all signed.
+
+    The renderings are returned for the caller's FALLBACK comparison only, the
+    case of a finding whose claim carries no verifiable envelope. There is more
+    than one because :meth:`Proposition.text` orders scope by the raw key while
+    identity casefolds it, so two writers of one proposition emit their pairs in
+    different orders (see :meth:`Proposition.normalized_renderings`). A rendering
+    is not identity-stable, which is why the primary binding is the
+    ``content_id`` the finding's own signed record names, not any of these
+    strings.
+
+    Returns None when the proposition row is absent, when its stored columns no
+    longer read back into a valid proposition, or when they no longer hash to
+    ``content_id``; the caller drops every finding under it. Never raises: an
+    unreadable proposition must not deny the whole count.
     """
     from . import Proposition
 
@@ -336,9 +333,135 @@ def _proposition_normalized_text(
             "scope": json.loads(row["scope_json"] or "{}"),
             "magnitude": row["magnitude"],
         })
-        return proposition.normalized_text()
+        if proposition.content_id() != content_id:
+            return None
+        return proposition.normalized_renderings()
     except (ValueError, TypeError):
         return None
+
+
+def _project_signs(conn: sqlite3.Connection) -> bool:
+    """True when this project enrols a validator, so its claims are signed.
+
+    The signing posture of a PROJECT, not of a row. It is what the legacy
+    grandfather needs beside ``statement_cid``, because every marker that lives
+    in the ``claims`` row is one more assignment on an UPDATE the writer is
+    already issuing: appending ``, statement_cid = NULL`` to the de-signing
+    statement restored the bypass in full. The ``validators`` table is a
+    different table, and it is where "does this project sign at all" actually
+    lives.
+
+    This is the same test restore has always made (``signed_mode =
+    bool(validators_section)``, which refuses a mixed-mode reconstruction
+    outright), so adopting it here makes the read path and the restore path agree
+    on one graph rather than holding two rules that can drift.
+
+    A graph too old or too damaged to answer reads as unsigned: the fallback is
+    the per-row reading it had before, never a denial of the whole count.
+    """
+    try:
+        return conn.execute(
+            "SELECT 1 FROM validators LIMIT 1"
+        ).fetchone() is not None
+    except sqlite3.Error:
+        return False
+
+
+def _verified_retirement(
+    conn: sqlite3.Connection,
+    plan_id: str,
+    cache: "GateCache | None" = None,
+    project_signs: bool = False,
+):
+    """The retirement record for *plan_id*, but only if it is genuinely attested.
+
+    A retirement decides which rule a proposition's stranded evidence is gated
+    under, and not one of ``plan_retirements``'s columns is signed. Resolution
+    used to read the raw row, on the reasoning that it is only reached from a
+    plan that cannot be run, so it could only recover a line counting zero. A
+    writer supplies that premise: rewriting a live plan's alpha to a value no
+    gate can discriminate at sends its lines into resolution, and a planted
+    replacement at a stricter alpha re-gates a refutation to NEUTRAL, which is
+    COUNTED rather than skipped.
+
+    Four things are checked, and each closes a measured defeat of the ones
+    before it:
+
+    1. **The retired plan's own rule still hashes to the plan_id keying it.**
+       Nothing re-derived it once a line was superseded, so the moment a plan was
+       un-runnable its rule was unauthenticated free text. Rewriting the retired
+       row's ``direction_of_interest`` and alpha together and then letting the
+       operator run the documented ``retire_plan`` repair produced a genuinely
+       SIGNED flip of a refutation into support, which survived restore: the
+       replacement is built from the tampered row, so the identity check downstream
+       only ever agreed with itself.
+    2. **The attestation claim's signed envelope must verify**, in a project that
+       signs. Falling back to ``claims.text`` unconditionally let a writer INSERT
+       an unsigned claim row carrying the attestation string: four SQL statements,
+       no key, no cooperation. The fallback is the legacy path and it is gated on
+       the project's signing posture, exactly as the run-axis grandfather is.
+    3. **The attestation must cite the replacement's own plan attestation** in its
+       signed ``supports``. Text equality is not identity: both plan ids are
+       computable in advance, so any claim whose text an attacker can influence
+       would otherwise become an attestation for a retirement nobody performed.
+       ``retire_plan`` cites the replacement; a look-alike cites nothing.
+    4. **The rendered triple must match**, compared NFC-normalised. The signed
+       text is normalised at signing and the ``reason`` column is not, so a reason
+       carrying a decomposed sequence made a genuine retirement resolve nothing,
+       permanently, since a plan retires once.
+
+    Returns None when any of those fails, and the caller then leaves the line
+    stranded and discloses it.
+    """
+    import unicodedata
+
+    from ._store import (
+        get_plan_claim_id,
+        get_plan_row,
+        plan_id_from_row,
+        plan_retirement,
+        retirement_claim_text,
+    )
+
+    row = plan_retirement(conn, plan_id)
+    if row is None:
+        return None
+    retired = get_plan_row(conn, plan_id)
+    if retired is None or plan_id_from_row(
+        retired["content_id"], retired,
+    ) != plan_id:
+        return None
+    claim = conn.execute(
+        "SELECT claim_id, text, signature_bundle FROM claims WHERE claim_id = ?",
+        (_row_get(row, "claim_id"),),
+    ).fetchone()
+    if claim is None:
+        return None
+    predicate = verified_predicate(
+        conn, claim["signature_bundle"], claim["claim_id"], cache,
+    )
+    if predicate is None:
+        # No verifiable envelope. Legacy and unsigned graphs read as they always
+        # did; a project that signs does not accept an unsigned attestation.
+        if project_signs:
+            return None
+        attested = claim["text"]
+    else:
+        attested = predicate.get("text")
+        replacement_claim = get_plan_claim_id(conn, row["superseded_by"])
+        supports = predicate.get("supports")
+        if replacement_claim is None or not isinstance(supports, list) or (
+            replacement_claim not in supports
+        ):
+            return None
+    expected = retirement_claim_text(
+        row["plan_id"], row["superseded_by"], row["reason"],
+    )
+
+    def _nfc(value: object) -> str:
+        return unicodedata.normalize("NFC", value if isinstance(value, str) else "")
+
+    return row if _nfc(attested) == _nfc(expected) else None
 
 
 def _row_get(row: Any, key: str, default: Any = None) -> Any:
@@ -361,6 +484,7 @@ def _signer_axis(
     generated_by: str,
     bundle_json: "str | None",
     statement_cid: "str | None" = None,
+    project_signs: bool = False,
 ) -> "tuple[str | None, str | None, str | None]":
     """Classify a line's distinct-signer / run axis: ``(run_token, keyid, skip)``.
 
@@ -374,8 +498,14 @@ def _signer_axis(
     - A claim with a **NULL** ``asserter_keyid`` is a pre-keyid legacy claim or a
       genuinely unsigned finding. It keeps the retired ``g:generated_by`` run-axis
       fallback (status_policy@v4), so a v0.3.10 graph and an unsigned-mode finding
-      still count. This is the ONLY grandfathered case, and the marker is the NULL
-      keyid, not the absence of a bundle.
+      still count, but only in a project that does not sign: the claim must carry
+      no ``statement_cid`` AND the project must enrol no validator
+      (:func:`_project_signs`). Neither test alone is enough. A column is one more
+      assignment on the UPDATE the writer is already issuing, and the grandfather
+      being a property of the ROW let a writer INSERT a fresh unsigned claim,
+      finding and evidence tree into a fully signed project and have every check
+      fall back to the columns it had just written. This is the ONLY grandfathered
+      case.
     - A claim that **names a signer** (non-NULL ``asserter_keyid``) counts on the
       distinct-signer axis (``k:keyid``) only when its ``signature_bundle`` (a)
       embeds that same keyid, (b) binds to this ``claim_id``, (c) is signed by an
@@ -400,15 +530,52 @@ def _signer_axis(
     could not be authenticated), the fail-closed disposition.
     """
     if asserter_keyid is None:
-        # The legacy grandfather, but only for a claim that was never signed.
+        # The legacy grandfather, and it takes two witnesses, in two tables.
+        #
         # ``statement_cid`` is written at signing time and is not cleared by
         # nulling the keyid and the bundle, so it distinguishes "unsigned from
-        # birth" from "de-signed just now". Without this, the cheapest forgery on
+        # birth" from "de-signed just now". Without it, the cheapest forgery on
         # the whole read path was `UPDATE claims SET asserter_keyid=NULL,
         # signature_bundle=NULL`: it converted a signed finding into a legacy one
         # and every new check exempted it, measured taking a proposition from
         # CONTESTED to a clean PRELIMINARY with nothing disclosed.
+        #
+        # On its own it is one column, and the writer is already issuing an
+        # UPDATE against that row: appending `, statement_cid = NULL` to the same
+        # statement restored the bypass in full, measured at CONVERGENT (2, 0, 0)
+        # with nothing skipped. The second witness is the project's own signing
+        # posture, which lives in the ``validators`` table, where no UPDATE
+        # against ``claims`` reaches. It also closes the INSERT form of the same
+        # attack, a brand-new unsigned claim written into a signed project, which
+        # no per-row marker can see at all.
+        #
+        # Nothing unsigned counts in a signing project, and that is the point:
+        # the run axis keys on ``generated_by``, which whoever writes the row
+        # chooses, so any route to it is a route to manufacturing a unit.
+        #
+        # THE COST, STATED RATHER THAN IMPLIED. A project that started with no
+        # key and later enrols one loses every finding it wrote before the key,
+        # permanently, and there is no un-enrol. Those claims read UNTESTED
+        # where they read CONVERGENT. That is a real regression for an honest
+        # operator and it is deliberate: the alternative left two measured
+        # attacks open, de-signing an existing claim and INSERTing a fabricated
+        # unsigned tree into a signed project, both reading CONVERGENT (2, 0, 0)
+        # with nothing disclosed.
+        #
+        # The repair for that cost is a retroactive signature over the pre-key
+        # claims. It was built and withdrawn before release: an adversary showed
+        # it could be turned into a laundering path, so it needs its own pass
+        # rather than a rushed one. Until it lands, the loss above is what an
+        # upgrading operator gets, and the release notes have to say so.
+        #
+        # The residual is named and much larger than one column: a writer who
+        # de-signs EVERY claim and deletes EVERY validator leaves a graph
+        # indistinguishable from one that never signed. That is a whole-graph
+        # rewrite, and it is pinned alongside the other named boundary in
+        # tests/test_gate_tamper.py.
         if statement_cid:
+            return (None, None, _UNREGISTERED_SIGNER)
+        if project_signs:
             return (None, None, _UNREGISTERED_SIGNER)
         return (f"g:{generated_by}", None, None)
     if not bundle_json:
@@ -441,32 +608,71 @@ def _signer_axis(
         return (None, None, _UNREGISTERED_SIGNER)
 
 
-def signed_predicate(bundle_json: "str | None", claim_id: str) -> "dict | None":
-    """The claim's VERIFIED signed predicate, or None when there isn't one.
+def verified_predicate(
+    conn: sqlite3.Connection,
+    bundle_json: "str | None",
+    claim_id: str,
+    cache: "GateCache | None" = None,
+) -> "dict | None":
+    """The claim's signed predicate, returned only when the signature VERIFIES.
 
-    ``_signer_axis`` already parses this envelope and holds the predicate, then
-    discards it. Two checks downstream (the finding's plan and the proposition
-    rendering it attests) were re-deriving those values from ``predicate_payload``
-    and ``claims.text`` instead: unsigned columns sitting beside the signed copy.
-    Rewriting the column and its unsigned twin together defeated both. This
-    returns the signed side so a check can compare against what was actually
-    signed rather than against another mutable column.
+    Every downstream check that says "read it from the signed side" reads it
+    here. The finding's plan, the proposition it attests, its estimates digest
+    and its model lineage all exist twice, once inside this envelope and once in
+    an unsigned column beside it, and each check was moved onto the envelope
+    because a writer with SQL access rewrites both columns of a pair. That move
+    is only worth anything if the envelope is authenticated: an envelope that is
+    merely parsed is another string the same writer controls, and they write it
+    themselves. Measured on an untampered unsigned graph, one planted envelope
+    re-pointed a refuting line at a supporting rule and read CONVERGENT (2, 0, 0)
+    with nothing skipped and restore accepting.
 
-    Structural failure returns None, so a caller falls back to its previous
-    behaviour rather than raising on a legacy or unsigned claim.
+    A predicate is returned only when the envelope (a) parses as a claim
+    envelope, (b) binds this ``claim_id``, (c) names a signer that ``is_enrolled``
+    walks back to the project's self-signed root, and (d) verifies against that
+    validator's stored public key. Anything else is None, and every caller falls
+    back to the behaviour it had before the signed copy existed, which is what
+    keeps a legacy or genuinely unsigned claim reading exactly as it did.
+
+    Never raises: one unreadable envelope must not deny the whole proposition's
+    count. The resolution is a property of the claim and identical across a
+    multi-line finding's rows, so it is memoized per claim in the shared cache;
+    a negative is not cached (see :class:`GateCache`), so an enrolment that lands
+    later is picked up rather than pinned to an absence.
     """
     if not bundle_json:
         return None
-    try:
-        from .. import signing as _signing
 
-        env = json.loads(bundle_json)
-        pred = _signing.claim_predicate_from_envelope(env)
-        if pred.get("claim_id") != claim_id:
+    def compute() -> "dict | None":
+        try:
+            from .. import signing as _signing
+            from .. import validators as _validators
+
+            env = json.loads(bundle_json)
+            pred = _signing.claim_predicate_from_envelope(env)
+            if pred.get("claim_id") != claim_id:
+                return None
+            keyid = env["signatures"][0]["keyid"]
+            signer_row = _validators.get_validator(conn, keyid)
+            # Presence in the table is not enrolment; the chain walk back to the
+            # self-signed root is. Same rule as the signer axis, for the same
+            # reason: one direct INSERT of a row carrying a real public key
+            # otherwise authenticates a signer nobody enrolled.
+            if signer_row is None or not _validators.is_enrolled(conn, keyid):
+                return None
+            pem = base64.standard_b64decode(signer_row["pubkey_pem"])
+            pub = _signing.public_key_from_pem(pem)
+            if not _signing.verify_envelope(env, pub):
+                return None
+            return pred
+        except Exception:
             return None
-        return pred
-    except Exception:
-        return None
+
+    if cache is None:
+        return compute()
+    return cache.resolve(  # type: ignore[return-value]
+        "verified_predicate", claim_id, _bundle_digest(bundle_json), compute,
+    )
 
 
 def _is_human_signer(conn: sqlite3.Connection, keyid: str) -> bool:
@@ -498,6 +704,7 @@ def _signed_model_lineage(
     conn: sqlite3.Connection,
     claim_id: str,
     bundle_json: "str | None",
+    cache: "GateCache | None" = None,
 ) -> "dict | None":
     """The model lineage the claim's SIGNED envelope binds, or None.
 
@@ -513,38 +720,19 @@ def _signed_model_lineage(
     never a fabricated distinct model. Never raises: one un-authenticatable line
     must not deny the whole proposition's count.
     """
-    if not bundle_json:
+    # Fail closed through the one verifier: a non-enrolled signer's bundle
+    # cannot be authenticated, so its lineage is unauthenticated. Trusting it
+    # lets a producer sign a fabricated distinct model with a throwaway key and
+    # inflate the count (the read-side parallel of the forged-column defence).
+    # An unauthenticatable line reads soft, never a counted model.
+    pred = verified_predicate(conn, bundle_json, claim_id, cache)
+    if pred is None:
         return None
-    try:
-        from .. import signing as _signing
-        from .. import validators as _validators
-
-        env = json.loads(bundle_json)
-        pred = _signing.claim_predicate_from_envelope(env)
-        if pred.get("claim_id") != claim_id:
-            return None
-        grounding = pred.get("observed_grounding")
-        if not isinstance(grounding, dict):
-            return None
-        lineage = grounding.get("model_lineage")
-        if not isinstance(lineage, dict):
-            return None
-        keyid = env["signatures"][0]["keyid"]
-        signer_row = _validators.get_validator(conn, keyid)
-        if signer_row is None:
-            # Fail closed: a non-enrolled signer's bundle cannot be verified, so
-            # its lineage is unauthenticated. Trusting it lets a producer sign a
-            # fabricated distinct model with a throwaway key and inflate the
-            # count (the read-side parallel of the forged-column defence). An
-            # unauthenticatable line reads soft, never a counted model.
-            return None
-        pem = base64.standard_b64decode(signer_row["pubkey_pem"])
-        pub = _signing.public_key_from_pem(pem)
-        if not _signing.verify_envelope(env, pub):
-            return None
-        return lineage
-    except Exception:
+    grounding = pred.get("observed_grounding")
+    if not isinstance(grounding, dict):
         return None
+    lineage = grounding.get("model_lineage")
+    return lineage if isinstance(lineage, dict) else None
 
 
 def _authentic_model_key(
@@ -552,6 +740,7 @@ def _authentic_model_key(
     claim_id: str,
     raw_column: "str | None",
     bundle_json: "str | None",
+    cache: "GateCache | None" = None,
 ) -> tuple:
     """The independence model key for a line, read from SIGNED material.
 
@@ -577,14 +766,14 @@ def _authentic_model_key(
     # would close a cycle. By call time both modules are fully loaded.
     from mareforma.observe._lineage import independence_model_key
 
-    signed = _signed_model_lineage(conn, claim_id, bundle_json)
+    signed = _signed_model_lineage(conn, claim_id, bundle_json, cache)
     if signed is None:
         return ("absent",) if raw_column is None else ("soft",)
     return independence_model_key(signed)
 
 
 def _resolve_signer_and_model(
-    conn: sqlite3.Connection, row, cache: GateCache,
+    conn: sqlite3.Connection, row, cache: GateCache, project_signs: bool,
 ) -> "tuple[str | None, tuple, str | None]":
     """(run_token, model_key, skip) for a line's claim, resolved once per claim.
 
@@ -606,11 +795,13 @@ def _resolve_signer_and_model(
         run_token, keyid, skip = _signer_axis(
             conn, claim_id, row["asserter_keyid"], row["generated_by"],
             row["signature_bundle"], _row_get(row, "statement_cid"),
+            project_signs,
         )
         if skip is not None:
             return (None, (), skip)
         model_key = _authentic_model_key(
             conn, claim_id, row["model_lineage"], row["signature_bundle"],
+            cache,
         )
         # A line with no observed model call, signed by an enrolled human
         # validator, keys to the human axis for the legacy status ladder, which
@@ -660,6 +851,9 @@ def _derive_units(
     # this same proposition; a mismatch is a rewritten edge, checked per finding
     # below. Computed once because all findings here share the one content_id.
     proposition_text = _proposition_normalized_text(conn, content_id)
+    # The project's signing posture, read once: it is a property of the graph,
+    # not of a row, and every line's signer axis needs it (see _signer_axis).
+    project_signs = _project_signs(conn)
     # Group the rows by finding, preserving first-seen order, so the digest can
     # be checked over each finding's full line set before its lines are counted.
     by_finding: dict[str, list] = {}
@@ -673,30 +867,44 @@ def _derive_units(
     for fid in finding_order:
         finding_rows = by_finding[fid]
         head = finding_rows[0]
-        # Per-finding proposition binding. The finding's claim text is the signed
-        # rendering of the proposition it attests, so the live proposition row
-        # must render back to it. A rewrite of the unsigned ``findings.content_id``
-        # column or the unsigned ``propositions`` text columns re-points a genuinely
-        # signed finding at a different sentence with its estimates and bearing
-        # intact; without this check the count would attest evidence for a claim
-        # the finding never made. Both sides are normalised, so a benign case or
-        # whitespace variant is not dropped. A proposition row that no longer reads
-        # back at all (``proposition_text is None``) drops every finding under it.
+        # Per-finding proposition binding. ``findings.content_id`` is unsigned, so
+        # a direct-SQL rewrite of it, or of the ``propositions`` text columns,
+        # re-points a genuinely signed finding at a different sentence with its
+        # estimates and bearing intact; without this check the count would attest
+        # evidence for a claim the finding never made.
         #
-        # The finding's side comes from the SIGNED predicate, not from
-        # ``claims.text``. Both columns are mutable, so comparing one against the
-        # other only catches an attacker who rewrites one of them: rewriting the
-        # proposition row and ``claims.text`` together passed this check with the
-        # verdict intact and nothing disclosed. Falling back to the column when a
-        # claim carries no verifiable envelope keeps legacy and unsigned findings
-        # reading exactly as before.
-        _signed = signed_predicate(head["signature_bundle"], head["claim_id"])
-        _finding_text = (
-            _signed.get("text") if _signed is not None else head["claim_text"]
+        # The binding is on the CONTENT_ID the finding's own signed record names,
+        # not on a rendering. The two renderings this used to compare are not
+        # identity-stable against each other: ``Proposition.text`` orders scope by
+        # the raw key, so two agents who capitalise a scope key differently share
+        # one ``content_id`` and render two different strings, and an untampered
+        # single-writer graph whose scope keys sort differently under the two
+        # orders read UNTESTED. The content_id is what identity IS, so comparing it
+        # is exact in both directions: it catches the re-point and it never
+        # false-drops a case variant.
+        #
+        # ``proposition_text is None`` covers the other half, the proposition row
+        # no longer hashing to its own key, and drops every finding under it.
+        #
+        # A finding whose claim carries no verifiable envelope has no signed
+        # content_id, so it falls back to the rendering comparison it had before
+        # the record existed. Both sides of that fallback are rendered by the same
+        # function, so a single writer's graph still reads as it always did.
+        _signed = verified_predicate(
+            conn, head["signature_bundle"], head["claim_id"], cache,
         )
-        if proposition_text is None or (
-            normalize_token(_finding_text or "") != proposition_text
-        ):
+        _signed_cid = (
+            (_signed.get("finding_record") or {}).get("content_id")
+            if _signed is not None else None
+        )
+        if _signed_cid is not None:
+            _attests = _signed_cid == content_id
+        else:
+            _attests = normalize_token(
+                (_signed.get("text") if _signed is not None
+                 else head["claim_text"]) or ""
+            ) in (proposition_text or ())
+        if proposition_text is None or not _attests:
             for r in finding_rows:
                 skipped.append(
                     _SkippedLine(
@@ -732,7 +940,7 @@ def _derive_units(
         # are dropped here. The reader needs both: which row broke, and that the
         # finding as a whole no longer matches what was signed.
         signed_digest = _committed_estimates_digest(
-            head["signature_bundle"], head["claim_id"], cache,
+            conn, head["signature_bundle"], head["claim_id"], cache,
         )
         if signed_digest is not None:
             unrebuildable = set()
@@ -789,14 +997,16 @@ def _derive_units(
             # at another rule to flip its bearing) or a claim that records no plan
             # is dropped rather than gated on the column: a repointed REFUTING
             # line would otherwise read as consensus.
-            # Prefer the SIGNED record. ``predicate_payload`` is an unsigned
+            # Prefer the VERIFIED record. ``predicate_payload`` is an unsigned
             # column sitting beside the signed copy, so comparing
             # ``findings.plan_id`` against it only catches a writer who rewrites
             # one of the two: rewriting both together re-pointed a refuting line
             # at a supporting rule and read CONVERGENT with nothing disclosed.
             # The unsigned payload stays the fallback for a finding written
             # before the signed record existed.
-            _signed_rec = signed_predicate(r["signature_bundle"], r["claim_id"])
+            _signed_rec = verified_predicate(
+                conn, r["signature_bundle"], r["claim_id"], cache,
+            )
             _signed_plan = (
                 (_signed_rec.get("finding_record") or {}).get("plan_id")
                 if _signed_rec is not None else None
@@ -824,9 +1034,16 @@ def _derive_units(
             # failure can surface as ValueError (enum / range), TypeError
             # (non-numeric column reaching math.isfinite), or
             # InconsistentEstimateError (the gate).
+            # The retirement, verified against its own attestation before it is
+            # allowed to decide anything (see _verified_retirement). Resolved
+            # once and used twice: to gate the line, and to name the plan the
+            # rule binding below re-derives against.
+            retirement = _verified_retirement(
+                conn, r["plan_id"], cache, project_signs,
+            )
             try:
                 estimate = estimate_from_row(r)
-                prediction, superseded = _gateable_prediction(conn, r)
+                prediction, superseded = _gateable_prediction(conn, r, retirement)
                 direction = compute_bearing(estimate, prediction).direction
             except _UngateablePlan as exc:
                 skipped.append(
@@ -863,7 +1080,6 @@ def _derive_units(
             # attestation) names it.
             gated_plan_id = r["plan_id"]
             if superseded:
-                retirement = plan_retirement(conn, r["plan_id"])
                 gated_plan_id = retirement["superseded_by"] if retirement else None
             if gated_plan_id is None or (
                 compute_plan_id(content_id, prediction) != gated_plan_id
@@ -876,7 +1092,7 @@ def _derive_units(
                 )
                 continue
             run_token, model_key, signer_skip = _resolve_signer_and_model(
-                conn, r, cache,
+                conn, r, cache, project_signs,
             )
             # A line whose claim names a signer that does not authenticate counts
             # on no axis: an enrolled signer whose signature fails is corruption,
@@ -971,10 +1187,10 @@ def verify_gate_inputs_or_refuse(
         if s.op == _PROPOSITION_REBIND:
             raise GateInputRefused(
                 f"proposition {content_id} carries a finding "
-                f"({s.detail.get('finding_id')}) whose claim text does not render "
-                "the proposition it is attached to; the finding's content_id or "
-                "the proposition's stored text was rewritten, and the recovered "
-                "graph would attest evidence for a sentence the finding never made."
+                f"({s.detail.get('finding_id')}) that does not attest it; the "
+                "finding's content_id, or the proposition's own stored columns, "
+                "was rewritten, and the recovered graph would attest evidence "
+                "for a sentence the finding never made."
             )
         raise GateInputRefused(
             f"proposition {content_id} carries an evidence line whose stored "
