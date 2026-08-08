@@ -13,6 +13,7 @@ import json
 
 import pytest
 
+from mareforma import __version__
 from mareforma.trust_map import (
     NOT_PRESENT,
     PRE_BINDING_GROUNDED_LABEL,
@@ -466,3 +467,22 @@ def test_grounding_render_survives_non_string_sources(cited, grounded):
     tmap = _assemble(_claim(observed_grounding=json.dumps(rec)), n_roots=1,
                      has_inclusion=False)
     assert tmap.get("grounding").value  # rendered, did not raise
+
+
+class TestEngineVersionMatchesPackage:
+    """Guard the trust-engine version against the shipped package version.
+
+    Every emitted trust map carries ``version=TRUST_MAP_VERSION``, so a record
+    names the engine build that computed it. When the distributed package version
+    and the engine stamp diverge, that name points at an engine the installer does
+    not have: a build labelled 0.3.10 can still carry the 0.3.9 engine. Binding the
+    two moves them in lockstep at every release, so this check fails on any tree
+    whose engine stamp lags the package version before an artifact is built.
+    """
+
+    def test_engine_stamp_matches_the_package_version(self) -> None:
+        assert TRUST_MAP_VERSION == f"v{__version__}", (
+            f"engine stamp {TRUST_MAP_VERSION} does not match package version "
+            f"{__version__}; bump TRUST_MAP_VERSION and the package version "
+            "together so a map never names an engine build that was not shipped"
+        )
