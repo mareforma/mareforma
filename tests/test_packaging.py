@@ -621,6 +621,7 @@ def _workflow_installed_extras():
     return extras
 
 
+@_requires_repo_checkout
 def test_flag_gated_deps_are_installed_by_a_workflow_leg():
     """a test gated on a ``HAS_*`` flag runs only where the dep behind it is
     installed. rdkit sat in the ``chem`` extra no leg named, so the form's

@@ -100,6 +100,35 @@ def _normalize(obj: Any) -> Any:
     return obj
 
 
+def signed_value_matches(signed: Any, stored: Any) -> bool:
+    """True when *stored* is the value *signed* covers, up to NFC form.
+
+    A signature is taken over :func:`canonicalize` bytes, which NFC-normalize
+    every string. The row keeps the bytes the caller passed. So a claim whose
+    text arrives decomposed (a macOS filename, a PDF extract, most text typed
+    in Vietnamese or Korean) is signed in composed form and stored in
+    decomposed form, and a bare ``!=`` between the two reports a mismatch on
+    input nobody tampered with. The read path then drops an honest claim, and
+    restore refuses the whole backup naming that claim as tampered.
+
+    Comparing the normalized forms is what the signature already means: the
+    canonicalizer that produced the signature does not distinguish the two
+    encodings, so neither can the check that re-derives it. This narrows
+    nothing an attacker could use, because any value that differs after
+    normalization still differs here.
+
+    Normalization can refuse a dict whose keys collide under NFC. That input
+    could never have been signed, so treat the refusal as a mismatch rather
+    than letting it escape to a caller that expects a bool.
+    """
+    if signed == stored:
+        return True
+    try:
+        return _normalize(signed) == _normalize(stored)
+    except ValueError:
+        return False
+
+
 def canonicalize(obj: Any) -> bytes:
     """Serialize *obj* to RFC 8785 canonical JSON bytes.
 
