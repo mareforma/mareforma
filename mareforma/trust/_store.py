@@ -698,9 +698,17 @@ def _count_run_distinct(units: list[tuple[str, str, tuple]]) -> int:
 # and refuses (:func:`estimates_digest_from_rows` handles the NULLs). On an
 # untampered graph every finding has its full line/contrast/estimate tree, so
 # the LEFT JOINs yield exactly the rows the inner joins did and nothing changes.
-# The ``predictions`` and ``claims`` joins stay INNER: they key off the
-# finding's own ``plan_id`` / ``claim_id`` columns, not the deletable downward
-# chain.
+#
+# ``predictions`` and ``claims`` are LEFT JOINed for the same reason. They key
+# off the finding's own ``plan_id`` / ``claim_id`` columns rather than the
+# downward chain, but the row on the far side of that key is deletable by
+# exactly the writer the LEFT JOINs were added for, and an inner join there
+# erased the whole finding before any check could run. Measured from one state:
+# deleting a single-line finding's estimate disclosed a skip and a health event,
+# while deleting the prediction it hangs on read UNTESTED with nothing skipped.
+# Outer-joined, the deletion arrives as NULLs the read path already refuses: a
+# NULL rule cannot rebuild into a runnable prediction, and a claim that is gone
+# attests nothing, so each drops the line and discloses it.
 #
 # The withdrawal columns are SELECTed, not filtered on: only a live claim
 # contributes a line, but the exclusion is disclosed rather than applied in SQL
@@ -728,8 +736,8 @@ INDEPENDENCE_COUNTS_SQL = (
     "LEFT JOIN evidence_lines el ON el.finding_id = f.finding_id "
     "LEFT JOIN contrasts c ON c.line_id = el.line_id "
     "LEFT JOIN effect_estimates est ON est.contrast_id = c.contrast_id "
-    "JOIN predictions pr ON pr.plan_id = f.plan_id "
-    "JOIN claims cl ON cl.claim_id = f.claim_id "
+    "LEFT JOIN predictions pr ON pr.plan_id = f.plan_id "
+    "LEFT JOIN claims cl ON cl.claim_id = f.claim_id "
     "WHERE f.content_id = ?"
 )
 

@@ -939,14 +939,31 @@ def _derive_units(
         # its concrete error by the per-line bearing check below, and its siblings
         # are dropped here. The reader needs both: which row broke, and that the
         # finding as a whole no longer matches what was signed.
+        #
+        # The exemption is keyed on the ESTIMATE failing to rebuild, not on the
+        # per-row digest raising, because those are not the same set and the
+        # difference was exploitable. Digesting a row also canonicalizes its
+        # ``data_id`` and ``control_type``, and canonical JSON refuses a value
+        # JSON cannot hold; ``evidence_lines.data_id`` is TEXT with no CHECK and
+        # SQLite stores a BLOB there verbatim. A BLOB data_id therefore raised
+        # from the data_id rather than the estimate, which exempted the row from
+        # the mismatch and handed it to a bearing check that recomputed cleanly,
+        # so the row was COUNTED: a refutation whose estimate was rewritten to
+        # support read as a second supporting unit with nothing skipped. Only a
+        # row the bearing check will itself name an error for may be exempted;
+        # anything else undigestable stays in the mismatch and is disclosed.
         signed_digest = _committed_estimates_digest(
             conn, head["signature_bundle"], head["claim_id"], cache,
         )
         if signed_digest is not None:
             unrebuildable = set()
             for r in finding_rows:
+                if r["estimate_value"] is None:
+                    # A deleted estimate: the digest folds it in as a ``None``
+                    # rather than raising, so it is not an exemption case.
+                    continue
                 try:
-                    estimates_digest_from_rows([r])
+                    estimate_from_row(r)
                 except Exception:
                     unrebuildable.add(r["line_id"])
             try:
