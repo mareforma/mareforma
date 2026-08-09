@@ -21,6 +21,7 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+from .._canonical import signed_value_matches
 from .errors import (
     LLMValidatorPromotionError,
     RestoreError,
@@ -1082,10 +1083,11 @@ def restore(
                 "signature in a project that enrols a validator. They were "
                 "restored, and a signing project does not count unsigned "
                 "claims toward independence, so their evidence lines are "
-                "skipped on read. If they predate this project's enrolment, "
-                "`mareforma validator cover-pre-signing` signs them under the "
-                "project's own key; otherwise they were written without the "
-                f"key. First: {', '.join(unsigned_in_signed_mode[:3])}",
+                "skipped on read. This does not reverse: there is no "
+                "un-enrol, and nothing signs a claim after the fact. To have "
+                "these findings count, assert them again under the project's "
+                "key, which writes them as new signed claims. "
+                f"First: {', '.join(unsigned_in_signed_mode[:3])}",
                 RuntimeWarning,
                 stacklevel=2,
             )
@@ -1980,8 +1982,16 @@ def _verify_claim_signatures_on_restore(
             "artifact_hash": c.get("artifact_hash"),
             "created_at": _required_field(c, "created_at", ctx_c),
         }
+        # Compared up to NFC form, because that is what the signature covers:
+        # canonicalization normalizes every string before signing while the row
+        # keeps the bytes the caller passed, so text that arrives decomposed is
+        # signed composed and stored decomposed. A bare ``!=`` read that as
+        # tamper, and restore is all-or-nothing, so one such claim cost the
+        # operator every other claim in the backup under a message accusing the
+        # operator of editing the file. Nothing is narrowed: a value that still
+        # differs after normalization still refuses here.
         for field in _signing.SIGNED_FIELDS:
-            if predicate.get(field) != expected[field]:
+            if not signed_value_matches(predicate.get(field), expected[field]):
                 raise RestoreError(
                     f"Claim {claim_id} signed-predicate field {field!r} "
                     "does not match the row, TOML tampered.",
@@ -2001,7 +2011,13 @@ def _verify_claim_signatures_on_restore(
                 f"Claim {claim_id} evidence_json is malformed.",
                 kind="claim_unverified",
             ) from exc
-        if predicate.get("evidence") != row_evidence:
+        # By form, like the SIGNED_FIELDS loop above. The evidence vector is
+        # not all integers: ``rationale`` is a dict of free text, and
+        # ``evidence_json`` is written with a plain ``json.dumps`` rather than
+        # the canonicalizer, so a rationale typed with decomposed accents is
+        # signed composed and stored decomposed. ``observed_grounding`` below
+        # needs no such care: its column is canonical JSON already.
+        if not signed_value_matches(predicate.get("evidence"), row_evidence):
             raise RestoreError(
                 f"Claim {claim_id} signed evidence vector does not match "
                 "evidence_json on the row, TOML tampered.",
