@@ -770,6 +770,59 @@ BEGIN
 END"""
 
 
+# project_policy carries the project's root-signed, one-way trust rules, and it
+# was the one trust table with no write guard at all. A rule is only one-way if
+# the row that records it cannot be removed: DELETE FROM project_policy launders
+# the whole declaration away, the backup written after it carries no
+# [project_policy] section, and restore then accepts the policyless graph as
+# authentic. So the row cannot be deleted, and it cannot be updated from outside
+# the one writer that signs a replacement.
+#
+# The columns are watched rather than read. A trigger BODY that named them
+# would pin them in place: ALTER TABLE ... DROP COLUMN refuses to drop a column
+# a trigger references, and a legacy table that predates
+# ``strict_promotion_required`` is migrated in place on open, so a WHEN clause
+# comparing OLD/NEW flags would make the very upgrade path this guard protects
+# unrunnable. A ``BEFORE UPDATE OF`` list is an event filter, not a reference,
+# and the column stays droppable.
+#
+# So the WHEN clause keys on the same per-connection marker
+# ``claims_signed_promotion_backed`` uses: ``set_project_policy`` opens the
+# window around its upsert, and no other connection has that temp table to find.
+# The marker is a speed bump, not the guarantee (a writer with SQL access can
+# create the same temp table, drop the trigger, or reach the row through
+# INSERT OR REPLACE, which SQLite runs without firing either guard while
+# recursive_triggers is off). The guarantee is on the read path, where the flat
+# columns are bound to the root-signed envelope before either is trusted
+# (``core._verified_project_policy``). This keeps a stray write from reaching
+# that check at all.
+_POLICY_MARKER_TABLE = "mareforma_policy_open"
+
+_PROJECT_POLICY_APPEND_ONLY_TRIGGER_NAME = "project_policy_append_only"
+
+_PROJECT_POLICY_APPEND_ONLY_TRIGGER_SQL = f"""\
+CREATE TRIGGER {_PROJECT_POLICY_APPEND_ONLY_TRIGGER_NAME}
+BEFORE UPDATE OF
+    rekor_required, strict_promotion_required, signer_keyid, envelope,
+    created_at, rekor_declared_at, strict_promotion_declared_at
+ON project_policy
+WHEN NOT EXISTS (
+        SELECT 1 FROM pragma_table_info('{_POLICY_MARKER_TABLE}', 'temp')
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:project_policy_locked');
+END"""
+
+_PROJECT_POLICY_NO_DELETE_TRIGGER_NAME = "project_policy_no_delete"
+
+_PROJECT_POLICY_NO_DELETE_TRIGGER_SQL = """\
+CREATE TRIGGER project_policy_no_delete
+BEFORE DELETE ON project_policy
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:project_policy_delete_blocked');
+END"""
+
+
 # predictions is append-only too, and its guard already exists, but it watched
 # every immutable column EXCEPT plan_id, the primary key. Rewriting plan_id
 # re-points a whole rule at a different identity and makes every line of
@@ -823,6 +876,14 @@ _MANAGED_TRIGGERS = (
     ),
     (_VALIDATORS_APPEND_ONLY_TRIGGER_NAME, _VALIDATORS_APPEND_ONLY_TRIGGER_SQL),
     (_VALIDATORS_NO_DELETE_TRIGGER_NAME, _VALIDATORS_NO_DELETE_TRIGGER_SQL),
+    (
+        _PROJECT_POLICY_APPEND_ONLY_TRIGGER_NAME,
+        _PROJECT_POLICY_APPEND_ONLY_TRIGGER_SQL,
+    ),
+    (
+        _PROJECT_POLICY_NO_DELETE_TRIGGER_NAME,
+        _PROJECT_POLICY_NO_DELETE_TRIGGER_SQL,
+    ),
     (
         _PREDICTIONS_APPEND_ONLY_TRIGGER_NAME,
         _PREDICTIONS_APPEND_ONLY_TRIGGER_SQL,

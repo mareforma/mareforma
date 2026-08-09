@@ -23,12 +23,14 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from .._atomic import atomic_write_bytes
+from .._canonical import signed_value_matches
 from ..doi_resolver import is_doi
 from ._schema_sql import (  # noqa: F401
     _ADDITIVE_TABLES_SQL,
     _CLAIM_COLUMNS,
     _CLAIM_SELECT,
     _MANAGED_TRIGGERS,
+    _POLICY_MARKER_TABLE,
     _PROMOTION_MARKER_TABLE,
     _SCHEMA_SQL,
     _SIGNED_FIELDS_TRIGGER_NAME,
@@ -249,6 +251,27 @@ def _promotion_window(conn: sqlite3.Connection):
             # IF EXISTS: a ROLLBACK inside the block takes the temp table with
             # it, and the close still has to be idempotent.
             conn.execute(f"DROP TABLE IF EXISTS temp.{_PROMOTION_MARKER_TABLE}")
+
+
+@contextmanager
+def _policy_window(conn: sqlite3.Connection):
+    """Open the project-policy marker for the statements inside the block.
+
+    The one write that replaces the singleton policy row runs inside one, for
+    the reason the promotion window exists: the guard on the table refuses an
+    UPDATE that no mareforma writer opened, and the marker is a temp table, so
+    it lives on this connection and dies with it. Nesting is not expected (only
+    :func:`set_project_policy` opens one) so the block simply creates and drops.
+    """
+    conn.execute(
+        f"CREATE TEMP TABLE IF NOT EXISTS {_POLICY_MARKER_TABLE} (id INTEGER)"
+    )
+    try:
+        yield
+    finally:
+        # IF EXISTS: a ROLLBACK inside the block takes the temp table with it,
+        # and the close still has to be idempotent.
+        conn.execute(f"DROP TABLE IF EXISTS temp.{_POLICY_MARKER_TABLE}")
 
 
 def _db_path(root: Path) -> Path:
@@ -3020,8 +3043,14 @@ def validate_claim(
                 "refusing to persist a wrong-typed envelope as validation."
             )
 
+        # A row in the validators table is not an enrolment: the table takes a
+        # direct INSERT, so a real pubkey under a junk envelope reads as a
+        # validator on presence alone. is_enrolled walks the chain back to the
+        # self-signed root, the bar the CLI and the verdict path already apply.
         signer_row = _validators.get_validator(conn, validator_keyid)
-        if signer_row is None:
+        if signer_row is None or not _validators.is_enrolled(
+            conn, validator_keyid,
+        ):
             raise InvalidValidationEnvelopeError(
                 f"validation_signature for claim '{claim_id}' is signed by "
                 f"keyid {validator_keyid[:12]}… which is not an enrolled "
@@ -3999,6 +4028,50 @@ def _is_seed_attestation(validation_signature: str | None) -> bool:
     return payload_type == _signing.PAYLOAD_TYPE_SEED
 
 
+def _legacy_unsigned_row(conn: sqlite3.Connection, row, cache: dict) -> bool:
+    """True when a row carrying no signature is legacy, not de-signed.
+
+    Two read-path exemptions hang off a NULL ``asserter_keyid``: the
+    corroboration index does not ask an unsigned row for the evidence behind its
+    rung, and the participant check has no envelope to hold it to. Both were
+    keyed on the claims row alone, and every column they read is one a writer
+    with SQL access is already assigning: ``UPDATE claims SET asserter_keyid =
+    NULL, signature_bundle = NULL`` turns any claim into a legacy one, and a
+    bare INSERT (or an unsigned ``support_level = "REPLICATED"`` block appended
+    to claims.toml before a restore) mints one from nothing. The exemption then
+    hands a fabricated row the level it wrote for itself.
+
+    So the grandfather asks two questions instead. ``statement_cid`` is written
+    at signing time and no honest path clears it, so it separates "unsigned from
+    birth" from "signed once and stripped". And the PROJECT is asked whether it
+    signs at all, through the validators table, which is a different table that
+    no UPDATE against ``claims`` reaches: a project that enrols a validator does
+    not serve a promoted claim carrying no signature. This is the rule
+    ``trust._gate._signer_identity`` already applies to the same claims, so the
+    read path and the gate speak for one graph.
+
+    *cache* is the caller's verify cache, so the validators probe runs once per
+    read. A caller whose SELECT omitted ``statement_cid`` (restore reads a
+    narrow column list) has it looked up, so both paths apply the same rule
+    rather than a laxer one on the recovery side.
+    """
+    ck = ("PS",)
+    if ck not in cache:
+        from mareforma.trust._gate import _project_signs
+        cache[ck] = _project_signs(conn)
+    if cache[ck]:
+        return False
+    try:
+        cid = row["statement_cid"]
+    except (KeyError, IndexError):
+        found = conn.execute(
+            "SELECT statement_cid FROM claims WHERE claim_id = ?",
+            (row["claim_id"],),
+        ).fetchone()
+        cid = found["statement_cid"] if found is not None else None
+    return cid is None
+
+
 def _gather_verdicts_by_claim(
     conn: sqlite3.Connection,
 ) -> dict[str, list[sqlite3.Row]]:
@@ -4166,8 +4239,12 @@ class _CorroborationIndex:
     verify.
 
     Legacy rows (NULL asserter_keyid) predate the asserter_keyid rule and are
-    grandfathered. Born-ESTABLISHED seed claims never climbed the ladder and are
-    exempt too.
+    grandfathered, but only where the grandfather is the honest reading:
+    :func:`_legacy_unsigned_row` asks the claim for a ``statement_cid`` and the
+    project whether it signs at all, so a de-signed row and one INSERTed into a
+    signing project do not inherit it. Born-ESTABLISHED seed claims never
+    climbed the ladder and are exempt too, at the ESTABLISHED tier alone: the
+    seed envelope is verified on read only there.
 
     Both probes gather and verify only the evidence a served row needs, not the
     whole graph. The verdict half groups the table once (one scan, no crypto)
@@ -4186,10 +4263,15 @@ class _CorroborationIndex:
         # written under the strict rule before the second declaration. The
         # helper answers None when the flag is undeclared, which is the same
         # "no cutoff" the level path needs.
+        #
+        # The policy is read through its root-signed envelope, never off the
+        # flat columns: those are a cache, and one UPDATE clearing
+        # strict_promotion_required (or dating the declaration into the future)
+        # would otherwise retire the rule for every row this index checks.
         self._conn = conn
         self._cache = cache
         self._strict_since = project_policy_declared_at(
-            get_project_policy(conn)
+            _verified_project_policy(conn)
         )[1]
         # Verdicts grouped by claim, gathered lazily on the first verdict check
         # and verified per claim on demand. Peer qualification is memoized per
@@ -4247,9 +4329,23 @@ class _CorroborationIndex:
         """
         if row["support_level"] not in ("REPLICATED", "ESTABLISHED"):
             return None
-        if row["asserter_keyid"] is None:
+        if row["asserter_keyid"] is None and _legacy_unsigned_row(
+            self._conn, row, self._cache,
+        ):
             return None
-        if _is_seed_attestation(row["validation_signature"]):
+        if (
+            row["support_level"] == "ESTABLISHED"
+            and _is_seed_attestation(row["validation_signature"])
+        ):
+            # The exemption is the born-ESTABLISHED case and only that. Nothing
+            # verifies this column below ESTABLISHED: _verify_validation_on_read
+            # runs on the ESTABLISHED tier alone, and validation_signature is
+            # not on the laundering trigger's watch list, so on a REPLICATED row
+            # the bytes are unauthenticated. One UPDATE writing
+            # {"payloadType": "...seed+json"} onto a lone claim would otherwise
+            # buy it the whole corroboration exemption. No honest REPLICATED row
+            # carries a seed envelope: a seed is asserted at ESTABLISHED and
+            # never climbs the ladder.
             return None
         # Under a strict-promotion policy the pair needed data on both sides, so
         # a post-declaration row without it could not have been promoted here
@@ -4460,10 +4556,18 @@ def _verify_validation_on_read(
     if ck in cache:
         return cache[ck]
     from mareforma import signing as _signing
+    from mareforma import validators as _validators
     ok = False
     if declared in (_signing.PAYLOAD_TYPE_VALIDATION, _signing.PAYLOAD_TYPE_SEED):
         signer_row = _cached_validator(conn, cache, keyid)
-        if signer_row is not None:
+        # Presence in the table is not enrolment. The validators table has no
+        # INSERT guard, so one INSERT carrying a real pubkey and a junk
+        # enrollment envelope makes any key look like a validator; is_enrolled
+        # walks the chain back to the self-signed root, the same bar
+        # _verdict_verifies and the CLI apply. Without it, that one INSERT
+        # promotes a claim to ESTABLISHED with a signature that verifies against
+        # a key the project never enrolled.
+        if signer_row is not None and _validators.is_enrolled(conn, keyid):
             try:
                 pem = base64.standard_b64decode(signer_row["pubkey_pem"])
                 pub = _signing.public_key_from_pem(pem)
@@ -4479,9 +4583,10 @@ def _verify_validation_on_read(
                     ok = payload.get("claim_id") == row.get("claim_id")
             except Exception:
                 ok = False
-        # signer_row is None -> the validator keyid is not enrolled. An
-        # ESTABLISHED promotion can only come from an enrolled validator, so
-        # this is a forged row: leave ok False (excluded).
+        # No row, or a row whose chain does not walk back to the root -> the
+        # validator keyid is not enrolled. An ESTABLISHED promotion can only
+        # come from an enrolled validator, so this is a forged row: leave ok
+        # False (excluded).
     cache[ck] = ok
     return ok
 
@@ -4494,6 +4599,16 @@ def _signed_field_mismatch(pred: dict, row: dict) -> str | None:
     classification, provenance and links can all be rewritten under an envelope
     that still verifies. Shared by the read-path gate and the audit path so the
     two cannot drift apart.
+
+    Every comparison runs through :func:`signed_value_matches`, not ``!=``. The
+    signature covers canonical bytes, which NFC-normalize every string, while
+    the row keeps the bytes the caller passed, so text that arrives decomposed
+    (a macOS filename, a PDF extract, most text typed in Vietnamese or Korean)
+    is signed composed and stored decomposed. A bare ``!=`` reports those as a
+    mismatch, which drops an honest claim on read and makes restore refuse the
+    whole backup naming it as tampered. Comparing up to NFC form is what the
+    signature already means and narrows nothing: a value that still differs
+    after normalization differs here too.
     """
     from mareforma import signing as _signing
     expected = {
@@ -4508,7 +4623,7 @@ def _signed_field_mismatch(pred: dict, row: dict) -> str | None:
         "created_at": row.get("created_at"),
     }
     for field in _signing.SIGNED_FIELDS:
-        if pred.get(field) != expected[field]:
+        if not signed_value_matches(pred.get(field), expected[field]):
             return field
     # The evidence vector and the observed-grounding verdict are signed and
     # chained too, but they live outside SIGNED_FIELDS (one is a nested dict,
@@ -4516,9 +4631,13 @@ def _signed_field_mismatch(pred: dict, row: dict) -> str | None:
     # or a rewritten verdict reads clean and unlocks the promotion the real
     # verdict blocked. Both sides are parsed so key ordering cannot fake a
     # mismatch; absent on both sides is the pre-observer case and passes.
-    if pred.get("evidence") != _json_object(row.get("evidence_json"), {}):
+    if not signed_value_matches(
+        pred.get("evidence"), _json_object(row.get("evidence_json"), {}),
+    ):
         return "evidence"
-    if pred.get("observed_grounding") != _json_object(row.get("observed_grounding")):
+    if not signed_value_matches(
+        pred.get("observed_grounding"), _json_object(row.get("observed_grounding")),
+    ):
         return "observed_grounding"
     return None
 
@@ -4548,7 +4667,11 @@ def _verify_participant_bundle_on_read(
     ak = row.get("asserter_keyid")
     bundle_json = row.get("signature_bundle")
     if not bundle_json:
-        return ak is None
+        # No envelope to check. That is the legacy case only when the claim was
+        # never signed AND the project does not sign at all; otherwise the row
+        # was de-signed or INSERTed, and an exemption would serve a promoted
+        # claim that carries no attribution whatsoever.
+        return ak is None and _legacy_unsigned_row(conn, row, cache)
     # claim_id is part of the key: the binding check below depends on the row,
     # so two rows sharing one bundle (a copy attack) must not share a cache
     # entry or the first-evaluated row poisons the second (same reasoning as
@@ -4634,8 +4757,11 @@ def _verify_role_signatures(conn: sqlite3.Connection, env: dict) -> bool:
         if not isinstance(keyid, str):
             return False
         signer_row = _validators.get_validator(conn, keyid)
-        if signer_row is None:
-            return False  # orphan signer, not enrolled
+        # A row in the table is not an enrolment: the chain has to walk back to
+        # the self-signed root, or one direct INSERT of a real pubkey under a
+        # junk envelope buys a role attestation the project never granted.
+        if signer_row is None or not _validators.is_enrolled(conn, keyid):
+            return False  # orphan or unchained signer, not enrolled
         try:
             pem = base64.standard_b64decode(signer_row["pubkey_pem"])
             pub = _signing.public_key_from_pem(pem)
@@ -4684,7 +4810,7 @@ def verify_claim_signatures(
     except Exception:
         return (False, "signature bundle envelope is structurally invalid")
 
-    if pred.get("claim_id") != row.get("claim_id"):
+    if not signed_value_matches(pred.get("claim_id"), row.get("claim_id")):
         return (False, "signed predicate does not bind this claim id")
 
     mismatch = _signed_field_mismatch(pred, row)
@@ -4702,6 +4828,20 @@ def verify_claim_signatures(
                     return (False, "asserter signature failed verification")
             except Exception:
                 return (False, "asserter signature could not be verified")
+            # A row in the validators table is not an enrolment. The table has
+            # no INSERT guard, so one INSERT with a real pubkey and a junk
+            # envelope puts a key there; ``is_enrolled`` walks the chain back to
+            # the self-signed root, which is what "registered" means everywhere
+            # else. A signer whose chain does not walk back is not a stranger
+            # the lean model has no pubkey for, it is a forged enrolment, and an
+            # audit that answered "verified" over it would report the forgery as
+            # attribution.
+            if not _validators.is_enrolled(conn, keyid):
+                return (
+                    False,
+                    "asserter key has a validators row whose enrollment does "
+                    "not chain back to the project root",
+                )
 
     if not _verify_role_signatures(conn, env):
         return (False, "a role signature failed verification")
@@ -6065,18 +6205,114 @@ def project_policy_declared_at(
     )
 
 
+# The reading a policy row gets when its envelope does not back it. Both rules
+# read as declared, from before every claim in the graph, which is the strictest
+# reading available and the only safe one: a policy that cannot be
+# authenticated has been tampered with, and every way of tampering with it is a
+# way of switching a rule OFF. Answering "no policy" instead would hand the
+# attacker exactly what the edit was for.
+_UNVERIFIED_POLICY: dict = {
+    "rekor_required": 1,
+    "strict_promotion_required": 1,
+    "signer_keyid": None,
+    "envelope": None,
+    "created_at": "",
+    "rekor_declared_at": "",
+    "strict_promotion_declared_at": "",
+}
+
+
+def _policy_envelope_binds(
+    conn: sqlite3.Connection, policy: dict,
+) -> bool:
+    """True iff the root's signature covers exactly this policy row.
+
+    The same check restore runs before it enforces a ``[project_policy]``
+    section (``restore._verify_and_insert_project_policy``), applied to the live
+    row so recovery and the running graph hold the policy to one standard: the
+    signer must be the project's single enrolled root, the envelope must verify
+    under that root's pubkey at the project-policy payload type, the payload's
+    own version fixes which fields it is allowed to carry, and every flat column
+    must match what the payload says. Never raises: an unreadable envelope is
+    not a verified one.
+    """
+    from mareforma import signing as _signing
+    from mareforma import validators as _validators
+
+    signer_keyid = policy["signer_keyid"]
+    root_keyid = _validators.trust_domain_root(conn)
+    if (
+        not signer_keyid
+        or root_keyid is None
+        or signer_keyid != root_keyid
+        or not _validators.is_enrolled(conn, signer_keyid)
+    ):
+        return False
+    signer_row = _validators.get_validator(conn, signer_keyid)
+    if signer_row is None:
+        return False
+    try:
+        env = json.loads(policy["envelope"] or "")
+        pem = base64.standard_b64decode(signer_row["pubkey_pem"])
+        pub = _signing.public_key_from_pem(pem)
+        if not _signing.verify_envelope(
+            env, pub,
+            expected_payload_type=_signing.PAYLOAD_TYPE_PROJECT_POLICY,
+        ):
+            return False
+        payload = _signing.envelope_payload(env)
+        signed_fields = _signing._project_policy_fields(
+            payload.get("version", 1)
+        )
+    except Exception:
+        return False
+    if set(payload) != set(signed_fields):
+        return False
+    return (
+        bool(payload.get("rekor_required")) == bool(policy["rekor_required"])
+        and bool(payload.get("strict_promotion_required"))
+        == bool(policy["strict_promotion_required"])
+        and payload.get("created_at") == policy["created_at"]
+        and payload.get("rekor_declared_at") == policy["rekor_declared_at"]
+        and payload.get("strict_promotion_declared_at")
+        == policy["strict_promotion_declared_at"]
+    )
+
+
+def _verified_project_policy(conn: sqlite3.Connection) -> dict | None:
+    """The stored policy, but only as far as its root signature backs it.
+
+    Every enforcement of the policy reads it through here. The envelope is the
+    authority and the flat columns are a denormalized cache, so a rule that
+    binds every writer cannot be read off columns any writer can edit: one
+    ``UPDATE project_policy SET strict_promotion_required = 0`` retires the rule
+    for the whole graph, and moving a ``*_declared_at`` forward grandfathers
+    every claim written in between.
+
+    No policy row answers None, the honest "nothing declared". A row whose
+    envelope does not bind it answers :data:`_UNVERIFIED_POLICY`, the strictest
+    reading, because tampering here can only ever be an attempt to switch a rule
+    off. ``get_project_policy`` stays the raw reader for the backup writer and
+    for the one-way check in :func:`set_project_policy`, which have to see the
+    row as stored.
+    """
+    policy = get_project_policy(conn)
+    if policy is None:
+        return None
+    return policy if _policy_envelope_binds(conn, policy) else _UNVERIFIED_POLICY
+
+
 def strict_promotion_required(conn: sqlite3.Connection) -> bool:
     """True when the project's stored policy gates promotion on data.
 
     Read on the promotion path so the rule belongs to the project rather than
     to whichever handle happens to be writing: the declaration is root-signed
     and one-way, so a caller that opened without ``strict_promotion`` is held
-    to it too.
+    to it too. It is read through the signed envelope for the same reason: a
+    rule that binds every writer must not be readable off a column every writer
+    can edit.
     """
-    row = conn.execute(
-        "SELECT strict_promotion_required FROM project_policy WHERE id = 1"
-    ).fetchone()
-    return bool(row["strict_promotion_required"]) if row is not None else False
+    return project_policy_flags(_verified_project_policy(conn))[1]
 
 
 def set_project_policy(
@@ -6136,19 +6372,33 @@ def set_project_policy(
                 "envelope dates it, so persisting it would move the rule's "
                 "start forward. Re-read the policy and sign the union."
             )
-        conn.execute("DELETE FROM project_policy WHERE id = 1")
-        conn.execute(
-            "INSERT INTO project_policy "
-            "(id, rekor_required, strict_promotion_required, signer_keyid, "
-            "envelope, created_at, rekor_declared_at, "
-            "strict_promotion_declared_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                1 if rekor_required else 0,
-                1 if strict_promotion_required else 0,
-                signer_keyid, envelope, created_at,
-                rekor_declared_at, strict_promotion_declared_at,
-            ),
-        )
+        # Upsert, not delete-then-insert: the row records a one-way rule and the
+        # table's no-delete guard refuses to let it go, so the replacement
+        # rewrites the singleton in place inside the policy window (the marker
+        # the append-only guard looks for).
+        with _policy_window(conn):
+            conn.execute(
+                "INSERT INTO project_policy "
+                "(id, rekor_required, strict_promotion_required, signer_keyid, "
+                "envelope, created_at, rekor_declared_at, "
+                "strict_promotion_declared_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET "
+                "rekor_required = excluded.rekor_required, "
+                "strict_promotion_required = "
+                "excluded.strict_promotion_required, "
+                "signer_keyid = excluded.signer_keyid, "
+                "envelope = excluded.envelope, "
+                "created_at = excluded.created_at, "
+                "rekor_declared_at = excluded.rekor_declared_at, "
+                "strict_promotion_declared_at = "
+                "excluded.strict_promotion_declared_at",
+                (
+                    1 if rekor_required else 0,
+                    1 if strict_promotion_required else 0,
+                    signer_keyid, envelope, created_at,
+                    rekor_declared_at, strict_promotion_declared_at,
+                ),
+            )
         conn.execute("COMMIT")
     except BaseException:
         try:

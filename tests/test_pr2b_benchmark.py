@@ -85,8 +85,13 @@ def test_pr2b_verify_count_is_bounded(
         # has a distinct (keyid, digest), so the count tracks the envelope
         # count. A REPLICATED row carries the asserter bundle; an ESTABLISHED
         # row carries the validation envelope on top of it, so it counts twice.
+        # The read also authenticates enrollment rather than trusting a
+        # validators row's presence, which costs one envelope check per read.
+        # Measured constant in the row count: the excess over the per-row terms
+        # is exactly 1 at 10, 40 and 80 converging claims, so it does not
+        # reintroduce the per-row re-checking this bound exists to catch.
         established = [r for r in rows if r["support_level"] == "ESTABLISHED"]
-        bound = len(replicated) + 2 * len(established)
+        bound = len(replicated) + 2 * len(established) + 1
         assert calls["n"] >= 1, "expected the read path to verify signatures"
         assert calls["n"] <= bound, (
             f"verify cache did not bound checks: {calls['n']} checks for "
