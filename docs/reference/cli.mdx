@@ -307,8 +307,8 @@ mareforma status [OPTIONS]
 | Color | Condition |
 |---|---|
 | 🔴 RED | No claims recorded |
-| 🟡 YELLOW | Claims exist but all are PRELIMINARY, or a promoted claim does not re-verify on read |
-| 🟢 GREEN | At least one REPLICATED or ESTABLISHED claim, and every promoted claim re-verifies |
+| 🟡 YELLOW | Claims exist but all are PRELIMINARY, or every promoted claim has been retracted or invalidated by a signed contradiction verdict, or a promoted claim does not re-verify on read |
+| 🟢 GREEN | At least one REPLICATED or ESTABLISHED claim still standing, meaning not retracted and not invalidated by a signed contradiction verdict, and every promoted claim re-verifies |
 
 The light cannot read green while a promoted claim fails re-verification: the
 stored REPLICATED or ESTABLISHED level is not backed by signed material (a forged
@@ -421,7 +421,7 @@ A signed audit run record is always unverifiable (exit 2), whether or not its si
 
 For a bundle, this checks the DSSE signature (over the DSSE PAE encoding, so it interoperates with standard verifiers), every per-claim subject digest, every per-claim **asserter signature** bound to the claim's presented content, the enrolled validator chain to a single root (which must be the bundle signer), and the displayed **support level** (ESTABLISHED against a validator-signed validation envelope, REPLICATED against distinct-signer corroboration). For a claim id, verification uses only public material (auditor mode) and prints the claim's trust map.
 
-Auditor mode verifies against enrolled validator pubkeys only, so a signed claim whose signer is **not an enrolled validator** cannot be authenticated: the claim's binding is all that could be checked, never its signature. `verify` exits **1** on such a claim (tamper or binding violation), not 0. A CI gate built on `verify` therefore no longer passes a claim carrying an all-zero signature under a keyid that was never enrolled.
+Auditor mode verifies against enrolled validator pubkeys only, so a signed claim whose signer is **not an enrolled validator** cannot be authenticated: the claim's binding is all that could be checked, never its signature. `verify` exits **2** on such a claim, not 0. Exit 2 is the unverifiable verdict, not a failure: enrol the signer's key and run it again to reach one. A CI gate built on `verify` therefore no longer passes a claim carrying an all-zero signature under a keyid that was never enrolled, and a gate that treats 2 as a failure will stop a claim that may be perfectly sound. Route 2 to "cannot tell yet", and reserve 1 for a definite failure.
 
 Editorial status (`retracted` / `contested`) and comparison summaries carry no signature in the data model, so a verified bundle does not attest them: it attests each claim's asserter content and earned support level, not a mutable status flag.
 

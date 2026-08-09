@@ -218,7 +218,7 @@ Three triggers keep it in lockstep with `claims`, all AFTER the write, so an `In
 
 ## Trust layer tables
 
-The trust layer (see [Findings](/concepts/findings)) adds six tables for
+The trust layer (see [Findings](/concepts/findings)) adds seven tables for
 structured findings. They are **additive**: `CREATE TABLE IF NOT EXISTS`, no
 migration, `user_version` stays `1`. A finding is an evidence tree
 (`finding → evidence_lines → contrasts → effect_estimates`), anchored to a

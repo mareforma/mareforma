@@ -126,6 +126,36 @@ class TestCouldNotReexecute:
         assert result.verdict is FaithfulnessVerdict.COULD_NOT_REEXECUTE
         assert "raised" in result.residual
 
+    def test_target_that_exits_is_could_not_not_reproduced(self) -> None:
+        # A pipeline written as a script ends in sys.exit(). SystemExit derives
+        # from BaseException, so an ``except Exception`` clause never sees it and
+        # the re-execution ends the process carrying no verdict. A clean exit(0)
+        # is the dangerous one: the gate reads 0 and scores a check that never
+        # ran as a reproduction. Both codes are could-not.
+        def clean_exit() -> float:
+            raise SystemExit(0)
+
+        result = reexec(_run(reported_value=0.5), registry={"pipe": clean_exit})
+        assert result.verdict is FaithfulnessVerdict.COULD_NOT_REEXECUTE
+        assert result.reproduced is False
+        assert "exited" in result.residual
+
+        def failing_exit() -> float:
+            raise SystemExit(2)
+
+        failed = reexec(_run(reported_value=0.5), registry={"pipe": failing_exit})
+        assert failed.verdict is FaithfulnessVerdict.COULD_NOT_REEXECUTE
+
+    def test_operator_interrupt_still_propagates(self) -> None:
+        # The clause above must not widen to BaseException: a KeyboardInterrupt
+        # is the operator stopping the run, not a pipeline that could not be
+        # re-executed, and swallowing it into a verdict would hide the stop.
+        def interrupted() -> float:
+            raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            reexec(_run(reported_value=0.5), registry={"pipe": interrupted})
+
     def test_unresolvable_target_is_could_not(self) -> None:
         # A dotted path that does not import is could-not, not a crash.
         result = reexec(

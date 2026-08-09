@@ -114,7 +114,7 @@ keyless write.
 | `enrollment_unverified` | A validator's enrollment envelope failed verification. |
 | `claim_unverified` | A claim's `signature_bundle` or `validation_signature` failed verification. |
 | `trust_row_rejected` | A trust-layer row replayed from claims.toml breaks a schema constraint, such as a foreign key pointing at a row the backup does not carry. No signature was checked. |
-| `mode_inconsistent` | Signed-mode graph (validators enrolled) contains a claim with no signature. |
+| `mode_inconsistent` | A claim carries a `statement_cid` but no `signature_bundle`: it was signed once and the signature is gone. A claim that was never signed no longer raises; it restores and is counted in `unsigned_in_signed_mode`. |
 | `orphan_signer` | A claim is signed by a keyid not present in the validators section. |
 | `rekor_inclusion_invalid` | A `[rekor_inclusions]` entry failed verification, references a missing claim, is missing required fields, or does not bind to the claim it is attached to. |
 | `policy_unverified` | A `[project_policy]` is present but its root signature or field binding failed. |
@@ -869,7 +869,7 @@ catching looks like `from mareforma import RekorInclusionError`.
 | `KeyPermissionError` | `mareforma.signing` | key load | The private key file is group- or world-readable; it must be mode 0600 |
 | `SigningError` | `mareforma.signing` | Rekor submission, TOFU pin conflict | Rekor URL unset / unreachable / invalid; or supplied log pubkey conflicts with the pinned key on `.mareforma/rekor_log_pubkey.pem` |
 | `InvalidEnvelopeError` | `mareforma.signing` | `verify_envelope`, `claim_predicate_from_envelope` | Envelope payload is malformed, wrong `payloadType`, or subject and predicate disagree on `claim_id` / text digest |
-| `RekorInclusionError` | `mareforma.signing` | `verify_rekor_inclusion`, `verify_rekor_checkpoint`, `fetch_inclusion_proof`, `fetch_log_pubkey`, and the submit + refresh paths when `rekor_log_pubkey_pem` is set | RFC 6962 inclusion proof failed cryptographic verification. Stable `.reason` token: `missing_proof`, `malformed_proof`, `bad_root_hex`, `bad_proof_hex`, `merkle_root_mismatch`, `checkpoint_missing`, `checkpoint_malformed`, `checkpoint_root_mismatch`, `checkpoint_unsigned`, `checkpoint_bad_sig`, `entry_claim_mismatch`, `unsupported_key`. Callers pattern-match on the reason without parsing English. |
+| `RekorInclusionError` | `mareforma.signing` | `verify_rekor_inclusion`, `verify_rekor_checkpoint`, `fetch_inclusion_proof`, `fetch_log_pubkey`, and the submit + refresh paths when `rekor_log_pubkey_pem` is set | RFC 6962 inclusion proof failed cryptographic verification. Stable `.reason` token: `missing_proof`, `malformed_proof`, `bad_root_hex`, `bad_proof_hex`, `merkle_root_mismatch`, `checkpoint_missing`, `checkpoint_malformed`, `checkpoint_root_mismatch`, `checkpoint_unsigned`, `checkpoint_bad_sig`, `checkpoint_origin_mismatch`, `entry_claim_mismatch`, `unsupported_key`. Callers pattern-match on the reason without parsing English. |
 | `InvalidIdentityError` | `mareforma.validators` | `enroll_validator()` | Identity contains rejected characters |
 | `ValidatorAlreadyEnrolledError` | `mareforma.validators` | `enroll_validator()` | Validator row already exists |
 | `InvalidValidatorTypeError` | `mareforma.validators` | `enroll_validator()` | `validator_type` is neither `'human'` nor `'llm'` |

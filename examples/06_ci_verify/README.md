@@ -81,6 +81,13 @@ key that is not an enrolled validator on the project.
 That last case is the one to think about. `verify` works from public material,
 which is the project's enrolled validator pubkeys, so a signature under a key
 nobody enrolled cannot be checked against anything, including a signature of 64
-zero bytes. A gate that warns on 2 lets that claim through. Fail on 2 unless
-you have a reason not to, and enroll the signer's key so its claims can reach a
+zero bytes.
+
+Exit 2 says the claim could not be checked, not that it failed, so what your gate
+does with it is a policy choice rather than something the exit code decides. The
+recipe above warns and passes, which is right while a project still expects
+claims from signers it has not enrolled. Once every signer on a project is
+supposed to be enrolled, an unverifiable claim is a broken expectation and the
+gate should fail on 2 as well, because warning on it lets a claim through that
+nothing checked. Either way, enroll the signer's key so its claims can reach a
 real verdict.
