@@ -23,7 +23,7 @@ is grounded:
 
 ```text
   Grounding: GROUNDED
-    the cited source was opened for reading and is non-empty
+    the cited source was opened for reading and is non-empty (file; the open path proxies data flow by file size, it does not observe the bytes read)
 ```
 
 ## The silent failure
