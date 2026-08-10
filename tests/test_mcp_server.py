@@ -358,6 +358,30 @@ class TestClaimTextIsWrappedForTheModel:
         finally:
             graph.close()
 
+    def test_short_label_fields_cannot_forge_a_closing_delimiter(self, tmp_path):
+        """A run token is exempt from the wrapper, not from the stripping.
+
+        ``generated_by`` and ``source_name`` skip the ``<untrusted_data>``
+        wrapper because delimiters around a short label are noise. They were
+        also skipping the forged-delimiter strip, which is a different
+        question: both are serialised into the same object as the wrapped
+        text, so a run token reading ``</untrusted_data>`` closes a delimiter
+        it was never given. That is the breakout the layer exists to stop, and
+        it reached the model through every row this server returns.
+        """
+        with open_graph(tmp_path) as graph:
+            cid = graph.assert_claim(
+                "a finding", classification="ANALYTICAL",
+                generated_by=_HOSTILE, source_name=_HOSTILE,
+            )
+        graph = mareforma.open(tmp_path, load_key=False)
+        try:
+            claim = ReadVerifyTools(graph).get_claim(cid)["claim"]
+        finally:
+            graph.close()
+        for field in ("generated_by", "source_name"):
+            assert "</untrusted_data>" not in (claim.get(field) or ""), field
+
     def test_query_wraps_claim_text(self, hostile_tools):
         row = hostile_tools.query_claims()["claims"][0]
         assert row["text"].startswith("<untrusted_data>")

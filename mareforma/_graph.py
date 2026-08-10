@@ -159,7 +159,18 @@ def _format_row_for_llm(row: dict, prompt_safety) -> dict:
             out[field] = prompt_safety.wrap_untrusted(sanitized)
     for field in _LLM_SANITIZE_FIELDS:
         if field in out:
-            out[field] = prompt_safety.sanitize_for_llm(out[field])
+            # Strip forged delimiters here too, not just hostile codepoints.
+            # These fields skip the *wrapper* because a short label gains
+            # nothing from delimiters, which is a different question from
+            # whether the label may carry one. A run token reading
+            # ``</untrusted_data>`` is serialised into the same object as the
+            # wrapped text and closes a delimiter it was never given, which is
+            # the whole breakout this layer exists to stop. Every other string
+            # in the row is already stripped by the closing pass below; these
+            # three were the only ones exempt.
+            out[field] = prompt_safety.strip_forged_tags(
+                prompt_safety.sanitize_for_llm(out[field])
+            )
     # Close the set: the remaining columns carry caller-supplied prose too
     # (evidence rationales, adapter predicate payloads, grounding reasons),
     # so strip hostile codepoints and forged delimiters from every string
