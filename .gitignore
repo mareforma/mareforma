@@ -212,4 +212,5 @@ __marimo__/
 # Mareforma runtime artifacts
 .mareforma/
 claims.toml
+claims.toml.prev
 ontology.jsonld

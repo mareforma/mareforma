@@ -50,6 +50,14 @@ class TestRemovedPublicNames:
         from mareforma import doi_resolver
         assert not hasattr(doi_resolver, name)
 
+    def test_doi_list_filter_gone(self) -> None:
+        # The cut took every caller of extract_dois; is_doi is what survives,
+        # and the graph reaches it directly at module scope.
+        from mareforma.db import core
+        from mareforma import doi_resolver
+        assert not hasattr(doi_resolver, "extract_dois")
+        assert core.is_doi is doi_resolver.is_doi
+
     @pytest.mark.parametrize(
         "method",
         ["refresh_unresolved", "refresh_all_dois", "find_drifted_dois"],

@@ -41,6 +41,18 @@ class TestOpenWithSigning:
                 require_signed=True,
             )
 
+    def test_require_signed_without_key_creates_no_project(self, tmp_path):
+        """A refusal must not leave a project behind. require_signed=True
+        depends only on the arguments, so it is decided before the store
+        at <root>/.mareforma/graph.db is created."""
+        with pytest.raises(_signing.KeyNotFoundError):
+            mareforma.open(
+                tmp_path,
+                key_path=tmp_path / "absent",
+                require_signed=True,
+            )
+        assert not (tmp_path / ".mareforma").exists()
+
     def test_signed_claim_has_verifiable_envelope(self, tmp_path):
         key_path = _bootstrap_key(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as graph:

@@ -36,6 +36,8 @@ blind spot.
 from __future__ import annotations
 
 import hashlib
+import threading
+import weakref
 from dataclasses import dataclass
 from enum import Enum
 
@@ -52,7 +54,50 @@ from .._canonical import canonicalize
 # write-time result. A v0.3.8 envelope omits ``cited_sources``; its absence is
 # "the citation binding was not checkable," never tampering, the pre-binding
 # label the auditor surface renders.
-GROUNDING_AXIS_VERSION = "v0.3.9"
+#
+# v0.3.11 bumps the MATCH RULE: a read identifier is normalized when it is
+# RECORDED, on the host whose filesystem can resolve it, and the summarizer then
+# compares normalized strings directly. A v0.3.9 receipt carries the loader's raw
+# identifier, so the same run's reads match its cited set under one rule and not
+# the other, and one report cannot mix the two. ``summarize_receipts`` refuses
+# the mismatch rather than reinterpreting an older receipt under the newer rule.
+# The digest is over the receipt, not a claim about it: an older receipt stays
+# verifiable against its own bytes.
+GROUNDING_AXIS_VERSION = "v0.3.11"
+
+
+# The provenance of a stored verdict that the observer did NOT compute. Absent
+# from a record the observer wrote, so an observed record signs to the same bytes
+# it always did; present means a caller handed the record in and mareforma
+# watched no execution behind it.
+DECLARED_PROVENANCE = "DECLARED"
+
+# Appended to a declared record's reason, at most once, so the surfaces that
+# render the reason (the trust map's residual, the CLI) say where the verdict
+# came from without needing to know about a new field. Same idiom, and the same
+# frozen-wording rule, as UNBOUND_ANNOTATION in :mod:`._binding`.
+#
+# It says what is known, for the same reason DECLARED_GROUNDED_REASON does: that
+# nothing this process's observer computed matches this record. Whether the
+# caller wrote it by hand is a stronger claim than the register can support.
+DECLARED_ANNOTATION = (
+    "[no verdict mareforma observed in this process matches this record]"
+)
+
+# The reason a declared GROUNDED carries once it is neutralised. It replaces the
+# caller's reason rather than annotating it: the caller's sentence describes a
+# read that mareforma never saw, so keeping it would leave an OPAQUE record still
+# narrating a grounded one.
+#
+# It says what is KNOWN, which is that no observer record in this process matches
+# this verdict. It does not say the caller declared it, because that is not
+# knowable here: a record whose verdict has been collected and whose digest entry
+# was evicted looks identical to one nobody ever computed, and asserting the
+# stronger sentence made a false statement about a good-faith run.
+DECLARED_GROUNDED_REASON = (
+    "GROUNDED is not stored: no verdict this process's observer computed matches "
+    "this record, so mareforma cannot say it watched any execution behind it"
+)
 
 
 class ObservedGrounding(str, Enum):
@@ -73,12 +118,43 @@ class ObservedGrounding(str, Enum):
         return self is ObservedGrounding.GROUNDED
 
 
+def as_int(value: object) -> int:
+    """Coerce a persisted record field to a non-negative int, defaulting to 0.
+
+    A hand-authored, older, or truncated record may carry a missing, null, or
+    non-numeric field; it degrades to 0 rather than raising, so one bad record
+    never denies the whole report.
+    """
+    try:
+        return max(0, int(value))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
+def _read_grounding(value: object, reason: str) -> tuple["ObservedGrounding", str]:
+    """Coerce a receipt's grounding field, degrading an unknown state to OPAQUE.
+
+    A future axis state, a typo, or an explicit null reads as OPAQUE (the
+    conservative, non-promoting bucket) with the unreadable value named in the
+    reason, so the blind spot is stated rather than either abandoned or promoted.
+    """
+    try:
+        return ObservedGrounding(value), reason
+    except ValueError:
+        note = f"unrecognized grounding {value!r}, read as OPAQUE"
+        return ObservedGrounding.OPAQUE, f"{note}: {reason}" if reason else note
+
+
 @dataclass(frozen=True)
 class ReadRecord:
     """One data-ingress event captured inside an observed scope.
 
-    ``identifier`` is the normalized handle the read touched: an absolute file
-    path, a database connection target, or a ``scheme://host/path`` for a URL.
+    ``identifier`` is the normalized handle the read touched: an absolute,
+    symlink-resolved file path, a database connection target, or a
+    ``scheme://host/path`` for a URL. Normalization happens when the read is
+    recorded, on the host that resolved it, so no credential (the userinfo and
+    query a presigned URL carries) is ever stored and a reader can compare the
+    identifier without touching a filesystem.
     ``nonempty`` is whether the read returned any bytes or rows, an empty read
     of a cited source is the silent-fallback signature, so it is recorded as a
     read that happened but carried nothing. ``content_address`` is the
@@ -96,20 +172,32 @@ class ReadRecord:
 class SeamEvent:
     """A boundary the observer cannot see across, captured inside a scope.
 
-    ``kind`` is ``thread`` / ``subprocess`` / ``socket`` / ``coverage-gap``.
+    ``kind`` is ``thread`` / ``subprocess`` / ``socket`` / ``coverage-gap`` /
+    ``abort`` (the target stopped before the scope closed) / ``failed-open``.
     ``detail`` is a short, non-sensitive descriptor (the audit event name, the
     connection host, or the cited path opened via an uninstrumented reader). A
     seam inside a scope with no qualifying cited read forces ``OPAQUE``, the
-    read could have happened on the far side of the seam.
+    read could have happened on the far side of the seam. ``failed-open`` is
+    the exception: it records an open the observer watched fail, which hides
+    nothing and leaves the verdict ``UNGROUNDED``.
     """
 
     kind: str
     detail: str
 
 
-@dataclass
+@dataclass(frozen=True)
 class GroundingVerdict:
     """The computed grounding verdict plus its inspectable receipt.
+
+    Frozen. The observed axis is the one field on a claim that is not the
+    producer's own word, and a mutable verdict hands it straight back: the
+    measured attack was to run a real ``observe()`` scope, assign
+    ``verdict.grounding = GROUNDED`` on the object it returned, and pass it in.
+    Freezing turns that assignment into an error at the point it is written.
+    Freezing alone is not the guarantee, it is the cheap half: the write path
+    stores the SNAPSHOT taken when the observer minted the verdict, so even an
+    edit made through ``object.__setattr__`` is discarded rather than signed.
 
     The verdict is what a human stakes trust on: one of three states, a plain
     reason, and the cited sources it was computed against. The receipt is the
@@ -196,6 +284,11 @@ class GroundingVerdict:
         "pre-binding axis; citation binding not checkable." ``grounded_sources``
         rides alongside it: the binding is re-checked on read against the sources
         actually read, not the declared cite set.
+
+        Pure: it reads this object and returns a dict. What the write path
+        actually stores for an observed verdict is the snapshot taken at mint
+        time, not this call's output (see :func:`_mint`), so serializing has no
+        say in provenance and cannot be made to have one.
         """
         return {
             "version": self.version,
@@ -216,12 +309,17 @@ class GroundingVerdict:
         seam kind. This rebuilds a verdict from one so the same summarize path
         serves both live verdicts and persisted receipts. Unknown / missing
         fields degrade to their defaults rather than raise, so a hand-authored or
-        older receipt still summarizes.
+        older receipt still summarizes: an unreadable grounding state reads as
+        OPAQUE (named in the reason) and unreadable coverage counts read as 0,
+        never GROUNDED, so a malformed record cannot promote itself.
         """
         cov = receipt.get("coverage") or {}
+        grounding, reason = _read_grounding(
+            receipt.get("grounding", "OPAQUE"), receipt.get("reason", "")
+        )
         return cls(
-            grounding=ObservedGrounding(receipt.get("grounding", "OPAQUE")),
-            reason=receipt.get("reason", ""),
+            grounding=grounding,
+            reason=reason,
             cited_sources=tuple(receipt.get("cited_sources") or ()),
             grounded_sources=tuple(receipt.get("grounded_sources") or ()),
             reads=tuple(
@@ -239,18 +337,227 @@ class GroundingVerdict:
             ),
             matched_identifier=receipt.get("matched_identifier"),
             version=receipt.get("version", GROUNDING_AXIS_VERSION),
-            reads_seen=int(cov.get("reads_seen", 0)),
-            opens_detected=int(cov.get("opens_detected", 0)),
+            reads_seen=as_int(cov.get("reads_seen")),
+            opens_detected=as_int(cov.get("opens_detected")),
         )
 
     def read_coverage_fraction(self) -> float | None:
-        """Fraction of detected opens the observer actually read through.
+        """Fraction of the detected cited opens the observer read through.
 
-        ``reads_seen / opens_detected``. ``None`` when nothing was opened (the
-        fraction is undefined, not zero). A value below 1.0 means the observer
-        detected data-ingress it could not see the bytes of, the honest
-        coverage bound the measurement reports.
+        ``reads_seen / opens_detected``, both counted over the cited paths seen
+        opened. ``None`` when no cited path was opened (the fraction is
+        undefined, not zero). A value below 1.0 means the observer detected
+        data-ingress it could not see the bytes of, the honest coverage bound
+        the measurement reports.
         """
         if self.opens_detected <= 0:
             return None
         return self.reads_seen / self.opens_detected
+
+
+# Freezing a dataclass with ``eq=True`` also makes it hashable, and this one must
+# not be. ``model_lineage.decoding`` is a dict, so the generated hash succeeds on
+# a verdict with no observed model call and raises ``unhashable type: 'dict'`` the
+# moment there is one: ``set(verdicts)`` would work in a test and fail in
+# production, on a difference that has nothing to do with hashing. Before the
+# freeze the type was uniformly unhashable, and that is the contract kept here.
+# Assigned after the class because the decorator overwrites an in-body
+# ``__hash__``.
+GroundingVerdict.__hash__ = None  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
+# Provenance: which verdicts this process's observer actually computed
+# ---------------------------------------------------------------------------
+#
+# The observed axis is the one signal on a claim that is not the producer's own
+# word, so the write path must not take a verdict on the producer's word. A
+# verdict is COMPUTED when it came out of :meth:`Scope.classify` in this process
+# and DECLARED otherwise, and the write path stores the observer's own record for
+# the first and neutralises the second (see ``EpistemicGraph._attest_grounding``).
+#
+# The boundary this draws is the PROCESS, and it is worth stating at full
+# strength rather than the flattering version. Any in-process code can mint, and
+# it does not need to import this module to do it: the scope's own recorder is
+# exported, so a caller can hand the observer a read that never happened and the
+# verdict it computes from that is genuinely minted. Nor is the register a proof
+# that a mint belongs to a particular claim: it is keyed on the receipt digest
+# and scoped to nothing, so any mint in the process authenticates any record
+# carrying that digest.
+#
+# What it does stop is the ordinary, undetectable path, a caller writing the
+# conclusion by hand and having every read surface render it as an execution
+# mareforma watched. That is worth having; it is not the same as the observed
+# axis being unforgeable by the producer, and nothing here should be read as
+# claiming it is.
+#
+# The register is keyed on the verdict OBJECT's identity, not on a flag the
+# object carries. A flag is settable, and every way of setting it was reachable:
+# per instance, through a subclass that defaults it True, and through a duck type
+# that is not a GroundingVerdict at all. Membership of a module-private table
+# cannot be claimed from outside this module.
+#
+# Each entry holds the SNAPSHOT of what the observer computed, taken at mint
+# time. The write path stores that snapshot, never a re-serialization of the
+# caller's live object, so an edit landed on the object between mint and write
+# (through ``object.__setattr__``, which the frozen dataclass does not stop) is
+# discarded rather than signed.
+#
+# There are two registers because there are two call shapes, and they have
+# different lifetimes.
+#
+# ``_MINTED`` is keyed on object identity, for the caller who hands the VERDICT
+# to ``assert_finding``. Its entries are dropped by a finalizer when the verdict
+# is collected, so it holds one entry per LIVE verdict and a long-lived process
+# that mints per request does not grow it.
+#
+# ``_BY_DIGEST`` is keyed on the receipt digest, for the documented
+# ``assert_claim(observed_grounding=obs.verdict.to_signed_dict())`` call, where
+# what arrives is a plain dict with no object behind it. Its entries CANNOT hang
+# off the verdict's lifetime: the verdict in that expression is very often a
+# temporary that is already collected by the time the record is written, and
+# tying the two dropped a genuinely observed GROUNDED on the release's own
+# documented call. So it is an independent table with a cap, and a miss falls
+# back to scanning the live verdicts, which is what keeps an honest caller who
+# still holds the object from ever losing to eviction.
+#
+# Eviction therefore reaches only a record whose verdict is already dead, and it
+# costs COMPUTED standing, never the reverse. The reason it leaves behind says
+# what is actually known — that no observer record in this process matches — and
+# not that the caller declared it, which is what the earlier wording asserted and
+# could not know.
+#
+# The boundary this draws is the PROCESS, and it is worth stating at full
+# strength rather than the flattering version. Any in-process code can mint, and
+# it does not need to import this module to do it: the scope's own recorder is
+# exported, so a caller can hand the observer a read that never happened and the
+# verdict it computes from that is genuinely minted. Nor is the register a proof
+# that a mint belongs to a particular claim: it is keyed on the receipt digest
+# and scoped to nothing, so any mint in the process authenticates any record
+# carrying that digest.
+#
+# What it does stop is the ordinary, undetectable path, a caller writing the
+# conclusion by hand and having every read surface render it as an execution
+# mareforma watched. That is worth having; it is not the same as the observed
+# axis being unforgeable by the producer, and nothing here should be read as
+# claiming it is.
+_BY_DIGEST_LIMIT = 8192
+_MINTED: "dict[int, tuple]" = {}
+_BY_DIGEST: "dict[str, dict]" = {}
+_MINTED_LOCK = threading.Lock()
+
+
+def _forget(key: int) -> None:
+    """Drop a dead verdict's identity entry. Its finalizer, registered at mint."""
+    with _MINTED_LOCK:
+        _MINTED.pop(key, None)
+
+
+def _mint(verdict: "GroundingVerdict") -> "GroundingVerdict":
+    """Register a verdict as the observer's own. The single mint point.
+
+    Called by :meth:`Scope.classify` on the verdict it just computed from the
+    recorded reads and seams, and by the observer's own teardown fallback. It is
+    never called on anything a caller supplied, and it is module-private so a
+    caller cannot call it on one: minting a hand-built verdict is the attack, not
+    the migration path for a test that wants a GROUNDED record. A test that needs
+    one runs a scope that reads a real file.
+
+    Returns the verdict so a caller can mint and return in one expression.
+    """
+    if type(verdict) is not GroundingVerdict:
+        return verdict
+    snapshot = verdict.to_signed_dict()
+    key = id(verdict)
+    digest = snapshot.get("receipt_digest")
+    digest = digest if isinstance(digest, str) else None
+    with _MINTED_LOCK:
+        _MINTED[key] = (weakref.ref(verdict), snapshot)
+        if digest is not None:
+            _BY_DIGEST[digest] = snapshot
+            while len(_BY_DIGEST) > _BY_DIGEST_LIMIT:
+                _BY_DIGEST.pop(next(iter(_BY_DIGEST)))
+    weakref.finalize(verdict, _forget, key)
+    return verdict
+
+
+def minted_snapshot(verdict: object) -> "dict | None":
+    """What the observer computed for THIS object, or None if it did not.
+
+    The weakref check is not decoration: ``id()`` is reused once an object dies,
+    and while the finalizer clears the entry at that moment, comparing the stored
+    reference against the object asked about makes a reused address unable to
+    inherit another verdict's standing under any interleaving.
+    """
+    if type(verdict) is not GroundingVerdict:
+        return None
+    with _MINTED_LOCK:
+        entry = _MINTED.get(id(verdict))
+    if entry is None:
+        return None
+    ref, snapshot = entry
+    return dict(snapshot) if ref() is verdict else None
+
+
+def is_observed(verdict: object) -> bool:
+    """True iff *verdict* is a :class:`GroundingVerdict` the observer computed."""
+    return minted_snapshot(verdict) is not None
+
+
+def minted_record(record: object) -> "dict | None":
+    """The observer's own record for a caller-supplied one, or None.
+
+    Keyed on ``receipt_digest``, and it returns THE OBSERVER'S copy, not the
+    caller's. That is the whole point: a caller who takes a real verdict's record
+    and flips ``grounding`` to GROUNDED keeps a digest that resolves to the
+    UNGROUNDED record the observer actually wrote, and that is what gets stored.
+    A digest the observer never emitted resolves to nothing.
+
+    On a miss the live verdicts are scanned before giving up, so a caller still
+    holding the object never loses to the digest table's cap.
+    """
+    if not isinstance(record, dict):
+        return None
+    digest = record.get("receipt_digest")
+    if not isinstance(digest, str):
+        return None
+    with _MINTED_LOCK:
+        stored = _BY_DIGEST.get(digest)
+        if stored is None:
+            for ref, snapshot in _MINTED.values():
+                if ref() is not None and snapshot.get("receipt_digest") == digest:
+                    stored = snapshot
+                    break
+    return dict(stored) if stored is not None else None
+
+
+def declared_record(record: dict) -> dict:
+    """Mark a caller-supplied verdict as declared, and strip its GROUNDED claim.
+
+    Two things happen, and they are separate on purpose. ``provenance`` records
+    the fact for any reader that wants it. Neutralising GROUNDED to OPAQUE is
+    what makes the fact unmissable: every read surface, the promotion gate, the
+    trust map, the CLI, the restore path, keys on the grounding STATE, so a
+    marker alone would still leave a hand-built verdict rendering as an execution
+    mareforma watched. OPAQUE is the honest state for it, the observer could not
+    see, and the reason says why. UNGROUNDED and OPAQUE are left standing: they
+    promote nothing, so a declaration cannot buy anything with them.
+
+    The GROUNDED-specific evidence goes with the state, for the same reason the
+    disjoint downgrade drops it: an OPAQUE record still committing to a GROUNDED
+    receipt reads as a mutated record to an auditor.
+    """
+    out = dict(record)
+    out["provenance"] = DECLARED_PROVENANCE
+    if out.get("grounding") == ObservedGrounding.GROUNDED.value:
+        # The neutralised reason already says declared, so it stands alone.
+        out["grounding"] = ObservedGrounding.OPAQUE.value
+        out["reason"] = DECLARED_GROUNDED_REASON
+        out["grounded_sources"] = []
+        out.pop("receipt_digest", None)
+        return out
+    reason = out.get("reason")
+    reason = reason if isinstance(reason, str) else ""
+    if DECLARED_ANNOTATION not in reason:
+        out["reason"] = f"{reason} {DECLARED_ANNOTATION}".strip()
+    return out

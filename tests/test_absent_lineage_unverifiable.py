@@ -16,6 +16,7 @@ import mareforma
 from mareforma.trust._store import (
     effective_independence,
     effective_independence_receipt,
+    independence_counts,
 )
 from tests._helpers import (
     _bootstrap_key, _enroll_key, _est, _pred, _prop, _verdict,
@@ -78,11 +79,14 @@ class TestAbsentLineageIsUnverifiable:
     def test_status_ladder_still_counts_distinct_signers(
         self, tmp_path: Path,
     ) -> None:
-        """The legacy status ladder is unchanged: absent distinct-signer findings
-        still corroborate to CONVERGENT. Only the per-finding map disclosure
-        narrows."""
+        """The legacy status ladder still counts distinct enrolled signers:
+        absent-lineage findings corroborate to CONVERGENT on the signer axis. Only
+        the per-finding map disclosure narrows. Both signers are enrolled, since a
+        line counts on the distinct-signer axis only when its signer is
+        registered."""
         ka = _bootstrap_key(tmp_path, "ka.key")
         kb = _bootstrap_key(tmp_path, "kb.key")
+        _enroll_key(tmp_path, ka, kb)
         prop, pred = _prop(), _pred()
         with mareforma.open(tmp_path, key_path=ka) as g:
             g.assert_finding(prop, pred, _est(), data_id="ds1", generated_by="run1")
@@ -102,3 +106,45 @@ class TestAbsentLineageIsUnverifiable:
             rec = effective_independence_receipt(g._conn, prop.content_id())
         assert rec["soft"] is True
         assert rec["number"] == 1
+
+    def test_counters_do_not_promise_they_always_agree(self) -> None:
+        """The two counters answer different questions and routinely differ.
+
+        The tests above pin the split on the commonest shape in the wild: a
+        finding with no observed model call reads 2 on the ladder and 1 on the
+        map. A docstring promising they can never disagree invites a caller to
+        quote either number for either question.
+        """
+        for fn in (independence_counts, effective_independence):
+            text = " ".join((fn.__doc__ or "").split())
+            assert "never disagree" not in text, (
+                f"{fn.__name__} promises an agreement the counters do not hold"
+            )
+
+    def test_declared_human_signer_does_not_certify_independence(
+        self, tmp_path: Path,
+    ) -> None:
+        """A human signer is self-declared, never observed, so it cannot lift an
+        unobserved line to a confident unit in the per-finding disclosure.
+
+        ``validator_type`` defaults to ``'human'`` and the root's type cannot be
+        chosen at all, so every fresh graph would otherwise print a confident
+        count for a body where no model call was observed and no person attested
+        to anything.
+        """
+        ka = _bootstrap_key(tmp_path, "ka.key")
+        kb = _bootstrap_key(tmp_path, "kb.key")
+        _enroll_key(tmp_path, ka, kb)
+        prop, pred = _prop(), _pred()
+        cid = prop.content_id()
+        with mareforma.open(tmp_path, key_path=ka) as g:
+            g.assert_finding(prop, pred, _est(), data_id="ds1", generated_by="run1")
+        with mareforma.open(tmp_path, key_path=kb) as g:
+            r = g.assert_finding(
+                prop, pred, _est(), data_id="ds2", generated_by="run2",
+            )
+            eff = effective_independence(g._conn, cid)
+            tmap = g.trust_map(r["claim_id"])
+        assert eff["soft"] is True
+        assert eff["number"] == 1
+        assert tmap.get("independence").value == "UNVERIFIABLE"

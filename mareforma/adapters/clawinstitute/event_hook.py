@@ -1,4 +1,8 @@
-"""EventSource implementation for ClawInstitute workshop posts."""
+"""EventSource implementation for ClawInstitute workshop posts.
+
+Every field of a post is untrusted: the body is capped, sanitised and
+wrapped, the labels beside it are sanitised.
+"""
 
 from __future__ import annotations
 
@@ -95,7 +99,10 @@ class EventHook:
         the returned list preserves subscription order. Untrusted
         post content runs through three layers of sanitisation
         (raw-byte cap → sanitize_for_llm → wrap_untrusted) before
-        anything else can see it.
+        anything else can see it. The labels that travel beside it
+        (``post_id``, ``author``, ``workspace_id``, ``event_type``)
+        come from the same untrusted response and get sanitize_for_llm
+        only, because a handler uses them as keys.
 
         Handler exceptions are caught and converted to a ClaimResult
         with ``emitted=False`` and ``error=<repr>`` so one bad
@@ -115,9 +122,16 @@ class EventHook:
         return results
 
     def _to_payload(self, post: dict[str, Any]) -> EventPayload:
-        post_id = post.get("id") or post.get("post_id") or "unknown"
-        author = post.get("author", "unknown")
-        workspace_id = post.get("workspace_id", "")
+        post_id = _scrub_label(
+            "id", post.get("id") or post.get("post_id") or "unknown",
+        )
+        author = _scrub_label("author", post.get("author", "unknown"))
+        workspace_id = _scrub_label(
+            "workspace_id", post.get("workspace_id", ""),
+        )
+        event_type = _scrub_label(
+            "event_type", post.get("event_type", "post.created"),
+        )
         created_at = post.get("created_at") or _now_iso()
         raw_content = post.get("content", "")
 
@@ -127,17 +141,8 @@ class EventHook:
                 f"got {type(raw_content).__name__}"
             )
 
-        # Cheap upper bound: UTF-8 is ≤4 bytes/char, so any string
-        # whose char-count * 4 fits in the cap is guaranteed to fit.
-        # Only allocate the full encoded bytes when we're close to the
-        # boundary, OR when we need them for the digest.
-        char_estimate_bytes = len(raw_content) * 4
-        if char_estimate_bytes > _MAX_CONTENT_BYTES:
-            raw_bytes = raw_content.encode("utf-8", errors="replace")
-            actual_too_big = len(raw_bytes) > _MAX_CONTENT_BYTES
-        else:
-            raw_bytes = raw_content.encode("utf-8", errors="replace")
-            actual_too_big = False
+        raw_bytes = raw_content.encode("utf-8", errors="replace")
+        actual_too_big = len(raw_bytes) > _MAX_CONTENT_BYTES
 
         # SHA-256 of the FULL raw bytes — content-addressable. A
         # downstream verifier can re-fetch the post body and confirm
@@ -168,7 +173,7 @@ class EventHook:
 
         return {
             "source": SOURCE_CLAWINSTITUTE,
-            "event_type": post.get("event_type", "post.created"),
+            "event_type": event_type,
             "data": {
                 "post_id": post_id,
                 "author": author,
@@ -212,6 +217,22 @@ class EventHook:
                 "event_type": "post.created",
             },
         )
+
+
+def _scrub_label(field: str, value: Any) -> str:
+    """Strip injection-hostile codepoints from one label field.
+
+    Sanitise-only, the treatment the core gives its own short label
+    fields: a handler uses post_id and workspace_id as keys, so
+    wrapping them in delimiters is not an option. A non-string label
+    is refused rather than forwarded unchecked.
+    """
+    if not isinstance(value, str):
+        raise TypeError(
+            f"post {field!r} field must be str, "
+            f"got {type(value).__name__}"
+        )
+    return sanitize_for_llm(value) or ""
 
 
 def _now_iso() -> str:

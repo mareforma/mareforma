@@ -8,8 +8,9 @@ Conceptual clusters:
 - :class:`TestGeminiCapabilityCoverage` — every Gemini capability
   writes a claim under the right URI.
 - :class:`TestCrossHostConvergence` — two independent graphs each
-  record the same Gemini hypothesis claim; verify the
-  preconditions a downstream REPLICATED-promotion path requires.
+  record the same Gemini hypothesis claim; verify the two hosts sign
+  under distinct keyids, the axis a downstream merge counts on, with
+  a shared-key negative control.
 """
 
 from __future__ import annotations
@@ -104,56 +105,64 @@ class TestGeminiCapabilityCoverage:
             assert _predicate_uri(graph, cid) == uri
 
 
-class TestCrossHostConvergence:
-    def test_two_hosts_emit_convergent_findings(self, tmp_path: Path):
-        """Two independent graphs each record a Gemini hypothesis claim
-        with the same hypothesis content; verify both produce INFERRED
-        claims with matching text and matching predicate payload (the
-        convergence signal a downstream merge agent looks for).
+def _ingest_on_two_hosts(tmp_path: Path, *, shared_key: bool) -> tuple:
+    """Record the same Gemini hypothesis on two host graphs; return both rows.
 
-        Cryptographic envelope cross-host replay is exercised by the
-        signing/restore suite; this test only verifies that two
-        independent adapter calls produce comparable claims when given
-        the same input — the precondition the REPLICATED-promotion
-        path requires.
-        """
-        from mareforma import signing as _signing
+    With *shared_key* the two hosts run under one signing key, the collapsed
+    case a merge cannot count twice.
+    """
+    from mareforma import signing as _signing
 
-        host_a = tmp_path / "host-a"
-        host_b = tmp_path / "host-b"
-        host_a.mkdir(); host_b.mkdir()
+    host_a = tmp_path / "host-a"
+    host_b = tmp_path / "host-b"
+    host_a.mkdir(); host_b.mkdir()
 
-        # Two independent signing keys (different agents on different hosts).
-        key_a = host_a / "k"; _signing.bootstrap_key(key_a)
+    key_a = host_a / "k"; _signing.bootstrap_key(key_a)
+    if shared_key:
+        key_b = key_a
+    else:
         key_b = host_b / "k"; _signing.bootstrap_key(key_b)
 
-        summary = "Compound X inhibits target Y at IC50=15nM"
-        payload = {
-            "summary": summary,
-            "final_hypothesis_text_digest": "sha256:" + "a" * 64,
-            "model_version": "gemini-2.0-2026-05",
-        }
-        with mareforma.open(host_a, key_path=key_a) as ga:
-            cid_a = OutputIngester(graph=ga).ingest(
+    payload = {
+        "summary": "Compound X inhibits target Y at IC50=15nM",
+        "final_hypothesis_text_digest": "sha256:" + "a" * 64,
+        "model_version": "gemini-2.0-2026-05",
+    }
+    rows = []
+    for host, key, run in (
+        (host_a, key_a, "adapter:gemini@host-a"),
+        (host_b, key_b, "adapter:gemini@host-b"),
+    ):
+        with mareforma.open(host, key_path=key) as g:
+            cid = OutputIngester(graph=g).ingest(
                 capability="hypothesis", payload=dict(payload),
-                generated_by="adapter:gemini@host-a",
+                generated_by=run,
             )
-            row_a = ga.get_claim(cid_a)
+            rows.append(g.get_claim(cid))
+    return tuple(rows)
 
-        with mareforma.open(host_b, key_path=key_b) as gb:
-            cid_b = OutputIngester(graph=gb).ingest(
-                capability="hypothesis", payload=dict(payload),
-                generated_by="adapter:gemini@host-b",
-            )
-            row_b = gb.get_claim(cid_b)
 
+class TestCrossHostConvergence:
+    def test_two_hosts_emit_convergent_findings(self, tmp_path: Path):
+        """Two independent graphs each record a Gemini hypothesis claim with
+        the same content; verify both produce INFERRED claims with matching
+        text and matching predicate payload (the convergence signal a
+        downstream merge agent looks for), and that the two hosts sign under
+        distinct non-NULL asserter keyids.
+
+        The keyid axis is the one a merge counts on: promotion turns on a
+        shared ESTABLISHED anchor plus distinct non-NULL ``asserter_keyid``,
+        never on equal text or an equal predicate payload. Cryptographic
+        envelope cross-host replay is exercised by the signing/restore suite.
+        """
+        row_a, row_b = _ingest_on_two_hosts(tmp_path, shared_key=False)
+
+        # Two hosts, two keys: two lines a merge may count separately.
+        assert row_a["asserter_keyid"] and row_b["asserter_keyid"]
+        assert row_a["asserter_keyid"] != row_b["asserter_keyid"]
         # Convergence: same human-readable text, both INFERRED.
         assert row_a["text"] == row_b["text"]
         assert row_a["classification"] == row_b["classification"] == "INFERRED"
-        # Distinct claim IDs (different keys, different hosts) — the
-        # distinctness is what allows REPLICATED promotion on a
-        # downstream merge that imports both.
-        assert cid_a != cid_b
         # Predicate payloads agree on the load-bearing hypothesis
         # digest (the bytes a merge agent compares against).
         pa = json.loads(row_a["predicate_payload"])
@@ -163,3 +172,12 @@ class TestCrossHostConvergence:
             == pb["final_hypothesis_text_digest"]
         )
         assert pa["predicate_type"] == pb["predicate_type"]
+
+    def test_one_key_on_both_hosts_stays_one_signer(self, tmp_path: Path):
+        """Negative control: run the same two-host body under one key. The
+        content assertions above still hold, so they say nothing about
+        independence; the keyid collapses, which is what blocks promotion."""
+        row_a, row_b = _ingest_on_two_hosts(tmp_path, shared_key=True)
+
+        assert row_a["text"] == row_b["text"]
+        assert row_a["asserter_keyid"] == row_b["asserter_keyid"]

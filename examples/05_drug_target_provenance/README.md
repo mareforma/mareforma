@@ -51,6 +51,9 @@ cp Medea/env_template.txt .env
 python 05_drug_target_provenance.py --run
 ```
 
+`--run` writes this directory's `claims.toml`, the backup of the live graph.
+The recorded Case B run is kept apart from it, under `recorded/`.
+
 ## Query-before-assert
 
 ```python
@@ -125,12 +128,27 @@ recorded both as `INFERRED`, making the silent failure visible immediately,
 before anyone acted on the results. That led directly to a bug report in MEDEA's
 EFO ID lookup: [mims-harvard/Medea#6](https://github.com/mims-harvard/Medea/pull/6).
 
+The four claims of that run are kept at
+[`recorded/case_b.claims.toml`](recorded/case_b.claims.toml). It is a 0.3.0
+capture, taken before claims were signed, so it carries no signature bundles and
+its `generated_by` reads `medea/gpt-4o` rather than the per-fork label the script
+writes today. `mareforma.restore()` reads it and rebuilds the four claims, but
+they come back unsigned, which the default `query()` drops. Pass
+`include_unverified=True` to read them.
+
 ## Promoting a finding
 
 An `INFERRED` finding is recorded, not discarded, and held at `PRELIMINARY`
-until independently replicated with real data. To reach `REPLICATED`, two
-conditions must both hold: a different `generated_by` fork reaches the same
-conclusion, **and** both forks cite the same `ESTABLISHED` upstream claim in
-`supports[]`. Without an `ESTABLISHED` anchor, mareforma keeps both at
-`PRELIMINARY` rather than promoting noise. See
-[Example 03](../03_documented_contestation/) for the seed-then-converge pattern.
+until an independent line backs it. To reach `REPLICATED`, two conditions must
+both hold: the converging claims carry **distinct, non-NULL** `asserter_keyid`
+values, **and** both cite the same `ESTABLISHED` upstream claim in `supports[]`.
+`generated_by` is a display label and plays no part in the gate. Without an
+`ESTABLISHED` anchor, mareforma keeps both at `PRELIMINARY` rather than
+promoting noise.
+
+Both forks here go through one `mareforma.open(HERE)` handle, so one signing
+key, and neither cites an upstream, so both stay `PRELIMINARY`. To promote,
+sign the second fork under a distinct key (`mareforma.open(key_path=...)`, or
+the per-call `signer=` override) and have both cite a shared `ESTABLISHED`
+anchor. See [Example 03](../03_documented_contestation/) for the
+seed-then-converge pattern.

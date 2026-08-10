@@ -1,9 +1,10 @@
 """strict_promotion (opt-in write gate) + multi-role read-path parity.
 
 strict_promotion requires non-NULL data on both sides of a REPLICATED pair; off
-by default the signer axis alone promotes. Multi-role parity: a forged role
-signature is now caught on the live read path (``mareforma verify`` /
-``verify_claim_signatures``), not only at restore.
+by default the signer axis alone promotes. It is a project rule: asking for it
+root-signs a one-way policy every later opener is held to. Multi-role parity: a
+forged role signature is now caught on the live read path (``mareforma verify``
+/ ``verify_claim_signatures``), not only at restore.
 """
 from __future__ import annotations
 
@@ -11,16 +12,27 @@ import base64
 import json
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 import mareforma
 from mareforma import signing
 from mareforma.cli import cli
-from mareforma.db import open_db, verify_claim_signatures
+from mareforma.db import (
+    ProjectPolicyError,
+    get_project_policy,
+    open_db,
+    strict_promotion_required,
+    verify_claim_signatures,
+)
 
 
 def _converge(tmp_path: Path, *, strict: bool, ah1, ah2) -> tuple[str, str]:
-    """Two distinct-signer claims sharing an ESTABLISHED anchor. Return levels."""
+    """Two distinct-signer claims sharing an ESTABLISHED anchor. Return levels.
+
+    Only k1 (the root) passes the flag: declaring it is a root-signed act, and
+    the second signer is bound by the project policy it wrote.
+    """
     k1 = tmp_path / "k1"
     k2 = tmp_path / "k2"
     signing.bootstrap_key(k1)
@@ -30,7 +42,7 @@ def _converge(tmp_path: Path, *, strict: bool, ah1, ah2) -> tuple[str, str]:
     with mareforma.open(tmp_path, key_path=k1, strict_promotion=strict) as g:
         c1 = g.assert_claim("finding one", classification="ANALYTICAL",
                             supports=[anchor], artifact_hash=ah1)
-    with mareforma.open(tmp_path, key_path=k2, strict_promotion=strict) as g:
+    with mareforma.open(tmp_path, key_path=k2) as g:
         c2 = g.assert_claim("finding two", classification="ANALYTICAL",
                             supports=[anchor], artifact_hash=ah2)
         return g.get_claim(c1)["support_level"], g.get_claim(c2)["support_level"]
@@ -62,6 +74,78 @@ class TestStrictPromotion:
     def test_default_unchanged_with_distinct_data(self, tmp_path: Path) -> None:
         l1, l2 = _converge(tmp_path, strict=False, ah1="a" * 64, ah2="b" * 64)
         assert l1 == "REPLICATED" and l2 == "REPLICATED"
+
+
+    def test_the_gate_is_recorded_as_root_signed_project_state(
+        self, tmp_path: Path,
+    ) -> None:
+        """Asking for the gate declares it: the rule lands in a root-signed
+        policy row, so it outlives the handle that asked for it and no later
+        opener can promote around it."""
+        k1 = tmp_path / "k1"
+        signing.bootstrap_key(k1)
+        with mareforma.open(tmp_path, key_path=k1, strict_promotion=True):
+            pass
+        conn = open_db(tmp_path)
+        try:
+            policy = get_project_policy(conn)
+            assert strict_promotion_required(conn) is True
+        finally:
+            conn.close()
+        assert policy["strict_promotion_required"] == 1
+        assert policy["signer_keyid"] == signing.public_key_id(
+            signing.load_private_key(k1).public_key()
+        )
+        # One-way: reopening without the flag does not clear it.
+        with mareforma.open(tmp_path, key_path=k1):
+            pass
+        conn = open_db(tmp_path)
+        try:
+            assert strict_promotion_required(conn) is True
+        finally:
+            conn.close()
+
+    def test_a_non_root_key_cannot_declare_the_gate(self, tmp_path: Path) -> None:
+        """The declaration is root-signed, so a second signer asking for it is
+        refused rather than handed a gate that binds only its own writes."""
+        k1 = tmp_path / "k1"
+        k2 = tmp_path / "k2"
+        signing.bootstrap_key(k1)
+        signing.bootstrap_key(k2)
+        with mareforma.open(tmp_path, key_path=k1):
+            pass
+        with pytest.raises(ProjectPolicyError):
+            mareforma.open(tmp_path, key_path=k2, strict_promotion=True)
+
+    def test_a_keyless_open_cannot_declare_the_gate(self, tmp_path: Path) -> None:
+        """No key, no declaration: the caller is told, not quietly given a
+        per-handle gate."""
+        k1 = tmp_path / "k1"
+        signing.bootstrap_key(k1)
+        with mareforma.open(tmp_path, key_path=k1):
+            pass
+        with pytest.raises(ProjectPolicyError):
+            mareforma.open(tmp_path, key_path=k1, load_key=False,
+                           strict_promotion=True)
+
+    def test_declaring_the_gate_keeps_the_witnessing_rule(
+        self, tmp_path: Path,
+    ) -> None:
+        """Extending the policy signs the union: a rule declared earlier is
+        never dropped by the declaration that adds the next one."""
+        k1 = tmp_path / "k1"
+        signing.bootstrap_key(k1)
+        with mareforma.open(tmp_path, key_path=k1) as g:
+            g.require_rekor_witnessing()
+        with mareforma.open(tmp_path, key_path=k1, strict_promotion=True):
+            pass
+        conn = open_db(tmp_path)
+        try:
+            policy = get_project_policy(conn)
+        finally:
+            conn.close()
+        assert policy["rekor_required"] == 1
+        assert policy["strict_promotion_required"] == 1
 
 
 class TestVerifyClaimSignatures:

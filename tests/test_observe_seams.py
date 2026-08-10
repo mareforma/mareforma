@@ -14,7 +14,6 @@ import subprocess
 import sys
 import threading
 import _thread
-import time
 
 import pytest
 
@@ -73,12 +72,59 @@ def test_thread_seam_detection_does_not_depend_on_a_thread_audit_event():
     # those versions the wrapper is the sole carrier. 3.12 emits
     # _thread.start_new_thread and 3.13+ _thread.start_joinable_thread as extra
     # coverage on top of the wrapper, so this only pins the pre-3.12 reality.
+    # The probe runs in a child process because sys.addaudithook cannot be
+    # undone (PEP 578): installing the recording hook here would leave it live
+    # for every test after this one. The child's hook dies with the child.
     if sys.version_info < (3, 12):
-        seen = []
-        sys.addaudithook(lambda event, args: seen.append(event))
-        threading.Thread(target=lambda: None).start()
-        time.sleep(0.02)
-        assert [e for e in seen if e in _audit.THREAD_SEAM_EVENTS] == []
+        probe = """
+import sys, threading, time
+seen = []
+sys.addaudithook(lambda event, args: seen.append(event))
+sys.audit("mareforma.probe.alive")
+threading.Thread(target=lambda: None).start()
+time.sleep(0.02)
+print(" ".join(sorted(set(seen))))
+"""
+        r = subprocess.run(
+            [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120
+        )
+        assert r.returncode == 0, r.stderr
+        seen = set(r.stdout.split())
+        # The marker proves the child's hook fired at all, so an empty
+        # intersection below is a real absence and not a dead probe.
+        assert "mareforma.probe.alive" in seen, r.stdout + r.stderr
+        assert seen & _audit.THREAD_SEAM_EVENTS == set()
+
+
+def test_the_thread_seam_probe_installs_no_extra_audit_hook(tmp_path):
+    # A PEP-578 audit hook can never be removed, so one installed by a test is
+    # live for the rest of the pytest process. mareforma pays that cost once,
+    # lazily, as a documented opt-in (_audit module docstring); a test must not
+    # add a second. The child observes once to install mareforma's own hook,
+    # then counts every install after it while running the probe above.
+    child = """
+import sys
+sys.path.insert(0, %r)
+import mareforma.observe as obs
+with obs.observe(cites="/no/such/cited/source"):
+    pass
+extra = []
+sys.addaudithook(
+    lambda event, args: extra.append(event) if event == "sys.addaudithook" else None
+)
+from tests import test_observe_seams as seams
+seams.test_thread_seam_detection_does_not_depend_on_a_thread_audit_event()
+print(len(extra))
+""" % os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    r = subprocess.run(
+        [sys.executable, "-c", child],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env={**os.environ, "XDG_CONFIG_HOME": str(tmp_path)},
+    )
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "0", r.stdout + r.stderr
 
 
 def test_reused_thread_pool_submit_is_a_seam(cited):
@@ -169,6 +215,30 @@ def test_uninstrumented_open_of_cited_path_is_a_coverage_gap(cited):
     assert h.verdict.grounding is OG.OPAQUE
     assert any(s.kind == "coverage-gap" for s in h.verdict.seams)
     assert h.verdict.read_coverage_fraction() == 0.0
+
+
+def test_the_audit_hook_imports_nothing_per_event(cited, monkeypatch):
+    # The hook is permanent and process-global once installed, so its body runs
+    # for every audited event in the process, scope or no scope. It must not
+    # import per event.
+    with obs.observe(cites=cited) as h:
+        fd = os.open(cited, os.O_RDONLY)
+        os.close(fd)
+    assert h.verdict.opens_detected == 1  # the hook is live, not a dead probe
+
+    import builtins
+
+    real_import = builtins.__import__
+    imported: list[str] = []
+
+    def counting(name, *args, **kwargs):
+        imported.append(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", counting)
+    for _ in range(5):  # audited opens with nothing observing
+        os.close(os.open(cited, os.O_RDONLY))
+    assert "_scope" not in imported
 
 
 def test_genuine_absence_is_ungrounded_not_opaque(cited):

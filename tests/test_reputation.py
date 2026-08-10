@@ -81,15 +81,29 @@ class TestIncludeUnverifiedFilter:
         filter — they already require the enrolled-chain check via
         REPLICATED's graph gates."""
         root_key = _bootstrap_key(tmp_path, "root.key")
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=root_key) as g:
             seed = g.assert_claim("seed", generated_by="seed", seed=True)
-            g.assert_claim("rep", supports=[seed], generated_by="A")
-            g.assert_claim("rep", supports=[seed], generated_by="B")
+            g.assert_claim(
+                "rep", supports=[seed], generated_by="A", signer=sa,
+            )
+            g.assert_claim(
+                "rep", supports=[seed], generated_by="B", signer=sb,
+            )
         with mareforma.open(tmp_path, key_path=root_key) as g:
             default_results = g.query()
-        # Three rows: seed (ESTABLISHED), rep-A (REPLICATED), rep-B (REPLICATED).
-        # All three have signing keyid == root keyid which IS enrolled.
+        # Three rows: seed (ESTABLISHED), rep-A (REPLICATED), rep-B
+        # (REPLICATED). The two rep rows are signed by keys that are NOT
+        # enrolled, so only their non-PRELIMINARY level keeps them on the
+        # default read surface.
         assert len(default_results) == 3
+        rep_rows = [
+            r for r in default_results if r["support_level"] != "ESTABLISHED"
+        ]
+        assert [r["support_level"] for r in rep_rows] == [
+            "REPLICATED", "REPLICATED",
+        ]
+        assert all(r["generator_enrolled"] is False for r in rep_rows)
 
 
 # ---------------------------------------------------------------------------

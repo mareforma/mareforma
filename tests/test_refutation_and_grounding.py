@@ -241,6 +241,26 @@ class TestGroundingSensorPlumbing:
         assert predicate["evidence"]["grounding_score"] == 0.9
         assert predicate["evidence"]["grounding_rationale"] == "strong entailment"
 
+    def test_sensor_never_writes_the_observed_axis(
+        self, tmp_path: Path,
+    ) -> None:
+        # The sensor's score is the asserter's own verdict, so it lands in
+        # the signed evidence vector and nowhere else. The observed column,
+        # the axis that gates promotion, stays NULL: a self-declaration must
+        # never be readable as a computed result.
+        key_path = tmp_path / "asserter.key"
+        _signing.save_private_key(_signing.generate_keypair(), key_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            cid = graph.assert_claim(
+                "claim with a wired sensor",
+                grounding_sensor=MockNLIVerifier(score=0.9, rationale="r"),
+            )
+            row = graph.get_claim(cid)
+            grounding = graph.trust_map(cid).get("grounding")
+        assert json.loads(row["evidence_json"])["grounding_score"] == 0.9
+        assert row["observed_grounding"] is None
+        assert grounding.value == "not present"
+
     def test_sensor_failure_does_not_block_assert(
         self, tmp_path: Path,
     ) -> None:

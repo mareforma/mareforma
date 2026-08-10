@@ -100,10 +100,12 @@ def _tolerance_is_wide(
     A relative tolerance of 100%+, or an absolute slack as large as the recorded
     magnitude itself, means almost any number would "reproduce". The REPRODUCED
     verdict still stands (the recorder declared the tolerance), but it is flagged
-    so a generous tolerance can never pass silently as a clean match.
+    so a generous tolerance can never pass silently as a clean match. A recorded
+    zero has no magnitude to compare against, so any slack at all is wide there;
+    the exact-match default (atol 0, rtol 0) has no slack and stays clean.
     """
     slack = max(atol, rtol * max(abs(recorded), abs(reproduced)))
-    return rtol >= 1.0 or (abs(recorded) > 0.0 and slack >= abs(recorded))
+    return rtol >= 1.0 or (slack > 0.0 and slack >= abs(recorded))
 
 
 def _conclusive_residual(atol: float, rtol: float, *, wide: bool) -> str:
@@ -353,6 +355,18 @@ def reexec(
     # 2. Resolve the entry point. An unresolvable target is could-not, not a crash.
     try:
         fn = _resolve_target(pipeline, registry)
+    except SystemExit as exc:
+        # A module that calls sys.exit() at import time raises SystemExit, which
+        # derives from BaseException and would sail past the clause below and out
+        # of this function. The re-execution would then end the process instead of
+        # returning a verdict, and a gate reading the exit code would score an
+        # unrun check as a reproduction. Not BaseException: a KeyboardInterrupt
+        # is the operator stopping the run, and must still propagate.
+        return _could_not(
+            record,
+            f"recorded pipeline entry point exited during resolution "
+            f"(SystemExit: {exc.code}); the re-execution did not run",
+        )
     except Exception as exc:  # noqa: BLE001, import-time failure is could-not, honestly
         return _could_not(
             record,
@@ -365,6 +379,18 @@ def reexec(
     try:
         with _clean_scope():
             raw = fn(**args) if isinstance(args, Mapping) else fn(*args)
+    except SystemExit as exc:
+        # A target written as a script ends with sys.exit(), and SystemExit is a
+        # BaseException, so the clause below never sees it. Unhandled it ends the
+        # process with the target's own code, which for a clean sys.exit(0) is an
+        # exit 0 carrying no verdict at all: a gate reads that as a reproduction
+        # of a run that never produced one. An aborted run is could-not, the same
+        # as a raise.
+        return _could_not(
+            record,
+            f"re-execution exited instead of returning (SystemExit: {exc.code}); "
+            "an aborted re-run is not evidence of divergence",
+        )
     except Exception as exc:  # noqa: BLE001, any target failure is could-not, honestly
         return _could_not(
             record,

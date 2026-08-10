@@ -106,9 +106,9 @@ graph.get_claim(c_analytical)             # single record by id
 ## 4. Idempotency
 
 ```python
-# Same idempotency_key → same claim_id returned, no duplicate inserted.
-# Useful for retry-safe agent loops, and a convergence convention: two agents
-# using the same key converge on one claim-id even with different phrasing.
+# Same idempotency_key and same fields → same claim_id returned, no duplicate
+# inserted. Useful for retry-safe agent loops. A replay with a different text or
+# generated_by raises IdempotencyConflictError instead of merging the two.
 KEY = "cell_A_inhibitory_dominance"
 
 id_a = graph.assert_claim(
@@ -190,7 +190,7 @@ graph = mareforma.open(tmp, key_path=agent_key_path)
   validate(PRELIMINARY)  ValueError: Claim '…' has support_level='PRELIMINARY'. Only REPLICATED claims can be promoted to ESTABLISHED.
   support_level          ESTABLISHED
   validated_by           jane@lab.org
-  validated_at           2026-06-11
+  validated_at           …
 ```
 
 ## 7. Operational surfaces
@@ -214,7 +214,7 @@ graph.classify_supports(mixed)
   dangling_supports      0
   convergence_errors     0
   convergence_retry_pending 0
-    f1af42da-db19-4a33-838c-1a6f6ff4 claim
+    f1af42da…                        claim
     10.1038/cure                     doi
     https://example.org/preprint     external
 ```

@@ -19,6 +19,7 @@ from mareforma.db import (
     open_db_from_db_path,
     update_claim,
 )
+from tests._helpers import _requires_drop_column
 
 
 def test_open_db_wraps_a_corrupt_file_as_database_error(tmp_path: Path) -> None:
@@ -53,6 +54,87 @@ def test_open_db_from_db_path_wraps_a_corrupt_file(tmp_path: Path) -> None:
     with pytest.raises(DatabaseError) as exc_info:
         open_db_from_db_path(db_file)
     assert not isinstance(exc_info.value, sqlite3.Error)
+
+
+def _seeded_graph(root: Path) -> str:
+    """Create a graph holding one claim and checkpoint the WAL into it."""
+    import sqlite3
+
+    conn = open_db(root)
+    cid = add_claim(conn, root, "read me back")
+    conn.close()
+    checkpoint = sqlite3.connect(str(root / ".mareforma" / "graph.db"))
+    checkpoint.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    checkpoint.close()
+    return cid
+
+
+def test_open_db_succeeds_while_another_writer_holds_the_lock(
+    tmp_path: Path,
+) -> None:
+    """Two agents share one project graph. If open() needs the write lock,
+    every command refuses to start whenever something else is mid-write,
+    including the read-only ones."""
+    import sqlite3
+
+    _seeded_graph(tmp_path)
+    writer = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
+    writer.execute("BEGIN IMMEDIATE")
+    writer.execute("UPDATE claims SET comparison_summary = 'held'")
+    try:
+        conn = open_db(tmp_path)
+        conn.close()
+    finally:
+        writer.rollback()
+        writer.close()
+
+
+def test_open_db_on_a_read_only_graph_still_reads(tmp_path: Path) -> None:
+    """Read-only media, a container image, a reviewer's copy with tight
+    permissions: none of them may lock the operator out of their own graph.
+    An open that changes nothing must not need write access."""
+    import os
+
+    cid = _seeded_graph(tmp_path)
+    db_file = tmp_path / ".mareforma" / "graph.db"
+    os.chmod(db_file, 0o444)
+    try:
+        conn = open_db(tmp_path)
+        try:
+            assert get_claim(conn, cid)["text"] == "read me back"
+        finally:
+            conn.close()
+    finally:
+        os.chmod(db_file, 0o644)
+
+
+def test_read_only_open_failure_does_not_advise_deleting_the_graph(
+    tmp_path: Path,
+) -> None:
+    """A write that a read-only file genuinely refuses is a permission
+    problem, not corruption. Answering it with the corruption remedy tells
+    someone whose graph is intact to delete their only copy."""
+    import os
+    import sqlite3
+
+    _seeded_graph(tmp_path)
+    db_file = tmp_path / ".mareforma" / "graph.db"
+    # Drift the trigger so the next open has real work to do.
+    drift = sqlite3.connect(str(db_file))
+    drift.executescript(
+        "DROP TRIGGER IF EXISTS claims_signed_fields_no_laundering;"
+    )
+    drift.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    drift.close()
+    os.chmod(db_file, 0o444)
+    try:
+        with pytest.raises(DatabaseError) as exc_info:
+            open_db(tmp_path)
+    finally:
+        os.chmod(db_file, 0o644)
+    message = str(exc_info.value)
+    assert "permission" in message.lower()
+    assert "delete" not in message.lower()
 
 
 def test_cross_thread_writes_do_not_merge_and_lose(tmp_path: Path) -> None:
@@ -124,6 +206,134 @@ def test_cross_thread_writes_do_not_merge_and_lose(tmp_path: Path) -> None:
         assert g.get_claim(b_result[0]) is not None
 
 
+def test_reader_thread_never_sees_an_uncommitted_claim(tmp_path: Path) -> None:
+    """A read on one thread must not return rows another thread has not
+    committed.
+
+    sqlite3 isolation is per connection, not per thread. A reader running while
+    thread A holds an open BEGIN IMMEDIATE on the shared connection runs inside
+    A's transaction and sees its rows, so a caller can be handed a claim_id and
+    a support level for state A's rollback then erases.
+    """
+    import sqlite3
+    import threading
+
+    import mareforma
+    import mareforma._supports as _supports
+    from tests._helpers import _bootstrap_key
+
+    key = _bootstrap_key(tmp_path, "root.key")
+
+    orig = _supports.record_supports_edges
+    a_in_txn = threading.Event()
+    release_a = threading.Event()
+    a_claim_id: list[str] = []
+
+    def patched(conn, claim_id, supports):
+        # Pause thread A INSIDE its owned transaction, after the claim row is
+        # inserted, then force the rollback that erases it.
+        if threading.current_thread().name == "writerA":
+            a_claim_id.append(claim_id)
+            a_in_txn.set()
+            release_a.wait(timeout=5.0)
+            raise sqlite3.OperationalError("forced rollback of A's transaction")
+        return orig(conn, claim_id, supports)
+
+    with mareforma.open(tmp_path, key_path=key) as g:
+        _supports.record_supports_edges = patched
+        try:
+            def run_a() -> None:
+                with pytest.raises(DatabaseError):
+                    g.assert_claim("claim authored by thread A", generated_by="a")
+
+            reads: dict[str, object] = {}
+
+            def run_reader() -> None:
+                reads["get"] = g.get_claim(a_claim_id[0])
+                reads["query"] = g.query("claim authored by thread A")
+
+            t_a = threading.Thread(target=run_a, name="writerA")
+            t_a.start()
+            assert a_in_txn.wait(timeout=5.0), "thread A never entered its txn"
+
+            t_r = threading.Thread(target=run_reader, name="reader")
+            t_r.start()
+            # The reader must not complete while A's transaction is open: it
+            # waits for the writer rather than reading A's uncommitted rows.
+            t_r.join(timeout=0.3)
+            assert t_r.is_alive(), "reader returned while A's txn was still open"
+
+            release_a.set()
+            t_a.join(timeout=5.0)
+            t_r.join(timeout=5.0)
+        finally:
+            _supports.record_supports_edges = orig
+
+        # A rolled back, so neither read may report the claim as persisted.
+        assert reads["get"] is None
+        assert reads["query"] == []
+
+
+def test_close_waits_for_an_in_flight_write(tmp_path: Path) -> None:
+    """close() must not tear down the shared connection while another thread
+    is inside a write.
+
+    The connection is shared across threads, so closing it under live
+    statements is a native crash, not a catchable error: no traceback, and
+    every other thread in the process goes with it. close() has to take the
+    same lock the writers take and wait its turn.
+    """
+    import threading
+
+    import mareforma
+    import mareforma._supports as _supports
+    from tests._helpers import _bootstrap_key
+
+    key = _bootstrap_key(tmp_path, "root.key")
+
+    orig = _supports.record_supports_edges
+    a_in_txn = threading.Event()
+    release_a = threading.Event()
+
+    def patched(conn, claim_id, supports):
+        # Pause thread A INSIDE its owned transaction, holding the graph lock.
+        if threading.current_thread().name == "writerA":
+            a_in_txn.set()
+            release_a.wait(timeout=5.0)
+        return orig(conn, claim_id, supports)
+
+    g = mareforma.open(tmp_path, key_path=key)
+    _supports.record_supports_edges = patched
+    try:
+        written: list[str] = []
+
+        def run_a() -> None:
+            written.append(
+                g.assert_claim("claim authored by thread A", generated_by="a")
+            )
+
+        t_a = threading.Thread(target=run_a, name="writerA")
+        t_a.start()
+        assert a_in_txn.wait(timeout=5.0), "thread A never entered its txn"
+
+        t_c = threading.Thread(target=g.close, name="closer")
+        t_c.start()
+        t_c.join(timeout=0.3)
+        assert t_c.is_alive(), "close() ran while A's write was still in flight"
+
+        release_a.set()
+        t_a.join(timeout=5.0)
+        t_c.join(timeout=5.0)
+    finally:
+        _supports.record_supports_edges = orig
+        g.close()
+
+    # A's write finished before the close, and the graph is closed after it.
+    assert written, "thread A never returned a claim_id"
+    with pytest.raises(RuntimeError, match="closed"):
+        g.assert_claim("after close")
+
+
 def test_update_claim_sanitizes_text_on_write(tmp_path: Path) -> None:
     """update_claim must strip zero-width / bidi codepoints like add_claim.
 
@@ -193,3 +403,161 @@ def test_literal_path_open_can_write_a_claim(tmp_path: Path) -> None:
         assert get_claim(conn, cid2) is not None
     finally:
         conn.close()
+
+
+def test_sanitized_text_is_signed_and_stored_as_one_string(
+    tmp_path: Path,
+) -> None:
+    """Sanitize-on-write must leave no whitespace the signature then strips.
+
+    strip() runs before sanitize_for_llm, so a zero-width space in front of a
+    real space survived the strip and sanitized to a leading blank. The INSERT
+    bound that value while the signature covered text.strip(), so an honest
+    write verified as tampered and restore refused to rebuild the graph.
+    """
+    import base64
+    import json
+
+    import mareforma
+    from mareforma.db import verify_claim_signatures
+    from tests._helpers import _bootstrap_key
+
+    key_path = _bootstrap_key(tmp_path, "root.key")
+    # U+200B (zero-width space) followed by an ordinary space: the usual
+    # copy-paste residue from a web page or a PDF.
+    text = "​ a finding pasted from a web page"
+
+    with mareforma.open(tmp_path, key_path=key_path) as g:
+        cid = g.assert_claim(text)
+        row = g.get_claim(cid)
+        bundle = json.loads(row["signature_bundle"])
+        payload = json.loads(base64.b64decode(bundle["payload"]))
+        assert payload["predicate"]["text"] == row["text"]
+        assert verify_claim_signatures(g._conn, row) == (True, "")
+
+    db_dir = tmp_path / ".mareforma"
+    for f in db_dir.iterdir():
+        f.unlink()
+    db_dir.rmdir()
+    assert mareforma.restore(tmp_path)["claims_restored"] == 1
+
+
+def test_text_of_only_invisible_characters_is_refused(tmp_path: Path) -> None:
+    """Zero-width plus whitespace has no visible content and must not store."""
+    (tmp_path / ".mareforma").mkdir(parents=True, exist_ok=True)
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="no visible content"):
+            add_claim(conn, tmp_path, "​ ​")
+    finally:
+        conn.close()
+
+
+def test_sanitized_text_compares_equal_on_retry_and_signed_edit(
+    tmp_path: Path,
+) -> None:
+    """The stored text is what idempotency and signed-immutability compare.
+
+    Both compared the caller's text.strip() against the row, so a genuine
+    retry of the same string raised IdempotencyConflictError and re-supplying
+    the original text to update_claim wrongly tripped the immutability guard.
+    """
+    import mareforma
+    from tests._helpers import _bootstrap_key
+
+    key_path = _bootstrap_key(tmp_path, "root.key")
+    text = "​ a finding pasted from a web page"
+
+    with mareforma.open(tmp_path, key_path=key_path) as g:
+        cid = g.assert_claim(text, idempotency_key="k1")
+        assert g.assert_claim(text, idempotency_key="k1") == cid
+        # Re-supplying the original text is a no-op edit, not a mutation.
+        update_claim(g._conn, tmp_path, cid, text=text, status="contested")
+        assert g.get_claim(cid)["status"] == "contested"
+
+
+def test_literal_path_open_refuses_a_foreign_schema_version(
+    tmp_path: Path,
+) -> None:
+    """A literal-path db from another build must be refused, same as open_db.
+
+    The version guard exists because a db written by a different build may
+    carry a partial schema. Opening it silently through the literal-path
+    branch leaves the current code relying on triggers that may not be there.
+    """
+    import sqlite3
+
+    db_file = tmp_path / "custom.db"
+    open_db_from_db_path(db_file).close()
+    raw = sqlite3.connect(str(db_file))
+    raw.execute("PRAGMA user_version = 99")
+    raw.commit()
+    raw.close()
+
+    with pytest.raises(DatabaseError, match="user_version"):
+        open_db_from_db_path(db_file)
+
+
+@_requires_drop_column
+def test_literal_path_open_migrates_a_legacy_claims_table(
+    tmp_path: Path,
+) -> None:
+    """A legacy claims table reached by literal path must be migrated in place.
+
+    open_db auto-adds the columns introduced after v0.3.0. Without the same
+    step here the first read fails with 'no such column: asserter_keyid'.
+    """
+    import sqlite3
+
+    from mareforma.db import list_claims
+
+    db_file = tmp_path / "custom.db"
+    open_db_from_db_path(db_file).close()
+    raw = sqlite3.connect(str(db_file))
+    # The laundering trigger and the partial index both name the column, so
+    # they go first; both are recreated on open.
+    raw.execute("DROP TRIGGER claims_signed_fields_no_laundering")
+    raw.execute("DROP INDEX idx_claims_asserter_keyid")
+    raw.execute("ALTER TABLE claims DROP COLUMN asserter_keyid")
+    raw.commit()
+    raw.close()
+
+    conn = open_db_from_db_path(db_file)
+    try:
+        assert list_claims(conn) == []
+    finally:
+        conn.close()
+
+
+@_requires_drop_column
+def test_open_migrates_a_policy_table_without_the_strict_column(
+    tmp_path: Path,
+) -> None:
+    """A project_policy table from a build that predates strict promotion must
+    gain the column in place, keeping the declaration it already carries. The
+    flat columns are a cache over the signed envelope, so nothing signed moves.
+    """
+    import sqlite3
+
+    from mareforma.db import get_project_policy
+
+    open_db(tmp_path).close()
+    raw = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
+    raw.execute(
+        "ALTER TABLE project_policy DROP COLUMN strict_promotion_required"
+    )
+    raw.execute(
+        "INSERT INTO project_policy "
+        "(id, rekor_required, signer_keyid, envelope, created_at) "
+        "VALUES (1, 1, 'k', '{}', '2026-01-01T00:00:00+00:00')"
+    )
+    raw.commit()
+    raw.close()
+
+    conn = open_db(tmp_path)
+    try:
+        policy = get_project_policy(conn)
+    finally:
+        conn.close()
+    assert policy["rekor_required"] == 1
+    assert policy["strict_promotion_required"] == 0

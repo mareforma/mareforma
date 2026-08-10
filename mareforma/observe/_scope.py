@@ -7,14 +7,16 @@ verdict from what was captured. Nothing about the verdict is declared; it is a
 function of the recorded evidence.
 
 Scope is held in a :class:`contextvars.ContextVar`, not thread-local, so it
-propagates correctly into ``asyncio`` tasks (the event loop copies the context
-into each task). It deliberately does NOT reach library-spawned threads or a
-pipeline that owns its own loop. Work handed off inside the scope, a thread
-started (``Thread.start``) or a thread-pool submit/map, is caught at the
-hand-off and recorded as a seam, so an unseeable read there becomes ``OPAQUE``
-rather than a confident false ``UNGROUNDED``. A resource opened BEFORE the scope
-and reused inside it (a module-level handle or pooled connection) stays the
-documented coverage bound described in ``_loaders``: its reads are invisible.
+propagates into ``asyncio`` tasks CREATED INSIDE it (the event loop copies the
+context into each task). A task that predates the scope carries a context copy
+without it and is seamed at scope entry instead. It deliberately does NOT reach
+library-spawned threads or a pipeline that owns its own loop. Work handed off
+inside the scope, a thread started (``Thread.start``) or a thread-pool
+submit/map, is caught at the hand-off and recorded as a seam, so an unseeable
+read there becomes ``OPAQUE`` rather than a confident false ``UNGROUNDED``. A
+resource opened BEFORE the scope and reused inside it (a module-level handle or
+pooled connection) stays the documented coverage bound described in
+``_loaders``: its reads are invisible.
 """
 from __future__ import annotations
 
@@ -25,7 +27,13 @@ from ._citation import (
     normalize_identifier,
     read_norm_matches,
 )
-from ._verdict import GroundingVerdict, ObservedGrounding, ReadRecord, SeamEvent
+from ._verdict import (
+    GroundingVerdict,
+    ObservedGrounding,
+    ReadRecord,
+    SeamEvent,
+    _mint,
+)
 
 # Which citation kinds a socket seam can hide a read of. A socket delivers bytes
 # over the network, so it is relevant to a URL or a content-address (whose bytes
@@ -33,9 +41,24 @@ from ._verdict import GroundingVerdict, ObservedGrounding, ReadRecord, SeamEvent
 # the open audit event; a C-extension file is floored to OPAQUE by its own
 # coverage-gap seam). Every other seam kind hides anything.
 _SOCKET_BLOCKS: frozenset[str] = frozenset({"url", "content-address", "unknown"})
+# The target aborted before the scope closed. Not a boundary in space but one in
+# time: the run stopped part way, so what it did not read says nothing about what
+# the pipeline reads. Recorded as a seam so the one classification routine
+# handles it, and blocking like every other non-socket seam.
+ABORT_SEAM = "abort"
 _BLOCKS_EVERYTHING: frozenset[str] = frozenset(
-    {"subprocess", "thread", "coverage-gap"}
+    {"subprocess", "thread", "coverage-gap", ABORT_SEAM}
 )
+# A failed open hides nothing: it is raised only when the observed failures
+# account for EVERY open of the cited path, so no reader is left unexplained and
+# the open provably returned no file object. That is evidence of absence, and a
+# scope that never attempted the read lands UNGROUNDED already, so blocking here
+# would make more observation buy a weaker verdict.
+_NEVER_BLOCKS: frozenset[str] = frozenset({"failed-open"})
+# Every seam kind the classifier can record, for the reports that enumerate them
+# (the doctor). Derived from the matrix above, so a kind cannot enter the
+# classifier without entering the report.
+SEAM_KINDS: frozenset[str] = _BLOCKS_EVERYTHING | _NEVER_BLOCKS | {"socket"}
 
 
 def _seam_blocks_ungrounded(seam_kind: str, cited_kinds: set[str]) -> bool:
@@ -45,8 +68,11 @@ def _seam_blocks_ungrounded(seam_kind: str, cited_kinds: set[str]) -> bool:
     citation kind present. Fail-closed on both axes, an unknown seam kind blocks
     everything, and an unknown citation kind is blocked by every seam, so a gap
     the matrix does not model lands OPAQUE, never a confident UNGROUNDED. An empty
-    citation set has no tell to recover, so any seam blocks.
+    citation set has no tell to recover, so any seam blocks. The one exception is
+    a seam that records a failure rather than a blind spot.
     """
+    if seam_kind in _NEVER_BLOCKS:
+        return False
     if not cited_kinds:
         return True
     for k in cited_kinds:
@@ -104,17 +130,49 @@ class Scope:
         self.models: list = []
         self._error: str | None = None
         self._token = None
-        # (normalized identifier, ReadRecord) for each read, computed once and
+        # The scope this one was opened inside, if any. A nested scope holds the
+        # contextvar for its whole span, so every read the parent would have seen
+        # lands here instead; exit() replays them into the parent.
+        self._parent: "Scope | None" = None
+        # (normalized identifier, ReadRecord) for each read, paired once and
         # reused across every classify pass. The post-hoc auditor shares this so
-        # a corpus audit normalizes the shared reads once, not once per finding.
+        # a corpus audit pairs the shared reads once, not once per finding.
         self._norm_reads: "list[tuple[str, ReadRecord]] | None" = None
+        # Normalized form per raw identifier, so a loop over one path resolves
+        # it once. Shared by reads, opens and failed opens.
+        self._norm_cache: dict[str, str] = {}
+        # Open counts keyed by normalized identifier, computed once and shared
+        # the same way: the opens are identical across findings too.
+        self._norm_opens: "dict[str, int] | None" = None
+        # (normalized identifier, exception type name) per failed open, paired
+        # once and shared for the same reason.
+        self._norm_failed_opens: "list[tuple[str, str]] | None" = None
 
     # -- recording (called by loaders + audit hook; must never raise upward) --
 
     def record_read(
         self, kind: str, identifier: str, nonempty: bool, content_address=None
     ) -> None:
-        self.reads.append(ReadRecord(kind, identifier, nonempty, content_address))
+        self.reads.append(
+            ReadRecord(kind, self._normalize(identifier), nonempty, content_address)
+        )
+
+    def _normalize(self, identifier: str) -> str:
+        """Normalize an identifier once, memoized per raw string.
+
+        Normalization happens HERE, on the producing host, where the filesystem
+        that resolves a relative path and the process that set the working
+        directory both live. A receipt then carries identifiers any reader can
+        compare by plain string equality, from any directory and on any host,
+        which is the same rule the citation binding follows. A read or open loop
+        hands the same path in thousands of times, so the memo keeps
+        ``realpath`` to one call per distinct identifier.
+        """
+        norm = self._norm_cache.get(identifier)
+        if norm is None:
+            norm = normalize_identifier(identifier)
+            self._norm_cache[identifier] = norm
+        return norm
 
     def record_seam(self, kind: str, detail: str) -> None:
         self.seams.append(SeamEvent(kind, detail))
@@ -150,29 +208,65 @@ class Scope:
     # -- classification ------------------------------------------------------
 
     def _normalized_reads(self) -> "list[tuple[str, ReadRecord]]":
-        """Each read paired with its normalized identifier, computed once.
+        """Each read paired with its normalized identifier, paired once.
 
-        ``normalize_identifier`` reaches ``os.path.realpath``; caching the result
-        keeps that syscall to one per read for the whole scope rather than once
-        per read per classify pass per finding.
+        The identifier is normalized at record time, so this is the pairing the
+        classifier and the post-hoc auditor both want, built once and shared
+        across every finding rather than rebuilt per classify pass.
         """
         if self._norm_reads is None:
-            # Memoize per raw identifier: a per-record read loop records the same
-            # path thousands of times, so realpath runs once per DISTINCT
-            # identifier rather than once per read.
-            cache: dict[str, str] = {}
-            pairs = []
-            for r in self.reads:
-                norm = cache.get(r.identifier)
-                if norm is None:
-                    norm = normalize_identifier(r.identifier)
-                    cache[r.identifier] = norm
-                pairs.append((norm, r))
-            self._norm_reads = pairs
+            self._norm_reads = [(r.identifier, r) for r in self.reads]
         return self._norm_reads
 
+    def _normalized_opens(self) -> "dict[str, int]":
+        """Open counts by normalized identifier, computed once.
+
+        Same memoization as the reads: ``normalize_identifier`` reaches
+        ``os.path.realpath``, and a run opens the same paths repeatedly.
+        """
+        if self._norm_opens is None:
+            counts: dict[str, int] = {}
+            for op in self.opens:
+                norm = self._normalize(op)
+                counts[norm] = counts.get(norm, 0) + 1
+            self._norm_opens = counts
+        return self._norm_opens
+
+    def _normalized_failed_opens(self) -> "list[tuple[str, str]]":
+        """Each failed open paired with its normalized identifier, paired once.
+
+        A retry loop records the same path once per attempt, and the pairing is
+        the same for every finding, so it is built once and shared like the
+        reads and the opens.
+        """
+        if self._norm_failed_opens is None:
+            self._norm_failed_opens = [
+                (self._normalize(path), exc_type)
+                for path, exc_type in self.failed_opens
+            ]
+        return self._norm_failed_opens
+
+    def coverage_counts(self) -> "tuple[int, int]":
+        """``(reads_seen, opens_detected)``, the honest coverage bound.
+
+        Both halves range over the CITED paths the audit hook saw opened, so
+        the fraction answers one question: of the ingress detected for the
+        cited sources, how much did the observer read through. It is the
+        complement of the coverage-gap seam ``classify`` raises, so a cited
+        file read through ``builtins.open`` gives 1/1 and one read through
+        ``os.open`` gives 0/1 alongside its seam.
+
+        Counting every open in the process instead would fold in the import
+        machinery's ``.pyc`` reads and the target script itself, deflating the
+        bound by how much the target imports rather than by what the observer
+        missed.
+        """
+        read_idents = {norm for norm, _ in self._normalized_reads()}
+        opened = {n for n in self._normalized_opens() if n in self.cited}
+        return len(opened & read_idents), len(opened)
+
     def classify(self) -> GroundingVerdict:
-        """Compute the verdict from captured reads, seams, and opens.
+        """Compute the verdict from captured reads, seams, and opens, and mint it.
 
         Order of decision:
           1. Any observer-internal error → OPAQUE (we cannot trust ourselves).
@@ -182,18 +276,23 @@ class Scope:
           4. Only when the scope was fully seen and no cited data arrived →
              UNGROUNDED. This is the sole path to UNGROUNDED, which is what
              makes UNGROUNDED trustworthy.
+
+        This is also the one place a verdict is minted (:func:`._verdict._mint`),
+        which is what lets the write path tell a computed verdict from a
+        declared one. Minting here rather than in ``observe()`` covers the
+        post-hoc auditor too, whose per-finding verdicts come from
+        :meth:`classify_against` and are just as observed.
         """
+        return _mint(self._decide())
+
+    def _decide(self) -> GroundingVerdict:
+        """The decision itself. Split out so the mint above covers every arm of
+        it: a new return path cannot ship an unminted verdict by omission."""
         cited = self.cited
         reads = tuple(self.reads)
         norm_reads = self._normalized_reads()
         seams = list(self.seams)
-        # Read coverage is a property of the FILE surface only: the audit hook's
-        # open events are file opens, and the coverage gap it measures is the
-        # builtins.open wrapper missing an os.open / C-extension read of a file.
-        # sqlite and http reads never emit an open event, so counting them here
-        # would divide across disjoint universes and push the fraction above 1.
-        reads_seen = sum(1 for r in reads if r.kind == "file")
-        opens_detected = len(self.opens)
+        reads_seen, opens_detected = self.coverage_counts()
 
         base = dict(
             cited_sources=cited,
@@ -262,35 +361,39 @@ class Scope:
         # never emit a PEP-578 event, a cited URL with no observed HTTP read, and
         # a content-address citation whose match the observer never had the hash
         # to attempt. Each becomes a coverage-gap seam, which the relevance
-        # matrix below treats as blocking every citation kind (fail-closed).
+        # matrix below treats as blocking every citation kind (fail-closed). An
+        # open the observer watched FAIL is not one of them: it is recorded as a
+        # failed-open seam, which names the failure without blocking.
         read_idents = {norm for norm, _ in norm_reads}
-        unexplained: dict[str, int] = {}
-        for op in self.opens:
-            n = normalize_identifier(op)
-            if n in cited and n not in read_idents:
-                unexplained[n] = unexplained.get(n, 0) + 1
+        failed_open_types = ""
+        unexplained = {
+            n: count
+            for n, count in self._normalized_opens().items()
+            if n in cited and n not in read_idents
+        }
         if unexplained:
             # A wrapped open that raised delivered no data. When such failures
             # account for EVERY unexplained open of the cited paths (count-
-            # aware, per identifier), the honest narrative is that the open
-            # failed. One open more than the observed failures means a reader
-            # the wrapper never saw, so the hidden-reader message stays: a
-            # failed open must never lend its story to an open that could
-            # have read the data.
+            # aware, per identifier), nothing is left unexplained and the
+            # honest narrative is that the open failed, which does not block
+            # UNGROUNDED. One open more than the observed failures means a
+            # reader the wrapper never saw, so the hidden-reader coverage gap
+            # stays: a failed open must never lend its story to an open that
+            # could have read the data.
             failed: dict[str, int] = {}
             failed_types: set[str] = set()
-            for path, exc_type in self.failed_opens:
-                fn = normalize_identifier(path)
+            for fn, exc_type in self._normalized_failed_opens():
                 if fn in unexplained:
                     failed[fn] = failed.get(fn, 0) + 1
                     failed_types.add(exc_type)
             if all(failed.get(n, 0) >= count for n, count in unexplained.items()):
-                types = ", ".join(sorted(failed_types))
+                failed_open_types = ", ".join(sorted(failed_types))
                 seams.append(
                     SeamEvent(
-                        "coverage-gap",
+                        "failed-open",
                         f"the observed open of the cited source failed "
-                        f"({types}); no data flowed through the failed open",
+                        f"({failed_open_types}); no data flowed through the "
+                        "failed open",
                     )
                 )
             else:
@@ -352,28 +455,46 @@ class Scope:
         # a silent fallback on an LLM-shaped pipeline leaves behind. It DOES block
         # URL- and content-address-cited findings (bytes can arrive over the
         # network). Subprocess / thread / coverage-gap seams, and any unknown
-        # seam or citation kind, block everything (fail-closed).
+        # seam or citation kind, block everything (fail-closed). A failed-open
+        # seam blocks nothing: it records a read that provably did not happen.
         cited_kinds = {citation_kind(c) for c in cited}
         relevant = [s for s in seams if _seam_blocks_ungrounded(s.kind, cited_kinds)]
         if relevant:
             kinds = ", ".join(sorted({s.kind for s in relevant}))
-            return GroundingVerdict(
-                grounding=ObservedGrounding.OPAQUE,
-                reason=(
+            if any(s.kind == ABORT_SEAM for s in relevant):
+                # Say what actually happened. The run was cut short, so no read
+                # was hidden; the observation simply never covered the whole
+                # pipeline, which is a different fact and the honest one.
+                reason = (
+                    "no cited read observed, but the target aborted before the "
+                    f"scope closed ({kinds}); the observation is truncated, so "
+                    "absence cannot be trusted"
+                )
+            else:
+                reason = (
                     "no cited read observed, but a seam relevant to the cited "
                     f"source(s) could have hidden one ({kinds}); absence cannot "
                     "be trusted"
-                ),
+                )
+            return GroundingVerdict(
+                grounding=ObservedGrounding.OPAQUE,
+                reason=reason,
                 seams=tuple(seams),
                 **base,
             )
 
+        reason = (
+            "scope fully observed; no read matching the cited source "
+            "returned data"
+        )
+        if failed_open_types:
+            reason = (
+                "scope fully observed; the open of the cited source failed "
+                f"({failed_open_types}) and no read matching it returned data"
+            )
         return GroundingVerdict(
             grounding=ObservedGrounding.UNGROUNDED,
-            reason=(
-                "scope fully observed; no read matching the cited source "
-                "returned data"
-            ),
+            reason=reason,
             seams=tuple(seams),
             **base,
         )
@@ -398,21 +519,73 @@ class Scope:
         # share it so a corpus audit normalizes the shared reads once, not once
         # per finding. Only the cited set differs per call.
         other._norm_reads = self._normalized_reads()
+        other._norm_opens = self._normalized_opens()
+        other._norm_failed_opens = self._normalized_failed_opens()
         return other.classify()
 
 
 def enter(cited: tuple[str, ...], *, content_address: bool = False) -> Scope:
     """Push a new scope onto the current context and return it."""
     scope = Scope(cited, content_address=content_address)
+    scope._parent = _active.get()
     scope._token = _active.set(scope)
+    _seam_pre_scope_tasks(scope)
     return scope
 
 
+def _seam_pre_scope_tasks(scope: Scope) -> None:
+    """Seam the asyncio tasks that already existed when *scope* opened.
+
+    A task created BEFORE the scope runs with a context copy that has no scope,
+    so a read it performs inside the scope's window is neither recorded nor seen:
+    the same hand-off blind spot the thread-pool wrapper covers, and the same
+    fail-closed answer. The ``thread`` kind blocks every citation kind, so the
+    span lands OPAQUE rather than a confident false UNGROUNDED. It
+    over-approximates (an unrelated heartbeat task seams too), which is the
+    conservative direction.
+    """
+    try:
+        import asyncio
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # no running loop: no task can be pending
+        if asyncio.all_tasks(loop) - {asyncio.current_task()}:
+            scope.record_seam(
+                "thread", "asyncio task pending outside the scope's context"
+            )
+    except BaseException as exc:  # noqa: BLE001
+        scope.mark_error(f"asyncio task snapshot failed: {type(exc).__name__}")
+
+
 def exit(scope: Scope) -> None:
-    """Pop *scope*, restoring the prior context (supports nesting)."""
-    if scope._token is not None:
-        _active.reset(scope._token)
-        scope._token = None
+    """Pop *scope*, replaying its evidence into the parent (supports nesting).
+
+    Everything the inner scope captured happened inside the outer span too, so
+    the outer scope inherits it. Without the replay the outer scope would
+    classify against an empty evidence set and return a confident false
+    UNGROUNDED for reads it never had a chance to see.
+    """
+    if scope._token is None:
+        return
+    _active.reset(scope._token)
+    scope._token = None
+    parent = scope._parent
+    scope._parent = None
+    if parent is None:
+        return
+    parent.reads.extend(scope.reads)
+    parent.seams.extend(scope.seams)
+    parent.opens.extend(scope.opens)
+    parent.failed_opens.extend(scope.failed_opens)
+    parent.models.extend(scope.models)
+    if scope._error is not None:
+        parent.mark_error(scope._error)
+    # The parent's evidence grew, so any memoized normalization is stale.
+    parent._norm_reads = None
+    parent._norm_opens = None
+    parent._norm_failed_opens = None
 
 
 # -- the single ingress-recording chokepoint --------------------------------
@@ -424,3 +597,18 @@ def record_read(kind: str, identifier: str, nonempty: bool, content_address=None
     scope = _active.get()
     if scope is not None:
         scope.record_read(kind, identifier, nonempty, content_address)
+
+
+def record_abort(exit_code: int) -> None:
+    """Record that the observed target aborted, against the active scope if any.
+
+    Call it from inside the scope, before it closes: what the target had not
+    read yet was never going to be observed, so the verdict must stop short of
+    a confident UNGROUNDED.
+    """
+    scope = _active.get()
+    if scope is not None:
+        scope.record_seam(
+            ABORT_SEAM,
+            f"target aborted before the scope closed (exit code {exit_code})",
+        )

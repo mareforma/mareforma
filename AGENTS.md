@@ -64,17 +64,28 @@ No `mareforma init` required.
 Open the epistemic graph and return an `EpistemicGraph`. Use as a context
 manager to ensure the connection is closed.
 
+**Decide signed or unsigned before you write.** The first key opened against a
+project enrols as its root validator, and a project that signs does not count
+unsigned claims toward independence, including the ones written before the key.
+Those findings stay in the graph but stop counting: the proposition reads
+`UNTESTED`, `lines_skipped` rises, and each drop is named
+`unregistered_signer_skipped` in `.mareforma/health.jsonl`. There is no un-enrol.
+Open with the key from the first write, or pass `load_key=False` to read a
+project without enrolling anything.
+
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `path` | `str \| Path \| None` | `None` | Project root. Defaults to `cwd()`. Graph stored at `<path>/.mareforma/graph.db`. |
 | `key_path` | `str \| Path \| None` | `None` | Ed25519 private key (PEM). `None` → use the XDG default `~/.config/mareforma/key`. If the path does not exist, the graph operates unsigned. |
 | `require_signed` | `bool` | `False` | Raise `KeyNotFoundError` if no key is found at `key_path`. |
+| `load_key` | `bool` | `True` | `False` loads no key even when one exists: nothing is signed and your key is never auto-enrolled as the project's root validator, so an audit pass leaves no trace. Combining it with `require_signed=True` raises `ValueError`. |
 | `rekor_url` | `str \| None` | `None` | Sigstore-Rekor transparency log endpoint. When set, every signed claim is submitted at INSERT time. `None` disables Rekor entirely. Use `mareforma.signing.PUBLIC_REKOR_URL` for the public instance. |
 | `require_rekor` | `bool` | `False` | Raise `SigningError` if `rekor_url` is unset or initial submission fails. |
 | `trust_insecure_rekor` | `bool` | `False` | Skip SSRF validation on `rekor_url` (only for private Rekor instances on internal networks). |
 | `rekor_log_pubkey_pem` | `bytes \| None` | `None` | PEM-encoded Rekor log operator public key. When supplied, every signed-claim submit and every `refresh_unsigned()` re-fetches the entry and cryptographically verifies the RFC 6962 Merkle inclusion proof against the log's signed checkpoint. Verification failure refuses to mark the row `transparency_logged=1`. Supports Ed25519 (private Rekor) and ECDSA secp256r1 (Sigstore public-good); other curves and key types raise `RekorInclusionError(reason="unsupported_key")`. Mutually exclusive with `rekor_log_pubkey_path`. |
 | `rekor_log_pubkey_path` | `str \| Path \| None` | `None` | Filesystem path to a PEM file holding the Rekor log operator public key. Read once at open() time; equivalent to passing the file contents via `rekor_log_pubkey_pem`. Mutually exclusive with `rekor_log_pubkey_pem`. |
-| `strict_promotion` | `bool` | `False` | Gate REPLICATED on non-NULL data (`artifact_hash`) present on BOTH sides of a converging pair. Off by default (the signer axis alone promotes; absent data never blocks). Opt-in and additive: it only ever adds the requirement. |
+| `strict_promotion` | `bool` | `False` | Gate REPLICATED on non-NULL data (`artifact_hash`) present on BOTH sides of a converging pair. Off by default (the signer axis alone promotes; absent data never blocks). Opt-in and additive: it only ever adds the requirement. Passing `True` root-signs a one-way project policy, so every later opener (including the CLI) promotes under the gate; a keyless or non-root caller raises `ProjectPolicyError`. |
+| `validator_type` | `str` | `"human"` | `"human"` or `"llm"`, the self-declared type recorded if this key auto-enrolls as the project's root validator. Ignored once a root exists. Pass `"llm"` when an agent bootstraps its own project: an `llm` validator cannot promote a claim to ESTABLISHED on its signature alone. |
 
 When `rekor_log_pubkey_pem` or `rekor_log_pubkey_path` is supplied, the
 key is persisted to `<project>/.mareforma/rekor_log_pubkey.pem` as a
@@ -120,8 +131,16 @@ Assert a claim into the graph. Returns `claim_id` (UUID string).
 | `contradicts` | `list[str] \| None` | `None` | Claim_ids this finding is in explicit tension with. |
 | `source_name` | `str \| None` | `None` | Data source name. Required for ANALYTICAL to be meaningful. |
 | `idempotency_key` | `str \| None` | `None` | Retry-safe key. Same key → same claim_id, no INSERT. |
+| `status` | `str` | `"open"` | `open` \| `contested` \| `retracted` |
+| `artifact_hash` | `str \| None` | `None` | SHA-256 hex digest of the output bytes backing the claim. Secondary collapse check: equal data collapses two peers to one line (a byte-identical rerun is not corroboration), distinct data counts as independent, absent data (NULL) never blocks. The column a strict-promotion project reads. |
+| `evidence` | `dict \| None` | `None` | Optional opaque evidence-vector dict for the claim, denormalised into the `ev_*` columns and stored as `evidence_json`. Carried inside the signed predicate; mareforma does not interpret it. |
+| `seed` | `bool` | `False` | Insert directly at `ESTABLISHED` with a signed seed envelope. Only an enrolled validator can produce a seed. Used to bootstrap the ESTABLISHED-upstream chain on a fresh project. |
 | `observed_grounding` | `dict \| None` | `None` | Signed grounding verdict from an `observe()` scope (`obs.verdict.to_signed_dict()`). Bound into the signed statement; a verdict that is not `GROUNDED` never counts toward promotion. |
+| `finding_record` | `dict \| None` | `None` | Set by `submit_finding`, not by hand: the signed record of a finding's verdict inputs (proposition, plan, datasets, bearing, and a digest over its estimate line set). Bound into the signed statement only when present, so a plain claim signs identically; a verdict re-derives against it on read. |
 | `grounding_sensor` | `object \| None` | `None` | Optional sensor exposing `grounding_score(text, supports) → (float, str)`. Its score and rationale are written into the claim's evidence vector. A sensor that raises is caught and the claim is asserted without a grounding score. |
+| `signer` | `object \| None` | `None` | Per-call override for the graph's loaded key (an Ed25519 private key from `signing.load_private_key`). `None` inherits the key from `mareforma.open(key_path=...)`. Not checked against the `validators` table: anyone can sign, only enrolled keys can `validate()` a claim to ESTABLISHED. Use it on a host holding several keys, one per asserter. |
+| `predicate_payload` | `dict \| None` | `None` | Structured predicate body for typed adapters. Stored in the queryable `predicate_payload` column only, NOT bound into the signed envelope or chain hash. |
+| `original_signature_bundle` | `str \| None` | `None` | Source-side DSSE envelope preserved by federation-import flows. Validated only for JSON well-formedness at write time, never re-verified. |
 
 **Raises:** `ValueError` if `classification` is invalid or `text` is empty.
 
@@ -146,15 +165,22 @@ support level (descending) then recency (descending).
 | `limit` | `int` | `20` | Maximum results. |
 | `include_unverified` | `bool` | `False` | When `False`, PRELIMINARY claims whose signing key is not in the validators table are excluded. Pass `True` to surface unverified preliminary claims. |
 | `include_invalidated` | `bool` | `False` | When `False`, claims invalidated by a signed `contradiction_verdicts` row (`t_invalid IS NOT NULL`) are excluded. Pass `True` for audit / history queries. |
+| `refutation_filter` | `str \| None` | `None` | Refutation-state filter: `clean` (`t_invalid IS NULL` and `status='open'`) \| `contradicted` \| `contested` \| `retracted` \| `any`. Composes with the other filters via AND. |
 
 Each dict contains: `claim_id`, `text`, `classification`, `support_level`,
 `idempotency_key`, `validated_by`, `validated_at`, `status`, `source_name`,
 `generated_by`, `supports_json`, `contradicts_json`, `comparison_summary`,
 `branch_id`, `unresolved`, `signature_bundle`, `transparency_logged`,
-`validation_signature`, `validator_keyid`, `artifact_hash`, `prev_hash`,
-`ev_risk_of_bias`, `ev_inconsistency`, `ev_indirectness`,
+`validation_signature`, `validator_keyid`, `asserter_keyid`, `artifact_hash`,
+`prev_hash`, `ev_risk_of_bias`, `ev_inconsistency`, `ev_indirectness`,
 `ev_imprecision`, `ev_pub_bias`, `evidence_json`, `statement_cid`,
-`t_invalid`, `created_at`, `updated_at`.
+`t_invalid`, `convergence_retry_needed`, `predicate_payload`,
+`original_signature_bundle`, `observed_grounding`, `created_at`,
+`updated_at`.
+
+`asserter_keyid` is the signing key the independence axis counts and
+`observed_grounding` is the stored grounding verdict, so a reader needs no
+second pass over `signature_bundle` to recover either.
 
 Plus two reputation projections computed at query time:
 
@@ -162,6 +188,10 @@ Plus two reputation projections computed at query time:
   ESTABLISHED claims signed by the same validator. `0` for non-ESTABLISHED.
 - `generator_enrolled: bool`: `True` iff the claim's signing keyid is
   in the validators table.
+
+ESTABLISHED rows carry two more keys: `single_trust_domain: bool` and
+`trust_domain_root: str | None`, disclosing whether every validator traces to
+one root of trust. Rows below ESTABLISHED omit both.
 
 **Raises:** `ValueError` if `min_support` or `classification` is invalid.
 
@@ -207,8 +237,8 @@ Return a single claim dict by ID, or `None` if not found.
 
 Return the per-finding `TrustMap` for a claim, or `None` if it does not
 exist. A read-side artifact: it places every trust property (attributability,
-provenance, grounding, methodological validity, leakage, independence,
-contestation, standing, trust-root, witnessing) at a tier
+provenance, grounding, faithfulness, methodological validity, leakage,
+independence, contestation, standing, trust-root, witnessing) at a tier
 (`COMPUTED` / `PROXIED` / `DEFERRED`) with the residual named, and infers
 nothing it cannot compute. The independence axis leads: it reports the
 effective-independence number (pairwise-distinct model, data, and signer
@@ -220,18 +250,31 @@ self-contained HTML file.
 
 ---
 
-### `mareforma.restore(project_root, *, claims_toml=None) → dict`
+### `mareforma.restore(project_root, *, claims_toml=None, rekor_log_pubkey_pem=None, enforce_rekor_policy=False) → dict`
 
 Rebuild a fresh `graph.db` from `claims.toml` (catastrophic-loss recovery).
 Refuses to run if the target `graph.db` already contains claims:
 fresh-only, never merge. Every signature is verified before any row is
 inserted; fail-all-or-nothing.
 
+Pass `rekor_log_pubkey_pem` to verify each `[rekor_inclusions]` entry's
+Merkle proof before replay; without it, sidecar entries are replayed
+unverified. Set `enforce_rekor_policy=True` to assert the project requires
+transparency-log witnessing: restore then demands a root-signed
+`[project_policy]` and a pinned log key, and marks a signed claim
+convergence-eligible only when it carries a verified, claim-bound
+inclusion proof. That closes the strip-route where an edited `claims.toml`
+makes an unwitnessed claim look ready. Off by default.
+
 Returns `{"validators_restored": N, "claims_restored": M}`.
 
 **Raises:** `mareforma.db.RestoreError` with a `.kind` field: `graph_not_empty`,
-`toml_not_found`, `toml_malformed`, `enrollment_unverified`,
-`claim_unverified`, `mode_inconsistent`, `orphan_signer`.
+`toml_not_found`, `toml_unreadable`, `toml_malformed`,
+`enrollment_unverified`, `claim_unverified`, `trust_row_rejected`,
+`mode_inconsistent`,
+`orphan_signer`, `policy_absent`, `policy_unverifiable`,
+`policy_unverified`, `policy_violation`, `rekor_inclusion_invalid`.
+`docs/reference/api.mdx` spells out what each one means.
 
 ---
 
@@ -278,6 +321,15 @@ signer is loaded, or the loaded signer is not an enrolled validator.
 not a strict-v4 UUID, does not point to an existing claim, post-dates
 `validated_at`, or disagrees with the validation envelope's signed
 `evidence_seen` field.
+**Raises:** `LLMValidatorPromotionError` if the loaded signer is
+enrolled with `validator_type='llm'`. LLM-typed validators sign
+validation envelopes but cannot promote past REPLICATED.
+**Raises:** `SelfValidationError` if the loaded signer's keyid is the
+one on the claim's `signature_bundle`. Promotion needs an external
+witness, so on a single-key project this is the expected outcome.
+**Raises:** `InvalidValidationEnvelopeError` if the signed envelope
+fails a structural or cryptographic gate.
+The last three subclass `MareformaError` directly, not `ValueError`.
 
 ---
 
@@ -301,7 +353,10 @@ the operator should look at.
 
 Retry convergence detection (PRELIMINARY → REPLICATED) for every
 claim flagged `convergence_retry_needed=1`. Returns
-`{"checked", "promoted", "still_pending"}`.
+`{"checked", "retried_ok", "promoted", "still_pending"}`. `retried_ok`
+counts the claims whose detection ran cleanly this pass; `promoted` is
+the subset that actually moved off PRELIMINARY, which is zero when the
+claim has no converging peer.
 
 The detection path runs after every successful claim INSERT. When a
 SQLite trigger or contention pattern causes that check to raise,
@@ -519,8 +574,16 @@ root = graph.assert_claim(
     seed=True,          # ← inserts directly as ESTABLISHED with a signed envelope
 )
 # Downstream peers now have an ESTABLISHED upstream to converge on.
-graph.assert_claim("finding A", supports=[root], generated_by="agent-A")
-graph.assert_claim("finding B", supports=[root], generated_by="agent-B")
+# Promotion counts independence by asserter_keyid, so each peer signs
+# under its own key. Two peers on the graph's one key stay PRELIMINARY.
+from mareforma.signing import load_private_key
+
+lab_a = load_private_key("lab_a.key")
+lab_b = load_private_key("lab_b.key")
+graph.assert_claim("finding A", supports=[root],
+                   generated_by="agent-A", signer=lab_a)
+graph.assert_claim("finding B", supports=[root],
+                   generated_by="agent-B", signer=lab_b)
 # → both promote to REPLICATED.
 ```
 
@@ -596,6 +659,7 @@ Methods: `register_proposition(proposition)`,
 `register_plan(proposition, prediction)`,
 `submit_finding(proposition, prediction, estimate, *, data_id, ...)`,
 `assert_finding(proposition, prediction, estimate, *, data_id, ...)`,
+`retire_plan(plan_id, *, alpha, reason)`,
 `proposition_status(proposition_or_content_id)`, `get_proposition(content_id)`,
 `query_frame(frame_id_or_proposition, *, min_status=None)`. `assert_finding` is
 idempotent on `(content_id, data_id)`. You can split the one-shot
@@ -607,8 +671,34 @@ that composes both. Pre-registration only counts when the rule is bound before
 the run produces outcomes, so `submit_finding` raises `PostHocPlanError` when a
 pre-registered plan's `registered_at` post-dates the run's first observed
 execution (its earliest prior finding under the same `generated_by` run token);
-a one-shot `assert_finding` claims no pre-registration and never raises it. Full
-reference:
+a one-shot `assert_finding` claims no pre-registration, so it is exempt only
+when its synthesised plan is the one on record. A one-shot that lands on a plan
+already pre-registered submits under that plan and is refused too.
+
+`retire_plan` is the recovery for a plan the gates cannot run. A plan written by
+a release with a wider alpha bound can state a rule that decides nothing (alpha
+at or above 0.5), and the `predictions` row can be neither corrected nor
+deleted, so its evidence drops out of every recompute and the proposition reads
+`UNTESTED` with `lines_skipped` non-zero. The drop names the plan on
+`.mareforma/health.jsonl` as `ungateable_plan_skipped`; pass that `plan_id`:
+
+```python
+graph.retire_plan(plan_id, alpha=0.05, reason="registered at an un-runnable alpha")
+```
+
+It registers the same rule at the alpha given (only the alpha moves, so the
+side of the null cannot be re-chosen after the numbers are in), records the
+retirement with its reason, and writes both as signed attestations. The retired
+row is left exactly as registered, and the evidence that stood under it gates
+under the replacement from then on. The replacement is flagged
+`preregistered=0`, because it was registered after the evidence, and
+`proposition_status` reports `post_hoc=True` for any count that then rests on
+it, so a reader can tell a pre-registered gate from one chosen after the numbers
+were seen. Only a plan whose rule cannot be run is retirable, so retirement
+never withdraws a line that counts; `PlanNotRetirableError` says which rule
+refused, and also refuses a retirement that would recover no line at all, or one
+whose replacement plan already exists (which would drop the post-hoc
+disclosure). Full reference:
 [docs.mareforma.com](https://docs.mareforma.com/reference/api) and the
 [Findings](https://docs.mareforma.com/concepts/findings) concept page.
 
@@ -782,11 +872,12 @@ constraint + INSERT trigger). A separate trigger on `status` makes
 `retracted` terminal. Transitions out of retracted are refused, so
 the only way to resurrect a withdrawn finding is to assert a new
 claim citing the old via `contradicts=`. Illegal transitions raise
-`IllegalStateTransitionError` with a parsed `<from>-><to>` string
-instead of an opaque `CHECK CONSTRAINT FAILED` message.
+`IllegalStateTransitionError` carrying the trigger's static suffix
+(`illegal_transition:from_preliminary` and its siblings) instead of
+an opaque `CHECK CONSTRAINT FAILED` message.
 
 The `claims` table also carries a `prev_hash` append-only hash chain
-(`sha256(prev_chain_link || canonical_payload)`) with a UNIQUE
+(`sha256(prev_chain_link || canonical_statement_bytes)`) with a UNIQUE
 constraint. `BEGIN IMMEDIATE` wraps the chain-extend INSERT so two
 concurrent writers cannot branch the chain. The chain is independent
 of per-claim signatures. It attests row ordering, not claim
@@ -821,41 +912,58 @@ with mareforma.open() as graph:
         print(row["identity"], row["validator_type"], row["keyid"])
 ```
 
-**Two-machine quickstart: first ESTABLISHED promotion, CLI only.**
-Mareforma refuses self-validation (a validator cannot promote a
-claim it signed itself), so promoting any claim to ESTABLISHED needs
-two keys on two operators. Both run the same install; the orchestration
-is four CLI commands plus one file exchange.
+**Shared-project quickstart: first ESTABLISHED promotion.**
+Mareforma refuses self-validation, and a key that asserted one of the
+converging peers cannot witness that convergence either, so the first
+ESTABLISHED promotion needs three enrolled keys: two that converge on a
+shared upstream and one that witnesses. The upstream is a seed claim, and
+no CLI command writes one, so that single step runs through the Python API
+(see the ESTABLISHED-upstream rule above); everything else is CLI.
 
 ```bash
-# --- Bob's machine ---------------------------------------------------------
-bob$ mareforma bootstrap                       # one-time, creates Bob's key
-bob$ mareforma key show --pem > bob.pub.pem    # safe to email/paste
-# Bob sends bob.pub.pem to Alice (Slack, email, S3, anything).
+# --- Bob's and Carol's machines --------------------------------------------
+bob$   mareforma bootstrap                      # one-time, creates Bob's key
+bob$   mareforma key show --pem > bob.pub.pem   # safe to email/paste
+carol$ mareforma bootstrap
+carol$ mareforma key show --pem > carol.pub.pem
+# Both send their .pub.pem to Alice (Slack, email, S3, anything).
 
 # --- Alice's machine -------------------------------------------------------
-alice$ mareforma bootstrap                     # one-time, creates Alice's key
+alice$ mareforma bootstrap                      # one-time, creates Alice's key
 alice$ cd ~/my-project
-alice$ # First call against a fresh project auto-enrolls Alice as root.
-alice$ mareforma status                        # opens the graph; auto-enrolls
+# Seed the ESTABLISHED anchor. This is the first key opened against a
+# fresh project, so it also creates the project and enrolls Alice as root.
+alice$ python - <<'PY'
+import mareforma
+with mareforma.open() as graph:
+    print(graph.assert_claim(
+        "established prior literature reference",
+        classification="DERIVED", generated_by="agent/seed", seed=True))
+PY
 alice$ mareforma validator add \
            --pubkey ./bob.pub.pem \
            --identity bob@lab.example
-alice$ mareforma validator list                # confirms both enrolled
-# Alice asserts a claim and gets it to REPLICATED through the usual
-# convergence path (distinct signing keys, shared ESTABLISHED upstream).
+alice$ mareforma validator add \
+           --pubkey ./carol.pub.pem \
+           --identity carol@lab.example
+alice$ mareforma validator list                 # confirms all three enrolled
 
-# --- Back on Bob's machine -------------------------------------------------
-bob$ cd ~/shared/my-project                    # same project root
-bob$ mareforma claim list --status open
-bob$ mareforma claim validate <claim_id> --validated-by bob@lab.example
+# --- Bob and Carol, in the shared project root -----------------------------
+bob$   mareforma claim add "finding B" --supports <anchor_id>
+carol$ mareforma claim add "finding C" --supports <anchor_id>
+# Distinct keys on one ESTABLISHED upstream: both are now REPLICATED.
+
+# --- Alice witnesses -------------------------------------------------------
+alice$ mareforma claim list --status open
+alice$ mareforma claim validate <claim_id> --validated-by alice@lab.example
 # ✓ Claim '<claim_id>' promoted to ESTABLISHED.
 ```
 
-If Alice (the signer of the claim) tries `mareforma claim validate`
-herself, the CLI surfaces `SelfValidationError` with a one-line
-resolution hint pointing at `validator add` and `key show`. The
-mareforma path is the source of truth; the CLI just translates.
+If Bob tries `mareforma claim validate` on his own claim, or on Carol's
+peer in the same converging set, the CLI surfaces `SelfValidationError`
+with a one-line resolution hint pointing at `validator add` and
+`key show`. The mareforma path is the source of truth; the CLI just
+translates.
 
 Each enrollment is signed by the parent validator (root for the first
 additions, then any already-enrolled key thereafter). On read,
@@ -869,15 +977,25 @@ self-declared `validator_type` field (`'human'` default, or `'llm'`),
 bound into the signed enrollment envelope. This is an honesty signal,
 not a security gate. There is no external attestation of whether a
 key is "really" a human or "really" a bot. Mareforma uses it for
-one rule: a validator with `validator_type='llm'` may sign validation
-envelopes, but mareforma refuses to promote a claim to ESTABLISHED
-on its signature alone. Both via `graph.validate()` (raises
+two rules. First, a validator with `validator_type='llm'` may sign
+validation envelopes, but mareforma refuses to promote a claim to
+ESTABLISHED on its signature alone. Both via `graph.validate()` (raises
 `LLMValidatorPromotionError`) and via the seed-claim bootstrap (same
 exception). To promote, an enrolled `human` validator must co-sign
 or re-sign. Mareforma also refuses self-validation when the
 calling signer's keyid equals the claim's `signature_bundle` signing
 keyid (raises `SelfValidationError`). Promotion is always an
 external-witnessing event, regardless of validator type.
+
+Second, the status ladder's independence count reads a supporting
+finding with no observed model call, signed by a `human` validator, on
+its own human axis: a human is not a model, so it needs no distinct
+model. The trust map's per-finding independence disclosure does **not**
+follow that re-key. Because the field is self-declared, defaults to
+`'human'`, and no person attested to the finding itself, an unobserved
+line is soft on the map and reads `UNVERIFIABLE`. Pass
+`mareforma.open(validator_type='llm')` when an agent bootstraps its own
+project, so the root is labelled honestly.
 
 The signal is **self-declared by each validator about itself**. The
 parent's type does not constrain the child's type. An LLM-typed root
@@ -1003,18 +1121,28 @@ what a claim cites, and its content is not verified.
 
 ## Export and signed bundles
 
-The graph exports to two formats. Plain JSON-LD is for everyday
-inspection; the signed bundle is for archival and cross-environment
+The graph exports in four unsigned formats plus a signed bundle. Plain
+JSON-LD is for everyday inspection; the three interop formats are for
+external tooling; the signed bundle is for archival and cross-environment
 verification.
 
-**Plain JSON-LD.** `mareforma export` writes `ontology.jsonld` in the
-mareforma-native vocabulary (`@type=mare:Graph`, media type
-`application/x-mareforma-graph+json`). The export is NOT
-PROV-O-conformant. Each claim node carries every `SIGNED_FIELDS`
-member plus the opaque `evidence` dict so the bundle verifier
-(below) can re-derive `canonical_statement` bytes from a node alone.
+**Plain JSON-LD.** `mareforma export` (default `--format=jsonld`) writes
+`ontology.jsonld` in the mareforma-native vocabulary (`@type=mare:Graph`,
+media type `application/x-mareforma-graph+json`). This default format is
+NOT PROV-O-conformant: it uses an honest mareforma-native vocabulary
+rather than name-dropping PROV-O without populating the full graph. For a
+real W3C PROV-O graph, use `--format=prov-o`. Each claim node carries
+every `SIGNED_FIELDS` member plus the opaque `evidence` dict so the bundle
+verifier (below) can re-derive `canonical_statement` bytes from a node
+alone.
 
-**SCITT-style signed bundle.** `mareforma export --bundle` wraps the
+**Interop formats.** `--format=in-toto-v1` writes an unsigned in-toto
+Statement v1 (sigstore / SLSA / GUAC ecosystem), `--format=ro-crate-1.2`
+an RO-Crate 1.2 Process Run Crate, and `--format=prov-o` a W3C PROV-O
+JSON-LD graph. `--format` and `--bundle` are mutually exclusive:
+`--bundle` always signs the native JSON-LD.
+
+**Signed export bundle.** `mareforma export --bundle` wraps the
 JSON-LD export in an in-toto Statement v1 envelope and signs it with
 the local Ed25519 key. The bundle includes one subject entry per
 claim (`urn:mareforma:claim:<uuid>`) with a SHA-256 of the claim's
@@ -1028,9 +1156,12 @@ mareforma verify mareforma-bundle.json # → "verified: N claim subjects match"
 
 `predicateType` is `urn:mareforma:predicate:epistemic-graph:v1`. URN
 namespacing means schema evolution to v2 carries a new predicate type
-without breaking v1 verifiers. Tampered claim text, or even a
-re-signed bundle whose predicate was edited, fails the per-claim
-subject digest check.
+without breaking v1 verifiers. Content added to the predicate or
+mutated in it fails the per-claim subject digest and asserter-signature
+checks, even when the bundle is re-signed with the same key. Content
+removed does not: a verified bundle attests the claims it carries, not
+that they are all the claims in the graph, so a claim dropped together
+with its subject entry verifies clean.
 
 ---
 
@@ -1067,10 +1198,8 @@ result = mareforma.restore("/path/to/project")
 # {'validators_restored': 3, 'claims_restored': 47}
 ```
 
-`RestoreError` has a `.kind` field naming the failure mode:
-`graph_not_empty`, `toml_not_found`, `toml_malformed`,
-`enrollment_unverified`, `claim_unverified`, `mode_inconsistent`,
-`orphan_signer`.
+`RestoreError` has a `.kind` field naming the failure mode; the kinds are
+listed under `mareforma.restore()` above.
 
 ---
 
@@ -1394,8 +1523,9 @@ its data provenance works. The graph does not validate it.
 ## Adapter framework (`mareforma.adapters.*`)
 
 Three opt-in adapter packages translate external AI platforms into
-signed mareforma claims. Each ships behind a matching install extra so
-the default install stays slim. All three share a convention surface
+signed mareforma claims. All three ship in the wheel and run on core
+dependencies, so none needs an install extra; an adapter costs nothing
+until a caller imports it. All three share a convention surface
 exercised by `tests/adapters/test_coexistence.py`: every adapter has
 `predicate_uris()` and `emit_sample()` so the cross-adapter test can
 verify multiple adapters writing into one graph without predicate-URI
@@ -1503,7 +1633,8 @@ Plus the public canonicalize registry and predicate-URI constants:
   with registered forms `json-c14n-v1` (default RFC 8785),
   `dsse-jcs-nfc-v1` (NFC-normalising, same bytes the signed
   envelope layer produces), plus specialty `rdkit-canonical-smiles-v1`
-  / `fasta-nfc-v1` / `pdb-atom-sorted-v1` registered on import of
+  / `smiles-nfc-fallback-v1` / `fasta-nfc-v1` / `fasta-nfc-v2` /
+  `pdb-atom-sorted-v1` / `pdb-atom-sorted-v2` registered on import of
   `mareforma.canonicalize`.
 - **Capability URI constants** at `mareforma.predicate_types` (also
   re-exported at the top level): `CLAIM_V1`, `TOOL_CALL_V1`,

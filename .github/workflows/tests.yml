@@ -5,10 +5,14 @@ name: Tests
 # branches (where all dev actually happens) never got pytest on a clean
 # checkout, that's how `test_canonical.py` shipped with a hardcoded
 # absolute path that only resolved on one machine.
+#
+# `workflow_call` lets the release workflow reuse this matrix as a gate, so a
+# publish waits on the same legs a push runs instead of a second copy of them.
 on:
   push:
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 jobs:
   test:
@@ -38,6 +42,9 @@ jobs:
     # (h5py, pyarrow, pandas, polars, duckdb, aiohttp, requests) so the grounding tests
     # that skip elsewhere actually run. Pinned to 3.13 because cp314 wheels for the
     # native scientific deps may not exist yet. HTTP tests mock the network.
+    # `chem` rides along as its own name rather than joining the heavy extra,
+    # which may hold only deps a test imports; nothing imports rdkit directly,
+    # the chemistry form does.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -49,10 +56,31 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -e ".[dev,test-heavy]"
+        run: pip install -e ".[dev,test-heavy,chem]"
 
       - name: Run tests
         run: pytest
+
+  sdist:
+    # The suite the sdist ships must pass from the unpacked archive too, or a
+    # distro packager who runs it reads a red build off a fine release. The
+    # guard builds and runs the archive, so it costs about 45 seconds and sits
+    # behind the `sdist` marker that `addopts` deselects; this leg selects it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run the sdist guard
+        run: pytest -m sdist
 
   examples:
     # Smoke-test the LangChain quickstart examples end-to-end. These are

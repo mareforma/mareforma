@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/mareforma-wordmark-dark.svg">
-    <img alt="Mareforma" src="assets/mareforma-wordmark.svg" width="420">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/mareforma/mareforma/main/assets/mareforma-wordmark-dark.svg">
+    <img alt="Mareforma" src="https://raw.githubusercontent.com/mareforma/mareforma/main/assets/mareforma-wordmark.svg" width="420">
   </picture>
 </p>
 
@@ -14,7 +14,7 @@
 <p align="center">
   <a href="https://docs.mareforma.com/introduction/quickstart">Quickstart</a> &nbsp;·&nbsp;
   <a href="https://docs.mareforma.com">Docs</a> &nbsp;·&nbsp;
-  <a href="examples/">Examples</a>
+  <a href="https://github.com/mareforma/mareforma/tree/main/examples/">Examples</a>
 </p>
 
 <p align="center">
@@ -146,7 +146,7 @@ recorded claim 75e4cbe5-f77a-45c0-9c00-57c065d83c90
 grounding: GROUNDED
 </pre>
 
-The claim now carries `GROUNDED` as a computed fact, not a self-reported label. The same run records which model authored the finding, computed from the request that was actually sent; a local model is identified by the sha256 digest of the weights that served it, not by the name it reports. [Example 02](examples/02_compounding_agents/) runs this catch end to end.
+The claim now carries `GROUNDED` as a computed fact, not a self-reported label. The same run records which model authored the finding, computed from the request that was actually sent; a local model is identified by the sha256 digest of the weights that served it, not by the name it reports. [Example 02](https://github.com/mareforma/mareforma/tree/main/examples/02_compounding_agents/) runs this catch end to end.
 
 ## Install
 
@@ -180,17 +180,17 @@ Classification stays a secondary label the agent declares: `INFERRED` (model rea
 
 | | Example | What it shows |
 |---|---|---|
-| 01 | [API Walkthrough](examples/01_api_walkthrough/) | The full API in one runnable script |
-| 02 | [Compounding Agents](examples/02_compounding_agents/) | The absence catch and computed independence, run end to end |
-| 03 | [Documented Contestation](examples/03_documented_contestation/) | An agent challenges established consensus |
-| 04 | [Private Data, Public Findings](examples/04_private_data_public_findings/) | Two labs share how they reached a finding without sharing the data |
-| 05 | [Drug Target Provenance](examples/05_drug_target_provenance/) | A real research agent that labels which findings come from real data and which from the model's guess |
-| 06 | [Verify in CI](examples/06_ci_verify/) | `mareforma verify` as a GitHub Actions gate, keyed on exit codes |
+| 01 | [API Walkthrough](https://github.com/mareforma/mareforma/tree/main/examples/01_api_walkthrough/) | The full API in one runnable script |
+| 02 | [Compounding Agents](https://github.com/mareforma/mareforma/tree/main/examples/02_compounding_agents/) | The absence catch and computed independence, run end to end |
+| 03 | [Documented Contestation](https://github.com/mareforma/mareforma/tree/main/examples/03_documented_contestation/) | An agent challenges established consensus |
+| 04 | [Private Data, Public Findings](https://github.com/mareforma/mareforma/tree/main/examples/04_private_data_public_findings/) | Two labs share how they reached a finding without sharing the data |
+| 05 | [Drug Target Provenance](https://github.com/mareforma/mareforma/tree/main/examples/05_drug_target_provenance/) | A real research agent that labels which findings come from real data and which from the model's guess |
+| 06 | [Verify in CI](https://github.com/mareforma/mareforma/tree/main/examples/06_ci_verify/) | `mareforma verify` as a GitHub Actions gate, keyed on exit codes |
 
 <hr>
 
-[`AGENTS.md`](AGENTS.md): execution contract and adapters &nbsp;·&nbsp;
-[`ARCHITECTURE.md`](ARCHITECTURE.md): system design &nbsp;·&nbsp;
-[`SECURITY.md`](SECURITY.md): threat model &nbsp;·&nbsp;
-[`CONTRIBUTING.md`](CONTRIBUTING.md): dev workflow &nbsp;·&nbsp;
-[`CHANGELOG.md`](CHANGELOG.md): releases
+[`AGENTS.md`](https://github.com/mareforma/mareforma/blob/main/AGENTS.md): execution contract and adapters &nbsp;·&nbsp;
+[`ARCHITECTURE.md`](https://github.com/mareforma/mareforma/blob/main/ARCHITECTURE.md): system design &nbsp;·&nbsp;
+[`SECURITY.md`](https://github.com/mareforma/mareforma/blob/main/SECURITY.md): threat model &nbsp;·&nbsp;
+[`CONTRIBUTING.md`](https://github.com/mareforma/mareforma/blob/main/CONTRIBUTING.md): dev workflow &nbsp;·&nbsp;
+[`CHANGELOG.md`](https://github.com/mareforma/mareforma/blob/main/CHANGELOG.md): releases

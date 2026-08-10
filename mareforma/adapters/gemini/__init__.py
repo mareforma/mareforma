@@ -28,11 +28,12 @@ Co-Scientist debate transcripts, AlphaEvolve population-tree
 reconstruction, deterministic replay) are queued for v0.3.4+ when
 adoption signal warrants the surface area.
 
-Install: ``pip install mareforma[gemini]``.
+Ships with ``pip install mareforma``; needs no install extra.
 """
 
 from __future__ import annotations
 
+import re
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Mapping
 
@@ -115,6 +116,21 @@ _RESERVED_PAYLOAD_KEYS: frozenset[str] = frozenset({
 })
 
 
+# Payload keys that carry a digest of the bytes a downstream merge agent
+# compares. Shape-checked against the same SHA256 form the core enforces in
+# normalize_artifact_hash, so an arbitrary string cannot pass as a digest.
+_DIGEST_FIELDS: frozenset[str] = frozenset({
+    "input_problem_digest",
+    "code_variation_source_digest",
+    "final_hypothesis_text_digest",
+    "cell_value_digest",
+    "query_digest",
+    "result_digest",
+})
+
+_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
+
+
 def _sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Recursively apply sanitize_for_llm to every string in ``payload``.
 
@@ -141,18 +157,43 @@ def _sanitize_value(v: Any) -> Any:
     return v
 
 
+def _blank_fields(capability: str, sanitised: dict[str, Any]) -> list[str]:
+    """Return the required fields that hold nothing once sanitised.
+
+    Only strings and ``None`` can be empty here: a score of 0 and an empty
+    ``cited_paper_dois`` are both real answers. Sanitisation is what turns a
+    non-empty input into an empty one, so this runs after it.
+    """
+    return sorted(
+        f for f in REQUIRED_FIELDS[capability]
+        if sanitised[f] is None
+        or (isinstance(sanitised[f], str) and not sanitised[f].strip())
+    )
+
+
+def _malformed_digests(sanitised: dict[str, Any]) -> list[str]:
+    """Return the digest fields whose value is not a SHA256 digest."""
+    return sorted(
+        f for f in _DIGEST_FIELDS & set(sanitised)
+        if not isinstance(sanitised[f], str)
+        or not _DIGEST_RE.fullmatch(sanitised[f])
+    )
+
+
 class OutputIngester:
     """Read-only ingest of Gemini-for-Science capability outputs.
 
     Each ``ingest()`` call:
 
     1. Validates the capability against :data:`SUPPORTED_CAPABILITIES`.
-    2. Validates required fields against :data:`REQUIRED_FIELDS`.
-    3. Refuses payloads that try to set reserved keys (predicate_type,
+    2. Refuses payloads that try to set reserved keys (predicate_type,
        capability): those are adapter-owned.
+    3. Checks every field in :data:`REQUIRED_FIELDS` is present.
     4. Sanitises every string in the payload via
        :func:`mareforma.sanitize_for_llm`.
-    5. Asserts ONE INFERRED claim under the matching capability URI.
+    5. Refuses required fields sanitisation left blank, and digest
+       fields that do not read ``sha256:<64 hex>``.
+    6. Asserts ONE INFERRED claim under the matching capability URI.
 
     Claims are INFERRED by default: a Gemini output is a single
     source's claim, not a cross-host replication. Downstream code is
@@ -226,7 +267,11 @@ class OutputIngester:
                 "predicate_type and capability are adapter-owned"
             )
 
-        # Required-field validation BEFORE assert_claim runs.
+        # Required-field validation BEFORE assert_claim runs. Presence is
+        # read off the raw payload so an absent key stays distinguishable
+        # from one Gemini emitted blank; emptiness is read off the sanitised
+        # payload, since sanitisation is what can empty a value that arrived
+        # with content in it.
         missing = REQUIRED_FIELDS[capability] - set(payload)
         if missing:
             raise ValueError(
@@ -236,6 +281,21 @@ class OutputIngester:
             )
 
         sanitised = _sanitize_payload(payload)
+
+        blank = _blank_fields(capability, sanitised)
+        if blank:
+            raise ValueError(
+                f"capability {capability!r} was given blank values for "
+                f"{blank}; the fields are present but carry nothing to sign"
+            )
+
+        malformed = _malformed_digests(sanitised)
+        if malformed:
+            raise ValueError(
+                f"digest fields {malformed} must read 'sha256:' followed by "
+                "64 lowercase hex characters"
+            )
+
         uri = SUPPORTED_CAPABILITIES[capability]
         summary = sanitised.get("summary") or f"Gemini {capability} ingest"
 

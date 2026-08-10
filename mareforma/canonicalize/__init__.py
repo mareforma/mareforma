@@ -7,14 +7,16 @@ keys are sorted, no platform-dependent ``e+``/``e-`` variance.
 
 Specialty canonicalizers register themselves on first import of
 :mod:`mareforma.canonicalize.specialty` and cover RDKit canonical
-SMILES (with NFC fallback when ``rdkit`` is unavailable), FASTA
-sequence NFC + uppercase + strip, and PDB ATOM/HETATM serial-sorted.
+SMILES, a separately named SMILES NFC string form for hosts without
+``rdkit``, FASTA sequence NFC + uppercase (``fasta-nfc-v2`` also
+absorbs column wrap and line endings), and PDB ATOM/HETATM
+serial-sorted.
 """
 
 from __future__ import annotations
 
 import hashlib
-import math
+import re
 import threading
 from typing import Any, Callable
 
@@ -51,29 +53,17 @@ def canonicalize_default(value: Any) -> bytes:
     """Default JCS-shaped canonicalizer.
 
     Non-finite floats (``NaN``, ``Inf``) have no canonical JSON form
-    under RFC 8785; this raises :class:`CanonicalizationError` with a
-    diagnostic pointer rather than the bare ``rfc8785`` error.
+    under RFC 8785, and neither do non-string keys or types JSON cannot
+    hold; ``rfc8785`` rejects all of them, and this raises
+    :class:`CanonicalizationError` with a diagnostic pointer added.
     """
-    _check_finite(value)
     try:
         return rfc8785.dumps(value)
     except rfc8785.CanonicalizationError as exc:
-        raise CanonicalizationError(str(exc)) from exc
-
-
-def _check_finite(value: Any) -> None:
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise CanonicalizationError(
-                f"non-finite floats are not byte-stable; values must be "
-                f"finite (got {value!r})"
-            )
-    elif isinstance(value, dict):
-        for v in value.values():
-            _check_finite(v)
-    elif isinstance(value, (list, tuple)):
-        for v in value:
-            _check_finite(v)
+        raise CanonicalizationError(
+            f"{exc}; values must be finite and JSON-representable "
+            f"for a byte-stable form"
+        ) from exc
 
 
 _REGISTRY: dict[str, Callable[[Any], bytes]] = {
@@ -86,21 +76,39 @@ _REGISTRY: dict[str, Callable[[Any], bytes]] = {
 # dict from another thread.
 _LOCK = threading.Lock()
 
+# ASCII-only by pattern: str.isalnum() accepts any Unicode alphanumeric,
+# which would let a Cyrillic homoglyph of a real form name be registered
+# and persisted in result_canonical_form.
+_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
 
-def register_canonicalizer(name: str, fn: Callable[[Any], bytes]) -> None:
+
+def register_canonicalizer(
+    name: str, fn: Callable[[Any], bytes], *, override: bool = False,
+) -> None:
     """Register a specialty canonicalizer under ``name``.
 
     Names must be non-empty and contain only ASCII letters, digits,
     hyphens, or underscores. The name ends up in a claim's
     ``result_canonical_form`` field so replay can pick the matching
     canonicalizer.
+
+    A name that is already registered is refused: the same name must mean
+    the same bytes in the producing process and in the verifying one, and
+    two modules colliding on a generic form name would otherwise resolve
+    by import order and surface at replay as a digest mismatch. Pass
+    ``override=True`` to replace a registration deliberately.
     """
-    if not name or not name.replace("-", "").replace("_", "").isalnum():
+    if not _NAME_RE.fullmatch(name):
         raise ValueError(
             "canonicalizer name must be non-empty kebab-case or "
-            "underscored alphanumeric"
+            "underscored ASCII alphanumeric"
         )
     with _LOCK:
+        if name in _REGISTRY and not override:
+            raise ValueError(
+                f"canonicalizer form {name!r} is already registered; "
+                "pass override=True to replace it"
+            )
         _REGISTRY[name] = fn
 
 
@@ -156,7 +164,8 @@ register_canonicalizer(DSSE_JCS_NFC_V1, _canonicalize_dsse_jcs_nfc_v1)
 
 
 # Auto-import specialty canonicalizers so the documented forms
-# (rdkit-canonical-smiles-v1, fasta-nfc-v1, pdb-atom-sorted-v1) are
+# (rdkit-canonical-smiles-v1, smiles-nfc-fallback-v1, fasta-nfc-v1,
+# fasta-nfc-v2, pdb-atom-sorted-v1, pdb-atom-sorted-v2) are
 # available the moment `mareforma.canonicalize` is imported. Without
 # this the docstring promise — "specialty canonicalizers register
 # themselves" — is false: users have to discover the submodule import.

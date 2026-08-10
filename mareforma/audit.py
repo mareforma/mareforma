@@ -28,7 +28,11 @@ and the signature attests the auditor's observation, not the target's honesty.
 Corpus mode iterates run specs with one fresh interpreter per run, a target
 cannot poison the observation of the next, and is resumable: a run is skipped
 on re-invocation only when its record is complete AND verifies against the
-auditor's key, so state a target planted on disk cannot mark a run done.
+auditor's key. The key never enters a child. Children hand their records to
+the parent over an anonymous pipe, keyed with a nonce they send before the
+target starts, and the parent signs those, so a target can neither reach the
+key through the frame stack nor rewrite what the auditor signs on its way
+out, in the run directory or on the channel itself.
 """
 from __future__ import annotations
 
@@ -39,7 +43,7 @@ import subprocess
 import sys
 import traceback
 from pathlib import Path
-from typing import Callable
+from typing import BinaryIO, Callable, Iterator
 
 import click
 
@@ -52,6 +56,33 @@ from mareforma.diagnose import _exit_code_of, _run_target
 RECEIPTS_FILE = "receipts.jsonl"
 RUN_RECORD_FILE = "run.json"
 ENVELOPES_DIR = "envelopes"
+
+# How a corpus child hands its records back to the parent that signs them: the
+# number of the write end of an anonymous pipe the parent opened before the
+# child started. The run directory cannot carry them, the audited target can
+# write there, and does so after the observer has finished; nor can a file,
+# the target can name any path and rewrite it on its way out.
+HANDOFF_FD_ENV = "MAREFORMA_AUDIT_HANDOFF_FD"
+
+# Reading that channel back. The nonce goes out on its own line before the
+# target starts, so it is the only thing on the stream at that point and a
+# short bound covers it. Everything after it is read in chunks: the target
+# shares the descriptor and owes it no terminator, so the observer's frame is
+# found by scanning rather than by line, and what is scanned past is discarded
+# as it goes. The frame cap only limits how much is held once the nonce marker
+# has already matched, which the target cannot make happen.
+_HANDOFF_NONCE_MAX = 64
+_HANDOFF_CHUNK = 1 << 16
+_HANDOFF_FRAME_MAX = 1 << 26
+
+# The fields a run record carries, the record built in :func:`run_audit`. The
+# parent signs what a child hands over, so it accepts exactly these: a key the
+# parent does not know is a key the observer did not write, and it must not
+# ride into a signed record. A field added to the record is added here too.
+RUN_RECORD_KEYS = frozenset({
+    "target", "exit_code", "partial", "findings", "reads", "seams",
+    "coverage", "completed", "traceback",
+})
 
 
 def load_findings(path: Path) -> dict[str, tuple[str, ...]]:
@@ -105,14 +136,16 @@ def _finding_verdict(scope, cited: tuple[str, ...]):
     """One finding's verdict from the shared observed evidence.
 
     Classification is pure and should not raise, but if it ever does the
-    receipt degrades to an honest OPAQUE rather than losing the finding , 
-    the same posture as the ``observe()`` teardown.
+    receipt degrades to an honest OPAQUE rather than losing the finding.
+    ``KeyboardInterrupt`` and ``SystemExit`` propagate: this loop runs after
+    the scope has closed, so an abort the operator asked for must end the
+    audit, not turn one finding OPAQUE and write the records anyway.
     """
     from mareforma.observe import GroundingVerdict, ObservedGrounding
 
     try:
         return scope.classify_against(cited)
-    except BaseException as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         return GroundingVerdict(
             grounding=ObservedGrounding.OPAQUE,
             reason=(
@@ -204,19 +237,32 @@ def run_audit(
     key_path,
     as_json: bool,
     redact_home: "Callable[[str], str] | None" = None,
+    defer_signing: bool = False,
 ) -> int:
     """Run COMMAND under the observer and emit per-finding signed receipts.
 
     Returns the target's own exit code, like diagnose: the audit succeeding is
     signalled by the receipts on disk, not by masking what the target did.
+
+    With *defer_signing* no key is loaded and the outputs land unsigned: this
+    is the corpus-child protocol, where the parent signs after the child exits
+    so the auditor's key never shares an interpreter with a target. The records
+    also go back to the parent on the handoff descriptor, which is what the
+    parent signs.
     """
     from mareforma import signing
     from mareforma.observe import _loaders, _scope
     from mareforma.observe._audit import ensure_installed as _ensure_hook
     from mareforma.observe._citation import cited_set
 
-    key_file = _resolve_key(key_path)
-    signer = signing.load_private_key(key_file)
+    # Opened before the target runs, so the nonce the parent keys on is on the
+    # channel before the target could write anything to it. Dropping the
+    # variable does not hide the descriptor, /proc still shows it, the nonce is
+    # what tells the parent which bytes are the observer's.
+    handoff = _open_handoff(os.environ.pop(HANDOFF_FD_ENV, None))
+    signer = None
+    if not defer_signing:
+        signer = signing.load_private_key(_resolve_key(key_path))
     findings = load_findings(Path(findings_path))
     # Resolved to an absolute path BEFORE the target runs: the target executes
     # in-process and may chdir, and where the receipts land must stay the
@@ -249,11 +295,16 @@ def run_audit(
             # Bad invocation of audit itself, re-raise so click reports it.
             raise
         except SystemExit as exc:
+            # A non-zero exit is an aborted run, the same event as a raised
+            # exception; only a clean sys.exit(0) leaves the run complete.
             exit_code = _exit_code_of(exc)
+            crashed = exit_code != 0
         except BaseException:  # noqa: BLE001, a target crash is expected input
             crashed = True
             exit_code = 1
             tb_text = traceback.format_exc()
+        if crashed:
+            _scope.record_abort(exit_code)
     finally:
         _scope.exit(scope)
 
@@ -271,25 +322,25 @@ def run_audit(
             "partial": crashed,
         })
 
-    env_dir = out / ENVELOPES_DIR
-    env_dir.mkdir(parents=True, exist_ok=True)
-    with (out / RECEIPTS_FILE).open("w", encoding="utf-8") as fh:
-        for rec in records:
-            fh.write(json.dumps(rec, sort_keys=True) + "\n")
-    for i, rec in enumerate(records, start=1):
-        envelope = signing.sign_audit_receipt(rec, signer)
-        name = f"{i:03d}-{_safe_name(rec['finding_id'])}.json"
-        (env_dir / name).write_text(
-            json.dumps(envelope, indent=2) + "\n", encoding="utf-8"
-        )
+    out.mkdir(parents=True, exist_ok=True)
+    # The envelopes are these same verdicts signed, so the directory gets the
+    # same truncation receipts.jsonl gets. Re-auditing into a used --out would
+    # otherwise leave an earlier run's envelopes beside the current ones, still
+    # signed and still verifying, with nothing on disk saying which run is
+    # current. Unconditional: deferred signing writes no envelopes, and a stale
+    # set surviving an unsigned run is the same mixed evidence.
+    for stale in (out / ENVELOPES_DIR).glob("*.json"):
+        stale.unlink()
+    _write_receipts(out / RECEIPTS_FILE, records)
+    if signer is not None:
+        _write_receipt_envelopes(out / ENVELOPES_DIR, records, signer)
 
     reads = [
         {"kind": r.kind, "identifier": r.identifier, "nonempty": r.nonempty}
         for r in scope.reads
     ]
     seams = [{"kind": s.kind, "detail": s.detail} for s in scope.seams]
-    reads_seen = sum(1 for r in scope.reads if r.kind == "file")
-    opens_detected = len(scope.opens)
+    reads_seen, opens_detected = scope.coverage_counts()
     run_record = {
         "target": list(command),
         "exit_code": exit_code,
@@ -308,14 +359,21 @@ def run_audit(
     }
     if tb_text:
         run_record["traceback"] = tb_text
-    # The run record lands last, signed: its ``completed`` flag is the resume
-    # key, so a run killed mid-write never reads as complete, and resume honors
-    # the flag only inside an envelope the auditor's key verifies, the record
-    # sits where the audited target could write.
+    # The run record lands last: its ``completed`` flag is the resume key, so a
+    # run killed mid-write never reads as complete. Signed here on the direct
+    # path, left unsigned for the corpus parent to sign when deferring, and
+    # resume honors the flag only inside an envelope the auditor's key
+    # verifies, the record sits where the audited target could write.
     (out / RUN_RECORD_FILE).write_text(
-        json.dumps(signing.sign_audit_run(run_record, signer), indent=2) + "\n",
+        json.dumps(
+            run_record if signer is None
+            else signing.sign_audit_run(run_record, signer),
+            indent=2,
+        ) + "\n",
         encoding="utf-8",
     )
+    if handoff is not None:
+        handoff.emit(run_record, records)
 
     verdict_lines = [
         {"finding_id": r["finding_id"], "grounding": r["grounding"],
@@ -334,6 +392,67 @@ def run_audit(
             click.echo(tb_text, err=True, nl=False)
         _echo_summary(run_record, verdict_lines, out, redact_home)
     return exit_code
+
+
+def _write_receipts(path: Path, records: list[dict]) -> None:
+    """Write one plain verdict receipt per line."""
+    with path.open("w", encoding="utf-8") as fh:
+        for rec in records:
+            fh.write(json.dumps(rec, sort_keys=True) + "\n")
+
+
+def _open_handoff(fd_text: "str | None") -> "_ChildHandoff | None":
+    """The handoff channel the corpus parent opened for this child, if any."""
+    return None if fd_text is None else _ChildHandoff(int(fd_text))
+
+
+class _ChildHandoff:
+    """A corpus child's end of the handoff pipe: nonce first, records once.
+
+    The pipe is anonymous, so there is no path the audited target can name and
+    rewrite, the way it can rewrite the run directory. The nonce goes out
+    before the target starts and the parent accepts only a frame carrying it,
+    so what the target writes to the descriptor once it is running, while it
+    runs or from the ``atexit`` hook that fires after the observer has closed,
+    reads as noise rather than as the observer's records. The nonce is what
+    marks the frame, not where the frame falls on the stream: the target
+    shares the descriptor and can leave its own bytes unterminated in front of
+    the frame, and none of that is its decision to make. The frame ends at a
+    newline, which the JSON body cannot contain, so a partial write from a
+    killed child lacks the terminator and reads as nothing handed over.
+
+    A target that reads the nonce out of this object can still forge a frame,
+    the same in-process reach that lets it fabricate the reads themselves.
+    """
+
+    def __init__(self, fd: int) -> None:
+        self._fh = os.fdopen(fd, "wb")
+        self._nonce = os.urandom(16).hex()
+        self._write(self._nonce)
+
+    def emit(self, run_record: dict, records: list[dict]) -> None:
+        """Hand the records over and close the channel."""
+        self._write(self._nonce + " " + json.dumps(
+            {"run_record": run_record, "receipts": records}
+        ))
+        self._fh.close()
+
+    def _write(self, line: str) -> None:
+        self._fh.write(line.encode("utf-8") + b"\n")
+        self._fh.flush()
+
+
+def _write_receipt_envelopes(env_dir: Path, records: list[dict], signer) -> None:
+    """DSSE-sign each receipt into ``envelopes/<n>-<finding_id>.json``."""
+    from mareforma import signing
+
+    env_dir.mkdir(parents=True, exist_ok=True)
+    for i, rec in enumerate(records, start=1):
+        name = f"{i:03d}-{_safe_name(rec['finding_id'])}.json"
+        (env_dir / name).write_text(
+            json.dumps(signing.sign_audit_receipt(rec, signer), indent=2) + "\n",
+            encoding="utf-8",
+        )
 
 
 def _echo_summary(run_record: dict, verdicts: list[dict], out: Path,
@@ -371,9 +490,10 @@ def _run_completed(run_dir: Path, public_key) -> bool:
 
     The record sits where an audited target could write, so the ``completed``
     flag is honored only inside a run-record envelope that verifies against
-    the auditor's key. A plain, unsigned, or unverifiable ``run.json``, the
-    state a hostile run A could plant in run B's directory, reads as not
-    complete, and the run re-executes.
+    the auditor's key. That key never enters a process that runs a target
+    (:func:`_sign_run_outputs` signs here, in the parent, after the child
+    exits), so a hostile run A cannot mint the signature run B's record needs:
+    whatever it plants reads as not complete and the run re-executes.
     """
     import base64
 
@@ -419,23 +539,30 @@ def _load_spec(spec_path: Path) -> dict:
     return spec
 
 
-def _execute_run(spec: dict, run_dir: Path, key_path: Path) -> int:
+def _execute_run(spec: dict, run_dir: Path) -> tuple[int, "dict | None"]:
     """Run one corpus spec in a fresh interpreter (the per-run isolation).
 
     A fresh process guarantees one target cannot poison the observation of the
     next: no shared module cache, no leaked global state, no half-crashed
-    interpreter. The child is the single-run audit path, so its record and
-    receipts are identical to a direct invocation, and its exit code is the
-    target's own. The child's stderr (the target's traceback on a crash) is
-    persisted next to the record so nothing is swallowed.
+    interpreter. The child gets no signing key and hands its records back on a
+    pipe this process opened, so a target can neither reach the key through
+    the frame stack nor rewrite the records after the observer wrote them. The
+    child's exit code is the target's own, and its stderr (the target's
+    traceback on a crash) is persisted next to the record so nothing is
+    swallowed.
+
+    Returns the child's exit code and the records it handed over, or ``None``
+    when it handed over nothing usable.
     """
+    from concurrent.futures import ThreadPoolExecutor
+
     import mareforma
 
     cmd = [
         sys.executable, "-m", "mareforma", "audit",
         "--findings", str(run_dir / "findings.json"),
         "--out", str(run_dir),
-        "--key", str(key_path),
+        "--defer-signing",
         "--", *spec["command"],
     ]
     env = dict(os.environ)
@@ -446,10 +573,178 @@ def _execute_run(spec: dict, run_dir: Path, key_path: Path) -> int:
         pkg_root + os.pathsep + env["PYTHONPATH"]
         if env.get("PYTHONPATH") else pkg_root
     )
-    proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
-    if proc.stderr:
-        (run_dir / "stderr.txt").write_text(proc.stderr, encoding="utf-8")
-    return proc.returncode
+    # An anonymous pipe rather than a temp file: the target runs in-process in
+    # the child and can reopen any path it can name, so a file leaves the
+    # records rewritable after the observer wrote them. The parent drains the
+    # pipe while the child runs, a buffer deep enough to hold the records is
+    # not something either side can promise.
+    read_fd, write_fd = os.pipe()
+    env[HANDOFF_FD_ENV] = str(write_fd)
+    try:
+        proc = subprocess.Popen(
+            cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, pass_fds=(write_fd,),
+        )
+    except BaseException:
+        os.close(read_fd)
+        raise
+    finally:
+        # The child holds the only write end from here, so the read end sees
+        # EOF when it exits however it exits.
+        os.close(write_fd)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        reading = pool.submit(_read_handoff, read_fd)
+        try:
+            _, stderr = proc.communicate()
+        except BaseException:
+            # An interrupt leaves the child running and the reader waiting on
+            # EOF that would never come.
+            proc.kill()
+            proc.wait()
+            raise
+        handoff = reading.result()
+    if stderr:
+        (run_dir / "stderr.txt").write_text(stderr, encoding="utf-8")
+    return proc.returncode, handoff
+
+
+def _read_handoff(fd: int) -> "dict | None":
+    """The records a child handed over, or ``None`` if it handed none.
+
+    The child writes its nonce before the target runs and then one frame
+    carrying it; everything else on the pipe was written by the audited
+    target, which does not know the nonce, and is discarded. Reading runs to
+    EOF either way: the target shares the descriptor, and a write of its own
+    left blocking on a full pipe would keep the child from exiting.
+
+    Where the frame sits is not the target's to decide. It shares the
+    descriptor and owes it no terminator, so its last bytes can run straight
+    into the front of the frame; keying on the frame starting a line would let
+    any target suppress its own record, fail the run closed, and repeat that
+    on every re-invocation. The nonce marker is found wherever it lands.
+
+    A child killed before it wrote leaves the channel empty or a frame without
+    its terminator; that reads as nothing handed over, the run stays unsigned,
+    and resume re-executes it.
+    """
+    handoff = None
+    with os.fdopen(fd, "rb") as fh:
+        nonce = fh.readline(_HANDOFF_NONCE_MAX)
+        if nonce.endswith(b"\n"):
+            for frame in _handoff_frames(fh, nonce[:-1] + b" "):
+                # The observer emits once, after the target has finished
+                # running, so its frame is the last marked one on the channel;
+                # anything marked ahead of it was there while the target still
+                # held the descriptor. Later wins, and a frame that does not
+                # parse leaves the last one that did in place.
+                handoff = _parse_handoff(frame) or handoff
+    return handoff
+
+
+def _handoff_frames(fh: BinaryIO, marker: bytes) -> Iterator[bytes]:
+    """Yield the body of each terminated frame carrying *marker*, in order.
+
+    Scanning, not line reading: the marker is matched wherever it appears and
+    the bytes ahead of it are dropped as they are read, so a target writing
+    without a terminator cannot grow this buffer. Only what follows a matched
+    marker is held, and only up to :data:`_HANDOFF_FRAME_MAX`; past that the
+    match is abandoned and scanning resumes, since the observer's frame is one
+    flushed write and does not arrive that far from its terminator.
+    """
+    # Held back on every discard: a marker split across two reads is still
+    # whole in the join. A one-byte marker would make this zero, and ``[-0:]``
+    # keeps everything, so the empty case is spelled out.
+    tail = len(marker) - 1
+    keep = (lambda buf: buf[-tail:]) if tail else (lambda buf: b"")
+    buf = b""
+    framing = False
+    while True:
+        chunk = fh.read(_HANDOFF_CHUNK)
+        if not chunk:
+            return
+        buf += chunk
+        while True:
+            if not framing:
+                at = buf.find(marker)
+                if at < 0:
+                    buf = keep(buf)
+                    break
+                buf = buf[at + len(marker):]
+                framing = True
+            end = buf.find(b"\n")
+            if end < 0:
+                if len(buf) > _HANDOFF_FRAME_MAX:
+                    buf, framing = keep(buf), False
+                    continue
+                break
+            yield buf[:end]
+            buf = buf[end + 1:]
+            framing = False
+
+
+def _parse_handoff(frame: bytes) -> "dict | None":
+    """The records inside a handoff frame, or ``None`` if it is not one.
+
+    The parent signs this, so the shape is checked rather than trusted: keys
+    it does not know are a refusal, at the top level and in the run record it
+    signs whole, so nothing the child composed beyond the record it observed
+    can ride into a signature.
+    """
+    try:
+        handoff = json.loads(frame)
+    except ValueError:
+        return None
+    if (
+        not isinstance(handoff, dict)
+        or set(handoff) != {"run_record", "receipts"}
+        or not isinstance(handoff["run_record"], dict)
+        or not isinstance(handoff["receipts"], list)
+        or not set(handoff["run_record"]) <= RUN_RECORD_KEYS
+    ):
+        return None
+    return handoff
+
+
+def _clear_run_outputs(run_dir: Path) -> None:
+    """Delete a run's records before it executes.
+
+    What sits there is either a killed earlier attempt or state another run's
+    target planted. Clearing first means a run that never finishes leaves no
+    earlier records behind to read as its own.
+    """
+    import shutil
+
+    for name in (RUN_RECORD_FILE, RECEIPTS_FILE):
+        (run_dir / name).unlink(missing_ok=True)
+    shutil.rmtree(run_dir / ENVELOPES_DIR, ignore_errors=True)
+
+
+def _sign_run_outputs(run_dir: Path, handoff: "dict | None", signer) -> None:
+    """Sign what the child handed over, here in the parent, and write it out.
+
+    The child observed the target in its own interpreter and passed its
+    records back on the handoff descriptor. Signing after it exits keeps the
+    auditor's key out of every process that runs untrusted code, so no target
+    can produce a signature another run's resume check would accept. The run
+    directory is not the channel: the target executes in-process in the child
+    and can rewrite those files on its way out, so the parent overwrites them
+    from the handoff rather than reading them back. A child that handed
+    nothing over leaves the run unsigned, which reads as not complete and
+    re-runs.
+    """
+    from mareforma import signing
+
+    if handoff is None:
+        return
+    receipts = handoff["receipts"]
+    _write_receipts(run_dir / RECEIPTS_FILE, receipts)
+    _write_receipt_envelopes(run_dir / ENVELOPES_DIR, receipts, signer)
+    (run_dir / RUN_RECORD_FILE).write_text(
+        json.dumps(
+            signing.sign_audit_run(handoff["run_record"], signer), indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
 
 
 def run_corpus(corpus_dir, *, out_dir, key_path) -> int:
@@ -469,10 +764,11 @@ def run_corpus(corpus_dir, *, out_dir, key_path) -> int:
     # Resolved once, up front: every run directory hangs off the invocation's
     # own out dir, whatever any child target does to its working directory.
     out = Path(out_dir).resolve()
-    key_file = _resolve_key(key_path)
-    # The child signs each run record with this key; its public half is what
+    # The key stays in this process, which never runs a target: children emit
+    # unsigned records and the parent signs them. Its public half is what
     # resume trusts when deciding a run is already complete.
-    public_key = signing.load_private_key(key_file).public_key()
+    signer = signing.load_private_key(_resolve_key(key_path))
+    public_key = signer.public_key()
 
     failed: list[str] = []
     for spec_path in specs:
@@ -483,10 +779,12 @@ def run_corpus(corpus_dir, *, out_dir, key_path) -> int:
             continue
         spec = _load_spec(spec_path)
         run_dir.mkdir(parents=True, exist_ok=True)
+        _clear_run_outputs(run_dir)
         (run_dir / "findings.json").write_text(
             json.dumps(spec["findings"], sort_keys=True), encoding="utf-8"
         )
-        rc = _execute_run(spec, run_dir, key_file)
+        rc, handoff = _execute_run(spec, run_dir)
+        _sign_run_outputs(run_dir, handoff, signer)
         if _run_completed(run_dir, public_key):
             click.echo(f"  run {run_id}: target exit {rc}, receipts written")
         else:

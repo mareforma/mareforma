@@ -15,6 +15,7 @@ importable at this level after the split: the submodule layout is an
 internal organisation, not a public API change.
 """
 
+from .._urlguard import _LOOPBACK_DNS_NAMES
 from .core import (
     # Payload-type constants.
     PAYLOAD_TYPE_CLAIM,
@@ -29,7 +30,12 @@ from .core import (
     _ENROLLMENT_FIELDS,
     _VALIDATION_FIELDS,
     _SEED_FIELDS,
-    _PROJECT_POLICY_FIELDS,
+    _PROJECT_POLICY_FIELDS_V1,
+    _PROJECT_POLICY_FIELDS_V2,
+    _PROJECT_POLICY_FIELDS_V3,
+    _PROJECT_POLICY_FIELDS_BY_VERSION,
+    _PROJECT_POLICY_VERSION,
+    _project_policy_fields,
     VALID_CLAIM_ROLES,
     # Exceptions.
     SigningError,
@@ -39,6 +45,7 @@ from .core import (
     # Key management.
     default_key_path,
     generate_keypair,
+    _fsync_parent,
     save_private_key,
     load_private_key,
     public_key_id,
@@ -70,8 +77,6 @@ from .rekor import (
     _REKOR_TIMEOUT,
     _REKOR_USER_AGENT,
     _MAX_REKOR_RESPONSE_SIZE,
-    _NUMERIC_HOSTNAME_RE,
-    _LOOPBACK_DNS_NAMES,
     _RFC6962_LEAF_PREFIX,
     _RFC6962_NODE_PREFIX,
     _UUID_HEX_RE,
@@ -89,6 +94,7 @@ from .rekor import (
     compute_rekor_leaf_hash,
     parse_rekor_checkpoint,
     verify_rekor_checkpoint,
+    rekor_entry_binds_to_envelope,
     verify_rekor_inclusion,
     _verify_with_pubkey,
     # Fetchers.
@@ -152,6 +158,7 @@ __all__ = [
     "compute_rekor_leaf_hash",
     "parse_rekor_checkpoint",
     "verify_rekor_checkpoint",
+    "rekor_entry_binds_to_envelope",
     "verify_rekor_inclusion",
     # Fetchers.
     "fetch_inclusion_proof",

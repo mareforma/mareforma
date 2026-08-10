@@ -1,20 +1,21 @@
 """
-examples/01_api_walkthrough.py, Full EpistemicGraph API walkthrough.
+01_api_walkthrough.py, Full EpistemicGraph API walkthrough.
 
 Run:
-    python examples/01_api_walkthrough.py
+    python 01_api_walkthrough.py
 
 No external dependencies. Uses a temporary directory, safe to run anywhere.
 
 Sections
 --------
-  1. Open           zero setup, context manager
-  2. Assert         INFERRED, ANALYTICAL, DERIVED
-  3. Query          text, min_support, classification, limit
-  4. Idempotency    retry-safe writes and convergence convention
-  5. REPLICATED     automatic when two independent agents converge
-  6. ESTABLISHED    human validation, requires REPLICATED first
-  7. Anti-patterns  what breaks the epistemic model silently
+  1. Open                  zero setup, context manager
+  2. Assert                INFERRED, ANALYTICAL, DERIVED
+  3. Query                 text, min_support, classification, limit
+  4. Idempotency           retry-safe writes
+  5. REPLICATED            automatic when two independent agents converge
+  6. ESTABLISHED           human validation, requires REPLICATED first
+  7. Operational surfaces  health(), classify_supports()
+  8. Anti-patterns         what breaks the epistemic model silently
 """
 
 import tempfile
@@ -154,10 +155,11 @@ show("first call", id_a[:8] + "…")
 show("second call", id_b[:8] + "…")
 show("same id?", id_a == id_b)
 
-# Structured keys are also a convergence convention.
-# Two agents using "cell_A_inhibitory_dominance" as their key
-# will converge on the same claim-id even with different text phrasing,
-# without needing explicit supports= links between them.
+# A key is retry safety, not convergence. A replay carrying the same key with
+# any divergent semantic field (text, generated_by, supports, ...) raises
+# IdempotencyConflictError: merging two authors into one row would discard the
+# second contribution. Two agents converge by citing a shared ESTABLISHED
+# upstream in supports= under distinct signing keys.
 
 
 # ---------------------------------------------------------------------------

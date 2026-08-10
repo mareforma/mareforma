@@ -42,3 +42,25 @@ def test_contrasts_reached_by_line_id_index(tmp_path: Path) -> None:
         )
     finally:
         conn.close()
+
+
+def test_count_anchors_on_findings_via_idx_find_content(tmp_path: Path) -> None:
+    """The count enumerates from the signed findings on idx_find_content.
+
+    Anchoring on ``findings`` and LEFT JOINing downward is what keeps a finding
+    whose evidence rows were deleted visible to the per-finding digest check.
+    Losing ``idx_find_content`` here was measured at up to 2858x on a large
+    graph, so the plan is pinned: ``f`` must be searched through the content_id
+    index, not scanned.
+    """
+    conn = open_db(tmp_path)
+    try:
+        details = _plan(conn)
+        assert any(
+            "SEARCH f USING INDEX idx_find_content" in d for d in details
+        ), f"findings must be reached via idx_find_content: {details}"
+        assert not any(
+            "SCAN f" in d for d in details
+        ), f"findings must not be full-scanned: {details}"
+    finally:
+        conn.close()

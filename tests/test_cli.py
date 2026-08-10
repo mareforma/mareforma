@@ -57,6 +57,38 @@ class TestClaimAdd:
             result = runner.invoke(cli, ["claim", "add", "   "])
         assert result.exit_code == 1
 
+    def test_add_from_subdirectory_joins_the_parent_project(
+        self, tmp_path: Path,
+    ) -> None:
+        """Run from a subdirectory of a project, add must write to that
+        project, not split the graph by creating a nested one."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            runner.invoke(cli, ["claim", "add", "Parent claim"],
+                          catch_exceptions=False)
+            sub = Path(fs) / "sub" / "deeper"
+            sub.mkdir(parents=True)
+            os.chdir(sub)
+            result = runner.invoke(cli, ["claim", "add", "Child claim"],
+                                   catch_exceptions=False)
+            assert result.exit_code == 0, result.output
+            assert not (sub / ".mareforma").exists()
+            listed = runner.invoke(cli, ["claim", "list", "--json"],
+                                   catch_exceptions=False)
+        texts = {c["text"] for c in json.loads(listed.output)}
+        assert texts == {"Parent claim", "Child claim"}
+
+    def test_add_in_a_bare_directory_still_creates_the_project(
+        self, tmp_path: Path,
+    ) -> None:
+        """With no project at or above cwd, add is still the way to make one."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            result = runner.invoke(cli, ["claim", "add", "First claim"],
+                                   catch_exceptions=False)
+            assert result.exit_code == 0, result.output
+            assert (Path(fs) / ".mareforma" / "graph.db").exists()
+
 
 # ---------------------------------------------------------------------------
 # claim list
@@ -185,6 +217,26 @@ class TestClaimUpdate:
                 cli, ["claim", "update", "no-such-id", "--status", "contested"]
             )
         assert result.exit_code == 1
+
+    def test_update_from_subdirectory_updates_parent_claim(
+        self, tmp_path: Path,
+    ) -> None:
+        """Run from a subdirectory, update must walk up to the project it is
+        inside, not mint a nested one and fail to find the claim."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            claim_id = self._add_and_get_id(runner, "Parent claim to update")
+            sub = Path(fs) / "sub"
+            sub.mkdir()
+            os.chdir(sub)
+            result = runner.invoke(
+                cli, ["claim", "update", claim_id, "--status", "contested"],
+            )
+            assert result.exit_code == 0, result.output
+            assert not (sub / ".mareforma").exists()
+            show = runner.invoke(cli, ["claim", "show", claim_id, "--json"],
+                                 catch_exceptions=False)
+        assert json.loads(show.output)["status"] == "contested"
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +369,78 @@ class TestExport:
             )["subject"]
             assert len(subjects) == 1
 
+    def test_export_format_in_toto_writes_default_file(
+        self, tmp_path: Path,
+    ) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            runner.invoke(cli, ["claim", "add", "In-toto claim GHI"],
+                          catch_exceptions=False)
+            result = runner.invoke(cli, ["export", "--format=in-toto-v1"],
+                                   catch_exceptions=False)
+            assert result.exit_code == 0, result.output
+            written = Path(fs) / "mareforma-statement.json"
+            assert written.exists()
+            statement = json.loads(written.read_text())
+            assert statement["_type"] == "https://in-toto.io/Statement/v1"
+
+    def test_export_format_ro_crate_writes_default_file(
+        self, tmp_path: Path,
+    ) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            runner.invoke(cli, ["claim", "add", "RO-Crate claim JKL"],
+                          catch_exceptions=False)
+            result = runner.invoke(cli, ["export", "--format=ro-crate-1.2"],
+                                   catch_exceptions=False)
+            assert result.exit_code == 0, result.output
+            written = Path(fs) / "ro-crate-metadata.json"
+            assert written.exists()
+            assert "@graph" in json.loads(written.read_text())
+
+    def test_export_format_prov_o_writes_default_file(
+        self, tmp_path: Path,
+    ) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            runner.invoke(cli, ["claim", "add", "PROV-O claim MNO"],
+                          catch_exceptions=False)
+            result = runner.invoke(cli, ["export", "--format=prov-o"],
+                                   catch_exceptions=False)
+            assert result.exit_code == 0, result.output
+            written = Path(fs) / "mareforma-prov-o.jsonld"
+            assert written.exists()
+            assert "@graph" in json.loads(written.read_text())
+
+    def test_export_format_prov_o_json_prints_and_writes_nothing(
+        self, tmp_path: Path,
+    ) -> None:
+        """--json short-circuits before the file write for interop formats."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            runner.invoke(cli, ["claim", "add", "PROV-O claim PQR"],
+                          catch_exceptions=False)
+            result = runner.invoke(cli, ["export", "--format=prov-o", "--json"],
+                                   catch_exceptions=False)
+            assert result.exit_code == 0, result.output
+            assert "@graph" in json.loads(result.output)
+            assert not (Path(fs) / "mareforma-prov-o.jsonld").exists()
+
+    def test_export_bundle_with_format_exits_1(self, tmp_path: Path) -> None:
+        """--bundle signs an in-toto envelope, --format selects an unsigned
+        shape; asking for both must refuse rather than silently pick one."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            runner.invoke(cli, ["claim", "add", "Conflicting flags STU"],
+                          catch_exceptions=False)
+            result = runner.invoke(
+                cli, ["export", "--bundle", "--format=in-toto-v1"],
+            )
+            assert result.exit_code == 1
+            assert "mutually exclusive" in result.output
+            assert not (Path(fs) / "mareforma-bundle.json").exists()
+            assert not (Path(fs) / "mareforma-statement.json").exists()
+
 
 # ---------------------------------------------------------------------------
 # claim validate
@@ -403,6 +527,23 @@ class TestClaimValidate:
             result = runner.invoke(cli, ["claim", "validate", claim_id])
         assert result.exit_code == 1
         assert "REPLICATED" in result.output
+
+    def test_validate_from_subdirectory_promotes_the_parent_claim(
+        self, tmp_path: Path,
+    ) -> None:
+        """Run from a subdirectory, validate must promote the claim in the
+        project it is inside, not fail against a nested empty one."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
+            self._ensure_xdg_key()
+            _, rep_id = self._make_replicated_claim_id()
+            sub = Path(fs) / "sub"
+            sub.mkdir()
+            os.chdir(sub)
+            result = runner.invoke(cli, ["claim", "validate", rep_id])
+            assert result.exit_code == 0, result.output
+            assert not (sub / ".mareforma").exists()
+        assert "ESTABLISHED" in result.output
 
     def test_validate_with_validated_by(self, tmp_path: Path) -> None:
         runner = CliRunner()

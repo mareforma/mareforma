@@ -265,6 +265,16 @@ def test_probe_never_contacts_a_remote_host(monkeypatch):
     assert _loaders._probe_ollama_digest("https://api.openai.com/v1/chat", "m") is None
     assert calls == []  # never opened a connection for a remote host
 
+    # A host-less URL (what a base_url client hands down) is treated as the
+    # local server, so the probe target must still be loopback and never a
+    # hostname the allowlist check never saw.
+    from urllib.parse import urlsplit
+    _loaders._ollama_digest_cache.clear()
+    _loaders._probe_ollama_digest("/api/chat", "m")
+    assert calls  # a relative /api/ path does probe the local server
+    assert {urlsplit(req.full_url).hostname for req in calls} == {"localhost"}
+    _loaders._ollama_digest_cache.clear()
+
 
 def test_probe_does_not_follow_redirects_off_host():
     # Security regression guard for the REAL opener: it has no redirect handler,
@@ -311,3 +321,26 @@ def test_probe_does_not_follow_redirects_off_host():
         t.join(timeout=2)
     assert dig is None            # the 302 was not followed, so no digest
     assert "/followed" not in hits  # the redirect target was never contacted
+
+
+def test_base_url_model_call_probes_the_clients_own_server(monkeypatch, httpx_mock):
+    # A base_url client hands the seam a relative path. The digest probe must
+    # target that client's own local server, not the default-port one, which
+    # may be serving a different model.
+    import httpx
+    import mareforma.observe as obs
+    from mareforma.observe import _loaders
+
+    base = "http://127.0.0.1:14434"
+    httpx_mock.add_response(url=f"{base}/api/chat", json={})
+    probed: list[str] = []
+    monkeypatch.setattr(
+        _loaders, "_probe_ollama_digest",
+        lambda url, model_id: probed.append(url) or None,
+    )
+    client = httpx.Client(base_url=base)
+    with obs.observe():
+        client.post("/api/chat", json={"model": "qwen3:0.6b"})
+    client.close()
+    assert probed
+    assert {_loaders._ollama_server_base(url) for url in probed} == {base}

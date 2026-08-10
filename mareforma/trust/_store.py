@@ -7,16 +7,16 @@ keeps the graph object thin and keeps every trust query in one place.
 """
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import sqlite3
 import uuid
-from typing import Optional
+from pathlib import Path
+from typing import Iterable, Optional
 
 from mareforma._canonical import canonicalize
 
-from .bearing import Bearing, BearingDirection, compute_bearing
+from .bearing import Bearing, BearingDirection
 from .estimate import EffectEstimate, EvidenceLine
 from .prediction import Prediction
 from .proposition import Direction, Proposition
@@ -77,6 +77,18 @@ def register_proposition(conn: sqlite3.Connection, prop: Proposition, now: str) 
 
     Idempotent and concurrency-safe via ON CONFLICT DO NOTHING on the
     content_id primary key.
+
+    Scope is stored as the string TOKENS identity is computed over, not as the
+    caller's Python values. ``content_id`` hashes ``str(value)`` and ``text``
+    renders ``str(value)``, but ``json.dumps`` does not preserve every type it
+    accepts: a tuple comes back a list, a non-string key comes back a string.
+    A row written from such a proposition could not re-derive its own
+    ``content_id`` and did not render its own claim text, so the read path
+    dropped every finding under it and restore refused the operator's own
+    backup, on an untampered graph with no adversary anywhere. Writing the token
+    makes the row attest its own key by construction. Nothing moves for a
+    string-valued scope, which is every scope in the examples and the docs:
+    ``str(s) is s``, so the stored bytes are unchanged.
     """
     cid = prop.content_id()
     conn.execute(
@@ -92,7 +104,10 @@ def register_proposition(conn: sqlite3.Connection, prop: Proposition, now: str) 
             prop.relation,
             prop.object,
             prop.direction.value,
-            json.dumps(dict(prop.scope), sort_keys=True, ensure_ascii=False),
+            json.dumps(
+                {str(k): str(v) for k, v in prop.scope.items()},
+                sort_keys=True, ensure_ascii=False,
+            ),
             prop.magnitude,
             now,
         ),
@@ -105,17 +120,14 @@ def compute_plan_id(content_id: str, prediction: Prediction) -> str:
 
     The plan_id is the identity of a decision *rule*: it hashes the gate-bearing
     fields (test_type, direction_of_interest, the equivalence margins, alpha,
-    inference_regime) bound to a proposition. ``preregistered`` is deliberately
-    EXCLUDED: it is provenance metadata about how the row was created (a real
-    pre-registration vs a one-shot synthesised by ``assert_finding``), not part
-    of the rule's identity. Two callers asserting the same rule must land on the
-    same plan_id whether or not either flagged it pre-registered, so a finding
-    can bind to a pre-registered plan regardless of the flag. Pure function: no
-    DB read, deterministic across hosts (RFC 8785 bytes).
+    inference_regime) bound to a proposition. ``preregistered`` is not among
+    them: it is provenance the store owns (a real pre-registration vs a one-shot
+    synthesised by ``assert_finding``), not part of the rule's identity, so a
+    finding binds to a pre-registered plan regardless of how the row was made.
+    Pure function: no DB read, deterministic across hosts (RFC 8785 bytes).
     """
-    ident = {k: v for k, v in prediction.to_dict().items() if k != "preregistered"}
     return hashlib.sha256(
-        canonicalize({"content_id": content_id, **ident})
+        canonicalize({"content_id": content_id, **prediction.to_dict()})
     ).hexdigest()
 
 
@@ -222,6 +234,225 @@ def register_plan(
         ),
     )
     return plan_id
+
+
+def prediction_from_row(row) -> Prediction:
+    """Rebuild the decision rule a stored ``predictions`` row (or join) carries.
+
+    The one place the persisted columns become a :class:`Prediction` again:
+    the read path gates every line through it, and the retirement path asks it
+    whether a plan's rule can still be run at all. It applies the live write-time
+    invariants, so a row a release with a wider bound wrote (an alpha at or above
+    0.5, which no gate can discriminate at) raises here rather than gating at a
+    rule that decides nothing. :meth:`mareforma.EpistemicGraph.retire_plan` is
+    the supported way out of that state.
+    """
+    return Prediction(
+        test_type=row["test_type"],
+        alpha=row["alpha"],
+        direction_of_interest=row["direction_of_interest"],
+        equivalence_lower=row["equivalence_lower"],
+        equivalence_upper=row["equivalence_upper"],
+        inference_regime=row["inference_regime"],
+    )
+
+
+def replacement_prediction(row, alpha: float) -> Prediction:
+    """The retired row's rule, repeated at *alpha*.
+
+    Only the alpha moves. Everything the gate reads to decide direction
+    (``test_type``, ``direction_of_interest``, the equivalence margins, the
+    regime) is carried over from the registration, so a repair cannot re-choose
+    the rule once the numbers are known: an operator who could also flip
+    ``direction_of_interest`` would be picking the side of the null that the
+    results already landed on.
+    """
+    return Prediction(
+        test_type=row["test_type"],
+        alpha=alpha,
+        direction_of_interest=row["direction_of_interest"],
+        equivalence_lower=row["equivalence_lower"],
+        equivalence_upper=row["equivalence_upper"],
+        inference_regime=row["inference_regime"],
+    )
+
+
+def get_plan_row(conn: sqlite3.Connection, plan_id: str) -> Optional[sqlite3.Row]:
+    """The full ``predictions`` row for *plan_id*, or None."""
+    return conn.execute(
+        "SELECT * FROM predictions WHERE plan_id = ?", (plan_id,)
+    ).fetchone()
+
+
+def plan_id_from_row(content_id: str, row) -> str:
+    """The plan_id a stored ``predictions`` row's rule hashes to.
+
+    :func:`compute_plan_id` needs a :class:`Prediction`, and a row whose rule no
+    gate can run cannot be built into one, which is exactly the row that needs
+    checking: a writer makes a plan un-runnable to send its lines into
+    retirement resolution. This hashes the same canonical shape
+    ``Prediction.to_dict`` produces, straight from the columns, so an
+    un-runnable row can still be held to the plan_id keying it.
+    """
+    return hashlib.sha256(
+        canonicalize({
+            "content_id": content_id,
+            "test_type": row["test_type"],
+            "alpha": row["alpha"],
+            "direction_of_interest": row["direction_of_interest"],
+            "equivalence_lower": row["equivalence_lower"],
+            "equivalence_upper": row["equivalence_upper"],
+            "inference_regime": row["inference_regime"],
+        })
+    ).hexdigest()
+
+
+def plan_retirement(
+    conn: sqlite3.Connection, plan_id: str
+) -> Optional[sqlite3.Row]:
+    """The retirement record for *plan_id*, or None if the plan is live."""
+    return conn.execute(
+        "SELECT * FROM plan_retirements WHERE plan_id = ?", (plan_id,)
+    ).fetchone()
+
+
+def plan_estimates(conn: sqlite3.Connection, plan_id: str) -> list[sqlite3.Row]:
+    """Every stored effect estimate on an evidence line under *plan_id*."""
+    return conn.execute(
+        "SELECT est.estimate_value, est.effect_type, est.scale, est.p_value, "
+        " est.ci_lower, est.ci_upper, est.ci_level, est.n_total "
+        "FROM findings f "
+        "JOIN evidence_lines el ON el.finding_id = f.finding_id "
+        "JOIN contrasts c ON c.line_id = el.line_id "
+        "JOIN effect_estimates est ON est.contrast_id = c.contrast_id "
+        "WHERE f.plan_id = ?",
+        (plan_id,),
+    ).fetchall()
+
+
+def estimate_from_row(row) -> EffectEstimate:
+    """Rebuild the stored estimate a gate reads from a persisted row."""
+    return EffectEstimate(
+        estimate_value=row["estimate_value"],
+        effect_type=row["effect_type"],
+        scale=row["scale"],
+        p_value=row["p_value"],
+        ci_lower=row["ci_lower"],
+        ci_upper=row["ci_upper"],
+        ci_level=row["ci_level"],
+        n_total=row["n_total"],
+    )
+
+
+def estimates_digest(triples: "Iterable[tuple[str, str, dict]]") -> str:
+    """Digest over a finding's ``(data_id, control_type, estimate)`` content.
+
+    A finding binds this into its claim's signed record so a later read can
+    recompute it from the live rows and detect an altered or deleted estimate,
+    contrast, or evidence line: the digest commits to what the line set *should*
+    contain, so a removed row is caught rather than invisible to an inner join.
+
+    It commits to CONTENT, never to row ids. ``finding_id``, ``line_id``,
+    ``contrast_id``, and ``estimate_id`` are all minted inside
+    :func:`insert_finding` AFTER the claim is signed, so a digest over them could
+    never be reproduced on read.
+
+    A canonically SORTED multiset with explicit counts, not an ordered list.
+    ``evidence_lines`` carries no ordinal column, ``created_at`` is identical
+    across a finding's lines, and ``line_id`` is a random uuid, so write order is
+    not recoverable on read (it survives only as an accident of the query plan,
+    which ``ANALYZE`` changes). Duplicate lines are reachable through the public
+    API, so the per-tuple count is load-bearing: a set loses it and would permit
+    one silent deletion. Each tuple is keyed by its canonical bytes, the keys are
+    sorted, and the digest covers ``[[tuple, count], ...]``.
+    """
+    counts: dict[bytes, int] = {}
+    reps: dict[bytes, list] = {}
+    for data_id, control_type, estimate in triples:
+        rep = [data_id, control_type, estimate]
+        key = canonicalize(rep)
+        counts[key] = counts.get(key, 0) + 1
+        reps.setdefault(key, rep)
+    entries = [[reps[key], counts[key]] for key in sorted(counts)]
+    return hashlib.sha256(canonicalize(entries)).hexdigest()
+
+
+def estimates_digest_from_lines(lines: "Iterable[EvidenceLine]") -> str:
+    """The finding digest computed from its :class:`EvidenceLine` objects.
+
+    The write-time path. Serialises each line's estimate through
+    :meth:`EffectEstimate.to_dict`, the exact serialisation
+    :func:`estimates_digest_from_rows` rebuilds on read, so write and read agree
+    byte-for-byte.
+    """
+    return estimates_digest(
+        (line.data_id, line.contrast.control_type.value, line.estimate.to_dict())
+        for line in lines
+    )
+
+
+def estimates_digest_from_rows(rows: "Iterable[sqlite3.Row]") -> str:
+    """The finding digest recomputed from the live joined rows.
+
+    The read-time path. Rebuilds each estimate through
+    :func:`estimate_from_row` and serialises it with the same
+    :meth:`EffectEstimate.to_dict` the write path uses, so a digest recomputed
+    here equals the one signed at write time iff no estimate, contrast, or line
+    was altered or removed.
+
+    A row whose estimate is absent, an ``effect_estimates``/``contrasts``/
+    ``evidence_lines`` row deleted so the count query's LEFT JOINs yield NULLs
+    downward, contributes a ``None`` estimate in place of a rebuilt one. The
+    write path never signs a ``None`` estimate (a live finding always has its
+    full tree), so the recomputed digest necessarily differs from the signed
+    one and the deletion is caught as a mismatch over the whole finding rather
+    than slipping through: recomputing ``estimate_from_row`` on a NULL row would
+    raise, which would abandon the digest check and let the finding's surviving
+    lines count. ``estimate_value`` is ``NOT NULL`` in the schema, so a NULL
+    there is the reliable signal that the downward join found no estimate.
+    """
+    return estimates_digest(
+        (
+            r["data_id"],
+            r["control_type"],
+            estimate_from_row(r).to_dict()
+            if r["estimate_value"] is not None
+            else None,
+        )
+        for r in rows
+    )
+
+
+def retirement_claim_text(plan_id: str, superseded_by: str, reason: str) -> str:
+    """The text the retirement attestation signs.
+
+    The row's three fields are unsigned columns, and a retirement decides which
+    rule a proposition's evidence is gated under, so the triple is rendered into
+    the claim text, which is signed and chained. Restore rebuilds this string
+    from the replayed row and compares it against the verified claim, so an
+    edited backup cannot re-point a retirement or rewrite its reason.
+    """
+    return (
+        f"Retired plan {plan_id}, superseded by plan {superseded_by}. "
+        f"Reason: {reason}"
+    )
+
+
+def retire_plan(
+    conn: sqlite3.Connection,
+    plan_id: str,
+    superseded_by: str,
+    reason: str,
+    claim_id: str,
+    now: str,
+) -> None:
+    """Record the retirement of *plan_id* in favour of *superseded_by*."""
+    conn.execute(
+        "INSERT INTO plan_retirements "
+        "(plan_id, superseded_by, reason, claim_id, retired_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (plan_id, superseded_by, reason, claim_id, now),
+    )
 
 
 def insert_finding(
@@ -449,207 +680,180 @@ def _count_run_distinct(units: list[tuple[str, str, tuple]]) -> int:
     return 1 if run_models else 0
 
 
-def _authentic_signer_keyid(
-    conn: sqlite3.Connection,
-    claim_id: str,
-    asserter_keyid: "str | None",
-    bundle_json: "str | None",
-) -> "str | None":
-    """Return ``asserter_keyid`` only when the signed bundle authenticates it.
-
-    The denormalized ``asserter_keyid`` column is not itself part of the signed
-    envelope, so a direct/foreign writer can set it to any string to inflate the
-    independence count. We trust it as the WHO axis only when the claim's
-    ``signature_bundle`` (a) embeds that same keyid, (b) binds to this
-    ``claim_id``, and (c) verifies against the pubkey when the signer is an
-    enrolled validator. This mirrors the read-path verify gate. When it does not
-    authenticate, the caller falls back to the soft ``generated_by`` axis, which
-    is no weaker than the pre-keyid behaviour. Any structural failure returns
-    None (fall back), never raises: one un-authenticatable line must not deny the
-    whole proposition's count.
-    """
-    if asserter_keyid is None or not bundle_json:
-        return None
-    try:
-        from .. import signing as _signing
-        from .. import validators as _validators
-
-        env = json.loads(bundle_json)
-        if env["signatures"][0]["keyid"] != asserter_keyid:
-            return None
-        pred = _signing.claim_predicate_from_envelope(env)
-        if pred.get("claim_id") != claim_id:
-            return None
-        signer_row = _validators.get_validator(conn, asserter_keyid)
-        if signer_row is not None:
-            pem = base64.standard_b64decode(signer_row["pubkey_pem"])
-            pub = _signing.public_key_from_pem(pem)
-            if not _signing.verify_envelope(env, pub):
-                return None
-        return asserter_keyid
-    except Exception:
-        return None
-
-
-def _is_human_signer(conn: sqlite3.Connection, keyid: str) -> bool:
-    """True iff *keyid* is an enrolled validator whose type is ``human``.
-
-    The human-independence signal keys off the validator schema rather than a
-    new column: a check whose signer is an enrolled human validator is a human
-    check. ``is_enrolled`` walks the chain back to a self-signed root and
-    verifies each enrollment envelope, and the envelope binds ``validator_type``
-    (see :func:`mareforma.validators.verify_enrollment`), so a row whose type was
-    flipped by a direct SQL UPDATE fails the chain and is not treated as human.
-    Only an authenticated signer keyid (see :func:`_authentic_signer_keyid`) ever
-    reaches here, so an unbacked keyid cannot claim the human axis. Any structural
-    failure returns False: one un-resolvable signer must not deny the whole
-    proposition's count.
-    """
-    try:
-        from .. import validators as _validators
-
-        if not _validators.is_enrolled(conn, keyid):
-            return False
-        row = _validators.get_validator(conn, keyid)
-        return bool(row and row.get("validator_type") == "human")
-    except Exception:
-        return False
-
-
 # The read query behind independence_counts. Kept as a module constant so a
-# regression test can pin its EXPLAIN QUERY PLAN (no full scan of
-# effect_estimates, the join stays keyed through idx_contrast_line and
-# idx_estimate_contrast).
+# regression test can pin its EXPLAIN QUERY PLAN: the count anchors on findings
+# through idx_find_content, and the join stays keyed through idx_contrast_line
+# and idx_estimate_contrast (no full scan of effect_estimates).
+#
+# The row is anchored on ``findings`` and joins DOWNWARD with LEFT JOINs to
+# evidence_lines, contrasts, and effect_estimates. The anchor matters: a finding
+# is the unit the signed estimates digest commits to, so enumerating from the
+# signed findings (rather than inner-joining up from the estimates) keeps a
+# finding visible even when its evidence rows were deleted. An inner join drops
+# the whole finding when any downward row is missing, and for a single-line
+# finding, the modal shape, that erases the finding before its digest can be
+# checked, so a deleted estimate reads as if the line never existed. The LEFT
+# JOINs keep one row per finding with NULLs downward instead, which the
+# per-finding digest check in :func:`mareforma.trust._gate._derive_units` sees
+# and refuses (:func:`estimates_digest_from_rows` handles the NULLs). On an
+# untampered graph every finding has its full line/contrast/estimate tree, so
+# the LEFT JOINs yield exactly the rows the inner joins did and nothing changes.
+#
+# ``predictions`` and ``claims`` are LEFT JOINed for the same reason. They key
+# off the finding's own ``plan_id`` / ``claim_id`` columns rather than the
+# downward chain, but the row on the far side of that key is deletable by
+# exactly the writer the LEFT JOINs were added for, and an inner join there
+# erased the whole finding before any check could run. Measured from one state:
+# deleting a single-line finding's estimate disclosed a skip and a health event,
+# while deleting the prediction it hangs on read UNTESTED with nothing skipped.
+# Outer-joined, the deletion arrives as NULLs the read path already refuses: a
+# NULL rule cannot rebuild into a runnable prediction, and a claim that is gone
+# attests nothing, so each drops the line and discloses it.
+#
+# The withdrawal columns are SELECTed, not filtered on: only a live claim
+# contributes a line, but the exclusion is disclosed rather than applied in SQL
+# (see :func:`_independence_units`).
 INDEPENDENCE_COUNTS_SQL = (
-    "SELECT el.data_id AS data_id, el.model_lineage AS model_lineage, "
+    "SELECT el.line_id AS line_id, el.data_id AS data_id, "
+    " f.finding_id AS finding_id, c.control_type AS control_type, "
+    " el.model_lineage AS model_lineage, f.plan_id AS plan_id, "
     " cl.generated_by AS generated_by, "
     " cl.asserter_keyid AS asserter_keyid, cl.claim_id AS claim_id, "
     " cl.signature_bundle AS signature_bundle, "
+    # Carries "this claim was signed once" independently of the bundle, so the
+    # signer axis can tell a genuinely unsigned legacy claim from one whose
+    # signature was stripped by a direct writer to reach the legacy grandfather.
+    " cl.statement_cid AS statement_cid, "
+    " cl.predicate_payload AS predicate_payload, "
+    " cl.status AS claim_status, cl.t_invalid AS t_invalid, "
+    " cl.text AS claim_text, "
     " est.estimate_value, est.effect_type, est.scale, est.p_value, "
     " est.ci_lower, est.ci_upper, est.ci_level, est.n_total, "
     " pr.test_type, pr.direction_of_interest, pr.equivalence_lower, "
-    " pr.equivalence_upper, pr.alpha, pr.inference_regime "
+    " pr.equivalence_upper, pr.alpha, pr.inference_regime, "
+    " pr.preregistered AS preregistered "
     "FROM findings f "
-    "JOIN evidence_lines el ON el.finding_id = f.finding_id "
-    "JOIN contrasts c ON c.line_id = el.line_id "
-    "JOIN effect_estimates est ON est.contrast_id = c.contrast_id "
-    "JOIN predictions pr ON pr.plan_id = f.plan_id "
-    "JOIN claims cl ON cl.claim_id = f.claim_id "
+    "LEFT JOIN evidence_lines el ON el.finding_id = f.finding_id "
+    "LEFT JOIN contrasts c ON c.line_id = el.line_id "
+    "LEFT JOIN effect_estimates est ON est.contrast_id = c.contrast_id "
+    "LEFT JOIN predictions pr ON pr.plan_id = f.plan_id "
+    "LEFT JOIN claims cl ON cl.claim_id = f.claim_id "
     "WHERE f.content_id = ?"
 )
 
 
-def _line_model_key(raw: "str | None") -> tuple:
-    """The independence model key for a stored ``model_lineage`` column value.
+class _UngateablePlan(Exception):
+    """A line's plan carries a rule no gate can run, and nothing supersedes it.
 
-    ``raw`` is the JSON string persisted on the evidence line, or ``None`` when
-    the finding was authored without an observed model call. A column that no
-    longer parses is treated as soft (never a fabricated distinct model).
+    Internal to the read path: it separates the one drop an operator can repair
+    (``retire_plan``) from drift and corruption, which no API fixes.
     """
-    # Lazy import: ``mareforma.observe`` imports ``trust._store`` (for
-    # ``is_content_addressed``), so importing the lineage helper at module top
-    # would close a cycle. By call time both modules are fully loaded.
-    from mareforma.observe._lineage import independence_model_key
 
-    if raw is None:
-        return ("absent",)
+
+def _gateable_prediction(
+    conn: sqlite3.Connection, row, retirement=None,
+) -> tuple[Prediction, bool]:
+    """The rule a stored line is gated under, and whether it was superseded.
+
+    Normally the line's own plan (``superseded`` False). When that plan's stored
+    rule cannot be run, the line is gated under the plan that supersedes it,
+    which an operator registered explicitly through
+    :meth:`EpistemicGraph.retire_plan` (``superseded`` True).
+
+    *retirement* is the retirement record the CALLER has already verified against
+    its own signed attestation, or None. It is a parameter rather than a lookup
+    because a lookup is what made this exploitable: resolution used to read the
+    raw ``plan_retirements`` row, on the reasoning that it is reached only from a
+    plan that cannot be run and so could only ever recover a line counting zero.
+    A writer supplies that premise. Rewriting a live plan's alpha to a value no
+    gate can discriminate at sends its lines into resolution, and a planted
+    replacement at a stricter alpha then re-gates a refutation to NEUTRAL, which
+    is COUNTED rather than skipped: measured, a refutation vanished with
+    ``lines_skipped`` still zero and nothing on the health channel. What the
+    caller verifies is the attestation ``retire_plan`` signs, which restore has
+    always re-derived, so both paths now resolve a retirement on the same
+    evidence.
+
+    The ``superseded`` flag rides back so the caller can mark the count as
+    resting on a replacement (post-hoc) plan: a replacement is registered after
+    the estimates are visible, so a reader must be able to tell it from a
+    pre-registered gate.
+    """
     try:
-        lineage = json.loads(raw)
-    except (ValueError, TypeError):
-        lineage = None
-    if not isinstance(lineage, dict):
-        return ("soft",)
-    return independence_model_key(lineage)
+        return prediction_from_row(row), False
+    except ValueError as exc:
+        superseding = None
+        if retirement is not None:
+            replacement = get_plan_row(conn, retirement["superseded_by"])
+            if replacement is not None:
+                try:
+                    superseding = prediction_from_row(replacement)
+                except ValueError:
+                    # The superseding row cannot be run either (only reachable
+                    # by a direct/foreign write): stays dropped, fail closed.
+                    superseding = None
+        if superseding is None:
+            raise _UngateablePlan(str(exc)) from exc
+        # A retirement carries the retired rule over unchanged except its alpha:
+        # it recovers evidence stranded under an un-gateable alpha, it does not
+        # re-choose the side of the null once the numbers are known. That
+        # identity is a property of the read, not only the write (finding 4): a
+        # direct writer who re-points ``plan_retirements.superseded_by`` at
+        # another registered plan whose rule differs would otherwise reflip the
+        # line's bearing under a rule the retirement never sanctioned. Rebuild
+        # the retired rule at the replacement's alpha and refuse a replacement
+        # that does not reproduce it.
+        if superseding != replacement_prediction(row, superseding.alpha):
+            raise _UngateablePlan(
+                "the replacement rule differs from the retired rule beyond its "
+                "alpha; a retirement may only re-register the same rule at a "
+                "gateable alpha"
+            ) from exc
+        return superseding, True
 
 
-def _signed_model_lineage(
-    conn: sqlite3.Connection,
-    claim_id: str,
-    bundle_json: "str | None",
-) -> "dict | None":
-    """The model lineage the claim's SIGNED envelope binds, or None.
+class SkipDisclosure:
+    """The health-channel half of the skipped-line disclosure, deduplicated.
 
-    A finding binds its model lineage into the signed observed record
-    (``finding/v2``), so the read path can re-authenticate the denormalized
-    ``evidence_lines.model_lineage`` column against material the signer covered.
-    Returns the signed lineage dict only when the bundle (a) is a claim envelope
-    that (b) binds to this ``claim_id``, (c) carries a model lineage on its
-    observed record, and (d) is signed by an enrolled validator whose signature
-    verifies. A non-enrolled signer (whose bundle cannot be verified), a bad
-    signature, a v1 finding (no signed lineage), an unsigned claim, or any
-    structural failure returns None, the caller then treats the line as soft,
-    never a fabricated distinct model. Never raises: one un-authenticatable line
-    must not deny the whole proposition's count.
+    A dropped line is a state, not an event: the claim stays withdrawn and an
+    un-gateable row stays un-gateable, so every later read notices the same drop
+    again. The per-read signal a caller acts on is ``lines_skipped`` in the
+    returned view, recomputed every call; this channel records a drop once per
+    ``(op, content_id, line_id)`` so an agent polling
+    :func:`proposition_status` cannot grow ``.mareforma/health.jsonl`` in
+    proportion to reads.
+
+    The drop is disclosed on read rather than at the write that caused it
+    because the writes that cause it need not pass through mareforma:
+    ``status`` is an unsigned column any handle holding the graph may rewrite
+    directly, and that keyless flip is exactly the erasure the disclosure
+    exists to catch.
+
+    The root and the dedupe set live in one object so a reader that can emit is
+    a reader that deduplicates; there is no way to arm the emitter without it.
     """
-    if not bundle_json:
-        return None
-    try:
-        from .. import signing as _signing
-        from .. import validators as _validators
 
-        env = json.loads(bundle_json)
-        pred = _signing.claim_predicate_from_envelope(env)
-        if pred.get("claim_id") != claim_id:
-            return None
-        grounding = pred.get("observed_grounding")
-        if not isinstance(grounding, dict):
-            return None
-        lineage = grounding.get("model_lineage")
-        if not isinstance(lineage, dict):
-            return None
-        keyid = env["signatures"][0]["keyid"]
-        signer_row = _validators.get_validator(conn, keyid)
-        if signer_row is None:
-            # Fail closed: a non-enrolled signer's bundle cannot be verified, so
-            # its lineage is unauthenticated. Trusting it lets a producer sign a
-            # fabricated distinct model with a throwaway key and inflate the
-            # count (the read-side parallel of the forged-column defence). An
-            # unauthenticatable line reads soft, never a counted model.
-            return None
-        pem = base64.standard_b64decode(signer_row["pubkey_pem"])
-        pub = _signing.public_key_from_pem(pem)
-        if not _signing.verify_envelope(env, pub):
-            return None
-        return lineage
-    except Exception:
-        return None
+    __slots__ = ("_root", "_seen")
 
+    def __init__(self, root: "Path | str") -> None:
+        self._root = root
+        self._seen: set[tuple[str, str, str]] = set()
 
-def _authentic_model_key(
-    conn: sqlite3.Connection,
-    claim_id: str,
-    raw_column: "str | None",
-    bundle_json: "str | None",
-) -> tuple:
-    """The independence model key for a line, read from SIGNED material.
-
-    The ``evidence_lines.model_lineage`` column is denormalized and unsigned, so
-    a direct/foreign writer can rewrite it to a fabricated distinct COMPUTED root
-    to inflate independence. We therefore key on the SIGNED lineage the claim's
-    envelope binds, never the raw column:
-
-    - a NULL column made no model claim → ``("absent",)`` (the legacy signer axis
-      still applies; a human line is re-keyed upstream);
-    - a present column whose claim carries an authenticated signed lineage keys on
-      that signed copy, so a forged column cannot move the count;
-    - a present column with no authenticatable signed lineage (a v1 finding, an
-      unsigned claim, or a bundle that does not verify) reads ``("soft",)``, a
-      distinct model that cannot be certified, never counted.
-
-    This is the model-axis parallel of :func:`_authentic_signer_keyid`.
-    """
-    from mareforma.observe._lineage import independence_model_key
-
-    if raw_column is None:
-        return ("absent",)
-    signed = _signed_model_lineage(conn, claim_id, bundle_json)
-    if signed is None:
-        return ("soft",)
-    return independence_model_key(signed)
+    def record(self, op: str, content_id: str, line_id: str, **detail) -> None:
+        key = (op, content_id, line_id)
+        if key in self._seen:
+            return
+        self._seen.add(key)
+        from mareforma.health import append_health_event
+        append_health_event(
+            self._root, op, outcome="degraded",
+            content_id=content_id, line_id=line_id, **detail,
+        )
 
 
 def _independence_units(
-    conn: sqlite3.Connection, content_id: str, *, memo: "dict | None" = None
+    conn: sqlite3.Connection, content_id: str, *, memo: "dict | None" = None,
+    disclose: "SkipDisclosure | None" = None,
 ):
     """Yield ``(direction, run_token, data_id, model_key)`` per gateable line.
 
@@ -670,104 +874,104 @@ def _independence_units(
     string axis. The ``k:`` / ``g:`` namespace stops a keyid aliasing a run
     label. The model key carries the distinct-model/method axis, read from the
     SIGNED lineage rather than the unsigned column so a forged column cannot
-    inflate the count (see :func:`_authentic_model_key`); a line with no observed
-    model call whose signer
-    is an enrolled human validator is re-keyed ``("human",)``, the human axis,
-    the highest-value independent source (see :func:`_is_human_signer`).
+    inflate the count (see :func:`mareforma.trust._gate._authentic_model_key`); a
+    line with no observed model call whose signer
+    is an enrolled human validator is re-keyed ``("human",)``, the human axis
+    the status ladder counts (see
+    :func:`mareforma.trust._gate._is_human_signer`). The per-finding map
+    disclosure narrows that key back to soft, see :func:`_supporting_units`.
 
-    ``memo`` is an optional per-read-call cache. The signer/model axis of a line
-    (``run_token`` and ``model_key``) is constant per claim, the authenticating
-    columns are written identically on every line of a finding, so it is
-    computed once per ``claim_id`` and reused, sparing the repeated Ed25519
-    verify a multi-line finding, and a frame read that walks the same claim as a
-    contrary, would otherwise pay. Only ``direction`` and ``data_id`` vary per
-    line. A claim belongs to exactly one proposition, so the cache never
-    collides across content_ids sharing a memo. Absent ``memo``, a fresh local
-    cache still dedups within the single call.
+    The verification itself, live claim, gateable bearing, authenticated signer
+    and model, lives behind one boundary in :mod:`mareforma.trust._gate`, which
+    both this read path and restore reach so the rule cannot drift into two
+    copies. This function applies the read-path disposition to what that boundary
+    returns: it counts the verified lines and discloses the skipped ones.
+
+    Two kinds of line are dropped from the count: one that no longer
+    reconstructs into a gateable bearing, and one whose claim is no longer live
+    (editorially withdrawn, or invalidated by a signed contradiction verdict).
+    Dropping is never conservative, a dropped REFUTING line manufactures
+    consensus, so no drop is silent. All are tallied under ``skipped`` in
+    the ``memo`` (read back as ``lines_skipped``, see
+    :func:`proposition_status`) and, when ``disclose`` is given, recorded once
+    per line on the ``.mareforma/health.jsonl`` channel as
+    ``bearing_recompute_skipped``, ``plan_rebind_skipped`` (the finding's
+    ``plan_id`` column no longer matches the plan its claim records),
+    ``plan_rule_rebind_skipped`` (a ``predictions`` rule column no longer hashes
+    to the plan_id keying it), ``ungateable_plan_skipped`` (the repairable case,
+    whose event names the plan :meth:`EpistemicGraph.retire_plan` takes) and
+    ``withdrawn_line_skipped`` (see :class:`SkipDisclosure`).
+
+    ``memo`` is an optional per-read-call cache. It carries the shared
+    :class:`mareforma.trust._gate.GateCache` so a claim's signature verifies once
+    across a frame read (the same claim is walked for its own proposition and
+    again as a contrary), and the per-proposition ``skipped`` tally read back as
+    ``lines_skipped``. Absent ``memo``, a fresh cache still dedups within the
+    single call.
     """
-    per_claim = memo.setdefault("signer", {}) if memo is not None else {}
-    rows = conn.execute(INDEPENDENCE_COUNTS_SQL, (content_id,)).fetchall()
-    for r in rows:
-        # Recompute the per-line bearing from stored inputs. Every row written by
-        # submit_finding was gated at write, so this is total for normal data. A
-        # row that no longer reconstructs into a gateable bearing (drift,
-        # corruption, or a direct/foreign writer landing a non-numeric column) is
-        # skipped rather than allowed to raise: one un-gateable line must not deny
-        # reads for the whole proposition (and its frame's contraries). The catch
-        # is broad on purpose: the failure can surface as ValueError (enum / range),
-        # TypeError (non-numeric column reaching math.isfinite), or
-        # InconsistentEstimateError (the gate). Writes are gated by EffectEstimate /
-        # compute_bearing before persistence, so a broad skip here cannot mask a
-        # write bug.
-        try:
-            estimate = EffectEstimate(
-                estimate_value=r["estimate_value"],
-                effect_type=r["effect_type"],
-                scale=r["scale"],
-                p_value=r["p_value"],
-                ci_lower=r["ci_lower"],
-                ci_upper=r["ci_upper"],
-                ci_level=r["ci_level"],
-                n_total=r["n_total"],
-            )
-            prediction = Prediction(
-                test_type=r["test_type"],
-                alpha=r["alpha"],
-                direction_of_interest=r["direction_of_interest"],
-                equivalence_lower=r["equivalence_lower"],
-                equivalence_upper=r["equivalence_upper"],
-                inference_regime=r["inference_regime"],
-            )
-            direction = compute_bearing(estimate, prediction).direction
-        except Exception:
-            continue
-        claim_id = r["claim_id"]
-        cached = per_claim.get(claim_id)
-        if cached is None:
-            keyid = _authentic_signer_keyid(
-                conn, claim_id, r["asserter_keyid"], r["signature_bundle"],
-            )
-            run_token = (
-                f"k:{keyid}" if keyid is not None else f"g:{r['generated_by']}"
-            )
-            model_key = _authentic_model_key(
-                conn, claim_id, r["model_lineage"], r["signature_bundle"],
-            )
-            # A line with no observed model call, signed by an enrolled human
-            # validator, is a human check: the highest-value independent axis,
-            # which needs no distinct model. A line that DID observe a model call
-            # keeps its model key even under a human signer, the check was the
-            # model's, and the human only signed it, so the model-distinct axis
-            # still governs.
-            if model_key[0] == "absent" and keyid is not None and _is_human_signer(
-                conn, keyid
-            ):
-                model_key = ("human",)
-            cached = (run_token, model_key)
-            per_claim[claim_id] = cached
-        run_token, model_key = cached
-        yield direction, run_token, r["data_id"], model_key
+    from ._gate import GateCache, verified_gate_inputs
+
+    skipped = memo.setdefault("skipped", {}) if memo is not None else {}
+    if memo is not None:
+        cache = memo.get("gate_cache")
+        if cache is None:
+            cache = memo["gate_cache"] = GateCache()
+    else:
+        cache = GateCache()
+
+    gate_inputs = verified_gate_inputs(conn, content_id, cache=cache)
+    # A proposition depends on a replacement (post-hoc) plan when any counted
+    # line is gated under a plan that was not pre-registered: either the finding's
+    # own one-shot plan or the replacement a retirement resolved it to. Recorded
+    # here, next to the skip tally, so proposition_status can surface it (see
+    # its ``post_hoc`` field).
+    if memo is not None:
+        memo.setdefault("post_hoc", {})[content_id] = any(
+            line.post_hoc for line in gate_inputs.units
+        )
+    for line in gate_inputs.skipped:
+        skipped[content_id] = skipped.get(content_id, 0) + 1
+        if disclose is not None:
+            disclose.record(line.op, content_id, line.line_id, **line.detail)
+    for line in gate_inputs.units:
+        yield line.direction, line.run_token, line.data_id, line.model_key
 
 
 def independence_counts(
-    conn: sqlite3.Connection, content_id: str, *, memo: "dict | None" = None
+    conn: sqlite3.Connection, content_id: str, *, memo: "dict | None" = None,
+    disclose: "SkipDisclosure | None" = None,
 ) -> tuple[int, int]:
     """(independent_support, independent_refute) by distinct signer + model, data guard.
 
     Counted by distinct **signer** (the claim's ``asserter_keyid``) AND distinct
     **model/method**, with a ``data_id`` guard (see :func:`_count_run_distinct`):
     one signer yields at most one independent support and one independent refute,
-    and two same-model checks no longer read as two independent lines. This is
-    the same WHO axis the REPLICATED promotion query keys on, read from the same
-    denormalised claim column, and the same model axis the promotion gate now
-    reads off the evidence line, so promotion and trust counting can never
-    disagree. Legacy evidence lines whose claim predates the keyid column (NULL
-    ``asserter_keyid``) fall back to the retired ``generated_by`` run axis, and a
-    finding with no observed model call carries no model constraint, so both keep
-    their count instead of collapsing (status_policy@v4). A no-model-call line
-    signed by an enrolled human validator counts on the human axis, the
-    highest-value independent source, never folded into a model root. The two run
+    and two same-model checks no longer read as two independent lines. A keyid
+    counts only when the claim's signature bundle authenticates it
+    (:func:`mareforma.trust._gate._signer_axis`), so this axis is
+    not the unsigned column
+    the REPLICATED promotion query reads; that query is a separate check under
+    its own editorial filters, and the two answer different questions and can
+    differ. So can this count and the trust map's number:
+    :func:`effective_independence` re-keys a line with no observed model call to
+    soft, so it sits at or below the count here. Legacy evidence lines whose
+    claim predates the keyid column (NULL ``asserter_keyid``) fall back to the
+    retired ``generated_by`` run axis, and a finding with no observed model call
+    carries no model constraint, so both keep their count instead of collapsing
+    (status_policy@v4). A no-model-call line
+    signed by an enrolled human validator counts on the human axis, never folded
+    into a model root. That axis rests on a self-declared ``validator_type``, so
+    the trust map's per-finding disclosure does not certify it; only this legacy
+    ladder counts it. The two run
     axes are namespaced (``k:`` vs ``g:``) so a keyid can never alias a run label.
+
+    Only a live claim contributes: a retracted or contested claim, or one a
+    signed contradiction verdict invalidated, is excluded on both sides, so a
+    withdrawn support can drop a proposition off CONVERGENT and a withdrawn
+    refutation can drop it off REFUTED (see
+    :func:`mareforma.trust.status.compute_status`). Every such exclusion is
+    disclosed as a skipped line, so a reader can tell a proposition nobody
+    contested from one whose refutations were withdrawn.
 
     ``memo`` is an optional per-read-call cache. A proposition's counts are
     constant within one read call, so a ``query_frame`` pass that counts a
@@ -782,7 +986,7 @@ def independence_counts(
     supports: list[tuple[str, str, tuple]] = []
     refutes: list[tuple[str, str, tuple]] = []
     for direction, run_token, data_id, model_key in _independence_units(
-        conn, content_id, memo=memo
+        conn, content_id, memo=memo, disclose=disclose
     ):
         unit = (run_token, data_id, model_key)
         if direction is BearingDirection.SUPPORTS:
@@ -795,52 +999,79 @@ def independence_counts(
     return result
 
 
-def effective_independence(conn: sqlite3.Connection, content_id: str) -> dict:
+def effective_independence(
+    conn: sqlite3.Connection, content_id: str,
+    *, memo: "dict | None" = None, disclose: "SkipDisclosure | None" = None,
+) -> dict:
     """The effective-independence number for a proposition, with a soft flag.
 
     ``number`` is the count of pairwise-distinct (model, data, signer) SUPPORTING
-    checks, the same model-aware axis :func:`independence_counts` promotes on, so
-    the two never disagree. A supporting check a human authored (no observed model
-    call, signed by an enrolled human validator) counts as the highest-value
-    independent source: it needs no distinct model, so a human check plus a model
-    check reads as two where two same-model checks read as one. ``soft`` is True
-    when a supporting line carries PROXY / UNVERIFIABLE model lineage or no
-    observed model call at all: the count then rests on lineage that cannot
-    certify a distinct model, which the trust map surfaces as UNVERIFIABLE rather
-    than a confident number.
+    checks over observed model calls. ``soft`` is True when a supporting line
+    carries PROXY / UNVERIFIABLE model lineage or no observed model call at all,
+    including one signed by a self-declared human validator: the count then rests
+    on lineage that cannot certify a distinct model, which the trust map surfaces
+    as UNVERIFIABLE rather than a confident number. The legacy status ladder
+    (:func:`independence_counts`) is unchanged and still counts a human check on
+    its own axis; this narrows only the per-finding disclosure.
+
+    ``lines_skipped`` is how many of the proposition's evidence lines the shared
+    verifier dropped (an unauthenticated signer, a withdrawn claim, an un-gateable
+    or repointed line): the same tally :func:`proposition_status` reports, surfaced
+    here so the independence axis does not read a confident number off a line set
+    that silently lost lines. ``memo`` / ``disclose`` thread the per-call cache and
+    the health channel through, so a dropped line is disclosed on this surface too,
+    not only on ``proposition_status``.
 
     Coarse by design: distinct-model is binary this release. The graded
-    cross-model residual (how *far apart* two distinct models are) is DEFERRED , 
+    cross-model residual (how *far apart* two distinct models are) is DEFERRED ,
     named here, not computed.
     """
-    supports, soft = _supporting_units(conn, content_id)
-    return {"number": _count_run_distinct(supports), "soft": soft}
+    if memo is None:
+        memo = {}
+    supports, soft = _supporting_units(
+        conn, content_id, memo=memo, disclose=disclose,
+    )
+    return {
+        "number": _count_run_distinct(supports),
+        "soft": soft,
+        "lines_skipped": memo.get("skipped", {}).get(content_id, 0),
+    }
 
 
 def _supporting_units(
-    conn: sqlite3.Connection, content_id: str
+    conn: sqlite3.Connection, content_id: str,
+    *, memo: "dict | None" = None, disclose: "SkipDisclosure | None" = None,
 ) -> tuple[list[tuple[str, str, tuple]], bool]:
     """The SUPPORTING ``(run, data, model)`` units for a proposition, plus soft.
 
     The shared collection behind :func:`effective_independence` and
     :func:`effective_independence_receipt`. ``soft`` is True when any supporting
     line carried PROXY / UNVERIFIABLE model lineage, or no observed model call at
-    all (absent): the per-finding disclosure certifies a distinct model only for
-    observed calls, so an unobserved model cannot be told apart and is soft here.
-    Absent is re-keyed to soft so it adds no confident hard unit, dropping the
-    count to the single-line floor rather than reverting to the pre-v0.3.10 signer
-    axis. This narrows only the map's per-finding certification; the legacy status
-    ladder (:func:`independence_counts`) still counts distinct signers. A human
-    check is re-keyed ``("human",)`` upstream, so it is never absent here and
-    keeps its axis.
+    all (absent / human): the per-finding disclosure certifies a distinct model
+    only for observed calls, so an unobserved model cannot be told apart and is
+    soft here. Both are re-keyed to soft so they add no confident hard unit,
+    dropping the count to the single-line floor rather than reverting to the
+    pre-v0.3.10 signer axis. This narrows only the map's per-finding
+    certification; the legacy status ladder (:func:`independence_counts`) still
+    counts distinct signers and still reads the human axis.
+
+    The human key is soft here because it rests on ``validator_type``, which is
+    self-declared, defaults to ``'human'``, and cannot be chosen at all for the
+    root a fresh graph auto-enrolls. Nothing was observed: the finding carries no
+    model call and no person attested to it. A key the operator happens to hold
+    must not turn an unobserved line into a certified independent one.
+
+    ``memo`` / ``disclose`` are threaded to :func:`_independence_units` so a line
+    the verifier drops is tallied in ``lines_skipped`` and disclosed on the health
+    channel here too, not silently lost the way this surface lost them before.
     """
     supports: list[tuple[str, str, tuple]] = []
     soft = False
     for direction, run_token, data_id, model_key in _independence_units(
-        conn, content_id
+        conn, content_id, memo=memo, disclose=disclose,
     ):
         if direction is BearingDirection.SUPPORTS:
-            if model_key[0] == "absent":
+            if model_key[0] in ("absent", "human"):
                 model_key = ("soft",)
             supports.append((run_token, data_id, model_key))
             if model_key[0] == "soft":
@@ -849,7 +1080,8 @@ def _supporting_units(
 
 
 def effective_independence_receipt(
-    conn: sqlite3.Connection, content_id: str
+    conn: sqlite3.Connection, content_id: str,
+    *, memo: "dict | None" = None, disclose: "SkipDisclosure | None" = None,
 ) -> dict:
     """The per-finding independence record a measurement receipt carries.
 
@@ -868,13 +1100,26 @@ def effective_independence_receipt(
     number=1`` (collapse of 1); a distinct-model pair reads ``naive=2, number=2``
     (no collapse); a soft-only body reads ``naive=0, number=1, soft=True``, not a
     collapse, an unverifiable count.
+
+    ``memo`` / ``disclose`` thread the per-call cache and the health channel
+    through :func:`_supporting_units`, so a line the verifier drops is tallied in
+    ``lines_skipped`` and disclosed on this surface too.
     """
-    supports, soft = _supporting_units(conn, content_id)
+    if memo is None:
+        memo = {}
+    supports, soft = _supporting_units(
+        conn, content_id, memo=memo, disclose=disclose,
+    )
     number = _count_run_distinct(supports)
     hard = [(run, data_id, mk) for run, data_id, mk in supports if mk[0] != "soft"]
     naive = _count_run_distinct(
         [(run, data_id, ("absent",)) for run, data_id, _mk in hard]
     )
+    # The receipt keeps its shape (number / naive / soft): it is aggregated into a
+    # measurement's independence arm and its schema is stable. The ``memo`` /
+    # ``disclose`` threaded above still route a dropped line to the health channel;
+    # the drop is surfaced as ``lines_skipped`` on proposition_status and
+    # effective_independence, the read views, not on this record.
     return {"number": number, "naive": naive, "soft": soft}
 
 
@@ -888,7 +1133,7 @@ def get_proposition_row(
 
 def _frame_status(
     conn: sqlite3.Connection, frame_id: str, direction: Direction,
-    *, memo: "dict | None" = None,
+    *, memo: "dict | None" = None, disclose: "SkipDisclosure | None" = None,
 ) -> FrameStatus:
     """CONTESTED iff some contrary proposition in the same frame has >=1
     independent supporting line; CONSISTENT otherwise. Stops at the first such
@@ -905,14 +1150,17 @@ def _frame_status(
         (frame_id, *contraries),
     ).fetchall()
     for r in rows:
-        support, _ = independence_counts(conn, r["content_id"], memo=memo)
+        support, _ = independence_counts(
+            conn, r["content_id"], memo=memo, disclose=disclose
+        )
         if support >= 1:
             return FrameStatus.CONTESTED
     return FrameStatus.CONSISTENT
 
 
 def proposition_status(
-    conn: sqlite3.Connection, content_id: str, *, memo: "dict | None" = None
+    conn: sqlite3.Connection, content_id: str, *, memo: "dict | None" = None,
+    disclose: "SkipDisclosure | None" = None,
 ) -> Optional[dict]:
     """The retrieval view: derived Status + counts + frame contest, or None.
 
@@ -920,6 +1168,21 @@ def proposition_status(
     content_id). ``frame_status`` is the separate frame-level contest (a contrary
     proposition in the same frame has independent support). They are two
     different signals and never the same number.
+
+    ``lines_skipped`` is how many of this proposition's evidence lines were left
+    out of the counts, either because they no longer reconstruct into a gateable
+    bearing or because their claim is no longer live (see
+    :func:`_independence_units`). It tells a one-line proposition apart from a
+    two-line proposition with a dropped line, which the counts alone cannot: a
+    dropped refutation reads as consensus. ``disclose`` is the health channel
+    the drop is also recorded on, once per line (see :class:`SkipDisclosure`).
+
+    ``post_hoc`` is True when the count rests on a replacement (post-hoc) plan:
+    any counted line gated under a plan that was not pre-registered, either a
+    one-shot finding's own plan or the replacement a retirement resolved a
+    stranded line to. The alpha of such a plan was chosen with the estimates in
+    view, so the view is not shape-identical to a pre-registered result; this
+    flag is what lets a reader tell the two apart.
 
     ``memo`` is an optional per-read-call cache shared between the own-status
     count and the frame-contest count so each proposition's counts (and each
@@ -931,10 +1194,13 @@ def proposition_status(
     row = get_proposition_row(conn, content_id)
     if row is None:
         return None
-    support, refute = independence_counts(conn, content_id, memo=memo)
+    support, refute = independence_counts(
+        conn, content_id, memo=memo, disclose=disclose
+    )
     status = compute_status(support, refute)
     frame_status = _frame_status(
-        conn, row["frame_id"], Direction(row["direction"]), memo=memo
+        conn, row["frame_id"], Direction(row["direction"]), memo=memo,
+        disclose=disclose,
     )
     return {
         "content_id": content_id,
@@ -943,13 +1209,16 @@ def proposition_status(
         "status": status.value,
         "independent_support": support,
         "independent_refute": refute,
+        "lines_skipped": memo.get("skipped", {}).get(content_id, 0),
+        "post_hoc": memo.get("post_hoc", {}).get(content_id, False),
         "frame_status": frame_status.value,
         "status_policy": STATUS_POLICY,
     }
 
 
 def query_frame(
-    conn: sqlite3.Connection, frame_id: str, min_status: Optional[str] = None
+    conn: sqlite3.Connection, frame_id: str, min_status: Optional[str] = None,
+    *, disclose: "SkipDisclosure | None" = None,
 ) -> list[dict]:
     """Everything known about a question (frame_id), each with its derived view.
 
@@ -976,7 +1245,7 @@ def query_frame(
     memo: dict = {}
     out: list[dict] = []
     for r in rows:
-        view = proposition_status(conn, r["content_id"], memo=memo)
+        view = proposition_status(conn, r["content_id"], memo=memo, disclose=disclose)
         if view is None:
             continue
         if floor is not None and _SUPPORT_RANK[view["status"]] < floor:

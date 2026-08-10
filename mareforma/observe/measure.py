@@ -18,8 +18,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Iterable
 
-from ._citation import read_matches_citation
-from ._verdict import GroundingVerdict, ObservedGrounding
+from ._citation import read_norm_matches
+from ._verdict import (
+    GROUNDING_AXIS_VERSION,
+    GroundingVerdict,
+    ObservedGrounding,
+    as_int,
+)
+
+
+class GroundingAxisMismatchError(ValueError):
+    """A receipt was written under a different grounding-axis version."""
 
 
 @dataclass(frozen=True)
@@ -112,9 +121,15 @@ class GroundingReport:
 
 
 def _has_incidental_read(v: GroundingVerdict) -> bool:
-    """Whether the verdict carried a non-empty read that matched no cited source."""
+    """Whether the verdict carried a non-empty read that matched no cited source.
+
+    Pure string comparison over identifiers both sides normalized at write time,
+    the same rule the citation binding follows: a receipt is summarized from
+    another directory, another run, or another host, and touching the filesystem
+    here would make the number depend on where the report was produced.
+    """
     for r in v.reads:
-        if r.nonempty and not read_matches_citation(
+        if r.nonempty and not read_norm_matches(
             r.identifier, r.content_address, v.cited_sources
         ):
             return True
@@ -168,8 +183,32 @@ def summarize_receipts(receipts: Iterable[dict]) -> GroundingReport:
     seam kind. This reconstructs each verdict from its receipt and defers to
     :func:`summarize`, so a run that saved receipts to disk reports identically to
     one holding the live verdicts.
+
+    Raises :class:`GroundingAxisMismatchError` on a receipt stamped with a
+    different axis version. Axis versions differ in what counts as a matching
+    read, so folding one into the other's report would publish a number no
+    definition produced. Summarize each axis separately.
     """
-    return summarize(GroundingVerdict.from_receipt(r) for r in receipts)
+    return summarize(_verdict_on_this_axis(r) for r in receipts)
+
+
+def _verdict_on_this_axis(receipt: dict) -> GroundingVerdict:
+    """Reconstruct one receipt, refusing a version this axis did not define.
+
+    An UNSTAMPED receipt is read on this axis, the same default
+    :meth:`GroundingVerdict.from_receipt` applies: a hand-authored record with no
+    version claims no other definition, and one such record must not deny the
+    whole report.
+    """
+    version = receipt.get("version")
+    if version is not None and version != GROUNDING_AXIS_VERSION:
+        raise GroundingAxisMismatchError(
+            f"receipt written under grounding axis {version}, this release "
+            f"computes {GROUNDING_AXIS_VERSION}. The two disagree about which "
+            "reads match the cited set, so one report cannot mix them. "
+            "Summarize each axis separately."
+        )
+    return GroundingVerdict.from_receipt(receipt)
 
 
 @dataclass(frozen=True)
@@ -276,19 +315,6 @@ class IndependenceReport:
         return lead
 
 
-def _as_int(value: object) -> int:
-    """Coerce a receipt field to a non-negative int, defaulting to 0.
-
-    A hand-authored or older record may carry a missing, null, or non-numeric
-    field; the independence arm degrades it to 0 rather than raising, so one bad
-    record never denies the whole report.
-    """
-    try:
-        return max(0, int(value))  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return 0
-
-
 def summarize_independence(records: Iterable[dict]) -> IndependenceReport:
     """Aggregate per-finding independence records into the independence report.
 
@@ -302,8 +328,8 @@ def summarize_independence(records: Iterable[dict]) -> IndependenceReport:
     unverifiable = naive_total = collapsed_total = 0
     for rec in records:
         total += 1
-        number = _as_int(rec.get("number"))
-        naive = _as_int(rec.get("naive"))
+        number = as_int(rec.get("number"))
+        naive = as_int(rec.get("naive"))
         if bool(rec.get("soft")):
             unverifiable += 1
         if number <= 0:

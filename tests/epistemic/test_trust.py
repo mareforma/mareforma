@@ -305,6 +305,23 @@ class TestInputConsistency:
         line = EvidenceLine(estimate=est, data_id="d", contrast=Contrast("vehicle"))
         assert line.contrast.control_type is ControlType.VEHICLE
 
+    def test_alpha_at_or_above_half_is_refused(self) -> None:
+        """The gate is one-sided at alpha over a two-sided (1 - 2*alpha) CI, so
+        alpha >= 0.5 marks every p-value significant on the p path and demands an
+        impossible CI level on the other. A rule that cannot discriminate is
+        refused at construction, never registered as a plan."""
+        for alpha in (0.5, 0.9):
+            with pytest.raises(ValueError, match=r"alpha must be in \(0, 0\.5\)"):
+                Prediction(
+                    TestType.SUPERIORITY,
+                    direction_of_interest=DirectionOfInterest.INCREASE,
+                    alpha=alpha,
+                )
+        # The working range is untouched: the usual alpha still gates as before.
+        pred = _superiority(DirectionOfInterest.INCREASE, alpha=0.05)
+        assert compute_bearing(_smd(0.8, p=0.99), pred).significant is False
+        assert compute_bearing(_smd(0.8, p=0.02), pred).significant is True
+
     def test_prediction_validation(self) -> None:
         with pytest.raises(ValueError):  # alpha out of range
             Prediction(TestType.SUPERIORITY, direction_of_interest=DirectionOfInterest.INCREASE, alpha=0)
@@ -352,7 +369,7 @@ class TestSuccessCriteria:
         assert status["status"] == Status.PRELIMINARY.value
         assert status["independent_support"] == 1
 
-    def test_two_independent_lines_reach_corroborated(self, tmp_path: Path) -> None:
+    def test_two_independent_lines_reach_convergent(self, tmp_path: Path) -> None:
         h = _prop(Direction.DECREASES)
         # v0.3.7 counts independent support by distinct asserter_keyid (the
         # finding-claim signer). assert_finding signs with the graph's loaded

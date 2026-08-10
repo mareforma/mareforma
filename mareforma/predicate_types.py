@@ -1,17 +1,21 @@
 """Reflective registry of mareforma predicate types.
 
-Adapters (`mareforma_tooluniverse`, `mareforma_gemini`, `mareforma_wet_lab`,
-`mareforma_peer_review`, `mareforma_elo`, ...) call :func:`register` at
-import time with the URI they ship. Mareforma validates URI shape
-(`urn:mareforma:predicate:<name>:v<N>`) but does not constrain payload
-semantics: adapters own the predicate body shape; this registry only
-asserts that the URI is well-formed and visible.
+The registry is a URI-shape gate and a reservation list. Mareforma
+validates URI shape (`urn:mareforma:predicate:<name>:v<N>`) but does
+not constrain payload semantics: adapters own the predicate body
+shape; this registry only asserts that the URI is well-formed and that
+a mareforma-owned namespace stays mareforma's.
 
-:func:`predicates` returns the full list of registered URIs for
-introspection (e.g. an agent that wants to know which adapter packages
-are available in the current Python environment without import-walking).
+Every URI in :data:`BUILTIN_URIS` is seeded at import, including the
+slots reserved for adapters, so an adapter imports the constant it
+emits rather than registering it (the in-tree adapters do this, e.g.
+``from mareforma.predicate_types import TOOL_CALL_V1``). Registering a
+reserved URI is refused or deprecated, never an owner change.
+:func:`register` is for a URI outside those namespaces.
 
-Built-in URIs registered at import:
+:func:`predicates` returns every registered URI, sorted.
+
+Built-in URIs whose writer lives in mareforma:
 
 * ``urn:mareforma:predicate:claim:v1``: mareforma's default
   single-claim envelope.

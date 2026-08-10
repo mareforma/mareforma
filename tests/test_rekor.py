@@ -24,51 +24,16 @@ import hashlib
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 
 import mareforma
 from mareforma import signing as _signing
-from tests._helpers import _bootstrap_key
+from mareforma._urlguard import _LOOPBACK_DNS_NAMES
+from tests._helpers import _bootstrap_key, _rekor_response_for
 
 
 _TEST_REKOR_URL = "https://rekor.test.example/api/v1/log/entries"
-
-
-def _rekor_response_for(
-    *,
-    payload_hash: str,
-    sig_b64: str,
-    uuid: str = "abc01deadbeef02",
-    log_index: int = 42,
-    integrated_time: int = 1700000000,
-) -> dict:
-    """Build a realistic Rekor 201 body whose `body` field actually
-    records the submitted hash + signature.
-
-    submit_to_rekor now verifies the response, a generic mock without a
-    matching body fails the equality check.
-    """
-    record = {
-        "apiVersion": "0.0.1",
-        "kind": "hashedrekord",
-        "spec": {
-            "data": {"hash": {"algorithm": "sha256", "value": payload_hash}},
-            "signature": {
-                "content": sig_b64,
-                "publicKey": {"content": "<not-checked>"},
-            },
-        },
-    }
-    encoded = base64.standard_b64encode(
-        json.dumps(record, separators=(",", ":")).encode("utf-8"),
-    ).decode("ascii")
-    return {
-        uuid: {
-            "body": encoded,
-            "integratedTime": integrated_time,
-            "logIndex": log_index,
-        }
-    }
 
 
 def _hash_and_sig(envelope: dict) -> tuple[str, str]:
@@ -126,6 +91,17 @@ def _mirror_rekor(httpx_mock, *, uuid_prefix: str = "m") -> None:
     httpx_mock.add_callback(
         callback, method="POST", url=_TEST_REKOR_URL, is_reusable=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# Outbound client identity
+# ---------------------------------------------------------------------------
+
+class TestRekorUserAgent:
+    def test_reports_the_shipped_package_version(self) -> None:
+        assert _signing.rekor._REKOR_USER_AGENT.startswith(
+            f"mareforma/{mareforma.__version__} ",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -212,11 +188,33 @@ class TestSubmitToRekor:
 # Streaming response body (oversized aborts mid-read, not after full buffer)
 # ---------------------------------------------------------------------------
 
-class TestSubmitToRekorStreaming:
-    def test_oversized_chunked_body_aborts_during_read(self, httpx_mock):
-        """No Content-Length, 256 KB of garbage past the 64 KB cap.
-        submit_to_rekor must reject without buffering the whole body
-       , the streaming accumulator is the only line of defense."""
+class _CountingByteStream(httpx.SyncByteStream):
+    """Emit ``chunks`` blocks of ``size`` bytes, counting the ones pulled.
+
+    Passing this as ``httpx.Response(stream=...)`` produces a response with
+    no Content-Length, so the header pre-check cannot fire. A reader that
+    aborts mid-body leaves ``consumed`` below ``chunks``; one that buffers
+    the whole answer drains every block.
+    """
+
+    def __init__(self, chunks: int = 4, size: int = 64 * 1024) -> None:
+        self.chunks = chunks
+        self.size = size
+        self.consumed = 0
+
+    def __iter__(self):
+        for _ in range(self.chunks):
+            self.consumed += 1
+            yield b"X" * self.size
+
+
+class TestRekorStreamingSizeCap:
+    """A chunked response omits Content-Length, so the streaming
+    accumulator is the only line of defense against a hostile or buggy
+    log server. It must stop reading past the cap, not after the body
+    fully lands."""
+
+    def test_submit_aborts_during_read(self, httpx_mock):
         key = _signing.generate_keypair()
         envelope = _signing.sign_claim(
             {"claim_id": "c", "text": "x", "classification": "INFERRED",
@@ -224,20 +222,34 @@ class TestSubmitToRekorStreaming:
              "source_name": None, "created_at": "2026-05-12T00:00:00+00:00"},
             key,
         )
-        huge = b"X" * (256 * 1024)
-        httpx_mock.add_response(
-            method="POST", url=_TEST_REKOR_URL, status_code=201,
-            content=huge,
+        stream = _CountingByteStream()
+        httpx_mock.add_callback(
+            lambda request: httpx.Response(201, stream=stream),
+            method="POST", url=_TEST_REKOR_URL,
         )
         logged, entry = _signing.submit_to_rekor(
             envelope, key.public_key(), rekor_url=_TEST_REKOR_URL,
         )
         assert logged is False
         assert entry is None
+        assert 0 < stream.consumed < stream.chunks
+
+    def test_fetch_inclusion_proof_aborts_during_read(self, httpx_mock):
+        stream = _CountingByteStream()
+        httpx_mock.add_callback(
+            lambda request: httpx.Response(200, stream=stream),
+            method="GET",
+        )
+        with pytest.raises(_signing.RekorInclusionError) as exc_info:
+            _signing.fetch_inclusion_proof(
+                "ab" * 32, "https://rekor.test.example/api/v1/log/entries",
+            )
+        assert exc_info.value.reason == "malformed_proof"
+        assert 0 < stream.consumed < stream.chunks
 
 
 # ---------------------------------------------------------------------------
-# Rekor response size cap (header pre-check + actual bytes)
+# Rekor response size cap (header pre-check)
 # ---------------------------------------------------------------------------
 
 class TestRekorResponseSizeCap:
@@ -253,27 +265,6 @@ class TestRekorResponseSizeCap:
             method="POST", url=_TEST_REKOR_URL, status_code=201,
             content=b"{}",
             headers={"content-length": "10485760"},  # 10 MiB
-        )
-        logged, _ = _signing.submit_to_rekor(
-            envelope, key.public_key(), rekor_url=_TEST_REKOR_URL,
-        )
-        assert logged is False
-
-    def test_oversized_actual_body_rejected(self, httpx_mock):
-        """No Content-Length header, the streaming accumulator must abort
-        once it has read past the cap, before the body fully lands."""
-        key = _signing.generate_keypair()
-        envelope = _signing.sign_claim(
-            {"claim_id": "c", "text": "x", "classification": "INFERRED",
-             "generated_by": "a", "supports": [], "contradicts": [],
-             "source_name": None, "created_at": "2026-05-12T00:00:00+00:00"},
-            key,
-        )
-        # 256 KB filler, well past the 64 KB cap.
-        huge = b"X" * (256 * 1024)
-        httpx_mock.add_response(
-            method="POST", url=_TEST_REKOR_URL, status_code=201,
-            content=huge,
         )
         logged, _ = _signing.submit_to_rekor(
             envelope, key.public_key(), rekor_url=_TEST_REKOR_URL,
@@ -308,6 +299,21 @@ class TestRekorResponseVerification:
             key,
         )
         return key, envelope
+
+    def test_shared_builder_mirrors_the_submission(self):
+        """Every rekor test module builds its 201 bodies with this one
+        helper, so it has to echo back exactly the hash and signature
+        submit_to_rekor compares against."""
+        sig_b64 = base64.standard_b64encode(b"a signature").decode("ascii")
+        body = _rekor_response_for(payload_hash="AB" * 32, sig_b64=sig_b64)
+
+        entry = next(iter(body.values()))
+        spec = json.loads(base64.standard_b64decode(entry["body"]))["spec"]
+        assert spec["data"]["hash"]["value"].lower() == "ab" * 32
+        assert (
+            _signing._b64_decode_tolerant(spec["signature"]["content"])
+            == _signing._b64_decode_tolerant(sig_b64)
+        )
 
     def test_hash_mismatch_in_response_is_rejected(self, httpx_mock):
         import base64
@@ -375,6 +381,52 @@ class TestRekorResponseVerification:
             envelope, key.public_key(), rekor_url=_TEST_REKOR_URL,
         )
         assert logged is False
+
+    def _mock_entry(self, httpx_mock, record) -> None:
+        encoded = base64.standard_b64encode(
+            json.dumps(record).encode("utf-8"),
+        ).decode("ascii")
+        httpx_mock.add_response(
+            method="POST", url=_TEST_REKOR_URL,
+            status_code=201, json={"u": {"body": encoded, "logIndex": 1}},
+        )
+
+    @pytest.mark.parametrize("bad_value", [None, 12345, ["a"], {"a": "b"}])
+    def test_non_string_hash_in_response_is_rejected(self, httpx_mock, bad_value):
+        """A present but non-string hash must degrade to (False, None) like
+        any other body mismatch. submit_to_rekor promises never to raise,
+        and its callers run after the claim row is already inserted."""
+        key, envelope = self._build_envelope()
+        self._mock_entry(httpx_mock, {
+            "apiVersion": "0.0.1",
+            "kind": "hashedrekord",
+            "spec": {
+                "data": {"hash": {"algorithm": "sha256", "value": bad_value}},
+                "signature": {
+                    "content": envelope["signatures"][0]["sig"],
+                    "publicKey": {"content": "x"},
+                },
+            },
+        })
+        logged, entry = _signing.submit_to_rekor(
+            envelope, key.public_key(), rekor_url=_TEST_REKOR_URL,
+        )
+        assert logged is False
+        assert entry is None
+
+    @pytest.mark.parametrize("spec", [{}, {"data": "not-a-mapping"}])
+    def test_unusable_entry_spec_is_rejected(self, httpx_mock, spec):
+        """The extraction guard covers a missing field and a scalar where a
+        mapping belongs."""
+        key, envelope = self._build_envelope()
+        self._mock_entry(httpx_mock, {
+            "apiVersion": "0.0.1", "kind": "hashedrekord", "spec": spec,
+        })
+        logged, entry = _signing.submit_to_rekor(
+            envelope, key.public_key(), rekor_url=_TEST_REKOR_URL,
+        )
+        assert logged is False
+        assert entry is None
 
 
 # ---------------------------------------------------------------------------
@@ -561,6 +613,61 @@ class TestAssertClaimWithRekor:
         envelope = json.loads(claim["signature_bundle"])
         assert "rekor" not in envelope
 
+    def test_rekor_failure_warns_and_records_a_health_event(
+        self, tmp_path: Path, httpx_mock,
+    ) -> None:
+        """A failed submit is pushed, not left for a per-claim trust map.
+
+        Submit is the saga step most likely to fail, and while it fails every
+        claim written stops short of REPLICATED. The other three failure
+        branches warn; this one must too, and must land in health.jsonl so an
+        outage shows up in `mareforma activity`.
+        """
+        httpx_mock.add_response(method="POST", url=_TEST_REKOR_URL, status_code=503)
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(
+            tmp_path, key_path=key_path, rekor_url=_TEST_REKOR_URL,
+        ) as graph:
+            with pytest.warns(UserWarning, match="transparency_logged stays 0"):
+                claim_id = graph.assert_claim("rekor down")
+
+        events = [
+            json.loads(line)
+            for line in (
+                tmp_path / ".mareforma" / "health.jsonl"
+            ).read_text().splitlines()
+            if line.strip()
+        ]
+        assert any(
+            e["op"] == "rekor_submit"
+            and e["outcome"] == "fail"
+            and e["claim_id"] == claim_id
+            for e in events
+        ), f"no rekor_submit fail event recorded: {events}"
+
+    def test_saga_does_not_commit_a_caller_owned_transaction(
+        self, tmp_path: Path, httpx_mock,
+    ) -> None:
+        """A claim asserted inside a caller's own BEGIN IMMEDIATE must roll
+        back with it, sidecar row included. The saga joined that transaction,
+        so none of its writes may commit on their own."""
+        _mirror_rekor(httpx_mock, uuid_prefix="saga")
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(
+            tmp_path, key_path=key_path, rekor_url=_TEST_REKOR_URL,
+        ) as graph:
+            conn = graph._conn
+            conn.execute("BEGIN IMMEDIATE")
+            graph.assert_claim("rolled back under rekor")
+            conn.rollback()
+
+            claims = conn.execute("SELECT COUNT(*) AS n FROM claims").fetchone()
+            sidecar = conn.execute(
+                "SELECT COUNT(*) AS n FROM rekor_inclusions",
+            ).fetchone()
+        assert claims["n"] == 0
+        assert sidecar["n"] == 0
+
     def test_unsigned_claim_stays_transparency_logged_true(
         self, tmp_path: Path, httpx_mock,
     ) -> None:
@@ -651,6 +758,43 @@ class TestReplicatedGating:
             assert graph.get_claim(id_a)["support_level"] == "REPLICATED"
             assert graph.get_claim(id_b)["support_level"] == "REPLICATED"
 
+    def test_late_doi_resolution_does_not_promote_an_unlogged_claim(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """The peer filter demands transparency_logged=1 of every candidate,
+        so the claim being resolved must meet the same bar. A claim whose
+        Rekor submission failed must not reach REPLICATED when its DOI
+        resolves later, nor drag a logged peer up with it."""
+        from mareforma.db import core as _db
+        from tests._helpers import _two_signers
+        key_path = _bootstrap_key(tmp_path)
+        sa, sb = _two_signers(tmp_path)
+        # Rekor is down for peer B; the graph itself runs without a log, so
+        # the anchor and peer A stay transparency_logged=1.
+        monkeypatch.setattr(
+            _signing, "submit_to_rekor", lambda *a, **kw: (False, None),
+        )
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            upstream = graph.assert_claim(
+                "upstream", generated_by="seed", seed=True,
+            )
+            id_a = graph.assert_claim(
+                "agent A", supports=[upstream], generated_by="agent/a", signer=sa,
+            )
+            # Peer B is inserted through the db layer so the unresolved flag
+            # can be forced on without plumbing a fake DOI through a resolver.
+            id_b = _db.add_claim(
+                graph._conn, graph._root, "agent B", supports=[upstream],
+                generated_by="agent/b", signer=sb, unresolved=True,
+                rekor_url=_TEST_REKOR_URL,
+            )
+            assert graph.get_claim(id_b)["transparency_logged"] == 0
+
+            _db.mark_claim_resolved(graph._conn, graph._root, id_b)
+
+            assert graph.get_claim(id_b)["support_level"] == "PRELIMINARY"
+            assert graph.get_claim(id_a)["support_level"] == "PRELIMINARY"
+
 
 # ---------------------------------------------------------------------------
 # REPLICATED gating: one peer logged, one peer not
@@ -662,7 +806,6 @@ class TestOnePeerLoggedOneNot:
         transparency_logged=1 alone, but REPLICATED requires the NEW
         claim's transparency_logged=1 as well, agent B's continued
         unlogged state keeps both at PRELIMINARY."""
-        import base64
         from tests._helpers import _bootstrap_key as _bk
         key_path = _bootstrap_key(tmp_path)
         # Peer A is signed by a distinct key (sa); peer B is signed by the
@@ -674,28 +817,12 @@ class TestOnePeerLoggedOneNot:
         def one_shot_mirror(httpx_mock):
             def cb(request: "httpx.Request") -> "httpx.Response":
                 import httpx as _httpx
-                body = json.loads(request.content)
-                spec = body["spec"]
-                record = {
-                    "apiVersion": "0.0.1", "kind": "hashedrekord",
-                    "spec": {
-                        "data": {"hash": {
-                            "algorithm": "sha256",
-                            "value": spec["data"]["hash"]["value"],
-                        }},
-                        "signature": {
-                            "content": spec["signature"]["content"],
-                            "publicKey": {"content": "x"},
-                        },
-                    },
-                }
-                encoded = base64.standard_b64encode(
-                    json.dumps(record).encode("utf-8"),
-                ).decode("ascii")
-                return _httpx.Response(
-                    201,
-                    json={"uu": {"body": encoded, "logIndex": 1, "integratedTime": 1}},
-                )
+                spec = json.loads(request.content)["spec"]
+                return _httpx.Response(201, json=_rekor_response_for(
+                    payload_hash=spec["data"]["hash"]["value"],
+                    sig_b64=spec["signature"]["content"],
+                    uuid="uu", log_index=1, integrated_time=1,
+                ))
             httpx_mock.add_callback(cb, method="POST", url=_TEST_REKOR_URL)
 
         one_shot_mirror(httpx_mock)  # upstream succeeds
@@ -1023,7 +1150,7 @@ class TestMarkClaimLoggedVerification:
         with mareforma.open(tmp_path, key_path=key_path) as graph:
             claim_id = graph.assert_claim("host")
         bad_bundle = json.dumps({
-            "payloadType": "application/vnd.mareforma.claim+json",
+            "payloadType": _signing.PAYLOAD_TYPE_CLAIM,
             "payload": base64.standard_b64encode(b'"nope"').decode("ascii"),
             "signatures": [{"keyid": "x", "sig": "y"}],
         })
@@ -1129,6 +1256,8 @@ class TestRekorUrlValidation:
         "https://2130706433/api/v1/log/entries",        # decimal of 127.0.0.1
         "https://0177.0.0.1/api/v1/log/entries",        # octal of 127.0.0.1
         "https://0.0.0.0/api/v1/log/entries",           # unspecified
+        "https://127.0.0.1./api/v1/log/entries",        # absolute-name form
+        "https://127.1./api/v1/log/entries",            # absolute short form
     ])
     def test_dns_shortcut_bypasses_rejected(self, tmp_path, url):
         """DNS shortcuts that ipaddress.ip_address() rejects but kernels
@@ -1136,6 +1265,23 @@ class TestRekorUrlValidation:
         bypass payloads."""
         with pytest.raises(_signing.SigningError):
             mareforma.open(tmp_path, rekor_url=url)
+
+    @pytest.mark.parametrize("suffix", ["", ".", ".."])
+    @pytest.mark.parametrize("name", sorted(_LOOPBACK_DNS_NAMES))
+    def test_loopback_alias_rejected_with_the_root_dot(self, name, suffix):
+        """A trailing dot makes an absolute DNS name that resolves the
+        same, so every alias must be blocked in that form too."""
+        with pytest.raises(_signing.SigningError):
+            _signing.validate_rekor_url(f"https://{name}{suffix}/api/v1")
+
+    def test_base10_hostname_regex_is_gone(self):
+        """The base-10-only hostname regex the radix-aware guard replaced
+        must not linger in the package namespace. It matches the decimal
+        form without classifying it and misses the hex form entirely, so
+        reaching for it reintroduces the bypass."""
+        assert not hasattr(_signing, "_NUMERIC_HOSTNAME_RE")
+        with pytest.raises(_signing.SigningError):
+            _signing.validate_rekor_url("http://2130706433/api/v1/log/entries")
 
     def test_https_dns_hostname_accepted(self, tmp_path):
         # DNS hostnames are allowed, TLS to the resolved host is the

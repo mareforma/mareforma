@@ -6,8 +6,9 @@ Its exit codes are stable, so a CI job can branch on them without parsing text:
 | Code | Meaning | CI action |
 |---|---|---|
 | `0` | verified | pass |
-| `1` | tamper or binding violation | fail the build |
-| `2` | unverifiable (missing material) | fail, or warn (your call) |
+| `1` | tamper or binding violation, a definite no | fail the build |
+| `2` | unverifiable, the check could not run | fail, or warn (read below first) |
+| `3` | usage error (bad flag or missing argument) | fail the build |
 
 The workflow below verifies a claim on every push. Copy it to
 `.github/workflows/verify.yml` and set `CLAIM_ID` to the claim your pipeline
@@ -29,7 +30,9 @@ jobs:
       # The claim id your pipeline recorded. A run that regenerates the
       # graph would assert claims first, then verify them here.
       - name: verify claim
-        run: mareforma verify "$CLAIM_ID"
+        run: |
+          : "${CLAIM_ID:?CLAIM_ID is not set}"
+          mareforma verify "$CLAIM_ID"
         env:
           CLAIM_ID: ${{ vars.CLAIM_ID }}
 ```
@@ -45,6 +48,7 @@ code directly and use `--json` for the details:
 ```yaml
       - name: verify claim (split tamper vs unverifiable)
         run: |
+          : "${CLAIM_ID:?CLAIM_ID is not set}"
           set +e
           mareforma verify "$CLAIM_ID" --json > verdict.json
           code=$?
@@ -53,8 +57,11 @@ code directly and use `--json` for the details:
             echo "::error::claim tampered or grounding binding violated"
             exit 1
           elif [ "$code" = "2" ]; then
-            echo "::warning::claim unverifiable in this environment"
+            echo "::warning::claim unverifiable, nothing to check it against"
             exit 0
+          elif [ "$code" != "0" ]; then
+            echo "::error::mareforma verify usage error (exit $code)"
+            exit 1
           fi
         env:
           CLAIM_ID: ${{ vars.CLAIM_ID }}
@@ -63,3 +70,24 @@ code directly and use `--json` for the details:
 The `--json` payload carries the verdict and the full trust map, so a
 downstream step can post the map as a comment or archive it as the run's audit
 receipt.
+
+## Before you warn on exit 2
+
+Exit 2 says the check could not run, not that it ran and found nothing wrong.
+A claim lands there when the material to reach a verdict is missing: the claim
+id is not in this graph, the graph cannot be read, or the claim is signed by a
+key that is not an enrolled validator on the project.
+
+That last case is the one to think about. `verify` works from public material,
+which is the project's enrolled validator pubkeys, so a signature under a key
+nobody enrolled cannot be checked against anything, including a signature of 64
+zero bytes.
+
+Exit 2 says the claim could not be checked, not that it failed, so what your gate
+does with it is a policy choice rather than something the exit code decides. The
+recipe above warns and passes, which is right while a project still expects
+claims from signers it has not enrolled. Once every signer on a project is
+supposed to be enrolled, an unverifiable claim is a broken expectation and the
+gate should fail on 2 as well, because warning on it lets a claim through that
+nothing checked. Either way, enroll the signer's key so its claims can reach a
+real verdict.

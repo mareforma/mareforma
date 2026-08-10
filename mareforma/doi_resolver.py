@@ -11,14 +11,22 @@ from __future__ import annotations
 import re
 
 
-_DOI_PATTERN = re.compile(r"^10\.\d{4,}/.+")
+# End-anchored with \Z (not $, which would let a trailing newline
+# through) and whitespace-free. The DOI Handbook allows printable
+# Unicode in the suffix, including spaces, so \S+ is deliberately
+# stricter than the spec: a string carrying prose or a second line is
+# not the form the ``doi`` tag names.
+_DOI_PATTERN = re.compile(r"^10\.\d{4,}/\S+\Z")
+
+# DOIs have no length limit in the spec; real ones are far under this.
+_DOI_MAX_LEN = 256
 
 
 def is_doi(s: str) -> bool:
-    """Return True if string matches DOI format ``10.<registrant>/<suffix>``."""
-    return bool(_DOI_PATTERN.match(s.strip()))
+    """Return True if string is exactly ``10.<registrant>/<suffix>``.
 
-
-def extract_dois(values: list[str]) -> list[str]:
-    """Filter a list to only DOIs, stripping surrounding whitespace."""
-    return [v.strip() for v in values if is_doi(v)]
+    The whole string is tested as given. Surrounding whitespace is not
+    trimmed, so a padded value classifies as external rather than
+    reaching a consumer that builds ``https://doi.org/<value>``.
+    """
+    return len(s) <= _DOI_MAX_LEN and bool(_DOI_PATTERN.match(s))

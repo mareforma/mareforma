@@ -98,6 +98,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
+from .._atomic import atomic_write_bytes, fsync_parent as _fsync_parent
+
 
 # Claim envelopes carry an in-toto Statement v1 as the signed payload.
 # payloadType is the IANA-style media type used by Sigstore / SLSA /
@@ -169,15 +171,42 @@ _SEED_FIELDS = (
     "seeded_at",
 )
 
-# Fields included in the signed payload of a project-policy declaration.
-# The root validator signs (rekor_required, created_at) to declare, once
-# and tamper-evidently, that this project's findings must be witnessed by
-# the transparency log before they can converge. restore verifies this
-# envelope against the enrolled root before enforcing the policy.
-_PROJECT_POLICY_FIELDS = (
+# Fields included in the signed payload of a project-policy declaration,
+# per payload version. The root validator signs the declaration once and
+# tamper-evidently; restore verifies the envelope against the enrolled root
+# before enforcing it.
+#
+# v1 declared witnessing alone. v2 adds ``strict_promotion_required`` (data
+# on both sides of a converging pair) and carries its own ``version`` inside
+# the signed bytes. v3 adds a per-flag declaration time, because ``created_at``
+# is when the row was last signed: extending a policy with a second rule moves
+# it forward, and any check keyed on it would treat the whole history before
+# the second declaration as predating the first. Each check reads its own
+# flag's timestamp instead. NULL until the flag is declared. The version
+# selects the field list, so an envelope signed before a field existed keeps
+# verifying under the rules it was signed with and a deployed project is never
+# invalidated by the newer field.
+_PROJECT_POLICY_FIELDS_V1 = (
     "rekor_required",
     "created_at",
 )
+_PROJECT_POLICY_FIELDS_V2 = (
+    "version",
+    "rekor_required",
+    "strict_promotion_required",
+    "created_at",
+)
+_PROJECT_POLICY_FIELDS_V3 = _PROJECT_POLICY_FIELDS_V2 + (
+    "rekor_declared_at",
+    "strict_promotion_declared_at",
+)
+_PROJECT_POLICY_FIELDS_BY_VERSION = {
+    1: _PROJECT_POLICY_FIELDS_V1,
+    2: _PROJECT_POLICY_FIELDS_V2,
+    3: _PROJECT_POLICY_FIELDS_V3,
+}
+# Version every new declaration is signed at.
+_PROJECT_POLICY_VERSION = 3
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +298,11 @@ def save_private_key(
         )
         try:
             os.write(fd, pem)
+            # Bootstrap prints the keyid and exits, so nothing else will
+            # flush this. A power loss in the writeback window would leave a
+            # zero-length key that graph.db's root validator row already
+            # names, and that root can never be re-enrolled.
+            os.fsync(fd)
         except OSError:
             # If the write failed (disk full, IO error), the O_EXCL'd file
             # is on disk but empty. Without cleanup, the next bootstrap
@@ -282,45 +316,14 @@ def save_private_key(
                 pass
             raise
         os.close(fd)
+        _fsync_parent(path)
         return
 
-    # Rotation path. Mirror the durable atomic write the claims.toml backup
-    # uses: an unpredictable temp name in the key's own directory (two
-    # concurrent overwrites cannot share and clobber one predictable temp),
-    # fsync the data before the rename (a power loss in the writeback window
-    # cannot leave path pointing at an empty or truncated key once os.replace
-    # has already destroyed the old one), then a best-effort directory fsync so
-    # the rename itself survives a crash.
-    import tempfile
-
-    fd, tmp_name = tempfile.mkstemp(
-        prefix="." + path.name + ".", suffix=".tmp", dir=str(path.parent),
-    )
-    try:
-        with os.fdopen(fd, "wb") as f:
-            # fdopen now owns fd, so it is closed even if fchmod raises.
-            # mkstemp already creates at 0o600; fchmod restates the intent so
-            # the key never exists with looser perms even if the umask changes.
-            os.fchmod(f.fileno(), 0o600)
-            f.write(pem)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_name, path)
-    except BaseException:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
-    if hasattr(os, "O_DIRECTORY"):
-        try:
-            dir_fd = os.open(str(path.parent), os.O_DIRECTORY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-        except OSError:
-            pass
+    # Rotation path. A power loss in the writeback window cannot leave path
+    # pointing at an empty or truncated key once the rename has destroyed the
+    # old one, so the write lands through a temp file in the key's own
+    # directory.
+    atomic_write_bytes(path, pem, mode=0o600)
 
 
 def load_private_key(path: Path) -> Ed25519PrivateKey:
@@ -461,6 +464,8 @@ def canonical_statement(
         # Optional/versioned: present in the signed bytes only when the caller
         # recorded an observed verdict. Absent keys leave the bytes unchanged.
         observed_grounding=claim_fields.get("observed_grounding"),
+        # Same posture for a finding's signed verdict inputs.
+        finding_record=claim_fields.get("finding_record"),
     )
     from .._canonical import canonicalize
     return canonicalize(stmt)
@@ -719,7 +724,11 @@ def sign_validator_enrollment(
 
     The record must contain ``keyid`` (sha256-hex of the NEW validator's
     raw public key), ``pubkey_pem`` (base64 of the new validator's PEM),
-    ``identity``, ``enrolled_at``, and ``enrolled_by_keyid``.
+    ``identity``, ``validator_type`` (``'human'`` or ``'llm'``),
+    ``enrolled_at``, and ``enrolled_by_keyid``. Every one of the six is
+    bound by the signature; a field the caller leaves out is signed as
+    null and fails :func:`mareforma.validators.verify_enrollment` against
+    the persisted row.
     *private_key* is the parent validator's key (equal to the new key for
     the root self-enrollment).
     """
@@ -737,10 +746,14 @@ def sign_validation(
     """Sign a validation event for a claim.
 
     The record must contain ``claim_id`` (the claim being promoted to
-    ESTABLISHED), ``validator_keyid`` (the signing validator), and
-    ``validated_at`` (ISO 8601 UTC). The envelope is persisted to the
-    claim's ``validation_signature`` column so the promotion event is
-    independently verifiable.
+    ESTABLISHED), ``validator_keyid`` (the signing validator),
+    ``validated_at`` (ISO 8601 UTC), and ``evidence_seen`` (the claim_ids
+    the validator reviewed, ``[]`` for none). ``evidence_seen`` is bound
+    by the signature like the rest, so an empty list is the way to say
+    "reviewed nothing"; leaving the key out signs it as null, which
+    ``validate_claim`` and restore then refuse. The envelope is persisted
+    to the claim's ``validation_signature`` column so the promotion event
+    is independently verifiable.
     """
     payload = _canonical_record(_VALIDATION_FIELDS, validation)
     return _build_envelope(
@@ -777,19 +790,40 @@ def sign_seed_claim(
     )
 
 
+def _project_policy_fields(version: Any) -> tuple[str, ...]:
+    """Signed field list for a project-policy payload of *version*.
+
+    ``version`` is read from the payload itself; a payload that carries no
+    version is v1, the shape that predates the field. A version this build
+    does not know is refused rather than read under the wrong field list.
+    """
+    fields = _PROJECT_POLICY_FIELDS_BY_VERSION.get(version)
+    if fields is None:
+        raise InvalidEnvelopeError(
+            f"project-policy payload version {version!r} is not one this "
+            "mareforma build can read. Upgrade the package."
+        )
+    return fields
+
+
 def sign_project_policy(
     policy: dict[str, Any],
     private_key: Ed25519PrivateKey,
 ) -> dict[str, Any]:
     """Sign a project-policy declaration.
 
-    The record must contain ``rekor_required`` (bool) and ``created_at``
-    (ISO 8601 UTC). The root validator signs it so restore can prove, from
-    the signed material alone, that the project requires transparency-log
-    witnessing. The payload type is distinct so a policy envelope cannot be
-    substituted for a validation or seed envelope, or vice versa.
+    The record must contain ``created_at`` (ISO 8601 UTC) and the flags the
+    declaration sets. ``version`` selects the signed field list and defaults
+    to 1 (``rekor_required`` only); a v2 record adds
+    ``strict_promotion_required``, a v3 record adds the time each flag was
+    first declared. The root validator signs it so restore can prove, from the
+    signed material alone, which rules the project runs under and since when.
+    The payload type is distinct so a policy envelope cannot be substituted
+    for a validation or seed envelope, or vice versa.
     """
-    payload = _canonical_record(_PROJECT_POLICY_FIELDS, policy)
+    payload = _canonical_record(
+        _project_policy_fields(policy.get("version", 1)), policy,
+    )
     return _build_envelope(
         payload, private_key,
         payload_type=PAYLOAD_TYPE_PROJECT_POLICY,
@@ -847,13 +881,26 @@ def verify_envelope(
     *,
     expected_payload_type: Optional[str] = None,
 ) -> bool:
-    """Verify a signature envelope against a public key.
+    """Verify one signature in an envelope against a public key.
 
-    Returns True iff the envelope is well-formed, names this public key
-    (by keyid), and the signature matches the payload bytes.
+    Returns True iff the envelope is well-formed, its first signature
+    entry names this public key (by keyid), and that signature matches
+    the payload bytes.
+
+    Only ``signatures[0]`` is verified. Later entries are read past, so
+    a True return says nothing about them: on a ``claim-with-roles:v1``
+    envelope it authenticates the asserter alone, and forged role
+    entries in ``signatures[1:]`` survive it while their role labels
+    stay readable. Verify those with :func:`verify_envelope_multi` and
+    a role-to-key map, or walk ``signatures[1:]`` in the caller.
 
     Does NOT decode the payload or re-validate semantic fields: those are
     the caller's concern. The contract here is purely cryptographic.
+
+    See Also
+    --------
+    verify_envelope_multi : verify every signature under a keyed role.
+    sign_claim_with_roles : produce a multi-signature claim envelope.
 
     Parameters
     ----------

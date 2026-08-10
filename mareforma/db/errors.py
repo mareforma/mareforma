@@ -9,6 +9,31 @@ class DatabaseError(MareformaError):
     """Raised when a graph.db operation fails."""
 
 
+class ScanCeilingReached(DatabaseError):
+    """Raised when a read surface exhausts its scan ceiling short of ``limit``.
+
+    ``query_claims`` and ``search_claims`` bound how many ordered rows they
+    materialise. Rows dropped by verify-on-read do not count as survivors, so a
+    flood of rows that fail that check can fill the ceiling before ``limit``
+    real matches are reached. Returning the short list would be indistinguishable
+    from an empty graph, and the query-before-asserting pattern would then
+    re-assert what is already recorded, so the read refuses instead. Narrow the
+    query or lower ``limit`` to bring the survivors inside the ceiling.
+    """
+
+
+class UnverifiedClaimError(MareformaError):
+    """Raised when an export is asked to publish a claim that failed verify-on-read.
+
+    The interop exports (JSON-LD, PROV-O, RO-Crate) carry a claim's
+    ``support_level`` off the machine, where nothing re-checks it. A REPLICATED
+    or ESTABLISHED row whose signature does not re-verify must not leave with
+    that level attached, and demoting it silently would hide the tamper, so the
+    export refuses and names the rows. Run ``mareforma verify <claim_id>`` for
+    the detail, then retract or repair the row.
+    """
+
+
 class ClaimNotFoundError(MareformaError):
     """Raised when a claim lookup finds no matching record."""
 
@@ -39,11 +64,13 @@ class IdempotencyConflictError(MareformaError):
 class IllegalStateTransitionError(MareformaError):
     """Raised when an SQLite state-machine trigger refuses a transition.
 
-    The trigger raises ``mareforma:state:<from>-><to>`` strings via
-    ``RAISE(ABORT, ...)``. Python catches the resulting
-    ``sqlite3.IntegrityError`` and re-raises this exception with the
-    parsed transition so callers can pattern-match on it instead of
-    parsing opaque ``CHECK CONSTRAINT FAILED`` messages.
+    The trigger raises ``mareforma:state:<suffix>`` strings via
+    ``RAISE(ABORT, ...)``, where the suffix is a static literal such as
+    ``illegal_transition:from_preliminary``: ``RAISE()`` cannot
+    concatenate a column value below SQLite 3.46. Python catches the
+    resulting ``sqlite3.IntegrityError`` and re-raises this exception
+    with the parsed suffix so callers can pattern-match on it instead
+    of parsing opaque ``CHECK CONSTRAINT FAILED`` messages.
     """
 
 
@@ -146,14 +173,17 @@ class RestoreError(MareformaError):
 
       - ``'graph_not_empty'``          : existing graph.db has claims
       - ``'toml_not_found'``           : claims.toml does not exist
+      - ``'toml_unreadable'``          : claims.toml exists but cannot be read
       - ``'toml_malformed'``           : TOML parse error
       - ``'enrollment_unverified'``    : enrollment envelope fails verify
       - ``'claim_unverified'``         : claim signature fails verify
+      - ``'trust_row_rejected'``       : replayed trust-layer row breaks the schema
       - ``'mode_inconsistent'``        : signed-mode graph with unsigned claim
       - ``'orphan_signer'``            : claim signed by an unenrolled keyid
       - ``'policy_absent'``            : enforce_rekor_policy set but no signed policy
       - ``'policy_unverifiable'``      : enforced policy has no pinned Rekor log key
       - ``'policy_unverified'``        : project_policy envelope fails verify
+      - ``'policy_violation'``         : rebuilt row breaks the signed policy
       - ``'rekor_inclusion_invalid'``  : Rekor inclusion entry or proof invalid
     """
 
@@ -176,17 +206,35 @@ class CycleDetectedError(MareformaError):
 
 class GraphTooLargeError(MareformaError):
     """Raised when a new claim's ``supports[]`` transitively reach more distinct
-    upstream claims than the reachable-claim cap allows.
+    upstream nodes than the reachable-claim cap allows.
 
-    This is a pathological-graph guard, NOT a cycle. The acyclicity walk visits
-    every distinct claim reachable from the new claim's supports; a legitimate
-    but enormous fan-out (a foundational claim cited across a mature graph) can
-    reach very many claims at shallow depth. Rejecting that write is a safety
-    valve against a runaway walk, and it is reported as its own condition so a
-    caller is never told "cycle" when the graph is merely large.
+    This is a pathological-graph guard, NOT a cycle. The acyclicity walk stops
+    at the cap; a legitimate but enormous fan-out (a foundational claim cited
+    across a mature graph) can reach very many claims at shallow depth.
+    Rejecting that write is a safety valve against a runaway walk, and it is
+    reported as its own condition so a caller is never told "cycle" when the
+    graph is merely large. The walk says nothing about the part it did not
+    reach, so a cycle beyond the cap surfaces here rather than as
+    :class:`CycleDetectedError`. Either way the write is refused.
     """
 
 
+
+
+class ProjectPolicyError(MareformaError, ValueError):
+    """Raised when a project-policy declaration is refused.
+
+    The project policy (Rekor witnessing, strict promotion) is root-signed,
+    project-wide and one-way, so declaring one is a privileged write, not a
+    handle setting. This fires when the caller cannot make that declaration:
+    no signing key is loaded, the loaded key is not the project's single root
+    validator, or a concurrent writer already declared a rule the envelope in
+    hand does not carry. Refusing is the point: a caller who asked for the
+    stricter rule and cannot record it must not proceed believing it holds.
+
+    Subclasses ``ValueError`` because the declaration surfaces raised that
+    before the policy grew its own type.
+    """
 
 
 class VerdictIssuerError(MareformaError):

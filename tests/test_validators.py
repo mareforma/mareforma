@@ -17,13 +17,16 @@ Covers:
 from __future__ import annotations
 
 import base64
+import inspect
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
 import mareforma
+from mareforma import db as _db
 from mareforma import signing as _signing
 from mareforma import validators as _validators
 from mareforma.cli import cli as mareforma_cli
@@ -44,6 +47,21 @@ class TestAutoEnrollRoot:
             assert row["keyid"] == keyid
             assert row["enrolled_by_keyid"] == keyid  # self-signed root
             assert row["identity"] == "root"
+
+    def test_graph_takes_no_root_identity_knob(self, tmp_path: Path) -> None:
+        """The root label is fixed, so the constructor advertises no override.
+
+        mareforma.open() is the only sanctioned construction site and it never
+        forwarded a label, so the parameter promised a configurable root
+        identity no caller could reach."""
+        from mareforma._graph import EpistemicGraph
+
+        params = inspect.signature(EpistemicGraph.__init__).parameters
+        assert "signer_identity" not in params
+        key_path = _bootstrap_key(tmp_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            keyid = _signing.public_key_id(graph._signer.public_key())
+            assert _validators.get_validator(graph._conn, keyid)["identity"] == "root"
 
     def test_reopen_with_same_key_is_idempotent(self, tmp_path: Path) -> None:
         key_path = _bootstrap_key(tmp_path)
@@ -116,6 +134,38 @@ class TestBootstrapRace:
             f"expected exactly one root, got {len(all_rows)} — "
             "BEGIN IMMEDIATE is supposed to serialize the racing writers"
         )
+
+    def test_lock_timeout_refuses_instead_of_returning_none(
+        self, tmp_path: Path,
+    ) -> None:
+        """A write that never happened is not a lost race. When another
+        process holds the write lock past the busy timeout, nothing is
+        enrolled and no key holds the root, so returning None would be read
+        upstream as 'a different key holds the root' — the wrong diagnosis
+        and an unrunnable remedy. It must refuse with the sqlite reason."""
+        open_db(tmp_path).close()
+        blocker = open_db(tmp_path)
+        conn = open_db(tmp_path)
+        conn.execute("PRAGMA busy_timeout = 50")
+        try:
+            blocker.execute("BEGIN IMMEDIATE")
+            with pytest.raises(_db.DatabaseError, match="locked"):
+                _validators.auto_enroll_root(
+                    conn, _signing.generate_keypair(), identity="root",
+                    root=tmp_path,
+                )
+            assert _validators.count_validators(conn) == 0
+        finally:
+            blocker.close()
+            conn.close()
+
+        events = [
+            json.loads(line) for line in
+            (tmp_path / ".mareforma" / "health.jsonl")
+            .read_text(encoding="utf-8").splitlines()
+        ]
+        assert [e["outcome"] for e in events
+                if e["op"] == "root_auto_enroll"] == ["fail"]
 
     def test_root_self_enrollment_emits_warning(self, tmp_path: Path) -> None:
         """A fresh-graph root enrollment must fire a UserWarning so the
@@ -232,6 +282,112 @@ class TestSingletonRoot:
 
 
 # ---------------------------------------------------------------------------
+# The listing verifies the chain it prints
+# ---------------------------------------------------------------------------
+
+def _plant_validator_row(
+    root: Path, identity: str, parent_keyid: str | None = None,
+) -> str:
+    """INSERT a validator row straight into sqlite, bypassing enrollment.
+
+    The envelope is signed by the planted key itself, so the row only ever
+    verifies when it claims to be its own parent. ``parent_keyid`` is the
+    parent the row claims (default: itself, an alternate self-signed root).
+    Returns the planted keyid.
+    """
+    import sqlite3
+
+    key = _signing.generate_keypair()
+    keyid = _signing.public_key_id(key.public_key())
+    pem_b64 = base64.standard_b64encode(
+        _signing.public_key_to_pem(key.public_key()),
+    ).decode("ascii")
+    now = "2026-05-12T00:00:00+00:00"
+    envelope = _signing.sign_validator_enrollment(
+        {
+            "keyid": keyid,
+            "pubkey_pem": pem_b64,
+            "identity": identity,
+            "enrolled_at": now,
+            "enrolled_by_keyid": parent_keyid or keyid,
+        },
+        key,
+    )
+    raw = sqlite3.connect(str(root / ".mareforma" / "graph.db"))
+    raw.execute(
+        "INSERT INTO validators "
+        "(keyid, pubkey_pem, identity, enrolled_at, "
+        " enrolled_by_keyid, enrollment_envelope) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            keyid, pem_b64, identity, now, parent_keyid or keyid,
+            json.dumps(envelope, sort_keys=True, separators=(",", ":")),
+        ),
+    )
+    raw.commit()
+    raw.close()
+    return keyid
+
+
+class TestListVerifiesTheChain:
+    """``who may promote claims here?`` must be answered by the chain walk.
+
+    A row planted by direct sqlite INSERT is refused by every enforcement
+    path, so the operator-facing listing is the one place it can still pass
+    for a healthy enrollment.
+    """
+
+    def _root_keyid(self, tmp_path: Path, key_path: Path) -> str:
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            return _signing.public_key_id(graph._signer.public_key())
+
+    def test_forged_child_row_is_listed_unverified(self, tmp_path: Path) -> None:
+        key_path = _bootstrap_key(tmp_path)
+        root_keyid = self._root_keyid(tmp_path, key_path)
+        planted = _plant_validator_row(tmp_path, "attacker", root_keyid)
+
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            rows = {r["keyid"]: r for r in graph.list_validators()}
+        assert rows[root_keyid]["verified"] is True
+        assert rows[planted]["verified"] is False
+
+    def test_alternate_root_lists_every_row_unverified(self, tmp_path: Path) -> None:
+        key_path = _bootstrap_key(tmp_path)
+        root_keyid = self._root_keyid(tmp_path, key_path)
+        _plant_validator_row(tmp_path, "attacker")
+
+        with pytest.warns(UserWarning, match="self-signed roots"):
+            with mareforma.open(tmp_path, key_path=key_path) as graph:
+                rows = graph.list_validators()
+        assert [r["verified"] for r in rows] == [False, False]
+        assert any(r["keyid"] == root_keyid for r in rows)
+
+    def test_cli_list_marks_and_refuses_a_forged_row(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        key_path = _bootstrap_key(tmp_path)
+        root_keyid = self._root_keyid(tmp_path, key_path)
+        _plant_validator_row(tmp_path, "attacker", root_keyid)
+
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(mareforma_cli, ["validator", "list"])
+        assert result.exit_code == 1, result.output
+        assert "UNVERIFIED" in result.output
+
+    def test_cli_list_names_the_root_count(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        key_path = _bootstrap_key(tmp_path)
+        self._root_keyid(tmp_path, key_path)
+        _plant_validator_row(tmp_path, "attacker")
+
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(mareforma_cli, ["validator", "list", "--json"])
+        assert result.exit_code == 1, result.output
+        assert "2 self-signed roots" in result.output
+
+
+# ---------------------------------------------------------------------------
 # enroll_validator (root signs B)
 # ---------------------------------------------------------------------------
 
@@ -310,6 +466,43 @@ class TestEnrollValidator:
                     graph._conn, graph._signer, root_pem, identity="root-clone",
                 )
 
+    def test_concurrent_enroll_of_same_key_raises_typed_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Two `validator add` runs for the same public key both pass the
+        pre-checks. The loser's INSERT must surface as the documented
+        ValidatorAlreadyEnrolledError, not a raw sqlite3.IntegrityError."""
+        root_key_path = _bootstrap_key(tmp_path, "root.key")
+        new_pem = _signing.public_key_to_pem(
+            _signing.generate_keypair().public_key(),
+        )
+        real_utcnow = _validators._utcnow_iso
+        raced = False
+
+        def racing_utcnow() -> str:
+            # Runs after the pre-checks and before the INSERT: the window
+            # another process enrolling the same key would land in.
+            nonlocal raced
+            if not raced:
+                raced = True
+                conn = open_db(tmp_path)
+                try:
+                    _validators.enroll_validator(
+                        conn, _signing.load_private_key(root_key_path),
+                        new_pem, identity="winner",
+                    )
+                finally:
+                    conn.close()
+            return real_utcnow()
+
+        with mareforma.open(tmp_path, key_path=root_key_path) as graph:
+            monkeypatch.setattr(_validators, "_utcnow_iso", racing_utcnow)
+            with pytest.raises(_validators.ValidatorAlreadyEnrolledError):
+                _validators.enroll_validator(
+                    graph._conn, graph._signer, new_pem, identity="loser",
+                )
+            assert _validators.count_validators(graph._conn) == 2
+
     def test_enrolled_validator_envelope_verifies_under_parent(
         self, tmp_path: Path,
     ) -> None:
@@ -371,8 +564,11 @@ class TestVerifyEnrollmentFullBinding:
             # Before tamper: verifies.
             assert _validators.verify_enrollment(row_before, pubkey_pem) is True
 
-        # Tamper: change identity in the row but not in the envelope.
+        # Tamper: change identity in the row but not in the envelope. Drop the
+        # append-only guard first (the adversary's move); the signature-vs-row
+        # binding is what must refuse the row, trigger or no trigger.
         raw = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
+        raw.execute("DROP TRIGGER IF EXISTS validators_append_only")
         raw.execute(
             "UPDATE validators SET identity = ? WHERE keyid = ?",
             ("attacker-renamed-the-root", root_keyid),
@@ -386,6 +582,51 @@ class TestVerifyEnrollmentFullBinding:
             # After tamper: the row's identity diverges from the envelope's
             # signed identity → verify must fail.
             assert _validators.verify_enrollment(row_after, pubkey_pem) is False
+
+    def test_keyid_that_is_not_its_own_key_breaks_verify(
+        self, tmp_path: Path,
+    ) -> None:
+        """A keyid is an identity only because it is the hash of a key. A row
+        naming a keyid that is not ``public_key_id`` of its own pubkey_pem is
+        internally consistent (payload and row agree, the signature verifies),
+        so binding the fields alone accepts it and the validators table becomes
+        a keyid-to-key map anyone holding one enrolled key can extend."""
+        key = _signing.generate_keypair()
+        pubkey_pem = _signing.public_key_to_pem(key.public_key())
+        pem_b64 = base64.standard_b64encode(pubkey_pem).decode("ascii")
+        unbacked = "ab" * 32
+        now = "2026-05-12T00:00:00+00:00"
+        assert unbacked != _signing.public_key_id(key.public_key())
+        payload = {
+            "keyid": unbacked,
+            "pubkey_pem": pem_b64,
+            "identity": "peer-lab",
+            "validator_type": "human",
+            "enrolled_at": now,
+            "enrolled_by_keyid": unbacked,  # self-signed root
+        }
+        envelope = json.dumps(
+            _signing.sign_validator_enrollment(payload, key),
+            sort_keys=True, separators=(",", ":"),
+        )
+        row = {**payload, "enrollment_envelope": envelope}
+        assert _validators.verify_enrollment(row, pubkey_pem) is False
+
+        conn = open_db(tmp_path)
+        try:
+            conn.execute(
+                "INSERT INTO validators "
+                "(keyid, pubkey_pem, identity, validator_type, enrolled_at, "
+                " enrolled_by_keyid, enrollment_envelope) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (unbacked, pem_b64, "peer-lab", "human", now, unbacked,
+                 envelope),
+            )
+            conn.commit()
+            listed = _validators.list_validators_verified(conn)
+        finally:
+            conn.close()
+        assert [r["verified"] for r in listed] == [False]
 
 
 # ---------------------------------------------------------------------------
@@ -871,6 +1112,44 @@ class TestValidatorCLI:
         finally:
             conn.close()
 
+    def test_validator_add_from_subdirectory_enrolls_on_the_parent(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """Run from a subdirectory, enrollment must land on the project the
+        command is inside, not on a nested one created here."""
+        import os
+        root_key_path = _bootstrap_key(tmp_path, "root.key")
+        xdg_key = _signing.default_key_path()
+        xdg_key.parent.mkdir(parents=True, exist_ok=True)
+        xdg_key.write_bytes(root_key_path.read_bytes())
+        os.chmod(xdg_key, 0o600)
+        with mareforma.open(tmp_path):
+            pass
+
+        new_key = _signing.generate_keypair()
+        new_pem_path = tmp_path / "carol.pub.pem"
+        new_pem_path.write_bytes(_signing.public_key_to_pem(new_key.public_key()))
+
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        monkeypatch.chdir(sub)
+        runner = CliRunner()
+        result = runner.invoke(
+            mareforma_cli,
+            ["validator", "add", "--pubkey", str(new_pem_path),
+             "--identity", "carol"],
+        )
+        assert result.exit_code == 0, result.output
+        assert not (sub / ".mareforma").exists()
+
+        conn = open_db(tmp_path)
+        try:
+            assert _validators.is_enrolled(
+                conn, _signing.public_key_id(new_key.public_key()),
+            )
+        finally:
+            conn.close()
+
     def test_validator_list_shows_root_and_extras(
         self, tmp_path: Path, monkeypatch,
     ) -> None:
@@ -1017,51 +1296,34 @@ class TestCLIValidateProducesSignedEnvelope:
 
 class TestConnCacheInvalidation:
     """The per-connection chain-verification cache is dropped whenever a
-    validator-mutation path runs through our Python API. Without this,
-    on Connection wrappers that DO accept arbitrary attributes (apsw,
-    certain SQLAlchemy adapters, future subclasses), an
-    ``is_enrolled(K) → True`` call caches the keyid; a subsequent
-    mutation would leave the cache pointing at a True that no longer
-    reflects ground truth until the connection is reopened.
+    validator-mutation path runs through our Python API. Without this, an
+    ``is_enrolled(K) → True`` call caches the keyid; a subsequent mutation
+    would leave the cache pointing at a True that no longer reflects
+    ground truth until the connection is reopened.
 
-    Stdlib ``sqlite3.Connection`` refuses ``setattr``, so on stdlib
-    ``_conn_cache`` falls into its per-call fresh-set safe branch and
-    the cache never persists. To exercise the invalidation logic
-    independently of stdlib behavior, the tests below use a tiny
-    ``_AttrConn`` wrapper that allows attribute writes — same surface
-    the cache code actually targets.
+    ``open_db`` builds every connection as ``_GraphConnection``, which
+    accepts the cache attribute, so the cache persists on the type the
+    product runs on and these tests observe it there directly. A raw
+    stdlib ``sqlite3.Connection`` refuses ``setattr`` and falls into the
+    per-call fresh-set branch of ``_conn_cache``; that branch is pinned
+    below on a connection built outside ``open_db``.
 
     Raw-SQL mutations from outside our Python paths are explicitly out
     of scope for this gate — see ``invalidate_conn_cache`` docstring.
     """
 
-    class _AttrConn:
-        """Minimal sqlite3.Connection-like shim that accepts arbitrary
-        attribute writes (which stdlib sqlite3.Connection refuses).
-        Lets us exercise the cache + invalidation logic in isolation
-        from whether the running stdlib is one of the wrappers that
-        happens to accept attrs."""
-
-        def __init__(self, real_conn):
-            self._real = real_conn
-
-        def __getattr__(self, name):
-            return getattr(self._real, name)
-
-    def test_cache_persists_when_attrs_allowed(
+    def test_cache_persists_on_a_graph_connection(
         self, tmp_path: Path,
     ) -> None:
-        """On a Connection wrapper that accepts attrs, _conn_cache
-        actually persists across calls — establishing the baseline the
-        invalidation has to clear."""
+        """_conn_cache persists across calls on a graph connection,
+        establishing the baseline the invalidation has to clear."""
         conn = open_db(tmp_path)
         try:
-            attr_conn = self._AttrConn(conn)
-            cache_a = _validators._conn_cache(attr_conn)
+            cache_a = _validators._conn_cache(conn)
             cache_a.add("test-keyid-deadbeef")
-            cache_b = _validators._conn_cache(attr_conn)
-            # Same set object returned across calls — cache really does
-            # persist on this wrapper.
+            cache_b = _validators._conn_cache(conn)
+            # Same set object returned across calls, so the cache really
+            # does persist on the connection open_db builds.
             assert cache_b is cache_a
             assert "test-keyid-deadbeef" in cache_b
         finally:
@@ -1074,29 +1336,41 @@ class TestConnCacheInvalidation:
         next _conn_cache call returns a fresh empty set."""
         conn = open_db(tmp_path)
         try:
-            attr_conn = self._AttrConn(conn)
-            cache = _validators._conn_cache(attr_conn)
+            cache = _validators._conn_cache(conn)
             cache.add("test-keyid-cafebabe")
-            assert "test-keyid-cafebabe" in _validators._conn_cache(attr_conn)
+            assert "test-keyid-cafebabe" in _validators._conn_cache(conn)
 
-            _validators.invalidate_conn_cache(attr_conn)
+            _validators.invalidate_conn_cache(conn)
 
-            after = _validators._conn_cache(attr_conn)
+            after = _validators._conn_cache(conn)
             assert "test-keyid-cafebabe" not in after
             assert after == set()
         finally:
             conn.close()
 
-    def test_invalidate_on_unattributed_conn_is_noop(
+    def test_invalidate_on_uncached_conn_is_noop(
         self, tmp_path: Path,
     ) -> None:
-        """On a connection that never built a cache (e.g. stdlib
-        sqlite3.Connection where setattr is refused), invalidation
-        must not raise. Idempotent."""
+        """On a connection that never built a cache, invalidation must
+        not raise, and it stays a no-op when repeated."""
         conn = open_db(tmp_path)
         try:
             _validators.invalidate_conn_cache(conn)  # never cached → no-op
             _validators.invalidate_conn_cache(conn)  # twice still no-op
+        finally:
+            conn.close()
+
+    def test_raw_stdlib_conn_gets_a_fresh_cache_every_call(self) -> None:
+        """A connection built outside open_db refuses the cache attribute,
+        so _conn_cache returns a new set each call and invalidation has
+        nothing to drop. Slow but correct, and it must not raise."""
+        conn = sqlite3.connect(":memory:")
+        try:
+            first = _validators._conn_cache(conn)
+            first.add("test-keyid-f00d")
+            assert _validators._conn_cache(conn) is not first
+            assert _validators._conn_cache(conn) == set()
+            _validators.invalidate_conn_cache(conn)
         finally:
             conn.close()
 

@@ -12,6 +12,7 @@ deterministic, so it is not gated on wall-clock timing (which varies by machine)
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import mareforma
@@ -32,6 +33,26 @@ def _enrolled_signer(graph, root: Path, name: str):
         _signing.public_key_to_pem(signer.public_key()), identity=name,
     )
     return signer
+
+
+def _build_many_anchors(graph, root: Path, n_anchors: int, n_signers: int = 3) -> int:
+    """Create *n_anchors* ESTABLISHED anchors, each with its own converging set.
+
+    The single-anchor fixture below is the shape a real project never has, and
+    it is the one shape where the corroboration peer probe finds its match on
+    the first row it scans. A regression that makes the probe walk the whole
+    graph is invisible there and quadratic here, so the bound is measured on
+    both. Returns the number of REPLICATED rows created.
+    """
+    signers = [_enrolled_signer(graph, root, f"m{i}") for i in range(n_signers)]
+    for a in range(n_anchors):
+        anchor = graph.assert_claim(f"anchor {a}", generated_by="seed", seed=True)
+        for i, s in enumerate(signers):
+            graph.assert_claim(
+                f"converging claim {a}.{i}", generated_by=f"lab_{i}",
+                supports=[anchor], signer=s,
+            )
+    return n_anchors * n_signers
 
 
 def _build_many_replicated(graph, root: Path, n_signers: int) -> int:
@@ -78,28 +99,75 @@ def test_pr2b_verify_count_is_bounded(
         # Every REPLICATED row was served verified (cache reports per row).
         assert all(r.get("verified", True) for r in replicated)
 
-        # Cache bound, MEASURED: at most one verification per high-trust row
-        # served — never the 2x+ that a missing cache would allow if a row were
+        # Cache bound, MEASURED: at most one verification per envelope served —
+        # never the 2x+ that a missing cache would allow if an envelope were
         # re-checked across the query's internal batches. Each distinct claim
-        # has a distinct (keyid, digest), so the count tracks the row count.
-        high_trust = [
-            r for r in rows
-            if r["support_level"] in ("REPLICATED", "ESTABLISHED")
-        ]
+        # has a distinct (keyid, digest), so the count tracks the envelope
+        # count. A REPLICATED row carries the asserter bundle; an ESTABLISHED
+        # row carries the validation envelope on top of it, so it counts twice.
+        # The read also authenticates enrollment rather than trusting a
+        # validators row's presence, which costs one envelope check per read.
+        # Measured constant in the row count on THIS fixture. That is a narrow
+        # claim: one anchor with every claim citing it is not the shape a
+        # project has, and a regression that walked every anchor once per row
+        # served passed this bound untouched, because verification count was
+        # never what moved. The many-anchor case below carries the same bound on
+        # the realistic shape, and the query plan is pinned separately.
+        established = [r for r in rows if r["support_level"] == "ESTABLISHED"]
+        bound = len(replicated) + 2 * len(established) + 1
         assert calls["n"] >= 1, "expected the read path to verify signatures"
-        assert calls["n"] <= len(high_trust), (
+        assert calls["n"] <= bound, (
             f"verify cache did not bound checks: {calls['n']} checks for "
-            f"{len(high_trust)} high-trust rows"
+            f"a bound of {bound} envelopes"
         )
 
 
-def test_pr2b_cache_collapses_a_repeated_row_in_one_walk(tmp_path):
-    """A claim reachable by two provenance paths is verified once, not twice.
+def test_pr2b_verify_count_is_bounded_across_many_anchors(tmp_path, monkeypatch):
+    """The same bound, on the graph shape a findings project actually has.
+
+    Twenty anchors with their own converging sets, rather than one anchor every
+    claim cites. The signature bound held through a query-plan regression that
+    made a bulk read walk every anchor once per row served, because the number
+    of verifications was never what moved; this pins the bound on the shape that
+    regression was invisible on, and the plan itself is pinned separately in
+    tests/test_corroboration_query_plan.py.
+    """
+    kv = tmp_path / "mareforma.key"
+    _signing.bootstrap_key(kv)
+    with mareforma.open(tmp_path, key_path=kv) as g:
+        created = _build_many_anchors(g, tmp_path, n_anchors=20)
+
+        calls = {"n": 0}
+        real = _signing.verify_envelope
+
+        def counting(*args, **kwargs):
+            calls["n"] += 1
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(_signing, "verify_envelope", counting)
+        rows = g.query(limit=1000)
+
+        replicated = [r for r in rows if r["support_level"] == "REPLICATED"]
+        established = [r for r in rows if r["support_level"] == "ESTABLISHED"]
+        assert len(replicated) == created
+        assert all(r.get("verified", True) for r in replicated)
+        bound = len(replicated) + 2 * len(established) + 1
+        assert calls["n"] <= bound, (
+            f"verify cache did not bound checks across {len(established)} "
+            f"anchors: {calls['n']} checks for a bound of {bound} envelopes"
+        )
+
+
+def test_pr2b_cache_collapses_a_repeated_row_in_one_walk(tmp_path, monkeypatch):
+    """One provenance walk verifies each envelope once, however often the
+    node it belongs to is reached.
 
     query_provenance shares one verify cache across the upstream and downstream
-    hydration, so a node that appears in both walks collapses to a single
-    ``(keyid, digest)`` check. This is the case where the cache genuinely saves
-    a redundant verification, measured directly.
+    hydration, so a node reached by two paths costs a single
+    ``(keyid, digest)`` check. The fixture makes the walk actually revisit a
+    node (the anchor is cited by the focal claim directly and through its
+    peers) and gives one signer two high-trust claims, so a count keyed on the
+    signer alone would report a second check that never happened.
     """
     kv = tmp_path / "mareforma.key"
     _signing.bootstrap_key(kv)
@@ -109,30 +177,37 @@ def test_pr2b_cache_collapses_a_repeated_row_in_one_walk(tmp_path):
         sb = _enrolled_signer(g, tmp_path, "sb")
         a = g.assert_claim("A", generated_by="x", supports=[anchor], signer=sa)
         b = g.assert_claim("B", generated_by="y", supports=[anchor], signer=sb)
-        # A downstream claim that cites both A and B, so the anchor and the
-        # REPLICATED peers are reachable on more than one path from it.
-        g.assert_claim("C cites both", generated_by="z", supports=[a, b], signer=sa)
+        # Second claim by sa: two distinct envelopes under one keyid.
+        e = g.assert_claim("E", generated_by="x2", supports=[anchor], signer=sa)
+        # The focal claim cites the anchor both directly and through its
+        # peers, so the anchor lands in the upstream edge list twice.
+        focal = g.assert_claim(
+            "F", generated_by="z", supports=[a, b, e, anchor], signer=sb,
+        )
+        g.assert_claim("D", generated_by="w", supports=[focal], signer=sa)
 
+        # Count verifications per signed payload. The digest identifies the
+        # envelope; the keyid alone does not, since every claim envelope
+        # shares a payload prefix and one signer can hold several claims.
         seen: dict[str, int] = {}
+        by_signer: dict[str, set[str]] = {}
         real = _signing.verify_envelope
 
-        # Count verifications per signature digest to prove a repeated node is
-        # checked at most once within a single provenance walk.
-        import mareforma.signing as _S
-
         def counting(env, *args, **kwargs):
-            try:
-                key = env["signatures"][0]["keyid"] + ":" + env["payload"][:16]
-            except Exception:
-                key = "?"
-            seen[key] = seen.get(key, 0) + 1
+            digest = hashlib.sha256(env["payload"].encode("utf-8")).hexdigest()
+            seen[digest] = seen.get(digest, 0) + 1
+            by_signer.setdefault(env["signatures"][0]["keyid"], set()).add(digest)
             return real(env, *args, **kwargs)
 
-        _S.verify_envelope = counting
-        try:
-            g.query_provenance(a, depth=4)
-        finally:
-            _S.verify_envelope = real
+        monkeypatch.setattr(_signing, "verify_envelope", counting)
+
+        prov = g.query_provenance(focal, depth=4)
+
+        # The fixture holds up: the anchor really is reached twice, and one
+        # signer really does hold two of the verified envelopes.
+        upstream_ids = [edge["claim_id"] for edge in prov["upstream"]]
+        assert upstream_ids.count(anchor) == 2
+        assert any(len(digests) > 1 for digests in by_signer.values())
 
         assert seen, "expected the provenance walk to verify signatures"
         assert max(seen.values()) == 1, (

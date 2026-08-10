@@ -1,0 +1,1218 @@
+"""_gate.py: the one boundary that owns verified trust-gate inputs.
+
+A trust gate decides a proposition's status from database rows, and most of
+those rows carry unsigned columns a process with SQL access can rewrite. The
+verification that turns a raw row into a countable line, its claim is live, its
+bearing still reconstructs, its signer and model are read from signed material,
+lived inlined on the read path and, separately, on restore. Two copies of one
+rule drift; that drift is what four rounds of review kept finding.
+
+This module is the single place that rule lives. A caller obtains gate inputs
+only through :func:`verified_gate_inputs` (the live read path) or
+:func:`verify_gate_inputs_or_refuse` (restore). Both run the one verifier,
+:func:`_derive_units`; they differ only in what they do with a line that does
+not verify. The read path drops it and discloses the drop; restore refuses the
+whole recovery. That is the "two entry points into one verifier" the design
+requires: the disposition is chosen by which entry point was called, never by a
+boolean flag threaded through a shared function (a boolean is how the two copies
+drifted apart in the first place).
+
+The verified rows are handed back inside a :class:`GateInputs`, a frozen record
+with no public constructor that accepts a raw ``sqlite3.Row``. The only way to
+build one is the two functions above, so a future edit cannot reintroduce a
+skipped check by passing unverified data straight into the counter.
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import sqlite3
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
+from .bearing import BearingDirection, compute_bearing
+from ._store import (
+    INDEPENDENCE_COUNTS_SQL,
+    _UngateablePlan,
+    _gateable_prediction,
+    compute_plan_id,
+    estimate_from_row,
+    estimates_digest_from_rows,
+)
+
+# Skip reasons. A line the verifier cannot count is tagged with one of these.
+# ``BEARING_RECOMPUTE``, ``PLAN_REBIND`` and ``PLAN_RULE_REBIND`` are the
+# corruption cases: a row whose stored estimate and prediction no longer
+# reconstruct into a gateable bearing, a finding whose ``plan_id`` column no
+# longer matches the plan its own claim records, and a ``predictions`` row whose
+# rule columns no longer hash to the ``plan_id`` keying them. The other two are
+# legitimate lifecycle states, a claim editorially withdrawn or invalidated, and
+# a plan whose rule no gate can run and nothing supersedes. The restore entry
+# point refuses only on corruption: a valid backup can legitimately carry a
+# retracted claim or a stranded plan, and refusing those would cost the operator
+# a recovery over honest state.
+_WITHDRAWN = "withdrawn_line_skipped"
+_UNGATEABLE = "ungateable_plan_skipped"
+_BEARING_RECOMPUTE = "bearing_recompute_skipped"
+_PLAN_REBIND = "plan_rebind_skipped"
+_PLAN_RULE_REBIND = "plan_rule_rebind_skipped"
+# A finding whose signed estimates digest no longer matches the digest recomputed
+# from its live rows: an estimate, contrast, or evidence line was altered or
+# deleted. It is a per-FINDING corruption (the digest is a property of the whole
+# line set), so every line of the finding is skipped under this one reason.
+_ESTIMATES_DIGEST_MISMATCH = "estimates_digest_skipped"
+# A line whose claim names a signer (non-NULL asserter_keyid) that does not
+# authenticate. Two causes, kept apart because they need different dispositions:
+#   * SIGNATURE_FAILED: the named signer IS an enrolled validator, but its
+#     signature does not verify (a stored pubkey was swapped or the signature
+#     forged). Corruption, refused on restore.
+#   * UNREGISTERED_SIGNER: the named signer is not an enrolled validator, or the
+#     bundle is absent / does not embed the keyid / does not bind this claim.
+#     The line counts on no axis (a forged claim controls generated_by too, so it
+#     must not fall back to the run axis), but it is not corruption: an honest
+#     backup can carry an unenrolled participant's finding, so restore accepts it
+#     and the read path merely discloses it.
+_SIGNATURE_FAILED = "signature_failed_skipped"
+_UNREGISTERED_SIGNER = "unregistered_signer_skipped"
+# A finding attached to a proposition its own claim does not attest. Neither
+# ``findings.content_id`` nor the ``propositions`` text columns are signed, so a
+# direct-SQL rewrite of either re-points a genuinely signed finding at a
+# different sentence (its estimates and bearing intact, the proposition now
+# reading "TP53 increases apoptosis" where the finding attests BRCA1). Two
+# re-derivations cover it: the proposition row must still hash to the
+# ``content_id`` it is keyed under, and the finding's own signed record must name
+# that same content_id. Both are exact, because content_id is what identity is;
+# an earlier version compared two RENDERINGS instead and dropped honest findings
+# whose scope keys sorted differently raw than casefolded. A finding with no
+# verifiable record keeps the rendering comparison, its only available lever.
+_PROPOSITION_REBIND = "proposition_rebind_skipped"
+_CORRUPTION_REASONS = frozenset(
+    {
+        _BEARING_RECOMPUTE,
+        _PLAN_REBIND,
+        _PLAN_RULE_REBIND,
+        _ESTIMATES_DIGEST_MISMATCH,
+        _SIGNATURE_FAILED,
+        _PROPOSITION_REBIND,
+    }
+)
+
+
+class GateInputRefused(Exception):
+    """A gate-input line did not verify and the caller refuses to proceed.
+
+    Raised only by :func:`verify_gate_inputs_or_refuse` (the restore entry
+    point). The read path never raises: it drops the line and discloses it.
+    """
+
+
+class GateCache:
+    """The per-derivation verify cache (design section 7).
+
+    Keyed on ``(table, row_id, digest)`` so an entry is bound to the exact row
+    bytes it was computed from: a later edit to the row changes the digest and
+    misses the entry rather than being served a stale answer. It carries
+    positive results only. A verification that fails is not recorded, so an
+    enrolment or a signature that lands after a miss is re-derived on the next
+    call rather than pinned to an "absent" that outlives the state describing it
+    (the caching defect where a stored "not enrolled" served a later forgery).
+
+    Scoped to one derivation call. A read shares a single instance across a
+    frame so each claim's signature verifies once; it is never persisted past
+    the rows it was built for. Callers hold a ``GateCache``, not a bare dict, so
+    the keying and the no-negative rule cannot be bypassed by reaching for
+    ``{}``.
+    """
+
+    __slots__ = ("_entries",)
+
+    def __init__(self) -> None:
+        self._entries: dict[tuple[str, str, str], object] = {}
+
+    def resolve(
+        self, table: str, row_id: str, digest: str, compute: Callable[[], object],
+    ) -> object:
+        """Return the cached positive value for this row, else compute + store it.
+
+        A ``None`` result is a negative verification and is deliberately not
+        cached (see the class docstring). Any other value is a positive
+        resolution and is memoized for the rest of the derivation call.
+        """
+        key = (table, row_id, digest)
+        cached = self._entries.get(key)
+        if cached is not None:
+            return cached
+        value = compute()
+        if value is not None:
+            self._entries[key] = value
+        return value
+
+
+@dataclass(frozen=True)
+class _GateLine:
+    """One verified evidence line, ready for the independence count.
+
+    ``direction`` is the recomputed per-line bearing, ``run_token`` the distinct
+    signer axis (``k:``/``g:`` namespaced), ``data_id`` the distinct-dataset key
+    and ``model_key`` the distinct-model/method axis, all read from verified or
+    signed material by :func:`_derive_units`. ``post_hoc`` is True when the plan
+    this line is gated under was not pre-registered (a one-shot plan or the
+    replacement a retirement resolved it to), so a count that rests on it can be
+    disclosed as post-hoc rather than passing for a pre-registered gate.
+    """
+
+    direction: BearingDirection
+    run_token: str
+    data_id: str
+    model_key: tuple
+    post_hoc: bool
+
+
+@dataclass(frozen=True)
+class _SkippedLine:
+    """A line the verifier could not count, with the health-channel detail.
+
+    ``op`` is the skip reason (one of the module constants) and doubles as the
+    health-event name the read path discloses under. ``detail`` carries the
+    per-event fields (claim id, plan id, error type) the disclosure records.
+    """
+
+    line_id: str
+    op: str
+    detail: dict = field(default_factory=dict)
+
+
+# The token that authorises a GateInputs. It is module-private, so no code
+# outside this module can pass it, and the dataclass refuses construction
+# without it. That is what makes "you cannot build gate inputs from a raw row"
+# a property of the type rather than a convention.
+_ISSUED = object()
+
+
+@dataclass(frozen=True)
+class GateInputs:
+    """The verified gate inputs for one proposition.
+
+    Carries already-verified lines (:class:`_GateLine`) and the lines that could
+    not be verified (:class:`_SkippedLine`), plus the :class:`GateCache` the
+    derivation used. It is not publicly constructible: the only ways to obtain
+    one are :func:`verified_gate_inputs` and :func:`verify_gate_inputs_or_refuse`,
+    both of which run the verifier first. A caller therefore cannot hand a raw
+    ``sqlite3.Row`` to the counter by building a ``GateInputs`` around it.
+    """
+
+    content_id: str
+    units: tuple[_GateLine, ...]
+    skipped: tuple[_SkippedLine, ...]
+    cache: GateCache
+    _token: object
+
+    def __post_init__(self) -> None:
+        if self._token is not _ISSUED:
+            raise TypeError(
+                "GateInputs is not publicly constructible; obtain it from "
+                "verified_gate_inputs() or verify_gate_inputs_or_refuse()."
+            )
+
+
+def _bundle_digest(bundle_json: "str | None") -> str:
+    """A stable cache key fragment for a claim's signature bundle."""
+    if not bundle_json:
+        return "0"
+    return hashlib.sha256(bundle_json.encode("utf-8")).hexdigest()
+
+
+def _committed_plan_id(
+    payload_json: "str | None", claim_id: str, cache: GateCache,
+) -> "str | None":
+    """The plan_id the finding's own claim records, or None.
+
+    A finding binds the plan it was filed under into its claim's ``finding/v2``
+    record (``predicate_payload``, written since v0.3.10). The read query gates
+    on the ``findings.plan_id`` column, which nothing in that record covers, so a
+    direct writer can re-point it at another rule to flip a REFUTED line to
+    SUPPORTS. Reading the plan_id back from the claim's own record lets the
+    caller catch that: the column must match what the finding recorded.
+
+    Returns the recorded plan_id, or None when the claim carries no record or no
+    ``plan_id`` in it (a pre-v0.3.10 finding, or an unparseable payload). The
+    resolution is a property of the claim, identical across a multi-line
+    finding's lines, so it is memoized once per claim in the shared cache.
+    """
+    digest = _bundle_digest(payload_json)
+
+    def compute() -> "str | None":
+        if not payload_json:
+            return None
+        try:
+            payload = json.loads(payload_json)
+        except (ValueError, TypeError):
+            return None
+        pid = payload.get("plan_id") if isinstance(payload, dict) else None
+        return pid if isinstance(pid, str) else None
+
+    return cache.resolve("finding_plan", claim_id, digest, compute)  # type: ignore[return-value]
+
+
+def _committed_estimates_digest(
+    conn: sqlite3.Connection,
+    bundle_json: "str | None",
+    claim_id: str,
+    cache: GateCache,
+) -> "str | None":
+    """The estimates digest the finding's own claim SIGNED, or None.
+
+    A finding binds the digest of its ``(data_id, control_type, estimate)`` line
+    set into its claim's signed statement (the optional, versioned
+    ``finding_record``). Reading it back lets the caller recompute the digest from
+    the live rows and catch an altered or deleted estimate the inner-join count
+    would otherwise miss.
+
+    Returns None when the claim carries no finding record (a non-finding claim, or
+    a finding written before the record existed, both grandfathered), when the
+    envelope does not verify against an enrolled validator (see
+    :func:`verified_predicate`: an unverified envelope is an attacker-chosen
+    digest, and a caller who could plant one would simply plant the digest its
+    edited rows recompute to), or when the record names no digest. Never raises:
+    one un-readable bundle must not deny the whole proposition's count.
+    """
+    pred = verified_predicate(conn, bundle_json, claim_id, cache)
+    if pred is None:
+        return None
+    record = pred.get("finding_record")
+    if not isinstance(record, dict):
+        return None
+    value = record.get("estimates_digest")
+    return value if isinstance(value, str) else None
+
+
+def _proposition_normalized_text(
+    conn: sqlite3.Connection, content_id: str,
+) -> "tuple[str, ...] | None":
+    """The normalised rendering of the proposition row keyed by *content_id*.
+
+    Two things happen here, and the second is the load-bearing one.
+
+    The row must first re-derive its OWN identity: ``content_id`` is a hash of the
+    proposition's normalised fields, so a row whose stored columns no longer hash
+    to the key they sit under has been rewritten, and every finding filed against
+    that key is now attached to a sentence none of them made. This is checked
+    without reference to any finding, so it holds for a proposition whose findings
+    are all legacy as well as one whose findings are all signed.
+
+    The renderings are returned for the caller's FALLBACK comparison only, the
+    case of a finding whose claim carries no verifiable envelope. There is more
+    than one because :meth:`Proposition.text` orders scope by the raw key while
+    identity casefolds it, so two writers of one proposition emit their pairs in
+    different orders (see :meth:`Proposition.normalized_renderings`). A rendering
+    is not identity-stable, which is why the primary binding is the
+    ``content_id`` the finding's own signed record names, not any of these
+    strings.
+
+    Returns None when the proposition row is absent, when its stored columns no
+    longer read back into a valid proposition, or when they no longer hash to
+    ``content_id``; the caller drops every finding under it. Never raises: an
+    unreadable proposition must not deny the whole count.
+    """
+    from . import Proposition
+
+    row = conn.execute(
+        "SELECT subject, relation, object, direction, scope_json, magnitude "
+        "FROM propositions WHERE content_id = ?",
+        (content_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        proposition = Proposition.from_dict({
+            "subject": row["subject"],
+            "relation": row["relation"],
+            "object": row["object"],
+            "direction": row["direction"],
+            "scope": json.loads(row["scope_json"] or "{}"),
+            "magnitude": row["magnitude"],
+        })
+        if proposition.content_id() != content_id:
+            return None
+        return proposition.normalized_renderings()
+    except (ValueError, TypeError):
+        return None
+
+
+def _project_signs(conn: sqlite3.Connection) -> bool:
+    """True when this project enrols a validator, so its claims are signed.
+
+    The signing posture of a PROJECT, not of a row. It is what the legacy
+    grandfather needs beside ``statement_cid``, because every marker that lives
+    in the ``claims`` row is one more assignment on an UPDATE the writer is
+    already issuing: appending ``, statement_cid = NULL`` to the de-signing
+    statement restored the bypass in full. The ``validators`` table is a
+    different table, and it is where "does this project sign at all" actually
+    lives.
+
+    This is the same test restore has always made (``signed_mode =
+    bool(validators_section)``, which refuses a mixed-mode reconstruction
+    outright), so adopting it here makes the read path and the restore path agree
+    on one graph rather than holding two rules that can drift.
+
+    A graph too old or too damaged to answer reads as unsigned: the fallback is
+    the per-row reading it had before, never a denial of the whole count.
+    """
+    try:
+        return conn.execute(
+            "SELECT 1 FROM validators LIMIT 1"
+        ).fetchone() is not None
+    except sqlite3.Error:
+        return False
+
+
+def _verified_retirement(
+    conn: sqlite3.Connection,
+    plan_id: str,
+    cache: "GateCache | None" = None,
+    project_signs: bool = False,
+):
+    """The retirement record for *plan_id*, but only if it is genuinely attested.
+
+    A retirement decides which rule a proposition's stranded evidence is gated
+    under, and not one of ``plan_retirements``'s columns is signed. Resolution
+    used to read the raw row, on the reasoning that it is only reached from a
+    plan that cannot be run, so it could only recover a line counting zero. A
+    writer supplies that premise: rewriting a live plan's alpha to a value no
+    gate can discriminate at sends its lines into resolution, and a planted
+    replacement at a stricter alpha re-gates a refutation to NEUTRAL, which is
+    COUNTED rather than skipped.
+
+    Four things are checked, and each closes a measured defeat of the ones
+    before it:
+
+    1. **The retired plan's own rule still hashes to the plan_id keying it.**
+       Nothing re-derived it once a line was superseded, so the moment a plan was
+       un-runnable its rule was unauthenticated free text. Rewriting the retired
+       row's ``direction_of_interest`` and alpha together and then letting the
+       operator run the documented ``retire_plan`` repair produced a genuinely
+       SIGNED flip of a refutation into support, which survived restore: the
+       replacement is built from the tampered row, so the identity check downstream
+       only ever agreed with itself.
+    2. **The attestation claim's signed envelope must verify**, in a project that
+       signs. Falling back to ``claims.text`` unconditionally let a writer INSERT
+       an unsigned claim row carrying the attestation string: four SQL statements,
+       no key, no cooperation. The fallback is the legacy path and it is gated on
+       the project's signing posture, exactly as the run-axis grandfather is.
+    3. **The attestation must cite the replacement's own plan attestation** in its
+       signed ``supports``. Text equality is not identity: both plan ids are
+       computable in advance, so any claim whose text an attacker can influence
+       would otherwise become an attestation for a retirement nobody performed.
+       ``retire_plan`` cites the replacement; a look-alike cites nothing.
+    4. **The rendered triple must match**, compared NFC-normalised. The signed
+       text is normalised at signing and the ``reason`` column is not, so a reason
+       carrying a decomposed sequence made a genuine retirement resolve nothing,
+       permanently, since a plan retires once.
+
+    Returns None when any of those fails, and the caller then leaves the line
+    stranded and discloses it.
+    """
+    import unicodedata
+
+    from ._store import (
+        get_plan_claim_id,
+        get_plan_row,
+        plan_id_from_row,
+        plan_retirement,
+        retirement_claim_text,
+    )
+
+    row = plan_retirement(conn, plan_id)
+    if row is None:
+        return None
+    retired = get_plan_row(conn, plan_id)
+    if retired is None or plan_id_from_row(
+        retired["content_id"], retired,
+    ) != plan_id:
+        return None
+    claim = conn.execute(
+        "SELECT claim_id, text, signature_bundle FROM claims WHERE claim_id = ?",
+        (_row_get(row, "claim_id"),),
+    ).fetchone()
+    if claim is None:
+        return None
+    predicate = verified_predicate(
+        conn, claim["signature_bundle"], claim["claim_id"], cache,
+    )
+    if predicate is None:
+        # No verifiable envelope. Legacy and unsigned graphs read as they always
+        # did; a project that signs does not accept an unsigned attestation.
+        if project_signs:
+            return None
+        attested = claim["text"]
+    else:
+        attested = predicate.get("text")
+        replacement_claim = get_plan_claim_id(conn, row["superseded_by"])
+        supports = predicate.get("supports")
+        if replacement_claim is None or not isinstance(supports, list) or (
+            replacement_claim not in supports
+        ):
+            return None
+    expected = retirement_claim_text(
+        row["plan_id"], row["superseded_by"], row["reason"],
+    )
+
+    def _nfc(value: object) -> str:
+        return unicodedata.normalize("NFC", value if isinstance(value, str) else "")
+
+    return row if _nfc(attested) == _nfc(expected) else None
+
+
+def _row_get(row: Any, key: str, default: Any = None) -> Any:
+    """``row[key]`` when the row carries it, else *default*.
+
+    ``sqlite3.Row`` raises ``IndexError`` on an absent key rather than returning
+    None, and not every caller builds its rows from the same SELECT (restore
+    assembles its own). A column added for one path must not break another.
+    """
+    try:
+        return row[key]
+    except (IndexError, KeyError, TypeError):
+        return default
+
+
+def _signer_axis(
+    conn: sqlite3.Connection,
+    claim_id: str,
+    asserter_keyid: "str | None",
+    generated_by: str,
+    bundle_json: "str | None",
+    statement_cid: "str | None" = None,
+    project_signs: bool = False,
+) -> "tuple[str | None, str | None, str | None]":
+    """Classify a line's distinct-signer / run axis: ``(run_token, keyid, skip)``.
+
+    Exactly one of ``run_token`` / ``skip`` is set. ``keyid`` is the
+    authenticated signer keyid for the ``k:`` axis, else None.
+
+    The denormalized ``asserter_keyid`` column is not part of the signed
+    envelope, so a direct/foreign writer can set it to any string. The axis is
+    resolved so a forged signer can inflate no count:
+
+    - A claim with a **NULL** ``asserter_keyid`` is a pre-keyid legacy claim or a
+      genuinely unsigned finding. It keeps the retired ``g:generated_by`` run-axis
+      fallback (status_policy@v4), so a v0.3.10 graph and an unsigned-mode finding
+      still count, but only in a project that does not sign: the claim must carry
+      no ``statement_cid`` AND the project must enrol no validator
+      (:func:`_project_signs`). Neither test alone is enough. A column is one more
+      assignment on the UPDATE the writer is already issuing, and the grandfather
+      being a property of the ROW let a writer INSERT a fresh unsigned claim,
+      finding and evidence tree into a fully signed project and have every check
+      fall back to the columns it had just written. This is the ONLY grandfathered
+      case.
+    - A claim that **names a signer** (non-NULL ``asserter_keyid``) counts on the
+      distinct-signer axis (``k:keyid``) only when its ``signature_bundle`` (a)
+      embeds that same keyid, (b) binds to this ``claim_id``, (c) is signed by an
+      enrolled validator, and (d) verifies against that validator's pubkey. A
+      named signer that does not authenticate does NOT fall back to the run axis:
+      a forged claim controls ``generated_by`` too, so a run-axis fallback would
+      let it manufacture support all the same (the measured no-bundle / fabricated
+      -signer forgery). It counts on no axis and its line is skipped:
+
+        * an enrolled signer whose signature FAILS to verify is corruption
+          (``_SIGNATURE_FAILED``): a stored pubkey was swapped or the signature
+          forged, which restore refuses;
+        * a signer that is not enrolled, a bundle absent under a named keyid, one
+          that does not embed the keyid, or one that binds another claim, is an
+          unregistered / unauthenticatable signer (``_UNREGISTERED_SIGNER``): the
+          honest cost of the registration rule, disclosed on read but accepted on
+          restore so an honest backup carrying an unenrolled participant's finding
+          still recovers.
+
+    Never raises: one un-authenticatable line must not deny the whole
+    proposition's count. A structural failure reads as an unregistered signer (it
+    could not be authenticated), the fail-closed disposition.
+    """
+    if asserter_keyid is None:
+        # The legacy grandfather, and it takes two witnesses, in two tables.
+        #
+        # ``statement_cid`` is written at signing time and is not cleared by
+        # nulling the keyid and the bundle, so it distinguishes "unsigned from
+        # birth" from "de-signed just now". Without it, the cheapest forgery on
+        # the whole read path was `UPDATE claims SET asserter_keyid=NULL,
+        # signature_bundle=NULL`: it converted a signed finding into a legacy one
+        # and every new check exempted it, measured taking a proposition from
+        # CONTESTED to a clean PRELIMINARY with nothing disclosed.
+        #
+        # On its own it is one column, and the writer is already issuing an
+        # UPDATE against that row: appending `, statement_cid = NULL` to the same
+        # statement restored the bypass in full, measured at CONVERGENT (2, 0, 0)
+        # with nothing skipped. The second witness is the project's own signing
+        # posture, which lives in the ``validators`` table, where no UPDATE
+        # against ``claims`` reaches. It also closes the INSERT form of the same
+        # attack, a brand-new unsigned claim written into a signed project, which
+        # no per-row marker can see at all.
+        #
+        # Nothing unsigned counts in a signing project, and that is the point:
+        # the run axis keys on ``generated_by``, which whoever writes the row
+        # chooses, so any route to it is a route to manufacturing a unit.
+        #
+        # THE COST, STATED RATHER THAN IMPLIED. A project that started with no
+        # key and later enrols one loses every finding it wrote before the key,
+        # permanently, and there is no un-enrol. Those claims read UNTESTED
+        # where they read CONVERGENT. That is a real regression for an honest
+        # operator and it is deliberate: the alternative left two measured
+        # attacks open, de-signing an existing claim and INSERTing a fabricated
+        # unsigned tree into a signed project, both reading CONVERGENT (2, 0, 0)
+        # with nothing disclosed.
+        #
+        # The repair for that cost is a retroactive signature over the pre-key
+        # claims. It was built and withdrawn before release: an adversary showed
+        # it could be turned into a laundering path, so it needs its own pass
+        # rather than a rushed one. Until it lands, the loss above is what an
+        # upgrading operator gets, and the release notes have to say so.
+        #
+        # The residual is named and much larger than one column: a writer who
+        # de-signs EVERY claim and deletes EVERY validator leaves a graph
+        # indistinguishable from one that never signed. That is a whole-graph
+        # rewrite, and it is pinned alongside the other named boundary in
+        # tests/test_gate_tamper.py.
+        if statement_cid:
+            return (None, None, _UNREGISTERED_SIGNER)
+        if project_signs:
+            return (None, None, _UNREGISTERED_SIGNER)
+        return (f"g:{generated_by}", None, None)
+    if not bundle_json:
+        return (None, None, _UNREGISTERED_SIGNER)
+    try:
+        from .. import signing as _signing
+        from .. import validators as _validators
+
+        env = json.loads(bundle_json)
+        if env["signatures"][0]["keyid"] != asserter_keyid:
+            return (None, None, _UNREGISTERED_SIGNER)
+        pred = _signing.claim_predicate_from_envelope(env)
+        if pred.get("claim_id") != claim_id:
+            return (None, None, _UNREGISTERED_SIGNER)
+        signer_row = _validators.get_validator(conn, asserter_keyid)
+        # Presence in the table is not enrolment. A row can be INSERTed directly;
+        # ``is_enrolled`` walks the chain back to the self-signed root, which is
+        # what "registered" means everywhere else in this codebase
+        # (``_verdict_verifies`` and the CLI both use it). Measured: one INSERT of
+        # a junk envelope took a proposition from PRELIMINARY to CONVERGENT
+        # without forging a single signature.
+        if signer_row is None or not _validators.is_enrolled(conn, asserter_keyid):
+            return (None, None, _UNREGISTERED_SIGNER)
+        pem = base64.standard_b64decode(signer_row["pubkey_pem"])
+        pub = _signing.public_key_from_pem(pem)
+        if not _signing.verify_envelope(env, pub):
+            return (None, None, _SIGNATURE_FAILED)
+        return (f"k:{asserter_keyid}", asserter_keyid, None)
+    except Exception:
+        return (None, None, _UNREGISTERED_SIGNER)
+
+
+def verified_predicate(
+    conn: sqlite3.Connection,
+    bundle_json: "str | None",
+    claim_id: str,
+    cache: "GateCache | None" = None,
+) -> "dict | None":
+    """The claim's signed predicate, returned only when the signature VERIFIES.
+
+    Every downstream check that says "read it from the signed side" reads it
+    here. The finding's plan, the proposition it attests, its estimates digest
+    and its model lineage all exist twice, once inside this envelope and once in
+    an unsigned column beside it, and each check was moved onto the envelope
+    because a writer with SQL access rewrites both columns of a pair. That move
+    is only worth anything if the envelope is authenticated: an envelope that is
+    merely parsed is another string the same writer controls, and they write it
+    themselves. Measured on an untampered unsigned graph, one planted envelope
+    re-pointed a refuting line at a supporting rule and read CONVERGENT (2, 0, 0)
+    with nothing skipped and restore accepting.
+
+    A predicate is returned only when the envelope (a) parses as a claim
+    envelope, (b) binds this ``claim_id``, (c) names a signer that ``is_enrolled``
+    walks back to the project's self-signed root, and (d) verifies against that
+    validator's stored public key. Anything else is None, and every caller falls
+    back to the behaviour it had before the signed copy existed, which is what
+    keeps a legacy or genuinely unsigned claim reading exactly as it did.
+
+    Never raises: one unreadable envelope must not deny the whole proposition's
+    count. The resolution is a property of the claim and identical across a
+    multi-line finding's rows, so it is memoized per claim in the shared cache;
+    a negative is not cached (see :class:`GateCache`), so an enrolment that lands
+    later is picked up rather than pinned to an absence.
+    """
+    if not bundle_json:
+        return None
+
+    def compute() -> "dict | None":
+        try:
+            from .. import signing as _signing
+            from .. import validators as _validators
+
+            env = json.loads(bundle_json)
+            pred = _signing.claim_predicate_from_envelope(env)
+            if pred.get("claim_id") != claim_id:
+                return None
+            keyid = env["signatures"][0]["keyid"]
+            signer_row = _validators.get_validator(conn, keyid)
+            # Presence in the table is not enrolment; the chain walk back to the
+            # self-signed root is. Same rule as the signer axis, for the same
+            # reason: one direct INSERT of a row carrying a real public key
+            # otherwise authenticates a signer nobody enrolled.
+            if signer_row is None or not _validators.is_enrolled(conn, keyid):
+                return None
+            pem = base64.standard_b64decode(signer_row["pubkey_pem"])
+            pub = _signing.public_key_from_pem(pem)
+            if not _signing.verify_envelope(env, pub):
+                return None
+            return pred
+        except Exception:
+            return None
+
+    if cache is None:
+        return compute()
+    return cache.resolve(  # type: ignore[return-value]
+        "verified_predicate", claim_id, _bundle_digest(bundle_json), compute,
+    )
+
+
+def _is_human_signer(conn: sqlite3.Connection, keyid: str) -> bool:
+    """True iff *keyid* is an enrolled validator whose type is ``human``.
+
+    The human-independence signal keys off the validator schema rather than a
+    new column: a check whose signer is an enrolled human validator is a human
+    check. ``is_enrolled`` walks the chain back to a self-signed root and
+    verifies each enrollment envelope, and the envelope binds ``validator_type``
+    (see :func:`mareforma.validators.verify_enrollment`), so a row whose type was
+    flipped by a direct SQL UPDATE fails the chain and is not treated as human.
+    Only an authenticated signer keyid (see :func:`_signer_axis`) ever
+    reaches here, so an unbacked keyid cannot claim the human axis. Any structural
+    failure returns False: one un-resolvable signer must not deny the whole
+    proposition's count.
+    """
+    try:
+        from .. import validators as _validators
+
+        if not _validators.is_enrolled(conn, keyid):
+            return False
+        row = _validators.get_validator(conn, keyid)
+        return bool(row and row.get("validator_type") == "human")
+    except Exception:
+        return False
+
+
+def _signed_model_lineage(
+    conn: sqlite3.Connection,
+    claim_id: str,
+    bundle_json: "str | None",
+    cache: "GateCache | None" = None,
+) -> "dict | None":
+    """The model lineage the claim's SIGNED envelope binds, or None.
+
+    A finding binds its model lineage into the signed observed record
+    (``finding/v2``), so the read path can re-authenticate the denormalized
+    ``evidence_lines.model_lineage`` column against material the signer covered.
+    Returns the signed lineage dict only when the bundle (a) is a claim envelope
+    that (b) binds to this ``claim_id``, (c) carries a model lineage on its
+    observed record, and (d) is signed by an enrolled validator whose signature
+    verifies. A non-enrolled signer (whose bundle cannot be verified), a bad
+    signature, a v1 finding (no signed lineage), an unsigned claim, or any
+    structural failure returns None, the caller then treats the line as soft,
+    never a fabricated distinct model. Never raises: one un-authenticatable line
+    must not deny the whole proposition's count.
+    """
+    # Fail closed through the one verifier: a non-enrolled signer's bundle
+    # cannot be authenticated, so its lineage is unauthenticated. Trusting it
+    # lets a producer sign a fabricated distinct model with a throwaway key and
+    # inflate the count (the read-side parallel of the forged-column defence).
+    # An unauthenticatable line reads soft, never a counted model.
+    pred = verified_predicate(conn, bundle_json, claim_id, cache)
+    if pred is None:
+        return None
+    grounding = pred.get("observed_grounding")
+    if not isinstance(grounding, dict):
+        return None
+    lineage = grounding.get("model_lineage")
+    return lineage if isinstance(lineage, dict) else None
+
+
+def _authentic_model_key(
+    conn: sqlite3.Connection,
+    claim_id: str,
+    raw_column: "str | None",
+    bundle_json: "str | None",
+    cache: "GateCache | None" = None,
+) -> tuple:
+    """The independence model key for a line, read from SIGNED material.
+
+    The ``evidence_lines.model_lineage`` column is denormalized and unsigned, so
+    a direct/foreign writer can rewrite it to a fabricated distinct COMPUTED root,
+    or erase it, to inflate independence. We therefore key on the SIGNED lineage
+    the claim's envelope binds, never the raw column:
+
+    - a claim carrying an authenticated signed lineage keys on that signed copy
+      whatever the column says, so neither a forged column nor a stripped one can
+      move the count (erasing it would otherwise read as "no model call", which
+      the signer axis counts per signer);
+    - a NULL column with no signed lineage made no model claim → ``("absent",)``
+      (the legacy signer axis still applies; a human line is re-keyed upstream);
+    - a present column with no authenticatable signed lineage (a v1 finding, an
+      unsigned claim, or a bundle that does not verify) reads ``("soft",)``, a
+      distinct model that cannot be certified, never counted.
+
+    This is the model-axis parallel of :func:`_signer_axis`.
+    """
+    # Lazy import: ``mareforma.observe`` imports ``trust._store`` (for
+    # ``is_content_addressed``), so importing the lineage helper at module top
+    # would close a cycle. By call time both modules are fully loaded.
+    from mareforma.observe._lineage import independence_model_key
+
+    signed = _signed_model_lineage(conn, claim_id, bundle_json, cache)
+    if signed is None:
+        return ("absent",) if raw_column is None else ("soft",)
+    return independence_model_key(signed)
+
+
+def _resolve_signer_and_model(
+    conn: sqlite3.Connection, row, cache: GateCache, project_signs: bool,
+) -> "tuple[str | None, tuple, str | None]":
+    """(run_token, model_key, skip) for a line's claim, resolved once per claim.
+
+    The signer and model axes are a property of the claim, not the line: the
+    authenticating columns are written identically on every line of a finding,
+    so the resolution is memoized in the shared cache keyed on the claim and its
+    bundle bytes. A frame read that walks the same claim for a proposition and
+    again as a contrary therefore verifies the signature once.
+
+    ``skip`` is set (and ``run_token`` None) when the claim names a signer that
+    does not authenticate (see :func:`_signer_axis`): the line counts on no axis
+    and the caller drops it under that reason. A counted line returns its
+    ``run_token`` and ``model_key`` with ``skip`` None.
+    """
+    claim_id = row["claim_id"]
+    digest = _bundle_digest(row["signature_bundle"])
+
+    def compute() -> "tuple[str | None, tuple, str | None]":
+        run_token, keyid, skip = _signer_axis(
+            conn, claim_id, row["asserter_keyid"], row["generated_by"],
+            row["signature_bundle"], _row_get(row, "statement_cid"),
+            project_signs,
+        )
+        if skip is not None:
+            return (None, (), skip)
+        model_key = _authentic_model_key(
+            conn, claim_id, row["model_lineage"], row["signature_bundle"],
+            cache,
+        )
+        # A line with no observed model call, signed by an enrolled human
+        # validator, keys to the human axis for the legacy status ladder, which
+        # needs no distinct model. A line that DID observe a model call keeps its
+        # model key even under a human signer, the check was the model's and the
+        # human only signed it, so the model-distinct axis still governs.
+        if model_key[0] == "absent" and keyid is not None and _is_human_signer(
+            conn, keyid,
+        ):
+            model_key = ("human",)
+        return (run_token, model_key, None)
+
+    return cache.resolve("claims", claim_id, digest, compute)  # type: ignore[return-value]
+
+
+def _derive_units(
+    conn: sqlite3.Connection, content_id: str, cache: GateCache,
+) -> tuple[list[_GateLine], list[_SkippedLine]]:
+    """The one verifier: verified lines and skipped lines for a proposition.
+
+    Both entry points call this. The rows are grouped by finding, because one
+    check is a property of the whole finding, not a single line: the finding
+    binds a digest of its ``(data_id, control_type, estimate)`` line set into its
+    claim's signed record, and a mismatch against the digest recomputed from the
+    live rows (an altered estimate, or a deleted contrast, line, or estimate that
+    changes the multiset) drops every line of that finding. A finding whose claim
+    carries no signed digest predates the record and is grandfathered.
+
+    Per gated line the bearing is recomputed from the stored estimate against the
+    finding's stored prediction (the gate inputs are persisted precisely so a
+    reader can recompute and catch drift), and the signer and model axes are read
+    from signed material. Two kinds of line are dropped: one whose claim is no
+    longer live (editorially withdrawn, or invalidated by a signed contradiction
+    verdict), and one that no longer reconstructs into a gateable bearing. A plan
+    whose own rule cannot be run is resolved through its retirement before the
+    line is dropped, and its skip names the plan the retirement takes. No drop is
+    silent: a dropped REFUTING line would manufacture consensus, so every skip is
+    returned for the caller's disposition.
+    """
+    from . import normalize_token
+
+    units: list[_GateLine] = []
+    skipped: list[_SkippedLine] = []
+    rows = conn.execute(INDEPENDENCE_COUNTS_SQL, (content_id,)).fetchall()
+    # The proposition every finding under this content_id attests, re-derived
+    # once from its stored columns. Each finding's signed claim text must render
+    # this same proposition; a mismatch is a rewritten edge, checked per finding
+    # below. Computed once because all findings here share the one content_id.
+    proposition_text = _proposition_normalized_text(conn, content_id)
+    # The project's signing posture, read once: it is a property of the graph,
+    # not of a row, and every line's signer axis needs it (see _signer_axis).
+    project_signs = _project_signs(conn)
+    # Group the rows by finding, preserving first-seen order, so the digest can
+    # be checked over each finding's full line set before its lines are counted.
+    by_finding: dict[str, list] = {}
+    finding_order: list[str] = []
+    for r in rows:
+        fid = r["finding_id"]
+        if fid not in by_finding:
+            by_finding[fid] = []
+            finding_order.append(fid)
+        by_finding[fid].append(r)
+    for fid in finding_order:
+        finding_rows = by_finding[fid]
+        head = finding_rows[0]
+        # Per-finding proposition binding. ``findings.content_id`` is unsigned, so
+        # a direct-SQL rewrite of it, or of the ``propositions`` text columns,
+        # re-points a genuinely signed finding at a different sentence with its
+        # estimates and bearing intact; without this check the count would attest
+        # evidence for a claim the finding never made.
+        #
+        # The binding is on the CONTENT_ID the finding's own signed record names,
+        # not on a rendering. The two renderings this used to compare are not
+        # identity-stable against each other: ``Proposition.text`` orders scope by
+        # the raw key, so two agents who capitalise a scope key differently share
+        # one ``content_id`` and render two different strings, and an untampered
+        # single-writer graph whose scope keys sort differently under the two
+        # orders read UNTESTED. The content_id is what identity IS, so comparing it
+        # is exact in both directions: it catches the re-point and it never
+        # false-drops a case variant.
+        #
+        # ``proposition_text is None`` covers the other half, the proposition row
+        # no longer hashing to its own key, and drops every finding under it.
+        #
+        # A finding whose claim carries no verifiable envelope has no signed
+        # content_id, so it falls back to the rendering comparison it had before
+        # the record existed. Both sides of that fallback are rendered by the same
+        # function, so a single writer's graph still reads as it always did.
+        _signed = verified_predicate(
+            conn, head["signature_bundle"], head["claim_id"], cache,
+        )
+        _signed_cid = (
+            (_signed.get("finding_record") or {}).get("content_id")
+            if _signed is not None else None
+        )
+        if _signed_cid is not None:
+            _attests = _signed_cid == content_id
+        else:
+            _attests = normalize_token(
+                (_signed.get("text") if _signed is not None
+                 else head["claim_text"]) or ""
+            ) in (proposition_text or ())
+        if proposition_text is None or not _attests:
+            for r in finding_rows:
+                skipped.append(
+                    _SkippedLine(
+                        r["line_id"], _PROPOSITION_REBIND,
+                        {"claim_id": head["claim_id"], "finding_id": fid},
+                    )
+                )
+            continue
+        # Per-finding digest check. The signer, plan and estimates_digest are a
+        # property of the finding's one claim, so read the signed digest once and
+        # recompute it over the finding's live rows. A valid-but-altered estimate
+        # (the demonstrated ``UPDATE estimate_value`` that flips a verdict) still
+        # rebuilds, so it is caught here even when the bearing recomputes cleanly.
+        # A deleted estimate, contrast, or evidence line surfaces as a
+        # NULL-downward row from the count query's LEFT JOINs, which
+        # ``estimates_digest_from_rows`` folds into the multiset as a ``None``
+        # estimate, so the recomputed digest differs and the whole finding is
+        # dropped here. A present estimate that no longer rebuilds at all
+        # (corruption other than deletion) makes the recompute raise, and is
+        # left to the per-line bearing check below, which discloses it with its
+        # concrete error. A finding whose claim carries no signed digest is
+        # grandfathered.
+        #
+        # A row that no longer rebuilds must not exempt its SIBLINGS. Treating the
+        # recompute failure as "no live digest" left the signed digest unchecked
+        # for the whole finding, so corrupting one line bought a free edit of the
+        # rest: measured on a three-line finding, the refutation vanished and the
+        # only disclosure named a different line.
+        #
+        # Each row is digested on its own so one bad row cannot suppress the
+        # comparison. On a mismatch the row that actually failed is disclosed with
+        # its concrete error by the per-line bearing check below, and its siblings
+        # are dropped here. The reader needs both: which row broke, and that the
+        # finding as a whole no longer matches what was signed.
+        #
+        # The exemption is keyed on the ESTIMATE failing to rebuild, not on the
+        # per-row digest raising, because those are not the same set and the
+        # difference was exploitable. Digesting a row also canonicalizes its
+        # ``data_id`` and ``control_type``, and canonical JSON refuses a value
+        # JSON cannot hold; ``evidence_lines.data_id`` is TEXT with no CHECK and
+        # SQLite stores a BLOB there verbatim. A BLOB data_id therefore raised
+        # from the data_id rather than the estimate, which exempted the row from
+        # the mismatch and handed it to a bearing check that recomputed cleanly,
+        # so the row was COUNTED: a refutation whose estimate was rewritten to
+        # support read as a second supporting unit with nothing skipped. Only a
+        # row the bearing check will itself name an error for may be exempted;
+        # anything else undigestable stays in the mismatch and is disclosed.
+        signed_digest = _committed_estimates_digest(
+            conn, head["signature_bundle"], head["claim_id"], cache,
+        )
+        if signed_digest is not None:
+            unrebuildable = set()
+            for r in finding_rows:
+                if r["estimate_value"] is None:
+                    # A deleted estimate: the digest folds it in as a ``None``
+                    # rather than raising, so it is not an exemption case.
+                    continue
+                try:
+                    estimate_from_row(r)
+                except Exception:
+                    unrebuildable.add(r["line_id"])
+            try:
+                live_digest = estimates_digest_from_rows(finding_rows)
+            except Exception:
+                live_digest = None
+            if live_digest != signed_digest:
+                intact = [
+                    r for r in finding_rows if r["line_id"] not in unrebuildable
+                ]
+                for r in intact:
+                    skipped.append(
+                        _SkippedLine(
+                            r["line_id"], _ESTIMATES_DIGEST_MISMATCH,
+                            {"claim_id": head["claim_id"], "finding_id": fid},
+                        )
+                    )
+                # Rows that failed to rebuild fall through so the bearing check
+                # names the concrete error. Nothing else in this finding counts.
+                finding_rows = [
+                    r for r in finding_rows if r["line_id"] in unrebuildable
+                ]
+                if not finding_rows:
+                    continue
+        for r in finding_rows:
+            # A claim the graph no longer treats as live contributes no line, in
+            # BOTH directions. ``t_invalid`` moves only behind a signed
+            # contradiction verdict, but ``status`` is a plain column outside the
+            # signed payload that any handle holding the graph may rewrite, so a
+            # keyless writer flipping a refutation to contested would otherwise
+            # erase it from the count with nothing on the read saying so.
+            if r["claim_status"] != "open" or r["t_invalid"] is not None:
+                skipped.append(
+                    _SkippedLine(
+                        r["line_id"], _WITHDRAWN,
+                        {
+                            "claim_id": r["claim_id"],
+                            "claim_status": r["claim_status"],
+                            "invalidated": r["t_invalid"] is not None,
+                        },
+                    )
+                )
+                continue
+            # Re-derive the plan the line is gated under. The read query gates on
+            # the unsigned ``findings.plan_id`` column, but the finding recorded
+            # the plan it was filed under in its own claim, so the column must
+            # match that record. A mismatch (a direct writer re-pointed the line
+            # at another rule to flip its bearing) or a claim that records no plan
+            # is dropped rather than gated on the column: a repointed REFUTING
+            # line would otherwise read as consensus.
+            # Prefer the VERIFIED record. ``predicate_payload`` is an unsigned
+            # column sitting beside the signed copy, so comparing
+            # ``findings.plan_id`` against it only catches a writer who rewrites
+            # one of the two: rewriting both together re-pointed a refuting line
+            # at a supporting rule and read CONVERGENT with nothing disclosed.
+            # The unsigned payload stays the fallback for a finding written
+            # before the signed record existed.
+            _signed_rec = verified_predicate(
+                conn, r["signature_bundle"], r["claim_id"], cache,
+            )
+            _signed_plan = (
+                (_signed_rec.get("finding_record") or {}).get("plan_id")
+                if _signed_rec is not None else None
+            )
+            committed = _signed_plan if _signed_plan is not None else (
+                _committed_plan_id(r["predicate_payload"], r["claim_id"], cache)
+            )
+            if committed != r["plan_id"]:
+                skipped.append(
+                    _SkippedLine(
+                        r["line_id"], _PLAN_REBIND,
+                        {
+                            "claim_id": r["claim_id"],
+                            "plan_id": r["plan_id"],
+                            "committed_plan_id": committed,
+                        },
+                    )
+                )
+                continue
+            # Recompute the per-line bearing from stored inputs. A row that no
+            # longer reconstructs into a gateable bearing (drift, corruption, or a
+            # direct/foreign writer landing a non-numeric column) is skipped
+            # rather than allowed to raise: one un-gateable line must not deny
+            # reads for the whole proposition. The catch is broad on purpose: the
+            # failure can surface as ValueError (enum / range), TypeError
+            # (non-numeric column reaching math.isfinite), or
+            # InconsistentEstimateError (the gate).
+            # The retirement, verified against its own attestation before it is
+            # allowed to decide anything (see _verified_retirement). Resolved
+            # once and used twice: to gate the line, and to name the plan the
+            # rule binding below re-derives against.
+            retirement = _verified_retirement(
+                conn, r["plan_id"], cache, project_signs,
+            )
+            try:
+                estimate = estimate_from_row(r)
+                prediction, superseded = _gateable_prediction(conn, r, retirement)
+                direction = compute_bearing(estimate, prediction).direction
+            except _UngateablePlan as exc:
+                skipped.append(
+                    _SkippedLine(
+                        r["line_id"], _UNGATEABLE,
+                        {
+                            "plan_id": r["plan_id"],
+                            "error": type(exc.__cause__).__name__,
+                        },
+                    )
+                )
+                continue
+            except Exception as exc:
+                skipped.append(
+                    _SkippedLine(
+                        r["line_id"], _BEARING_RECOMPUTE,
+                        {"error": type(exc).__name__},
+                    )
+                )
+                continue
+            # Re-derive the plan_id the gated rule hashes to and confirm it
+            # matches the plan_id keying it. A plan_id is content-addressed over
+            # its rule (test_type, direction_of_interest, the equivalence margins,
+            # alpha, inference_regime; see :func:`compute_plan_id`), so a rewrite
+            # of any rule-bearing ``predictions`` column re-points the row at a
+            # rule whose hash is a different plan_id. The read query gates on the
+            # row's columns, not that binding, so a direct writer could otherwise
+            # flip a line's bearing (a SUPPORTS to a REFUTES) by editing the rule
+            # in place. This is the predictions-table parallel of the
+            # ``findings.plan_id`` re-derivation above: the row the gate runs must
+            # be the rule its plan_id names. For a line gated under a retirement's
+            # replacement, the binding checked is the replacement's own plan_id;
+            # the retirement record (restore-verified against its signed
+            # attestation) names it.
+            gated_plan_id = r["plan_id"]
+            if superseded:
+                gated_plan_id = retirement["superseded_by"] if retirement else None
+            if gated_plan_id is None or (
+                compute_plan_id(content_id, prediction) != gated_plan_id
+            ):
+                skipped.append(
+                    _SkippedLine(
+                        r["line_id"], _PLAN_RULE_REBIND,
+                        {"plan_id": r["plan_id"], "gated_plan_id": gated_plan_id},
+                    )
+                )
+                continue
+            run_token, model_key, signer_skip = _resolve_signer_and_model(
+                conn, r, cache, project_signs,
+            )
+            # A line whose claim names a signer that does not authenticate counts
+            # on no axis: an enrolled signer whose signature fails is corruption,
+            # an unregistered signer is the registration rule's honest cost, and
+            # neither may fall back to the run axis (a forged claim controls
+            # generated_by). The line is dropped and disclosed rather than counted.
+            if signer_skip is not None:
+                skipped.append(
+                    _SkippedLine(
+                        r["line_id"], signer_skip,
+                        {
+                            "claim_id": r["claim_id"],
+                            "asserter_keyid": r["asserter_keyid"],
+                        },
+                    )
+                )
+                continue
+            # The count rests on a post-hoc plan when the line's own plan was not
+            # pre-registered (a one-shot plan) or a retirement resolved it to a
+            # replacement, whose alpha was chosen with the estimates in view.
+            post_hoc = superseded or not r["preregistered"]
+            units.append(
+                _GateLine(direction, run_token, r["data_id"], model_key, post_hoc)
+            )
+    return units, skipped
+
+
+def verified_gate_inputs(
+    conn: sqlite3.Connection, content_id: str, *, cache: GateCache,
+) -> GateInputs:
+    """Verified gate inputs for a proposition, the live read-path entry point.
+
+    Runs the one verifier and hands back every line that verified plus the ones
+    that did not. The read path counts the verified lines and discloses the
+    skipped ones; a line that cannot be verified is dropped, never counted, and
+    never raises. This is the drop-and-disclose disposition; the strict
+    disposition is :func:`verify_gate_inputs_or_refuse`.
+    """
+    units, skipped = _derive_units(conn, content_id, cache)
+    return GateInputs(content_id, tuple(units), tuple(skipped), cache, _ISSUED)
+
+
+def verify_gate_inputs_or_refuse(
+    conn: sqlite3.Connection, content_id: str, *, cache: GateCache,
+) -> GateInputs:
+    """Verified gate inputs for a proposition, the restore entry point.
+
+    Runs the same verifier as :func:`verified_gate_inputs`, then holds restore's
+    stricter posture: a line that fails to reconstruct into a gateable bearing is
+    corruption, not a lifecycle state, and restore refuses the whole recovery
+    rather than committing a graph a later read would silently drop lines from.
+    A legitimately withdrawn claim or a stranded (un-runnable, unsuperseded) plan
+    is not corruption and is accepted, so an honest backup carrying either still
+    restores. Raises :class:`GateInputRefused` on the first corrupt line.
+    """
+    units, skipped = _derive_units(conn, content_id, cache)
+    for s in skipped:
+        if s.op not in _CORRUPTION_REASONS:
+            continue
+        if s.op == _PLAN_REBIND:
+            raise GateInputRefused(
+                f"proposition {content_id} carries an evidence line whose "
+                f"plan_id column ({s.detail.get('plan_id')}) no longer matches "
+                f"the plan its own claim records "
+                f"({s.detail.get('committed_plan_id')}); the recovered graph "
+                "would silently drop it."
+            )
+        if s.op == _PLAN_RULE_REBIND:
+            raise GateInputRefused(
+                f"proposition {content_id} carries an evidence line whose "
+                f"prediction rule no longer hashes to the plan_id keying it "
+                f"(plan {s.detail.get('plan_id')}); a rule-bearing predictions "
+                "column was rewritten, and the recovered graph would silently "
+                "drop the line."
+            )
+        if s.op == _ESTIMATES_DIGEST_MISMATCH:
+            raise GateInputRefused(
+                f"proposition {content_id} carries a finding "
+                f"({s.detail.get('finding_id')}) whose estimates no longer match "
+                "the digest its own claim signed; an estimate, contrast, or "
+                "evidence line was altered or deleted, and the recovered graph "
+                "would silently drop the finding's lines."
+            )
+        if s.op == _SIGNATURE_FAILED:
+            raise GateInputRefused(
+                f"proposition {content_id} carries an evidence line whose claim "
+                f"is signed by an enrolled validator "
+                f"({s.detail.get('asserter_keyid')}) but the signature no longer "
+                "verifies; a stored pubkey was swapped or the signature forged, "
+                "and the recovered graph would silently drop the line."
+            )
+        if s.op == _PROPOSITION_REBIND:
+            raise GateInputRefused(
+                f"proposition {content_id} carries a finding "
+                f"({s.detail.get('finding_id')}) that does not attest it; the "
+                "finding's content_id, or the proposition's own stored columns, "
+                "was rewritten, and the recovered graph would attest evidence "
+                "for a sentence the finding never made."
+            )
+        raise GateInputRefused(
+            f"proposition {content_id} carries an evidence line whose stored "
+            f"estimate no longer reconstructs into a gateable bearing "
+            f"({s.detail.get('error', 'unknown')}); the recovered graph "
+            "would silently drop it."
+        )
+    return GateInputs(content_id, tuple(units), tuple(skipped), cache, _ISSUED)

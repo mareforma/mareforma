@@ -26,7 +26,8 @@ conclusion.
 Mareforma is that combination. It is **not** trying to replace:
 
 - W3C PROV-O (richer provenance vocabulary, mareforma is a runtime
-  library, not an RDF graph)
+  library, not an RDF graph; the graph exports as a PROV-O JSON-LD
+  graph via `mareforma/exporters/prov_o.py`)
 - FAIRSCAPE's EVI (research-evidence ontology; the schema stays
   mareforma-native and there is no EVI export)
 - IETF SCITT (federated supply-chain transparency; mareforma uses Rekor
@@ -133,7 +134,9 @@ Three rules:
    independence. REPLICATED is a convergence signal, not a truth claim.
    Opening with `strict_promotion=True` (opt-in, off by default) turns the
    equal-data collapse into a hard gate: a pair then promotes only when
-   BOTH sides carry non-NULL data. Independence itself is reported on its
+   BOTH sides carry non-NULL data. The root validator signs that gate into
+   the project policy, one-way, so it binds every later opener and not just
+   the handle that asked for it. Independence itself is reported on its
    own axis by the read-side trust map (`graph.trust_map`), which surfaces
    the effective-independence number and marks it `UNVERIFIABLE` when the
    supporting lineage is too soft to certify a distinct model or when every
@@ -166,7 +169,7 @@ independence axis of the trust map instead.
 
 ## Trust map
 
-Three read-side CLI commands expose a claim's trust state without
+The read-side CLI commands expose a claim's trust state without
 adding any signed field:
 
 - `mareforma map <claim>` renders the per-claim trust map
@@ -212,7 +215,7 @@ semantics and property placement live in `mareforma/trust_map.py`.
 
 The trust ladder above derives a claim's `support_level` from provenance. The
 trust layer (`mareforma.trust`) adds a parallel, structured model for a single
-content-addressed proposition. It is additive: six new tables, schema stays at
+content-addressed proposition. It is additive: seven new tables, schema stays at
 v1, and every finding still rides a signed claim.
 
 ```
@@ -225,6 +228,14 @@ Proposition (content_id, frame_id)
 A finding carries one evidence line or many. The single-line case is the common
 one; a multi-line finding records several datasets or arms under one proposition
 and prediction.
+
+A prediction is append-only, so a plan written by a release with a wider alpha
+bound can state a rule no gate can run and strand its evidence for good.
+`retire_plan` is the way out: it records the retirement (`plan_retirements`)
+and registers the same rule at an alpha the gate can run, both as signed
+attestations, and leaves the retired row exactly as registered. Only a plan
+whose rule cannot be run is retirable, and those lines count zero as they
+stand, so retirement recovers a dropped line and never drops a counted one.
 
 Three rules:
 
@@ -251,13 +262,21 @@ Three rules:
    (PROXY or UNVERIFIABLE) cannot certify a distinct model and never earns a
    second line, and where a supporting line's lineage is soft the effective count
    the trust map surfaces reads `UNVERIFIABLE` rather than a confident number. A
-   **human check is the highest-value independent source**: a supporting finding
-   with no observed model call, signed by an enrolled human validator
-   (`validator_type='human'`), needs no distinct model (a human is not a model)
-   and is never folded into a model root, so a human check plus a model check
-   reads as two where two same-model checks read as one. One signer still
+   **human check counts on the status ladder but is not certified by the map**:
+   a supporting finding with no observed model call, signed by an enrolled
+   `validator_type='human'` validator, needs no distinct model on the ladder (a
+   human is not a model) and is never folded into a model root there. The
+   per-finding map disclosure holds it soft instead: the type is self-declared,
+   defaults to `'human'`, and no person attested to the finding, so the map
+   reads `UNVERIFIABLE` rather than certifying a line nothing observed. One
+   signer still
    contributes at most one support and one refute, and re-running the same
-   dataset adds nothing. Where dataset bytes are supplied the `data_id` is
+   dataset adds nothing. A line that names a signer counts on the
+   distinct-signer axis only when that signer is an enrolled validator whose
+   signature verifies: an unenrolled or unauthenticated signer counts on no
+   axis and is disclosed, so an unregistered key cannot manufacture a second
+   independent line. Only a legacy NULL-keyid line keeps the run-token
+   fallback. Where dataset bytes are supplied the `data_id` is
    content-addressed (`sha256:`); a string `data_id` stays a flagged fallback.
    Legacy findings whose line carries no model lineage keep the distinct-signer
    axis so their counts are preserved. It is a versioned policy, recomputed on
@@ -283,7 +302,52 @@ produces outcomes, so `submit_finding` refuses a plan whose `registered_at`
 post-dates the run's first observed execution (its earliest prior finding under
 the same `generated_by` run token) with `PostHocPlanError`, rather than
 laundering a post-hoc plan as a pre-registration. A one-shot `assert_finding`
-synthesises its plan with no pre-registration claim and never raises it.
+synthesises its plan with no pre-registration claim and never raises it. Both
+write paths re-validate the plan's alpha against the same `(0, 0.5)` bound the
+`Prediction` constructor holds, so a rule reaching persistence past the
+constructor cannot mint an un-gateable plan; that stranded state stays the
+property of a release that predates the bound.
+
+**One boundary for every gate input.** A trust gate decides a proposition's
+status from database rows, and the rows the count reads are denormalized
+columns nothing signed. `mareforma/trust/_gate.py` owns their derivation: one
+verifier (`_derive_units`) reached through two entry points, `verified_gate_inputs`
+for the live read path and `verify_gate_inputs_or_refuse` for restore, so both
+answer from the same checks rather than drifting. It hands back a frozen
+`GateInputs` built behind a module-private token, so a caller cannot feed a raw
+row to the counter by constructing one. Per gated line it recomputes the
+bearing from the stored estimate, reads the signer and model axes from the
+claim's signed envelope, and re-derives the line's gate plan two ways: the
+`findings.plan_id` column must match the plan the finding's own claim recorded,
+and the `predictions` rule columns must hash to the `plan_id` keying them
+(`compute_plan_id`).
+
+Three checks re-derive the rest of the verdict from signed material. A finding
+binds a digest of its ordered `(data_id, control_type, estimate)` line set into
+its claim's signed `finding_record`, so the verifier recomputes that digest from
+the live rows and drops the whole finding when they no longer match: this is what
+catches an altered estimate value that still recomputes a clean bearing, or a
+deleted estimate, contrast, or line. The count enumerates from the signed
+`findings` row and LEFT JOINs downward, so a deleted evidence row leaves the
+finding visible with NULLs rather than vanishing from an inner join before its
+digest can be checked. A finding's signed claim text is the rendering of the
+proposition it attests, so the live proposition row must render back to it
+(both sides normalised), which catches a rewritten `findings.content_id` or
+proposition text that re-points a signed finding at a different sentence. And a
+line whose claim names a signer (a non-NULL `asserter_keyid`) counts on the
+distinct-signer axis only when that signer authenticates as an enrolled
+validator whose signature verifies; a named signer that does not authenticate
+counts on no axis and is disclosed, rather than falling back to the run token a
+forged claim also controls. Only a NULL-keyid legacy line keeps that fallback.
+
+A line that fails any check is dropped and disclosed on the
+health channel on the read path, and refuses the whole recovery on restore. A
+plan whose own rule cannot run is resolved through its retirement before the
+line drops. `proposition_status` and `effective_independence` carry a
+`lines_skipped` tally so a dropped line does not read as a silently lower count,
+and `proposition_status` carries a `post_hoc` flag naming a count that
+rests on a replacement or one-shot plan, so a reader can tell a pre-registered
+gate from one chosen after the numbers were seen.
 
 ## Contestation model
 
@@ -329,7 +393,10 @@ enrolled validator chain to a single root (which must be the bundle
 signer), and the displayed support level (ESTABLISHED against a
 validator-signed validation envelope, REPLICATED against distinct-signer
 corroboration). Editorial status (`retracted` / `contested`) carries no
-signature and stays exporter-attested.
+signature and stays exporter-attested, and so does completeness: a
+verified bundle attests the claims it carries, not that they are all the
+claims in the graph. A claim removed together with its subject entry and
+re-signed by the same key verifies clean.
 
 ### Canonicalization: RFC 8785 strict
 
@@ -393,7 +460,9 @@ Tables:
   when a swallowed error needs operator follow-up.
 - `validators`: per-project enrolled-validator chain, rooted at a
   self-signed row. Singleton-root invariant: more than one self-signed
-  row → entire chain forfeit.
+  row → entire chain forfeit. Append-only and no-delete at the trigger
+  level: a swapped `pubkey_pem` would make a forged signature verify, and
+  a dropped row would rewrite who the graph trusts.
 - `replication_verdicts` / `contradiction_verdicts`: signed verdicts
   from enrolled issuers. Append-only at the trigger level.
 - `rekor_inclusions`: sidecar recording every successful Rekor
@@ -409,16 +478,20 @@ Tables:
 - `claims_fts`: FTS5 virtual table (independent of `claims`, not
   `content=` linked) for substring + tokenized search.
 
-The six trust-layer tables (`propositions`, `predictions`, `findings`,
-`evidence_lines`, `contrasts`, `effect_estimates`) are described in the
-Trust layer section above.
+The seven trust-layer tables (`propositions`, `predictions`,
+`plan_retirements`, `findings`, `evidence_lines`, `contrasts`,
+`effect_estimates`) are described in the Trust layer section above.
 
 SQL triggers enforce the state machine, the append-only invariants on
 signed predicate fields, the no-delete rule on signed claims, the
 verdict tables' append-only-and-no-delete invariants, the rekor-
 inclusions sidecar's same invariants, the contradiction-invalidates-
-older logic, and the FTS sync. A tampered Python interpreter cannot
-relax these rules.
+older logic, and the FTS sync. The gate-input tables the read path reads
+to derive a proposition's status carry the same append-only-and-no-delete
+guard: `propositions`, `contrasts`, and `effect_estimates`, alongside
+`validators` and the `plan_id`-inclusive `predictions` UPDATE guard, so an
+in-place edit or delete of any of them is refused at the storage layer, not
+only caught on read. A tampered Python interpreter cannot relax these rules.
 
 ## What survives restore
 
@@ -500,7 +573,8 @@ cannot bypass them.
 | INSERT at any level | `claims_insert_state_check` | ESTABLISHED without `validation_signature`; PRELIMINARY with `validated_by` set; non-PRELIMINARY non-ESTABLISHED birth states |
 | PRELIMINARY → REPLICATED → ESTABLISHED (one-way) | `claims_update_state_check` | downgrades; bypass of REPLICATED via PRELIMINARY → ESTABLISHED |
 | status = 'retracted' is terminal | `claims_update_status_terminal` | the resurrection attack where a born-retracted ESTABLISHED seed is later flipped to 'open' |
-| signed claims are append-only over the predicate | `claims_signed_fields_no_laundering` | direct-SQL UPDATE of `text` / `classification` / `generated_by` / `supports_json` / `contradicts_json` / `source_name` / `artifact_hash` / `ev_*` / `evidence_json` / `statement_cid` / `prev_hash` / `created_at` on a row with `signature_bundle IS NOT NULL` |
+| signed claims are append-only over the predicate | `claims_signed_fields_no_laundering` | direct-SQL UPDATE of `text` / `classification` / `generated_by` / `supports_json` / `contradicts_json` / `source_name` / `artifact_hash` / `ev_*` / `evidence_json` / `observed_grounding` / `statement_cid` / `prev_hash` / `created_at` / `asserter_keyid` / `predicate_payload` on a row with `signature_bundle IS NOT NULL`, and any UPDATE that sets `signature_bundle` back to NULL on such a row |
+| a signed claim is promoted only by a promotion path | `claims_signed_promotion_backed` | direct-SQL UPDATE of `support_level` on a row with `signature_bundle IS NOT NULL` outside a promotion window; the level itself is re-derived from signed evidence on every read, so a row promoted after the trigger is dropped is served `verified=False` |
 | signed claims cannot be deleted | `claims_signed_no_delete` | the wipe-and-rewrite attack where a Rekor-logged ESTABLISHED claim is deleted from `graph.db` and `claims.toml` is regenerated as if it never existed |
 
 ### Append-only sidecars
@@ -510,6 +584,13 @@ cannot bypass them.
 | `rekor_inclusions` | `rekor_inclusions_append_only` + `rekor_inclusions_no_delete` | any UPDATE or DELETE; once Rekor witnessed a claim, the saga's step-3 record is immutable; SQL writers cannot launder forged Rekor coords through the recovery path |
 | `replication_verdicts` | `replication_verdicts_append_only` + `replication_verdicts_no_delete` | UPDATE of signed columns; DELETE of any row; verdicts are signed evidence, not editable records |
 | `contradiction_verdicts` | `contradiction_verdicts_append_only` + `contradiction_verdicts_no_delete` | same; plus the `contradiction_invalidates_older` AFTER INSERT trigger that sets `t_invalid` on the older of two referenced claims (lex-tie-break, idempotent via `WHERE t_invalid IS NULL`) |
+| `findings` | `findings_append_only` + `findings_no_delete` | any UPDATE or DELETE; a finding's row (its `plan_id`, `content_id`, bearing) is written once and gates every evidence line under it, so an in-place edit is refused. These are reconciled onto an existing graph by the same `sqlite_master` text comparison the claims guards use, and their bodies name no per-connection function, so a connection that registered none still compiles an `UPDATE` against the table |
+| `evidence_lines` | `evidence_lines_append_only` + `evidence_lines_no_delete` | any UPDATE or DELETE; a line's `data_id` and model lineage are the distinctness axes the count reads, written once at submit |
+| `propositions` | `propositions_append_only` + `propositions_no_delete` | any UPDATE or DELETE; a proposition is content-addressed and frozen, so an in-place rewrite of its text would leave the evidence backing a different sentence, and a delete would drop a node findings still point at |
+| `contrasts` | `contrasts_append_only` + `contrasts_no_delete` | any UPDATE or DELETE; a contrast is written once by `insert_finding` and a delete would drop it from the count so a refutation reads as consensus |
+| `effect_estimates` | `effect_estimates_append_only` + `effect_estimates_no_delete` | any UPDATE or DELETE; the demonstrated convergent-to-refuted attack flips an estimate value in place, and a delete removes a line from the count without disclosure |
+| `validators` | `validators_append_only` + `validators_no_delete` | any UPDATE or DELETE; swapping a row's `pubkey_pem` makes a forged signature verify, and dropping a row rewrites who the graph trusts. Idempotent re-registration uses `ON CONFLICT DO NOTHING`, which fires neither trigger |
+| `predictions` | `predictions_append_only` + `predictions_no_delete` | UPDATE of any immutable rule column, `plan_id` included (rewriting the primary key re-points a whole rule at a different identity and vanishes its evidence from the count); any DELETE. The UPDATE guard is reconciled through the managed drop-and-recreate so its `plan_id` watch reaches a graph whose trigger predates it |
 
 ### Signed-fields vs mutable-fields
 
@@ -561,7 +642,7 @@ this is the consolidated view.
 |---|---|
 | Direct-SQL `UPDATE` of a signed claim's text / supports / evidence | `claims_signed_fields_no_laundering` trigger |
 | Direct-SQL `DELETE` of a signed claim | `claims_signed_no_delete` trigger |
-| Resurrection of a retracted claim by flipping status | `claims_update_status_terminal` trigger |
+| Direct-SQL resurrection of a retracted claim by flipping status | `claims_update_status_terminal` trigger. It fires on UPDATE, so it covers the SQL edit and not the backup path; see the table below |
 | Born-retracted ESTABLISHED seed riding an honest peer into REPLICATED | `_maybe_update_replicated_unlocked` filters peers AND new claim on `status='open'`; ESTABLISHED-upstream + open required |
 | Same-signer self-replication | distinct, non-NULL `asserter_keyid` required in REPLICATED detection; a single signer's two claims share one keyid and do not converge |
 | Self-validation (validator signs the claim they are validating) | `_refuse_self_validation` |
@@ -570,10 +651,14 @@ this is the consolidated view.
 | Validator who didn't review the cited evidence | `_verify_evidence_seen`, each cited claim_id must exist in the graph with `created_at <= validated_at` |
 | Forged validation envelope (different signer, same claim_id) | `db.validate_claim` `verify_envelope`s against the claimed signer's pubkey from the validators table before any gate fires |
 | Replay of a validation envelope onto a different claim | envelope payload-field equality check refuses `claim_id` mismatch |
-| Direct-SQL forgery of a high-trust row served from the read path | verify-on-read: `get_claim` / `query` / `query_provenance` re-verify the validation envelope (ESTABLISHED) and the asserter bundle (REPLICATED, enrolled asserter); a forged or tampered signature is excluded from `query` and flagged `verified=false` from `get_claim`, never raising. Legacy unsigned REPLICATED rows are verify-exempt |
+| Direct-SQL forgery of a high-trust row served from the read path | verify-on-read: `get_claim` / `query` / `query_provenance` re-verify the asserter bundle (REPLICATED and ESTABLISHED) plus the validation envelope (ESTABLISHED), and hold the bundle's signed predicate against every signed field on the row, so a rewritten field cannot hide under an envelope that still verifies; a forged, tampered or removed signature is excluded from `query` and flagged `verified=false` from `get_claim`, never raising. Legacy unsigned rows (no bundle, no `asserter_keyid`) are verify-exempt |
+| Direct-SQL promotion of a row whose signature still verifies | `support_level` is not signed, so the read path re-derives it: a stored REPLICATED (and the rung an ESTABLISHED climbed through) must show a signature-verified replication verdict naming the claim, or distinct-signer convergence on a shared ESTABLISHED anchor. The same rule refuses the row on restore. A row that cannot show it is excluded and flagged exactly like a signature mismatch |
+| A promoted row read as healthy while its level is forged or its envelope tampered | `mareforma status` re-verifies the promoted rows (`count_unverified_promoted`, the same per-row gate `get_claim` applies) rather than counting stored levels, so the traffic light cannot read green while any REPLICATED / ESTABLISHED row fails re-verification. It also names `convergence_retry_pending`, promotions a swallowed convergence check left flagged, so that stuck state is visible instead of silent |
+| Direct-SQL rewrite of a gate input the count reads (a finding's `plan_id`, a `predictions` rule column, a re-pointed `plan_retirements.superseded_by`, an in-place estimate value, a re-pointed `findings.content_id` or proposition text, a fabricated `asserter_keyid`) | the `_gate.py` boundary re-derives each on read: `findings.plan_id` against the plan the finding's own claim recorded, the rule columns against the `compute_plan_id` that keys them, the estimate line set against the signed `finding_record` digest, the proposition against the finding's signed claim text, and the signer against the claim's verifying envelope. A rewrite that would reflip a bearing or re-point a finding drops the line and discloses it rather than moving the count in silence; restore refuses the recovery. The append-only triggers on `findings`, `evidence_lines`, `propositions`, `contrasts`, and `effect_estimates` refuse the naive UPDATE or DELETE ahead of the read check |
 | Tampered TOML in restore (any signed field, any verdict field, any evidence value) | restore re-derives canonical bytes and refuses on mismatch |
 | SQL-injected parallel root validator | singleton-root invariant: any second self-signed root breaks `is_enrolled` for every key |
 | Rekor log operator mutates / removes / repositions an entry after submit | opt-in inclusion-proof verification re-derives the Merkle root and checks against the log's signed checkpoint |
+| Hostile Rekor answers the re-fetch with a different entry it really did log | `fetch_inclusion_proof` requires the returned uuid to be the one asked for, and `verify_rekor_inclusion` binds the proven body to the claim's payload hash + signature (`entry_claim_mismatch`) |
 | Hostile Rekor returns a `uuid` with path-traversal or query-string characters | `fetch_inclusion_proof` validates uuid against a hex regex before URL substitution |
 | Hostile Rekor returns a `logIndex` / `treeSize` that's a float or bool | strict int parsing surfaces as `malformed_proof` |
 | `rekor_url` pointing at loopback / private IP / non-HTTPS | `validate_rekor_url` SSRF defense; also called by `fetch_inclusion_proof` and `fetch_log_pubkey` |
@@ -581,6 +666,10 @@ this is the consolidated view.
 | Threat mareforma does NOT catch (deliberate scope) | Why |
 |---|---|
 | Colluding agents producing fake `REPLICATED` via two signing keys | distinct `asserter_keyid` is a cryptographic distinctness signal, not a proof of apparatus independence: one party can hold two keys. REPLICATED is a convergence signal, not a truth claim; the real trust anchor is human-validated ESTABLISHED. `single_trust_domain` discloses when all validators share one root, but does not prevent Sybils |
+| A gate input flipped consistently across every table that carries it, with the guarding triggers dropped first | `plan_id` and `preregistered` are not in `SIGNED_FIELDS`, so the read path re-derives `plan_id` against the value the finding's claim recorded (itself guarded only by `claims_signed_fields_no_laundering`) and cannot re-derive `preregistered` at all. A writer with SQL access who drops the append-only triggers and rewrites both `findings.plan_id` and the claim's recorded copy, or flips `preregistered` on a plan, defeats the read check: this binding rests on the triggers plus the claim signature, not on the gate input being a signed field. A single-column edit is still caught |
+| Erasure of a refutation by deleting the `findings` row it hangs from, with the append-only triggers dropped first | The count enumerates from `findings`, so removing that row removes the anchor there is anything to re-derive against. Every other tamper on this path drops the line and discloses it; this one leaves no line to drop. A contested proposition then reads CONVERGENT with `independent_refute` at 0, `lines_skipped` at 0, and nothing on the health channel, and the state survives a backup and restore. Deleting a supporting row is the same mechanism pointing the safe way, and is the case the suite pins. Closing this needs an anchor outside the database, which is why the design defers it rather than papering over it |
+| Resurrection of a retracted claim through an edited backup replayed by restore | `status` is editorial and carries no signature, so nothing re-derives it, and `claims_update_status_terminal` fires before an UPDATE, which restore's INSERT never performs. A writer who can edit `claims.toml` flips `retracted` back to `open` with no key and no SQL access, and restore accepts it without a warning. What the claim says is unaffected: its text, provenance and support level still have to verify. Treat a retraction as an editorial signal, and the signed content as the record |
+| A rung backed by a peer whose signer the project never registered | The read path re-derives a REPLICATED rung by looking for a distinct signed peer on the same ESTABLISHED anchor, and it accepts a peer whose signer has no validators row, because serving a stranger's claim is what the lean model is for and no signature is checked in that case. So a writer who signs with a key the project never enrolled can back a rung. Requiring enrolment here is a behaviour change rather than a repair: it also strips the rung from an honest claim whose only peer is an unregistered signer, and the write path promotes on convergence without asking, so the two would disagree. Held for a release that can move both together |
 | Misclassified `INFERRED` / `ANALYTICAL` / `DERIVED` | declared by the agent, not verified |
 | Colluding log operator publishing two checkpoints to different audiences | needs gossip / witness protocols, out of scope for the single-checkpoint trust model |
 | Compromised log signing key | mareforma trusts whichever pubkey the caller pinned via TOFU; rotation requires deleting the pin |
@@ -593,8 +682,10 @@ For the reader who wants to read the actual enforcement:
 
 - **State-machine triggers**: [`mareforma/db/_schema_sql.py`](mareforma/db/_schema_sql.py) `_SCHEMA_SQL`
   (search for `claims_insert_state_check`, `claims_update_state_check`,
-  `claims_update_status_terminal`, `claims_signed_fields_no_laundering`,
-  `claims_signed_no_delete`)
+  `claims_update_status_terminal`, `claims_signed_no_delete`).
+  `claims_signed_fields_no_laundering` lives in `_SIGNED_FIELDS_TRIGGER_SQL`,
+  re-created on every `open_db()` so an existing database gains the current
+  watch list
 - **Convergence detection**: `_maybe_update_replicated_unlocked` in [`mareforma/db/core.py`](mareforma/db/core.py) (distinct `asserter_keyid` + equal-data collapse)
 - **Verify-on-read**: `_row_verified_on_read`, `_verify_validation_on_read`,
   `_verify_participant_bundle_on_read` in `db/core.py`, wired into `get_claim`,
@@ -611,7 +702,8 @@ For the reader who wants to read the actual enforcement:
   `_verify_and_insert_contradiction_verdict` in [`mareforma/db/restore.py`](mareforma/db/restore.py)
 - **Rekor inclusion verification**: `verify_rekor_inclusion`,
   `verify_merkle_inclusion_proof`, `verify_rekor_checkpoint`,
-  `fetch_inclusion_proof`, `fetch_log_pubkey` in
+  `rekor_entry_binds_to_envelope`, `fetch_inclusion_proof`,
+  `fetch_log_pubkey` in
   [`mareforma/signing/rekor.py`](mareforma/signing/rekor.py)
 - **TOFU pubkey pinning**: `_pem_canonical_der` +
   `O_CREAT|O_EXCL` write in [`mareforma/__init__.py`](mareforma/__init__.py)
@@ -629,10 +721,9 @@ platform-specific translation lives. Three load-bearing properties:
   adapters ship platform plumbing (HTTP clients, payload shapes,
   event semantics). A new adapter never modifies `mareforma.db`,
   `_graph`, or `_canonical`; it imports them.
-- **Opt-in by install extra.** `pip install mareforma` brings the
-  core alone. `pip install mareforma[clawinstitute]` /
-  `[tooluniverse]` / `[gemini]` adds the platform's
-  runtime deps. Users pay for what they integrate.
+- **Opt-in by import.** Every adapter ships in the wheel and runs on
+  core dependencies, so none carries an install extra. An adapter costs
+  nothing until a caller imports it.
 - **Convention surface, not framework.** Each adapter exposes the
   same minimum: a constructor taking `graph=`, `predicate_uris()`
   enumerating the URIs it may emit, `emit_sample()` for the
@@ -686,7 +777,12 @@ finding's UNGROUNDED tell, but it does block a URL or content-address
 citation whose bytes can arrive over the network. Thread, subprocess, and
 coverage-gap seams hide anything; an unknown seam or citation kind blocks
 (fail-closed). A cited C-runtime file with no observed read floors to OPAQUE
-("bytes not observable via PEP-578"), never a false UNGROUNDED.
+("bytes not observable via PEP-578"), never a false UNGROUNDED. A target that
+exits non-zero records an `abort` seam: the run stopped part way, so what it
+did not read says nothing about what the pipeline reads. An open of the cited
+source the observer watched FAIL, accounting for every open of that path,
+hides nothing: it is a failed-open seam, and the verdict stays UNGROUNDED with
+the exception type named.
 
 The observed axis is **separate and additive**. It never touches the
 declared `classification` enum (`INFERRED` / `ANALYTICAL` / `DERIVED`) and

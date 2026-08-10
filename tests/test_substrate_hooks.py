@@ -3,7 +3,7 @@
 Coverage:
 - ``predicate_payload`` TEXT column on claims table
 - ``predicate_type`` reflective registry (``mareforma.predicates()``)
-- ``mareforma export --format=in-toto-v1|ro-crate-1.2`` CLI
+- ``mareforma.exporters.in_toto`` / ``ro_crate`` builder output
 - Public ``assert_claim(..., signer=key)`` param on EpistemicGraph
 - Per-row ``original_signature_bundle`` column
 - ``record_replication_verdict(method='signed-elo-bracket-replay')`` enum
@@ -375,11 +375,11 @@ class TestPerCallSignerOverride:
 
 
 class TestExportFormats:
-    """The CLI integration test path covers `mareforma export --format`.
+    """Shape of the interop exports behind `mareforma export --format`.
 
-    Build the format outputs by directly calling the exporter modules
-    here (CLI-shell-level testing would need a click runner; the
-    existing test_cli.py tests cover the CLI plumbing).
+    These call the exporter builders directly. The CLI branches that
+    wrap them (flag handling, default output paths, `--json`) are
+    covered by ``TestExport`` in ``tests/test_cli.py``.
     """
 
     def _seed_graph(self, tmp_path: Path) -> str:
@@ -459,6 +459,27 @@ class TestExportFormats:
         )
         assert text_obj["@type"] == "MediaObject"
         assert text_obj["text"] == "test claim for export"
+
+    def test_ro_crate_keeps_agents_differing_only_in_escaped_chars(
+        self, tmp_path: Path
+    ) -> None:
+        from mareforma.exporters.ro_crate import build_crate
+        with mareforma.open(tmp_path) as graph:
+            spaced = graph.assert_claim("a", generated_by="lab alpha")
+            scored = graph.assert_claim("b", generated_by="lab_alpha")
+        entities = build_crate(tmp_path)["@graph"]
+        agents = [
+            e for e in entities if e["@type"] == "SoftwareApplication"
+        ]
+        by_name = {a["name"]: a["@id"] for a in agents}
+        assert set(by_name) == {"lab alpha", "lab_alpha"}
+        assert len(set(by_name.values())) == 2
+        for claim_id, name in ((spaced, "lab alpha"), (scored, "lab_alpha")):
+            action = next(
+                e for e in entities
+                if e["@id"] == f"urn:mareforma:claim:{claim_id}"
+            )
+            assert action["agent"]["@id"] == by_name[name]
 
     def test_ro_crate_empty_graph_handles_gracefully(
         self, tmp_path: Path
@@ -673,6 +694,20 @@ class TestPredicatePayloadTypeValidation:
                     predicate_payload=42,  # type: ignore[arg-type]
                 )
 
+    def test_typeerror_shows_valid_python_remedy(self, tmp_path: Path) -> None:
+        """The message an adapter author reads must be copyable. The escaped
+        braces of an f-string do not collapse in a plain literal, so the
+        suggested wrapper printed as ``{{'value': ...}}``."""
+        with mareforma.open(tmp_path) as graph:
+            with pytest.raises(TypeError) as exc:
+                graph.assert_claim(
+                    "claim",
+                    predicate_payload="just a string",  # type: ignore[arg-type]
+                )
+        message = str(exc.value)
+        assert "{{" not in message
+        assert "{'value':" in message
+
 
 class TestRoCrateInputValidation:
     """RO-Crate exporter refuses non-UUID claim_ids and gracefully
@@ -688,15 +723,46 @@ class TestRoCrateInputValidation:
             })
 
     def test_unsafe_agent_id_sanitized(self) -> None:
-        from mareforma.exporters.ro_crate import _safe_agent_id
+        from mareforma.exporters._ids import safe_agent_id
         # Slash + dash + dot OK (model/version/context convention).
-        assert _safe_agent_id("openai/gpt-4o/v1.0") == "openai/gpt-4o/v1.0"
-        # Hash sign → underscore (breaks JSON-LD @id fragment otherwise).
-        assert "#" not in _safe_agent_id("evil#agent")
-        # Whitespace → underscore.
-        assert " " not in _safe_agent_id("agent with spaces")
-        # Other shell-meta → underscore.
-        assert ";" not in _safe_agent_id("agent;rm")
+        assert safe_agent_id("openai/gpt-4o/v1.0") == "openai/gpt-4o/v1.0"
+        # Hash sign escaped (breaks JSON-LD @id fragment otherwise).
+        assert "#" not in safe_agent_id("evil#agent")
+        # Whitespace escaped.
+        assert " " not in safe_agent_id("agent with spaces")
+        # Other shell-meta escaped.
+        assert ";" not in safe_agent_id("agent;rm")
+
+    def test_agent_ids_are_injective(self) -> None:
+        from mareforma.exporters._ids import safe_agent_id
+        assert safe_agent_id("lab alpha") != safe_agent_id("lab_alpha")
+
+    def test_signature_is_the_dsse_envelope_object(self, tmp_path: Path) -> None:
+        from mareforma import signing as _signing
+        from mareforma.exporters.ro_crate import build_crate
+        key_path = tmp_path / "asserter.key"
+        _signing.save_private_key(_signing.generate_keypair(), key_path)
+        with mareforma.open(tmp_path, key_path=key_path) as graph:
+            claim_id = graph.assert_claim("signed claim")
+        action = next(
+            e for e in build_crate(tmp_path)["@graph"]
+            if e["@id"] == f"urn:mareforma:claim:{claim_id}"
+        )
+        assert isinstance(action["signature"], dict)
+        assert "payload" in action["signature"]
+        assert "signatures" in action["signature"]
+
+    def test_malformed_signature_bundle_is_omitted(self) -> None:
+        # A hand-edited bundle must not crash the export or ship a bare
+        # string where consumers expect the envelope object.
+        import uuid
+        from mareforma.exporters.ro_crate import _claim_to_create_action
+        action = _claim_to_create_action({
+            "claim_id": str(uuid.uuid4()),
+            "generated_by": "agent",
+            "signature_bundle": "{not json",
+        })
+        assert "signature" not in action
 
     def test_supports_json_dict_does_not_iterate_keys(
         self, tmp_path: Path
@@ -736,6 +802,58 @@ class TestRoCrateInputValidation:
         assert action["object"] == [
             {"@id": f"urn:mareforma:claim:{other_uuid}"}
         ]
+
+
+class TestExporterIdRulesAreShared:
+    """One @id-safety rule, one implementation. Both exporters write
+    claim_ids and agent ids into the same URN space, so a copy in each
+    module lets a tightening land on one side only and the two exports
+    of one graph then disagree on which claims can leave.
+    """
+
+    def test_both_exporters_use_the_shared_helpers(self) -> None:
+        from mareforma.exporters import _ids, prov_o, ro_crate
+        for module in (prov_o, ro_crate):
+            assert module.safe_agent_id is _ids.safe_agent_id
+            assert module.require_uuid_claim_id is _ids.require_uuid_claim_id
+            assert module.UUID_RE is _ids.UUID_RE
+
+    @pytest.mark.parametrize("agent", [
+        "openai/gpt-4o/v1.0",
+        "evil#agent",
+        "agent with spaces",
+        "lab_alpha",
+        "lab alpha",
+    ])
+    def test_exporters_sanitise_agents_identically(self, agent: str) -> None:
+        import uuid
+        from mareforma.exporters.prov_o import _agent_id
+        from mareforma.exporters.ro_crate import _claim_to_create_action
+        action = _claim_to_create_action({
+            "claim_id": str(uuid.uuid4()),
+            "generated_by": agent,
+        })
+        escaped = action["agent"]["@id"].removeprefix("#agent/")
+        assert _agent_id(agent) == f"mareforma:agent:{escaped}"
+
+    @pytest.mark.parametrize("claim_id", [
+        "not-a-uuid",
+        "10.1038/s41586-026-10652-y",
+        "",
+        # Surrounding whitespace: the graph keys these as ids distinct
+        # from the bare UUID, and a consumer that trims IRIs merges the
+        # two entities back into one. Refuse rather than export both.
+        "123e4567-e89b-12d3-a456-426614174000\n",
+        "123e4567-e89b-12d3-a456-426614174000\r",
+        " 123e4567-e89b-12d3-a456-426614174000",
+    ])
+    def test_exporters_refuse_the_same_claim_ids(self, claim_id: str) -> None:
+        from mareforma.exporters.prov_o import _entity_id
+        from mareforma.exporters.ro_crate import _claim_to_create_action
+        with pytest.raises(ValueError, match="non-UUID claim_id"):
+            _entity_id(claim_id)
+        with pytest.raises(ValueError, match="non-UUID claim_id"):
+            _claim_to_create_action({"claim_id": claim_id, "generated_by": "a"})
 
 
 class TestRestoreTypeSafety:

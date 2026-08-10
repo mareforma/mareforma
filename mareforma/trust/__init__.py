@@ -21,6 +21,7 @@ from .errors import (
     InconsistentEstimateError,
     NoRegisteredPlanError,
     NonFalsifiablePropositionError,
+    PlanNotRetirableError,
     PostHocPlanError,
     TrustError,
 )
@@ -92,6 +93,7 @@ __all__ = [
     "NonFalsifiablePropositionError",
     "NoRegisteredPlanError",
     "FindingPlanForkError",
+    "PlanNotRetirableError",
     "PostHocPlanError",
     "InconsistentEstimateError",
 ]

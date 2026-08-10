@@ -21,6 +21,8 @@ from pathlib import Path
 import pytest
 
 import mareforma
+import tests.fixtures.predicate_polluter  # noqa: F401
+from tests._helpers import _import_registry_delta
 
 
 pytestmark = pytest.mark.adapters
@@ -93,17 +95,26 @@ class TestImportHygiene:
     def test_adapter_imports_do_not_pollute_predicate_registry(self):
         """Importing an adapter must not register predicates as a side
         effect — registration is the emitter's job, not import-time."""
-        from mareforma import predicate_types as _pt
-        before = set(_pt._registry)
-
         for name in (
             "mareforma.adapters.clawinstitute",
             "mareforma.adapters.tooluniverse",
             "mareforma.adapters.gemini",
         ):
             _try_import(name)
+            delta = _import_registry_delta(name)
+            assert delta == 0, (
+                f"importing {name} polluted the predicate registry: "
+                f"delta={delta}"
+            )
 
-        after = set(_pt._registry)
-        assert before == after, (
-            f"adapter import polluted predicate registry: {after - before}"
-        )
+    def test_guard_sees_an_import_time_registration(self):
+        """The guard must be able to fail.
+
+        ``predicate_polluter`` seizes a URI in its module body and is
+        imported at module scope above, so an in-process snapshot reads
+        a delta of zero for it and would clear every adapter
+        unconditionally.
+        """
+        assert _import_registry_delta(
+            "tests.fixtures.predicate_polluter"
+        ) == 1

@@ -5,8 +5,8 @@ The scenario these tests defend against:
 
   1. Adversary asserts a claim with status='retracted' (or 'contested')
      pointing at an ESTABLISHED upstream.
-  2. An honest peer asserts the same upstream with a different
-     generated_by, expecting their claim to REPLICATE off the upstream.
+  2. An honest peer asserts the same upstream under a different
+     signing key, expecting their claim to REPLICATE off the upstream.
   3. Without a status filter, the graph would also promote the
      adversary's tainted claim to REPLICATED.
   4. validate() (or another adversary path) then promotes the tainted
@@ -70,6 +70,11 @@ class TestReplicatedFiltersStatus:
     def test_retracted_peer_does_not_trigger_replicated(
         self, tmp_path: Path,
     ) -> None:
+        """Distinct signers on a shared ESTABLISHED anchor, so the status
+        filter on the candidate peer is the only thing holding the pair
+        at PRELIMINARY."""
+        from tests._helpers import _two_signers
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
             seed = _seeded_upstream(g)
             tainted = g.assert_claim(
@@ -77,11 +82,13 @@ class TestReplicatedFiltersStatus:
                 supports=[seed],
                 generated_by="agent/adversary",
                 status="retracted",
+                signer=sa,
             )
             honest = g.assert_claim(
                 "X is true",
                 supports=[seed],
                 generated_by="agent/honest",
+                signer=sb,
             )
             assert g.get_claim(tainted)["support_level"] == "PRELIMINARY"
             assert g.get_claim(honest)["support_level"] == "PRELIMINARY"
@@ -89,6 +96,8 @@ class TestReplicatedFiltersStatus:
     def test_contested_peer_does_not_trigger_replicated(
         self, tmp_path: Path,
     ) -> None:
+        from tests._helpers import _two_signers
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
             seed = _seeded_upstream(g)
             tainted = g.assert_claim(
@@ -96,11 +105,13 @@ class TestReplicatedFiltersStatus:
                 supports=[seed],
                 generated_by="agent/a",
                 status="contested",
+                signer=sa,
             )
             honest = g.assert_claim(
                 "X is true",
                 supports=[seed],
                 generated_by="agent/b",
+                signer=sb,
             )
             assert g.get_claim(tainted)["support_level"] == "PRELIMINARY"
             assert g.get_claim(honest)["support_level"] == "PRELIMINARY"
@@ -129,17 +140,22 @@ class TestReplicatedFiltersStatus:
         retracted claim citing the same upstream. Without the new-claim
         status guard, the adversary's INSERT would find the honest peer in
         the SELECT and the UPDATE (which appends new_claim_id to peer_ids
-        unconditionally) would co-promote BOTH rows to REPLICATED."""
+        unconditionally) would co-promote BOTH rows to REPLICATED. The two
+        rows carry distinct signers, so the new-claim status guard is the
+        only thing holding them down."""
+        from tests._helpers import _two_signers
+        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
             seed = _seeded_upstream(g)
             honest = g.assert_claim(
-                "Z", supports=[seed], generated_by="agent/honest",
+                "Z", supports=[seed], generated_by="agent/honest", signer=sa,
             )
             tainted = g.assert_claim(
                 "Z",
                 supports=[seed],
                 generated_by="agent/adversary",
                 status="retracted",
+                signer=sb,
             )
             assert g.get_claim(honest)["support_level"] == "PRELIMINARY"
             assert g.get_claim(tainted)["support_level"] == "PRELIMINARY"

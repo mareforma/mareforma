@@ -34,7 +34,7 @@ from ._canonical import canonicalize
 # Version of the trust-map shape. Bound into the rendered record so a consumer
 # knows which property set + tier semantics produced it, and a future revision
 # is distinguishable rather than silently reinterpreted.
-TRUST_MAP_VERSION = "v0.3.10"
+TRUST_MAP_VERSION = "v0.3.11"
 
 # Observed-grounding axis versions KNOWN to carry the verdict↔citation binding.
 # An ALLOWLIST, not a denylist: only a GROUNDED verdict stamped with one of these
@@ -42,7 +42,7 @@ TRUST_MAP_VERSION = "v0.3.10"
 # hand-edited record, an older axis, or a future axis that drops binding, reads
 # as pre-binding ("citation binding not checkable"), which is the honest, fail-
 # safe default. A denylist would let an unknown/absent version overclaim as bound.
-_BINDING_AXIS_VERSIONS = frozenset({"v0.3.9"})
+_BINDING_AXIS_VERSIONS = frozenset({"v0.3.9", "v0.3.11"})
 
 # The rendered string for a GROUNDED verdict computed on a pre-binding axis. A
 # golden-file test pins this exact text; do not reword without updating it.
@@ -52,6 +52,12 @@ PRE_BINDING_GROUNDED_LABEL = "GROUNDED (pre-binding axis; citation binding not c
 # otherwise be computed (a pre-observer claim has no grounding verdict). Never
 # inferred to a confident answer.
 NOT_PRESENT = "not present"
+
+# The placeholder every renderer substitutes for an absent value, so a blank
+# cell always means a rendering failure and never an absent value. One spelling
+# for every renderer, so the text and HTML views of one map agree. A golden-file
+# test pins this exact text; do not reword without updating it.
+ABSENT_VALUE = "n/a"
 
 # The faithfulness verdicts the map will place. An ALLOWLIST: only these three
 # render as a faithfulness signal; any other value in a supplied record reads as
@@ -65,6 +71,37 @@ _FAITHFULNESS_PROXY_NOTE = (
     "re-execution proxy: reproducible is not correct, and a same-arm re-run is "
     "not an independent line of evidence"
 )
+
+
+class TrustMapVersionError(RuntimeError):
+    """The trust-map code version disagrees with the package it ships inside.
+
+    ``TRUST_MAP_VERSION`` witnesses this module's property set and tier
+    semantics; ``mareforma.__version__`` names the package the module is packaged
+    within. A build that ships a stale ``trust_map`` beside a differently
+    versioned package renders a map whose logic does not match the version it
+    reports, so a residual can be under-named while the map still reads as
+    authoritative. The map builder fails closed on that state instead of
+    presenting a map whose honesty it cannot vouch for.
+    """
+
+
+def _require_consistent_version() -> None:
+    """Fail closed unless the trust-map code version matches the package version.
+
+    Refusing here keeps a drifted build from silently emitting a trust map: an
+    inconsistent build cannot promise that its independence residual (or any
+    axis) matches the version it stamps, so it must not present one.
+    """
+    from mareforma import __version__ as package_version
+
+    stamped = TRUST_MAP_VERSION.removeprefix("v")
+    if stamped != package_version:
+        raise TrustMapVersionError(
+            f"trust-map code version {TRUST_MAP_VERSION!r} does not match package "
+            f"version {package_version!r}: this build is inconsistent, so its "
+            "trust map cannot be trusted to match the shipped logic"
+        )
 
 
 class Tier(str, Enum):
@@ -158,11 +195,36 @@ def parse_grounding_record(value) -> "dict | None":
     return None
 
 
+def display_value(value) -> str:
+    """Render a property value for a reader, an absent one as ``n/a``.
+
+    One placeholder for every renderer of a map, text and HTML alike, so two
+    views of the same property cannot disagree on how absence reads.
+    """
+    return ABSENT_VALUE if value is None else str(value)
+
+
 def _short(keyid: str | None) -> str:
     """First 12 hex chars of a keyid for display, or a placeholder."""
     if not keyid:
-        return "n/a"
+        return ABSENT_VALUE
     return f"{keyid[:12]}…"
+
+
+def _source_strings(value: object) -> list[str]:
+    """A stored source list as display strings, tolerating a tampered shape.
+
+    A hand-built or tampered record can hold an unhashable element or a value
+    that is not a list at all where a list of paths belongs. The map has to
+    render what it reads, so anything else degrades to its string form instead
+    of raising out of ``build_trust_map`` and taking down verify/map for the
+    claim.
+    """
+    if not value:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    return [str(value)]
 
 
 def _grounding_property(claim: dict) -> TrustProperty:
@@ -186,8 +248,9 @@ def _grounding_property(claim: dict) -> TrustProperty:
         )
     state = record.get("grounding")
     reason = record.get("reason") or ""
-    cited = record.get("cited_sources") or []
-    grounded = record.get("grounded_sources")
+    cited = _source_strings(record.get("cited_sources"))
+    grounded_raw = record.get("grounded_sources")
+    grounded = None if grounded_raw is None else _source_strings(grounded_raw)
     version = record.get("version")
     pre_binding = version not in _BINDING_AXIS_VERSIONS
     # A plain file read is a stat-based proxy (opened + non-empty), not a
@@ -206,14 +269,14 @@ def _grounding_property(claim: dict) -> TrustProperty:
     # wider, so the gap is visible, not hidden.
     if grounded is not None:
         note = (
-            f"; grounded on: {', '.join(map(str, grounded))}" if grounded
+            f"; grounded on: {', '.join(grounded)}" if grounded
             else "; grounded on: (no cited read observed)"
         )
         if cited and set(cited) - set(grounded):
-            note += f"; declared cited (not all read-verified): {', '.join(map(str, cited))}"
+            note += f"; declared cited (not all read-verified): {', '.join(cited)}"
     else:
         note = (
-            f"; declared cited set, binding not checkable: {', '.join(map(str, cited))}"
+            f"; declared cited set, binding not checkable: {', '.join(cited)}"
             if cited else "; cited set: (none recorded)"
         )
     residual = f"{reason}{note}" if reason else f"observed axis{note}"
@@ -286,23 +349,35 @@ def _independence_property(
     """
     if effective is not None:
         number = int(effective.get("number", 0))
+        # A line the shared verifier dropped (an unauthenticated signer, a
+        # withdrawn claim, an un-gateable or repointed line) is not in the number.
+        # Surface the count so the independence axis is not read as confident off a
+        # line set that silently lost lines.
+        skipped = int(effective.get("lines_skipped", 0))
+        skip_note = (
+            f"; {skipped} evidence line(s) were dropped from the count and "
+            "disclosed (unauthenticated signer, withdrawn claim, or un-gateable "
+            "line)" if skipped else ""
+        )
         if effective.get("soft") and number < 2:
             return TrustProperty(
                 name="independence",
                 tier=Tier.COMPUTED,
                 value="UNVERIFIABLE",
                 residual=(
-                    "a supporting line's model lineage is PROXY/UNVERIFIABLE, so "
-                    "a distinct model cannot be certified; independent "
-                    "corroboration is unverifiable (per-finding model/data/signer "
-                    "axis)"
+                    "a supporting line's model lineage is PROXY/UNVERIFIABLE, or "
+                    "the line observed no model call at all, so a distinct model "
+                    "cannot be certified; a human signer does not lift it, "
+                    "validator_type is self-declared and no person attested to "
+                    "the finding; independent corroboration is unverifiable "
+                    "(per-finding model/data/signer axis)" + skip_note
                 ),
             )
         residual = (
             f"{number} pairwise-distinct (model, data, signer) supporting "
             "check(s); coarse by design: distinct-model is binary this "
             "release, the graded cross-model residual is DEFERRED, not "
-            "computed"
+            "computed" + skip_note
         )
         # Operator-Sybil disclosure: under a single trust root the operator owns
         # every enrolled key, so every axis of distinctness is operator-assertable,
@@ -429,33 +504,28 @@ def build_trust_map(
     conn,
     claim_id: str,
     *,
-    single_domain: "bool | None" = None,
     reexec_record: "dict | None" = None,
+    disclose=None,
 ) -> "TrustMap | None":
     """Build the trust map for a stored claim, or ``None`` if it does not exist.
 
-    ``conn`` is an open graph connection. ``single_domain`` may be passed to
-    avoid a redundant validator-topology read when the caller already has it;
-    when ``None`` it is read from the graph. ``reexec_record`` optionally carries
+    ``conn`` is an open graph connection. ``reexec_record`` optionally carries
     a re-execution faithfulness verdict (from :meth:`mareforma.reexec.ReexecResult.to_map_record`)
     to place on the map's PROXY-tier faithfulness axis; when omitted the axis
-    reads ``not present``.
+    reads ``not present``. ``disclose`` optionally carries the graph's
+    :class:`mareforma.trust._store.SkipDisclosure` so a line the independence axis
+    drops is recorded on the health channel, the same disclosure the read path
+    threads; when omitted the axis still counts and reports ``lines_skipped`` but
+    emits no health event.
     """
     from mareforma.db import get_claim
 
     claim = get_claim(conn, claim_id)
     if claim is None:
         return None
-    if single_domain is None:
-        from mareforma import validators as _validators
+    from mareforma import validators as _validators
 
-        n_roots = len(_validators.enrollment_roots(conn))
-    else:
-        # Explicit override (a caller that already knows the topology): the bool
-        # maps to a representative count, a single domain is one root, "not
-        # single" is two. A zero-root graph is only reached via the graph read
-        # above, where its distinct three-way handling matters.
-        n_roots = 1 if single_domain else 2
+    n_roots = len(_validators.enrollment_roots(conn))
     has_inclusion = _has_rekor_inclusion(conn, claim_id)
     # Attributability must reflect an ACTUAL signature check, not the promotion
     # gate: get_claim's ``verified`` passes PRELIMINARY rows through True without
@@ -475,7 +545,7 @@ def build_trust_map(
         # pubkey (the lean model has no key to check it against). Tell the two
         # apart so the map does not claim "re-verified" for a binding-only pass.
         asserter_enrolled = is_enrolled(conn, claim["asserter_keyid"])
-    effective = _effective_independence(conn, claim_id)
+    effective = _effective_independence(conn, claim_id, disclose=disclose)
     return _assemble(
         claim, n_roots, has_inclusion,
         sig_verified=sig_verified, asserter_enrolled=asserter_enrolled,
@@ -484,14 +554,15 @@ def build_trust_map(
     )
 
 
-def _effective_independence(conn, claim_id: str) -> "dict | None":
+def _effective_independence(conn, claim_id: str, *, disclose=None) -> "dict | None":
     """The effective-independence record for a finding claim, or None.
 
     A claim is a finding when a ``findings`` row binds it to a proposition; the
     independence axis then reports the per-finding effective number over that
     proposition's evidence lines. A plain claim (no finding row, or a graph whose
     schema predates the evidence tree) has no such number, so the axis falls back
-    to the validator-topology disclosure.
+    to the validator-topology disclosure. ``disclose`` threads the health channel
+    through so a line the independence count drops is recorded there.
     """
     import sqlite3
 
@@ -506,7 +577,7 @@ def _effective_independence(conn, claim_id: str) -> "dict | None":
         return None
     from mareforma.trust._store import effective_independence
 
-    return effective_independence(conn, row["content_id"])
+    return effective_independence(conn, row["content_id"], disclose=disclose)
 
 
 def _has_rekor_inclusion(conn, claim_id: str) -> bool:
@@ -542,6 +613,10 @@ def _assemble(
     (binding only, no pubkey to check against), so the map must not claim the
     signature was cryptographically re-verified.
     """
+    # Refuse before stamping: a build whose trust-map code drifted from the
+    # package version cannot vouch that this map's residuals match the shipped
+    # logic, so it fails closed rather than present a possibly under-named axis.
+    _require_consistent_version()
     from mareforma.db import refutation_status
 
     supports = claim.get("supports_json")

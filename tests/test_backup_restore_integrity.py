@@ -103,6 +103,44 @@ def test_refresh_convergence_writes_the_backup_once_not_per_row(
     assert writes["n"] == 1
 
 
+def test_refresh_unsigned_writes_the_backup_once_not_per_claim(
+    tmp_path, monkeypatch, httpx_mock,
+):
+    """Clearing a backlog of unlogged claims writes claims.toml once, not once
+    per claim. The sidecar-replay path has no network call to hide the cost."""
+    from mareforma.db import _record_rekor_inclusion
+
+    rekor_url = "https://rekor.test.example/api/v1/log/entries"
+    root_key = _bootstrap_key(tmp_path, "root.key")
+    out = tmp_path / "claims.toml"
+    with mareforma.open(tmp_path, key_path=root_key, rekor_url=rekor_url) as g:
+        # Rekor is down at assert time, so every claim is signed but unlogged.
+        for _ in range(4):
+            httpx_mock.add_response(method="POST", url=rekor_url, status_code=503)
+        ids = [
+            g.assert_claim(f"pending claim {i}", generated_by="x")
+            for i in range(4)
+        ]
+        # A sidecar entry per claim routes refresh_unsigned through the replay
+        # path, which re-logs the rows without touching the network.
+        for i, cid in enumerate(ids):
+            assert _record_rekor_inclusion(
+                g._conn,
+                cid,
+                {
+                    "uuid": f"uuid-{i}",
+                    "logIndex": i,
+                    "integratedTime": 1_700_000_000,
+                },
+            )
+
+        writes = _count_claims_toml_writes(monkeypatch, out)
+        result = g.refresh_unsigned()
+
+    assert result == {"checked": 4, "logged": 4, "still_unlogged": 0}
+    assert writes["n"] == 1
+
+
 def test_defer_backup_batches_writes_and_backup_forces_one(tmp_path, monkeypatch):
     """defer_backup groups mutations under one write and leaves claims.toml
     current on exit; backup() forces a write on demand."""
@@ -233,3 +271,28 @@ def test_null_integrated_time_rekor_entry_does_not_break_the_backup(
     data = tomllib.loads(out.read_text())
     assert cid in data.get("rekor_inclusions", {})
     assert "integrated_time" not in data["rekor_inclusions"][cid]
+
+
+def test_a_relative_root_stays_anchored_across_a_chdir(tmp_path, monkeypatch):
+    """``mareforma.open("proj")`` must bind its sidecars to the directory the
+    connection opened, not re-resolve them against the cwd of the moment. A
+    caller (or an observed target) that chdirs into a sibling holding an
+    identically named subdirectory would otherwise split the corpus in two."""
+    root_key = _bootstrap_key(tmp_path, "root.key")
+    here = tmp_path / "a" / "proj"
+    there = tmp_path / "b" / "proj"
+    here.mkdir(parents=True)
+    there.mkdir(parents=True)
+
+    monkeypatch.chdir(tmp_path / "a")
+    with mareforma.open("proj", key_path=root_key) as g:
+        g.assert_claim("first claim alpha", generated_by="x")
+        monkeypatch.chdir(tmp_path / "b")
+        cid = g.assert_claim("second claim beta", generated_by="x")
+        g.query_provenance(cid)
+
+    data = tomllib.loads((here / "claims.toml").read_text())
+    texts = {c["text"] for c in data["claims"].values()}
+    assert texts == {"first claim alpha", "second claim beta"}
+    assert not (there / "claims.toml").exists()
+    assert not (there / ".mareforma").exists()

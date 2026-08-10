@@ -6,10 +6,12 @@ Two failure modes an honest trust layer has to catch, shown end to end:
    The observer watched the scope, saw no cited read, and returns `UNGROUNDED` , 
    so the trust map's grounding edge names no source. A number with no observed
    execution has an empty provenance edge, not a filled-in one.
-2. **Overcounted convergence.** Two agents on the same model that reach the same
-   answer are one line of evidence, not two. Distinct signing keys and distinct
-   datasets do not change that: effective independence stays at 1 until a
-   genuinely different model checks the result, and only then rises.
+2. **Uncertified convergence.** Two agents on the same model that reach the same
+   answer are one line of evidence, not two, and distinct signing keys and
+   distinct datasets do not change that. This run shows the stricter half of the
+   rule: the model calls answer from a transport the script supplied, so the
+   model behind each line is declared rather than observed, and effective
+   independence reads `UNVERIFIABLE` in place of a count.
 
 Each step below is the code from
 [`02_compounding_agents.py`](02_compounding_agents.py) followed by the console
@@ -19,9 +21,9 @@ output it prints.
 python 02_compounding_agents.py
 ```
 
-No API key and no network required. The model calls run through an in-memory
-httpx transport, so the model capture at the socket boundary is real while the
-example runs anywhere.
+No API key and no network required. The model calls answer from an in-memory
+httpx transport, so nothing leaves the process. That is also why no model call
+is certified here.
 
 ## Setup: a shared graph, distinct agent keys, and datasets on disk
 
@@ -56,8 +58,8 @@ for name in ("agent-a", "agent-b", "agent-c"):
         identity=name, validator_type="llm")
     agent_graphs[name] = mareforma.open(tmp, key_path=kp)
 
-# An offline httpx client: the transport answers locally, and the observer still
-# reads the model off the request body at the socket boundary.
+# An offline httpx client: the transport answers locally, so the observer reads
+# the model off the request body as a declaration, not as an observed call.
 client = httpx.Client(
     transport=httpx.MockTransport(lambda req: httpx.Response(200, json={})))
 
@@ -66,7 +68,7 @@ client = httpx.Client(
 # evidence into the other's count.
 plan = Prediction(
     test_type=TestType.SUPERIORITY,
-    direction_of_interest=DirectionOfInterest.INCREASE, alpha=0.05, preregistered=True)
+    direction_of_interest=DirectionOfInterest.INCREASE, alpha=0.05)
 prop_absence = Proposition(
     subject="cell type A", relation="gap-junction coupling onto", object="cell type C",
     direction=Direction.INCREASES, scope={"region": "cortex", "species": "mouse"})
@@ -141,7 +143,7 @@ verdict_b = model_check(client, ANTHROPIC_URL, "claude-3-5-sonnet-20241022", bet
 line_b = agent_graphs["agent-b"].assert_finding(
     prop, plan, estimate, data_id="dataset_beta",
     data_source=str(beta_csv), generated_by="agent-b", grounding=verdict_b)
-graph.trust_map(line_b["claim_id"]).get("independence").value   # "1"
+graph.trust_map(line_b["claim_id"]).get("independence").value   # "UNVERIFIABLE"
 ```
 
 ```
@@ -149,37 +151,44 @@ graph.trust_map(line_b["claim_id"]).get("independence").value   # "1"
   agent-b model                claude-3-5-sonnet
   distinct keys                yes
   distinct datasets            yes
-  effective independence       1
-    1 pairwise-distinct (model, data, signer) supporting check(s); coarse by design ...
+  effective independence       UNVERIFIABLE
+    a supporting line's model lineage is PROXY/UNVERIFIABLE, so a distinct model cannot be certified; ...
 ```
 
-Distinct in every legacy axis, signer and dataset, but one model. Two
-same-model checks are one line of evidence, so the count holds at 1.
+Distinct in every legacy axis, signer and dataset, but one model, and that model
+was never observed. Two same-model checks would be one line of evidence; here
+the instrument cannot certify even that, so it reports `UNVERIFIABLE` instead of
+a number.
 
-## 3. A different model raises the count
+## 3. A different model name, still nothing to count
 
 ```python
 verdict_c = model_check(client, OPENAI_URL, "gpt-4o-2024-08-06", gamma_csv)
 line_c = agent_graphs["agent-c"].assert_finding(
     prop, plan, estimate, data_id="dataset_gamma",
     data_source=str(gamma_csv), generated_by="agent-c", grounding=verdict_c)
-graph.trust_map(line_c["claim_id"]).get("independence").value   # "2"
+graph.trust_map(line_c["claim_id"]).get("independence").value   # "UNVERIFIABLE"
 ```
 
 ```
   agent-c model                gpt-4o
-  effective independence       2
-    2 pairwise-distinct (model, data, signer) supporting check(s); coarse by design ...
+  effective independence       UNVERIFIABLE
+    a supporting line's model lineage is PROXY/UNVERIFIABLE, so a distinct model cannot be certified; ...
 ```
 
-A genuinely different model is a second line. The count moves from 1 to 2 only
-when the evidence is independent in the axis that matters, the model, not
-merely in the key that signed it.
+A genuinely different model would be a second line, but a name in a request body
+this script answered itself proves nothing. The axis that matters is the model,
+not the key that signed it, and it is counted only when the call is observed
+against a recognized provider host. `tests/test_examples_absence.py` pins that
+path, where the same three findings score 1 and then 2.
 
 ## Where the numbers come from
 
-The model is read off the request body at the socket boundary, which the
-producer does not control, so the lineage is `COMPUTED`. The grounding verdict
-comes from watching the scope for a read of the cited source. Both ride into the
-signed finding through `grounding=`, and the trust map places each on its own
-axis: grounding, and effective independence. Neither is a label the agent chose.
+The model is read off the request body at the POST boundary. That capture earns
+`COMPUTED` only when httpx's own network transport answered a recognized
+provider host; an in-process transport is a producer declaration (`PROXY`), and
+one soft supporting lineage is enough to make the count `UNVERIFIABLE`. The
+grounding verdict comes from watching the scope for a read of the cited source.
+Both ride into the signed finding through `grounding=`, and the trust map places
+each on its own axis: grounding, and effective independence. Neither is a label
+the agent chose.

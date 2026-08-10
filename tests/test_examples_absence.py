@@ -8,14 +8,19 @@ The two claims ``examples/02_compounding_agents`` makes, held as tests:
   empty provenance edge.
 - Two agents on the same model are one line of evidence. Effective independence
   stays 1 across distinct signing keys and datasets, and rises only when a
-  genuinely different model checks the result.
+  genuinely different model checks the result. That count needs a real network
+  transport, so it is pinned here rather than in the offline example.
+- The shipped script and its README report what the engine printed, never a
+  count it refused to compute.
 
-Both drive the real ``observe()`` path: the model call runs through an in-memory
-httpx transport, so the socket-boundary model capture is exercised offline,
-without an API key or a network.
+All drive the real ``observe()`` path, without an API key or a network.
 """
 from __future__ import annotations
 
+import os
+import re
+import subprocess
+import sys
 from pathlib import Path
 
 import httpx
@@ -32,6 +37,7 @@ from mareforma.trust import (
     Proposition,
 )
 from mareforma.trust._store import effective_independence
+from tests._helpers import _requires_repo_checkout
 
 _ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 _OPENAI_URL = "https://api.openai.com/v1/chat/completions"
@@ -63,7 +69,6 @@ def _plan() -> Prediction:
         test_type=TestType.SUPERIORITY,
         direction_of_interest=DirectionOfInterest.INCREASE,
         alpha=0.05,
-        preregistered=True,
     )
 
 
@@ -216,3 +221,38 @@ def test_compounding_same_model_not_independent(tmp_path: Path, httpx_mock) -> N
         for g in agent_graphs.values():
             g.close()
         graph.close()
+
+
+_EXAMPLE_DIR = Path(__file__).resolve().parents[1] / "examples" / "02_compounding_agents"
+_INDEPENDENCE_PRINT = re.compile(r"^ +effective independence +(\S+)$", re.M)
+_COUNT_CLAIM = re.compile(
+    r"(?:count (?:holds at|moves from)|independence stays) (\d+)"
+)
+
+
+@_requires_repo_checkout
+def test_example_02_narration_matches_the_engine(tmp_path: Path) -> None:
+    """The shipped script may not narrate a count the engine did not print.
+
+    The example runs on a producer-supplied transport, so the model lineage is a
+    declaration and the independence axis reads UNVERIFIABLE. Prose asserting a
+    number the trust map refused to compute is the defect this repo exists to
+    catch, and the README publishes the same block.
+    """
+    run = subprocess.run(
+        [sys.executable, str(_EXAMPLE_DIR / "02_compounding_agents.py")],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=True,
+        env={**os.environ, "TMPDIR": str(tmp_path)},  # the example's graph, cleaned up
+    )
+    printed = _INDEPENDENCE_PRINT.findall(run.stdout)
+    assert printed, run.stdout
+    narrated = set(_COUNT_CLAIM.findall(run.stdout))
+    assert narrated <= set(printed), (
+        f"narration claims counts {sorted(narrated)}, engine printed {printed}"
+    )
+
+    readme = (_EXAMPLE_DIR / "README.md").read_text()
+    assert _INDEPENDENCE_PRINT.findall(readme) == printed

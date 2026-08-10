@@ -1,18 +1,14 @@
-"""Deterministic Open Targets stand-in for the demo CLI.
+"""Deterministic Open Targets stand-in for the adapter tests.
 
-The CLI's ``demo`` subcommand and the adapter test both need a tool that
-behaves like ToolUniverse's `OpenTargets_search_targets` but returns a
-pinned response. This module ships that tool so the CLI is callable
-without the test fixtures at runtime.
-
-The pinned response payload is duplicated from
-``tests/conftest.py::MOCK_OPEN_TARGETS_PAYLOAD`` deliberately: the
-test fixture is a test-only artifact, while this demo tool ships with
-the package for runtime use.
+:class:`ToolCallRecorder` and the adapter tests need a tool that behaves
+like ToolUniverse's `OpenTargets_search_targets` but returns a pinned
+response. This module ships that tool so the adapter family can be
+exercised without ToolUniverse installed.
 """
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 
@@ -67,12 +63,14 @@ class OpenTargetsSearchTargetsMock:
         target = kwargs.get("target")
         if not isinstance(target, str) or not target:
             raise ValueError("target is required and must be non-empty")
-        payload = dict(MOCK_OPEN_TARGETS_PAYLOAD)
         return {
             "data": {
-                "search": payload["search"],
+                # Deep copy: a caller that post-processes the result in
+                # place must not edit the pinned payload every later
+                # call reads from.
+                "search": deepcopy(MOCK_OPEN_TARGETS_PAYLOAD["search"]),
                 "args_echo": dict(sorted(kwargs.items())),
             },
             "metadata": {"observed_at_call_time": True},
-            "source_version": payload["_source_version"],
+            "source_version": MOCK_OPEN_TARGETS_PAYLOAD["_source_version"],
         }

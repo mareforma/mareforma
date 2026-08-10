@@ -114,6 +114,8 @@ class TestRestoreHappyPath:
         assert result == {
             "validators_restored": len(pre_validators),
             "claims_restored": pre_count,
+            # Nothing unsigned in an honest signed backup.
+            "unsigned_in_signed_mode": 0,
         }
 
         # Re-open the restored graph and confirm shape.
@@ -138,6 +140,28 @@ class TestRestoreHappyPath:
         assert {v["keyid"] for v in post_validators} == {
             v["keyid"] for v in pre_validators
         }
+
+    def test_round_trip_preserves_idempotency_keys(
+        self, tmp_path: Path,
+    ) -> None:
+        """A restored graph must keep honouring the retry-safe-writes contract.
+
+        Dropping idempotency_key on the round trip makes the post-restore
+        replay of a pipeline step insert a second signed near-duplicate
+        instead of returning the original claim_id.
+        """
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            cid = g.assert_claim("a resumable step", idempotency_key="run-1:s3")
+
+        _wipe_graph_db(tmp_path)
+        assert mareforma.restore(tmp_path)["claims_restored"] == 1
+
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            assert g.assert_claim(
+                "a resumable step", idempotency_key="run-1:s3",
+            ) == cid
+            assert len(g.query(include_unverified=True, limit=99)) == 1
 
     def test_restore_rebuilds_fts_index(self, tmp_path: Path) -> None:
         """The INSERT triggers fire during restore, populating
@@ -164,7 +188,10 @@ class TestRestoreHappyPath:
             g.assert_claim("beta")
         _wipe_graph_db(tmp_path)
         result = mareforma.restore(tmp_path)
-        assert result == {"validators_restored": 0, "claims_restored": 2}
+        assert result == {
+            "validators_restored": 0, "claims_restored": 2,
+            "unsigned_in_signed_mode": 0,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -345,6 +372,29 @@ class TestRestoreAdversarial:
         with pytest.raises(_db.RestoreError) as exc_info:
             mareforma.restore(tmp_path)
         assert exc_info.value.kind == "enrollment_unverified"
+
+    def test_refused_restore_leaves_no_project_behind(
+        self, tmp_path: Path,
+    ) -> None:
+        """A refused restore must leave the project in its pre-restore state.
+
+        restore() opens the db before it verifies anything, so a refusal used
+        to leave an empty graph.db and supports cache in a directory that had
+        neither. Every later read command then reports a live empty project
+        instead of "no mareforma project here"."""
+        self._setup_and_wipe(tmp_path)
+        assert not (tmp_path / ".mareforma").exists()
+        data = self._read_toml(tmp_path)
+        victim = next(
+            keyid for keyid, v in data["validators"].items()
+            if v["enrolled_by_keyid"] != keyid
+        )
+        data["validators"][victim]["identity"] = "TAMPERED-IDENTITY"
+        self._write_toml(tmp_path, data)
+
+        with pytest.raises(_db.RestoreError):
+            mareforma.restore(tmp_path)
+        assert not (tmp_path / ".mareforma").exists()
 
     def test_tampered_payload_type_raises_restore_error(
         self, tmp_path: Path,

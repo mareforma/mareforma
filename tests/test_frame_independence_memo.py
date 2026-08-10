@@ -14,6 +14,7 @@ import collections
 from pathlib import Path
 
 import mareforma
+import mareforma.trust._gate as gt
 import mareforma.trust._store as st
 from mareforma.trust import Direction, Proposition
 from tests._helpers import _bootstrap_key, _est, _pred, _verdict
@@ -51,17 +52,17 @@ def test_query_frame_authenticates_each_signature_once(tmp_path: Path) -> None:
         ).fetchone()["frame_id"]
 
         counts: collections.Counter = collections.Counter()
-        orig = st._authentic_signer_keyid
+        orig = gt._signer_axis
 
         def counting(conn, claim_id, *args, **kwargs):
             counts[claim_id] += 1
             return orig(conn, claim_id, *args, **kwargs)
 
-        st._authentic_signer_keyid = counting
+        gt._signer_axis = counting
         try:
             views = st.query_frame(g._conn, frame_id)
         finally:
-            st._authentic_signer_keyid = orig
+            gt._signer_axis = orig
 
     assert len(views) == 3
     assert counts, "no signatures were authenticated at all"

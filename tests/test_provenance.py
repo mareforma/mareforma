@@ -14,6 +14,8 @@ Coverage:
 from __future__ import annotations
 
 import json
+import shutil
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -124,6 +126,86 @@ class TestSupportsCache:
         # Cache rebuilt with the restored chain.
         with mareforma.open(tmp_path) as graph:
             assert _supports.claim_supports_count(graph._conn) == 1
+
+    def test_supports_revision_survives_restore(self, tmp_path: Path) -> None:
+        # A restored graph resumes the counter its backup recorded. Restarting
+        # at 0 would let it climb back through values a surviving cache file
+        # already stamped, and pre-loss edges would read as fresh.
+        with mareforma.open(tmp_path) as graph:
+            a = graph.assert_claim("a")
+            graph.assert_claim("b", supports=[a])
+            before = _supports.supports_revision(graph._conn)
+        assert before > 0
+
+        (tmp_path / ".mareforma" / "graph.db").unlink()
+        (tmp_path / ".mareforma" / "claim_supports_cache.db").unlink()
+        mareforma.restore(tmp_path)
+
+        with mareforma.open(tmp_path) as graph:
+            assert _supports.supports_revision(graph._conn) == before
+            assert not _supports.is_cache_stale(graph._conn)
+
+    def test_graph_without_counter_migrates(self, tmp_path: Path) -> None:
+        # A graph written before the counter existed carries neither the table
+        # nor a cache stamp. The next open adds both and rebuilds once.
+        with mareforma.open(tmp_path) as graph:
+            a = graph.assert_claim("a")
+            graph.assert_claim("b", supports=[a])
+        cache = tmp_path / ".mareforma" / "claim_supports_cache.db"
+        conn = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
+        try:
+            conn.execute("ATTACH DATABASE ? AS supports_cache", (str(cache),))
+            conn.execute("DROP TABLE supports_revision")
+            conn.execute(
+                "DELETE FROM supports_cache.cache_meta "
+                "WHERE key = 'source_revision'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with mareforma.open(tmp_path) as graph:
+            assert _supports.claim_supports_count(graph._conn) == 1
+            assert not _supports.is_cache_stale(graph._conn)
+
+    def test_torn_in_place_edge_edit_is_detected(self, tmp_path: Path) -> None:
+        # The cache is an attached database and both files run WAL, so a crash
+        # can commit the graph half of an in-place supports edit and lose the
+        # cache half. The claim count does not move on such an edit, so the
+        # count check alone leaves the pre-edit edges served forever. The
+        # supports revision lives in graph.db and moves with every edge
+        # mutation, so the surviving cache stamp is behind and next open
+        # rebuilds.
+        with mareforma.open(tmp_path) as graph:
+            a = graph.assert_claim("a")
+            c = graph.assert_claim("c")
+            b = graph.assert_claim("b", supports=[a])
+        cache = tmp_path / ".mareforma" / "claim_supports_cache.db"
+        pre_edit = tmp_path / "cache-before-edit.db"
+        shutil.copy2(cache, pre_edit)
+
+        with mareforma.open(tmp_path) as graph:
+            graph.update_claim(b, supports=[c])
+        # The cache half of the edit never reached disk.
+        shutil.copy2(pre_edit, cache)
+
+        conn = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("ATTACH DATABASE ? AS supports_cache", (str(cache),))
+            assert _supports.is_cache_stale(conn) is True
+        finally:
+            conn.close()
+
+        with mareforma.open(tmp_path) as graph:
+            a_down = {
+                e["claim_id"] for e in graph.query_provenance(a)["downstream"]
+            }
+            c_down = {
+                e["claim_id"] for e in graph.query_provenance(c)["downstream"]
+            }
+        assert b not in a_down, "stale edge: b still shows as downstream of a"
+        assert b in c_down, "lost edge: b should be downstream of c"
 
 
 # ----------------------------------------------------------------------------
@@ -526,6 +608,25 @@ class TestProvOExport:
         ids = " ".join(n.get("@id", "") for n in doc["@graph"])
         assert "#" not in ids.replace("@id", "")
 
+    def test_agents_differing_only_in_escaped_chars_stay_distinct(
+        self, tmp_path: Path
+    ) -> None:
+        from mareforma.exporters.prov_o import build_prov_o
+        with mareforma.open(tmp_path) as graph:
+            spaced = graph.assert_claim("a", generated_by="lab alpha")
+            scored = graph.assert_claim("b", generated_by="lab_alpha")
+        doc = build_prov_o(tmp_path)
+        agents = [n for n in doc["@graph"] if n.get("@type") == "prov:Agent"]
+        by_label = {a["rdfs:label"]: a["@id"] for a in agents}
+        assert set(by_label) == {"lab alpha", "lab_alpha"}
+        assert len(set(by_label.values())) == 2
+        for claim_id, label in ((spaced, "lab alpha"), (scored, "lab_alpha")):
+            entity = next(
+                n for n in doc["@graph"]
+                if n.get("@id") == f"mareforma:claim:{claim_id}"
+            )
+            assert entity["prov:wasAttributedTo"]["@id"] == by_label[label]
+
     def test_validate_catches_orphan_entity(self) -> None:
         from mareforma.exporters.prov_o import (
             validate_prov_o, ProvOValidationError,
@@ -554,6 +655,58 @@ class TestProvOExport:
             validate_prov_o(doc)
         assert ei.value.invariant == "activity-needs-agent"
 
+    def test_validate_catches_attribution_to_an_activity(self) -> None:
+        from mareforma.exporters.prov_o import (
+            validate_prov_o, ProvOValidationError,
+        )
+        doc = {
+            "@context": {"prov": "http://www.w3.org/ns/prov#"},
+            "@graph": [
+                {"@id": "ag", "@type": "prov:Agent"},
+                {
+                    "@id": "act",
+                    "@type": "prov:Activity",
+                    "prov:wasAssociatedWith": {"@id": "ag"},
+                },
+                {
+                    "@id": "x",
+                    "@type": "prov:Entity",
+                    "prov:wasGeneratedBy": {"@id": "act"},
+                    # Attribution must land on an Agent, not the Activity.
+                    "prov:wasAttributedTo": {"@id": "act"},
+                },
+            ],
+        }
+        with pytest.raises(ProvOValidationError) as ei:
+            validate_prov_o(doc)
+        assert ei.value.invariant == "attribution-targets-agent"
+
+    def test_validate_catches_derivation_from_an_agent(self) -> None:
+        from mareforma.exporters.prov_o import (
+            validate_prov_o, ProvOValidationError,
+        )
+        doc = {
+            "@context": {"prov": "http://www.w3.org/ns/prov#"},
+            "@graph": [
+                {"@id": "ag", "@type": "prov:Agent"},
+                {
+                    "@id": "act",
+                    "@type": "prov:Activity",
+                    "prov:wasAssociatedWith": {"@id": "ag"},
+                },
+                {
+                    "@id": "x",
+                    "@type": "prov:Entity",
+                    "prov:wasGeneratedBy": {"@id": "act"},
+                    # Derivation runs Entity → Entity, so an Agent is out.
+                    "prov:wasDerivedFrom": [{"@id": "ag"}],
+                },
+            ],
+        }
+        with pytest.raises(ProvOValidationError) as ei:
+            validate_prov_o(doc)
+        assert ei.value.invariant == "derivation-targets-entity"
+
     def test_focal_claim_walks_ancestors(self, tmp_path: Path) -> None:
         from mareforma.exporters.prov_o import build_prov_o
         with mareforma.open(tmp_path) as graph:
@@ -569,6 +722,48 @@ class TestProvOExport:
         assert f"mareforma:claim:{a}" in claim_ids
         assert f"mareforma:claim:{b}" in claim_ids
         assert f"mareforma:claim:{c}" in claim_ids
+
+    def test_ancestor_walk_builds_one_corroboration_index(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The evidence behind a promoted row is graph-wide, so the index that
+        carries it is built once per read. The ancestor walk reads one claim
+        per hop; without a shared verify cache it rebuilds the index per hop
+        and the export costs a full graph pass for every ancestor."""
+        from mareforma.db import core as _core
+        from mareforma.exporters.prov_o import build_prov_o
+        from tests._helpers import _bootstrap_key, _two_signers
+
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        sa, sb = _two_signers(tmp_path)
+        with mareforma.open(tmp_path, key_path=root_key) as graph:
+            anchor = graph.assert_claim("anchor", generated_by="seed", seed=True)
+            peers = [
+                graph.assert_claim(
+                    f"peer {i}", supports=[anchor], generated_by=f"lab{i % 2}",
+                    signer=sa if i % 2 == 0 else sb,
+                )
+                for i in range(8)
+            ]
+            focal = graph.assert_claim(
+                "focal", supports=peers, generated_by="lab0", signer=sa,
+            )
+            assert graph.get_claim(peers[0])["support_level"] == "REPLICATED"
+
+        builds = 0
+        real = _core._CorroborationIndex
+
+        def counting(conn, cache):
+            nonlocal builds
+            builds += 1
+            return real(conn, cache)
+
+        monkeypatch.setattr(_core, "_CorroborationIndex", counting)
+        build_prov_o(tmp_path, claim_id=focal)
+        assert builds == 1, (
+            f"the export built {builds} corroboration indexes over "
+            f"{len(peers)} ancestors; the walk is not sharing one cache"
+        )
 
     def test_missing_graph_db_raises(self, tmp_path: Path) -> None:
         from mareforma.exporters.prov_o import build_prov_o
@@ -680,9 +875,11 @@ class TestRestoreVerifiesEverySignatureInMultiSigEnvelope:
     ) -> None:
         # Restore must enforce the same role-uniqueness contract as
         # verify_envelope_multi. A tampered claims.toml that attaches
-        # two role='planner' signatures (both with enrolled keyids
-        # and valid bytes) would otherwise sneak past restore and
+        # two role='planner' signatures, each individually valid over
+        # the envelope payload, would otherwise sneak past restore and
         # land duplicate roles in query_provenance's attestation set.
+        # Both entries are really signed so the first one clears the
+        # cryptographic verify and the loop reaches the second.
         import base64 as _b64
         from mareforma.db import RestoreError
         asserter_key = tmp_path / "asserter.key"
@@ -706,13 +903,18 @@ class TestRestoreVerifiesEverySignatureInMultiSigEnvelope:
         )
         bundle_value = bundle_line.split(" = ", 1)[1].strip().strip('"')
         bundle = json.loads(bundle_value.encode().decode("unicode_escape"))
-        garbage = _b64.standard_b64encode(b"\x00" * 64).decode("ascii")
-        bundle["signatures"].append({
-            "keyid": planner_keyid, "sig": garbage, "role": "planner",
-        })
-        bundle["signatures"].append({
-            "keyid": planner_keyid, "sig": garbage, "role": "planner",
-        })
+        planner_sig = _b64.standard_b64encode(
+            _signing.load_private_key(planner_key).sign(
+                _signing.dsse_pae(
+                    _signing.PAYLOAD_TYPE_CLAIM,
+                    _b64.standard_b64decode(bundle["payload"]),
+                ),
+            ),
+        ).decode("ascii")
+        for _ in range(2):
+            bundle["signatures"].append({
+                "keyid": planner_keyid, "sig": planner_sig, "role": "planner",
+            })
         tampered = json.dumps(bundle).replace('"', '\\"')
         toml_path.write_text(
             text.replace(bundle_line, f'signature_bundle = "{tampered}"'),
@@ -724,6 +926,7 @@ class TestRestoreVerifiesEverySignatureInMultiSigEnvelope:
         with pytest.raises(RestoreError) as ei:
             mareforma.restore(tmp_path)
         assert ei.value.kind == "claim_unverified"
+        assert "duplicate role" in str(ei.value)
 
     def test_tampered_extra_signature_rejected_on_restore(
         self, tmp_path: Path,

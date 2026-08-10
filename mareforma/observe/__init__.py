@@ -13,6 +13,22 @@ what it saw, never from what the producer declared. Pass the verdict to
     # author outside the scope, then sign:
     graph.assert_finding(prop, pred, estimate, data_id=..., grounding=obs.verdict)
 
+Only a verdict this observer computed can write the observed axis. A record a
+caller builds by hand, whether a dict or an instance of
+:class:`GroundingVerdict`, is stored and reported as DECLARED and can never
+occupy GROUNDED on the ASSERT path (see :func:`._verdict.declared_record`).
+
+Two bounds on that sentence, both measured, neither closed:
+
+* it is the assert path only. :func:`mareforma.restore` writes the record
+  straight from ``claims.toml``, so a producer can export a neutralised record,
+  edit it, re-sign it with its own key and restore it as GROUNDED, and
+  ``mareforma verify`` then exits 0 on it;
+* "computed" means the observer's classifier ran, not that the data moved. The
+  scope's recorder is reachable through this module's own exports, so in-process
+  code can have the observer mint a GROUNDED for a read that never happened. The
+  boundary here is the process, not the caller's honesty inside it.
+
 The verdict is computed from execution of a COOPERATING producer: the binding is
 tamper-evidence over what a cooperating run did, not a proof against an
 adversarial operator. A finding must be AUTHORED inside the scope and SIGNED
@@ -41,7 +57,9 @@ from ._verdict import (
     ReadRecord,
     SeamEvent,
 )
+from ._verdict import _mint as _verdict_mint
 from .measure import (
+    GroundingAxisMismatchError,
     GroundingReport,
     IndependenceReport,
     PilotReport,
@@ -56,6 +74,7 @@ from .oracle import (
     MetricReducer,
     OracleInfluence,
     OracleResult,
+    ReconcileResult,
     Reconciliation,
     declared_reducer,
     numeric_extraction_reducer,
@@ -164,6 +183,9 @@ def observe(cites=None, *, content_address: bool = False):
             # Verdict computation is pure and should not raise, but if it ever
             # does it must not supplant an exception propagating from the
             # with-body. Degrade to an honest OPAQUE rather than mask the error.
+            # Minted like any other verdict the observer produced: it promotes
+            # nothing, and leaving it unminted would report the observer's own
+            # failure as a caller's declaration.
             handle._verdict = GroundingVerdict(
                 grounding=ObservedGrounding.OPAQUE,
                 reason=(
@@ -171,6 +193,7 @@ def observe(cites=None, *, content_address: bool = False):
                     f"{type(exc).__name__}"
                 ),
             )
+            _verdict_mint(handle._verdict)
 
 
 __all__ = [
@@ -200,6 +223,7 @@ __all__ = [
     "OracleInfluence",
     "OracleResult",
     "reconcile",
+    "ReconcileResult",
     "Reconciliation",
     # Declared metric reducer (prose findings need a stated reduction).
     "MetricReducer",
@@ -210,6 +234,7 @@ __all__ = [
     "summarize",
     "GroundingReport",
     "summarize_receipts",
+    "GroundingAxisMismatchError",
     # The independence arm of the measurement.
     "IndependenceReport",
     "summarize_independence",

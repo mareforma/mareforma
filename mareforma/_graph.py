@@ -60,6 +60,17 @@ _LLM_WRAP_FIELDS = ("text", "comparison_summary")
 # could realistically use as a multi-line injection payload.
 _LLM_SANITIZE_FIELDS = ("source_name", "generated_by", "validated_by")
 
+# The two sets above are the only fields whose treatment is named. Every
+# other string in the row is cleaned by the closing pass in
+# _format_row_for_llm, so adding a column cannot quietly add an unsanitized
+# field to an LLM-bound result.
+_LLM_NAMED_FIELDS = frozenset(_LLM_WRAP_FIELDS + _LLM_SANITIZE_FIELDS)
+
+# The run token a claim is attributed to when the caller names none. Every
+# path that resolves an absent generated_by uses this one name so a write and
+# the checks that read it back cannot drift apart.
+DEFAULT_RUN_TOKEN = "agent"
+
 
 def _model_lineage_of(grounding):
     """The model/method lineage a grounding verdict carries, or None.
@@ -85,11 +96,20 @@ def _format_row_for_llm(row: dict, prompt_safety) -> dict:
     for field in _LLM_SANITIZE_FIELDS:
         if field in out:
             out[field] = prompt_safety.sanitize_for_llm(out[field])
+    # Close the set: the remaining columns carry caller-supplied prose too
+    # (evidence rationales, adapter predicate payloads, grounding reasons),
+    # so strip hostile codepoints and forged delimiters from every string
+    # left. No wrapper on these: several are JSON the caller parses.
+    for field, value in out.items():
+        if field not in _LLM_NAMED_FIELDS and isinstance(value, str):
+            out[field] = prompt_safety.strip_forged_tags(
+                prompt_safety.sanitize_for_llm(value)
+            )
     return out
 
 
 def _synchronized(method):
-    """Serialize a graph mutation under the graph's re-entrant lock.
+    """Serialize a graph call under the graph's re-entrant lock.
 
     The connection is opened with ``check_same_thread=False``, so one graph may
     be driven from several threads. Transaction ownership in the db layer is
@@ -104,9 +124,16 @@ def _synchronized(method):
     a writer at a time, so ``not conn.in_transaction`` becomes a thread-correct
     ownership test. The lock is an ``RLock`` so the existing nested-call pattern
     (``submit_finding`` calling ``assert_claim`` inside one transaction, on the
-    same thread) re-enters instead of deadlocking. Read-only methods are left
-    unwrapped: SQLite serves them from the committed snapshot and they must not
-    block behind a long write.
+    same thread) re-enters instead of deadlocking.
+
+    Reads take the same lock. sqlite3 isolation is per CONNECTION, not per
+    thread, so a read issued while another thread holds an open
+    ``BEGIN IMMEDIATE`` on the shared connection runs inside that transaction
+    and returns rows the writer's rollback then erases. The cost is that a
+    reader waits for the writer ahead of it, including the Rekor round trip
+    ``submit_finding`` holds inside its transaction. Waiting is the lesser
+    harm: handing a caller a claim_id, a support level, or a trust map for
+    state that never lands is the failure this project exists to catch.
     """
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
@@ -127,14 +154,20 @@ class EpistemicGraph:
         root: Path,
         *,
         signer: object | None = None,
-        signer_identity: str | None = None,
         rekor_url: str | None = None,
         require_rekor: bool = False,
+        trust_insecure_rekor: bool = False,
         rekor_log_pubkey_pem: bytes | None = None,
         strict_promotion: bool = False,
+        validator_type: str = "human",
     ) -> None:
         self._conn = conn
         self._root = root
+        # The health-channel side of the read-path skipped-line disclosure.
+        # One per handle: a dropped line is a state, so it is recorded once,
+        # not once per read (see trust._store.SkipDisclosure).
+        from mareforma.trust import _store as _trust_store
+        self._skips = _trust_store.SkipDisclosure(root)
         # Re-entrant lock serializing graph mutations across threads. See
         # _synchronized: the connection is shareable across threads, so writers
         # must not race on transaction ownership.
@@ -142,8 +175,16 @@ class EpistemicGraph:
         self._signer = signer
         self._rekor_url = rekor_url
         self._require_rekor = require_rekor
+        # The session opt-in for a private Rekor on a non-public address.
+        # mareforma.open() validates the URL once with this flag; every
+        # submit and fetch re-validates, so the flag has to travel with
+        # the URL or those re-validations reject what open() accepted.
+        self._trust_insecure_rekor = trust_insecure_rekor
         # Opt-in gate: require data on both sides of a REPLICATED pair. Off by
         # default; threaded into every write path that can trigger promotion.
+        # Asking for it also declares it on the project (see the end of
+        # __init__), so this handle's copy of the flag only ever agrees with
+        # the stored policy the write paths read.
         self._strict_promotion = strict_promotion
         # Rekor log operator's public key, used to verify the signed
         # checkpoint that anchors each inclusion proof. When None,
@@ -161,6 +202,13 @@ class EpistemicGraph:
         # promotions stopped firing. Track the count here so it can be
         # asserted in tests and surfaced in dashboards.
         self._convergence_errors = 0
+        # Rows a read dropped because their signature did not re-verify. The
+        # enumerating surfaces cannot return them, so without this counter a
+        # tampered graph reads as a graph with fewer claims.
+        self._read_verify_exclusions = 0
+        # The grounding record the finding path has already attested, held for
+        # the one nested assert_claim call it makes. See _attest_grounding.
+        self._attested_grounding: "dict | None" = None
 
         # Bootstrap-of-trust: the first key opened against a fresh project's
         # graph.db auto-enrolls as the root validator. This is silent and
@@ -180,20 +228,44 @@ class EpistemicGraph:
             _validators.auto_enroll_root(
                 self._conn,
                 signer,
-                identity=signer_identity or "root",
+                identity="root",
+                validator_type=validator_type,
                 root=self._root,
             )
             keyid = _signing.public_key_id(signer.public_key())
             if not _validators.is_enrolled(self._conn, keyid):
                 import warnings as _warnings
-                _warnings.warn(
-                    f"Opened project with key {keyid[:12]}… but this key "
-                    "is not an enrolled validator (a different key holds "
-                    "the root). graph.validate() will refuse until this "
-                    "key is enrolled by an existing validator via "
-                    "`mareforma validator add`.",
-                    stacklevel=2,
+                prefix = (
+                    f"Opened project with key {keyid[:12]}… but this key is "
+                    "not an enrolled validator"
                 )
+                roots = _validators.enrollment_roots(self._conn)
+                if len(roots) == 1:
+                    msg = (
+                        f"{prefix} (a different key holds the root). "
+                        "graph.validate() will refuse until this key is "
+                        "enrolled by an existing validator via "
+                        "`mareforma validator add`."
+                    )
+                else:
+                    # Without a single root no chain verifies, for any key.
+                    msg = (
+                        f"{prefix}: the validators table carries {len(roots)} "
+                        "self-signed roots, so no enrollment chain verifies. "
+                        "graph.validate() will refuse for every key until the "
+                        "table is repaired; run `mareforma validator list`."
+                    )
+                _warnings.warn(msg, stacklevel=2)
+
+        # strict_promotion governs a state transition applied to rows other
+        # sessions write, so it is a project rule and is recorded as one: the
+        # root signs a one-way policy every later opener reads. A caller who
+        # cannot make that declaration is refused here rather than handed a
+        # gate that only holds while their own handle is doing the writing.
+        if strict_promotion:
+            self._declare_project_policy(
+                "the strict-promotion policy", strict_promotion_required=True,
+            )
 
     # ------------------------------------------------------------------
     # Core API
@@ -219,6 +291,7 @@ class EpistemicGraph:
         original_signature_bundle: str | None = None,
         grounding_sensor: "object | None" = None,
         observed_grounding: dict | None = None,
+        finding_record: dict | None = None,
     ) -> str:
         # signer:
         #     Per-call override for the graph's loaded signer. When
@@ -268,7 +341,8 @@ class EpistemicGraph:
             Stable key for retry-safe writes. Same key returns the same
             ``claim_id`` only when EVERY semantic field also matches
             (text, classification, generated_by, supports, contradicts,
-            source_name, artifact_hash). Any mismatch raises
+            source_name, artifact_hash, evidence, observed_grounding).
+            Any mismatch raises
             :class:`mareforma.db.IdempotencyConflictError`. Silently
             merging two different claims would discard the second
             author's content and break REPLICATED detection. For
@@ -311,6 +385,35 @@ class EpistemicGraph:
             predicate and denormalized into the ``ev_*`` columns for
             queryable filters. Defaults to all-zeros (the asserter
             flagged no quality concerns).
+        grounding_sensor:
+            Optional sensor scoring the claim text against its cited
+            supports. Its result is a declaration: ``grounding_score``
+            and ``grounding_rationale`` are folded into the signed
+            evidence vector, the same posture as the rest of it. The
+            sensor never writes the observed axis, so a self-declared
+            score can never be read as a computed verdict.
+        observed_grounding:
+            Observed-grounding record computed by ``observe()`` or by
+            ``submit_finding``, as ``obs.verdict.to_signed_dict()``. Bound
+            into the signed statement and the chain hash and stored in the
+            queryable ``observed_grounding`` column. ``UNGROUNDED`` or
+            ``OPAQUE`` blocks promotion; absent is read as no verdict
+            recorded and blocks nothing.
+            The axis is written from what the observer computed, not from
+            this argument: the record is looked up by its receipt digest and
+            the OBSERVER'S copy is what gets signed, so an edited state on a
+            real digest is discarded. A record the observer did not produce
+            in this process is stored and reported as ``DECLARED`` and can
+            never occupy ``GROUNDED``, so a hand-built verdict cannot read as
+            a computed one on any surface.
+        finding_record:
+            The signed record of a finding's verdict inputs (content_id,
+            frame_id, plan_id, data_ids, bearing, and the estimates
+            digest), passed by ``submit_finding``. Bound into the signed
+            statement and the chain hash only when present, so a plain
+            claim signs to byte-identical bytes. A verdict re-derives
+            against this copy on read; absent means the claim is not a
+            finding, or predates the record.
 
         Returns
         -------
@@ -432,6 +535,36 @@ class EpistemicGraph:
         def _bump_convergence_errors(_exc: Exception) -> None:
             self._convergence_errors += 1
 
+        from mareforma.observe._binding import predicate_citation_sources
+
+        # A claim asserted directly carries nothing to bind a verdict against:
+        # source_name is free text and no data_id or data_source lands in a
+        # bindable field, so the verdict-to-citation check the finding path runs
+        # is inapplicable here. Annotate the record with the same not-applicable
+        # marker so an unbound verdict is distinguishable on read from one that
+        # passed the check. assert_finding binds first and hands down a predicate
+        # carrying the citation, so a bound verdict is left alone and the marker
+        # is never appended twice. A non-dict verdict is left untouched so
+        # add_claim raises its own TypeError on it.
+        #
+        # Settle provenance before that: the observed axis is written from what
+        # the observer computed, never from the caller's dict. The finding path
+        # attested its verdict before it bound it, and binding can strip the
+        # receipt digest this keys on, so the record it hands down is passed
+        # through by identity rather than attested a second time (which would
+        # read the observer's own verdict back as a declaration).
+        if (
+            isinstance(observed_grounding, dict)
+            and observed_grounding is not self._attested_grounding
+        ):
+            observed_grounding = self._attest_grounding(
+                observed_grounding, observed_grounding,
+            )
+        if isinstance(observed_grounding, dict) and not (
+            predicate_citation_sources(predicate_payload)
+        ):
+            observed_grounding = self._annotate_unbound(observed_grounding)
+
         return _db.add_claim(
             self._conn,
             self._root,
@@ -440,7 +573,7 @@ class EpistemicGraph:
             supports=supports,
             contradicts=contradicts,
             idempotency_key=idempotency_key,
-            generated_by=generated_by or "agent",
+            generated_by=generated_by or DEFAULT_RUN_TOKEN,
             source_name=source_name,
             status=status,
             unresolved=unresolved,
@@ -450,14 +583,17 @@ class EpistemicGraph:
             signer=signer if signer is not None else self._signer,
             rekor_url=self._rekor_url,
             require_rekor=self._require_rekor,
+            trust_insecure_rekor=self._trust_insecure_rekor,
             on_convergence_error=_bump_convergence_errors,
             rekor_log_pubkey_pem=self._rekor_log_pubkey_pem,
             predicate_payload=predicate_payload,
             original_signature_bundle=original_signature_bundle,
             observed_grounding=observed_grounding,
+            finding_record=finding_record,
             strict_promotion=self._strict_promotion,
         )
 
+    @_synchronized
     def query(
         self,
         text: str | None = None,
@@ -559,6 +695,13 @@ class EpistemicGraph:
         ------
         ValueError
             If ``min_support`` or ``classification`` is not a valid value.
+        ScanCeilingReached
+            If the read exhausted its scan ceiling (``max(limit * 50, 5000)``
+            ordered rows) before collecting ``limit`` survivors. Rows dropped
+            by verify-on-read do not count as survivors, so a graph carrying
+            many unverifiable rows can bury a real match behind the ceiling.
+            The read refuses rather than return a short list that reads as an
+            empty graph; narrow the query or lower ``limit``.
         """
         self._check_open()
         return _db.query_claims(
@@ -570,6 +713,7 @@ class EpistemicGraph:
             include_unverified=include_unverified,
             include_invalidated=include_invalidated,
             refutation_filter=refutation_filter,
+            on_verify_excluded=self._record_verify_exclusions,
         )
 
     @_synchronized
@@ -635,6 +779,7 @@ class EpistemicGraph:
             strict_promotion=self._strict_promotion,
         )
 
+    @_synchronized
     def refutation_status(self, claim_id: str) -> dict:
         """Return the refutation classification for *claim_id*.
 
@@ -656,6 +801,7 @@ class EpistemicGraph:
             )
         return _db.refutation_status(row)
 
+    @_synchronized
     def search(
         self,
         query: str,
@@ -698,6 +844,8 @@ class EpistemicGraph:
         ValueError
             If ``query`` is empty or pure wildcards, or fails FTS5
             parsing. Also for invalid ``min_support`` / ``classification``.
+        ScanCeilingReached
+            Same scan ceiling as :meth:`query`, on the ranked fetch.
         """
         self._check_open()
         return _db.search_claims(
@@ -708,6 +856,20 @@ class EpistemicGraph:
             limit=limit,
             include_unverified=include_unverified,
             include_invalidated=include_invalidated,
+            on_verify_excluded=self._record_verify_exclusions,
+        )
+
+    def _record_verify_exclusions(self, n: int) -> None:
+        """Record that a read dropped *n* rows failing signature re-verification.
+
+        Counted on the graph and appended to the health log, because no read
+        surface can show the rows themselves: without this a tampered graph
+        answers a query with a shorter list and nothing else.
+        """
+        self._read_verify_exclusions += n
+        from mareforma import health as _health
+        _health.append_health_event(
+            self._root, "read_verify_excluded", outcome="fail", n=n,
         )
 
     # ------------------------------------------------------------------
@@ -816,6 +978,7 @@ class EpistemicGraph:
             signer=self._signer,
         )
 
+    @_synchronized
     def replication_verdicts(
         self,
         *,
@@ -838,6 +1001,7 @@ class EpistemicGraph:
             include_invalidated=include_invalidated,
         )
 
+    @_synchronized
     def contradiction_verdicts(
         self, *, claim_id: str | None = None,
         include_invalidated: bool = False,
@@ -855,6 +1019,7 @@ class EpistemicGraph:
             include_invalidated=include_invalidated,
         )
 
+    @_synchronized
     def get_validator_reputation(self) -> dict[str, int]:
         """Return ``{validator_keyid: count}`` for every enrolled validator.
 
@@ -866,11 +1031,13 @@ class EpistemicGraph:
         self._check_open()
         return _db.get_validator_reputation(self._conn)
 
+    @_synchronized
     def get_claim(self, claim_id: str) -> dict | None:
         """Return a single claim dict by ID, or None if not found."""
         self._check_open()
         return _db.get_claim(self._conn, claim_id)
 
+    @_synchronized
     def trust_map(self, claim_id: str, *, reexec_record: "dict | None" = None):
         """Return the per-finding :class:`mareforma.trust_map.TrustMap` for a claim.
 
@@ -886,7 +1053,10 @@ class EpistemicGraph:
         self._check_open()
         from mareforma.trust_map import build_trust_map
 
-        return build_trust_map(self._conn, claim_id, reexec_record=reexec_record)
+        return build_trust_map(
+            self._conn, claim_id, reexec_record=reexec_record,
+            disclose=self._skips,
+        )
 
     # ------------------------------------------------------------------
     # Trust layer: propositions, findings, derived Status
@@ -953,6 +1123,7 @@ class EpistemicGraph:
         self._check_open()
         from mareforma.db.core import _now
         from mareforma.trust import NonFalsifiablePropositionError, _store
+        from mareforma.trust.prediction import validate_alpha
 
         if not proposition.is_falsifiable():
             raise NonFalsifiablePropositionError(
@@ -960,6 +1131,13 @@ class EpistemicGraph:
                 f"got direction={proposition.direction.value}, "
                 f"scope={dict(proposition.scope)!r}"
             )
+
+        # Re-validate the alpha at the write boundary, not only at Prediction
+        # construction: a Prediction built off the normal route (e.g. a frozen
+        # field set past __post_init__) must not be able to persist an
+        # un-gateable plan through here. This is what keeps the stranded state
+        # provably legacy-only, which retire_plan's docstring assumes.
+        validate_alpha(prediction.alpha)
 
         cid = proposition.content_id()
         plan_id = _store.compute_plan_id(cid, prediction)
@@ -974,6 +1152,9 @@ class EpistemicGraph:
                 "frame_id": proposition.frame_id(),
                 "plan_id": plan_id,
                 **prediction.to_dict(),
+                # The store's word, written last so the attestation can only
+                # restate the predictions row this call is about to write.
+                "preregistered": True,
             },
         )
 
@@ -989,6 +1170,272 @@ class EpistemicGraph:
             self._root, "register_plan", plan_claim=claim_id,
         )
         return plan_id
+
+    @_synchronized
+    def retire_plan(self, plan_id: str, *, alpha: float, reason: str) -> dict:
+        """Retire a plan the gates cannot run and re-register its evidence.
+
+        A plan written by a release with a wider alpha bound can carry a rule no
+        gate can discriminate at (alpha at or above 0.5 marks every p-value
+        significant and asks for a confidence level of zero or less). The graph
+        still restores, but every evidence line under that plan drops out of the
+        counts and the proposition reads UNTESTED. The ``predictions`` row is
+        append-only and cannot be deleted, so there is nothing to correct in
+        place. This is the way out, and it is the operator's call to make: a
+        plan never retires itself.
+
+        Three effects, in one transaction:
+
+        1. Registers the **replacement**: the retired plan's own rule repeated at
+           *alpha*. Only the alpha moves, so a repair cannot re-choose the side
+           of the null once the numbers are known. The row carries
+           ``preregistered=0`` and its claim states what it supersedes: it was
+           registered after the evidence, and the record says so rather than
+           reading as an original pre-registration.
+        2. Records the retirement (``plan_retirements``) with *reason*, and
+           writes its own signed **retirement attestation** whose text renders
+           the plan, the replacement and the reason, so restore re-derives the
+           record from signed material.
+        3. Leaves the retired row exactly as registered. Nothing is rewritten and
+           nothing is deleted; the read path gates the evidence that stood under
+           the retired plan against the replacement from here on.
+
+        Returns a receipt: ``plan_id``, ``superseded_by``, ``reason``,
+        ``retired_at``, ``claim_id`` (the retirement attestation),
+        ``plan_claim_id`` (the replacement's attestation) and ``lines_recovered``
+        (evidence lines that gate again under the replacement). Idempotent:
+        retiring the same plan at the same alpha returns the recorded receipt.
+
+        Raises :class:`NoRegisteredPlanError` when no such plan is registered,
+        and :class:`PlanNotRetirableError` when the plan's rule still runs (a
+        retirement is not a way to withdraw evidence a reader dislikes), when
+        the plan is already retired (a second retirement would let the operator
+        shop for the alpha that reads best), or when no line under the plan
+        would gate under the replacement, which would spend the one retirement
+        for nothing. An *alpha* outside ``(0, 0.5)`` raises ``ValueError``, from
+        the same bound every registration is held to.
+        """
+        self._check_open()
+        from mareforma.db.core import _now, _validate_claim_text
+        from mareforma.trust import (
+            NoRegisteredPlanError,
+            PlanNotRetirableError,
+            Proposition,
+            _store,
+        )
+
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError(
+                "reason must be a non-empty string: the retirement record is "
+                "what tells a later reader why the plan was retired"
+            )
+        # Clean the reason through the claim-text rule before it is stored, so
+        # the column holds the same string the signed attestation carries and
+        # restore's re-derivation compares like with like.
+        reason = _validate_claim_text(reason)
+
+        row = _store.get_plan_row(self._conn, plan_id)
+        if row is None:
+            raise NoRegisteredPlanError(
+                f"no registered plan with plan_id={plan_id[:12]}…; there is "
+                "nothing to retire"
+            )
+        try:
+            _store.prediction_from_row(row)
+        except ValueError:
+            pass
+        else:
+            raise PlanNotRetirableError(
+                f"plan {plan_id[:12]}… states a rule the gates can still run, "
+                "so it is not retirable. Retirement recovers evidence stranded "
+                "under an un-runnable rule; it is not a way to withdraw a "
+                "finding, which is what graph.update_claim(claim_id, "
+                "status='retracted') is for."
+            )
+
+        # The replacement repeats the retired rule at a gateable alpha. Building
+        # it applies the (0, 0.5) bound, so an alpha that would strand the
+        # evidence again is refused here, before anything is written.
+        replacement = _store.replacement_prediction(row, alpha)
+        superseded_by = _store.compute_plan_id(row["content_id"], replacement)
+
+        recorded = _store.plan_retirement(self._conn, plan_id)
+        if recorded is not None:
+            if recorded["superseded_by"] == superseded_by:
+                return self._retirement_receipt(recorded)
+            raise PlanNotRetirableError(
+                f"plan {plan_id[:12]}… is already retired and superseded by "
+                f"plan {recorded['superseded_by'][:12]}…. Re-pointing it at a "
+                "second alpha would be choosing the rule that reads best once "
+                "the numbers are known."
+            )
+
+        # The replacement must be a fresh registration. If a plan with this
+        # exact rule + alpha already exists (someone pre-registered it earlier,
+        # or it stands as another retirement's replacement), the write below
+        # would reuse that plan's attestation via the idempotency key and leave
+        # its predictions row as it stands. A pre-registered row (preregistered=1)
+        # would then record this post-hoc repair as a pre-registration and drop
+        # the supersedes disclosure silently. This retirement is not on record
+        # (recorded is None above), so an existing replacement here is never this
+        # retirement's own: refuse, naming it, rather than laundering the choice.
+        if _store.plan_exists(self._conn, superseded_by):
+            raise PlanNotRetirableError(
+                f"retiring plan {plan_id[:12]}… at alpha={alpha} would reuse the "
+                f"already-registered plan {superseded_by[:12]}… as its "
+                "replacement. That plan may be a pre-registration; adopting it "
+                "here would record a post-hoc repair as one and drop the "
+                "supersedes disclosure. Retire at an alpha whose replacement "
+                "plan does not already exist."
+            )
+
+        # How much evidence the replacement actually recovers. A line whose
+        # stored estimate is unreadable stays dropped either way, but a
+        # retirement that recovers nothing spends the one retirement this plan
+        # gets, so it is refused with the gate's own reason. The guard fires on
+        # recovered==0 alone: a plan with no evidence at all (stranded==0) must
+        # not spend its one retirement either.
+        recovered, stranded, refusal = self._lines_recovered(
+            plan_id, replacement,
+        )
+        if not recovered:
+            detail = f": {refusal}" if refusal is not None else ""
+            raise PlanNotRetirableError(
+                f"retiring plan {plan_id[:12]}… at alpha={alpha} would recover "
+                f"none of its {stranded} evidence line(s){detail}. "
+                "A plan is retired once, so a retirement that recovers nothing "
+                "is refused rather than spent."
+            )
+
+        prop_row = _store.get_proposition_row(self._conn, row["content_id"])
+        proposition = Proposition.from_dict({
+            "subject": prop_row["subject"],
+            "relation": prop_row["relation"],
+            "object": prop_row["object"],
+            "direction": prop_row["direction"],
+            "scope": json.loads(prop_row["scope_json"] or "{}"),
+            "magnitude": prop_row["magnitude"],
+        })
+        retirement_text = _store.retirement_claim_text(
+            plan_id, superseded_by, reason,
+        )
+
+        # Both claims and both rows land together: a committed replacement with
+        # no retirement record would leave the evidence stranded under a plan
+        # the graph now reads as live.
+        now = _now()
+        conn = self._conn
+        _own_txn = not conn.in_transaction
+        if _own_txn:
+            conn.execute("BEGIN IMMEDIATE")
+        try:
+            plan_claim_id = self.assert_claim(
+                proposition.text(),
+                idempotency_key=f"plan:{superseded_by}",
+                predicate_payload={
+                    "trust": "plan/v1",
+                    "content_id": row["content_id"],
+                    "frame_id": proposition.frame_id(),
+                    "plan_id": superseded_by,
+                    **replacement.to_dict(),
+                    # The store's word: this plan was registered to take over
+                    # evidence already in the graph, so it claims no
+                    # pre-registration and names what it replaces.
+                    "preregistered": False,
+                    "supersedes": plan_id,
+                    "supersedes_reason": reason,
+                },
+            )
+            _store.register_plan(
+                conn, row["content_id"], replacement, now, preregistered=False,
+            )
+            claim_id = self.assert_claim(
+                retirement_text,
+                supports=[plan_claim_id],
+                idempotency_key=f"plan-retirement:{plan_id}",
+                predicate_payload={
+                    "trust": "plan-retirement/v1",
+                    "content_id": row["content_id"],
+                    "plan_id": plan_id,
+                    "superseded_by": superseded_by,
+                    "reason": reason,
+                },
+            )
+            _store.retire_plan(
+                conn, plan_id, superseded_by, reason, claim_id, now,
+            )
+            if _own_txn:
+                conn.commit()
+                from mareforma.db.core import _backup_claims_toml
+                _backup_claims_toml(conn, self._root)
+        except BaseException:
+            if _own_txn:
+                conn.rollback()
+            raise
+
+        from mareforma import health as _health
+        _health.append_health_event(
+            self._root, "retire_plan", plan_id=plan_id,
+            superseded_by=superseded_by, lines_recovered=recovered,
+        )
+        return {
+            "plan_id": plan_id,
+            "superseded_by": superseded_by,
+            "reason": reason,
+            "retired_at": now,
+            "claim_id": claim_id,
+            "plan_claim_id": plan_claim_id,
+            "lines_recovered": recovered,
+        }
+
+    def _lines_recovered(self, plan_id: str, replacement) -> tuple:
+        """``(recovered, stranded, first refusal)`` for *plan_id* under *replacement*.
+
+        A stranded line is recovered when the replacement can gate its stored
+        estimate. One that still cannot be gated (an unreadable estimate, a CI
+        at a level this alpha does not read) stays dropped, and its refusal is
+        carried back so the caller can name why.
+        """
+        from mareforma.trust import _store, compute_bearing
+
+        recovered = 0
+        refusal = None
+        estimates = _store.plan_estimates(self._conn, plan_id)
+        for est_row in estimates:
+            try:
+                compute_bearing(_store.estimate_from_row(est_row), replacement)
+            except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+                refusal = refusal or exc
+                continue
+            recovered += 1
+        return recovered, len(estimates), refusal
+
+    def _retirement_receipt(self, row) -> dict:
+        """The receipt for a retirement already on record (idempotent replay).
+
+        ``lines_recovered`` is recomputed rather than stored, so a replay
+        reports the graph as it stands and the key means the same thing on both
+        paths: the retired plan's lines that gate under the replacement.
+        """
+        from mareforma.trust import _store
+
+        replacement = _store.prediction_from_row(
+            _store.get_plan_row(self._conn, row["superseded_by"])
+        )
+        recovered, _stranded, _refusal = self._lines_recovered(
+            row["plan_id"], replacement,
+        )
+        return {
+            "plan_id": row["plan_id"],
+            "superseded_by": row["superseded_by"],
+            "reason": row["reason"],
+            "retired_at": row["retired_at"],
+            "claim_id": row["claim_id"],
+            "plan_claim_id": _store.get_plan_claim_id(
+                self._conn, row["superseded_by"],
+            ),
+            "lines_recovered": recovered,
+        }
 
     @_synchronized
     def assert_finding(
@@ -1036,7 +1483,11 @@ class EpistemicGraph:
         the proposition and a synthesised plan (``preregistered=0``, so a real
         :meth:`register_plan` pre-registration stays distinguishable), then
         delegates to :meth:`submit_finding`. The return shape, idempotency,
-        atomicity, and derived Status are all preserved. A one-shot finding does
+        atomicity, and derived Status are all preserved. The synthesised plan is
+        a no-op when a plan for the same proposition and prediction is already on
+        record, so a one-shot landing on a pre-registered plan submits under that
+        plan and can raise :class:`~mareforma.trust.PostHocPlanError` like any
+        other submission. A one-shot finding does
         not separately attest its plan, so its signed ``supports[]`` carries no
         plan edge; use the explicit :meth:`register_plan` / :meth:`submit_finding`
         split when you want the signed plan -> finding edge.
@@ -1051,6 +1502,7 @@ class EpistemicGraph:
             _store,
             compute_bearing,
         )
+        from mareforma.trust.prediction import validate_alpha
 
         if not proposition.is_falsifiable():
             raise NonFalsifiablePropositionError(
@@ -1109,6 +1561,14 @@ class EpistemicGraph:
         # against them. preregistered=0 marks this as a one-shot rather than a
         # genuine up-front pre-registration. ON CONFLICT DO NOTHING keeps it
         # idempotent and never upgrades an existing pre-registered plan's flag.
+        #
+        # Re-validate the alpha at this write boundary, the same bound
+        # register_plan holds. Prediction.__post_init__ already enforces it, but
+        # a rule reaching persistence off the normal route (a frozen-instance
+        # bypass, a future caller) must not mint a plan no gate can run: that is
+        # the stranded state retire_plan exists to repair, and it should only
+        # ever arise from a release that predates this bound.
+        validate_alpha(prediction.alpha)
         now = _now()
         with self._conn:
             _store.register_proposition(self._conn, proposition, now)
@@ -1185,6 +1645,15 @@ class EpistemicGraph:
         :func:`mareforma.trust._store.independence_counts`), so the run token
         must be per-run-unique; a default/None token is flagged as a health event
         because it collapses independence.
+
+        Grounding. ``grounding`` takes the verdict an ``observe()`` scope
+        computed, and only such a verdict writes the observed axis. A
+        :class:`~mareforma.observe.GroundingVerdict` a caller constructed is a
+        declaration, whatever its type says: it is stored and reported as
+        ``DECLARED`` and neutralised out of ``GROUNDED``, so it cannot promote
+        and cannot read as an execution mareforma watched. The verdict is
+        attested before it is bound to the finding's citation, so a declared one
+        cannot borrow a real citation either.
 
         All input validation (falsifiability, estimate consistency, each line's
         gate) runs before the signed claim is written, so a rejected finding
@@ -1320,7 +1789,12 @@ class EpistemicGraph:
                     "the submitted datasets already span more than one finding"
                 )
             (row,) = touched.values()
-            if row["plan_id"] != plan_id:
+            # A retired plan's datasets stand under the plan that superseded it,
+            # which is what the read path counts them under, so a re-submission
+            # under the replacement is the same finding, not a fork.
+            retirement = _store.plan_retirement(conn, row["plan_id"])
+            superseded_by = retirement["superseded_by"] if retirement else None
+            if row["plan_id"] != plan_id and superseded_by != plan_id:
                 raise _fork_error(
                     f"its datasets already stand under plan {row['plan_id'][:12]}…, "
                     f"but the prediction now passed resolves to plan {plan_id[:12]}…"
@@ -1340,7 +1814,7 @@ class EpistemicGraph:
                 self._root, "submit_finding",
                 bearing=primary_bearing.direction.value, idempotent=True,
             )
-            view = _store.proposition_status(self._conn, cid)
+            view = _store.proposition_status(self._conn, cid, disclose=self._skips)
             return {
                 "finding_id": existing["finding_id"],
                 "content_id": cid,
@@ -1384,19 +1858,27 @@ class EpistemicGraph:
         # can only land at a timestamp at or after now (>= registered_at on an
         # honored path), so it cannot retroactively move the run's first
         # execution before the plan's registration.
-        if generated_by is not None:
-            reg = _store.plan_registration(self._conn, plan_id)
-            if reg is not None and reg["preregistered"] == 1:
-                first_exec = _store.run_first_execution(self._conn, generated_by)
-                if first_exec is not None and reg["registered_at"] > first_exec:
-                    raise PostHocPlanError(
-                        f"plan {plan_id[:12]}… was registered at "
-                        f"{reg['registered_at']}, after run {generated_by!r} first "
-                        f"executed at {first_exec}. A plan registered once the run "
-                        "was already producing findings is not a pre-registration; "
-                        "it is refused, not honored. Pre-register the plan before "
-                        "the run executes, or submit under a fresh run token."
-                    )
+        #
+        # Omitting generated_by is not a third exemption. The claim write
+        # resolves it to DEFAULT_RUN_TOKEN, so the work IS attributed to a run;
+        # the guard resolves it the same way and asks about the same token. The
+        # consequence is intended: a project that never sets a run token puts
+        # every finding under one identity, so once any finding exists no later
+        # preregistered=1 plan can be submitted under the default. That is the
+        # collapsed run identity the health event below already reports.
+        run_token = generated_by or DEFAULT_RUN_TOKEN
+        reg = _store.plan_registration(self._conn, plan_id)
+        if reg is not None and reg["preregistered"] == 1:
+            first_exec = _store.run_first_execution(self._conn, run_token)
+            if first_exec is not None and reg["registered_at"] > first_exec:
+                raise PostHocPlanError(
+                    f"plan {plan_id[:12]}… was registered at "
+                    f"{reg['registered_at']}, after run {run_token!r} first "
+                    f"executed at {first_exec}. A plan registered once the run "
+                    "was already producing findings is not a pre-registration; "
+                    "it is refused, not honored. Pre-register the plan before "
+                    "the run executes, or submit under a fresh run token."
+                )
 
         # Bind the grounding verdict to the finding's citation, AFTER the
         # idempotency check, so an idempotent replay (which reuses the first
@@ -1485,7 +1967,7 @@ class EpistemicGraph:
                 # meaningless when the run token is the default/None. Flag it
                 # loudly (non-blocking) only here, on an actual new write, not
                 # on idempotent re-submits or calls about to fork/raise.
-                if not generated_by or generated_by == "agent":
+                if not generated_by or generated_by == DEFAULT_RUN_TOKEN:
                     from mareforma import health as _health
                     _health.append_health_event(
                         self._root, "submit_finding",
@@ -1493,36 +1975,66 @@ class EpistemicGraph:
                     )
                 plan_claim_id = _store.get_plan_claim_id(conn, plan_id)
                 supports = [plan_claim_id] if plan_claim_id else None
-                claim_id = self.assert_claim(
-                    proposition.text(),
-                    generated_by=generated_by,
-                    supports=supports,
-                    idempotency_key=finding_key,
-                    observed_grounding=grounding_signed,
-                    predicate_payload={
-                        # v2 binds the model lineage into the signed observed
-                        # record (see grounding_signed above); a v1 finding has
-                        # lineage on the evidence tree only, which the read side
-                        # treats as unverifiable rather than a distinct model.
-                        "trust": "finding/v2",
-                        "content_id": cid,
-                        "frame_id": proposition.frame_id(),
-                        "plan_id": plan_id,
-                        # Back-compat scalar for single-line readers; the full set
-                        # is always in data_ids.
-                        "data_id": next(iter(data_id_set)) if single_line else None,
-                        "data_ids": sorted(data_id_set),
-                        # Normalized read location(s) the finding declares, next
-                        # to data_ids so the read side re-checks the grounding
-                        # binding against signed material. Omitted (not an empty
-                        # list) when no line names a data_source, so a finding
-                        # without one is byte-identical to a pre-v0.3.9 finding.
-                        **({"data_sources": data_sources} if data_sources else {}),
-                        "code_ref": code_ref,
-                        "bearing": primary_bearing.direction.value,
-                        "bearings": [b.direction.value for b in bearings],
-                    },
-                )
+                # The finding's verdict inputs, bound into the SIGNED statement
+                # (see _statement.build_statement). The unsigned predicate_payload
+                # below stays for readers; this is the copy a verdict re-derives
+                # against. estimates_digest commits to the line set's CONTENT so
+                # an altered or deleted estimate is caught on read; it is computed
+                # here, at signing time, over the same lines insert_finding writes.
+                finding_record = {
+                    "content_id": cid,
+                    "frame_id": proposition.frame_id(),
+                    "plan_id": plan_id,
+                    "data_ids": sorted(data_id_set),
+                    "bearing": primary_bearing.direction.value,
+                    "estimates_digest": _store.estimates_digest_from_lines(
+                        evidence_lines
+                    ),
+                }
+                predicate_payload = {
+                    # v2 binds the model lineage into the signed observed
+                    # record (see grounding_signed above); a v1 finding has
+                    # lineage on the evidence tree only, which the read side
+                    # treats as unverifiable rather than a distinct model.
+                    "trust": "finding/v2",
+                    "content_id": cid,
+                    "frame_id": proposition.frame_id(),
+                    "plan_id": plan_id,
+                    # Back-compat scalar for single-line readers; the full set
+                    # is always in data_ids.
+                    "data_id": next(iter(data_id_set)) if single_line else None,
+                    "data_ids": sorted(data_id_set),
+                    # Normalized read location(s) the finding declares, next
+                    # to data_ids so the read side re-checks the grounding
+                    # binding against the persisted citation set (this
+                    # column is unsigned; the append-only trigger locks it
+                    # on a signed row). Omitted (not an empty
+                    # list) when no line names a data_source, so a finding
+                    # without one is byte-identical to a pre-v0.3.9 finding.
+                    **({"data_sources": data_sources} if data_sources else {}),
+                    "code_ref": code_ref,
+                    "bearing": primary_bearing.direction.value,
+                    "bearings": [b.direction.value for b in bearings],
+                }
+                # This verdict was attested at bind time, on the caller's own
+                # object, before the binding rewrote it. Hand the exact record
+                # down so the claim write recognises it and does not attest it a
+                # second time: the bind step may have stripped the receipt digest
+                # the second pass would key on, which would read the observer's
+                # own verdict back as a caller declaration.
+                self._attested_grounding = grounding_signed
+                try:
+                    claim_id = self.assert_claim(
+                        proposition.text(),
+                        generated_by=generated_by,
+                        supports=supports,
+                        idempotency_key=finding_key,
+                        observed_grounding=grounding_signed,
+                        finding_record=finding_record,
+                        predicate_payload=predicate_payload,
+                    )
+                finally:
+                    self._attested_grounding = None
                 finding_id = _store.insert_finding(
                     conn, cid, plan_id, claim_id, bearings, evidence_lines, now,
                     model_lineage=model_lineage_json,
@@ -1532,7 +2044,7 @@ class EpistemicGraph:
             # Read the derived status inside the transaction so the returned dict
             # is an isolated snapshot of the graph immediately after this write,
             # not a post-commit read that a concurrent finding could have moved.
-            view = _store.proposition_status(conn, cid)
+            view = _store.proposition_status(conn, cid, disclose=self._skips)
             if _own_txn:
                 conn.commit()
                 # add_claim ran inside this transaction (own_transaction=False),
@@ -1670,6 +2182,73 @@ class EpistemicGraph:
             }
         )
 
+    @staticmethod
+    def _attest_grounding(supplied, record: dict) -> dict:
+        """The observed-grounding record to STORE, taken from the observer.
+
+        ``supplied`` is what the caller handed in (a verdict object on the
+        finding path, the record itself on the claim path) and ``record`` is that
+        value in signed-record shape.
+
+        The observed axis is the one signal on a claim that is not the producer's
+        own word, so this is where the write path stops taking it on the
+        producer's word. Three inputs, one rule:
+
+        - a :class:`~mareforma.observe.GroundingVerdict` the observer computed:
+          the SNAPSHOT taken when the observer minted it is stored. Not
+          ``record``, which is a re-serialization of the caller's live object:
+          the object is frozen, but ``object.__setattr__`` reaches through a
+          frozen dataclass, and a re-serialization would carry whatever it was
+          made to say. The snapshot cannot;
+        - a dict whose ``receipt_digest`` the observer emitted (the documented
+          ``obs.verdict.to_signed_dict()`` call): the OBSERVER'S record for that
+          digest is stored, not the caller's copy, so a hand-edited state on a
+          real digest is discarded rather than signed;
+        - anything else: a declaration. It is marked and its GROUNDED claim is
+          neutralised (see :func:`~mareforma.observe._verdict.declared_record`).
+
+        The boundary is this process, and it is drawn by the digest, not by the
+        process id: a record carried in from another process reads DECLARED
+        UNLESS its receipt digest matches a verdict THIS process minted, which
+        happens whenever both observed the same reads. Measured: a child process
+        observing a file the parent never touched reads DECLARED in the parent,
+        and the same record reads GROUNDED once the parent has observed that file
+        itself. So an observe-here / assert-there pipeline degrades to DECLARED,
+        and the digest is a bearer token within a process rather than a proof
+        that THIS claim is the one the observation was about.
+
+        This covers the write path only. :func:`mareforma.restore` writes
+        ``observed_grounding`` straight from ``claims.toml`` and does not pass
+        through here, so a record that was neutralised can be exported, edited,
+        re-signed by the producer's own key and restored as GROUNDED.
+        """
+        from mareforma.observe._verdict import (
+            declared_record,
+            minted_record,
+            minted_snapshot,
+        )
+
+        snapshot = minted_snapshot(supplied)
+        if snapshot is not None:
+            return snapshot
+        observed = minted_record(record)
+        return observed if observed is not None else declared_record(record)
+
+    @staticmethod
+    def _annotate_unbound(record: dict) -> dict:
+        """Mark a verdict that had no citation to bind against, at most once.
+
+        The finding path binds before it calls :meth:`assert_claim` and the claim
+        path checks again, so the marker must be idempotent: a reader tells an
+        unexercised binding from a passed one by its presence, not its count.
+        """
+        from mareforma.observe._binding import UNBOUND_ANNOTATION
+
+        reason = record.get("reason", "")
+        if UNBOUND_ANNOTATION in reason:
+            return record
+        return {**record, "reason": f"{reason} {UNBOUND_ANNOTATION}"}
+
     def _bind_grounding(
         self, grounding, finding_sources, *, strict, content_id
     ) -> dict | None:
@@ -1684,10 +2263,15 @@ class EpistemicGraph:
         not at audit. A verdict that already matches, or a finding with no
         citation to bind, is returned unchanged (the latter annotated). The check
         is pure string comparison over the normalized identifiers.
+
+        Provenance is settled first, before any binding: what gets bound is the
+        record the OBSERVER wrote (see :meth:`_attest_grounding`), so a caller
+        cannot bind a verdict it authored itself onto a real citation.
         """
         record = self._normalize_grounding(grounding)
         if record is None:
             return None
+        record = self._attest_grounding(grounding, record)
 
         from mareforma.observe._binding import (
             DISJOINT_REASON,
@@ -1711,9 +2295,7 @@ class EpistemicGraph:
         if result.state is BindingState.NOT_APPLICABLE:
             # Nothing to bind against; keep the verdict and annotate so a reader
             # sees the binding was not exercised rather than silently assumed.
-            record = dict(record)
-            record["reason"] = f"{record.get('reason', '')} [no finding citation to bind]"
-            return record
+            return self._annotate_unbound(record)
 
         # DISJOINT. Only a GROUNDED verdict is unsafe to store as-is, an OPAQUE
         # or UNGROUNDED verdict does not promote and does not claim the data
@@ -1743,6 +2325,7 @@ class EpistemicGraph:
         record.pop("receipt_digest", None)
         return record
 
+    @_synchronized
     def proposition_status(self, proposition_or_content_id) -> dict | None:
         """The retrieval view for one proposition: derived Status, independence
         counts, and the frame-level contest. Accepts a content_id or a
@@ -1756,8 +2339,9 @@ class EpistemicGraph:
             if isinstance(proposition_or_content_id, str)
             else proposition_or_content_id.content_id()
         )
-        return _store.proposition_status(self._conn, cid)
+        return _store.proposition_status(self._conn, cid, disclose=self._skips)
 
+    @_synchronized
     def get_proposition(self, content_id: str) -> dict | None:
         """Return the stored proposition row as a dict, or None."""
         self._check_open()
@@ -1766,6 +2350,7 @@ class EpistemicGraph:
         row = _store.get_proposition_row(self._conn, content_id)
         return dict(row) if row is not None else None
 
+    @_synchronized
     def query_frame(
         self, frame_id_or_proposition, *, min_status: str | None = None
     ) -> list[dict]:
@@ -1782,7 +2367,9 @@ class EpistemicGraph:
             if isinstance(frame_id_or_proposition, str)
             else frame_id_or_proposition.frame_id()
         )
-        return _store.query_frame(self._conn, fid, min_status=min_status)
+        return _store.query_frame(
+            self._conn, fid, min_status=min_status, disclose=self._skips
+        )
 
     def query_for_llm(
         self,
@@ -1801,8 +2388,16 @@ class EpistemicGraph:
         ``<untrusted_data>...</untrusted_data>`` delimiters. The short
         metadata fields ``source_name``, ``generated_by``, ``validated_by``
         are sanitized but not wrapped: they are short labels, not
-        free-form text. Other fields (``claim_id``, ``support_level``,
-        timestamps) pass through unchanged.
+        free-form text. Every other string value is sanitized and has
+        forged ``<untrusted_data>`` delimiters replaced by ``[stripped]``,
+        without a wrapper, since several of them (``evidence_json``,
+        ``predicate_payload``, ``observed_grounding``, the ``*_json``
+        columns) are JSON the caller parses. Non-string values pass
+        through unchanged.
+
+        One consequence: the signature fields in this view are cleaned
+        text, not the signed bytes. Read them from :meth:`query` when the
+        signature has to verify.
 
         The caller must still tell the LLM in the system prompt that
         everything inside ``<untrusted_data>`` is data, not instructions.
@@ -2028,15 +2623,35 @@ class EpistemicGraph:
 
         Raises
         ------
-        ValueError
+        ProjectPolicyError
             If no signer is loaded, or the loaded signer is not the project's
-            single root validator.
+            single root validator. Subclasses ``ValueError``.
         """
         self._check_open()
+        return self._declare_project_policy("the Rekor witnessing policy",
+                                            rekor_required=True)
+
+    def _declare_project_policy(
+        self,
+        what: str,
+        *,
+        rekor_required: bool = False,
+        strict_promotion_required: bool = False,
+    ) -> dict:
+        """Root-sign an extension of the project's trust policy.
+
+        The declaration is project-wide and one-way, so the flags asked for are
+        unioned with the stored ones and signed together: extending a policy
+        never drops a rule an earlier declaration recorded. Each flag keeps the
+        time it was first declared, so extending the policy cannot restate an
+        older rule as newer than it is. Idempotent, a declaration that adds
+        nothing returns the stored policy untouched. ``what`` names the rule in
+        the refusal messages.
+        """
         if self._signer is None:
-            raise ValueError(
-                "graph.require_rekor_witnessing requires a loaded signing key. "
-                "Reopen the graph with the root key_path."
+            raise _db.ProjectPolicyError(
+                f"Declaring {what} needs the project's root signing key. "
+                "Reopen the graph with key_path pointing at it."
             )
         from mareforma import signing as _signing
         from mareforma import validators as _validators
@@ -2044,31 +2659,63 @@ class EpistemicGraph:
         signer_keyid = _signing.public_key_id(self._signer.public_key())
         root_keyid = _validators.trust_domain_root(self._conn)
         if root_keyid is None or signer_keyid != root_keyid:
-            raise ValueError(
-                "Only the project's root validator may declare the Rekor "
-                "witnessing policy. Reopen with the root key."
+            raise _db.ProjectPolicyError(
+                f"Only the project's root validator may declare {what}. "
+                "Reopen with the root key."
             )
         existing = _db.get_project_policy(self._conn)
-        if existing is not None:
+        had_rekor, had_strict = _db.project_policy_flags(existing)
+        rekor_required = rekor_required or had_rekor
+        strict_promotion_required = strict_promotion_required or had_strict
+        if existing is not None and (had_rekor, had_strict) == (
+            rekor_required, strict_promotion_required
+        ):
             return existing
         created_at = _now()
+        # A flag already declared keeps its own start time; one this call adds
+        # starts now. Without that, extending the policy would restamp the
+        # older rule and any check grandfathering on it would skip everything
+        # written between the two declarations.
+        was_rekor_at, was_strict_at = _db.project_policy_declared_at(existing)
+        rekor_declared_at = was_rekor_at or (
+            created_at if rekor_required else None
+        )
+        strict_declared_at = was_strict_at or (
+            created_at if strict_promotion_required else None
+        )
         envelope = _signing.sign_project_policy(
-            {"rekor_required": True, "created_at": created_at},
+            {
+                "version": _signing._PROJECT_POLICY_VERSION,
+                "rekor_required": rekor_required,
+                "strict_promotion_required": strict_promotion_required,
+                "created_at": created_at,
+                "rekor_declared_at": rekor_declared_at,
+                "strict_promotion_declared_at": strict_declared_at,
+            },
             self._signer,
         )
         return _db.set_project_policy(
             self._conn, self._root,
             envelope=json.dumps(envelope, sort_keys=True, separators=(",", ":")),
             signer_keyid=signer_keyid,
-            rekor_required=True,
+            rekor_required=rekor_required,
+            strict_promotion_required=strict_promotion_required,
             created_at=created_at,
+            rekor_declared_at=rekor_declared_at,
+            strict_promotion_declared_at=strict_declared_at,
         )
 
+    @_synchronized
     def list_validators(self) -> list[dict]:
-        """Return all enrolled validators ordered by enrollment time."""
+        """Return the validator rows, ordered by enrollment time.
+
+        Each row carries ``verified``: False when its enrollment chain does not
+        walk back to the project's single self-signed root, so a planted row is
+        never reported as an enrollment.
+        """
         self._check_open()
         from mareforma import validators as _validators
-        return _validators.list_validators(self._conn)
+        return _validators.list_validators_verified(self._conn)
 
     @_synchronized
     def refresh_convergence(self) -> dict[str, int]:
@@ -2090,11 +2737,14 @@ class EpistemicGraph:
         Returns
         -------
         dict
-            ``{"checked", "promoted", "still_pending"}``: int counts.
-            ``checked`` is the total rows examined; ``promoted`` is the
-            number that ran detection cleanly this pass (the flag was
-            cleared); ``still_pending`` is the number that errored
-            again and remain flagged.
+            ``{"checked", "retried_ok", "promoted", "still_pending"}``:
+            int counts. ``checked`` is the total rows examined;
+            ``retried_ok`` is the number that ran detection cleanly this
+            pass (the flag was cleared); ``promoted`` is the subset of
+            those whose support level actually moved, so a claim with no
+            converging peer recovers cleanly and counts zero promotions;
+            ``still_pending`` is the number that errored again and remain
+            flagged.
 
         Side effects: only the per-claim flag column and (transitively)
         the convergence-detection promotions themselves are mutated.
@@ -2105,6 +2755,7 @@ class EpistemicGraph:
         flagged = _db.list_convergence_retry_claims(self._conn)
 
         checked = len(flagged)
+        retried_ok = 0
         promoted = 0
         still_pending = 0
 
@@ -2114,7 +2765,7 @@ class EpistemicGraph:
                     supports = json.loads(row.get("supports_json") or "[]")
                 except (json.JSONDecodeError, TypeError):
                     supports = []
-                generated_by = row.get("generated_by") or "agent"
+                generated_by = row.get("generated_by") or DEFAULT_RUN_TOKEN
                 artifact_hash = row.get("artifact_hash")
                 claim_id = row["claim_id"]
 
@@ -2134,15 +2785,33 @@ class EpistemicGraph:
                     _db.clear_convergence_retry_flag(
                         self._conn, self._root, claim_id,
                     )
-                    promoted += 1
+                    retried_ok += 1
+                    # The helper returns clean-or-swallowed-error, never
+                    # whether a row was promoted, so read the support level
+                    # back. Detection that ran and moved nothing (the common
+                    # case: no converging peer) must not report a promotion.
+                    if self._support_level(claim_id) != row["support_level"]:
+                        promoted += 1
                 else:
                     still_pending += 1
 
         return {
             "checked": checked,
+            "retried_ok": retried_ok,
             "promoted": promoted,
             "still_pending": still_pending,
         }
+
+    def _support_level(self, claim_id: str) -> str | None:
+        """The claim's current support level, or None when it is gone.
+
+        Reads the column directly so a retry pass can tell a promotion from a
+        clean run that moved nothing.
+        """
+        row = self._conn.execute(
+            "SELECT support_level FROM claims WHERE claim_id = ?", (claim_id,)
+        ).fetchone()
+        return row["support_level"] if row is not None else None
 
     def classify_supports(
         self, values: list[str],
@@ -2161,6 +2830,7 @@ class EpistemicGraph:
         """
         return _db.classify_supports(values)
 
+    @_synchronized
     def query_provenance(
         self,
         claim_id: str,
@@ -2228,7 +2898,16 @@ class EpistemicGraph:
                 "build lineage."
             )
 
-        focal = _db.get_claim(self._conn, claim_id)
+        # query_provenance is an audit surface, so it FLAGS each high-trust
+        # row's verify-on-read result rather than excluding a tampered row:
+        # an auditor must be able to see a forged ESTABLISHED/REPLICATED row
+        # and know it failed verification. One cache for the whole walk, the
+        # focal row included, so a signature is checked once per call.
+        prov_verify_cache: dict = {}
+
+        focal = _db.get_claim(
+            self._conn, claim_id, verify_cache=prov_verify_cache,
+        )
         if focal is None:
             raise _db.ClaimNotFoundError(
                 f"Claim '{claim_id}' not found; cannot build lineage."
@@ -2266,12 +2945,6 @@ class EpistemicGraph:
             _supports.walk_downstream(self._conn, claim_id, depth=depth)
             if depth >= 1 else []
         )
-
-        # query_provenance is an audit surface, so it FLAGS each high-trust
-        # row's verify-on-read result rather than excluding a tampered row:
-        # an auditor must be able to see a forged ESTABLISHED/REPLICATED row
-        # and know it failed verification. One cache for the whole walk.
-        prov_verify_cache: dict = {}
 
         def _hydrate(edges: list[dict]) -> list[dict]:
             if not edges:
@@ -2374,6 +3047,7 @@ class EpistemicGraph:
             "depth": depth,
         }
 
+    @_synchronized
     def find_dangling_supports(self) -> list[dict]:
         """Return UUID-shaped ``supports[]`` entries that point nowhere.
 
@@ -2392,9 +3066,21 @@ class EpistemicGraph:
         helper is for auditing integrity, not for blocking writes.
         REPLICATED detection already refuses to promote on a dangling
         reference, so a hanging arrow cannot trigger spurious promotion.
+
+        Raises
+        ------
+        mareforma.DatabaseError
+            If the audit query fails (an unparseable ``supports_json`` planted
+            by a hand-edit is the reachable case). The raw sqlite3 error is not
+            part of the public surface, so it is translated rather than leaked.
         """
         self._check_open()
-        return _db.find_dangling_supports(self._conn)
+        try:
+            return _db.find_dangling_supports(self._conn)
+        except sqlite3.Error as exc:
+            raise _db.DatabaseError(
+                f"Failed to audit dangling supports: {exc}",
+            ) from exc
 
     @_synchronized
     def refresh_unsigned(self) -> dict[str, int]:
@@ -2451,188 +3137,209 @@ class EpistemicGraph:
         public_key = self._signer.public_key()
         current_keyid = _signing.public_key_id(public_key)
 
-        for claim in unlogged:
-            cid = claim["claim_id"]
-            try:
-                envelope = json.loads(claim["signature_bundle"])
-            except (json.JSONDecodeError, TypeError):
-                warnings.warn(
-                    f"Claim {cid} has a malformed signature_bundle; "
-                    "skipping during refresh_unsigned.",
-                    stacklevel=2,
-                )
-                still_unlogged += 1
-                continue
-
-            # Key-rotation guard. If the user ran `mareforma bootstrap
-            # --overwrite` since the claim was signed, this graph's signer
-            # cannot re-submit on the old key's behalf. Rekor would reject
-            # the public-key vs signature mismatch every time; warn and
-            # skip so the operator notices instead of retrying forever.
-            try:
-                bundle_keyid = envelope["signatures"][0]["keyid"]
-            except (KeyError, IndexError, TypeError):
-                warnings.warn(
-                    f"Claim {cid} signature_bundle has no keyid; skipping.",
-                    stacklevel=2,
-                )
-                still_unlogged += 1
-                continue
-            if bundle_keyid != current_keyid:
-                warnings.warn(
-                    f"Claim {cid} was signed by keyid {bundle_keyid[:12]}… "
-                    f"but the current signer is {current_keyid[:12]}…. The "
-                    "old key must be restored to re-log this claim. Skipping.",
-                    stacklevel=2,
-                )
-                still_unlogged += 1
-                continue
-
-            # Drift guard. If the row was tampered after assert_claim, the
-            # envelope's signed payload no longer matches the live row.
-            # Submitting it to Rekor would create a permanent public record
-            # of a claim text that no longer exists locally. Compare the
-            # canonical re-derivation of the live row against the envelope
-            # payload bytes.
-            try:
-                payload_bytes = base64.standard_b64decode(envelope["payload"])
-            except (KeyError, TypeError, ValueError):
-                warnings.warn(
-                    f"Claim {cid} signature_bundle payload could not be "
-                    "decoded; skipping during refresh_unsigned.",
-                    stacklevel=2,
-                )
-                still_unlogged += 1
-                continue
-            # The signed payload is a canonical in-toto Statement v1
-            # whose predicate carries the evidence vector. Re-derive
-            # with the row's stored evidence_json so a row+envelope
-            # drift detector compares like-with-like.
-            try:
-                evidence_dict = json.loads(claim.get("evidence_json") or "{}")
-            except (ValueError, TypeError):
-                evidence_dict = {}
-            live_fields = {
-                "claim_id": cid,
-                "text": claim["text"],
-                "classification": claim["classification"],
-                "generated_by": claim["generated_by"],
-                "supports": json.loads(claim.get("supports_json") or "[]"),
-                "contradicts": json.loads(claim.get("contradicts_json") or "[]"),
-                "source_name": claim.get("source_name"),
-                "artifact_hash": claim.get("artifact_hash"),
-                "created_at": claim["created_at"],
-            }
-            # A grounded claim binds its observed_grounding verdict into the
-            # signed payload, so the re-derivation must include it or the drift
-            # guard fires on every untampered grounded row. Add the key only when
-            # present, mirroring the restore path, so pre-observer claims stay
-            # byte-identical.
-            from mareforma.db.restore import _parse_observed_grounding
-
-            observed_grounding = _parse_observed_grounding(
-                claim.get("observed_grounding")
-            )
-            if observed_grounding is not None:
-                live_fields["observed_grounding"] = observed_grounding
-            live_payload = _signing.canonical_statement(live_fields, evidence_dict)
-            if live_payload != payload_bytes:
-                warnings.warn(
-                    f"Claim {cid} row drifted from its signed payload; "
-                    "refusing to log a stale signature to Rekor. "
-                    "Investigate the row vs signature_bundle mismatch.",
-                    stacklevel=2,
-                )
-                still_unlogged += 1
-                continue
-
-            # Step-4-replay path. If the Rekor saga's sidecar INSERT
-            # succeeded but the claims-row UPDATE failed (213 design),
-            # rekor_inclusions has the entry for this claim. Replay the
-            # UPDATE from stored coords instead of submitting again to
-            # avoid creating a duplicate Rekor entry.
-            #
-            # Placed AFTER the drift guard so a tampered row cannot ride
-            # the sidecar replay to re-attach valid Rekor coords to
-            # invalid payload bytes. The drift guard refusal is uniform
-            # across both the replay and re-submit paths, there is no
-            # way to launder a stale signature through this method.
-            saved_entry = _db.get_rekor_inclusion(self._conn, cid)
-            if saved_entry is not None:
-                augmented = _signing.attach_rekor_entry(envelope, saved_entry)
-                new_bundle = json.dumps(
-                    augmented, sort_keys=True, separators=(",", ":"),
-                )
-                _db.mark_claim_logged(
-                    self._conn, self._root, cid, new_bundle,
-                    strict_promotion=self._strict_promotion,
-                )
-                logged_count += 1
-                continue
-
-            logged, entry = _signing.submit_to_rekor(
-                envelope, public_key, rekor_url=self._rekor_url,
-            )
-            if logged and entry is not None:
-                # Merkle inclusion-proof verification (opt-in). Mirrors
-                # the submit-time path in db._attempt_rekor_saga: when
-                # the graph was opened with a log pubkey, re-fetch the
-                # entry and cryptographically verify before persisting.
-                # On verification failure, the entry stays unlogged
-                # (the operator can retry once they investigate).
-                if self._rekor_log_pubkey_pem is not None:
-                    entry_uuid = entry.get("uuid")
-                    if not isinstance(entry_uuid, str) or not entry_uuid:
-                        warnings.warn(
-                            f"Claim {cid} submitted to Rekor but the "
-                            "response had no uuid; cannot verify "
-                            "inclusion proof. Leaving unlogged.",
-                            stacklevel=2,
-                        )
-                        still_unlogged += 1
-                        continue
-                    try:
-                        full_body = _signing.fetch_inclusion_proof(
-                            entry_uuid, self._rekor_url,
-                        )
-                        _signing.verify_rekor_inclusion(
-                            full_body, self._rekor_log_pubkey_pem,
-                        )
-                    except _signing.RekorInclusionError as exc:
-                        warnings.warn(
-                            f"Claim {cid} inclusion-proof verification "
-                            f"failed (uuid {entry_uuid}, reason="
-                            f"{exc.reason}). Leaving unlogged; refresh "
-                            "again after investigating.",
-                            stacklevel=2,
-                        )
-                        still_unlogged += 1
-                        continue
-                # Saga step 3 (sidecar write) BEFORE step 4 (row UPDATE),
-                # mirroring _attempt_rekor_saga in db.py. Without this,
-                # a mark_claim_logged failure (drift refusal, transient
-                # IntegrityError, contention) would leave the entry in
-                # Rekor with no local sidecar record; the next
-                # refresh_unsigned would re-submit and create a duplicate
-                # Rekor entry. Writing the sidecar first lets the next
-                # refresh route through the saved_entry replay path
-                # above instead.
-                if not _db._record_rekor_inclusion(self._conn, cid, entry):
-                    # Sidecar write itself failed (rare; emits its own
-                    # warning). Leave the row unlogged, refresh_unsigned
-                    # will retry, accepting the duplicate-Rekor-entry
-                    # risk documented in _record_rekor_inclusion.
+        with self.defer_backup():
+            for claim in unlogged:
+                cid = claim["claim_id"]
+                try:
+                    envelope = json.loads(claim["signature_bundle"])
+                except (json.JSONDecodeError, TypeError):
+                    warnings.warn(
+                        f"Claim {cid} has a malformed signature_bundle; "
+                        "skipping during refresh_unsigned.",
+                        stacklevel=2,
+                    )
                     still_unlogged += 1
                     continue
-                augmented = _signing.attach_rekor_entry(envelope, entry)
-                new_bundle = json.dumps(
-                    augmented, sort_keys=True, separators=(",", ":"),
+
+                # Key-rotation guard. If the user ran `mareforma bootstrap
+                # --overwrite` since the claim was signed, this graph's signer
+                # cannot re-submit on the old key's behalf. Rekor would reject
+                # the public-key vs signature mismatch every time; warn and
+                # skip so the operator notices instead of retrying forever.
+                try:
+                    bundle_keyid = envelope["signatures"][0]["keyid"]
+                except (KeyError, IndexError, TypeError):
+                    warnings.warn(
+                        f"Claim {cid} signature_bundle has no keyid; skipping.",
+                        stacklevel=2,
+                    )
+                    still_unlogged += 1
+                    continue
+                if bundle_keyid != current_keyid:
+                    warnings.warn(
+                        f"Claim {cid} was signed by keyid {bundle_keyid[:12]}… "
+                        f"but the current signer is {current_keyid[:12]}…. The "
+                        "old key must be restored to re-log this claim. Skipping.",
+                        stacklevel=2,
+                    )
+                    still_unlogged += 1
+                    continue
+
+                # Drift guard. If the row was tampered after assert_claim, the
+                # envelope's signed payload no longer matches the live row.
+                # Submitting it to Rekor would create a permanent public record
+                # of a claim text that no longer exists locally. Compare the
+                # canonical re-derivation of the live row against the envelope
+                # payload bytes.
+                try:
+                    payload_bytes = base64.standard_b64decode(envelope["payload"])
+                except (KeyError, TypeError, ValueError):
+                    warnings.warn(
+                        f"Claim {cid} signature_bundle payload could not be "
+                        "decoded; skipping during refresh_unsigned.",
+                        stacklevel=2,
+                    )
+                    still_unlogged += 1
+                    continue
+                # The signed payload is a canonical in-toto Statement v1
+                # whose predicate carries the evidence vector. Re-derive
+                # with the row's stored evidence_json so a row+envelope
+                # drift detector compares like-with-like.
+                try:
+                    evidence_dict = json.loads(claim.get("evidence_json") or "{}")
+                except (ValueError, TypeError):
+                    evidence_dict = {}
+                live_fields = {
+                    "claim_id": cid,
+                    "text": claim["text"],
+                    "classification": claim["classification"],
+                    "generated_by": claim["generated_by"],
+                    "supports": json.loads(claim.get("supports_json") or "[]"),
+                    "contradicts": json.loads(claim.get("contradicts_json") or "[]"),
+                    "source_name": claim.get("source_name"),
+                    "artifact_hash": claim.get("artifact_hash"),
+                    "created_at": claim["created_at"],
+                }
+                # A grounded claim binds its observed_grounding verdict into the
+                # signed payload, so the re-derivation must include it or the drift
+                # guard fires on every untampered grounded row. Add the key only when
+                # present, mirroring the restore path, so pre-observer claims stay
+                # byte-identical.
+                from mareforma.db.restore import _parse_observed_grounding
+
+                observed_grounding = _parse_observed_grounding(
+                    claim.get("observed_grounding")
                 )
-                _db.mark_claim_logged(self._conn, self._root, cid, new_bundle,
-                                      strict_promotion=self._strict_promotion)
-                logged_count += 1
-            else:
-                still_unlogged += 1
+                if observed_grounding is not None:
+                    live_fields["observed_grounding"] = observed_grounding
+                # A finding binds its verdict inputs into the signed payload too;
+                # the record has no row column, so re-derive it from the envelope
+                # itself. Absent for non-finding and pre-record claims, so their
+                # re-derivation stays byte-identical.
+                try:
+                    _pred = _signing.claim_predicate_from_envelope(envelope)
+                    finding_record = (
+                        _pred.get("finding_record") if isinstance(_pred, dict)
+                        else None
+                    )
+                except Exception:
+                    finding_record = None
+                if isinstance(finding_record, dict):
+                    live_fields["finding_record"] = finding_record
+                live_payload = _signing.canonical_statement(live_fields, evidence_dict)
+                if live_payload != payload_bytes:
+                    warnings.warn(
+                        f"Claim {cid} row drifted from its signed payload; "
+                        "refusing to log a stale signature to Rekor. "
+                        "Investigate the row vs signature_bundle mismatch.",
+                        stacklevel=2,
+                    )
+                    still_unlogged += 1
+                    continue
+
+                # Step-4-replay path. If the Rekor saga's sidecar INSERT
+                # succeeded but the claims-row UPDATE failed (213 design),
+                # rekor_inclusions has the entry for this claim. Replay the
+                # UPDATE from stored coords instead of submitting again to
+                # avoid creating a duplicate Rekor entry.
+                #
+                # Placed AFTER the drift guard so a tampered row cannot ride
+                # the sidecar replay to re-attach valid Rekor coords to
+                # invalid payload bytes. The drift guard refusal is uniform
+                # across both the replay and re-submit paths, there is no
+                # way to launder a stale signature through this method.
+                saved_entry = _db.get_rekor_inclusion(self._conn, cid)
+                if saved_entry is not None:
+                    augmented = _signing.attach_rekor_entry(envelope, saved_entry)
+                    new_bundle = json.dumps(
+                        augmented, sort_keys=True, separators=(",", ":"),
+                    )
+                    _db.mark_claim_logged(
+                        self._conn, self._root, cid, new_bundle,
+                        strict_promotion=self._strict_promotion,
+                    )
+                    logged_count += 1
+                    continue
+
+                logged, entry = _signing.submit_to_rekor(
+                    envelope, public_key, rekor_url=self._rekor_url,
+                    allow_insecure=self._trust_insecure_rekor,
+                )
+                if logged and entry is not None:
+                    # Merkle inclusion-proof verification (opt-in). Mirrors
+                    # the submit-time path in db._attempt_rekor_saga: when
+                    # the graph was opened with a log pubkey, re-fetch the
+                    # entry and cryptographically verify before persisting.
+                    # On verification failure, the entry stays unlogged
+                    # (the operator can retry once they investigate).
+                    proof_entry = None
+                    if self._rekor_log_pubkey_pem is not None:
+                        entry_uuid = entry.get("uuid")
+                        if not isinstance(entry_uuid, str) or not entry_uuid:
+                            warnings.warn(
+                                f"Claim {cid} submitted to Rekor but the "
+                                "response had no uuid; cannot verify "
+                                "inclusion proof. Leaving unlogged.",
+                                stacklevel=2,
+                            )
+                            still_unlogged += 1
+                            continue
+                        try:
+                            full_body = _signing.fetch_inclusion_proof(
+                                entry_uuid, self._rekor_url,
+                                allow_insecure=self._trust_insecure_rekor,
+                            )
+                            _signing.verify_rekor_inclusion(
+                                full_body, self._rekor_log_pubkey_pem, envelope,
+                            )
+                            proof_entry = full_body
+                        except _signing.RekorInclusionError as exc:
+                            warnings.warn(
+                                f"Claim {cid} inclusion-proof verification "
+                                f"failed (uuid {entry_uuid}, reason="
+                                f"{exc.reason}). Leaving unlogged; refresh "
+                                "again after investigating.",
+                                stacklevel=2,
+                            )
+                            still_unlogged += 1
+                            continue
+                    # Saga step 3 (sidecar write) BEFORE step 4 (row UPDATE),
+                    # mirroring _attempt_rekor_saga in db.py. Without this,
+                    # a mark_claim_logged failure (drift refusal, transient
+                    # IntegrityError, contention) would leave the entry in
+                    # Rekor with no local sidecar record; the next
+                    # refresh_unsigned would re-submit and create a duplicate
+                    # Rekor entry. Writing the sidecar first lets the next
+                    # refresh route through the saved_entry replay path
+                    # above instead.
+                    if not _db._record_rekor_inclusion(
+                        self._conn, cid, entry, proof_entry=proof_entry,
+                    ):
+                        # Sidecar write itself failed (rare; emits its own
+                        # warning). Leave the row unlogged, refresh_unsigned
+                        # will retry, accepting the duplicate-Rekor-entry
+                        # risk documented in _record_rekor_inclusion.
+                        still_unlogged += 1
+                        continue
+                    augmented = _signing.attach_rekor_entry(envelope, entry)
+                    new_bundle = json.dumps(
+                        augmented, sort_keys=True, separators=(",", ":"),
+                    )
+                    _db.mark_claim_logged(self._conn, self._root, cid, new_bundle,
+                                          strict_promotion=self._strict_promotion)
+                    logged_count += 1
+                else:
+                    still_unlogged += 1
 
         from mareforma import health as _health
         _health.append_health_event(
@@ -2647,20 +3354,26 @@ class EpistemicGraph:
         }
 
     def get_tools(
-        self, *, generated_by: str = "agent",
+        self, *, generated_by: str = DEFAULT_RUN_TOKEN,
         include_deprecated_aliases: bool = False,
     ) -> list:
         """Return agent tool callables pre-bound to this graph.
 
         Returns two plain Python functions that any agent framework can wrap.
-        ``generated_by`` is baked into the closure: set it to the calling
-        agent's identifier so REPLICATED detection works across independent runs.
+        ``generated_by`` is baked into the closure as a display and provenance
+        label on each claim. REPLICATED independence keys on the signing key
+        (``asserter_keyid``), not on that label, and every tool from one
+        binding signs with the key the graph was opened with: all claims
+        recorded through it share one asserter keyid. Independent lines need a
+        graph handle per agent, each opened with its own key, or
+        ``graph.assert_claim(..., signer=...)`` with distinct keys.
 
         Parameters
         ----------
         generated_by:
-            Agent identifier, e.g. ``"agent/model-a/lab_a"``.
-            Defaults to ``'agent'``.
+            Agent identifier, e.g. ``"agent/model-a/lab_a"``, carried as a
+            display label. Defaults to ``'agent'``. It plays no part in the
+            trust axes.
         include_deprecated_aliases:
             When True, appends a deprecated ``assert_finding`` tool that
             forwards to ``record_claim`` and warns on use. The LLM-facing
@@ -2831,6 +3544,25 @@ class EpistemicGraph:
         """
         return self._convergence_errors
 
+    @property
+    def read_verify_exclusions(self) -> int:
+        """Rows :meth:`query` and :meth:`search` dropped as unverifiable.
+
+        A REPLICATED or ESTABLISHED row whose signature does not re-verify
+        is excluded from every enumerating read, and no flag brings it back.
+        The result is a shorter list that reads exactly like a graph missing
+        those claims, so the exclusion is counted here (and appended to
+        ``.mareforma/health.jsonl`` as ``read_verify_excluded``).
+
+        Resets to zero each time the graph is re-opened, and counts only the
+        reads this session made: zero means nothing was excluded from what was
+        read, not that the graph is untampered. A non-zero value means a claim
+        on disk failed re-verification; name it with :meth:`get_claim` or
+        ``mareforma verify`` to see which.
+        """
+        return self._read_verify_exclusions
+
+    @_synchronized
     def health(self) -> dict[str, int]:
         """Single-call audit summary of mareforma state.
 
@@ -2934,8 +3666,14 @@ class EpistemicGraph:
         finally:
             _db.resume_backup(self._conn, self._root)
 
+    @_synchronized
     def close(self) -> None:
         """Close the underlying database connection.
+
+        Takes the graph lock like every other mutator: the connection is
+        shared across threads, and closing it under another thread's live
+        statements crashes the process instead of raising. Waiting here lets
+        an in-flight write commit first.
 
         Subsequent calls on this graph raise ``RuntimeError`` with an
         actionable message instead of leaking a raw

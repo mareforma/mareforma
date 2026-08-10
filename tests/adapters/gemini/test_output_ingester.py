@@ -33,6 +33,7 @@ from mareforma.adapters.gemini import (
     OutputIngester,
     SUPPORTED_CAPABILITIES,
 )
+from tests._helpers import _import_registry_delta
 
 
 # Reusable per-capability payload fixtures that satisfy REQUIRED_FIELDS.
@@ -132,6 +133,35 @@ class TestPayloadValidation:
         with pytest.raises(ValueError, match="missing"):
             ing.ingest(capability="hypothesis", payload={"summary": "x"})
 
+    def test_rejects_a_value_sanitisation_empties(self, graph):
+        """A digest of stripped codepoints is blank by the time it is signed."""
+        ing = OutputIngester(graph=graph)
+        payload = dict(_VALID_PAYLOADS["hypothesis"])
+        payload["final_hypothesis_text_digest"] = "​​"
+        with pytest.raises(ValueError, match="blank"):
+            ing.ingest(capability="hypothesis", payload=payload)
+
+    def test_rejects_a_blank_required_value(self, graph):
+        ing = OutputIngester(graph=graph)
+        payload = dict(_VALID_PAYLOADS["hypothesis"])
+        payload["model_version"] = ""
+        with pytest.raises(ValueError, match="blank"):
+            ing.ingest(capability="hypothesis", payload=payload)
+
+    def test_rejects_a_digest_that_is_not_sha256(self, graph):
+        ing = OutputIngester(graph=graph)
+        payload = dict(_VALID_PAYLOADS["hypothesis"])
+        payload["final_hypothesis_text_digest"] = "banana"
+        with pytest.raises(ValueError, match="sha256:"):
+            ing.ingest(capability="hypothesis", payload=payload)
+
+    def test_accepts_an_empty_doi_list(self, graph):
+        """An empty cited_paper_dois is a real answer, not a blank field."""
+        ing = OutputIngester(graph=graph)
+        payload = dict(_VALID_PAYLOADS["literature-insight"])
+        payload["cited_paper_dois"] = []
+        assert ing.ingest(capability="literature-insight", payload=payload)
+
 
 class TestSanitization:
     def test_string_payload_values_flow_through_sanitize(self, graph):
@@ -186,8 +216,4 @@ class TestEmitSample:
 
 class TestImportHygiene:
     def test_import_does_not_register_predicates(self):
-        from mareforma.predicate_types import predicates
-        before = len(predicates())
-        import mareforma.adapters.gemini  # noqa: F401
-        after = len(predicates())
-        assert before == after
+        assert _import_registry_delta("mareforma.adapters.gemini") == 0

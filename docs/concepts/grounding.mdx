@@ -44,11 +44,17 @@ with observe(cites="/data/trial.csv") as obs:
 # Author the finding after the scope closes, then bind the verdict:
 graph.assert_finding(
     prop, prediction, estimate,
-    data_id="dataset_alpha",
+    data_id="sha256:...",
+    data_source="/data/trial.csv",
     generated_by="analyst/model-a/lab_a",
     grounding=obs.verdict,
 )
 ```
+
+`data_source=` names the location the finding cites, which is what the verdict is
+bound against. Omit it and pass only a free-text `data_id`, and there is nothing
+matchable to cross-check, so the verdict is stored unbound. See [Binding the
+verdict to the finding's citation](#binding-the-verdict-to-the-findings-citation).
 
 The verdict is available only after the `with` block closes, since it is a
 function of the whole span. Read `obs.verdict` after the block, not inside it.
@@ -71,13 +77,14 @@ by the `sha256:` hash of the returned bytes against a cited data id.
 
 ## When the observer cannot see: seams
 
-The observed scope propagates into `asyncio` tasks but not into library-spawned
-threads or a child process. A read on the far side of one of those boundaries is
-invisible. Rather than call that invisible read a genuine absence, the observer
-records a **seam** and, when the seam is relevant to the citation, returns
-`OPAQUE`:
+The observed scope propagates into the `asyncio` tasks created inside it, but not
+into a task that predates it, a library-spawned thread, or a child process. A
+read on the far side of one of those boundaries is invisible. Rather than call
+that invisible read a genuine absence, the observer records a **seam** and, when
+the seam is relevant to the citation, returns `OPAQUE`:
 
 - a thread start (`threading.Thread.start`, `_thread.start_new_thread`),
+- an `asyncio` task already pending when the scope opened,
 - a subprocess or new process (`subprocess`, `os.exec`, `os.fork`, ...),
 - a raw socket connection,
 - a cited path opened through an uninstrumented reader (`os.open`), a `duckdb`
@@ -92,7 +99,11 @@ an unrelated network call. A socket seam does block a **URL** or **content-addre
 citation, whose bytes can arrive over the network. Thread, subprocess, and
 coverage-gap seams can hide anything, so they always block; an unknown seam or
 citation kind blocks too (fail-closed). A cited URL with no observed HTTP read is
-unknown coverage, so it is `OPAQUE`, never `UNGROUNDED`.
+unknown coverage, so it is `OPAQUE`, never `UNGROUNDED`. An open of the cited
+source that the observer watched **fail**, and that accounts for every open of
+that path, hides nothing: it is recorded as a `failed-open` seam and the verdict
+stays `UNGROUNDED`, naming the failure and its exception type. That is the
+try/except silent fallback, reported as the tell it is.
 
 Keep-alive HTTP is covered: pooled `requests.Session`, `httpx.Client` /
 `AsyncClient`, and `aiohttp` sessions reused inside the scope are wrapped, so a
@@ -132,7 +143,10 @@ The oracle handles the honest hard case: a stochastic pipeline (an LLM at nonzer
 temperature) moves run to run even with fixed input. It measures that run-to-run
 noise first and calls `INFLUENCED` only when the perturbation moves the finding
 past the noise floor. When the effect sits inside the noise band the answer is
-`UNDECIDABLE`, never a silent `INFLUENCED`.
+`UNDECIDABLE`, never a silent `INFLUENCED`. Measuring the noise needs repeats: at
+the default `repeats=1` nothing is measured, so the floor is 0 and jitter alone
+can clear it. The result records that as `noise_measured=False` and names it in
+the reason, so a reader can tell a missing floor from a small one.
 
 A prose finding needs a reduction to a scalar the oracle can compare.
 `numeric_extraction_reducer` pulls the reported number out of an answer string
@@ -204,11 +218,17 @@ mareforma measure run-receipts.jsonl --json
 
 A `GROUNDED` verdict is only as honest as the claim it is attached to. The verdict
 is computed against the source you named in `observe(cites=...)`, which need not be
-the data the finding cites. So at bind time the verdict's cited set is cross-checked
-against the finding's own citation: its `data_id` set plus any `data_source=`. A
-`GROUNDED` whose cited set shares nothing with the finding downgrades to `OPAQUE`
-with a signed reason, or raises `GroundingCitationMismatchError` when you pass
-`grounding_strict=True`.
+the data the finding cites. So on `assert_finding` and `submit_finding`, at bind
+time, the verdict's cited set is cross-checked against the finding's own citation:
+its `data_id` set plus any `data_source=`. A `GROUNDED` whose cited set shares
+nothing with the finding downgrades to `OPAQUE` with a signed reason, or raises
+`GroundingCitationMismatchError` when you pass `grounding_strict=True`.
+
+`assert_claim` has no citation to bind against. A plain claim carries no `data_id`
+and no `data_source=`, and the free-text `source_name` never binds, so there is
+nothing to cross-check the verdict with. Such a verdict is stored with
+`[no finding citation to bind]` appended to its signed reason: the binding was not
+exercised, not passed. Assert a finding when you want the verdict bound.
 
 The modal honest workflow cites a path in the verdict, passes that same path as
 `data_source=`, and content-addresses the `data_id`:

@@ -15,14 +15,18 @@ from mareforma import _supports
 # ----------------------------------------------------------------------------
 #
 # The cache exists so REPLICATED queries don't degrade to a full
-# table scan as the graph grows. The pin documents the graph's
-# scaling promise:
+# table scan as the graph grows. The pin is expressed at 1k claims and
+# relative to a primary-key lookup on the same machine, so it runs in
+# the default suite on every invocation.
 #
-#   10k claims  → p99 < 100ms
-#   50k claims  → p99 < 300ms
-#
-# The 50k case is opt-in via -k or marker because building the graph
-# costs ~20s on a laptop and we don't want it in the default suite.
+# There is no absolute pin at a larger n. Deferring the claims.toml backup
+# for the whole build took the fixture off its quadratic curve, but the cost
+# still grows with the graph: measured 0.7s at 1k claims, 12s at 4k, 56s at
+# 8k, so a 50k graph runs for tens of minutes. That is too slow for the
+# default suite and no job selects anything outside it, so an absolute 50k
+# pin would be carried and never executed. The 1k relative pin is the guard:
+# an O(N) regression in walk_upstream pushes it into the hundreds of
+# milliseconds and fails here.
 
 
 def _build_wide_dag(
@@ -43,46 +47,52 @@ def _build_wide_dag(
     import random as _random
     rng = _random.Random(42)  # reproducible
     ids: list[str] = []
-    seed = graph.assert_claim("seed")
-    ids.append(seed)
-    for i in range(1, n):
-        # Pool of recently-seen ids to support; sliding window keeps
-        # the per-walk recursion depth bounded.
-        pool = ids[max(0, len(ids) - seed_pool):]
-        k = min(fanout, len(pool))
-        supports = rng.sample(pool, k=k) if k else []
-        cid = graph.assert_claim(f"claim-{i}", supports=supports)
-        ids.append(cid)
+    # One claims.toml rewrite for the whole build. Without the window each
+    # insert re-serialises the entire table, which makes the setup quadratic
+    # and swamps the walk it exists to measure.
+    with graph.defer_backup():
+        seed = graph.assert_claim("seed")
+        ids.append(seed)
+        for i in range(1, n):
+            # Pool of recently-seen ids to support; sliding window keeps
+            # the per-walk recursion depth bounded.
+            pool = ids[max(0, len(ids) - seed_pool):]
+            k = min(fanout, len(pool))
+            supports = rng.sample(pool, k=k) if k else []
+            cid = graph.assert_claim(f"claim-{i}", supports=supports)
+            ids.append(cid)
     return ids
 
 
-@pytest.mark.slow
-def test_supports_cache_50k_walk_under_300ms(tmp_path: Path) -> None:
-    """50k claims, walk_upstream p99 < 300ms.
+def test_wide_dag_build_rewrites_claims_toml_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The DAG helper builds under one backup rewrite, not one per claim.
 
-    DAG is wide-but-shallow (fanout=2, seed-pool=256) so the cycle-
-    detection depth cap (1024 hops) isn't hit while still exercising
-    a substantial recursive walk.
+    ``claims.toml`` is re-serialised in full on every mutation, so a bare
+    insertion loop is quadratic and the setup dwarfs the measurement it
+    exists to take. Nothing the pins assert reads the backup, and the file
+    on exit is the same either way.
     """
-    n = 50_000
-    with mareforma.open(tmp_path) as graph:
-        ids = _build_wide_dag(graph, n)
+    import tomli_w
 
+    real_dumps = tomli_w.dumps
+    rewrites = []
+
+    def counting_dumps(*args, **kwargs):
+        rewrites.append(1)
+        return real_dumps(*args, **kwargs)
+
+    monkeypatch.setattr(tomli_w, "dumps", counting_dumps)
     with mareforma.open(tmp_path) as graph:
-        # Walk from the most recently created claim (densest cache
-        # coverage). depth=4 mirrors the query_provenance default.
-        leaf = ids[-1]
-        latencies: list[float] = []
-        for _ in range(100):
-            t0 = time.perf_counter()
-            _supports.walk_upstream(graph._conn, leaf, depth=4)
-            latencies.append(time.perf_counter() - t0)
-        latencies.sort()
-        p99 = latencies[int(0.99 * len(latencies))]
-        assert p99 < 0.3, (
-            f"50k-claim p99 walk_upstream = {p99*1000:.1f}ms exceeds "
-            "300ms pin"
-        )
+        ids = _build_wide_dag(graph, 25)
+
+    assert len(rewrites) == 1, (
+        f"{len(rewrites)} claims.toml rewrites for 25 claims: the build loop "
+        "pays a full re-serialisation per claim"
+    )
+    assert len(ids) == 25
+    assert (tmp_path / "claims.toml").exists()
 
 
 def _percentile(samples: list[float], q: float) -> float:

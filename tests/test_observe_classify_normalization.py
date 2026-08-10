@@ -15,6 +15,7 @@ import os.path
 import pytest
 
 from mareforma.observe import _citation, _scope
+from mareforma.observe._verdict import ObservedGrounding
 
 _READ = "/data/incidental.csv"  # a read that does NOT match the citation
 _CITED = "/data/cited.csv"      # forces the full non-matching scan, not early exit
@@ -56,3 +57,18 @@ def test_audit_reuses_normalization_across_findings(count_realpath):
         scope.classify_against(cited)
     # The reads never change between findings, so no finding re-normalizes them.
     assert count_realpath.count(_READ) == 0
+
+
+def test_audit_reuses_failed_open_normalization_across_findings(count_realpath):
+    cited = (_citation.normalize_identifier(_CITED),)
+    scope = _scope.Scope(cited=cited)
+    for _ in range(20):  # a retry loop over one cited path that never opens
+        scope.record_open(_CITED)
+        scope.record_failed_open(_CITED, "FileNotFoundError")
+    verdict = scope.classify()  # warm the shared normalization
+    assert verdict.grounding is ObservedGrounding.UNGROUNDED
+    count_realpath.clear()
+    for _ in range(10):  # ten findings over the same shared evidence
+        scope.classify_against(cited)
+    # The failed opens never change between findings either.
+    assert count_realpath.count(_CITED) == 0

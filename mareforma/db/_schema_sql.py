@@ -237,59 +237,6 @@ BEGIN
     END;
 END;
 
--- Append-only over the signed predicate. The Statement v1 envelope
--- + signature binds every SIGNED_FIELDS value plus the evidence
--- vector + the statement_cid anchor. Without this trigger,
--- a direct `UPDATE claims SET ev_risk_of_bias = 0 WHERE …` would
--- silently retroactively upgrade a claim's evidence quality , 
--- signature verification on the unchanged envelope would still
--- pass, but the row no longer matches what was signed. Refuse the
--- mutation at the SQL layer; the envelope is the canonical source.
---
--- The trigger refuses only when (a) the row is signed
--- (signature_bundle IS NOT NULL) AND (b) at least one of the watched
--- columns actually changed (OLD ≠ NEW). A pure status-only update
--- that re-emits the same text + supports + evidence values via a
--- multi-column UPDATE passes through unblocked.
---
--- Note: signature_bundle itself is NOT watched. The system path
--- legitimately rewrites it on Rekor inclusion-proof attachment
--- (the rekor block is metadata, the payload + signatures stay
--- byte-equal). If an adversary edits signature_bundle directly,
--- restore's signature-vs-row binding catches the divergence.
-CREATE TRIGGER IF NOT EXISTS claims_signed_fields_no_laundering
-BEFORE UPDATE OF
-    text, classification, generated_by,
-    supports_json, contradicts_json,
-    source_name, artifact_hash,
-    ev_risk_of_bias, ev_inconsistency, ev_indirectness,
-    ev_imprecision, ev_pub_bias,
-    evidence_json, statement_cid,
-    prev_hash, created_at
-ON claims
-WHEN OLD.signature_bundle IS NOT NULL
-  AND (
-        OLD.text IS NOT NEW.text
-     OR OLD.classification IS NOT NEW.classification
-     OR OLD.generated_by IS NOT NEW.generated_by
-     OR OLD.supports_json IS NOT NEW.supports_json
-     OR OLD.contradicts_json IS NOT NEW.contradicts_json
-     OR OLD.source_name IS NOT NEW.source_name
-     OR OLD.artifact_hash IS NOT NEW.artifact_hash
-     OR OLD.ev_risk_of_bias IS NOT NEW.ev_risk_of_bias
-     OR OLD.ev_inconsistency IS NOT NEW.ev_inconsistency
-     OR OLD.ev_indirectness IS NOT NEW.ev_indirectness
-     OR OLD.ev_imprecision IS NOT NEW.ev_imprecision
-     OR OLD.ev_pub_bias IS NOT NEW.ev_pub_bias
-     OR OLD.evidence_json IS NOT NEW.evidence_json
-     OR OLD.statement_cid IS NOT NEW.statement_cid
-     OR OLD.prev_hash IS NOT NEW.prev_hash
-     OR OLD.created_at IS NOT NEW.created_at
-  )
-BEGIN
-    SELECT RAISE(ABORT, 'mareforma:append_only:signed_field_locked');
-END;
-
 -- A signed claim cannot be deleted. The signature + Rekor entry + chain
 -- hash collectively attest "this claim was asserted by this signer at
 -- this time"; allowing a delete would let a process with DB access wipe
@@ -527,6 +474,423 @@ CREATE TABLE IF NOT EXISTS validators (
 """
 
 
+# Append-only over the signed predicate, reconciled on every open_db() call
+# (both fresh and already-initialised dbs). Lives outside _SCHEMA_SQL, which
+# runs only on a fresh db: a db written by an earlier build still carries the
+# earlier trigger, and CREATE TRIGGER IF NOT EXISTS would leave it in place.
+# open_db compares this text against sqlite_master and rewrites only on a
+# mismatch, so an already-current graph is never left without the guard and
+# never has to take the write lock to open. DROP plus CREATE is a durable
+# write to sqlite_master, not a free operation.
+# The text below is stored verbatim in sqlite_master.sql, which is what makes
+# that comparison exact: keep it a single CREATE statement with no trailing
+# semicolon and no leading blank line.
+#
+# The Statement v1 envelope + signature binds every SIGNED_FIELDS value plus
+# the evidence vector, the observed-grounding verdict and the statement_cid
+# anchor. observed_grounding is watched for the same reason as the evidence
+# vector, one step sharper: it gates support-level promotion, so a single
+# UPDATE flipping it to GROUNDED lifts exactly the claims the observer refused
+# to promote. Without this trigger, a
+# direct `UPDATE claims SET ev_risk_of_bias = 0 WHERE …` would silently
+# retroactively upgrade a claim's evidence quality , signature verification on
+# the unchanged envelope would still pass, but the row no longer matches what
+# was signed. Refuse the mutation at the SQL layer; the envelope is the
+# canonical source.
+#
+# The trigger refuses only when (a) the row is signed (signature_bundle IS NOT
+# NULL) AND (b) at least one of the watched columns actually changed
+# (OLD ≠ NEW), or the update de-signs the row. A pure status-only update that
+# re-emits the same text + supports + evidence values via a multi-column
+# UPDATE passes through unblocked.
+#
+# signature_bundle is watched for one transition only: non-NULL to NULL.
+# Nulling it on a signed row clears this trigger's own guard and the guard of
+# claims_signed_no_delete, so three statements (null, rewrite a signed field,
+# put the original bundle back) would leave a valid envelope over substituted
+# content, and two would delete a Rekor-logged claim outright. The system path
+# rewrites the bundle non-NULL to non-NULL on Rekor inclusion-proof
+# attachment, which stays legal; an adversarial non-NULL edit is caught by
+# restore's signature-vs-row binding.
+#
+# asserter_keyid is watched for the same reason, one step removed. It is an
+# unsigned denormalisation of the bundle's signer that the REPLICATED promotion
+# query and the trust-layer independence count both read, so a row that
+# contradicts its own envelope inflates the distinct-signer count.
+#
+# predicate_payload is watched on the same ground. It stays outside the signed
+# envelope, but the audit path reads the finding's citation set out of it to
+# re-check a GROUNDED verdict against the sources the finding names, so one
+# UPDATE clearing it turns a binding violation into a clean verdict. The column
+# is only ever written at INSERT; a change on a signed row is tampering.
+_SIGNED_FIELDS_TRIGGER_NAME = "claims_signed_fields_no_laundering"
+
+_SIGNED_FIELDS_TRIGGER_SQL = """\
+CREATE TRIGGER claims_signed_fields_no_laundering
+BEFORE UPDATE OF
+    text, classification, generated_by,
+    supports_json, contradicts_json,
+    source_name, artifact_hash,
+    ev_risk_of_bias, ev_inconsistency, ev_indirectness,
+    ev_imprecision, ev_pub_bias,
+    evidence_json, observed_grounding, statement_cid,
+    prev_hash, created_at, signature_bundle, asserter_keyid,
+    predicate_payload
+ON claims
+WHEN OLD.signature_bundle IS NOT NULL
+  AND (
+        NEW.signature_bundle IS NULL
+     OR OLD.text IS NOT NEW.text
+     OR OLD.classification IS NOT NEW.classification
+     OR OLD.generated_by IS NOT NEW.generated_by
+     OR OLD.supports_json IS NOT NEW.supports_json
+     OR OLD.contradicts_json IS NOT NEW.contradicts_json
+     OR OLD.source_name IS NOT NEW.source_name
+     OR OLD.artifact_hash IS NOT NEW.artifact_hash
+     OR OLD.ev_risk_of_bias IS NOT NEW.ev_risk_of_bias
+     OR OLD.ev_inconsistency IS NOT NEW.ev_inconsistency
+     OR OLD.ev_indirectness IS NOT NEW.ev_indirectness
+     OR OLD.ev_imprecision IS NOT NEW.ev_imprecision
+     OR OLD.ev_pub_bias IS NOT NEW.ev_pub_bias
+     OR OLD.evidence_json IS NOT NEW.evidence_json
+     OR OLD.observed_grounding IS NOT NEW.observed_grounding
+     OR OLD.statement_cid IS NOT NEW.statement_cid
+     OR OLD.prev_hash IS NOT NEW.prev_hash
+     OR OLD.created_at IS NOT NEW.created_at
+     OR OLD.asserter_keyid IS NOT NEW.asserter_keyid
+     OR OLD.predicate_payload IS NOT NEW.predicate_payload
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:signed_field_locked');
+END"""
+
+
+# support_level is the trust ladder, and it is the one column the honest paths
+# rewrite after signing, so it cannot join the list above: the level is derived
+# state, promoted later than the signature that binds the claim's content. What
+# it can be held to is the writer. The two transitions the state machine permits
+# (PRELIMINARY -> REPLICATED, REPLICATED -> ESTABLISHED) are legal only inside a
+# promotion window, and only ``core._promotion_window`` opens one. A statement
+# from anywhere else is refused, on a signed row, for the same reason the
+# laundering trigger refuses one: the row carries a commitment the writer did
+# not make. The marker is a temp table, so it is per connection: a co-resident
+# process opening graph.db with plain sqlite3 has no temp schema of its own to
+# find it in and is refused.
+#
+# The marker has to be state, not a connection-scoped SQL function. Trigger text
+# is durable schema and SQLite resolves the names in it when it compiles the
+# UPDATE, so a function only this release registers makes support_level
+# unwritable by every other connection that opens the file, an older mareforma
+# included, instead of refusing the two guarded transitions. A temp table cannot
+# be named directly from a trigger (cross-schema references are refused at CREATE
+# time), so the WHEN clause probes for it through pragma_table_info, a
+# table-valued pragma any connection can compile since SQLite 3.16, well under
+# the 3.30 floor open_db enforces.
+#
+# The marker is a speed bump, not the guarantee: a writer with SQL access can
+# create the same temp table, or drop this trigger outright. The guarantee is on
+# the read path, where a level above PRELIMINARY has to be backed by the signed
+# evidence that earns it (``core._CorroborationIndex``). This trigger keeps a
+# stray write from reaching that check at all.
+#
+# Reconciled onto existing graphs by the same sqlite_master comparison as the
+# laundering trigger, so keep the text a single CREATE statement.
+_PROMOTION_MARKER_TABLE = "mareforma_promotion_open"
+
+_PROMOTION_TRIGGER_NAME = "claims_signed_promotion_backed"
+
+_PROMOTION_TRIGGER_SQL = f"""\
+CREATE TRIGGER {_PROMOTION_TRIGGER_NAME}
+BEFORE UPDATE OF support_level ON claims
+WHEN OLD.signature_bundle IS NOT NULL
+  AND (
+        (OLD.support_level = 'PRELIMINARY' AND NEW.support_level = 'REPLICATED')
+     OR (OLD.support_level = 'REPLICATED' AND NEW.support_level = 'ESTABLISHED')
+  )
+  AND NOT EXISTS (
+        SELECT 1 FROM pragma_table_info('{_PROMOTION_MARKER_TABLE}', 'temp')
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:promotion_unmarked');
+END"""
+
+
+# findings and evidence_lines are the two gate-input tables the read path reads
+# to derive a proposition's status, and neither carried a write guard: an UPDATE
+# could re-point a finding's plan or rewrite a line's data_id, and a DELETE could
+# drop a refuting line so the survivors read as consensus. No honest path updates
+# or deletes either table (a finding is written once by submit_finding and read
+# forever after), so both are append-only and no-delete, mirroring the guards
+# predictions and plan_retirements already carry.
+#
+# These go through _MANAGED_TRIGGERS rather than a CREATE TRIGGER IF NOT EXISTS
+# in _ADDITIVE_TABLES_SQL for the reason the learning
+# schema-if-not-exists-hides-constraint-change names: the tables already exist in
+# graphs written by an earlier release, and IF NOT EXISTS is a no-op the moment a
+# trigger of the same name is present, so a later change to the body would never
+# reach an existing graph. The managed path compares the stored text against the
+# wanted text and drop-and-recreates on a mismatch, so a definition that changes
+# shape reconciles onto every graph on open. Keep each SQL a single CREATE
+# statement with no trailing semicolon and no leading blank line: the text is
+# compared verbatim against sqlite_master.sql. The bodies name no per-connection
+# SQL function so a connection that registered none can still compile an UPDATE
+# against the guarded table (the trigger refuses the write, it does not make the
+# table unwritable to an older release).
+_FINDINGS_APPEND_ONLY_TRIGGER_NAME = "findings_append_only"
+
+_FINDINGS_APPEND_ONLY_TRIGGER_SQL = """\
+CREATE TRIGGER findings_append_only
+BEFORE UPDATE ON findings
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:finding_locked');
+END"""
+
+_FINDINGS_NO_DELETE_TRIGGER_NAME = "findings_no_delete"
+
+_FINDINGS_NO_DELETE_TRIGGER_SQL = """\
+CREATE TRIGGER findings_no_delete
+BEFORE DELETE ON findings
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:finding_delete_blocked');
+END"""
+
+_EVIDENCE_LINES_APPEND_ONLY_TRIGGER_NAME = "evidence_lines_append_only"
+
+_EVIDENCE_LINES_APPEND_ONLY_TRIGGER_SQL = """\
+CREATE TRIGGER evidence_lines_append_only
+BEFORE UPDATE ON evidence_lines
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:evidence_line_locked');
+END"""
+
+_EVIDENCE_LINES_NO_DELETE_TRIGGER_NAME = "evidence_lines_no_delete"
+
+_EVIDENCE_LINES_NO_DELETE_TRIGGER_SQL = """\
+CREATE TRIGGER evidence_lines_no_delete
+BEFORE DELETE ON evidence_lines
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:evidence_line_delete_blocked');
+END"""
+
+
+# propositions, contrasts and effect_estimates are the remaining gate-input
+# tables the read path reads to derive a proposition's status, and none carried
+# a write guard: a direct UPDATE could flip an estimate's value (the demonstrated
+# convergent-to-refuted attack) or rewrite a proposition's text so the evidence
+# now backs a different sentence, and a DELETE could drop a contrast or estimate
+# so a refutation reads as consensus. validators is guarded too: swapping a row's
+# pubkey_pem makes a forged signature verify, and dropping a row rewrites who the
+# graph will trust. None of the four carries a legitimate post-insert mutation
+# (a proposition is content-addressed and frozen, an estimate and contrast are
+# written once by insert_finding, and enrollment is one-way), so each is
+# append-only and no-delete. Idempotent re-registration uses ON CONFLICT DO
+# NOTHING, which fires neither trigger.
+#
+# These join _MANAGED_TRIGGERS for the same reason findings and evidence_lines
+# do (see the note above): the tables already exist in graphs written by an
+# earlier release, so a CREATE TRIGGER IF NOT EXISTS in _ADDITIVE_TABLES_SQL
+# would never reach an existing graph if a later change altered the body. The
+# managed path drop-and-recreates on a text mismatch, so a definition change
+# reconciles onto every graph on open. Keep each SQL a single CREATE statement
+# with no trailing semicolon and no leading blank line: the text is compared
+# verbatim against sqlite_master.sql. The bodies name no per-connection SQL
+# function, so a connection that registered none (an older release, a co-resident
+# reader) can still compile an UPDATE against the guarded table with foreign keys
+# off; the trigger refuses the write rather than making the table unwritable.
+_PROPOSITIONS_APPEND_ONLY_TRIGGER_NAME = "propositions_append_only"
+
+_PROPOSITIONS_APPEND_ONLY_TRIGGER_SQL = """\
+CREATE TRIGGER propositions_append_only
+BEFORE UPDATE ON propositions
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:proposition_locked');
+END"""
+
+_PROPOSITIONS_NO_DELETE_TRIGGER_NAME = "propositions_no_delete"
+
+_PROPOSITIONS_NO_DELETE_TRIGGER_SQL = """\
+CREATE TRIGGER propositions_no_delete
+BEFORE DELETE ON propositions
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:proposition_delete_blocked');
+END"""
+
+_CONTRASTS_APPEND_ONLY_TRIGGER_NAME = "contrasts_append_only"
+
+_CONTRASTS_APPEND_ONLY_TRIGGER_SQL = """\
+CREATE TRIGGER contrasts_append_only
+BEFORE UPDATE ON contrasts
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:contrast_locked');
+END"""
+
+_CONTRASTS_NO_DELETE_TRIGGER_NAME = "contrasts_no_delete"
+
+_CONTRASTS_NO_DELETE_TRIGGER_SQL = """\
+CREATE TRIGGER contrasts_no_delete
+BEFORE DELETE ON contrasts
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:contrast_delete_blocked');
+END"""
+
+_EFFECT_ESTIMATES_APPEND_ONLY_TRIGGER_NAME = "effect_estimates_append_only"
+
+_EFFECT_ESTIMATES_APPEND_ONLY_TRIGGER_SQL = """\
+CREATE TRIGGER effect_estimates_append_only
+BEFORE UPDATE ON effect_estimates
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:effect_estimate_locked');
+END"""
+
+_EFFECT_ESTIMATES_NO_DELETE_TRIGGER_NAME = "effect_estimates_no_delete"
+
+_EFFECT_ESTIMATES_NO_DELETE_TRIGGER_SQL = """\
+CREATE TRIGGER effect_estimates_no_delete
+BEFORE DELETE ON effect_estimates
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:effect_estimate_delete_blocked');
+END"""
+
+_VALIDATORS_APPEND_ONLY_TRIGGER_NAME = "validators_append_only"
+
+_VALIDATORS_APPEND_ONLY_TRIGGER_SQL = """\
+CREATE TRIGGER validators_append_only
+BEFORE UPDATE ON validators
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:validator_locked');
+END"""
+
+_VALIDATORS_NO_DELETE_TRIGGER_NAME = "validators_no_delete"
+
+_VALIDATORS_NO_DELETE_TRIGGER_SQL = """\
+CREATE TRIGGER validators_no_delete
+BEFORE DELETE ON validators
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:validator_delete_blocked');
+END"""
+
+
+# project_policy carries the project's root-signed, one-way trust rules, and it
+# was the one trust table with no write guard at all. A rule is only one-way if
+# the row that records it cannot be removed: DELETE FROM project_policy launders
+# the whole declaration away, the backup written after it carries no
+# [project_policy] section, and restore then accepts the policyless graph as
+# authentic. So the row cannot be deleted, and it cannot be updated from outside
+# the one writer that signs a replacement.
+#
+# The columns are watched rather than read. A trigger BODY that named them
+# would pin them in place: ALTER TABLE ... DROP COLUMN refuses to drop a column
+# a trigger references, and a legacy table that predates
+# ``strict_promotion_required`` is migrated in place on open, so a WHEN clause
+# comparing OLD/NEW flags would make the very upgrade path this guard protects
+# unrunnable. A ``BEFORE UPDATE OF`` list is an event filter, not a reference,
+# and the column stays droppable.
+#
+# So the WHEN clause keys on the same per-connection marker
+# ``claims_signed_promotion_backed`` uses: ``set_project_policy`` opens the
+# window around its upsert, and no other connection has that temp table to find.
+# The marker is a speed bump, not the guarantee (a writer with SQL access can
+# create the same temp table, drop the trigger, or reach the row through
+# INSERT OR REPLACE, which SQLite runs without firing either guard while
+# recursive_triggers is off). The guarantee is on the read path, where the flat
+# columns are bound to the root-signed envelope before either is trusted
+# (``core._verified_project_policy``). This keeps a stray write from reaching
+# that check at all.
+_POLICY_MARKER_TABLE = "mareforma_policy_open"
+
+_PROJECT_POLICY_APPEND_ONLY_TRIGGER_NAME = "project_policy_append_only"
+
+_PROJECT_POLICY_APPEND_ONLY_TRIGGER_SQL = f"""\
+CREATE TRIGGER {_PROJECT_POLICY_APPEND_ONLY_TRIGGER_NAME}
+BEFORE UPDATE OF
+    rekor_required, strict_promotion_required, signer_keyid, envelope,
+    created_at, rekor_declared_at, strict_promotion_declared_at
+ON project_policy
+WHEN NOT EXISTS (
+        SELECT 1 FROM pragma_table_info('{_POLICY_MARKER_TABLE}', 'temp')
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:project_policy_locked');
+END"""
+
+_PROJECT_POLICY_NO_DELETE_TRIGGER_NAME = "project_policy_no_delete"
+
+_PROJECT_POLICY_NO_DELETE_TRIGGER_SQL = """\
+CREATE TRIGGER project_policy_no_delete
+BEFORE DELETE ON project_policy
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:project_policy_delete_blocked');
+END"""
+
+
+# predictions is append-only too, and its guard already exists, but it watched
+# every immutable column EXCEPT plan_id, the primary key. Rewriting plan_id
+# re-points a whole rule at a different identity and makes every line of
+# evidence gated under it vanish from the count with nothing disclosed, so
+# plan_id joins the watch list. The guard moves out of _ADDITIVE_TABLES_SQL and
+# into the managed set for exactly the reason above: this body change reaches an
+# existing graph only through the drop-and-recreate reconciliation. The message
+# stays 'prediction_locked' so callers keying off it are unaffected.
+_PREDICTIONS_APPEND_ONLY_TRIGGER_NAME = "predictions_append_only"
+
+_PREDICTIONS_APPEND_ONLY_TRIGGER_SQL = """\
+CREATE TRIGGER predictions_append_only
+BEFORE UPDATE OF
+    plan_id, content_id, inference_regime, test_type, direction_of_interest,
+    equivalence_lower, equivalence_upper, alpha, preregistered, registered_at
+ON predictions
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:prediction_locked');
+END"""
+
+
+# The triggers open_db reconciles against sqlite_master on every open, name
+# first so a definition that changed shape reaches an existing graph.
+_MANAGED_TRIGGERS = (
+    (_SIGNED_FIELDS_TRIGGER_NAME, _SIGNED_FIELDS_TRIGGER_SQL),
+    (_PROMOTION_TRIGGER_NAME, _PROMOTION_TRIGGER_SQL),
+    (_FINDINGS_APPEND_ONLY_TRIGGER_NAME, _FINDINGS_APPEND_ONLY_TRIGGER_SQL),
+    (_FINDINGS_NO_DELETE_TRIGGER_NAME, _FINDINGS_NO_DELETE_TRIGGER_SQL),
+    (
+        _EVIDENCE_LINES_APPEND_ONLY_TRIGGER_NAME,
+        _EVIDENCE_LINES_APPEND_ONLY_TRIGGER_SQL,
+    ),
+    (
+        _EVIDENCE_LINES_NO_DELETE_TRIGGER_NAME,
+        _EVIDENCE_LINES_NO_DELETE_TRIGGER_SQL,
+    ),
+    (
+        _PROPOSITIONS_APPEND_ONLY_TRIGGER_NAME,
+        _PROPOSITIONS_APPEND_ONLY_TRIGGER_SQL,
+    ),
+    (_PROPOSITIONS_NO_DELETE_TRIGGER_NAME, _PROPOSITIONS_NO_DELETE_TRIGGER_SQL),
+    (_CONTRASTS_APPEND_ONLY_TRIGGER_NAME, _CONTRASTS_APPEND_ONLY_TRIGGER_SQL),
+    (_CONTRASTS_NO_DELETE_TRIGGER_NAME, _CONTRASTS_NO_DELETE_TRIGGER_SQL),
+    (
+        _EFFECT_ESTIMATES_APPEND_ONLY_TRIGGER_NAME,
+        _EFFECT_ESTIMATES_APPEND_ONLY_TRIGGER_SQL,
+    ),
+    (
+        _EFFECT_ESTIMATES_NO_DELETE_TRIGGER_NAME,
+        _EFFECT_ESTIMATES_NO_DELETE_TRIGGER_SQL,
+    ),
+    (_VALIDATORS_APPEND_ONLY_TRIGGER_NAME, _VALIDATORS_APPEND_ONLY_TRIGGER_SQL),
+    (_VALIDATORS_NO_DELETE_TRIGGER_NAME, _VALIDATORS_NO_DELETE_TRIGGER_SQL),
+    (
+        _PROJECT_POLICY_APPEND_ONLY_TRIGGER_NAME,
+        _PROJECT_POLICY_APPEND_ONLY_TRIGGER_SQL,
+    ),
+    (
+        _PROJECT_POLICY_NO_DELETE_TRIGGER_NAME,
+        _PROJECT_POLICY_NO_DELETE_TRIGGER_SQL,
+    ),
+    (
+        _PREDICTIONS_APPEND_ONLY_TRIGGER_NAME,
+        _PREDICTIONS_APPEND_ONLY_TRIGGER_SQL,
+    ),
+)
+
+
 # Additive tables created on every open_db() call (both fresh and
 # already-initialised dbs). All CREATE statements are IF NOT EXISTS so
 # the script is idempotent. Lives outside _SCHEMA_SQL because it must
@@ -535,17 +899,25 @@ CREATE TABLE IF NOT EXISTS validators (
 # otherwise be missing on every upgrade.
 _ADDITIVE_TABLES_SQL = """
 -- project_policy: a root-signed, single-row declaration of project-wide
--- trust policy. Today it carries rekor_required: once set, the project's
--- findings must be witnessed by the transparency log before they can
--- converge. The row is a singleton (id = 1). The signed envelope is the
--- authority; the flat columns are a denormalized read cache. restore
--- verifies the envelope against the enrolled root before enforcing.
+-- trust policy. rekor_required: the project's findings must be witnessed by
+-- the transparency log before they can converge. strict_promotion_required:
+-- a converging pair must carry data (artifact_hash) on both sides. Both are
+-- one-way once declared, and both bind every writer, not just the handle
+-- that declared them. The row is a singleton (id = 1). created_at is when the
+-- row was last signed, so extending the policy moves it; the *_declared_at
+-- columns hold when each flag was first declared and are what a grandfathering
+-- check reads. NULL until the flag is declared. The signed envelope is the
+-- authority; the flat columns are a denormalized read cache. restore verifies
+-- the envelope against the enrolled root before enforcing.
 CREATE TABLE IF NOT EXISTS project_policy (
-    id             INTEGER PRIMARY KEY CHECK (id = 1),
-    rekor_required INTEGER NOT NULL,
-    signer_keyid   TEXT NOT NULL,
-    envelope       TEXT NOT NULL,
-    created_at     TEXT NOT NULL
+    id                           INTEGER PRIMARY KEY CHECK (id = 1),
+    rekor_required               INTEGER NOT NULL,
+    signer_keyid                 TEXT NOT NULL,
+    envelope                     TEXT NOT NULL,
+    created_at                   TEXT NOT NULL,
+    strict_promotion_required    INTEGER NOT NULL DEFAULT 0,
+    rekor_declared_at            TEXT,
+    strict_promotion_declared_at TEXT
 );
 
 -- Trust layer: the structured meaning above the signed claim graph. A finding
@@ -584,6 +956,12 @@ CREATE INDEX IF NOT EXISTS idx_prop_frame_dir ON propositions(frame_id, directio
 -- registered (see the append-only trigger below). assert_finding registers it
 -- inline today; a later release exposes a register-plan-then-submit split,
 -- which becomes additive because the plan already stands alone here.
+-- The alpha bound the gates need is (0, 0.5) and Prediction enforces it on
+-- every write. The CHECK here stays at the wider (0, 1) on purpose: this file
+-- is all CREATE TABLE IF NOT EXISTS, so an existing graph keeps the bound it
+-- was created with, and restore replays that graph's backup into a fresh
+-- schema. A tighter CHECK here would reject a plan a live graph holds and cost
+-- the operator the whole recovery.
 CREATE TABLE IF NOT EXISTS predictions (
     plan_id               TEXT PRIMARY KEY,
     content_id            TEXT NOT NULL REFERENCES propositions(content_id),
@@ -600,21 +978,51 @@ CREATE TABLE IF NOT EXISTS predictions (
 );
 CREATE INDEX IF NOT EXISTS idx_pred_content ON predictions(content_id);
 
--- A registered plan is append-only: refuse any UPDATE of its immutable columns
--- and any DELETE, so the gap between registration and evidence is a real
--- pre-registration guarantee. Mirrors the verdict tables' append-only protection.
-CREATE TRIGGER IF NOT EXISTS predictions_append_only
-BEFORE UPDATE OF
-    content_id, inference_regime, test_type, direction_of_interest,
-    equivalence_lower, equivalence_upper, alpha, preregistered, registered_at
-ON predictions
-BEGIN
-    SELECT RAISE(ABORT, 'mareforma:append_only:prediction_locked');
-END;
+-- A registered plan is append-only: refuse any DELETE, so the gap between
+-- registration and evidence is a real pre-registration guarantee. Mirrors the
+-- verdict tables' append-only protection. The UPDATE half (predictions_append_only)
+-- is a managed trigger in _MANAGED_TRIGGERS: it watches plan_id as well as the
+-- other immutable columns, and a managed definition reaches an existing graph
+-- whose trigger predates the plan_id addition, which an IF NOT EXISTS here would
+-- not.
 CREATE TRIGGER IF NOT EXISTS predictions_no_delete
 BEFORE DELETE ON predictions
 BEGIN
     SELECT RAISE(ABORT, 'mareforma:append_only:prediction_delete_blocked');
+END;
+
+-- A retired plan. A plan written by a release with a wider alpha bound can
+-- carry a rule the gates cannot run, and the row above can be neither corrected
+-- nor removed, so the evidence standing under it would count as nothing for
+-- good. Retirement is the operator's recovery: it names the plan, the plan that
+-- supersedes it (the same rule at an alpha the gates can run) and why, so the
+-- read path can gate that evidence under the replacement. It is recorded state,
+-- never a rewrite: the retired row stays exactly as it was registered. Both
+-- ends reference predictions, so a retirement can only point at rules the graph
+-- holds, and superseded_by is a different plan by CHECK. The claim is the
+-- signed retirement attestation, whose text renders the same triple the row
+-- carries, so restore re-derives the row from signed material.
+CREATE TABLE IF NOT EXISTS plan_retirements (
+    plan_id       TEXT PRIMARY KEY REFERENCES predictions(plan_id),
+    superseded_by TEXT NOT NULL REFERENCES predictions(plan_id)
+                      CHECK (superseded_by <> plan_id),
+    reason        TEXT NOT NULL,
+    claim_id      TEXT NOT NULL REFERENCES claims(claim_id),
+    retired_at    TEXT NOT NULL
+);
+
+-- A retirement is append-only like the plan it retires: an operator who could
+-- re-point or drop one could move a proposition's counts by rewriting which
+-- rule its evidence stands under, with nothing on the read saying so.
+CREATE TRIGGER IF NOT EXISTS plan_retirements_append_only
+BEFORE UPDATE ON plan_retirements
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:plan_retirement_locked');
+END;
+CREATE TRIGGER IF NOT EXISTS plan_retirements_no_delete
+BEFORE DELETE ON plan_retirements
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:plan_retirement_delete_blocked');
 END;
 
 -- A finding: one attestation (claim_id) plus its computed bearing_direction on
@@ -691,6 +1099,23 @@ CREATE TABLE IF NOT EXISTS effect_estimates (
     n_total        INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_estimate_contrast ON effect_estimates(contrast_id);
+
+-- supports_revision: a monotonic counter over supports-edge mutations, bumped
+-- by every write that changes the claim_supports cache. It lives in graph.db,
+-- not in the cache file, so it commits in the same database as the claims row
+-- it describes. The cache stamps the value it last saw; a mismatch means the
+-- cache missed a mutation (a crash between the two WAL commits, or a writer
+-- that did not maintain the cache) and the cache is rebuilt on next open. The
+-- claim-count check alone cannot see an in-place supports edit, which moves no
+-- count. Additive: existing graphs gain the table and the singleton row on the
+-- next open, and the first open after the upgrade rebuilds the cache once.
+-- The singleton row is seeded by _ensure_supports_revision_row, not here: an
+-- INSERT in this script would need write access on every open, including the
+-- opens that change nothing.
+CREATE TABLE IF NOT EXISTS supports_revision (
+    id       INTEGER PRIMARY KEY CHECK (id = 1),
+    revision INTEGER NOT NULL DEFAULT 0
+);
 """
 
 

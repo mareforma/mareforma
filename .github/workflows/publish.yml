@@ -5,7 +5,14 @@ on:
     types: [published]
 
 jobs:
+  # A PyPI upload cannot be taken back, and `twine check` reads metadata
+  # rendering only. Run the same matrix a push runs and hold the upload behind
+  # it, so a release cut from a red commit fails before it ships.
+  test:
+    uses: ./.github/workflows/tests.yml
+
   publish:
+    needs: test
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -32,15 +39,18 @@ jobs:
         # skip-existing below silently no-ops a re-publish of an already-present
         # version, so a forgotten version bump would ship a release tag with no
         # new package and no error. Fail loudly when the tag and the built
-        # version disagree, before publish.
+        # version disagree, before publish. The wheel name comes from pyproject
+        # alone, so __version__ is compared separately: it is stamped into signed
+        # export bundles, which cannot be corrected once written.
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME#v}"
           WHEEL="$(ls dist/*.whl | head -1)"
           BUILT="$(basename "$WHEEL" | sed -E 's/^mareforma-([^-]+)-.*/\1/')"
-          echo "release tag=$TAG  built version=$BUILT"
-          if [ "$TAG" != "$BUILT" ]; then
-            echo "::error::Release tag '$GITHUB_REF_NAME' (version $TAG) does not match the built version $BUILT. Bump pyproject.toml and mareforma/__init__.py before tagging."
+          INIT="$(sed -nE 's/^__version__ = "(.+)"$/\1/p' mareforma/__init__.py)"
+          echo "release tag=$TAG  built version=$BUILT  __version__=$INIT"
+          if [ "$TAG" != "$BUILT" ] || [ "$TAG" != "$INIT" ]; then
+            echo "::error::Release tag '$GITHUB_REF_NAME' (version $TAG) does not match the built version $BUILT and __version__ $INIT. Bump pyproject.toml and mareforma/__init__.py before tagging."
             exit 1
           fi
 

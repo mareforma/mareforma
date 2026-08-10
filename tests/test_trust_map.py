@@ -8,8 +8,12 @@ byte-stable, dependency-free HTML render.
 """
 from __future__ import annotations
 
+import inspect
 import json
 
+import pytest
+
+from mareforma import __version__
 from mareforma.trust_map import (
     NOT_PRESENT,
     PRE_BINDING_GROUNDED_LABEL,
@@ -18,6 +22,7 @@ from mareforma.trust_map import (
     TrustMap,
     TrustProperty,
     _assemble,
+    build_trust_map,
 )
 from mareforma.trust_map_html import render_html
 from tests._helpers import _claim
@@ -50,6 +55,14 @@ _SHAPE_BY_VERSION = {
         # v0.3.10 independence reports a per-finding numeric count of pairwise
         # distinct (model, data, signer) checks; v0.3.9 emitted only the closed
         # word set {UNVERIFIABLE, MULTI_ROOT}.
+        "independence_numeric": True,
+    },
+    "v0.3.11": {
+        "properties": _EXPECTED_PROPERTIES,
+        # v0.3.11 emits the same property set and independence values, but the
+        # trust_root axis is now always computed from the enrolled roots: the
+        # caller-supplied topology bool, which collapsed the three root states
+        # into two, is gone.
         "independence_numeric": True,
     },
 }
@@ -362,9 +375,10 @@ class TestHtmlRender:
         assert ">grounding<" in html
         assert ">GROUNDED<" in html
         assert ">DEFERRED<" in html
-        # A None value renders as an em-dash placeholder, never "None".
+        # A None value renders as the shared "n/a" placeholder, never "None"
+        # and never a blank cell an auditor would read as a broken render.
         assert ">None<" not in html
-        assert ", " in html
+        assert ">n/a<" in html
 
     def test_html_escapes_dynamic_text(self) -> None:
         tmap = TrustMap("v1", "claim", "<script>x</script>",
@@ -391,6 +405,17 @@ class TestZeroRootIndependence:
         tmap = _assemble(_claim(), n_roots=2, has_inclusion=False)
         assert tmap.get("independence").value == "MULTI_ROOT"
         assert tmap.get("trust_root").value == "multiple roots"
+
+    def test_builder_takes_no_topology_bool(self, graph) -> None:
+        """The builder reads the topology itself and accepts no bool override.
+        A bool cannot express the zero-root state above, and the value a caller
+        would reach for (``single_trust_domain``) is False on a rootless graph,
+        which would render "multiple roots" and drop the zero-root residual."""
+        assert "single_domain" not in inspect.signature(build_trust_map).parameters
+        cid = graph.assert_claim("real", classification="ANALYTICAL",
+                                 source_name="ds")
+        tmap = build_trust_map(graph._conn, cid)
+        assert tmap.get("trust_root").value == "single trust domain"
 
 
 class TestPreBindingAllowlist:
@@ -424,12 +449,40 @@ class TestGroundingSurfacesGroundedSubset:
         assert "/B.csv" in resid and "declared cited" in resid
 
 
-def test_grounding_render_survives_non_string_sources():
+@pytest.mark.parametrize("cited, grounded", [
+    ([1, "/A.csv"], [2]),
+    ([["nested"]], []),
+    ([{"a": 1}], ["/A.csv"]),
+    (["/A.csv"], [["nested"]]),
+    (["/A.csv"], 7),
+    (7, ["/A.csv"]),
+])
+def test_grounding_render_survives_non_string_sources(cited, grounded):
     # A DB-tampered non-string element in grounded/cited must degrade to an
     # honest rendered map, not crash build_trust_map (which would take down
-    # `mareforma verify`/`map` for that claim).
+    # `mareforma verify`/`map` for that claim). Unhashable elements and
+    # non-iterable values are the same class: the map still renders.
     rec = {"version": "v0.3.9", "grounding": "GROUNDED", "reason": "r",
-           "cited_sources": [1, "/A.csv"], "grounded_sources": [2]}
+           "cited_sources": cited, "grounded_sources": grounded}
     tmap = _assemble(_claim(observed_grounding=json.dumps(rec)), n_roots=1,
                      has_inclusion=False)
     assert tmap.get("grounding").value  # rendered, did not raise
+
+
+class TestEngineVersionMatchesPackage:
+    """Guard the trust-engine version against the shipped package version.
+
+    Every emitted trust map carries ``version=TRUST_MAP_VERSION``, so a record
+    names the engine build that computed it. When the distributed package version
+    and the engine stamp diverge, that name points at an engine the installer does
+    not have: a build labelled 0.3.10 can still carry the 0.3.9 engine. Binding the
+    two moves them in lockstep at every release, so this check fails on any tree
+    whose engine stamp lags the package version before an artifact is built.
+    """
+
+    def test_engine_stamp_matches_the_package_version(self) -> None:
+        assert TRUST_MAP_VERSION == f"v{__version__}", (
+            f"engine stamp {TRUST_MAP_VERSION} does not match package version "
+            f"{__version__}; bump TRUST_MAP_VERSION and the package version "
+            "together so a map never names an engine build that was not shipped"
+        )

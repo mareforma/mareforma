@@ -2,8 +2,10 @@
 
 Traffic light (claim-based)
 ---------------------------
-  green  : at least one REPLICATED or ESTABLISHED claim
-  yellow : claims exist but all are PRELIMINARY
+  green  : at least one standing REPLICATED or ESTABLISHED claim
+  yellow : claims exist but none is standing above PRELIMINARY, either
+           because none was ever promoted or because every promoted one
+           has since been retracted or invalidated
   red    : no claims at all
   error  : graph.db could not be read (corruption, missing table, locked)
 
@@ -25,13 +27,38 @@ from pathlib import Path
 class HealthReport:
     claims_open: int = 0
     claims_resolved: int = 0
+    # Claims a signed contradiction verdict marked invalid, the same
+    # reading as refutation_status(row)["state"] == "contradicted". It
+    # is not a count of claims that assert a contradiction, and it does
+    # not partition with open / resolved.
     claims_contradicted: int = 0
     support_level_breakdown: dict[str, int] = field(default_factory=dict)
+    # REPLICATED / ESTABLISHED claims still standing: open, and not marked
+    # invalid by a signed contradiction verdict. The breakdown above is the
+    # full census and counts a retracted claim like any other.
+    standing_promoted: int = 0
+    # REPLICATED / ESTABLISHED rows whose signed material does not back the
+    # level they claim on read: a lone claim flipped to a high level by direct
+    # SQL, or a promoted row whose envelope was tampered. The census above counts
+    # levels as recorded and cannot tell a forged promotion from a genuine one;
+    # this is the separate re-verification count, and the traffic light cannot
+    # read green while it is non-zero.
+    failed_verification: int = 0
+    # Claims a promotion check failed to run on and left flagged for retry
+    # (``convergence_retry_needed=1``). The failure is swallowed at write time so
+    # a promotion never crashes a write, but a swallowed failure leaves the claim
+    # stuck below the level its evidence earns until refresh_convergence() re-runs
+    # detection. The common cause is a project one writer has upgraded: a promotion
+    # under the older release trips the newer promotion guard and gets flagged, and
+    # only the newer release clears it. Surfaced here so that stuck state is visible
+    # on `mareforma status` rather than silent. Informational, not a defect, so it
+    # does not gate the traffic light.
+    convergence_retry_pending: int = 0
     traffic_light: str = "green"
     rationale: str = ""
 
 
-def compute_health(root: Path, conn: sqlite3.Connection) -> HealthReport:
+def compute_health(conn: sqlite3.Connection) -> HealthReport:
     """Build a HealthReport from graph.db.
 
     Never raises. On a SQLite read failure the report's traffic light
@@ -42,9 +69,21 @@ def compute_health(root: Path, conn: sqlite3.Connection) -> HealthReport:
     report = HealthReport()
 
     try:
-        from mareforma.db import list_claims, DatabaseError
+        from mareforma.db import DatabaseError
 
-        claims = list_claims(conn)
+        # One grouped pass, not a materialised table. The census is five
+        # integers, and reading every row's text, signature bundle and
+        # payloads into Python to add them up costs memory proportional to
+        # the stored findings. ``t_invalid IS NOT NULL`` is the same test
+        # refutation_status applies for its ``contradicted`` state, so the
+        # word keeps one meaning across both surfaces.
+        rows = conn.execute(
+            "SELECT support_level, COUNT(*) AS n, "
+            "SUM(status = 'open') AS n_open, "
+            "SUM(t_invalid IS NOT NULL) AS n_contradicted, "
+            "SUM(status = 'open' AND t_invalid IS NULL) AS n_standing "
+            "FROM claims GROUP BY support_level"
+        ).fetchall()
     except (sqlite3.OperationalError, sqlite3.DatabaseError, DatabaseError) as exc:
         # Read failure: surface as ``error`` rather than folding into
         # the empty-graph ``red`` state. Counters stay at zero so the
@@ -52,32 +91,60 @@ def compute_health(root: Path, conn: sqlite3.Connection) -> HealthReport:
         report.traffic_light = "error"
         report.rationale = (
             "Could not read claims table from graph.db "
-            f"({type(exc).__name__}: {exc}). Run `graph.restore()` or "
+            f"({type(exc).__name__}: {exc}). Run `mareforma restore` "
+            "(or `mareforma.restore(project_root)`) or "
             "investigate the .mareforma/ directory; this is not the "
             "same as an empty graph."
         )
         return report
 
-    for c in claims:
-        if c["status"] == "open":
-            report.claims_open += 1
-        else:
-            report.claims_resolved += 1
+    for r in rows:
+        level = r["support_level"]
+        report.support_level_breakdown[level] = r["n"]
+        report.claims_open += r["n_open"]
+        report.claims_resolved += r["n"] - r["n_open"]
+        report.claims_contradicted += r["n_contradicted"]
+        # Same filter the promotion path applies: a retracted or
+        # verdict-invalidated claim is no longer evidence of anything.
+        if level in ("REPLICATED", "ESTABLISHED"):
+            report.standing_promoted += r["n_standing"]
 
-        try:
-            contradicts = json.loads(c.get("contradicts_json", "[]") or "[]")
-        except (TypeError, ValueError):
-            # Malformed JSON in a single row is per-row corruption,
-            # not whole-DB corruption. Skip the contradicts accounting
-            # for this row and continue producing a report for the rest.
-            contradicts = []
-        if contradicts:
-            report.claims_contradicted += 1
+    # Re-verify the promoted rows (only those; see count_unverified_promoted) so a
+    # forged support level cannot read green. Kept separate from the grouped
+    # census: the census counts levels as recorded, this counts the ones the
+    # signed material does not back.
+    try:
+        from mareforma.db import DatabaseError, count_unverified_promoted
 
-        level = c.get("support_level", "PRELIMINARY")
-        report.support_level_breakdown[level] = (
-            report.support_level_breakdown.get(level, 0) + 1
+        report.failed_verification = count_unverified_promoted(conn)
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, DatabaseError) as exc:
+        report.traffic_light = "error"
+        report.rationale = (
+            "Could not re-verify promoted claims in graph.db "
+            f"({type(exc).__name__}: {exc}). Run `mareforma restore` "
+            "(or `mareforma.restore(project_root)`) or "
+            "investigate the .mareforma/ directory; this is not the "
+            "same as an empty graph."
         )
+        return report
+
+    # Claims a swallowed promotion failure left flagged for retry. One grouped
+    # count over the partial index, not a row materialisation.
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM claims WHERE convergence_retry_needed = 1"
+        ).fetchone()
+        report.convergence_retry_pending = int(row[0]) if row is not None else 0
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, DatabaseError) as exc:
+        report.traffic_light = "error"
+        report.rationale = (
+            "Could not read the convergence-retry queue in graph.db "
+            f"({type(exc).__name__}: {exc}). Run `mareforma restore` "
+            "(or `mareforma.restore(project_root)`) or "
+            "investigate the .mareforma/ directory; this is not the "
+            "same as an empty graph."
+        )
+        return report
 
     report.traffic_light, report.rationale = _compute_traffic_light(report)
     return report
@@ -92,6 +159,23 @@ def _compute_traffic_light(report: HealthReport) -> tuple[str, str]:
     replicated = report.support_level_breakdown.get("REPLICATED", 0)
     if established + replicated == 0:
         return "yellow", "All claims are PRELIMINARY, no independent replication yet."
+
+    if report.standing_promoted == 0:
+        return "yellow", (
+            "Every replicated or validated claim has been retracted or "
+            "invalidated by a signed contradiction verdict."
+        )
+
+    # A promoted row whose signed material does not back its level bars green: the
+    # stored count says the project has standing evidence, but at least one of
+    # those promotions does not re-verify, so it is not evidence of anything.
+    if report.failed_verification > 0:
+        return "yellow", (
+            f"{report.failed_verification} promoted claim(s) do not re-verify on "
+            "read: the stored REPLICATED/ESTABLISHED level is not backed by signed "
+            "material (a forged level or a tampered envelope). Run "
+            "`mareforma verify <claim_id>` to see which, then retract or repair."
+        )
 
     return "green", "At least one independently replicated or validated claim."
 

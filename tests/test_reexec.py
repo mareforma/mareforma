@@ -126,6 +126,36 @@ class TestCouldNotReexecute:
         assert result.verdict is FaithfulnessVerdict.COULD_NOT_REEXECUTE
         assert "raised" in result.residual
 
+    def test_target_that_exits_is_could_not_not_reproduced(self) -> None:
+        # A pipeline written as a script ends in sys.exit(). SystemExit derives
+        # from BaseException, so an ``except Exception`` clause never sees it and
+        # the re-execution ends the process carrying no verdict. A clean exit(0)
+        # is the dangerous one: the gate reads 0 and scores a check that never
+        # ran as a reproduction. Both codes are could-not.
+        def clean_exit() -> float:
+            raise SystemExit(0)
+
+        result = reexec(_run(reported_value=0.5), registry={"pipe": clean_exit})
+        assert result.verdict is FaithfulnessVerdict.COULD_NOT_REEXECUTE
+        assert result.reproduced is False
+        assert "exited" in result.residual
+
+        def failing_exit() -> float:
+            raise SystemExit(2)
+
+        failed = reexec(_run(reported_value=0.5), registry={"pipe": failing_exit})
+        assert failed.verdict is FaithfulnessVerdict.COULD_NOT_REEXECUTE
+
+    def test_operator_interrupt_still_propagates(self) -> None:
+        # The clause above must not widen to BaseException: a KeyboardInterrupt
+        # is the operator stopping the run, not a pipeline that could not be
+        # re-executed, and swallowing it into a verdict would hide the stop.
+        def interrupted() -> float:
+            raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            reexec(_run(reported_value=0.5), registry={"pipe": interrupted})
+
     def test_unresolvable_target_is_could_not(self) -> None:
         # A dotted path that does not import is could-not, not a crash.
         result = reexec(
@@ -264,6 +294,27 @@ class TestWideToleranceIsFlagged:
         assert "WARNING" in result.residual
         assert "wide" in result.residual
 
+    def test_wide_absolute_tolerance_around_zero_is_flagged(self) -> None:
+        # A recorded zero (no effect, null result) is where a generous absolute
+        # tolerance makes every number "reproduce", so it has to be flagged too.
+        result = reexec(
+            _run(reported_value=0.0, tolerance=1e6),
+            registry={"pipe": lambda: 999999.0},
+        )
+        assert result.verdict is FaithfulnessVerdict.REPRODUCED
+        assert "WARNING" in result.residual
+
+    def test_slack_over_the_recorded_magnitude_is_flagged(self) -> None:
+        # Wideness is judged against the recorded magnitude, not against the
+        # number the re-run happened to produce: a slack larger than what was
+        # recorded is wide even when the re-run lands far above it.
+        result = reexec(
+            _run(reported_value=5.0, tolerance=6.0),
+            registry={"pipe": lambda: 11.0},
+        )
+        assert result.verdict is FaithfulnessVerdict.REPRODUCED
+        assert "WARNING" in result.residual
+
     def test_narrow_tolerance_is_not_flagged(self) -> None:
         result = reexec(
             _run(reported_value=5.0, tolerance=0.001),
@@ -314,6 +365,9 @@ class TestCli:
         res = CliRunner().invoke(cli, ["reexec", str(path)])
         assert res.exit_code == 2, res.output
         assert "COULD_NOT_REEXECUTE" in res.output
+        # No reproduced number exists; say so with the same placeholder every
+        # other renderer uses.
+        assert "reproduced: n/a" in res.output
 
     def test_json_output(self, tmp_path: Path) -> None:
         run = _run(
@@ -336,6 +390,15 @@ class TestCli:
         res = CliRunner().invoke(cli, ["reexec", str(path)])
         assert res.exit_code == 3
         assert "Malformed" in res.output
+
+    @pytest.mark.parametrize("args", [["--nosuchflag"], []])
+    def test_click_usage_errors_exit_three(self, args: list[str]) -> None:
+        # A typo'd flag and a missing argument are usage errors, not verdicts.
+        # Click exits 2 by default, the code this command's table sells as
+        # COULD_NOT_REEXECUTE, so a broken command line would read to a CI gate
+        # as an honest inconclusive re-run.
+        res = CliRunner().invoke(cli, ["reexec", *args])
+        assert res.exit_code == 3, res.output
 
     def test_tolerance_shown_in_human_output(self, tmp_path: Path) -> None:
         # The tolerance that enabled a match is visible, so a REPRODUCED reached
@@ -371,6 +434,48 @@ class TestCli:
             assert "REPRODUCED" in res.output
             assert "PROXIED" in res.output
 
+    def test_map_overlay_json_is_one_document(self, tmp_path: Path) -> None:
+        # --json --map is the only programmatic path to the overlaid map, so it
+        # must emit a single parseable object carrying both the verdict and the
+        # map, not two concatenated top-level documents.
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            with mareforma.open(".") as g:
+                cid = g.assert_claim("f", classification="ANALYTICAL")
+            run = _run(
+                reported_value=_RECORDED_NUMBER,
+                pipeline={"target": "tests.test_reexec:deterministic_pipeline"},
+            )
+            Path("run.json").write_text(json.dumps(run), encoding="utf-8")
+            res = r.invoke(cli, ["reexec", "run.json", "--json", "--map", cid])
+            assert res.exit_code == 0, res.output
+            doc = json.loads(res.output)
+            assert doc["verdict"] == "REPRODUCED"
+            assert doc["trust_map"]["subject_id"] == cid
+
+    def test_map_overlay_json_keeps_the_verdict_on_a_map_failure(
+        self, tmp_path: Path,
+    ) -> None:
+        # A --map that cannot be rendered is a usage error, but the verdict is
+        # already known: it stays on stdout as a parseable document, with no
+        # trust_map key to claim an overlay that was never rendered.
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            with mareforma.open(".") as g:
+                g.assert_claim("f", classification="ANALYTICAL")
+            run = _run(
+                reported_value=_RECORDED_NUMBER,
+                pipeline={"target": "tests.test_reexec:deterministic_pipeline"},
+            )
+            Path("run.json").write_text(json.dumps(run), encoding="utf-8")
+            res = r.invoke(
+                cli, ["reexec", "run.json", "--json", "--map", "does-not-exist"],
+            )
+            assert res.exit_code == 3, res.output
+            doc = json.loads(res.stdout)
+            assert doc["verdict"] == "REPRODUCED"
+            assert "trust_map" not in doc
+
     def test_map_overlay_unknown_claim_exits_usage_error(
         self, tmp_path: Path,
     ) -> None:
@@ -391,3 +496,37 @@ class TestCli:
             assert "not found" in res.output
             # The faithfulness verdict still prints before the lookup error.
             assert "REPRODUCED" in res.output
+
+    def test_map_overlay_without_a_project_exits_usage_error(
+        self, tmp_path: Path,
+    ) -> None:
+        # No project at or above cwd is an environment error of the overlay,
+        # not a divergence: exit 3, so a gate never reads it as a failed re-run.
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            run = _run(
+                reported_value=_RECORDED_NUMBER,
+                pipeline={"target": "tests.test_reexec:deterministic_pipeline"},
+            )
+            Path("run.json").write_text(json.dumps(run), encoding="utf-8")
+            res = r.invoke(cli, ["reexec", "run.json", "--map", "any-id"])
+            assert res.exit_code == 3, res.output
+            assert "No mareforma project" in res.output
+
+    def test_map_overlay_unreadable_graph_exits_usage_error(
+        self, tmp_path: Path,
+    ) -> None:
+        # A damaged graph.db is likewise an overlay failure, not a divergence.
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            db = Path(".mareforma") / "graph.db"
+            db.parent.mkdir()
+            db.write_bytes(b"not a database")
+            run = _run(
+                reported_value=_RECORDED_NUMBER,
+                pipeline={"target": "tests.test_reexec:deterministic_pipeline"},
+            )
+            Path("run.json").write_text(json.dumps(run), encoding="utf-8")
+            res = r.invoke(cli, ["reexec", "run.json", "--map", "any-id"])
+            assert res.exit_code == 3, res.output
+            assert "Could not read graph.db" in res.output

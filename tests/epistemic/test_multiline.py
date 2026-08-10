@@ -11,12 +11,15 @@ from pathlib import Path
 
 import pytest
 
+import mareforma
 from mareforma.trust import (
     Contrast,
     ControlType,
+    Direction,
     EvidenceLine,
     FindingPlanForkError,
     InconsistentEstimateError,
+    Proposition,
     Status,
 )
 from mareforma.trust._store import _count_run_distinct
@@ -266,7 +269,10 @@ class TestReadPathSurvivesUngateableRow:
             g.assert_finding(h, _superiority(), _smd(-2.4, p=0.01), data_id="dB", generated_by="run2")
             # Corrupt only run1's stored estimate to a non-numeric value (direct
             # SQL, the "foreign/direct writer" case the read-path guard exists
-            # for). math.isfinite on it raises TypeError on recompute.
+            # for). math.isfinite on it raises TypeError on recompute. The
+            # append-only trigger is the write-side speed bump a SQL adversary
+            # drops first; the read-path skip is the guarantee under test.
+            g._conn.execute("DROP TRIGGER IF EXISTS effect_estimates_append_only")
             g._conn.execute(
                 "UPDATE effect_estimates SET estimate_value = 'CORRUPT' "
                 "WHERE contrast_id IN ("
@@ -280,6 +286,44 @@ class TestReadPathSurvivesUngateableRow:
         # The poisoned row is skipped; the valid run2/dB line still counts.
         assert status["independent_support"] == 1
         assert status["status"] == Status.PRELIMINARY.value
+        assert status["lines_skipped"] == 1
+
+    def test_dropped_refuting_line_is_counted_and_recorded(self, tmp_path: Path) -> None:
+        """Dropping a REFUTING line is not conservative, it manufactures
+        consensus: the read would report the same clean status as a proposition
+        that never carried a refutation. The line still drops (one un-gateable
+        row must not deny the read), but the drop is counted in the returned
+        view and recorded on the health channel."""
+        h = _prop()
+        with open_graph(tmp_path) as g:
+            g.assert_finding(h, _superiority(), _smd(-2.6, p=0.003), data_id="dA", generated_by="run1")
+            g.assert_finding(h, _superiority(), _smd(2.6, p=0.003), data_id="dB", generated_by="run2")
+            assert g.proposition_status(h)["status"] == Status.CONTESTED.value
+            g._conn.execute("DROP TRIGGER IF EXISTS effect_estimates_append_only")
+            g._conn.execute(
+                "UPDATE effect_estimates SET estimate_value = 'CORRUPT' "
+                "WHERE contrast_id IN ("
+                "  SELECT c.contrast_id FROM contrasts c "
+                "  JOIN evidence_lines el ON el.line_id = c.line_id "
+                "  WHERE el.data_id = 'dB')"
+            )
+            g._conn.commit()
+            status = g.proposition_status(h)
+        assert (status["independent_support"], status["independent_refute"]) == (1, 0)
+        assert status["lines_skipped"] == 1
+        skips = [e for e in _read_health(tmp_path) if e["op"] == "bearing_recompute_skipped"]
+        assert len(skips) == 1
+        assert skips[0]["content_id"] == h.content_id()
+        assert skips[0]["error"] == "TypeError"
+        assert skips[0]["outcome"] == "degraded"
+
+    def test_gateable_lines_report_no_skip(self, tmp_path: Path) -> None:
+        h = _prop()
+        with open_graph(tmp_path) as g:
+            g.assert_finding(h, _superiority(), _smd(-2.6, p=0.003), data_id="dA", generated_by="run1")
+            status = g.proposition_status(h)
+        assert status["lines_skipped"] == 0
+        assert not [e for e in _read_health(tmp_path) if e["op"] == "bearing_recompute_skipped"]
 
 
 class TestGeneratedByPrecondition:
@@ -302,6 +346,51 @@ class TestGeneratedByPrecondition:
             g.assert_finding(h, _superiority(), _smd(-2.6, p=0.003), data_id="dA", generated_by="run1")
         events = _read_health(tmp_path)
         assert not any(e.get("generated_by_default") for e in events)
+
+
+class TestPropositionCaseVariantRestore:
+    def test_a_case_variant_proposition_still_restores(
+        self, tmp_path: Path,
+    ) -> None:
+        """Two agents name one proposition with different capitalisation.
+
+        Identity is content-addressed through casefold, so both findings attach
+        to a single proposition row whose stored strings are the first writer's,
+        while the second finding's claim text renders the second writer's. The
+        restore binding check must normalise both renderings, or it reads this
+        honest, tamper-free graph as a rewritten edge and refuses. No tampering:
+        the whole graph is written through the public API.
+        """
+        upper = Proposition(
+            "BRCA1", "affects", "tumour growth",
+            Direction.DECREASES, {"population": "TNBC"},
+        )
+        lower = Proposition(
+            "brca1", "AFFECTS", "Tumour Growth",
+            Direction.DECREASES, {"population": "tnbc"},
+        )
+        assert upper.content_id() == lower.content_id()
+        assert upper.text() != lower.text()
+        with open_graph(tmp_path) as g:
+            g.assert_finding(
+                upper, _superiority(), _smd(-2.6, p=0.003),
+                data_id="ds1", generated_by="run1",
+            )
+            g.assert_finding(
+                lower, _superiority(), _smd(-2.4, p=0.004),
+                data_id="ds2", generated_by="run2",
+            )
+        (tmp_path / ".mareforma" / "graph.db").unlink()
+        # Before the normalisation fix this raised RestoreError; the case variant
+        # must round-trip cleanly.
+        mareforma.restore(tmp_path)
+        with open_graph(tmp_path) as g:
+            view = g.proposition_status(upper)
+        # Both findings share one signer, so distinct-signer independence
+        # collapses to one; the point is that neither line was dropped by a
+        # false binding refusal on restore.
+        assert view["independent_support"] == 1
+        assert view["lines_skipped"] == 0
 
 
 class TestMultiLineIdempotencyAndFork:

@@ -148,8 +148,11 @@ def test_receipt_soft_lineage_is_unverifiable_not_collapse(tmp_path: Path):
     # A PROXY (declared) line makes the pair UNVERIFIABLE for independence: the
     # effective number rests on soft lineage (soft=True), the naive-hard count
     # excludes the soft line, and it is not counted as a same-model collapse.
+    # Both signers are enrolled so the second line counts at all (an unregistered
+    # signer is dropped, not read soft); its PROXY lineage is what reads soft.
     ka = _bootstrap_key(tmp_path, "ka.key")
     kb = _bootstrap_key(tmp_path, "kb.key")
+    _enroll_key(tmp_path, ka, kb)
     prop, pred = _prop(), _pred()
     with mareforma.open(tmp_path, key_path=ka) as g:
         g.assert_finding(prop, pred, _est(), data_id="ds1", generated_by="run1",

@@ -78,7 +78,11 @@ with mareforma.open() as graph:
 `classification` is your declaration of origin. `observed_grounding` is
 Mareforma's independent check on it, computed from what the run actually read.
 An `ANALYTICAL` claim that comes back `UNGROUNDED` is the silent-fallback
-failure caught in the act. `graph.db` is created automatically on first
+failure caught in the act. On `assert_claim` the verdict is stored unbound, with
+`[no finding citation to bind]` in its reason: there is no `data_id` or
+`data_source=` to cross-check it against, so it attests the read it saw, not that
+the read covered this claim's data. `assert_finding` binds it.
+`graph.db` is created automatically on first
 `mareforma.open()`. No `mareforma init` required.
 
 ---
@@ -90,11 +94,14 @@ failure caught in the act. `graph.db` is created automatically on first
 | `path` | `str \| Path \| None` | `None` | Project root. Defaults to `cwd()`. Graph stored at `<path>/.mareforma/graph.db`. |
 | `key_path` | `str \| Path \| None` | `None` | Ed25519 private key (PEM). `None` → use the XDG default. If the path does not exist, the graph operates unsigned. |
 | `require_signed` | `bool` | `False` | Raise `KeyNotFoundError` if no key is found. |
+| `load_key` | `bool` | `True` | `False` loads no key even when one exists: nothing is signed and your key is never auto-enrolled as the project's root validator, so an audit pass leaves no trace. Combining it with `require_signed=True` raises `ValueError`. |
 | `rekor_url` | `str \| None` | `None` | Sigstore-Rekor transparency log endpoint. When set, every signed claim is submitted at INSERT time. Use `mareforma.signing.PUBLIC_REKOR_URL` for the public instance. |
 | `require_rekor` | `bool` | `False` | Raise `SigningError` if `rekor_url` is unset or initial submission fails. |
 | `trust_insecure_rekor` | `bool` | `False` | Skip SSRF validation on `rekor_url` (only for private Rekor instances on internal networks). |
 | `rekor_log_pubkey_pem` | `bytes \| None` | `None` | PEM-encoded Rekor log operator public key. Opts into RFC 6962 Merkle inclusion-proof verification on every submit + `refresh_unsigned()`. Persists to `.mareforma/rekor_log_pubkey.pem` as a TOFU pin; silent rotation refused. Mutually exclusive with `rekor_log_pubkey_path`. |
 | `rekor_log_pubkey_path` | `str \| Path \| None` | `None` | Path to a PEM file with the Rekor log operator public key. Equivalent to passing the file bytes via `rekor_log_pubkey_pem`. |
+| `strict_promotion` | `bool` | `False` | Gate REPLICATED on non-NULL data (`artifact_hash`) present on both sides of a converging pair. Off by default (the signer axis alone promotes; absent data never blocks). Opt-in and additive: it only ever adds the requirement. Passing `True` root-signs a one-way project policy, so every later opener including the CLI promotes under the gate; a keyless or non-root caller raises `ProjectPolicyError`. |
+| `validator_type` | `str` | `"human"` | `"human"` or `"llm"`, the self-declared type recorded if this key auto-enrolls as the project's root validator. Ignored once a root exists. Pass `"llm"` when an agent bootstraps its own project: an `llm` validator cannot promote a claim to ESTABLISHED on its signature alone. |
 
 ```python
 graph = mareforma.open()                                              # cwd, unsigned if no key
@@ -122,8 +129,16 @@ Assert a claim. Returns `claim_id` (UUID).
 | `contradicts` | `list[str] \| None` | `None` | Claim_ids this finding is in explicit tension with. |
 | `source_name` | `str \| None` | `None` | Data source name. Required for ANALYTICAL to be meaningful. |
 | `idempotency_key` | `str \| None` | `None` | Retry-safe key. Same key → same claim_id, no INSERT. |
+| `status` | `str` | `"open"` | `open` \| `contested` \| `retracted` |
 | `artifact_hash` | `str \| None` | `None` | SHA-256 hex digest of the output bytes (figure, CSV, model). Secondary collapse check: equal data collapses two peers to one line (a byte-identical rerun is not corroboration), distinct data counts as independent, absent data never blocks. |
+| `evidence` | `dict \| None` | `None` | Optional opaque evidence-vector dict for the claim, denormalised into the `ev_*` columns and stored as `evidence_json`. Carried inside the signed predicate; mareforma does not interpret it. |
 | `seed` | `bool` | `False` | Insert directly at `ESTABLISHED` with a signed seed envelope. Only enrolled validators can produce seeds. |
+| `observed_grounding` | `dict \| None` | `None` | Signed grounding verdict from an `observe()` scope (`obs.verdict.to_signed_dict()`). Bound into the signed statement; a verdict that is not `GROUNDED` never counts toward promotion. |
+| `finding_record` | `dict \| None` | `None` | Set by `submit_finding`, not by hand: the signed record of a finding's verdict inputs (proposition, plan, datasets, bearing, and a digest over its estimate line set). Bound into the signed statement only when present, so a plain claim signs identically; a verdict re-derives against it on read. |
+| `grounding_sensor` | `object \| None` | `None` | Optional sensor exposing `grounding_score(text, supports) → (float, str)`. Its score and rationale are written into the claim's evidence vector. A sensor that raises is caught and the claim is asserted without a grounding score. |
+| `signer` | `object \| None` | `None` | Per-call override for the graph's loaded key (an Ed25519 private key from `signing.load_private_key`). `None` inherits the key from `mareforma.open(key_path=...)`. Not checked against the `validators` table: anyone can sign, only enrolled keys can `validate()` a claim to ESTABLISHED. Use it on a host holding several keys, one per asserter. |
+| `predicate_payload` | `dict \| None` | `None` | Structured predicate body for typed adapters. Stored in the queryable `predicate_payload` column only, NOT bound into the signed envelope or chain hash. |
+| `original_signature_bundle` | `str \| None` | `None` | Source-side DSSE envelope preserved by federation-import flows. Validated only for JSON well-formedness at write time, never re-verified. |
 
 **Side effect:** if ≥2 claims now share the same upstream in `supports[]`
 signed by distinct keys, all are promoted to `REPLICATED`, provided
@@ -189,8 +204,9 @@ from mareforma.observe import observe
 with observe(cites="/data/trial.csv") as obs:
     frame = pandas.read_csv("/data/trial.csv")   # wrapped loaders record the read
     estimate = analyze(frame)
-# author outside the scope, then sign:
-graph.assert_finding(prop, pred, estimate, data_id="dataset_alpha",
+# author outside the scope, then sign. data_source names the read location so the
+# verdict binds to a content-addressed data_id:
+graph.assert_finding(prop, pred, estimate, data_id=..., data_source="/data/trial.csv",
                      grounding=obs.verdict)
 ```
 
@@ -201,6 +217,13 @@ or uninstrumented reader could have hidden a read, so absence cannot be
 trusted). It is bound into the signed envelope, so verify-on-read re-checks it,
 and a non-`GROUNDED` verdict never counts toward `REPLICATED` promotion. A claim
 asserted without the observer carries no verdict and behaves exactly as before.
+
+The verdict must attest the finding's OWN data: its cited set is cross-checked
+against the finding's citation (the `data_id` set plus any `data_source=`), and a
+GROUNDED whose cited set is disjoint downgrades to OPAQUE (or raises with
+`grounding_strict=True`). The modal workflow cites a path in `observe(cites=...)`
+and passes that same path as `data_source=`, with a content-addressed `data_id`.
+The free-text `source_name` never participates in binding.
 
 Author inside the scope and sign after it closes: asserting a claim while its
 grounding scope is still open is refused. See [Grounding](/concepts/grounding)
@@ -247,8 +270,16 @@ root = graph.assert_claim(
     seed=True,          # ← inserts directly as ESTABLISHED with a signed envelope
 )
 # Downstream peers now have an ESTABLISHED upstream to converge on.
-graph.assert_claim("finding A", supports=[root], generated_by="agent-A")
-graph.assert_claim("finding B", supports=[root], generated_by="agent-B")
+# Promotion counts independence by asserter_keyid, so each peer signs
+# under its own key. Two peers on the graph's one key stay PRELIMINARY.
+from mareforma.signing import load_private_key
+
+lab_a = load_private_key("lab_a.key")
+lab_b = load_private_key("lab_b.key")
+graph.assert_claim("finding A", supports=[root],
+                   generated_by="agent-A", signer=lab_a)
+graph.assert_claim("finding B", supports=[root],
+                   generated_by="agent-B", signer=lab_b)
 # → both promote to REPLICATED.
 ```
 
@@ -424,8 +455,9 @@ not resolve, HEAD-check, or cache DOIs.
 
 ## Export and signed bundles
 
-The graph exports to two formats. Plain JSON-LD is for everyday
-inspection; the signed bundle is for archival and cross-environment
+The graph exports in four unsigned formats plus a signed bundle. Plain
+JSON-LD is for everyday inspection; the three interop formats are for
+external tooling; the signed bundle is for archival and cross-environment
 verification.
 
 **Plain JSON-LD.** `mareforma export` (default `--format=jsonld`) writes
@@ -433,13 +465,19 @@ verification.
 media type `application/x-mareforma-graph+json`). This default format is
 NOT PROV-O-conformant; pass `--format=prov-o` for a real W3C PROV-O
 graph. Each claim node carries every `SIGNED_FIELDS` member so the bundle
-verifier can re-derive `canonical_payload` from a node alone.
+verifier can re-derive `canonical_statement` bytes from a node alone.
 
-**SCITT-style signed bundle.** `mareforma export --bundle` wraps the
+**Interop formats.** `--format=in-toto-v1` writes an unsigned in-toto
+Statement v1 (sigstore / SLSA / GUAC ecosystem), `--format=ro-crate-1.2`
+an RO-Crate 1.2 Process Run Crate, and `--format=prov-o` a W3C PROV-O
+JSON-LD graph. `--format` and `--bundle` are mutually exclusive:
+`--bundle` always signs the native JSON-LD.
+
+**Signed export bundle.** `mareforma export --bundle` wraps the
 JSON-LD export in an in-toto Statement v1 envelope and signs it with the
 local Ed25519 key. The bundle includes one subject entry per claim
-(`urn:mareforma:claim:<uuid>`) with a SHA-256 of the claim's
-`canonical_payload`, plus a bundle-level DSSE signature. Verify with
+(`urn:mareforma:claim:<uuid>`) with a SHA-256 of the claim's canonical
+Statement v1 bytes, plus a bundle-level DSSE signature. Verify with
 `mareforma verify <bundle.json>`:
 
 ```bash
@@ -449,11 +487,27 @@ mareforma verify mareforma-bundle.json # → "verified: N claim subjects match"
 
 `predicateType` is `urn:mareforma:predicate:epistemic-graph:v1`. URN
 namespacing means schema evolution to v2 carries a new predicate type
-without breaking v1 verifiers. Tampered claim text, or even a re-signed
-bundle whose predicate was edited, fails verification: each claim's
-subject digest and its own asserter signature are checked against the
-presented content, and the displayed support level against signed
-material. Editorial status is exporter-attested, not verified.
+without breaking v1 verifiers. Content added to the predicate or mutated
+in it fails verification even when the bundle is re-signed with the same
+key: each claim's subject digest and its own asserter signature are
+checked against the presented content, and the displayed support level
+against signed material. Content removed does not: a verified bundle
+attests the claims it carries, not that they are all the claims in the
+graph, so a claim dropped together with its subject entry verifies
+clean. Editorial status is exporter-attested, not verified.
+
+**Validator set in the predicate.** The predicate carries
+`mare:validators`, the exporting graph's enrolled validator table: one
+object per validator with `keyid`, `pubkey_pem` (base64 of the PEM),
+`identity`, `validator_type`, `enrolled_at`, `enrolled_by_keyid` and
+`enrollment_envelope`. Verification chain-checks that set first, so every
+per-claim signature is checked against a key whose own enrollment is
+signed rather than against the exporter's word. A bundle whose validators
+do not descend from exactly one root, or that is signed by any key other
+than that root, is refused. `mare:trustDomainRoot` names the root and
+`mare:singleTrustDomain` reports whether the whole table traces to it.
+That pair is a disclosure about the exporting graph, not a guard against
+one operator holding every key.
 
 ---
 
@@ -530,42 +584,32 @@ and `mareforma.wrap_untrusted(...)` are public primitives.
 
 ## Idempotency
 
-`idempotency_key` solves two distinct problems.
-
-**Retry safety.** Same key → same `claim_id` returned, no duplicate
-inserted. Use this whenever an agent run may be interrupted and retried:
+`idempotency_key` is **retry safety only**. Same key + matching semantic
+fields → same `claim_id` returned, no duplicate inserted. Use this whenever
+an agent run may be interrupted and retried:
 
 ```python
 claim_id = graph.assert_claim("...", idempotency_key="run_abc_claim_1")
-# Crash and retry: same claim_id returned, graph unchanged
+# Crash and retry with the same fields: same claim_id returned, graph unchanged.
 claim_id = graph.assert_claim("...", idempotency_key="run_abc_claim_1")
 ```
 
-**Convergence convention.** Agents running the same conceptual query
-should use a structured key that encodes the semantic content of the
-claim, not a random run ID. Two agents using the same key converge on
-the same `claim_id` even with different text:
+**Strict contract.** A replay that supplies the same key with any
+divergent semantic field (`text`, `classification`, `generated_by`,
+`supports`, `contradicts`, `source_name`, `artifact_hash`,
+`evidence`, `observed_grounding`, `original_signature_bundle`) is not a retry. It is a different claim
+trying to ride someone else's key. `assert_claim` raises
+`IdempotencyConflictError` and lists every mismatched field, so a caller
+cannot believe their new state was registered when it was not. Use a
+different `idempotency_key` or reconcile the conflict.
 
-```python
-# Lab A
-graph.assert_claim(
-    "Target T is elevated in condition C (cohort_1, n=620)",
-    idempotency_key="target_T_elevated_condition_C",
-    generated_by="agent/model-a/lab_a",
-)
-
-# Lab B: same key, different text, different agent → same claim_id
-graph.assert_claim(
-    "Target T shows increased expression under condition C (cohort_2, n=580)",
-    idempotency_key="target_T_elevated_condition_C",
-    generated_by="agent/model-b/lab_b",
-)
-```
-
-**Hash conflicts raise.** A replay that supplies a different
-`artifact_hash` than the original is not a retry: it is a different
-claim that happens to share a key. `assert_claim` raises
-`IdempotencyConflictError` rather than silently dropping the new hash.
+**Not a convergence mechanism.** Two agents reaching the same conclusion
+must converge through the epistemic ladder, not by sharing a key. The
+supported pattern: both cite the same `ESTABLISHED` upstream in
+`supports[]` and sign with distinct keys, so `REPLICATED` fires
+automatically. `idempotency_key` collapsing two distinct findings into
+one row would erase the second agent's independent contribution;
+mareforma refuses that path on purpose.
 
 ---
 
@@ -624,7 +668,7 @@ graph.assert_claim("...", classification="DERIVED", supports=[upstream_id])
 
 **Treat REPLICATED as proof of truth.** Two INFERRED claims from the same LLM prior can still trigger REPLICATED if they share an ESTABLISHED upstream. Always check `classification` alongside `support_level`.
 
-**Call `graph.validate()` on a PRELIMINARY claim.** Raises `ValueError`. Also raises if no signer is loaded or the loaded signer is not an enrolled validator.
+**Call `graph.validate()` on a PRELIMINARY claim.** Raises `ValueError`. Also raises if no signer is loaded or the loaded signer is not an enrolled validator, and raises `SelfValidationError` if the loaded key signed the claim or any peer in its converging set. Promotion needs a witness who asserted none of those lines.
 
 ---
 
@@ -673,7 +717,7 @@ pipeline stages via `source_name` (any string convention works).
 
 ## Adapter framework
 
-Three opt-in adapter packages translate external AI platforms into signed mareforma claims. Each ships behind a matching install extra so the default install stays slim.
+Three opt-in adapter packages translate external AI platforms into signed mareforma claims. All three ship in the wheel and run on core dependencies, so none needs an install extra; an adapter costs nothing until a caller imports it.
 
 ### `mareforma.adapters.clawinstitute`
 

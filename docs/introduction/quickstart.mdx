@@ -9,17 +9,23 @@ description: "Five minutes to your first claim."
 uv add mareforma
 ```
 
-## (Optional) bootstrap a signing key
+## Bootstrap a signing key
 
 ```bash
 mareforma bootstrap
 ```
 
 Generates an Ed25519 keypair at `~/.config/mareforma/key` (mode `0600`).
-Optional but recommended: with a key, every claim is signed and the first
-project you open will auto-enroll you as its root validator (the only
-identity allowed to promote claims to `ESTABLISHED`). Without a key, the
-graph still works: claims are just stored unsigned.
+With a key, every claim is signed and the first project you open
+auto-enrolls you as its root validator (the identity allowed to promote
+claims to `ESTABLISHED`).
+
+Do this before you start. Without a key, `assert_claim` still writes, but
+the claim is unsigned, so `query` hides it unless you pass
+`include_unverified=True`, and everything from "Bootstrap an ESTABLISHED
+upstream" onward raises: a seed claim, `enroll_validator` and `validate`
+each need a loaded signer. Independence and promotion key on the signing
+identity (`asserter_keyid`), which an unsigned claim does not have.
 
 ## Open a graph
 
@@ -80,6 +86,12 @@ block, `UNGROUNDED` if none was, and `OPAQUE` if the read happened somewhere
 Mareforma could not see: a subprocess, a C extension, a warmed connection.
 Mareforma computes this from the run, so an agent that declares `ANALYTICAL` on a
 silent pipeline failure leaves the gap on the record instead of hiding it.
+
+The verdict says a cited read happened, not that it was a read of this claim's own
+data. `assert_claim` has no citation to bind it to, so the stored reason carries
+`[no finding citation to bind]`. Use `assert_finding` with `data_source=` when you
+want the verdict cross-checked against the data the claim rests on. See
+[Grounding](/concepts/grounding).
 
 ## Query what is already known
 
@@ -164,15 +176,33 @@ extra step required.
 
 ## Promote to ESTABLISHED
 
+Promotion needs a witness. No key can promote a claim it signed, and no key
+can promote a claim whose converging peer it signed, so neither your root
+key nor `lab_b` can do this step. Enroll a third key that asserted nothing
+and validate from it.
+
 ```python
-graph.validate(id_a, validated_by="reviewer@example.org")
+# A reviewer who signed neither line of the converging set.
+signing.bootstrap_key("reviewer.key")
+reviewer = signing.load_private_key("reviewer.key")
+graph.enroll_validator(
+    signing.public_key_to_pem(reviewer.public_key()),
+    identity="reviewer",
+)
+
+# validate() uses the graph's loaded key, so promote from the reviewer's graph.
+with mareforma.open(key_path="reviewer.key") as review_graph:
+    review_graph.validate(id_a, validated_by="reviewer@example.org")
+
 graph.get_claim(id_a)["support_level"]  # → "ESTABLISHED"
 ```
 
 Only `REPLICATED` claims can be promoted. `validate()` is identity-gated:
 the loaded signing key must be enrolled in the project's `validators`
-table. The validation event itself is signed and persisted to the claim's
-`validation_signature` column.
+table, and it must not appear on the claim envelope or on any peer in the
+converging set. A key that promotes its own line raises
+`SelfValidationError`. The validation event itself is signed and persisted
+to the claim's `validation_signature` column.
 
 ## Close the graph
 

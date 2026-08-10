@@ -9,18 +9,20 @@ hidden instructions, RTL/LTR overrides that visually reorder text, or
 a forged ``</untrusted_data>`` closing tag that breaks out of the
 wrapper.
 
-This module provides two minimal operations:
+This module provides three minimal operations:
 
 - :func:`sanitize_for_llm` strips zero-width / bidi / C0-C1 control
   characters (whitespace except ``\\n`` and ``\\t`` is kept) and caps
   pathologically long inputs.
-- :func:`wrap_untrusted` strips any forged opening/closing tag from the
-  inner content and wraps the result in
+- :func:`strip_forged_tags` replaces any forged opening/closing tag
+  with ``[stripped]``, leaving the content otherwise intact.
+- :func:`wrap_untrusted` strips forged tags and wraps the result in
   ``<untrusted_data>...</untrusted_data>`` delimiters.
 
 Callers should be opinionated about what they wrap. The graph's
 ``query_for_llm`` method wraps the ``text`` and ``comparison_summary``
-fields and sanitizes-only on the short metadata labels.
+fields, sanitizes-only on the short metadata labels, and sanitizes plus
+strips forged tags on every other string in the row.
 
 Threat model
 ------------
@@ -44,11 +46,14 @@ _MAX_FIELD_LEN: Final = 100_000
 _TRUNCATION_MARKER: Final = "\n…[mareforma: truncated, original exceeded 100k chars]"
 
 # Singleton zero-width / bidi-override / tag-lookalike codepoints we
-# refuse. Subset of ``validators._FORBIDDEN_DISPLAY_CHARS`` plus the
-# fullwidth ``<`` / ``>`` / ``/`` lookalikes — a hostile claim using
-# ``＜/untrusted_data＞`` could survive both sanitize and wrap if a
-# downstream NFKC normaliser (logging, RAG vectorizer, the LLM's own
-# tokenizer) folds the fullwidth glyphs to ASCII at read time.
+# refuse. Subset of ``validators._FORBIDDEN_DISPLAY_CHARS`` plus every
+# non-ASCII character that NFKC-folds to ``<``, ``>`` or ``/`` — a
+# hostile claim using ``＜/untrusted_data＞`` could survive both
+# sanitize and wrap if a downstream NFKC normaliser (logging, RAG
+# vectorizer, the LLM's own tokenizer) folds the glyphs to ASCII at
+# read time. The lookalike entries below are the full derivation over
+# the codepoint space, {0xFE64, 0xFE65, 0xFF0F, 0xFF1C, 0xFF1E}, which
+# tests/test_prompt_safety.py re-derives so the set cannot drift.
 _FORBIDDEN_CODEPOINTS: Final = frozenset({
     0x200B,  # ZERO WIDTH SPACE
     0x200C,  # ZERO WIDTH NON-JOINER
@@ -64,6 +69,8 @@ _FORBIDDEN_CODEPOINTS: Final = frozenset({
     0x2067,  # RIGHT-TO-LEFT ISOLATE
     0x2068,  # FIRST STRONG ISOLATE
     0x2069,  # POP DIRECTIONAL ISOLATE
+    0xFE64,  # SMALL LESS-THAN SIGN (NFKC → '<')
+    0xFE65,  # SMALL GREATER-THAN SIGN (NFKC → '>')
     0xFEFF,  # ZERO WIDTH NO-BREAK SPACE / BOM
     0xFF1C,  # FULLWIDTH LESS-THAN SIGN (NFKC → '<')
     0xFF1E,  # FULLWIDTH GREATER-THAN SIGN (NFKC → '>')
@@ -86,15 +93,29 @@ _FORBIDDEN_RANGES: Final = (
 )
 
 
-def _is_forbidden_codepoint(cp: int) -> bool:
-    """True if *cp* is a zero-width / bidi / tag-lookalike / steganographic
-    codepoint we strip from LLM-bound text."""
-    if cp in _FORBIDDEN_CODEPOINTS:
-        return True
-    for lo, hi in _FORBIDDEN_RANGES:
-        if lo <= cp <= hi:
-            return True
-    return False
+def _build_forbidden_re() -> re.Pattern[str]:
+    """Compile the tables above, plus the control ranges, into one
+    character class.
+
+    ``sanitize_for_llm`` runs on every string of every row a query hands
+    to an LLM, including the payload and signature columns, so the strip
+    has to cost a scan of the bytes rather than a Python loop over each
+    one of them. The class is derived from the tables so the two cannot
+    drift; tests/test_prompt_safety.py checks it against a
+    codepoint-by-codepoint walk over the whole codepoint space.
+    """
+    parts = [
+        r"\x00-\x08",  # C0 controls, keeping \t (0x09) and \n (0x0A)
+        r"\x0b-\x1f",
+        r"\x7f-\x9f",  # DEL and the C1 controls
+    ]
+    parts += [f"\\U{lo:08X}-\\U{hi:08X}" for lo, hi in _FORBIDDEN_RANGES]
+    parts += [f"\\U{cp:08X}" for cp in sorted(_FORBIDDEN_CODEPOINTS)]
+    return re.compile("[" + "".join(parts) + "]")
+
+
+_FORBIDDEN_RE: Final = _build_forbidden_re()
+
 
 def _forged_tag_re(tag: str) -> re.Pattern[str]:
     """Compile a case-insensitive regex that matches opening or closing
@@ -103,6 +124,40 @@ def _forged_tag_re(tag: str) -> re.Pattern[str]:
         rf"<\s*/?\s*{re.escape(tag)}\b[^>]*>",
         flags=re.IGNORECASE,
     )
+
+
+def strip_forged_tags(text: str | None, *, tag: str = "untrusted_data") -> str | None:
+    """Replace every literal ``<{tag}>`` / ``</{tag}>`` in *text* with
+    ``[stripped]``.
+
+    The tag-forgery half of :func:`wrap_untrusted`, without the wrapping.
+    Use it on content that must be splice-safe but cannot carry delimiters
+    of its own, such as a JSON column whose shape the caller parses.
+
+    Returns ``None`` for ``None`` input.
+    """
+    if text is None:
+        return None
+    if not isinstance(text, str):
+        raise TypeError(
+            f"strip_forged_tags expects str or None, got {type(text).__name__}"
+        )
+    _validate_tag(tag)
+    return _forged_tag_re(tag).sub("[stripped]", text)
+
+
+def _validate_tag(tag: str) -> None:
+    """Reject a tag that would make the wrapper itself injectable.
+
+    The tag is a static identifier in callers we control, but bound the
+    contract: a tag with whitespace or ``>`` would let an attacker close
+    the delimiter from inside.
+    """
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", tag):
+        raise ValueError(
+            f"tag {tag!r} must be a simple ASCII identifier (letters, "
+            "digits, underscore; not starting with a digit)."
+        )
 
 
 def sanitize_for_llm(text: str | None) -> str | None:
@@ -115,8 +170,8 @@ def sanitize_for_llm(text: str | None) -> str | None:
     - C0 (``< 0x20``) and C1 (``0x7F-0x9F``) control characters,
       except ``\\n`` and ``\\t`` which are kept (legitimate claim
       text contains them)
-    - Fullwidth ``<``, ``>``, ``/``: would NFKC-fold to ASCII and
-      reconstruct a forged delimiter post-wrap
+    - Fullwidth and small-form ``<``, ``>``, ``/``: would NFKC-fold to
+      ASCII and reconstruct a forged delimiter post-wrap
     - Variation selectors (U+FE00-FE0F, U+E0100-E01EF, U+180B-180D)
     - Interlinear annotation anchors (U+FFF9-FFFB)
     - **Tag plane (U+E0000-E007F)**: Goodside's "ASCII smuggler"
@@ -135,24 +190,7 @@ def sanitize_for_llm(text: str | None) -> str | None:
             f"sanitize_for_llm expects str or None, got {type(text).__name__}"
         )
 
-    out: list[str] = []
-    for ch in text:
-        cp = ord(ch)
-        if _is_forbidden_codepoint(cp):
-            continue
-        # C0 controls (0x00-0x1F) and DEL (0x7F) and C1 controls
-        # (0x80-0x9F). Keep \n (0x0A) and \t (0x09) — legitimate
-        # in claim text.
-        if cp < 0x20:
-            if cp in (0x09, 0x0A):
-                out.append(ch)
-            # else: drop
-            continue
-        if 0x7F <= cp <= 0x9F:
-            continue
-        out.append(ch)
-
-    sanitized = "".join(out)
+    sanitized = _FORBIDDEN_RE.sub("", text)
     if len(sanitized) > _MAX_FIELD_LEN:
         sanitized = sanitized[:_MAX_FIELD_LEN] + _TRUNCATION_MARKER
     return sanitized
@@ -184,17 +222,8 @@ def wrap_untrusted(text: str | None, *, tag: str = "untrusted_data") -> str:
         raise TypeError(
             f"wrap_untrusted expects str or None, got {type(text).__name__}"
         )
-    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", tag):
-        # The tag is a static identifier in callers we control, but
-        # bound the contract: a tag with whitespace or `>` would let
-        # the wrapper itself become injectable.
-        raise ValueError(
-            f"tag {tag!r} must be a simple ASCII identifier (letters, "
-            "digits, underscore; not starting with a digit)."
-        )
-
-    stripped = _forged_tag_re(tag).sub("[stripped]", text)
-    return f"<{tag}>\n{stripped}\n</{tag}>"
+    _validate_tag(tag)
+    return f"<{tag}>\n{strip_forged_tags(text, tag=tag)}\n</{tag}>"
 
 
 def safe_for_llm(text: str | None, *, tag: str = "untrusted_data") -> str:

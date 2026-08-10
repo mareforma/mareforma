@@ -1,9 +1,9 @@
 """
-examples/04_private_data_public_findings.py, Private data, public findings.
+04_private_data_public_findings.py, Private data, public findings.
 
 Run:
     pip install langchain-core
-    python examples/04_private_data_public_findings.py
+    python 04_private_data_public_findings.py
 
 No API key required.
 
@@ -253,18 +253,25 @@ print(f"  rep_2 id: {rep_2[:8]}…")
 sep("Q1, Independent data paths?")
 
 all_claims = graph.query("Target T")
-sources = {c.get("source_name") for c in all_claims if c.get("source_name")}
-agents  = {c.get("generated_by") for c in all_claims if c.get("generated_by")}
+# Q1 compares data paths, so it reads the claims that have a dataset behind
+# them: the ESTABLISHED seed is the shared upstream, not one of the paths.
+paths = [c for c in all_claims if c.get("source_name")]
+sources = {c["source_name"] for c in paths}
+keyids  = {c["asserter_keyid"] for c in paths if c.get("asserter_keyid")}
+agents  = {c["generated_by"] for c in paths if c.get("generated_by")}
 
 show("distinct source_names", sorted(sources))
-show("distinct generated_by", sorted(agents))
+show("distinct signing keys", sorted(k[:8] + "…" for k in keyids))
+# generated_by is a display label the producer picks. It is printed to read,
+# never gated on: two labels under one key are still one signer.
+show("generated_by (display)", sorted(agents))
 print()
 
-if len(sources) > 1 and len(agents) > 1:
+if len(sources) > 1 and len(keyids) > 1:
     print("  ✓ Two independent data sources, two distinct signing keys.")
     print("    If they converged, the finding is not a dataset artifact.")
 else:
-    print("  ✗ Same source or same key: not genuinely independent.")
+    print("  ✗ Same source or same signing key: not genuinely independent.")
 
 
 # ---------------------------------------------------------------------------
@@ -298,16 +305,31 @@ else:
 
 sep("Q3, Provenance distance?")
 
+
+def chain(claim_id: str) -> str:
+    """The chain under a claim, first cited support per hop, oldest first."""
+    hops = []
+    while claim_id:
+        claim = graph.get_claim(claim_id)
+        hops.append(f"{claim['classification']} ({claim_id[:8]}…)")
+        supports = json.loads(claim.get("supports_json") or "[]")
+        claim_id = supports[0] if supports else None
+    return " → ".join(reversed(hops))
+
+
 print("""
   Provenance distance measures how far a conclusion is from raw data.
   A short chain close to raw ANALYTICAL steps = high epistemic confidence.
   A long chain of INFERRED steps = epistemic fragility.
-
-  Lab A's chain:  upstream_ref_A → ANALYTICAL (step_1) → ANALYTICAL (step_2)
-  Lab B's chain:  upstream_ref_A → ANALYTICAL (rep_1)  → ANALYTICAL (rep_2)
-
-  Both chains are anchored in ANALYTICAL findings from independent sources.
-  The shared node (upstream_ref_A) is the prior literature, not a model prior.
+""")
+print(f"  Lab A, step_2:  {chain(step_2)}")
+print(f"  Lab B, rep_1:   {chain(rep_1)}")
+print(f"  Lab B, rep_2:   {chain(rep_2)}")
+print("""
+  rep_1 hangs off the prior literature alone, so it is an independent path:
+  the only node it shares with Lab A is the seed both labs cite.
+  rep_2 cites Lab A's step_2, so it descends through Lab A's private-dataset
+  chain. That branch is corroboration built on Lab A, not a second path.
 
   Compare with spurious replication (see below): both chains INFERRED,
   no data behind either. REPLICATED fires but the signal is worthless.

@@ -89,6 +89,28 @@ def test_httpx_post_model_captured_openai(httpx_mock):
     assert any(s.kind == "socket" for s in verdict.seams)
 
 
+def test_base_url_relative_post_is_computed(httpx_mock):
+    # The modal hand-rolled idiom: a client with base_url and a relative path.
+    # The seam must read the absolute URL the call requested, so the provider
+    # match holds and the .post capture equals the .send one instead of
+    # collapsing a real call to UNVERIFIABLE.
+    httpx_mock.add_response(url=_ANTHROPIC_URL, json={"content": []})
+    client = httpx.Client(base_url="https://api.anthropic.com")
+    with obs.observe() as h:
+        client.post(
+            "/v1/messages",
+            json={"model": "claude-3-5-sonnet-20241022",
+                  "messages": [{"role": "user", "content": "hi"}]},
+        )
+    client.close()
+    lineage = h.verdict.model_lineage
+    assert lineage is not None
+    assert lineage.tier is ModelLineageTier.COMPUTED
+    assert lineage.family_root == "claude-3-5-sonnet"
+    assert lineage.provider == "anthropic"
+    assert [r.identifier for r in h.verdict.reads] == [_ANTHROPIC_URL]
+
+
 # -- COMPUTED via the SDK send() path ----------------------------------------
 
 def test_httpx_client_send_captures_model(httpx_mock):
@@ -150,6 +172,8 @@ def test_send_non_2xx_records_no_lineage(httpx_mock):
 def test_aiohttp_request_captures_model():
     # litellm's default transport is aiohttp; ClientSession._request exposes the
     # JSON body in kwargs, so the model is captured without consuming the stream.
+    # A stub _request is a producer-controlled stack, so the capture is a
+    # declaration (PROXY); COMPUTED needs aiohttp's own network call.
     pytest.importorskip("aiohttp")
 
     from mareforma.observe import _loaders
@@ -173,8 +197,18 @@ def test_aiohttp_request_captures_model():
 
     lineage = asyncio.run(go())
     assert lineage is not None
-    assert lineage.tier is ModelLineageTier.COMPUTED
+    assert lineage.tier is ModelLineageTier.PROXY
     assert lineage.model_id == "claude-3-5-sonnet-20241022"
+
+
+def test_aiohttp_url_reads_the_keyword_aiohttp_accepts():
+    # aiohttp names the URL parameter ``str_or_url``. Reading any other keyword
+    # loses the URL on a keyword call, which downgrades a call that did execute
+    # to UNVERIFIABLE with no provider or method.
+    from mareforma.observe._loaders import _aiohttp_url
+
+    assert _aiohttp_url(("POST", _ANTHROPIC_URL), {}) == _ANTHROPIC_URL
+    assert _aiohttp_url(("POST",), {"str_or_url": _ANTHROPIC_URL}) == _ANTHROPIC_URL
 
 
 # -- PROXY: producer-declared ------------------------------------------------

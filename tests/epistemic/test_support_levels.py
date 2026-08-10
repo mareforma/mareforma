@@ -47,7 +47,6 @@ from tests._helpers import _pem_of, _two_signers
 from tests.epistemic._builders import (
     _bootstrap_validator_key,
     open_graph,
-    open_signed_graph,
 )
 
 
@@ -84,10 +83,12 @@ class TestReplicatedGenuine:
         assert c_a["support_level"] == "REPLICATED"
         assert c_b["support_level"] == "REPLICATED"
 
-    def test_replicated_requires_different_generated_by(
+    def test_replicated_requires_distinct_asserter_keyid(
         self, tmp_path: Path
     ) -> None:
-        """Same agent making two claims on the same upstream is not independent."""
+        """Two claims on the same upstream signed by one key are one line of
+        evidence. Convergence keys on the signer (``asserter_keyid``);
+        ``generated_by`` is a display label and never carries the gate."""
         with open_graph(tmp_path) as graph:
             upstream = graph.assert_claim("upstream finding", generated_by="seed", seed=True)
 
@@ -111,7 +112,10 @@ class TestReplicatedGenuine:
     def test_replicated_requires_shared_upstream(
         self, tmp_path: Path
     ) -> None:
-        """Two independent agents with no shared upstream do not trigger REPLICATED."""
+        """Two independent agents with no shared upstream do not trigger
+        REPLICATED. Distinct signers, so the missing shared anchor is the
+        only thing holding the pair at PRELIMINARY."""
+        sa, sb = _two_signers(tmp_path)
         with open_graph(tmp_path) as graph:
             upstream_a = graph.assert_claim("upstream A", generated_by="seed", seed=True)
             upstream_b = graph.assert_claim("upstream B", generated_by="seed", seed=True)
@@ -120,11 +124,13 @@ class TestReplicatedGenuine:
                 "finding from agent A",
                 generated_by="agent/model-a/lab_a",
                 supports=[upstream_a],
+                signer=sa,
             )
             id_b = graph.assert_claim(
                 "finding from agent B",
                 generated_by="agent/model-b/lab_b",
                 supports=[upstream_b],         # different upstream
+                signer=sb,
             )
 
             c_a = graph.get_claim(id_a)
@@ -170,7 +176,11 @@ class TestReplicatedGenuine:
         peer-has-some-established) which incorrectly admitted this
         configuration. The fix collapses the gate into a single
         EXISTS check on the shared element's level.
+
+        Distinct signers, so the shared element's level is the only thing
+        holding the pair at PRELIMINARY.
         """
+        sa, sb = _two_signers(tmp_path)
         with open_graph(tmp_path) as graph:
             # Two UNRELATED ESTABLISHED anchors.
             e1 = graph.assert_claim("anchor 1: drug X", generated_by="seed", seed=True)
@@ -186,10 +196,12 @@ class TestReplicatedGenuine:
             id_a = graph.assert_claim(
                 "A finding", supports=[e1, p],
                 generated_by="agent/model-a/lab_a",
+                signer=sa,
             )
             id_b = graph.assert_claim(
                 "B finding", supports=[e2, p],
                 generated_by="agent/model-b/lab_b",
+                signer=sb,
             )
 
             assert graph.get_claim(id_a)["support_level"] == "PRELIMINARY", (
@@ -461,7 +473,7 @@ class TestDerivedChain:
 
 class TestEstablishedGate:
     def test_validate_on_preliminary_raises(self, tmp_path: Path) -> None:
-        with open_signed_graph(tmp_path) as graph:
+        with open_graph(tmp_path) as graph:
             claim_id = graph.assert_claim(
                 "single agent claim",
                 generated_by="agent/model-a/lab_a",
@@ -472,7 +484,7 @@ class TestEstablishedGate:
     def test_validate_on_replicated_succeeds(self, tmp_path: Path) -> None:
         validator_key_path = _bootstrap_validator_key(tmp_path)
         sa, sb = _two_signers(tmp_path)
-        with open_signed_graph(tmp_path) as graph:
+        with open_graph(tmp_path) as graph:
             upstream = graph.assert_claim("upstream", generated_by="seed", seed=True)
             id_a = graph.assert_claim(
                 "claim A", generated_by="agent/model-a/lab_a", supports=[upstream],
@@ -516,6 +528,6 @@ class TestEstablishedGate:
     def test_validate_on_nonexistent_claim_raises(
         self, tmp_path: Path
     ) -> None:
-        with open_signed_graph(tmp_path) as graph:
+        with open_graph(tmp_path) as graph:
             with pytest.raises(ClaimNotFoundError):
                 graph.validate("no-such-uuid")

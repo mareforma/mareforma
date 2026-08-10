@@ -28,19 +28,26 @@ out of scope: the PROV model carries less than the signed graph
 (no DSSE envelopes, no evidence vector, no hash chain), so a
 round-trip through PROV-O would drop integrity surface.
 
-The four-invariant validator :func:`validate_prov_o` runs over the
-exported document and raises :class:`ProvOValidationError` on
-structural violations. It is a hand-rolled schema check, not a full
-SHACL or OWL validator: the four invariants are the minimum a
-consumer needs to walk the document without nil-pointer surprises.
+The four-invariant validator :func:`validate_prov_o` raises
+:class:`ProvOValidationError` on a structural violation. It is
+exported for consumers and for regression tests; the exporter does
+not run it, so ``build_prov_o`` returns the document as built. It is
+a hand-rolled schema check, not a full SHACL or OWL validator: the
+four invariants are the minimum a consumer needs to walk the
+document without nil-pointer surprises.
 """
 
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
+
+from mareforma.exporters._ids import (
+    UUID_RE,
+    require_uuid_claim_id,
+    safe_agent_id,
+)
 
 
 __all__ = [
@@ -59,12 +66,6 @@ PROV_CONTEXT = {
 }
 
 
-_UUID_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-)
-_AGENT_SAFE_RE = re.compile(r"^[A-Za-z0-9._/\-]+$")
-
-
 class ProvOValidationError(ValueError):
     """Raised when a PROV-O document violates the four export invariants."""
 
@@ -73,40 +74,17 @@ class ProvOValidationError(ValueError):
         self.invariant = invariant
 
 
-def _safe_agent_id(agent: str) -> str:
-    if _AGENT_SAFE_RE.match(agent):
-        return agent
-    return re.sub(r"[^A-Za-z0-9._/\-]", "_", agent)
-
-
-def _require_uuid_claim_id(claim_id: str) -> str:
-    """Guard against non-UUID claim_ids being spliced into URN @ids.
-
-    Federation imports can land non-UUID identifiers in the graph;
-    those must be remapped to UUIDs before export; otherwise we emit
-    malformed JSON-LD ``@id`` values that downstream PROV-O tooling
-    cannot parse. Mirror the RO-Crate exporter's posture: refuse,
-    don't sanitise.
-    """
-    if not isinstance(claim_id, str) or not _UUID_RE.match(claim_id):
-        raise ValueError(
-            f"PROV-O export refuses non-UUID claim_id: {claim_id!r}. "
-            "Federation-imported foreign IDs must be remapped to UUIDs "
-            "before export."
-        )
-    return claim_id
-
-
 def _entity_id(claim_id: str) -> str:
-    return f"mareforma:claim:{_require_uuid_claim_id(claim_id)}"
+    return f"mareforma:claim:{require_uuid_claim_id(claim_id, 'PROV-O')}"
 
 
 def _activity_id(claim_id: str, kind: str) -> str:
-    return f"mareforma:activity:{kind}:{_require_uuid_claim_id(claim_id)}"
+    checked = require_uuid_claim_id(claim_id, "PROV-O")
+    return f"mareforma:activity:{kind}:{checked}"
 
 
 def _agent_id(generated_by: str) -> str:
-    return f"mareforma:agent:{_safe_agent_id(generated_by)}"
+    return f"mareforma:agent:{safe_agent_id(generated_by)}"
 
 
 def _validator_id(keyid: str) -> str:
@@ -136,8 +114,12 @@ def build_prov_o(root: Path, claim_id: str | None = None) -> dict[str, Any]:
         If no graph database exists at the expected path.
     ValueError
         If *claim_id* is supplied but does not exist in the graph.
+    UnverifiedClaimError
+        If any exported claim failed verify-on-read.
     """
-    from mareforma.db import open_db, list_claims, get_claim
+    from mareforma.db import (
+        open_db, list_claims, get_claim, refuse_unverified_claims,
+    )
 
     db_path = root / ".mareforma" / "graph.db"
     if not db_path.exists():
@@ -151,7 +133,13 @@ def build_prov_o(root: Path, claim_id: str | None = None) -> dict[str, Any]:
         if claim_id is None:
             claims = list_claims(conn)
         else:
-            focal = get_claim(conn, claim_id)
+            # One cache for the whole walk. The corroboration evidence behind
+            # a promoted row is graph-wide, so a per-hop cache would rebuild it
+            # once per ancestor and make the export cost grow with a graph it
+            # does not read. list_claims shares one across its rows for the
+            # same reason.
+            verify_cache: dict = {}
+            focal = get_claim(conn, claim_id, verify_cache=verify_cache)
             if focal is None:
                 raise ValueError(
                     f"claim_id {claim_id!r} not found in graph"
@@ -171,10 +159,12 @@ def build_prov_o(root: Path, claim_id: str | None = None) -> dict[str, Any]:
                 for ref in refs:
                     if (
                         isinstance(ref, str)
-                        and _UUID_RE.match(ref)
+                        and UUID_RE.match(ref)
                         and ref not in claims_by_id
                     ):
-                        ancestor = get_claim(conn, ref)
+                        ancestor = get_claim(
+                            conn, ref, verify_cache=verify_cache,
+                        )
                         if ancestor is not None:
                             claims_by_id[ref] = ancestor
                             frontier.append(ref)
@@ -184,6 +174,7 @@ def build_prov_o(root: Path, claim_id: str | None = None) -> dict[str, Any]:
             )
     finally:
         conn.close()
+    refuse_unverified_claims(claims)
 
     graph: list[dict[str, Any]] = []
     seen_agents: set[str] = set()
@@ -192,15 +183,14 @@ def build_prov_o(root: Path, claim_id: str | None = None) -> dict[str, Any]:
     for claim in claims:
         cid = claim["claim_id"]
         agent = claim.get("generated_by") or "agent"
-        agent_safe = _safe_agent_id(agent)
 
-        if agent_safe not in seen_agents:
+        if agent not in seen_agents:
             graph.append({
                 "@id": _agent_id(agent),
                 "@type": "prov:Agent",
                 "rdfs:label": agent,
             })
-            seen_agents.add(agent_safe)
+            seen_agents.add(agent)
 
         # Entity: the claim itself.
         entity: dict[str, Any] = {
@@ -221,7 +211,7 @@ def build_prov_o(root: Path, claim_id: str | None = None) -> dict[str, Any]:
             derivations = [
                 {"@id": _entity_id(r)}
                 for r in refs
-                if isinstance(r, str) and _UUID_RE.match(r)
+                if isinstance(r, str) and UUID_RE.match(r)
             ]
             if derivations:
                 entity["prov:wasDerivedFrom"] = derivations

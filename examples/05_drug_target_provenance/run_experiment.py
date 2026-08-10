@@ -170,8 +170,9 @@ def main() -> None:
             print("     This was Case B in the original run. See the README for context.")
         else:
             print("\n  ✓  Both forks ran the data pipeline (ANALYTICAL).")
-            print("     If the findings converge on the same upstream target,")
-            print("     REPLICATED fires automatically.")
+            print("     Both stay PRELIMINARY: they share one signing key and")
+            print("     cite no upstream, so neither is an independent line for")
+            print("     the other. See the README for the promotion gate.")
 
     print(f"\nClaims written to: {HERE / 'claims.toml'}")
     print("Run 'mareforma status' for the full epistemic dashboard.")

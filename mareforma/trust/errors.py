@@ -38,6 +38,18 @@ class NoRegisteredPlanError(TrustError):
     """
 
 
+class PlanNotRetirableError(TrustError):
+    """A plan was offered for retirement that must not be retired.
+
+    Raised by :meth:`EpistemicGraph.retire_plan` in three cases: the plan's
+    stored rule still reconstructs into a runnable gate (retirement is the
+    recovery for a rule the gates cannot run, not a way to withdraw evidence a
+    reader dislikes); the plan is already retired, so a second retirement would
+    let the operator shop for the alpha that reads best; or the retirement would
+    recover no evidence line, which would spend the one retirement for nothing.
+    """
+
+
 class FindingPlanForkError(TrustError):
     """A finding already exists for (content_id, data_id) under a different plan.
 
@@ -60,9 +72,13 @@ class PostHocPlanError(TrustError):
     honoring a rule registered after the run was already executing would launder
     a post-hoc plan as a pre-registration, so the core refuses it rather than
     counts it. A one-shot :meth:`EpistemicGraph.assert_finding` synthesises its
-    plan with ``preregistered=0`` and makes no such claim, so it never raises
-    this; a run that has authored no prior finding has not begun executing, so
-    nothing can post-date it.
+    plan with ``preregistered=0`` and makes no such claim, so it is exempt only
+    when that synthesised plan is the one on record: ``plan_id`` is
+    content-addressed and the flag is first-writer-wins, so a one-shot that
+    lands on a plan already registered with ``preregistered=1`` submits under
+    that claim and is refused like any other submission. A run that has
+    authored no prior finding has not begun executing, so nothing can
+    post-date it.
     """
 
 

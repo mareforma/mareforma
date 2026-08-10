@@ -12,13 +12,16 @@ from pathlib import Path
 
 import pytest
 
-from mareforma.observe import summarize_pilot
-from mareforma.observe import _loaders
+from mareforma.observe import GROUNDING_AXIS_VERSION, summarize_pilot
+from mareforma.observe import _loaders, _scope
 from tests.fixtures.killswitch import (
     KILL_SWITCHES,
+    decoy_incidental_read,
+    excluded_partition,
     register_model_responses,
     run_all,
     same_model_corroboration,
+    silent_zero_row_fallback,
     unrecognized_host_model,
 )
 
@@ -72,11 +75,46 @@ def test_model_axis_killswitches_break_when_provider_derivation_breaks(
     assert unrecognized_host_model(tmp_path).caught is False
 
 
+def test_read_axis_killswitches_break_when_the_observer_goes_blind(
+    tmp_path: Path, monkeypatch
+):
+    """The read-axis fixtures must route through the observer's read seam.
+
+    A fixture whose ``caught`` rests only on fields a blind observer also
+    produces greenlights the pre-spend gate on an instrument that saw
+    nothing. Break the seam in each direction and every fixture that
+    depends on it must stop reporting ``caught``.
+
+    ``number_with_no_execution`` is absent by construction: its scope
+    contains no read, so a blind observer and an honest one report the
+    same empty provenance. The legs below are what makes its UNGROUNDED
+    worth reading, they prove the seam was live for the run.
+    """
+    # Leg 1: the binder can never bind a read to a citation, so nothing is ever
+    # grounded. Only the fixture that claims a partition WAS grounded can see
+    # this; the zero-row and decoy catches do not rest on a successful bind.
+    with monkeypatch.context() as m:
+        m.setattr(_scope, "read_norm_matches", lambda *a, **k: False)
+        blind_binder = tmp_path / "blind_binder"
+        blind_binder.mkdir()
+        assert excluded_partition(blind_binder).caught is False
+
+    # Leg 2: no read reaches the scope. Every fixture whose catch rests on an
+    # observed read must stop firing.
+    with monkeypatch.context() as m:
+        m.setattr(_scope, "record_read", lambda *a, **k: None)
+        blind_seam = tmp_path / "blind_seam"
+        blind_seam.mkdir()
+        assert silent_zero_row_fallback(blind_seam).caught is False
+        assert excluded_partition(blind_seam).caught is False
+        assert decoy_incidental_read(blind_seam).caught is False
+
+
 # -- the slim natural-prevalence pilot --------------------------------------
 
 def _ground_receipt(state: str, indep: dict | None = None) -> dict:
     r = {
-        "version": "v0.3.9",
+        "version": GROUNDING_AXIS_VERSION,
         "grounding": state,
         "reason": state.lower(),
         "cited_sources": ["/data/x"],

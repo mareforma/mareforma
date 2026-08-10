@@ -58,10 +58,17 @@ this release as deprecated one-release aliases.
     replication. A fresh project bootstraps the chain via a *seed claim* (see
     below).
 
-    Promotion is also gated on the claim being witnessed (marked in the
-    transparency log). A project that requires witnessing
-    (`graph.require_rekor_witnessing()`) will not converge a claim until a
-    verified inclusion proof lands.
+    Promotion is also gated on the claim's `transparency_logged` flag. That
+    flag holds a claim back only when the graph was opened with a `rekor_url`
+    and submission has not yet succeeded; `graph.refresh_unsigned()` retries
+    it. With no `rekor_url` the flag is set at insert, so a signed claim
+    converges on its signature alone and the flag imposes no gate.
+
+    `graph.require_rekor_witnessing()` is a root-signed declaration, not a
+    live gate. It is enforced on recovery by
+    `restore(..., enforce_rekor_policy=True)`, which refuses to mark a signed
+    claim convergence-eligible without a verified, claim-bound inclusion
+    proof.
   </Accordion>
   <Accordion title="ESTABLISHED">
     A human (an enrolled validator) reviewed the provenance chain and
@@ -99,6 +106,7 @@ envelope.
 
 ```python
 import mareforma
+from mareforma.signing import load_private_key
 
 with mareforma.open() as graph:
     # Bootstrap the chain. Only an enrolled validator can produce a seed.
@@ -110,15 +118,19 @@ with mareforma.open() as graph:
     )
 
     # Downstream peers now have an ESTABLISHED upstream to converge on.
+    # Each peer signs under its own key: two peers asserted through the
+    # graph's single key share one asserter_keyid and stay PRELIMINARY.
     id_a = graph.assert_claim(
         "Finding A consistent with X",
         supports=[seed_id],
         generated_by="agent/model-a",
+        signer=load_private_key("lab_a.key"),
     )
     id_b = graph.assert_claim(
         "Finding B consistent with X",
         supports=[seed_id],
         generated_by="agent/model-b",
+        signer=load_private_key("lab_b.key"),
     )
 
     graph.get_claim(id_a)["support_level"]  # → "REPLICATED"
@@ -142,6 +154,13 @@ check, open with `strict_promotion=True`: a pair then promotes only when BOTH
 sides carry non-NULL data. It is off by default and only ever adds the
 requirement. It never loosens the default signer-axis rule.
 
+The gate is project state, not a session option. Asking for it has the root
+validator sign a one-way policy record, so every later opener promotes under
+it, restore rebuilds it, and a second session cannot promote around it by
+opening without the flag. Only the root key can declare it: a keyless or
+non-root caller gets a `ProjectPolicyError` rather than a gate that binds
+nothing but its own writes.
+
 ## The independence axis
 
 Independence is reported as its own axis, separate from the support labels,
@@ -160,6 +179,32 @@ distinct signatures" read as "two independent labs."
 
 `mareforma map <claim>` renders the axis, and it never translates a convergence
 marker into the word "independent."
+
+## What enrolling a key costs
+
+A project can start with no key. Its claims carry no signer, and the trust gate
+counts them on a retired run axis keyed on `generated_by`, so the graph still
+reads.
+
+The moment you enrol a validator, that stops. A project that signs does not count
+unsigned claims toward independence, including the ones it wrote before it had a
+key. Those findings do not disappear from the graph, but they stop counting:
+the proposition reads `UNTESTED` with `lines_skipped` equal to the number of
+lines dropped, and each drop is named `unregistered_signer_skipped` in
+`.mareforma/health.jsonl`.
+
+There is no un-enrol. Plan for this before you open a project with a key.
+
+The reason is that `generated_by` is a value the writer chooses. Once a project
+signs, a writer with database access can add an unsigned claim and pick any run
+token, and the gate cannot tell that claim from the honest ones written before
+the key existed. Two attacks follow directly: stripping the signature off an
+existing claim, and inserting a fabricated unsigned tree into a signed project.
+Both read as convergent support before the rule, with nothing disclosed.
+
+So the rule trades a real cost for a real defence, and the cost is disclosed
+rather than silent. If you intend to sign a project, enrol the key first and
+write afterwards.
 
 ## The trust map
 
@@ -181,6 +226,13 @@ mareforma map <claim-id> --html       # one self-contained page
 A property Mareforma cannot observe is stated (`DEFERRED`, `not present`, or
 `UNVERIFIABLE`), never inferred to a confident answer. The map is a read-side
 artifact: it adds no signed field and changes no verdict.
+
+Every map carries the engine version that computed it, so a stored record names
+the build behind its tiers. That version is bound to the package version, and a
+build where the two disagree refuses to render a map at all, raising
+`TrustMapVersionError`. A map whose tiers came from one engine while naming
+another would be worse than no map, because the name is what a later reader
+checks the tiers against.
 
 ## Faithfulness: re-execution as a proxy
 
@@ -205,10 +257,14 @@ every other property without being confused for truth or independence.
 
 `mareforma verify <target>` is the audit receipt at the moment of the check. It
 re-verifies signatures, the grounding-to-citation binding, and the support
-level, then prints the trust map. `target` is detected by shape: an existing
-file is a signed bundle, a directory an export dir, anything else a claim id
-resolved against the local project. Verifying a claim needs only public
-material; an auditor does not need the producer's private key.
+level, then prints the trust map. A directory target is an export dir and a
+target that is not a path is a claim id resolved against the local project. A
+file is told apart by its DSSE `payloadType`, never by its name: a per-finding
+audit receipt and a signed audit-run record each reach their own verifier, and
+everything else falls through to the signed-bundle verifier. A receipt is
+signed by the auditor, so pin their key with `--key`; without it the check
+reports exit 2, unverifiable, rather than a verdict. Verifying a claim needs
+only public material; an auditor does not need the producer's private key.
 
 Exit codes are stable, for CI gates:
 
@@ -217,10 +273,12 @@ Exit codes are stable, for CI gates:
 | `0` | verified |
 | `1` | tamper or binding violation |
 | `2` | unverifiable (missing material to reach a verdict) |
+| `3` | usage error (bad flag or argument) |
 
 A missing local key makes a bundle *unverifiable* (2), never a *failure* (1):
-the auditor lacks the key, the bundle is not proven tampered. `--json` emits the
-verdict and trust map for a gate to parse.
+the auditor lacks the key, the bundle is not proven tampered. Code 3 is not a
+verdict at all, so a gate fails the build on it rather than reading it as one.
+`--json` emits the verdict and trust map for a gate to parse.
 
 ## Verify on read
 
@@ -253,7 +311,10 @@ label; the authoritative identity is the keyid embedded in the signed
 envelope.
 
 `validate()` raises `ValueError` if the claim is not yet `REPLICATED`,
-if no signer is loaded, or if the loaded signer is not enrolled.
+if no signer is loaded, or if the loaded signer is not enrolled. It raises
+`SelfValidationError` if the loaded key signed the claim itself, or signed
+any peer in the set that converged it: promotion needs a witness who
+asserted none of the lines being promoted.
 
 ## What trust is not
 

@@ -13,7 +13,7 @@ import pytest
 
 import mareforma.observe as obs
 from mareforma.observe import ObservedGrounding as OG
-from mareforma.observe import _scope
+from mareforma.observe import _loaders, _scope
 
 
 @pytest.fixture
@@ -45,6 +45,45 @@ def test_nested_scopes_restore_the_outer(data_files):
         # The outer scope must be active again after the inner one closes.
         assert _scope.current_scope() is not None
     assert _scope.current_scope() is None
+
+
+def test_nested_scope_evidence_replays_into_the_outer(data_files):
+    # A helper that opens its own observe() must not blind the caller's scope:
+    # the read happened inside the outer span, so the outer verdict sees it.
+    def helper():
+        with obs.observe(cites=data_files["data"]):
+            open(data_files["data"]).read()
+
+    with obs.observe(cites=data_files["data"]) as outer:
+        helper()
+    assert outer.verdict.grounding is OG.GROUNDED
+    assert any(data_files["data"] in r.identifier for r in outer.verdict.reads)
+
+
+def test_nested_scope_seam_replays_into_the_outer(data_files):
+    # Seams cross the same way: an unseeable hand-off inside the inner scope
+    # floors the outer verdict to OPAQUE instead of a confident UNGROUNDED.
+    def helper():
+        with obs.observe(cites=data_files["data"]):
+            _scope.current_scope().record_seam("subprocess", "handed off")
+
+    with obs.observe(cites=data_files["data"]) as outer:
+        helper()
+    assert outer.verdict.grounding is OG.OPAQUE
+    assert any(s.kind == "subprocess" for s in outer.verdict.seams)
+
+
+def test_nested_scope_error_replays_into_the_outer(data_files):
+    # An observer-internal error inside the inner scope means the outer scope
+    # cannot trust its own observation either.
+    def helper():
+        with obs.observe(cites=data_files["data"]):
+            _scope.current_scope().mark_error("wrapper blew up")
+
+    with obs.observe(cites=data_files["data"]) as outer:
+        helper()
+    assert outer.verdict.grounding is OG.OPAQUE
+    assert "wrapper blew up" in outer.verdict.reason
 
 
 def test_exception_inside_scope_does_not_leak_the_scope(data_files):
@@ -266,6 +305,61 @@ def test_sqlite_empty_fetch_cited_is_ungrounded(tmp_path):
     assert h.verdict.grounding is OG.UNGROUNDED
 
 
+def test_connect_created_database_cannot_ground_the_citation(tmp_path):
+    # sqlite3.connect creates a missing database, so a typo in the cited path
+    # gives the run an empty file of its own making. Rows that come back through
+    # that connection are not the cited source, so nothing about it is a read:
+    # the citation must land on the silent-fallback tell, not on GROUNDED.
+    db = str(tmp_path / "typo.db")
+    with obs.observe(cites=db) as h:
+        c = sqlite3.connect(db)
+        c.execute("SELECT 1").fetchone()
+        c.close()
+    assert h.verdict.grounding is OG.UNGROUNDED
+    assert [r for r in h.verdict.reads if r.kind == "sqlite"] == []
+
+
+def test_fetchone_loop_records_one_read_per_outcome(tmp_path):
+    # A per-row fetchone loop repeats one identical read. Retaining thousands of
+    # them grows the receipt (and the digest paid per asserted finding) with the
+    # host's row count, over evidence one record already carries.
+    db = str(tmp_path / "rows.db")
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE t(x)")
+    con.executemany("INSERT INTO t VALUES (?)", [(i,) for i in range(2000)])
+    con.commit()
+    con.close()
+    with obs.observe(cites=db) as h:
+        c = sqlite3.connect(db)
+        cur = c.execute("SELECT x FROM t")
+        while cur.fetchone() is not None:
+            pass
+        c.close()
+    # One non-empty read plus the empty tail the loop ends on, nothing per row.
+    assert len([r for r in h.verdict.reads if r.kind == "sqlite"]) <= 2
+    assert h.verdict.grounding is OG.GROUNDED
+
+
+def test_sqlite_cursor_records_in_every_scope_it_reads_in(tmp_path):
+    # One cursor read in two scopes must record in both. A collapse that spans
+    # scopes would leave the second one a confident false UNGROUNDED.
+    db = str(tmp_path / "two.db")
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE t(x)")
+    con.executemany("INSERT INTO t VALUES (?)", [(1,), (2,)])
+    con.commit()
+    con.close()
+    with obs.observe(cites=db) as first:
+        c = sqlite3.connect(db)  # opened INSIDE a scope: wrapped
+        cur = c.execute("SELECT x FROM t")
+        cur.fetchone()
+    with obs.observe(cites=db) as second:
+        cur.fetchone()
+    c.close()
+    assert first.verdict.grounding is OG.GROUNDED
+    assert second.verdict.grounding is OG.GROUNDED
+
+
 # -- conditional third-party wrapping ---------------------------------------
 
 def test_third_party_wrap_absent_when_module_not_imported():
@@ -344,3 +438,30 @@ def test_host_exception_propagates_untouched(data_files, tmp_path):
             open(missing).read()
     # A host-side failure is the host's; the observer records no cited read.
     assert h.verdict.grounding is OG.UNGROUNDED
+
+
+# -- wrapper identity --------------------------------------------------------
+
+def test_wrapped_loader_keeps_its_identity():
+    # Transparency covers the callable itself, not just its behavior: the
+    # wrappers are installed process-wide and never uninstalled, so a wrapper
+    # that drops the real loader's name, doc and signature breaks help(),
+    # inspect and pickling for the rest of the process.
+    import inspect
+    import pickle
+
+    import httpx
+
+    real_open_sig = inspect.signature(_loaders._reals.get("open", open))
+    with obs.observe():
+        pass
+    assert open.__name__ == "open"
+    assert open.__doc__
+    assert inspect.signature(open) == real_open_sig
+    assert pickle.loads(pickle.dumps(httpx.get)) is httpx.get
+
+
+def test_loaders_does_not_advertise_a_verdict_re_export():
+    # _loaders wraps loaders; the verdict type is taken from _verdict or from
+    # the package, so a name parked here would name an import site nobody keeps.
+    assert "GroundingVerdict" not in vars(_loaders)

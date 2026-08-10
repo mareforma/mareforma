@@ -83,13 +83,34 @@ class TestRegisterPlan:
             # No finding yet: the proposition is a dangling (registered) plan.
             assert graph.proposition_status(h)["status"] == Status.UNTESTED.value
 
-    def test_plan_id_is_independent_of_preregistered_flag(self, tmp_path: Path) -> None:
+    def test_attestation_payload_restates_the_stored_flag(self, tmp_path: Path) -> None:
+        """The plan claim's payload cannot contradict the row the same call wrote.
+
+        ``preregistered`` is the store's word, not the caller's: the attestation
+        is the only machine-readable body of the plan claim, so an auditor
+        reading it must be told what ``predictions.preregistered`` says.
+        """
         h = _prop()
-        # Same rule, different preregistered flag -> same identity.
-        a = _superiority(preregistered=True)
-        b = _superiority(preregistered=False)
-        cid = h.content_id()
-        assert _store.compute_plan_id(cid, a) == _store.compute_plan_id(cid, b)
+        with open_graph(tmp_path) as graph:
+            plan_id = graph.register_plan(h, _superiority(), generated_by="lab_a")
+            row = graph._conn.execute(
+                "SELECT preregistered FROM predictions WHERE plan_id = ?", (plan_id,)
+            ).fetchone()
+            claim_id = _store.get_plan_claim_id(graph._conn, plan_id)
+            payload = json.loads(graph.get_claim(claim_id)["predicate_payload"])
+        assert row["preregistered"] == 1
+        assert payload["preregistered"] is True
+
+    def test_prediction_refuses_the_preregistered_keyword(self) -> None:
+        """The flag is provenance the store owns, so callers cannot assert it."""
+        from mareforma.trust import Prediction, TestType
+
+        with pytest.raises(TypeError):
+            Prediction(
+                TestType.SUPERIORITY,
+                direction_of_interest=DirectionOfInterest.DECREASE,
+                preregistered=True,
+            )
 
     def test_idempotent_reregister_no_duplicate(self, tmp_path: Path) -> None:
         h = _prop()
@@ -511,3 +532,42 @@ class TestPreregistrationGuard:
             second = graph.assert_finding(h2, _superiority(), _smd(-2.4, p=0.01),
                                           data_id="dataB", generated_by="lab_a")
             assert second["idempotent"] is False
+
+    def test_one_shot_on_an_existing_preregistered_plan_is_gated(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The exemption rides the plan row, not the call path. ``plan_id`` is
+        content-addressed over (content_id, prediction) and the flag is
+        first-writer-wins, so a one-shot whose synthesised plan collides with a
+        plan already registered as pre-registered submits under THAT claim and
+        is refused like any other submission. Switching API is not a way past
+        the gate."""
+        monkeypatch.setattr("mareforma.db.core._now", _MonotonicClock())
+        h1 = _prop(Direction.DECREASES)
+        h2 = _prop(Direction.DECREASES, population="OTHER")
+        pred = _superiority()
+        with open_graph(tmp_path) as graph:
+            graph.assert_finding(h1, pred, _smd(-2.6, p=0.003),
+                                 data_id="dataA", generated_by="lab_a")
+            graph.register_plan(h2, pred, generated_by="lab_a")
+            with pytest.raises(PostHocPlanError):
+                graph.assert_finding(h2, pred, _smd(-2.4, p=0.01),
+                                     data_id="dataB", generated_by="lab_a")
+
+    def test_default_run_token_is_not_exempt(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Omitting generated_by attributes the work to the default run token,
+        so the guard applies exactly as it does when the caller spells that
+        token out: a plan registered after the default run's first execution is
+        refused, not laundered."""
+        monkeypatch.setattr("mareforma.db.core._now", _MonotonicClock())
+        h1 = _prop(Direction.DECREASES)
+        h2 = _prop(Direction.DECREASES, population="OTHER")
+        pred = _superiority()
+        with open_graph(tmp_path) as graph:
+            graph.assert_finding(h1, pred, _smd(-2.6, p=0.003), data_id="dataA")
+            graph.register_plan(h2, pred)
+            with pytest.raises(PostHocPlanError):
+                graph.submit_finding(h2, pred, _smd(-2.4, p=0.01),
+                                     data_id="dataB")

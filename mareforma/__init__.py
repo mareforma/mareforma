@@ -1,7 +1,7 @@
 """Mareforma: local verification layer for AI-assisted research."""
 
 __description__ = "Mareforma: local verification layer for AI-assisted research."
-__version__ = "0.3.10"
+__version__ = "0.3.11"
 
 from pathlib import Path
 
@@ -39,12 +39,14 @@ def open(  # noqa: A001
     *,
     key_path: "str | Path | None" = None,
     require_signed: bool = False,
+    load_key: bool = True,
     rekor_url: "str | None" = None,
     require_rekor: bool = False,
     trust_insecure_rekor: bool = False,
     rekor_log_pubkey_pem: "bytes | None" = None,
     rekor_log_pubkey_path: "str | Path | None" = None,
     strict_promotion: bool = False,
+    validator_type: str = "human",
 ) -> "EpistemicGraph":
     """Open the epistemic graph at *path* and return an EpistemicGraph.
 
@@ -64,6 +66,14 @@ def open(  # noqa: A001
         When True, raise :class:`mareforma.signing.KeyNotFoundError` if no
         key is found at ``key_path``. Use for high-assurance contexts where
         an unsigned claim is unacceptable.
+    load_key:
+        When False, no signing key is loaded even if one exists, and the
+        graph opens read-only in effect: nothing is signed and the caller's
+        key is never auto-enrolled as the project's root validator. Read-only
+        commands (``verify``, ``map``, ``validator list``) use this so an
+        auditor's key leaves no trace in the graph it inspects. Combining it
+        with ``require_signed=True`` is a contradiction and raises
+        :class:`ValueError`.
     rekor_url:
         Transparency-log endpoint. When set, every signed claim is submitted
         to Rekor at INSERT time; the entry uuid + logIndex are attached to
@@ -108,6 +118,21 @@ def open(  # noqa: A001
         additive: it never loosens the default, only adds the data-presence
         requirement.
 
+        Passing True DECLARES the rule on the project: the root validator
+        signs a one-way ``project_policy`` row, and every later opener,
+        including the CLI, promotes under it whether or not it passes the
+        flag. That makes it a property of the project rather than of the
+        handle. Only the root key can declare it, so a keyless or non-root
+        caller raises :class:`mareforma.ProjectPolicyError` instead of
+        receiving a gate that binds nothing but its own writes.
+    validator_type:
+        ``'human'`` or ``'llm'``, the self-declared type recorded if this key
+        auto-enrolls as the project's root validator. Ignored once a root
+        exists. An autonomous agent bootstrapping its own project should pass
+        ``'llm'``: an ``llm`` validator cannot promote a claim to ESTABLISHED on
+        its signature alone. The default is ``'human'`` for compatibility, and a
+        defaulted type carries no weight on the trust map's independence axis.
+
     Returns
     -------
     EpistemicGraph
@@ -131,14 +156,28 @@ def open(  # noqa: A001
     from mareforma.db import open_db
     from mareforma import signing as _signing
 
-    root = Path(path) if path is not None else Path.cwd()
-    conn = open_db(root)
+    if require_signed and not load_key:
+        raise ValueError(
+            "require_signed=True and load_key=False contradict each other: "
+            "signing needs the key that load_key=False refuses to load."
+        )
 
+    # Resolve once, at open. The sqlite connection binds to the file it
+    # opened, but the sidecars (claims.toml, .mareforma/health.jsonl) rebuild
+    # their path from this root on every write. A relative root would follow
+    # the process cwd, and a caller or an observed target that chdirs would
+    # split the corpus across two directories with no warning.
+    root = Path(path).resolve() if path is not None else Path.cwd()
+
+    # Everything that depends only on the arguments is decided BEFORE
+    # open_db, which creates <root>/.mareforma/ and the WAL-backed store.
+    # A call that refuses must leave no project behind, in whatever
+    # directory the caller happened to be in.
     resolved_key_path = (
         Path(key_path) if key_path is not None else _signing.default_key_path()
     )
     signer = None
-    if resolved_key_path.exists():
+    if load_key and resolved_key_path.exists():
         signer = _signing.load_private_key(resolved_key_path)
     elif require_signed:
         raise _signing.KeyNotFoundError(
@@ -174,72 +213,131 @@ def open(  # noqa: A001
             "not both, the two are mutually exclusive."
         )
     if rekor_log_pubkey_path is not None:
-        rekor_log_pubkey_pem = Path(rekor_log_pubkey_path).read_bytes()
-    _pinned_path = root / ".mareforma" / "rekor_log_pubkey.pem"
-    if rekor_log_pubkey_pem is None and _pinned_path.exists():
-        # Continue with the pinned key from a prior session.
-        rekor_log_pubkey_pem = _pinned_path.read_bytes()
-    elif rekor_log_pubkey_pem is not None and _pinned_path.exists():
-        # TOFU pin enforcement: refuse silent log-key rotation. Compare
-        # the pinned PEM and the supplied PEM by their CANONICAL DER
-        # bytes, line-wrap width (64 vs 76 columns) and trailing
-        # CR/LF differences make two semantically-identical PEMs
-        # byte-unequal, so a literal-bytes ``.strip()`` check would
-        # produce spurious mismatch errors and lock the operator out.
-        existing = _pinned_path.read_bytes()
-        if _pem_canonical_der(existing) != _pem_canonical_der(rekor_log_pubkey_pem):
-            raise _signing.SigningError(
-                f"Rekor log pubkey at {_pinned_path} pins a different key "
-                "than the one supplied. Silent key rotation is refused. "
-                "To intentionally rotate, delete the pin file first."
-            )
-    elif rekor_log_pubkey_pem is not None:
-        # First use: persist the pin ATOMICALLY. Two concurrent
-        # ``mareforma.open()`` calls with different keys could
-        # otherwise both see ``_pinned_path.exists() == False`` and
-        # race to write, the loser would silently overwrite the
-        # winner's pin. ``O_CREAT|O_EXCL`` makes the creation
-        # mutually-exclusive: the loser gets ``FileExistsError`` and
-        # is routed through the mismatch-check branch instead of
-        # silently clobbering. Mirrors the bootstrap_key pattern.
-        _pinned_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            import os as _os
-            fd = _os.open(
-                _pinned_path,
-                _os.O_CREAT | _os.O_EXCL | _os.O_WRONLY,
-                0o644,
-            )
+            rekor_log_pubkey_pem = Path(rekor_log_pubkey_path).read_bytes()
+        except OSError as exc:
+            raise _signing.SigningError(
+                f"Rekor log pubkey at {rekor_log_pubkey_path} is not "
+                f"readable: {exc}"
+            ) from exc
+
+    # From here on the store exists, so every failure closes the
+    # connection it opened rather than stranding a live handle in the
+    # raising frame.
+    conn = open_db(root)
+    try:
+        _pinned_path = root / ".mareforma" / "rekor_log_pubkey.pem"
+        if rekor_log_pubkey_pem is None and _pinned_path.exists():
+            # Continue with the pinned key from a prior session. Parse it
+            # before trusting it: a pin truncated by a crash mid-write is
+            # not None, so it would otherwise flow into every submit and
+            # fail inclusion verification per claim, blaming the log.
+            rekor_log_pubkey_pem = _pinned_path.read_bytes()
             try:
-                _os.write(fd, rekor_log_pubkey_pem)
-            finally:
-                _os.close(fd)
-        except FileExistsError:
-            # Lost the race. Re-check the just-written file.
+                _pem_canonical_der(rekor_log_pubkey_pem)
+            except _signing.SigningError as exc:
+                raise _signing.SigningError(
+                    f"Rekor log pubkey pinned at {_pinned_path} is not a "
+                    f"readable public key ({exc}). Delete the pin file to "
+                    "re-pin the log operator's key."
+                ) from exc
+        elif rekor_log_pubkey_pem is not None and _pinned_path.exists():
+            # TOFU pin enforcement: refuse silent log-key rotation. Compare
+            # the pinned PEM and the supplied PEM by their CANONICAL DER
+            # bytes, line-wrap width (64 vs 76 columns) and trailing
+            # CR/LF differences make two semantically-identical PEMs
+            # byte-unequal, so a literal-bytes ``.strip()`` check would
+            # produce spurious mismatch errors and lock the operator out.
             existing = _pinned_path.read_bytes()
             if _pem_canonical_der(existing) != _pem_canonical_der(rekor_log_pubkey_pem):
                 raise _signing.SigningError(
-                    f"Rekor log pubkey at {_pinned_path} was pinned to a "
-                    "different key by a concurrent mareforma.open() call. "
-                    "Silent key rotation is refused. Pick one key for the "
-                    "project; delete the pin file to rotate."
+                    f"Rekor log pubkey at {_pinned_path} pins a different key "
+                    "than the one supplied. Silent key rotation is refused. "
+                    "To intentionally rotate, delete the pin file first."
                 )
-    # NOTE: TOFU auto-fetch is intentionally off by default. Callers
-    # who want Merkle inclusion-proof verification must pass
-    # ``rekor_log_pubkey_pem`` or ``rekor_log_pubkey_path`` explicitly
-    # (or pre-pin the file at ``.mareforma/rekor_log_pubkey.pem``).
-    # This keeps the open() path I/O-free when no key is configured
-    # and avoids surprise GETs to /api/v1/log/publicKey for every
-    # Rekor-enabled session.
+        elif rekor_log_pubkey_pem is not None:
+            # First use: persist the pin ATOMICALLY. Two concurrent
+            # ``mareforma.open()`` calls with different keys could
+            # otherwise both see ``_pinned_path.exists() == False`` and
+            # race to write, the loser would silently overwrite the
+            # winner's pin. ``O_CREAT|O_EXCL`` makes the creation
+            # mutually-exclusive: the loser gets ``FileExistsError`` and
+            # is routed through the mismatch-check branch instead of
+            # silently clobbering. Mirrors the bootstrap_key pattern.
+            _pinned_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                import os as _os
+                fd = _os.open(
+                    _pinned_path,
+                    _os.O_CREAT | _os.O_EXCL | _os.O_WRONLY,
+                    0o644,
+                )
+                try:
+                    written = _os.write(fd, rekor_log_pubkey_pem)
+                    if written != len(rekor_log_pubkey_pem):
+                        raise OSError(
+                            f"Short write pinning the Rekor log pubkey to "
+                            f"{_pinned_path}: {written} of "
+                            f"{len(rekor_log_pubkey_pem)} bytes."
+                        )
+                    # fsync before close: a power loss in the writeback
+                    # window would otherwise leave a zero-byte pin that the
+                    # next open() reads back as this project's pin.
+                    _os.fsync(fd)
+                except OSError:
+                    # The O_EXCL'd file is on disk and empty or truncated.
+                    # Remove it before re-raising so the operator is not
+                    # stranded behind a file they were never told about.
+                    _os.close(fd)
+                    try:
+                        _os.unlink(_pinned_path)
+                    except OSError:
+                        pass
+                    raise
+                _os.close(fd)
+                # Best-effort directory fsync so the creation itself
+                # survives a crash. Failure here is not fatal: the data is
+                # already durable.
+                if hasattr(_os, "O_DIRECTORY"):
+                    try:
+                        dir_fd = _os.open(str(_pinned_path.parent), _os.O_DIRECTORY)
+                        try:
+                            _os.fsync(dir_fd)
+                        finally:
+                            _os.close(dir_fd)
+                    except OSError:
+                        pass
+            except FileExistsError:
+                # Lost the race. Re-check the just-written file.
+                existing = _pinned_path.read_bytes()
+                if _pem_canonical_der(existing) != _pem_canonical_der(rekor_log_pubkey_pem):
+                    raise _signing.SigningError(
+                        f"Rekor log pubkey at {_pinned_path} was pinned to a "
+                        "different key by a concurrent mareforma.open() call. "
+                        "Silent key rotation is refused. Pick one key for the "
+                        "project; delete the pin file to rotate."
+                    )
+        # NOTE: TOFU auto-fetch is intentionally off by default. Callers
+        # who want Merkle inclusion-proof verification must pass
+        # ``rekor_log_pubkey_pem`` or ``rekor_log_pubkey_path`` explicitly
+        # (or pre-pin the file at ``.mareforma/rekor_log_pubkey.pem``).
+        # This keeps the open() path I/O-free when no key is configured
+        # and avoids surprise GETs to /api/v1/log/publicKey for every
+        # Rekor-enabled session.
 
-    return EpistemicGraph(
-        conn, root,
-        signer=signer,
-        rekor_url=rekor_url,
-        require_rekor=require_rekor,
-        rekor_log_pubkey_pem=rekor_log_pubkey_pem,
-        strict_promotion=strict_promotion,
-    )
+        return EpistemicGraph(
+            conn, root,
+            signer=signer,
+            rekor_url=rekor_url,
+            require_rekor=require_rekor,
+            trust_insecure_rekor=trust_insecure_rekor,
+            rekor_log_pubkey_pem=rekor_log_pubkey_pem,
+            strict_promotion=strict_promotion,
+            validator_type=validator_type,
+        )
+    except BaseException:
+        conn.close()
+        raise
 
 
 def schema() -> dict:
@@ -367,10 +465,11 @@ def restore(
     ------
     mareforma.db.RestoreError
         With a ``.kind`` field naming the failure mode: graph_not_empty,
-        toml_not_found, toml_malformed, enrollment_unverified,
-        claim_unverified, mode_inconsistent, orphan_signer,
-        rekor_inclusion_invalid, policy_unverified, policy_absent, or
-        policy_unverifiable.
+        toml_not_found, toml_unreadable, toml_malformed,
+        enrollment_unverified, claim_unverified, trust_row_rejected,
+        mode_inconsistent, orphan_signer, rekor_inclusion_invalid,
+        policy_unverified, policy_absent, policy_unverifiable, or
+        policy_violation.
     """
     from mareforma.db import restore as _restore
     return _restore(
@@ -391,7 +490,9 @@ def restore(
 from mareforma.db import (
     MareformaError,
     DatabaseError,
+    ScanCeilingReached,
     ClaimNotFoundError,
+    UnverifiedClaimError,
     SignedClaimImmutableError,
     IdempotencyConflictError,
     IllegalStateTransitionError,
@@ -403,6 +504,7 @@ from mareforma.db import (
     RestoreError,
     CycleDetectedError,
     GraphTooLargeError,
+    ProjectPolicyError,
     VerdictIssuerError,
     REFUTATION_STATES,
     VALID_REFUTATION_FILTERS,
@@ -420,7 +522,23 @@ from mareforma.signing import (
     InvalidEnvelopeError,
     RekorInclusionError,
 )
-from mareforma.validators import ValidatorNotEnrolledError
+from mareforma.validators import (
+    InvalidIdentityError,
+    InvalidValidatorTypeError,
+    ValidatorAlreadyEnrolledError,
+    ValidatorNotEnrolledError,
+)
+from mareforma.export_bundle import BundleVerificationError
+from mareforma.observe import ScopeNotClosedError
+from mareforma.trust import (
+    FindingPlanForkError,
+    InconsistentEstimateError,
+    NoRegisteredPlanError,
+    NonFalsifiablePropositionError,
+    PlanNotRetirableError,
+    PostHocPlanError,
+    TrustError,
+)
 from mareforma.reexec import (
     FaithfulnessVerdict,
     MalformedRunError,
@@ -509,26 +627,44 @@ __all__ = [
     "COMPOUNDING_ATTESTATION_V1",
     "SEMANTIC_GROUNDING_V1",
     "DOI_RESOLUTION_V1",
-    # User-catchable exceptions (alphabetical under MareformaError).
+    # User-catchable exceptions, alphabetical after the base. The db and trust
+    # errors are the MareformaError tree; signing, validator, observer, verifier
+    # and bundle errors sit outside it, so a broad catch on MareformaError does
+    # not cover them.
     "MareformaError",
+    "BundleVerificationError",
     "ChainIntegrityError",
     "ClaimNotFoundError",
     "CycleDetectedError",
     "GraphTooLargeError",
     "DatabaseError",
+    "ScanCeilingReached",
     "EvidenceCitationError",
+    "FindingPlanForkError",
     "IdempotencyConflictError",
     "IllegalStateTransitionError",
+    "InconsistentEstimateError",
     "InvalidEnvelopeError",
+    "InvalidIdentityError",
     "InvalidValidationEnvelopeError",
+    "InvalidValidatorTypeError",
     "KeyNotFoundError",
     "KeyPermissionError",
     "RekorInclusionError",
     "LLMValidatorPromotionError",
+    "NonFalsifiablePropositionError",
+    "NoRegisteredPlanError",
+    "PlanNotRetirableError",
+    "PostHocPlanError",
+    "ProjectPolicyError",
     "RestoreError",
+    "ScopeNotClosedError",
     "SelfValidationError",
     "SignedClaimImmutableError",
     "SigningError",
+    "TrustError",
+    "UnverifiedClaimError",
+    "ValidatorAlreadyEnrolledError",
     "ValidatorNotEnrolledError",
     "VerdictIssuerError",
     "VerifierError",

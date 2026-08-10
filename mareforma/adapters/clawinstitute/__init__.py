@@ -26,7 +26,7 @@ three layers of sanitisation before any handler sees it:
    ``<untrusted_data>`` / ``</untrusted_data>`` tags so a downstream
    LLM cannot mistake it for a directive.
 
-Install: ``pip install mareforma[clawinstitute]``.
+Ships with ``pip install mareforma``; needs no install extra.
 """
 
 from __future__ import annotations

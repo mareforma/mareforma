@@ -16,8 +16,8 @@ code lands.
 ```bash
 git clone https://github.com/mareforma/mareforma.git
 cd mareforma
-uv sync               # or: python -m venv .venv && pip install -e .
-pytest                # full suite must pass before any commit
+uv sync --extra dev   # or: python -m venv .venv && . .venv/bin/activate && pip install -e ".[dev]"
+uv run pytest         # full suite must pass before any commit
 ```
 
 Python ≥ 3.10. Dependencies are minimal (`click`, `tomli-w`, `tomli`,
@@ -58,7 +58,7 @@ Reporting channel and the response targets.
 
 1. Branch from `main`.
 2. Make the change with tests.
-3. `pytest`: must be green.
+3. `uv run pytest`: must be green.
 4. Self-review the full diff against the checklist below.
 5. Update any docs that describe the changed surface (`AGENTS.md`,
    `docs/reference/*.mdx`, `CHANGELOG.md`).
@@ -168,9 +168,34 @@ Rules of thumb:
   (`OSError`, `RuntimeError`, `ConnectionError`) when you need to
   test mareforma's fallback path; the assertion still lands and
   a `RuntimeWarning` surfaces.
-- Tests that need an actually-trained model must be guarded behind
-  an opt-in marker (`@pytest.mark.requires_model`) and skipped by
-  default; running the full suite must not download anything.
+- Tests that need an actually-trained model must skip unless the
+  weights are already on disk; running the full suite must not
+  download anything. A marker will not do that on its own: every
+  marker has to be registered under `[tool.pytest.ini_options]`,
+  and one `addopts` deselects needs a CI leg that selects it back.
+
+## Tests that read repo files
+
+The sdist ships the whole `tests/` tree so distro packagers can run it,
+but it does not ship `docs/`, `examples/`, `.github/` or `AGENTS.md`. A
+test that reads one of those carries the shared skip, as a module-level
+`pytestmark` or as a decorator on the one test or class that needs it:
+
+```python
+from tests._helpers import _requires_repo_checkout
+
+pytestmark = _requires_repo_checkout
+```
+
+The skip keys on `PKG-INFO`, a file only an unpacked sdist carries. Do
+not key it on the tree the test reads (`skipif(not DOCS.is_dir())`):
+that spelling also skips in CI the day a path moves, so the guard goes
+quiet instead of failing.
+
+`pytest -m sdist` builds the archive, unpacks it and runs the shipped
+suite inside it, which is what catches a new test that reads a repo file
+without the skip. It costs about 45 seconds, so `addopts` deselects it
+and one CI leg selects it back.
 
 ## Examples
 
