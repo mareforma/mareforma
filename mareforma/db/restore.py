@@ -43,8 +43,7 @@ from .core import (
     _serialize_observed_grounding,
     _validate_claim_text,
     _replication_verdict_pae,
-    _verdict_canonical_payload,
-    _CONTRADICTION_VERDICT_FIELDS,
+    _contradiction_verdict_pae,
     _TRUST_TABLE_BACKUP,
 )
 
@@ -123,7 +122,7 @@ def _verify_grounding_binding_on_read(claim_id, record, predicate) -> None:
     match is a binding violation. Statement v1 binds neither key, so a claim
     whose citation set lives only in the ``predicate_payload`` column is not
     checkable here; the live audit path reads that column instead
-    (:func:`mareforma.cli._claim_bound_sources`).
+    (:func:`mareforma._verify.claim_bound_sources`).
     """
     if not isinstance(record, dict) or record.get("grounding") != "GROUNDED":
         return
@@ -1601,10 +1600,7 @@ def _verify_and_insert_contradiction_verdict(
         "other_claim_id": other_claim_id,
         "confidence": confidence_dict,
     }
-    payload = _verdict_canonical_payload(_CONTRADICTION_VERDICT_FIELDS, record)
-    pae = _signing.dsse_pae(
-        "application/vnd.mareforma.contradiction-verdict+json", payload,
-    )
+    pae = _contradiction_verdict_pae(record)
     from cryptography.exceptions import InvalidSignature
     try:
         pubkey.verify(signature_bytes, pae)

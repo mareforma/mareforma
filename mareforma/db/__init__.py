@@ -102,6 +102,7 @@ from .core import (
     _VALID_REPLICATION_METHODS,
     _REPLICATION_VERDICT_PAYLOAD_TYPE,
     _REPLICATION_VERDICT_FIELDS,
+    _CONTRADICTION_VERDICT_PAYLOAD_TYPE,
     _CONTRADICTION_VERDICT_FIELDS,
     # Connection management.
     open_db,
@@ -184,6 +185,7 @@ from .core import (
     # Verdict protocol.
     _verdict_canonical_payload,
     _replication_verdict_pae,
+    _contradiction_verdict_pae,
     _require_enrolled_issuer,
     _require_claim_exists,
     record_replication_verdict,

@@ -1325,7 +1325,6 @@ def _reconcile_idempotency_row(
     artifact_hash: str | None,
     evidence_dict: dict,
     observed_grounding: dict | None,
-    predicate_payload: dict | None = None,
     original_signature_bundle: str | None = None,
 ) -> str:
     """Compare a found row against the current call's semantic fields.
@@ -1544,7 +1543,6 @@ def add_claim(
                     row, idempotency_key, text, classification, generated_by,
                     supports, contradicts, source_name, artifact_hash,
                     evidence_dict, observed_grounding,
-                    predicate_payload=predicate_payload,
                     original_signature_bundle=original_signature_bundle,
                 )
                 return existing_id
@@ -1833,7 +1831,6 @@ def add_claim(
                     row, idempotency_key, text, classification, generated_by,
                     supports, contradicts, source_name, artifact_hash,
                     evidence_dict, observed_grounding,
-                    predicate_payload=predicate_payload,
                     original_signature_bundle=original_signature_bundle,
                 )
         translated = _state_error_from_integrity(exc)
@@ -5107,6 +5104,12 @@ def delete_claims_by_generated_by(
             return 0
         if _own_transaction:
             conn.execute("BEGIN IMMEDIATE")
+        # The f-string interpolates only ``?`` placeholders, one per id, never
+        # data, so this is the standard parameterised-IN idiom, not injection.
+        # The real bound is SQLite's host-parameter cap
+        # (SQLITE_LIMIT_VARIABLE_NUMBER): a cohort larger than the cap would need
+        # chunking, the same limit tests/test_sql_variable_limit.py pins for the
+        # convergence and dangling-support queries.
         placeholders = ",".join("?" * len(claim_ids))
         conn.execute(
             f"DELETE FROM claims WHERE claim_id IN ({placeholders})", claim_ids
@@ -5160,6 +5163,10 @@ _REPLICATION_VERDICT_FIELDS = (
     "confidence",
 )
 
+_CONTRADICTION_VERDICT_PAYLOAD_TYPE = (
+    "application/vnd.mareforma.contradiction-verdict+json"
+)
+
 _CONTRADICTION_VERDICT_FIELDS = (
     "verdict_id",
     "member_claim_id",
@@ -5197,6 +5204,20 @@ def _replication_verdict_pae(record: dict) -> bytes:
     return _signing.dsse_pae(
         _REPLICATION_VERDICT_PAYLOAD_TYPE,
         _verdict_canonical_payload(_REPLICATION_VERDICT_FIELDS, record),
+    )
+
+
+def _contradiction_verdict_pae(record: dict) -> bytes:
+    """The DSSE PAE a contradiction verdict's signature is made and checked over.
+
+    The signing path and restore's verify-before-INSERT both build the signed
+    bytes here, so the canonical form cannot drift into one version per caller,
+    the same discipline :func:`_replication_verdict_pae` holds for its sibling.
+    """
+    from mareforma import signing as _signing
+    return _signing.dsse_pae(
+        _CONTRADICTION_VERDICT_PAYLOAD_TYPE,
+        _verdict_canonical_payload(_CONTRADICTION_VERDICT_FIELDS, record),
     )
 
 
@@ -5470,10 +5491,7 @@ def record_contradiction_verdict(
         "other_claim_id": other_claim_id,
         "confidence": confidence_dict,
     }
-    payload = _verdict_canonical_payload(_CONTRADICTION_VERDICT_FIELDS, record)
-    pae = _signing.dsse_pae(
-        "application/vnd.mareforma.contradiction-verdict+json", payload,
-    )
+    pae = _contradiction_verdict_pae(record)
     signature = signer.sign(pae)
     created_at = _now()
     try:

@@ -499,11 +499,6 @@ def minted_snapshot(verdict: object) -> "dict | None":
     return dict(snapshot) if ref() is verdict else None
 
 
-def is_observed(verdict: object) -> bool:
-    """True iff *verdict* is a :class:`GroundingVerdict` the observer computed."""
-    return minted_snapshot(verdict) is not None
-
-
 def minted_record(record: object) -> "dict | None":
     """The observer's own record for a caller-supplied one, or None.
 
