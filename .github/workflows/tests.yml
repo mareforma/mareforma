@@ -83,10 +83,11 @@ jobs:
         run: pytest -m sdist
 
   examples:
-    # Smoke-test the LangChain quickstart examples end-to-end. These are
-    # what every first-time reader of the repo will run; if any break,
-    # the next negative review writes itself. Only examples 01-04, 05
-    # needs OPENAI_API_KEY + a 21 GB MedeaDB download.
+    # Smoke-test the quickstart examples end-to-end. These are what every
+    # first-time reader of the repo will run; if any break, the next negative
+    # review writes itself. Examples 01-04 run here; 05 needs OPENAI_API_KEY +
+    # a 21 GB MedeaDB download; 07 needs pandas (in the test-heavy extra) for
+    # its grounding-catch demo.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -99,7 +100,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -e ".[dev]"
+          pip install -e ".[dev,test-heavy]"
           pip install langchain-core
 
       - name: Example 01, API walkthrough
@@ -113,3 +114,9 @@ jobs:
 
       - name: Example 04, private data, public findings
         run: python examples/04_private_data_public_findings/04_private_data_public_findings.py
+
+      - name: Example 07, silent-failure catch
+        working-directory: examples/07_silent_failure_catch
+        run: |
+          mareforma diagnose --cites data.csv -- analysis.py | grep -q "Grounding: GROUNDED"
+          mareforma diagnose --cites data.csv -- analysis_fallback.py | grep -q "Grounding: UNGROUNDED"

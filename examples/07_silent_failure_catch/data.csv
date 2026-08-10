@@ -1,0 +1,7 @@
+sample_id,expression
+BRCA1_kd_1,0.41
+BRCA1_kd_2,0.38
+BRCA1_kd_3,0.44
+control_1,1.02
+control_2,0.97
+control_3,1.01

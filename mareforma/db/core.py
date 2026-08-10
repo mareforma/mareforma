@@ -4849,31 +4849,53 @@ def verify_claim_signatures(
     if mismatch is not None:
         return (False, f"signed field {mismatch!r} does not match the row (tampered)")
 
-    keyid = _extract_signature_bundle_keyid(bundle_json) or row.get("asserter_keyid")
-    if keyid is not None:
-        signer_row = _validators.get_validator(conn, keyid)
-        if signer_row is not None:
-            try:
-                pem = base64.standard_b64decode(signer_row["pubkey_pem"])
-                pub = _signing.public_key_from_pem(pem)
-                if not _signing.verify_envelope(env, pub):
-                    return (False, "asserter signature failed verification")
-            except Exception:
-                return (False, "asserter signature could not be verified")
-            # A row in the validators table is not an enrolment. The table has
-            # no INSERT guard, so one INSERT with a real pubkey and a junk
-            # envelope puts a key there; ``is_enrolled`` walks the chain back to
-            # the self-signed root, which is what "registered" means everywhere
-            # else. A signer whose chain does not walk back is not a stranger
-            # the lean model has no pubkey for, it is a forged enrolment, and an
-            # audit that answered "verified" over it would report the forgery as
-            # attribution.
-            if not _validators.is_enrolled(conn, keyid):
-                return (
-                    False,
-                    "asserter key has a validators row whose enrollment does "
-                    "not chain back to the project root",
-                )
+    # The signer the bundle itself names. ``asserter_keyid`` is an unsigned
+    # denormalisation of it, written from the bundle on the only honest path
+    # (see :func:`assert_claim`). A row whose column contradicts its own
+    # envelope was written outside that path, so refuse it rather than let the
+    # column pick the pubkey to check against. ``ak is None`` is the legacy row
+    # (bundle present, keyid never denormalised) and is not a disagreement. This
+    # mirrors the participant-side guard in _verify_participant_bundle_on_read,
+    # and keeps this surface reading the same keyid the CLI enrollment
+    # disclosure reads.
+    bundle_keyid = _extract_signature_bundle_keyid(bundle_json)
+    # A bundle that names no signer is not the legacy row. ``_extract`` answers
+    # None for two different things: a row that never denormalised its keyid
+    # (legacy, honest) and a bundle whose ``signatures`` array is empty or
+    # malformed (nothing to verify). Conflating them let an empty array satisfy
+    # the agreement check below, skip the pubkey block entirely, and fall
+    # through to verified: exit 0 over a bundle carrying no signature at all.
+    # The legacy row is bundle-with-a-signer plus a NULL column, which the
+    # ``ak is None`` arm below still admits.
+    if bundle_keyid is None:
+        return (False, "signature bundle names no signer, so nothing can be verified")
+    ak = row.get("asserter_keyid")
+    if not (ak is None or ak == bundle_keyid):
+        return (False, "row asserter keyid disagrees with its signature bundle")
+    keyid = bundle_keyid
+    signer_row = _validators.get_validator(conn, keyid)
+    if signer_row is not None:
+        try:
+            pem = base64.standard_b64decode(signer_row["pubkey_pem"])
+            pub = _signing.public_key_from_pem(pem)
+            if not _signing.verify_envelope(env, pub):
+                return (False, "asserter signature failed verification")
+        except Exception:
+            return (False, "asserter signature could not be verified")
+        # A row in the validators table is not an enrolment. The table has
+        # no INSERT guard, so one INSERT with a real pubkey and a junk
+        # envelope puts a key there; ``is_enrolled`` walks the chain back to
+        # the self-signed root, which is what "registered" means everywhere
+        # else. A signer whose chain does not walk back is not a stranger
+        # the lean model has no pubkey for, it is a forged enrolment, and an
+        # audit that answered "verified" over it would report the forgery as
+        # attribution.
+        if not _validators.is_enrolled(conn, keyid):
+            return (
+                False,
+                "asserter key has a validators row whose enrollment does "
+                "not chain back to the project root",
+            )
 
     if not _verify_role_signatures(conn, env):
         return (False, "a role signature failed verification")
@@ -6332,6 +6354,24 @@ def _verified_project_policy(conn: sqlite3.Connection) -> dict | None:
     if policy is None:
         return None
     return policy if _policy_envelope_binds(conn, policy) else _UNVERIFIED_POLICY
+
+
+def project_policy_unverified(conn: sqlite3.Connection) -> bool:
+    """True when a stored project policy exists but its root signature does not
+    back it, so every enforcement reads the fail-closed :data:`_UNVERIFIED_POLICY`.
+
+    The stalled state: the row is present, so the project declared a rule, but
+    the signed envelope no longer binds it. :func:`_verified_project_policy` then
+    hands every caller the strictest possible policy (both rules on, declared
+    before every claim), which is correct as a defence but silent as a signal.
+    An operator meets it as a promotion held closed or a restore refusing the
+    backup, with nothing on ``mareforma status`` to say why. This predicate is
+    what ``health()`` and ``status`` read to name it.
+    """
+    policy = get_project_policy(conn)
+    if policy is None:
+        return False
+    return not _policy_envelope_binds(conn, policy)
 
 
 def strict_promotion_required(conn: sqlite3.Connection) -> bool:

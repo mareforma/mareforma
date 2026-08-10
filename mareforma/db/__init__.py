@@ -242,6 +242,7 @@ from .core import (
     set_project_policy,
     project_policy_flags,
     project_policy_declared_at,
+    project_policy_unverified,
     strict_promotion_required,
     _UNVERIFIED_POLICY,
     _policy_envelope_binds,

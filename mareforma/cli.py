@@ -514,6 +514,18 @@ def status_cmd(as_json: bool) -> None:
             )
         )
 
+    if report.policy_unverified:
+        click.echo(
+            "  " + click.style(
+                "Project policy unverified: the stored policy row's root "
+                "signature does not verify, so every rule reads at maximum "
+                "strictness (witnessing and strict promotion both required). "
+                "Re-sign the policy with the project root or restore from a "
+                "clean backup.",
+                fg="red", bold=True,
+            )
+        )
+
     click.echo("  " + "-" * 50)
     light_colors = {"green": "green", "yellow": "yellow", "red": "red"}
     color = light_colors.get(report.traffic_light, "white")
@@ -1088,7 +1100,11 @@ def _verify_claim(target: str, as_json: bool, redact_home: bool) -> int:
     definite tamper/violation (1).
     """
     import mareforma
-    from mareforma.db import DatabaseError, verify_claim_signatures
+    from mareforma.db import (
+        DatabaseError,
+        _extract_signature_bundle_keyid,
+        verify_claim_signatures,
+    )
     from mareforma.observe._binding import check_grounding_binding
     from mareforma.trust_map import build_trust_map, parse_grounding_record
 
@@ -1168,10 +1184,20 @@ def _verify_claim(target: str, as_json: bool, redact_home: bool) -> int:
             # which is the exit-2 case, the same reading the bundle path gives a
             # bundle it has no key for. Calling it exit 1 told a CI gate a claim
             # was tampered on the strength of a key the project never enrolled.
-            if claim.get("signature_bundle") and claim.get("asserter_keyid"):
+            #
+            # Read enrollment on the SIGNER THE BUNDLE NAMES, the same keyid
+            # verify_claim_signatures checks, not the row's asserter_keyid column.
+            # The column is an unsigned denormalisation: a bundle signed by an
+            # unenrolled key stapled under a row naming the enrolled root would
+            # otherwise disclose the root's enrollment over a signature the root
+            # never made. The db guard already refuses that disagreement; reading
+            # the bundle keyid here keeps the two surfaces from ever disagreeing.
+            bundle_keyid = _extract_signature_bundle_keyid(
+                claim.get("signature_bundle"))
+            if bundle_keyid is not None:
                 from mareforma.validators import is_enrolled
 
-                if not is_enrolled(graph._conn, claim["asserter_keyid"]):
+                if not is_enrolled(graph._conn, bundle_keyid):
                     unchecked.append(
                         "signer keyid is not an enrolled validator, so the "
                         "signature cannot be authenticated from public "
@@ -1467,6 +1493,13 @@ def diagnose_cmd(cites: tuple[str, ...], as_json: bool, redact_home: bool,
     Interpreter flags (-u, -O, -X, …) are rejected: the target runs
     in-process, so there is no interpreter to pass them to.
 
+    A target with a non-Python file extension is refused as a usage error
+    before anything runs. A JSON run spec is a valid Python dict literal, so it
+    would compile, exit cleanly, read nothing, and draw UNGROUNDED with "scope
+    fully observed" beside it. Everything runpy can run is accepted: .py, .pyw,
+    .pyz, .pyc, .zip, a directory with a __main__, an extensionless script, and
+    -m module.
+
     \b
     Examples:
         mareforma diagnose -- python analysis.py
@@ -1475,10 +1508,53 @@ def diagnose_cmd(cites: tuple[str, ...], as_json: bool, redact_home: bool,
     """
     from mareforma.diagnose import run_diagnose
 
+    _reject_non_python_target(tuple(command), "diagnose")
     sys.exit(run_diagnose(
         list(command), cites=list(cites), as_json=as_json,
         redact_home=(_redact_home if redact_home else None),
     ))
+
+
+# Extensions runpy actually executes. ``.pyw`` is a Python script on every
+# platform (the suffix only changes which launcher Windows picks), and a ``.zip``
+# carrying a ``__main__`` is a zipapp exactly as ``.pyz`` is; both ran before this
+# guard existed and must keep running.
+_RUNNABLE_PYTHON_SUFFIXES = (".py", ".pyw", ".pyz", ".pyc", ".zip")
+
+
+def _reject_non_python_target(command: tuple[str, ...], verb: str) -> None:
+    """Refuse an observed target that is not a Python program.
+
+    Both ``diagnose`` and ``audit`` run the target in-process via runpy, so a
+    data file handed to the wrong flag (a JSON run spec, a CSV, a shell script)
+    is compiled as Python: it never runs, observes no reads, and the command
+    then reports a grounding verdict for a target that did not execute. A JSON
+    object is a valid Python dict literal, so it compiles and exits cleanly, and
+    the report says ``UNGROUNDED`` with ``scope fully observed`` beside it: a
+    false accusation carrying a false completeness claim.
+
+    Both commands share this rule because both make the same promise about what
+    they watched. Refuse the one thing runpy cannot run as Python, an explicit
+    non-Python file extension, and leave everything it does run untouched: any
+    suffix in :data:`_RUNNABLE_PYTHON_SUFFIXES`, a directory or zipapp with a
+    ``__main__``, an extensionless script, a ``-m module``, or a bare
+    interpreter flag (whose usage error the runner raises).
+    """
+    from mareforma.diagnose import _looks_like_interpreter
+
+    argv = list(command)
+    if argv and _looks_like_interpreter(argv[0]):
+        argv = argv[1:]
+    if not argv or argv[0].startswith("-"):
+        return
+    suffix = Path(argv[0]).suffix
+    if suffix and suffix.lower() not in _RUNNABLE_PYTHON_SUFFIXES:
+        raise click.UsageError(
+            f"{verb} target {argv[0]!r} is not a Python program: {verb} runs the "
+            "target in-process, so it must be a Python script or a `-m module`. "
+            "A non-Python file is compiled as Python, observes nothing, and "
+            "would report a grounding verdict for a target that never ran."
+        )
 
 
 @cli.command("audit", context_settings={"ignore_unknown_options": True})
@@ -1559,6 +1635,7 @@ def audit_cmd(findings_path: str | None, corpus_dir: str | None, out_dir: str,
     if not command:
         raise click.UsageError(
             "audit needs a target after `--`, e.g. `-- python analysis.py`")
+    _reject_non_python_target(tuple(command), "audit")
     sys.exit(run_audit(
         list(command), findings_path=findings_path, out_dir=out_dir,
         key_path=key_path, as_json=as_json,
