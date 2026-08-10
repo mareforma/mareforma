@@ -85,6 +85,10 @@ _install_lock = threading.Lock()
 # deadlocking on it. See _wrap_third_party_locked.
 _in_wrap = threading.local()
 
+# One extra round covers a module that arrived after its own line ran. The
+# rounds after that exist only so a pathological import graph terminates.
+_MAX_WRAP_ROUNDS = 4
+
 
 # Third-party top-level modules the observer can wrap once the host imports them.
 # The late-import hook re-runs the third-party wrap when one of these is imported
@@ -493,11 +497,21 @@ def _wrap_third_party_locked() -> None:
     attributes (``getattr(h5py, "File", None)``) and a lazily loading module can
     import another wrappable name from inside that read, which arrives back here
     through the import hook on the same thread. Taking the lock again would hang
-    the host forever inside an ordinary import. The nested pass is skipped
-    instead, which loses nothing: the outer pass wraps the module that triggered
-    it.
+    the host forever inside an ordinary import, so the nested pass is skipped.
+
+    Skipping is not enough on its own. The wrappers run in a fixed order, and a
+    module that arrives after its own line has already run is not picked up by
+    the pass that is in flight: that line looked for it, did not find it, and
+    will not look again. polars imported from inside the duckdb wrapper is the
+    live case, and it leaves polars unwrapped for the life of the process, which
+    reads as a cited source that was never opened and floors an honest finding to
+    UNGROUNDED. So a skipped pass records that it was skipped, and the outer pass
+    runs again before it returns.
     """
     if getattr(_in_wrap, "active", False):
+        # The outer pass may already be past this module's line. Ask it to go
+        # round again rather than assuming it covered us.
+        _in_wrap.pending = True
         return
     with _install_lock:
         _wrap_third_party_if_present()
@@ -507,20 +521,30 @@ def _wrap_third_party_if_present() -> None:
     # Callers hold _install_lock. The flag marks this thread as inside the pass
     # so a nested import skips the lock rather than deadlocking on it.
     _in_wrap.active = True
+    _in_wrap.pending = False
     try:
-        _wrap_pandas_if_present()
-        _wrap_httpx_if_present()
-        _wrap_requests_if_present()
-        _wrap_requests_session_if_present()
-        _wrap_httpx_clients_if_present()
-        _wrap_aiohttp_if_present()
-        _wrap_h5py_if_present()
-        _wrap_pyarrow_if_present()
-        _wrap_netcdf4_if_present()
-        _wrap_polars_if_present()
-        _wrap_duckdb_if_present()
+        # Bounded: each pass either wraps something new or it does not, and every
+        # wrapper is idempotent on ``key in _reals``, so a module can only ask for
+        # one more round once. The cap makes a pathological import graph terminate
+        # rather than spin.
+        for _ in range(_MAX_WRAP_ROUNDS):
+            _in_wrap.pending = False
+            _wrap_pandas_if_present()
+            _wrap_httpx_if_present()
+            _wrap_requests_if_present()
+            _wrap_requests_session_if_present()
+            _wrap_httpx_clients_if_present()
+            _wrap_aiohttp_if_present()
+            _wrap_h5py_if_present()
+            _wrap_pyarrow_if_present()
+            _wrap_netcdf4_if_present()
+            _wrap_polars_if_present()
+            _wrap_duckdb_if_present()
+            if not getattr(_in_wrap, "pending", False):
+                break
     finally:
         _in_wrap.active = False
+        _in_wrap.pending = False
 
 
 # -- late-import hook: wrap a loader imported while a scope is open -----------
