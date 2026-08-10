@@ -212,6 +212,8 @@ from .core import (
     _cached_validator,
     _gather_verdicts_by_claim,
     _verdict_verifies,
+    _QUALIFYING_PEER_SQL,
+    _QUALIFYING_PEER_STRICT_SUFFIX,
     _qualifying_peer_exists,
     _CorroborationIndex,
     _corroboration_backs_level,

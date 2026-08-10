@@ -4138,6 +4138,32 @@ def _verdict_verifies(
     return True
 
 
+# The corroboration peer probe, at module scope so tests/test_corroboration_
+# query_plan.py can EXPLAIN the shipped string instead of a copy that drifts.
+# ``a.claim_id`` takes the anchor as a parameter rather than through ``j.value``:
+# the WHERE fixes ``j.value`` to that same value, so the rows are identical, but
+# as a join condition SQLite cannot tell that ``a`` is one known row and drives
+# the whole query off ``idx_claims_support_level``, walking every ESTABLISHED
+# claim once per row served.
+_QUALIFYING_PEER_SQL = (
+    "SELECT c.* FROM claims c, json_each(c.supports_json) j "
+    "JOIN claims a ON a.claim_id = ? "
+    "AND a.support_level = 'ESTABLISHED' "
+    "WHERE j.value = ? "
+    "AND c.asserter_keyid IS NOT NULL "
+    "AND c.signature_bundle IS NOT NULL "
+    "AND c.asserter_keyid != ? "
+    "AND (? IS NULL OR c.artifact_hash IS NULL OR c.artifact_hash != ?) "
+    "AND (c.observed_grounding IS NULL OR ("
+    "  CASE WHEN json_valid(c.observed_grounding) "
+    "  THEN json_extract(c.observed_grounding, '$.grounding') "
+    "  ELSE NULL END) = 'GROUNDED')"
+)
+
+# The strict-promotion policy adds one disqualifier: a peer must carry data.
+_QUALIFYING_PEER_STRICT_SUFFIX = " AND c.artifact_hash IS NOT NULL"
+
+
 def _qualifying_peer_exists(
     conn: sqlite3.Connection,
     cache: dict,
@@ -4165,29 +4191,35 @@ def _qualifying_peer_exists(
     enrolled signer's pubkey when there is one. Never raises: a peer that does
     not verify is skipped, not fatal. *cache* is the caller's verify cache, so a
     peer that is also a served row is verified once.
+
+    A peer whose signer has no validators row is counted, because that helper
+    answers True without checking a signature there. Corroboration is a different
+    question from service, and this is the weaker of the two: it means a writer
+    who signs with a key the project never registered can back a rung. Tightening
+    it is a behaviour change, not a repair, because it also strips the rung from
+    an honest claim whose only peer is an unregistered signer, and the write path
+    promotes on convergence without asking. Named in ARCHITECTURE.md under what
+    the model does not catch, and left for a release that can change the write
+    path with it.
     """
     # Non-row-specific filters (anchor is ESTABLISHED, peer is signed, peer's
     # grounding promotes) and the row-specific disqualifiers (distinct keyid,
     # distinct hash, strict-mode data) are both in SQL, so verification is the
     # last filter. own_hash NULL keeps every peer on the hash clause (the served
     # row carried no artifact to collide with), matching the Python original.
-    sql = (
-        "SELECT c.* FROM claims c, json_each(c.supports_json) j "
-        "JOIN claims a ON a.claim_id = j.value "
-        "AND a.support_level = 'ESTABLISHED' "
-        "WHERE j.value = ? "
-        "AND c.asserter_keyid IS NOT NULL "
-        "AND c.signature_bundle IS NOT NULL "
-        "AND c.asserter_keyid != ? "
-        "AND (? IS NULL OR c.artifact_hash IS NULL OR c.artifact_hash != ?) "
-        "AND (c.observed_grounding IS NULL OR ("
-        "  CASE WHEN json_valid(c.observed_grounding) "
-        "  THEN json_extract(c.observed_grounding, '$.grounding') "
-        "  ELSE NULL END) = 'GROUNDED')"
-    )
-    params: list[Any] = [anchor_id, own_keyid, own_hash, own_hash]
+    #
+    # The anchor is pinned by its own primary key rather than reached through
+    # ``j.value``. The two are the same row, because the WHERE below fixes
+    # ``j.value`` to this same parameter, but written as a join condition SQLite
+    # cannot see that ``a`` is one known row: it drives the query off
+    # ``idx_claims_support_level`` and walks every ESTABLISHED claim in the graph,
+    # once per row served. Pinning it collapses that to a primary-key seek. This
+    # probe answers a single-row question, so its plan has to stay a seek; the
+    # plan itself is asserted in tests/test_corroboration_query_plan.py.
+    sql = _QUALIFYING_PEER_SQL
+    params: list[Any] = [anchor_id, anchor_id, own_keyid, own_hash, own_hash]
     if strict_row:
-        sql += " AND c.artifact_hash IS NOT NULL"
+        sql += _QUALIFYING_PEER_STRICT_SUFFIX
     for e in conn.execute(sql, params):
         if _verify_participant_bundle_on_read(conn, dict(e), cache):
             return True
