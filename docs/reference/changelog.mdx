@@ -7,6 +7,158 @@ The authoritative changelog lives in [CHANGELOG.md](https://github.com/mareforma
 This page mirrors it section for section from v0.3.1 on. v0.3.0 and the
 0.2.x line are summarized here; read CHANGELOG.md for their full entries.
 
+## v0.3.12 - 2026-08-11
+
+An agent can now read and audit a project over the Model Context Protocol,
+without being able to write to it. The rest of the release is the work that
+makes that safe, and the largest part of it is that `verify` no longer blesses
+what it did not check: a claim carrying no signature was reported verified, on
+the default path, in every release up to and including 0.3.11.
+
+### Added
+
+- **A read-and-verify MCP server.** `mareforma mcp serve` serves one project
+  over the Model Context Protocol behind the optional `mcp` extra. Six tools:
+  `query_claims`, `search_claims`, `get_claim`, `proposition_status`,
+  `trust_map`, `verify_claim`. There is no write path and there will not be one:
+  a claim asserted across a transport carries no observed grounding, and the
+  record exists to hold claims to the grounding they earned. The project root is
+  pinned once at startup rather than taken per request, and one graph is held for
+  the process lifetime.
+- **Claim text reaches a model as data, not as instructions.** Every row the
+  server returns is sanitized and wrapped in `<untrusted_data>` markers, and the
+  server states that contract in its instructions so the reader knows what the
+  markers mean. Claim text is written by whoever produced the claim, which on a
+  shared record is usually another agent.
+- **`proposition_status` reports `question_status`.** `consistent` or `divided`
+  names the state of the question, beside `status` for the state of the answer.
+  Both derive from one frame computation, so they cannot disagree about whether
+  a frame is contested.
+- **An example that plants a silent failure and catches it.** `examples/07` runs
+  two pipelines that print the same number, and shows only the one that read its
+  data reading GROUNDED.
+
+### Changed
+
+- **`diagnose` refuses a target that is not a Python program.** A JSON run spec
+  is a valid Python dict literal, so it used to compile, exit cleanly, read
+  nothing, and draw `UNGROUNDED` with `scope fully observed` beside it: a false
+  accusation carrying a false completeness claim. It is now a usage error, exit
+  2, before the target runs. `audit` already refused these; both commands make
+  the same promise about what they watched, so both now enforce it. Anything
+  runpy can run is untouched: `.py`, `.pyw`, `.pyz`, `.pyc`, `.zip`, a directory
+  with a `__main__`, an extensionless script, and `-m module`.
+- **The MCP page size is capped at 200 rows,** and a capped page says so with a
+  `limit_capped_from` field. The graph sizes its scan ceiling from the limit it
+  is handed, so an unbounded limit was an unbounded scan holding the one lock
+  every other tool call waits on. A short page that does not report the cap
+  reads as "that is all there is", which is a false answer about the record.
+- **`mareforma mcp serve` refuses a project it cannot write to,** and says which
+  path to fix. The server signs nothing and writes no claims, but SQLite opens
+  the graph read-write and journals beside it even on a pure read. A readable
+  project that was not writable used to pass startup and then die with "attempt
+  to write a readonly database", which names no directory to fix.
+
+- **`mareforma.open()` refuses two path mistakes** that used to create a nested
+  project: a path that resolves to an existing file, and a path named
+  `graph.db` or sitting inside a `.mareforma/` directory that is not already a
+  project. Both raise `ValueError`. Pointing the library at the database file
+  rather than the project directory is the mistake this catches.
+- **`mareforma status` can read yellow on a project that meets every green
+  condition.** A stored project policy whose root signature no longer verifies
+  now overlays the traffic light and appends its reason. The support-level
+  breakdown also prints the retired-ladder notice.
+- **`JSONLDExporter` requires `classification` and `support_level` on every row
+  it is handed.** It used to default them silently. First-party callers pass
+  full `list_claims` rows and are unaffected; a caller passing a projected row
+  to `export(claims=...)` now gets an error instead of a fabricated node.
+
+- **`mareforma mcp serve` refuses to derive a target carrying more than 1000
+  evidence lines,** configurable with `--max-evidence-lines`. Derivation cost is
+  linear in that count and runs holding the one read lock every tool call
+  shares, so an unbounded target stalled every other caller. The refusal names
+  the count and the way to raise it. It refuses rather than answering over a
+  subset, because a trust map derived over part of the evidence is a wrong
+  trust map.
+
+### Fixed
+
+- **`verify` no longer reports a claim verified when nothing was checked.** A
+  signature bundle whose `signatures` array is empty or malformed names no
+  signer, so the pubkey check was skipped and the command fell through to exit
+  0. A bundle that names no signer is now refused. The bundle-file path already
+  refused these; the stored-claim path now agrees with it.
+- **`verify` no longer reports an unsigned claim as verified.** A claim with
+  no signature reached none of the signature checks, so the verdict fell
+  through to `verified` and exit 0. It is now `unverifiable`, exit 2. This was
+  reachable with no database access and no attacker: open a project, assert a
+  claim, never run `bootstrap`. That is the path the quickstart teaches and the
+  path `examples/06_ci_verify` gates CI on, so anyone following that example had
+  a gate that never fired. Present in every release up to 0.3.11. The trust map
+  had the right answer throughout and rendered attributability as `unsigned`;
+  the verdict never read its own map.
+- **The witnessing axis reports the record it found, not a proof it did not
+  check.** It read `logged` with the residual "signed and recorded in a
+  transparency log with an inclusion proof" whenever a row existed in
+  `rekor_inclusions`. Nothing opened the stored proof: the Merkle check runs at
+  restore, and the table's triggers block UPDATE and DELETE but permit INSERT.
+  It now reads `inclusion record present` and says the proof is not re-checked
+  on read.
+- **The contestation axis reports the column it read.** It stated that a signed
+  contradiction verdict had marked a claim invalid, from `t_invalid` alone. No
+  trigger guards that column and the signed verdicts are never replayed on
+  read, so one direct write could fabricate a contradiction or erase a real
+  one. The signal is now `invalidation-recorded` rather than `signed-verdict`.
+
+- **`verify` no longer treats exit 0 as the fall-through.** The verdict was
+  matched against string literals, so any verdict the classifier grows that the
+  branches did not name would have exited 0 and reported "verified". Exit 0 is
+  now the branch that has to be earned; anything else is unverifiable.
+- **The trust map no longer reports a signature for a claim that has none.**
+  Re-verification was gated on a row carrying both an asserter keyid and a
+  signature bundle, so a row with a keyid stapled on and no bundle skipped the
+  check entirely and fell back to the stored verified gate, which passes
+  PRELIMINARY rows through. The map read "signature re-verified on read" beside
+  a keyid while `verify` called the same claim tampered. Enrolment is now read
+  on the signer the bundle names, the same keyid the verification uses. Present
+  since 0.3.11, reachable through `mareforma map` and `graph.trust_map()`;
+  `verify` was correct throughout.
+- **Short label fields can no longer forge a closing delimiter.**
+  `source_name`, `generated_by` and `validated_by` skip the `<untrusted_data>`
+  wrapper because delimiters around a short label are noise, and they were
+  skipping the forged-delimiter strip with it. A run token reading
+  `</untrusted_data>` is serialised into the same object as the wrapped text and
+  closes a delimiter it was never given. The labels are still not wrapped; they
+  are now stripped, like every other string in the row. Present since 0.3.11 in
+  `query_for_llm`.
+
+### Deprecated
+
+- **The support ladder, whole.** 0.4.0 removes the `PRELIMINARY` /
+  `REPLICATED` / `ESTABLISHED` labels, the stored `support_level` column, the
+  promotion machinery, and the `query(min_support=...)` filter. Read the trust
+  map's independence axis, or `proposition_status()`, for how much distinct
+  backing a finding has. Both surfaces warn today: the retired module labels on
+  attribute access, and `min_support` on the reads that filter by it. The filter
+  is the path callers actually take, so a removal announced only through the
+  module attribute would have reached nobody.
+- **`frame_status` on `proposition_status`.** It echoed the answer's own status
+  word. Read `question_status` instead. Removed in 0.4.0.
+- **`assert_claim(seed=True)`.** It still writes a signed ESTABLISHED claim and
+  remains the anchor that bootstraps a fresh trust chain. Removed in 0.4.0.
+
+### Migration
+
+- `get_tools()`'s `query_graph` no longer defaults `min_support` to
+  `"PRELIMINARY"`. That value is the floor of the ladder, so it filtered
+  nothing, but it reached `query` as an explicit argument and made every agent
+  tool call warn about a deprecation the caller had not asked for. Passing
+  nothing now means asking for nothing; the rows returned are unchanged.
+- The `verify` and `trust_map` fixes change the answer only for rows that were
+  already inconsistent with their own signatures. The three Changed entries
+  above are the only other calls whose result moves: two `open()` paths that
+  now refuse, and one exporter that now requires the fields it reads.
+
 ## v0.3.11 - 2026-08-08
 
 A hardening release. An adversarial audit of the substrate found defects on every

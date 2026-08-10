@@ -65,6 +65,20 @@ _SHAPE_BY_VERSION = {
         # into two, is gone.
         "independence_numeric": True,
     },
+    "v0.3.12": {
+        "properties": _EXPECTED_PROPERTIES,
+        # The shape does not move in v0.3.12: same properties, same independence
+        # values. The version tracks the package version, so a release bumps it
+        # whether or not the shape changed, and this entry is where that gets
+        # said out loud rather than assumed.
+        #
+        # What did change is one attributability VALUE, not the shape. A row
+        # carrying a stapled asserter keyid and no signature bundle used to skip
+        # re-verification and read "signature re-verified on read"; it now reads
+        # the failure. Enrolment is read on the signer the bundle names rather
+        # than the row's unsigned column.
+        "independence_numeric": True,
+    },
 }
 
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mareforma"
-version = "0.3.11"
+version = "0.3.12"
 description = "Local verification layer for AI-assisted research"
 readme = "README.md"
 requires-python = ">=3.10"
