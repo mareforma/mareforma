@@ -117,6 +117,69 @@ def _page_result(claims, served: int, adjusted) -> dict:
     return out
 
 
+# The most evidence lines a single-id tool will derive over before refusing.
+# Cost is linear in this count: ~0.31 ms per line measured, ~200 Ed25519
+# verifies and ~1005 SQL statements per 100 lines, and every bit of it runs
+# holding the one graph lock every other tool call waits on. 1000 lines caps
+# the worst case near 310 ms while sitting far above anything this repo's
+# tests or examples produce, so the refusal should not fire in ordinary use.
+#
+# The three tools it guards take a single id, so there is no page to cap and
+# the _page pattern does not transfer. Refusing beats answering partially: a
+# trust map derived over a subset of the evidence is a wrong trust map, and
+# flagging it partial does not stop an agent keying on the verdict.
+_MAX_EVIDENCE_LINES = 1000
+
+
+class _TooMuchEvidence(RuntimeError):
+    """Raised when a target's evidence exceeds the servable ceiling."""
+
+
+def _evidence_line_count(conn, *, claim_id=None, content_id=None) -> int:
+    """Evidence lines reachable from a claim id or a content id.
+
+    Both joins are index-served (``idx_find_claim`` / ``idx_find_content`` on
+    findings, ``idx_line_finding`` on evidence_lines), so the count costs far
+    less than the derivation it is deciding whether to run.
+    """
+    if claim_id is not None:
+        sql = ("SELECT COUNT(*) FROM evidence_lines el "
+               "JOIN findings f ON f.finding_id = el.finding_id "
+               "WHERE f.claim_id = ?")
+        key = claim_id
+    else:
+        sql = ("SELECT COUNT(*) FROM evidence_lines el "
+               "JOIN findings f ON f.finding_id = el.finding_id "
+               "WHERE f.content_id = ?")
+        key = content_id
+    return conn.execute(sql, (key,)).fetchone()[0]
+
+
+def _check_evidence_ceiling(conn, ceiling: int, **target) -> None:
+    """Refuse before deriving when the target carries too much evidence.
+
+    Fails closed: a count that cannot be taken is a refusal, not a pass, so a
+    broken count can never wave through the unbounded work it exists to stop.
+    """
+    import sqlite3
+
+    try:
+        count = _evidence_line_count(conn, **target)
+    except sqlite3.Error as exc:
+        raise _TooMuchEvidence(
+            "could not measure this target's evidence before deriving it, so "
+            f"the read was refused rather than run unbounded: {exc}"
+        ) from exc
+    if count > ceiling:
+        raise _TooMuchEvidence(
+            f"this target carries {count} evidence lines, above the "
+            f"{ceiling}-line ceiling this server derives over. Deriving it "
+            "would hold the shared read lock for roughly "
+            f"{count * 0.31 / 1000:.1f}s. Raise --max-evidence-lines to serve "
+            "it, or read it through the CLI, which has no shared lock."
+        )
+
+
 def _scrub(value):
     """Strip forged delimiters and hostile codepoints from every string within.
 
@@ -257,8 +320,11 @@ class ReadVerifyTools:
     over raw.
     """
 
-    def __init__(self, graph: "EpistemicGraph") -> None:
+    def __init__(
+        self, graph: "EpistemicGraph", max_evidence_lines: int = _MAX_EVIDENCE_LINES,
+    ) -> None:
         self._graph = graph
+        self._max_evidence_lines = max_evidence_lines
 
     def query_claims(
         self,
@@ -327,6 +393,13 @@ class ReadVerifyTools:
         ``frame_status`` and ``status_policy``. ``found`` is ``False`` and
         ``status`` is ``None`` when no proposition resolves to *content_id*.
         """
+        try:
+            _check_evidence_ceiling(
+                self._graph._conn, self._max_evidence_lines,
+                content_id=content_id,
+            )
+        except _TooMuchEvidence as exc:
+            return {"found": False, "status": None, "refused": str(exc)}
         status = self._graph.proposition_status(content_id)
         if status is None:
             return {"found": False, "status": None}
@@ -342,9 +415,13 @@ class ReadVerifyTools:
         the whole payload is scrubbed before it leaves, the same treatment the
         claim rows get.
         """
-        from mareforma.trust_map import build_trust_map
-
-        tmap = build_trust_map(self._graph._conn, claim_id)
+        try:
+            _check_evidence_ceiling(
+                self._graph._conn, self._max_evidence_lines, claim_id=claim_id,
+            )
+        except _TooMuchEvidence as exc:
+            return {"found": False, "trust_map": None, "refused": str(exc)}
+        tmap = self._graph.trust_map(claim_id)
         if tmap is None:
             return {"found": False, "trust_map": None}
         return {"found": True, "trust_map": _scrub(tmap.to_dict())}
@@ -360,17 +437,36 @@ class ReadVerifyTools:
         """
         from mareforma._verify import classify_claim_verdict
 
-        claim = self._graph.get_claim(claim_id)
-        if claim is None:
-            return {
-                "claim_id": claim_id,
-                "verdict": "unverifiable",
-                "reason": (
-                    f"claim {claim_id!r} not found in this project; cannot verify"
-                ),
-                "trust_map": None,
-            }
-        result = classify_claim_verdict(self._graph._conn, claim, claim_id)
+        # Hold the graph's re-entrant read lock across the claim lookup and the
+        # verdict so both touch the shared connection under the same
+        # serialization the synchronized reads use. The connection is opened
+        # check_same_thread=False, so an unguarded raw-connection read would race
+        # a concurrent tool call dispatched on another thread.
+        with self._graph._lock:
+            try:
+                _check_evidence_ceiling(
+                    self._graph._conn, self._max_evidence_lines,
+                    claim_id=claim_id,
+                )
+            except _TooMuchEvidence as exc:
+                return {
+                    "claim_id": claim_id,
+                    "verdict": "unverifiable",
+                    "reason": str(exc),
+                    "trust_map": None,
+                }
+            claim = self._graph.get_claim(claim_id)
+            if claim is None:
+                return {
+                    "claim_id": claim_id,
+                    "verdict": "unverifiable",
+                    "reason": (
+                        f"claim {claim_id!r} not found in this project; "
+                        "cannot verify"
+                    ),
+                    "trust_map": None,
+                }
+            result = classify_claim_verdict(self._graph._conn, claim, claim_id)
         return {
             "claim_id": claim_id,
             "verdict": result.verdict,
@@ -409,7 +505,11 @@ def build_server(tools: ReadVerifyTools):
     return server
 
 
-def run_server(project_root: "str | None" = None, transport: str = "stdio") -> None:
+def run_server(
+    project_root: "str | None" = None,
+    transport: str = "stdio",
+    max_evidence_lines: int = _MAX_EVIDENCE_LINES,
+) -> None:
     """Serve one mareforma project over MCP, read and verify only.
 
     Fixes the project root once (see :func:`_resolve_project_root`), opens one
@@ -429,7 +529,7 @@ def run_server(project_root: "str | None" = None, transport: str = "stdio") -> N
 
     graph = mareforma.open(root, **_READ_ONLY_OPEN)
     try:
-        server = build_server(ReadVerifyTools(graph))
+        server = build_server(ReadVerifyTools(graph, max_evidence_lines))
         server.run(transport=transport)
     finally:
         graph.close()

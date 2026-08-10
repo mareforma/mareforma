@@ -136,6 +136,43 @@ class TestOneGraphHeld:
         after = health_log.read_text() if health_log.exists() else ""
         assert after == before, "repeated reads on a held graph must not append"
 
+    def test_trust_map_reads_through_the_synchronized_method(self, tools, project):
+        """The connection is shared across the SDK's tool threads (sync tools run
+        via anyio.to_thread), so every read must go through the graph's
+        synchronized layer, not a raw-connection read that skips the lock."""
+        _root, claim_id, _content_id = project
+        seen = []
+        real = tools._graph.trust_map
+
+        def spy(cid, **kw):
+            seen.append(cid)
+            return real(cid, **kw)
+
+        tools._graph.trust_map = spy
+        out = tools.trust_map(claim_id)
+        assert out["found"] is True
+        assert seen == [claim_id], "trust_map must route through graph.trust_map"
+
+    def test_verify_holds_the_lock_across_the_verdict(self, tools, project):
+        """verify reads the verdict off the raw connection, so it must hold the
+        graph's lock across the read the way the synchronized reads do."""
+        _root, claim_id, _content_id = project
+        entered = {"n": 0}
+        real_lock = tools._graph._lock
+
+        class _Tracking:
+            def __enter__(self):
+                entered["n"] += 1
+                return real_lock.__enter__()
+
+            def __exit__(self, *exc):
+                return real_lock.__exit__(*exc)
+
+        tools._graph._lock = _Tracking()
+        out = tools.verify_claim(claim_id)
+        assert out["verdict"] in {"verified", "tampered", "unverifiable"}
+        assert entered["n"] >= 1, "verify_claim must acquire the graph lock"
+
 
 # ---------------------------------------------------------------------------
 # No write path (the designed bound)
@@ -475,3 +512,73 @@ class TestStartupFailuresReachTheOperator:
         assert res.exit_code == 1
         assert "not a mareforma project" in res.output
         assert "Traceback" not in res.output
+
+
+class TestEvidenceCeiling:
+    """The three single-id tools refuse rather than derive without bound.
+
+    query_claims and search_claims cap a page; these three take one id, so
+    there is no page to cap and the cost driver is evidence-line count, which
+    the caller never supplies. Derivation is linear in that count and runs
+    holding the one lock every tool call shares.
+
+    Refusing beats answering partially. A trust map derived over a subset of
+    the evidence is a wrong trust map, and marking it partial does not stop an
+    agent keying on the verdict.
+    """
+
+    def test_a_target_under_the_ceiling_is_served(self, tools, project):
+        _root, claim_id, _content_id = project
+        assert tools.trust_map(claim_id)["found"] is True
+        assert tools.verify_claim(claim_id)["verdict"] == "verified"
+
+    def test_trust_map_refuses_above_the_ceiling(self, project):
+        root, claim_id, _content_id = project
+        graph = mareforma.open(root, load_key=False)
+        try:
+            strict = ReadVerifyTools(graph, max_evidence_lines=-1)
+            result = strict.trust_map(claim_id)
+        finally:
+            graph.close()
+        assert result["found"] is False
+        assert result["trust_map"] is None
+        assert "evidence lines" in result["refused"]
+        assert "--max-evidence-lines" in result["refused"], (
+            "a refusal must name the way out"
+        )
+
+    def test_verify_refuses_as_unverifiable_not_as_a_crash(self, project):
+        """The refusal has to reach the verdict vocabulary, not escape as an error."""
+        root, claim_id, _content_id = project
+        graph = mareforma.open(root, load_key=False)
+        try:
+            result = ReadVerifyTools(graph, max_evidence_lines=-1).verify_claim(claim_id)
+        finally:
+            graph.close()
+        assert result["verdict"] == "unverifiable"
+        assert result["trust_map"] is None
+        assert result["reason"]
+
+    def test_proposition_status_refuses_above_the_ceiling(self, project):
+        root, _claim_id, content_id = project
+        graph = mareforma.open(root, load_key=False)
+        try:
+            result = ReadVerifyTools(graph, max_evidence_lines=-1).proposition_status(
+                content_id)
+        finally:
+            graph.close()
+        assert result["found"] is False
+        assert "refused" in result
+
+    def test_a_count_that_cannot_be_taken_refuses(self, project):
+        """Fail closed: a broken count must not wave through unbounded work."""
+        import sqlite3
+
+        from mareforma.mcp.server import _TooMuchEvidence, _check_evidence_ceiling
+
+        class _Broken:
+            def execute(self, *_a, **_k):
+                raise sqlite3.OperationalError("no such table: evidence_lines")
+
+        with pytest.raises(_TooMuchEvidence, match="could not measure"):
+            _check_evidence_ceiling(_Broken(), 1000, claim_id="x")
