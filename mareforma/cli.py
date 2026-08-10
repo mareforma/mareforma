@@ -1962,8 +1962,9 @@ def claim() -> None:
     """Manage scientific claims.
 
     Claims are falsifiable assertions with a classification (INFERRED |
-    ANALYTICAL | DERIVED) and a graph-derived support level (PRELIMINARY →
-    REPLICATED → ESTABLISHED).
+    ANALYTICAL | DERIVED). Trust reads off the derived status a claim earns in
+    the graph; the stored support level (PRELIMINARY -> REPLICATED ->
+    ESTABLISHED) is the legacy promotion ladder, deprecated for v0.4.0.
 
     \b
     Examples:
@@ -2272,5 +2273,79 @@ def restore_cmd(claims_toml_path: Path | None) -> None:
     _ok(f"Restored graph.db from claims.toml ({_root()}/.mareforma/graph.db).")
     _info(f"validators_restored: {result['validators_restored']}")
     _info(f"claims_restored:     {result['claims_restored']}")
+
+
+# ---------------------------------------------------------------------------
+# mcp
+# ---------------------------------------------------------------------------
+
+@cli.group()
+def mcp() -> None:
+    """Serve one project to an agent over the Model Context Protocol.
+
+    Read and verify only. The server exposes tools that query the graph and
+    check a claim's signatures and grounding binding; it exposes no write
+    path. An agent can look a claim up and audit it across the process
+    boundary, but cannot assert one: a claim written over a transport carries
+    no observed grounding, and the record exists to hold claims to grounding
+    they earned, so that refusal is a designed bound, not a missing feature.
+    """
+
+
+@mcp.command("serve")
+@click.option(
+    "--project-root", "project_root", default=None, metavar="PATH",
+    type=click.Path(exists=False, file_okay=False, dir_okay=True),
+    help="Project to serve. Falls back to $MAREFORMA_PROJECT_ROOT, then to "
+         "discovery from the current directory. Resolved once at startup, "
+         "never per request.",
+)
+@click.option(
+    "--max-evidence-lines", "max_evidence_lines", type=int, default=1000,
+    metavar="N", show_default=True,
+    help=(
+        "Refuse to derive a target carrying more than N evidence lines. The "
+        "derivation cost is linear in this count and runs holding the one "
+        "read lock every tool call shares, so an unbounded target stalls "
+        "every other caller. Raise it if your propositions are legitimately "
+        "larger; the CLI has no shared lock and is not affected."
+    ),
+)
+@click.option(
+    "--transport", type=click.Choice(["stdio"]), default="stdio",
+    show_default=True,
+    help="Transport the server speaks. stdio is the Model Context Protocol "
+         "default.",
+)
+def mcp_serve(
+    project_root: "str | None", transport: str, max_evidence_lines: int,
+) -> None:
+    """Run the read-and-verify server on the chosen transport.
+
+    The project root is fixed for the server's lifetime, resolved once at
+    startup and never per request: the option wins, else
+    $MAREFORMA_PROJECT_ROOT, else discovery from the current directory (the
+    first ancestor holding a mareforma project). A per-request path would be
+    both non-deterministic and a directory-traversal surface. This callback
+    forwards the option-or-environment value; the server performs the discovery
+    fallback and pins the resolved root at startup.
+    """
+    import os
+
+    root = project_root or os.environ.get("MAREFORMA_PROJECT_ROOT")
+    from mareforma.mcp.server import MCPServerError, run_server
+
+    # Every startup refusal in the server names what was wrong and what to
+    # pass, which is worth nothing if it reaches the operator as a traceback.
+    # MCPServerError's own docstring says the message is meant for whoever ran
+    # this command; the other commands all report their errors this way.
+    try:
+        run_server(
+            project_root=root, transport=transport,
+            max_evidence_lines=max_evidence_lines,
+        )
+    except MCPServerError as exc:
+        _err(str(exc))
+        sys.exit(1)
 
 

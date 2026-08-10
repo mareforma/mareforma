@@ -6,6 +6,12 @@ description: "Five minutes to your first claim."
 ## Install
 
 ```bash
+pip install mareforma
+```
+
+Or, with uv:
+
+```bash
 uv add mareforma
 ```
 
@@ -38,33 +44,13 @@ graph = mareforma.open()
 No project setup. No init command. `graph.db` is created in `.mareforma/`
 under the current directory on first call.
 
-## Assert a claim
+## Assert a claim, and record whether the data was there
 
-```python
-claim_id = graph.assert_claim(
-    "Cell type A receives more inhibitory input than cell type B",
-    classification="ANALYTICAL",
-    generated_by="agent/model-a/lab_a",
-    source_name="dataset_alpha",
-)
-```
-
-`claim_id` is a UUID. The claim is immediately persisted to `graph.db` and
-backed up to `claims.toml`, a human-readable TOML file written after every
-mutation. If `graph.db` is ever deleted or corrupted, `claims.toml` preserves
-the full record.
-
-A claim is a falsifiable assertion with provenance: what was asserted,
-how the knowledge was derived (`classification`), from which data source,
-and building on which upstream claims (`supports`). Claims are append-only:
-once recorded, a claim is built upon, contradicted, or retracted, never
-overwritten.
-
-## Record whether the data was there
-
-The `classification="ANALYTICAL"` above is the agent's own declaration. Mareforma
-can check it against what the run actually did. Wrap the code that reads the data
-in `observe()` and pass the verdict into the claim.
+A claim carries a `classification` the agent declares (`INFERRED`,
+`ANALYTICAL`, or `DERIVED`), but a declaration is only as good as the run
+behind it. So assert the claim from inside `observe()`: it watches the block,
+and Mareforma records what the run actually did next to what the agent said it
+did. Lead with this, not with a bare classification.
 
 ```python
 from mareforma.observe import observe
@@ -83,9 +69,23 @@ claim_id = graph.assert_claim(
 
 `obs.verdict` is `GROUNDED` if a read of `dataset_alpha` was observed inside the
 block, `UNGROUNDED` if none was, and `OPAQUE` if the read happened somewhere
-Mareforma could not see: a subprocess, a C extension, a warmed connection.
-Mareforma computes this from the run, so an agent that declares `ANALYTICAL` on a
-silent pipeline failure leaves the gap on the record instead of hiding it.
+Mareforma could not see: a subprocess, a C extension, a warmed connection. The
+catch worth internalising is what a *silent failure* lands: when a cited read
+is attempted and fails, and the failures account for every open of that path,
+the scope lands `UNGROUNDED`, not a comfortable `OPAQUE`. So an agent that
+declares `ANALYTICAL` on a pipeline that quietly read nothing leaves the gap on
+the record instead of hiding it.
+
+`claim_id` is a UUID. The claim is immediately persisted to `graph.db` and
+backed up to `claims.toml`, a human-readable TOML file written after every
+mutation. If `graph.db` is ever deleted or corrupted, `claims.toml` preserves
+the full record.
+
+A claim is a falsifiable assertion with provenance: what was asserted,
+how the knowledge was derived (`classification`), from which data source,
+and building on which upstream claims (`supports`). Claims are append-only:
+once recorded, a claim is built upon, contradicted, or retracted, never
+overwritten.
 
 The verdict says a cited read happened, not that it was a read of this claim's own
 data. `assert_claim` has no citation to bind it to, so the stored reason carries
@@ -101,8 +101,13 @@ for r in results:
     print(r["text"], r["support_level"])
 ```
 
-Always query before asserting. If the graph already has a REPLICATED or
-ESTABLISHED finding on your topic, build on it; don't duplicate it.
+Always query before asserting. If the graph already carries a well-supported
+finding on your topic, build on it; don't duplicate it. Trust itself reads off
+the derived axes, not the stored label: `graph.proposition_status(prop)`
+returns the answer's `status` and the question's `question_status`, both
+computed on every read. The `support_level` column (`PRELIMINARY` ->
+`REPLICATED` -> `ESTABLISHED`) and the `min_support=` filter are the legacy
+promotion ladder, still functional this release but deprecated for v0.4.0.
 
 When the results will be spliced into an LLM prompt, use
 `graph.query_for_llm(...)` instead: it sanitizes free-text fields and

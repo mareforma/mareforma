@@ -2,9 +2,11 @@
 
 Mareforma is pre-1.0 software maintained by the Mareforma team. The threat model
 matters: mareforma builds the local epistemic record AI scientists rely on
-for cross-agent replication, so a defect that lets an attacker forge a
-`REPLICATED` claim, a signed envelope, or a validator enrollment is a
-trust-layer failure, not a cosmetic bug. Reports here get priority.
+for cross-agent replication, so a defect that lets an attacker forge cross-agent
+convergence (promoting a claim past `PRELIMINARY` without the distinct-signer
+evidence the promotion rule requires), a signed envelope, or a validator
+enrollment is a trust-layer failure, not a cosmetic bug. Reports here get
+priority.
 
 ## Supported versions
 
@@ -34,8 +36,8 @@ hours. Do not include exploit details in the public issue.
 
 - Affected version (`mareforma --version` or `pip show mareforma`)
 - Reproduction: minimum code or CLI commands that demonstrate the issue
-- Impact: what an attacker can do (forge `REPLICATED`, mutate a signed
-  claim without detection, bypass identity gates, etc.)
+- Impact: what an attacker can do (forge a promotion past `PRELIMINARY`,
+  mutate a signed claim without detection, bypass identity gates, etc.)
 - Suggested fix or mitigation, if you have one
 
 ### Response targets

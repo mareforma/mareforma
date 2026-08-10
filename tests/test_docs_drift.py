@@ -137,8 +137,14 @@ _SIGNING_NAME_EXEMPT = frozenset({"CHANGELOG.md", "changelog.mdx"})
 
 
 def _signing_name_sources():
-    """Yield every doc and package file the signing-name guard reads."""
-    for name in ("AGENTS.md", "ARCHITECTURE.md", "README.md"):
+    """Yield every doc and package file the signing-name guard reads.
+
+    ``CHANGELOG.md`` is scanned like the other root prose so its exemption is
+    live rather than dead: it records the ``canonical_payload`` rename and is
+    mirrored section for section onto ``changelog.mdx``, so both changelog
+    surfaces keep the old name and both are exempted below.
+    """
+    for name in ("AGENTS.md", "ARCHITECTURE.md", "README.md", "CHANGELOG.md"):
         yield ROOT / name
     yield from sorted(DOCS.rglob("*.mdx"))
     yield from sorted((ROOT / "mareforma").rglob("*.py"))

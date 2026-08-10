@@ -211,7 +211,11 @@ Examples in `examples/` must:
 - Use `seed=True` to bootstrap an ESTABLISHED upstream when the
   example demonstrates REPLICATED convergence (the
   ESTABLISHED-upstream rule means a plain string anchor or an
-  unsigned upstream will not trigger REPLICATED)
+  unsigned upstream will not trigger REPLICATED). Note: `seed=True`
+  emits a deprecation warning and is scheduled for removal in v0.4.0,
+  when a replacement anchor lands; it still writes a signed
+  ESTABLISHED claim for this release, so it stays the way to
+  demonstrate convergence in an example today
 
 ## Licence
 

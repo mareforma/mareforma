@@ -652,8 +652,17 @@ result["status"]                  # "PRELIMINARY" (one independent line)
 
 # A second check on a DISTINCT model (and dataset, and signer) lifts it to
 # CONVERGENT. A same-model rerun stays one line and does not.
-graph.proposition_status(prop)["status"]
+graph.proposition_status(prop)["status"]            # answer axis, per content_id
+graph.proposition_status(prop)["question_status"]   # question axis, per frame_id:
+                                                     # "consistent" or "divided"
 ```
+
+`proposition_status` returns the two derived axes to read trust off: `status`
+(the state of the answer, per `content_id`) and `question_status` (the state of
+the question, per `frame_id`: `consistent` when the frame's propositions agree,
+`divided` when they point in contrary directions). It also returns a
+`frame_status` key that echoes the answer's own word; that key is deprecated for
+v0.4.0 in favour of `question_status`.
 
 Methods: `register_proposition(proposition)`,
 `register_plan(proposition, prediction)`,

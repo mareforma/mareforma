@@ -10,6 +10,16 @@ There is no confidence score. An agent that is wrong is still confident.
 The graph does not ask the agent how sure it is; it tracks what the agent
 can demonstrate.
 
+Trust reads off two axes Mareforma derives on every read, not off a stored
+label: **`Status`** per `content_id` is the state of the answer (`UNTESTED` ->
+`PRELIMINARY` -> `CONVERGENT`, plus `REFUTED` and `CONTESTED`), and
+**`question_status`** per `frame_id` is the state of the question
+(`consistent` / `divided`). Both come from `graph.proposition_status(prop)`.
+The `support_level` ladder below is the legacy stored promotion axis; its
+`REPLICATED` and `ESTABLISHED` public labels are deprecated for v0.4.0. See
+[Findings](/concepts/findings#the-two-derived-axes-and-the-legacy-ladder) for
+the answer/question structure the axes sit on.
+
 ## Independence is the signal
 
 The property Mareforma leads with is **effective independence**: the number of

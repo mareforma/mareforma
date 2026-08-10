@@ -254,20 +254,34 @@ pre-registration, not a convention. `assert_finding` composes both in one call
 and flags its synthesised plan `preregistered=0`, so a genuine up-front
 pre-registration stays distinguishable from a one-shot.
 
-## How this relates to support levels
+## The two derived axes, and the legacy ladder
 
-The two layers answer different questions and run side by side:
+Trust is read off two axes Mareforma **derives on every read**, one per level of
+the answer/question structure above. Read these, not a stored label:
 
-- **`support_level`** (`PRELIMINARY` / `REPLICATED` / `ESTABLISHED`, see
-  [Trust](/concepts/trust)) is about a *claim's* provenance: did independent
-  agents converge on a shared upstream, and did a human validate it.
 - **`Status`** (`UNTESTED`, `PRELIMINARY`, `CONVERGENT`, `REFUTED`,
-  `CONTESTED`) is about a *proposition's* evidence: how many independent
-  datasets support or refute it, with the direction of each computed from a
-  pre-registered rule.
+  `CONTESTED`) is the state of the **answer**, computed per `content_id`: how
+  many independent datasets support or refute this exact proposition, with the
+  direction of each computed from a pre-registered rule.
+- **`question_status`** (`consistent` / `divided`) is the state of the
+  **question**, computed per `frame_id`: whether the propositions sharing a
+  frame agree or point in contrary directions. It comes from the same
+  computation as the underlying `FrameStatus`, so the two cannot disagree about
+  whether the frame is divided.
 
-A finding has both. The claim records who asserted what; the trust layer records
-whether the data earns it.
+`graph.proposition_status(prop)` returns both, alongside a `frame_status` key
+that echoes the answer's own word and is **deprecated for v0.4.0** in favour of
+`question_status`.
+
+The **legacy layer** is `support_level` (`PRELIMINARY` / `REPLICATED` /
+`ESTABLISHED`, see [Trust](/concepts/trust)): the stored promotion ladder on a
+*claim*, recording whether independent agents converged on a shared upstream and
+whether a human validated it. Its `REPLICATED` and `ESTABLISHED` public labels
+are deprecated for v0.4.0; the derived axes above are what a reader should reach
+for.
+
+A finding carries all of it. The claim records who asserted what; the derived
+axes record whether the data earns it.
 
 A third axis asks whether the cited data actually flowed into the finding at all,
 computed from execution rather than declared: see [Grounding](/concepts/grounding).

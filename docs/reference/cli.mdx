@@ -689,3 +689,42 @@ mareforma restore backups/state.toml
 The output reports `validators_restored` and `claims_restored` counts. Failure exits `1` with a `RestoreError` message naming the failure mode: `graph_not_empty`, `toml_not_found`, `toml_unreadable`, `toml_malformed`, `enrollment_unverified`, `claim_unverified`, `trust_row_rejected`, `mode_inconsistent`, `orphan_signer`, `policy_violation`, or `rekor_inclusion_invalid`. Three further modes (`policy_unverified`, `policy_absent`, `policy_unverifiable`) exist but fire only under `enforce_rekor_policy`, which the CLI `restore` does not expose; see the `mareforma.restore()` API table for those.
 
 `claims.toml` includes a `[rekor_inclusions]` section. Older files written without it restore successfully with a `RekorSidecarSectionAbsentWarning`. Run `refresh_unsigned()` afterward to re-fetch inclusion proofs.
+
+---
+
+## mcp
+
+Serve one project to an agent over the Model Context Protocol.
+
+```bash
+mareforma mcp [SUBCOMMAND]
+```
+
+The server is **read and verify only**. It exposes tools that query the graph and check a claim's signatures and grounding-to-citation binding, and it exposes no write path. An agent can look a claim up and audit it across the transport, but cannot assert one: a claim written over the boundary would carry no observed grounding, and the record exists to hold claims to the grounding they earned. The refusal is a designed bound, not a missing feature.
+
+### mcp serve
+
+Run the read-and-verify server on the chosen transport.
+
+```bash
+mareforma mcp serve [OPTIONS]
+```
+
+The project root is fixed for the process lifetime, resolved once at startup and never per request: a per-request path would be both non-deterministic and a directory-traversal surface. Resolution order is `--project-root`, then the `MAREFORMA_PROJECT_ROOT` environment variable, then discovery from the current directory (the first ancestor holding a `.mareforma/graph.db`).
+
+**Options**
+
+| Option | Default | Description |
+|---|---|---|
+| `--project-root PATH` | discovery | Project to serve. Falls back to `$MAREFORMA_PROJECT_ROOT`, then to discovery from the current directory. Resolved once at startup, never per request |
+| `--transport [stdio]` | `stdio` | Transport the server speaks. `stdio` is the Model Context Protocol default |
+
+**Examples**
+
+```bash
+# Serve the project discovered from the current directory:
+mareforma mcp serve
+
+# Serve an explicit project, pinned for the process lifetime:
+mareforma mcp serve --project-root /path/to/project
+```

@@ -42,9 +42,13 @@ on the page, like two independent labs.
 ## What Mareforma does
 
 Mareforma treats independence as a quantity to surface, not a verdict to declare.
-It sits outside the system that produced the finding, for the same reason you do
-not ask a company to audit its own accounts. A producer's own account of its work,
-however detailed, cannot supply the independent check that is missing.
+It does not pretend to sit outside the system that produced the finding: on the
+default library path it runs in the producer's own process, under the same user,
+with the signing key loaded in the same interpreter. It is not an external
+auditor, and claiming to be one would be the exact self-report it exists to
+replace. What it supplies instead is a structural check on the record and an
+honest account of its own reach, so a producer's account of its work is measured
+against what the run did rather than taken on its word.
 
 A finding enters the graph as a signed claim carrying its provenance: what it
 builds on, what it contradicts, who signed it, and what the run that produced it
@@ -54,7 +58,9 @@ page.
 - **Grounding.** The cheapest check: did real data reach this finding, or did the
   model fill the gap from its prior? `observe()` watches the run and returns
   GROUNDED, UNGROUNDED, or OPAQUE when the read happened somewhere it could not
-  see.
+  see. The catch is that a silent failure does not hide behind OPAQUE: when a
+  cited read is attempted and every open of that path fails, the scope lands
+  UNGROUNDED, so a pipeline that quietly read nothing is named, not excused.
 - **Effective independence.** The lead signal is a computed count: the number of
   pairwise-distinct (model, data, signer) checks behind a finding. A second key
   minted from the same model shares the same blind spots, so it does not raise
@@ -66,8 +72,10 @@ page.
   `ESTABLISHED` labels still resolve this release as deprecated aliases, but the
   number is what to read.
 - **The residual.** Where independence cannot be checked, Mareforma says so. The
-  trust map reports each property it computed, each it could only proxy, and each
-  it does not evaluate, instead of rounding up to a verdict.
+  trust map places each property at its tier: `COMPUTED` for what it measured
+  from evidence, `PROXIED` for what it could only reach through a stand-in whose
+  bound it names (re-execution stands in for faithfulness), and `DEFERRED` for
+  what it does not evaluate at all, instead of rounding up to a verdict.
 
 ## Who it is for
 

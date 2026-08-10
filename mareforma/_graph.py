@@ -9,8 +9,18 @@ Usage
 
   with mareforma.open() as graph:                  # context manager
       claim_id = graph.assert_claim("...", classification="ANALYTICAL")
-      results  = graph.query("topic X", min_support="REPLICATED")
+      results  = graph.query("topic X")
+      status   = graph.proposition_status(prop)    # the derived answer/question axes
       graph.validate(claim_id, validated_by="reviewer@example.org")
+
+Trust vocabulary
+----------------
+  Read trust off the two derived axes: ``Status`` per content_id is the state
+  of the answer, ``FrameStatus`` / ``question_status`` per frame_id is the
+  state of the question, both computed on every read from the graph. The
+  stored ``support_level`` column (PRELIMINARY -> REPLICATED -> ESTABLISHED)
+  is the legacy promotion ladder; its public labels are deprecated for v0.4.0,
+  though ``query(min_support=...)`` still filters on them for this release.
 
 Flow
 ----
@@ -18,13 +28,13 @@ Flow
     ├─ idempotency check (if key provided)
     ├─ validate classification
     ├─ INSERT via db.add_claim()
-    └─ REPLICATED check fires inside add_claim()
+    └─ convergence check fires inside add_claim() (writes support_level)
 
   query()
     └─ SELECT via db.query_claims() with text/support/classification filters
 
   validate()
-    └─ UPDATE via db.validate_claim(): requires REPLICATED, sets ESTABLISHED
+    └─ UPDATE via db.validate_claim(): the human-witness promotion gate
 """
 
 from __future__ import annotations

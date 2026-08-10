@@ -253,6 +253,12 @@ claim_id in `supports[]` and are signed by distinct keys **AND**
 at least one of those upstreams is itself `ESTABLISHED`. No agent can
 self-promote to `ESTABLISHED`.
 
+The `support_level` ladder above is the legacy stored axis. For the state of a
+proposition, read the two axes `graph.proposition_status(prop)` derives on every
+call: `status` (the answer, per `content_id`) and `question_status` (the
+question, per `frame_id`: `consistent` or `divided`). The `frame_status` key it
+also returns is deprecated for v0.4.0 in favour of `question_status`.
+
 ### ESTABLISHED-upstream rule
 
 REPLICATED requires an ESTABLISHED claim in the converging `supports[]`.
