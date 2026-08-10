@@ -312,3 +312,13 @@ def _module_level_names(source_path: Path) -> list[str]:
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             names.append(node.target.id)
     return [n for n in names if not n.startswith("__")]
+
+
+def _bootstrap_default_key() -> None:
+    """Create the XDG-default signing key (XDG is isolated per test)."""
+    from mareforma import signing
+
+    kp = signing.default_key_path()
+    kp.parent.mkdir(parents=True, exist_ok=True)
+    if not kp.exists():
+        signing.bootstrap_key(kp)

@@ -22,15 +22,7 @@ from mareforma import signing
 from mareforma._verify import claim_bound_sources
 from mareforma.cli import cli, _trust_map_plaintext
 from mareforma.db import open_db
-from tests._helpers import _requires_repo_checkout
-
-
-def _bootstrap_default_key() -> None:
-    """Create the XDG-default signing key (XDG is isolated per test)."""
-    kp = signing.default_key_path()
-    kp.parent.mkdir(parents=True, exist_ok=True)
-    if not kp.exists():
-        signing.bootstrap_key(kp)
+from tests._helpers import _bootstrap_default_key, _requires_repo_checkout
 
 
 def _count_validators() -> int:

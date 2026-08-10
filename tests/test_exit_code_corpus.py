@@ -42,13 +42,7 @@ from mareforma.cli import (
 )
 from mareforma._verify import classify_claim_verdict
 from mareforma.db import open_db
-
-
-def _bootstrap_default_key() -> None:
-    kp = signing.default_key_path()
-    kp.parent.mkdir(parents=True, exist_ok=True)
-    if not kp.exists():
-        signing.bootstrap_key(kp)
+from tests._helpers import _bootstrap_default_key
 
 
 # ---------------------------------------------------------------------------
