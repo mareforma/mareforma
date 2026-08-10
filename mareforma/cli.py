@@ -494,6 +494,14 @@ def status_cmd(as_json: bool) -> None:
             if count:
                 bar = "█" * min(count, 20)
                 click.echo(f"    {level:14} {bar}  {count}")
+        click.echo(
+            "  " + click.style(
+                "The support ladder (PRELIMINARY / REPLICATED / ESTABLISHED) is "
+                "a retired axis, removed in v0.4.0. A project stores one even if "
+                "no level was ever named. Read the computed status instead.",
+                fg="yellow",
+            )
+        )
 
     if report.failed_verification:
         click.echo(

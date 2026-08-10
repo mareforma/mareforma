@@ -84,6 +84,22 @@ mareforma = ["py.typed"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short --strict-markers -m 'not sdist'"
+filterwarnings = [
+    # The seed-anchor deprecation fires on ~180 seed=True call sites across the
+    # suite, most of them incidental scaffolding for tests about something else.
+    # Ignore it suite-wide, scoped by message and category so nothing else is
+    # touched. A blanket `error` is a trust-root defect: it would raise on the
+    # irrevocable root-enrollment notice (validators.py) before its stderr
+    # fallback runs. That the warning actually fires is proved by
+    # tests/test_seed_deprecation.py, which escalates this exact message to an
+    # error locally rather than suite-wide.
+    'ignore:assert_claim\(seed=True\) is deprecated:DeprecationWarning',
+    # Same treatment, same reason: the support-ladder retirement now warns on
+    # query(min_support=...), the path real callers take, and ~40 suite call
+    # sites pass it as scaffolding for tests about something else. It is proved
+    # to fire in tests/test_min_support_deprecation.py.
+    'ignore:query\(min_support=\.\.\.\) is deprecated:DeprecationWarning',
+]
 markers = [
     "adapters: tests exercising the mareforma.adapters.* namespace",
     "sdist: builds an sdist and runs the shipped suite inside it (~45s)",

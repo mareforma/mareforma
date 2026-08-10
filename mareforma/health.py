@@ -33,6 +33,14 @@ class HealthReport:
     # not partition with open / resolved.
     claims_contradicted: int = 0
     support_level_breakdown: dict[str, int] = field(default_factory=dict)
+    # True when the project carries any support_level, which every project with
+    # claims does: the column is NOT NULL DEFAULT 'PRELIMINARY', so a project
+    # that never named a level still stores one. The support ladder
+    # (PRELIMINARY / REPLICATED / ESTABLISHED) is a retired axis, removed in
+    # v0.4.0; the computed status is the axis to read. Surfaced so an operator
+    # who never typed a level still learns the vocabulary is retired. Read off
+    # the census above, so no extra scan of the claims table.
+    support_level_retired: bool = False
     # REPLICATED / ESTABLISHED claims still standing: open, and not marked
     # invalid by a signed contradiction verdict. The breakdown above is the
     # full census and counts a retracted claim like any other.
@@ -115,6 +123,11 @@ def compute_health(conn: sqlite3.Connection) -> HealthReport:
         # verdict-invalidated claim is no longer evidence of anything.
         if level in ("REPLICATED", "ESTABLISHED"):
             report.standing_promoted += r["n_standing"]
+
+    # A non-empty census means the project stores support levels (it always
+    # does once it has a claim), so the retired-ladder disclosure applies. Read
+    # off the grouped census above, not a fresh scan.
+    report.support_level_retired = bool(report.support_level_breakdown)
 
     # Re-verify the promoted rows (only those; see count_unverified_promoted) so a
     # forged support level cannot read green. Kept separate from the grouped

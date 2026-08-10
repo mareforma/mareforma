@@ -91,6 +91,7 @@ from .core import (
     VALID_CLASSIFICATIONS,
     VALID_SUPPORT_LEVELS,
     _SUPPORT_LEVEL_TIERS,
+    _unknown_min_support_message,
     _SHA256_HEX_RE,
     _CLAIM_ID_RE,
     _REACHABLE_CLAIM_CAP,

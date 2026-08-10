@@ -71,6 +71,60 @@ _LLM_NAMED_FIELDS = frozenset(_LLM_WRAP_FIELDS + _LLM_SANITIZE_FIELDS)
 # the checks that read it back cannot drift apart.
 DEFAULT_RUN_TOKEN = "agent"
 
+_MIN_SUPPORT_DEPRECATION = (
+    "query(min_support=...) is deprecated: the support ladder is retired and "
+    "the whole support_level column goes in v0.4.0, filter and all. Read the "
+    "trust map's independence axis, or proposition_status(), for how much "
+    "distinct backing a finding actually has."
+)
+
+
+def _caller_stacklevel() -> int:
+    """The stacklevel that attributes a warning to the first frame outside us.
+
+    A fixed number cannot be right here. ``query`` reaches its caller in four
+    frames, but ``query_for_llm`` delegates to ``query``, so the same warning
+    needs five to get past the library, and any future public read that
+    delegates would need its own count. A wrong count is not cosmetic: Python's
+    default filter ignores a DeprecationWarning unless it comes from
+    ``__main__``, so an attribution inside mareforma silences the notice for
+    every real caller, and it collapses every call site onto one dedup key so
+    only the first ever reports. Walking out of the package answers it for
+    every path at once. Falls back to 2 if the whole stack is ours, which only
+    happens when mareforma calls itself.
+    """
+    import sys
+    from pathlib import Path
+
+    package_dir = str(Path(__file__).resolve().parent)
+    frame = sys._getframe(1)
+    level = 1
+    while frame is not None:
+        if not str(Path(frame.f_code.co_filename).resolve()).startswith(package_dir):
+            return level
+        frame = frame.f_back
+        level += 1
+    return 2
+
+
+def _warn_min_support(value) -> None:
+    """Warn once per call when a read still filters on the retired ladder.
+
+    The retirement warned only on ``mareforma.REPLICATED``, the module
+    attribute, which is not how anyone uses the ladder: callers pass the level
+    as a plain string to ``min_support``. So the announcement reached the one
+    path nobody takes and stayed silent on the path everybody does, which would
+    have made the v0.4.0 removal arrive unannounced for every real caller.
+    """
+    if value is None:
+        return
+    import warnings as _warnings
+
+    _warnings.warn(
+        _MIN_SUPPORT_DEPRECATION, DeprecationWarning,
+        stacklevel=_caller_stacklevel(),
+    )
+
 
 def _model_lineage_of(grounding):
     """The model/method lineage a grounding verdict carries, or None.
@@ -704,6 +758,7 @@ class EpistemicGraph:
             empty graph; narrow the query or lower ``limit``.
         """
         self._check_open()
+        _warn_min_support(min_support)
         return _db.query_claims(
             self._conn,
             text=text,
@@ -848,6 +903,7 @@ class EpistemicGraph:
             Same scan ceiling as :meth:`query`, on the ranked fetch.
         """
         self._check_open()
+        _warn_min_support(min_support)
         return _db.search_claims(
             self._conn,
             query,
@@ -3404,7 +3460,7 @@ class EpistemicGraph:
         """
         self._check_open()
 
-        def query_graph(topic: str, min_support: str = "PRELIMINARY") -> str:
+        def query_graph(topic: str, min_support: str | None = None) -> str:
             """Query the epistemic graph for what is already established about a topic.
 
             Call this BEFORE asserting any new finding. If REPLICATED or ESTABLISHED
@@ -3417,6 +3473,12 @@ class EpistemicGraph:
                 Substring to search for in claim text (case-insensitive).
             min_support:
                 Minimum trust level: PRELIMINARY, REPLICATED, or ESTABLISHED.
+                Defaults to no filter. It used to default to ``PRELIMINARY``,
+                which is the floor and so filtered nothing, but still counted
+                as the caller asking for the retired support ladder: every call
+                warned about a deprecation the caller had not opted into, and
+                the warning named a library default the agent author could not
+                change. Passing nothing now means asking for nothing.
 
             Returns
             -------

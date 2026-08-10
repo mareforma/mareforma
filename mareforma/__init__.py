@@ -688,10 +688,15 @@ __all__ = [
 # the effective-independence number, not a single support word, so these labels
 # are retired from the public surface. They keep working for one release as
 # string aliases and emit a DeprecationWarning when read via the public module;
-# a future release removes them. This is a public-label retirement ONLY: the
-# stored ``support_level`` strings and the promotion machinery are unchanged
-# (internal callers use the string literals directly, never this module
-# attribute, so the suite does not warn on itself).
+# v0.4.0 removes them.
+#
+# The labels go first, the ladder goes with them. v0.4.0 drops the stored
+# ``support_level`` column, the promotion machinery, and the
+# ``query(min_support=...)`` filter, which is why that filter warns too
+# (``_graph._warn_min_support``): the string path is the one real callers take,
+# and a removal that only announced itself through a module attribute would
+# reach nobody. Internal callers use the string literals directly, never this
+# module attribute, so the suite does not warn on itself here.
 _DEPRECATED_SUPPORT_LABELS = ("REPLICATED", "ESTABLISHED")
 
 
@@ -708,8 +713,10 @@ def __getattr__(name: str) -> str:
         _warnings.warn(
             f"The public support-level label `mareforma.{name}` is deprecated; "
             "the trust map now leads with the effective-independence number, "
-            "not a support word. This alias will be removed in v0.4. Read the "
-            "independence axis of the trust map instead.",
+            "not a support word. v0.4.0 removes the whole support ladder, not "
+            "just this alias: the stored support_level column, the promotion "
+            "machinery, and the query(min_support=...) filter go with it. Read "
+            "the independence axis of the trust map instead.",
             DeprecationWarning,
             stacklevel=2,
         )

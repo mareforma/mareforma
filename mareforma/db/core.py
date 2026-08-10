@@ -89,6 +89,22 @@ _SUPPORT_LEVEL_TIERS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _unknown_min_support_message(value: str | None) -> str:
+    """The rejection message for an unrecognised ``min_support`` value.
+
+    Lists the accepted levels, which still filter this release, and names the
+    retirement rather than teaching the ladder as the axis to read: a confused
+    reader meets the deprecation at the moment they are most likely to copy the
+    old vocabulary.
+    """
+    return (
+        f"Unknown min_support {value!r}. Use one of: "
+        f"{', '.join(VALID_SUPPORT_LEVELS)} (these still filter this release). "
+        "The support ladder is deprecated and removed in v0.4.0; read the "
+        "computed status instead as the trust axis."
+    )
+
+
 
 def _serialize_predicate_payload(payload: dict | None) -> str:
     """Serialize an adapter's structured predicate_payload for storage.
@@ -1560,7 +1576,15 @@ def add_claim(
     # ESTABLISHED-upstream rule blocks the first REPLICATED forever).
     seed_envelope_json: str | None = None
     if seed:
-        # Seed envelopes sign claim_id + validator_keyid + seeded_at , 
+        # Deprecated this release, removed in v0.4.0. Fires once per seed call
+        # and never on the honest (seed=False) path, since it is gated on the
+        # ``if seed:`` branch. stacklevel aims past add_claim and the graph
+        # wrapper at the caller's assert_claim(seed=True); the message is
+        # self-identifying if a direct db-layer caller shifts the frame.
+        from mareforma._deprecation import warn_deprecated_seed
+
+        warn_deprecated_seed(stacklevel=6)
+        # Seed envelopes sign claim_id + validator_keyid + seeded_at ,
         # NOT status. A non-open seed could be flipped back to 'open'
         # via update_claim later (status is mutable on signed rows) and
         # the resurrection would carry no envelope evidence. Refuse the
@@ -5876,10 +5900,7 @@ def query_claims(
 
     if min_support is not None:
         if min_support not in VALID_SUPPORT_LEVELS:
-            raise ValueError(
-                f"Unknown min_support '{min_support}'. "
-                f"Use one of: {', '.join(VALID_SUPPORT_LEVELS)}"
-            )
+            raise ValueError(_unknown_min_support_message(min_support))
         tiers = _SUPPORT_LEVEL_TIERS[min_support]
         tier_placeholders = ",".join("?" * len(tiers))
         conditions.append(f"support_level IN ({tier_placeholders})")
@@ -6079,10 +6100,7 @@ def search_claims(
     fts_query = _validate_fts5_query(query)
 
     if min_support is not None and min_support not in VALID_SUPPORT_LEVELS:
-        raise ValueError(
-            f"Unknown min_support '{min_support}'. "
-            f"Use one of: {', '.join(VALID_SUPPORT_LEVELS)}"
-        )
+        raise ValueError(_unknown_min_support_message(min_support))
     if classification is not None and classification not in VALID_CLASSIFICATIONS:
         raise ValueError(
             f"Unknown classification '{classification}'. "

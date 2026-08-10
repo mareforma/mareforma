@@ -189,3 +189,38 @@ class TestFileOutput:
         _open(tmp_path).close()
         result = JSONLDExporter(tmp_path).write()
         assert isinstance(result, Path)
+
+
+class TestCallerSuppliedRowsRefuseSubstitution:
+    """A caller-supplied row that omits a field is refused, not fabricated.
+
+    Rows from ``list_claims`` always carry ``support_level`` and
+    ``classification`` (both columns are NOT NULL), so the normal export is
+    unaffected. A caller that hands over its own row missing one of them used to
+    get a fabricated ``PRELIMINARY`` / ``INFERRED`` the record never carried;
+    now the export refuses, matching the sibling fields that hard-index.
+    """
+
+    def _one_row(self, tmp_path: Path) -> dict:
+        from mareforma.db import list_claims
+
+        conn = _open(tmp_path)
+        try:
+            add_claim(conn, tmp_path, "a claim")
+            rows = list_claims(conn)
+        finally:
+            conn.close()
+        assert rows, "expected one claim to export"
+        return dict(rows[0])
+
+    def test_export_refuses_row_missing_support_level(self, tmp_path: Path) -> None:
+        row = self._one_row(tmp_path)
+        del row["support_level"]
+        with pytest.raises(KeyError, match="support_level"):
+            JSONLDExporter(tmp_path).export(claims=[row])
+
+    def test_export_refuses_row_missing_classification(self, tmp_path: Path) -> None:
+        row = self._one_row(tmp_path)
+        del row["classification"]
+        with pytest.raises(KeyError, match="classification"):
+            JSONLDExporter(tmp_path).export(claims=[row])

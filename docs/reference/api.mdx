@@ -1224,10 +1224,12 @@ The retrieval view for one proposition. Accepts a `content_id` or a
 `Proposition`. `None` if not registered.
 
 **Returns** `dict` with `content_id`, `frame_id`, `direction`, `status`,
-`independent_support`, `independent_refute`, `frame_status`, `status_policy`,
-`lines_skipped`, the count of this proposition's evidence lines that were left
-out of the counts, and `post_hoc`. A dropped refutation reads as consensus, so
-read `lines_skipped` next to the two counts.
+`independent_support`, `independent_refute`, `question_status` (the state of the
+question, either consistent or divided), `frame_status` (its retired
+predecessor, removed in v0.4.0), `status_policy`, `lines_skipped`, the count of
+this proposition's evidence lines that were left out of the counts, and
+`post_hoc`. A dropped refutation reads as consensus, so read `lines_skipped` next
+to the two counts.
 
 Each skipped line records its reason once in `.mareforma/health.jsonl`, so a
 non-zero `lines_skipped` is always explainable. It is written once per handle,

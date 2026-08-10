@@ -50,9 +50,11 @@ from .proposition import (
 from .status import (
     STATUS_POLICY,
     FrameStatus,
+    QuestionStatus,
     Status,
     compute_frame_status,
     compute_status,
+    question_status_of,
 )
 
 __all__ = [
@@ -85,6 +87,8 @@ __all__ = [
     # status
     "Status",
     "FrameStatus",
+    "QuestionStatus",
+    "question_status_of",
     "compute_status",
     "compute_frame_status",
     "STATUS_POLICY",

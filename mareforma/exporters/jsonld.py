@@ -24,6 +24,15 @@ should treat it as a mareforma-native format with media type
 ``application/x-mareforma-graph+json``, not as a standards-compliant
 PROV-O graph. See ``docs/for-agents/agents.mdx`` under "Export and
 signed bundles" for the shape.
+
+Deprecation
+-----------
+``supportLevel`` (the ``mare:supportLevel`` term in the ``@context``)
+carries the retired support ladder (PRELIMINARY / REPLICATED /
+ESTABLISHED). The ladder is deprecated; read the computed status axis
+instead. The term still emits this release so existing consumers are not
+broken. What happens to ``mare:supportLevel`` at v0.4.0, when the stored
+column is removed, is an open format question, not decided here.
 """
 
 from __future__ import annotations
@@ -210,8 +219,13 @@ class JSONLDExporter:
             "@type": "mare:Claim",
             "@id": f"mare:claim/{claim['claim_id']}",
             "claimText": claim["text"],
-            "classification": claim.get("classification", "INFERRED"),
-            "supportLevel": claim.get("support_level", "PRELIMINARY"),
+            # Hard-index, do not substitute a default. Both columns are NOT NULL
+            # in the schema, so a claim from list_claims always carries them; a
+            # caller-supplied row that omits one is refused here rather than
+            # exported as a fabricated level or classification the record never
+            # carried, matching the sibling fields below.
+            "classification": claim["classification"],
+            "supportLevel": claim["support_level"],
             "claimStatus": claim["status"],
             "generatedBy": claim.get("generated_by", "agent"),
             "dateCreated": claim["created_at"],
