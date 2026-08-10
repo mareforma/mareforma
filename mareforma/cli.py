@@ -2228,6 +2228,11 @@ def mcp_serve(
     both non-deterministic and a directory-traversal surface. This callback
     forwards the option-or-environment value; the server performs the discovery
     fallback and pins the resolved root at startup.
+
+    The project has to be writable and the server refuses to start if it is
+    not. It signs nothing and writes no claims, but SQLite opens the graph
+    read-write and journals beside it even on a pure read. Serve from a copy if
+    the original must stay untouched.
     """
     import os
 

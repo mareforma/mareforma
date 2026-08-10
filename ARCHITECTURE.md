@@ -221,10 +221,26 @@ adding any signed field:
   run specs, one fresh interpreter per run, resumable (resume honors
   only a run record signed by the auditor's key), with a crashing
   target's partial receipts and its own exit code recorded.
+- `mareforma mcp serve` exposes the read side to an agent over the Model
+  Context Protocol (`mareforma/mcp/server.py`, the `mcp` optional extra). It
+  serves one project, pinned once at startup, through six read-and-verify
+  tools: query, search, fetch a claim, read a proposition's derived axes,
+  fetch a trust map, and verify a claim. It holds no write path, so an agent
+  can look a claim up and audit it across the transport but cannot assert one:
+  a claim written over the boundary would carry no observed grounding, and the
+  record exists to hold claims to the grounding they earned. It loads no
+  signing key, so it never signs or enrols one, and it runs the same verify
+  code path the `verify` command runs, so the two surfaces cannot drift. The
+  graph underneath still opens read-write, because SQLite journals even on a
+  pure read: the bound is on what the server can assert, not on what it touches
+  on disk, and a project that is not writable is refused at startup. Every row
+  it returns is sanitized and wrapped as untrusted data, since a tool result
+  lands in a model's context by definition of the protocol.
 
 The `map`, `verify`, `diagnose`, and `audit` commands live in
-`mareforma/cli.py` (the audit runner in `mareforma/audit.py`); the tier
-semantics and property placement live in `mareforma/trust_map.py`.
+`mareforma/cli.py` (the audit runner in `mareforma/audit.py`, the read-only
+MCP server in `mareforma/mcp/server.py`); the tier semantics and property
+placement live in `mareforma/trust_map.py`.
 
 ## Trust layer
 

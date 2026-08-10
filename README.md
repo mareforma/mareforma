@@ -165,6 +165,7 @@ mareforma bootstrap   # optional: sign your claims and enable the public log
 | **Verify** | `mareforma verify <claim>` re-checks the signatures, that the grounding verdict matches the data the finding cites, and the support level, with stable exit codes for CI (0 verified, 1 tampered, 2 unverifiable). |
 | **Diagnose a run** | `mareforma diagnose -- python run.py` runs a target under the observer and reports what data actually flowed, and where a silent fallback hid. |
 | **Audit a pipeline** | `mareforma audit --findings map.json -- python run.py` runs a pipeline that never imports mareforma and signs one grounding receipt per finding, from the observer alone. |
+| **Serve a project to an agent** | `mareforma mcp serve` serves one project over the Model Context Protocol, read and verify only. Six tools to query, inspect and verify; no write path. |
 | **Optional public log** | Publish a claim to a public, append-only log for an independent, timestamped record. |
 | **Local-first** | Runs on local SQLite. Network only for the optional log. |
 

@@ -20,6 +20,10 @@ uv sync --extra dev   # or: python -m venv .venv && . .venv/bin/activate && pip 
 uv run pytest         # full suite must pass before any commit
 ```
 
+Add `--extra mcp` if you touch the Model Context Protocol server. Its tests
+skip without the SDK installed, so without that extra the suite passes while
+`tests/test_mcp_server.py` never runs. CI covers it on one pinned leg.
+
 Python ≥ 3.10. Dependencies are minimal (`click`, `tomli-w`, `tomli`,
 `httpx`, `cryptography`, `rfc8785`); we add new runtime deps reluctantly.
 
