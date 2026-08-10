@@ -43,8 +43,9 @@ _KNOWN_BOUNDS = (
     "than the wrapped HTTP sessions) is not swapped, so its reads are invisible.",
     "The scope reaches only the asyncio tasks created inside it; a task that "
     "predates the scope is seamed at entry and lands OPAQUE.",
-    "A read on a fork-started multiprocessing child is not observed (fork skips "
-    "interpreter startup); it lands OPAQUE via the subprocess seam.",
+    "A read on a multiprocessing child is not observed: the child runs in a "
+    "separate interpreter. Every start method (fork, spawn, forkserver) is "
+    "seamed at process start, so the read lands OPAQUE via the subprocess seam.",
     "Foreign-runtime readers (R, Julia, a CLI subprocess) are OPAQUE, not "
     "GROUNDED — the observer instruments Python I/O only.",
     "For a plain file, GROUNDED means the cited file was opened and is non-empty; "

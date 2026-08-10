@@ -169,6 +169,36 @@ def open(  # noqa: A001
     # split the corpus across two directories with no warning.
     root = Path(path).resolve() if path is not None else Path.cwd()
 
+    # Refuse the sqlite-style mistake before open_db can act on it. ``open()``
+    # takes the project ROOT directory; the graph lives at
+    # ``<root>/.mareforma/graph.db`` and is managed here. A caller who passes the
+    # database file itself (``mareforma.open("graph.db")``) would otherwise get a
+    # nested project created inside a directory literally named ``graph.db``, or
+    # a cryptic OS error when the path is an existing file. Name it instead.
+    if path is not None:
+        if root.is_file():
+            raise ValueError(
+                f"mareforma.open() takes the project root directory, but "
+                f"{root} is a file. The graph is stored at "
+                "<root>/.mareforma/graph.db and managed for you; pass the "
+                "directory that should hold .mareforma/, or omit the path to "
+                "use the current directory."
+            )
+        # The sqlite-style mistake: a path pointed at the graph.db file (by name
+        # or inside a .mareforma/ directory) that is NOT already a project.
+        # Refusing it here stops open_db from creating a nested project inside a
+        # directory named graph.db. An existing project keeps opening, however it
+        # happens to be named, because it carries its own .mareforma/graph.db.
+        looks_like_db_file = root.name == "graph.db" or root.parent.name == ".mareforma"
+        already_a_project = (root / ".mareforma" / "graph.db").exists()
+        if looks_like_db_file and not already_a_project:
+            raise ValueError(
+                f"mareforma.open() takes the project root directory, not the "
+                f"graph.db file. {root} looks like the database file; pass the "
+                "directory that should hold .mareforma/graph.db, or omit the "
+                "path to use the current directory."
+            )
+
     # Everything that depends only on the arguments is decided BEFORE
     # open_db, which creates <root>/.mareforma/ and the WAL-backed store.
     # A call that refuses must leave no project behind, in whatever
@@ -297,16 +327,9 @@ def open(  # noqa: A001
                 _os.close(fd)
                 # Best-effort directory fsync so the creation itself
                 # survives a crash. Failure here is not fatal: the data is
-                # already durable.
-                if hasattr(_os, "O_DIRECTORY"):
-                    try:
-                        dir_fd = _os.open(str(_pinned_path.parent), _os.O_DIRECTORY)
-                        try:
-                            _os.fsync(dir_fd)
-                        finally:
-                            _os.close(dir_fd)
-                    except OSError:
-                        pass
+                # already durable. Same routine the atomic-write path uses.
+                from mareforma._atomic import fsync_parent
+                fsync_parent(_pinned_path)
             except FileExistsError:
                 # Lost the race. Re-check the just-written file.
                 existing = _pinned_path.read_bytes()

@@ -121,6 +121,7 @@ def ensure_installed() -> None:
         _wrap_sqlite()
         _wrap_thread_seams()
         _wrap_executor_seams()
+        _wrap_process_seams()
         _wrap_import_hook()
         _wrap_third_party_if_present()
         _installed = True
@@ -482,6 +483,46 @@ def _mark_thread_seam(detail: str) -> None:
         scope.record_seam("thread", detail)
     except BaseException as exc:  # noqa: BLE001
         scope.mark_error(f"thread seam wrapper failed: {type(exc).__name__}")
+
+
+def _wrap_process_seams() -> None:
+    """Seam a multiprocessing child started inside a scope.
+
+    A child runs in a separate interpreter the observer cannot instrument, so a
+    read on the far side is invisible and must force OPAQUE, never a confident
+    UNGROUNDED. The audit hook catches ``os.fork`` / ``os.exec``, but a
+    ``forkserver`` child launched while the fork server is already running
+    reaches the parent only as a ``socket.connect`` to that server. A socket seam
+    is scoped to network citations and does NOT block a local-file citation, so
+    such a read lands a confident false UNGROUNDED instead of OPAQUE. Wrapping
+    ``BaseProcess.start`` records the subprocess seam at the hand-off, at the one
+    point every start method funnels through, the same primary mechanism the
+    thread seams use where the audit events are unreliable. Class-level and a
+    no-op outside a scope.
+    """
+    if "multiprocessing.BaseProcess.start" in _reals:
+        return
+    from multiprocessing.process import BaseProcess
+
+    real_start = BaseProcess.start
+    _reals["multiprocessing.BaseProcess.start"] = real_start
+
+    @functools.wraps(real_start)
+    def observed_start(self, *args, **kwargs):
+        _mark_process_seam("multiprocessing.BaseProcess.start")
+        return real_start(self, *args, **kwargs)  # host behavior unchanged
+
+    BaseProcess.start = observed_start
+
+
+def _mark_process_seam(detail: str) -> None:
+    scope = _scope.current_scope()
+    if scope is None:
+        return
+    try:
+        scope.record_seam("subprocess", detail)
+    except BaseException as exc:  # noqa: BLE001
+        scope.mark_error(f"process seam wrapper failed: {type(exc).__name__}")
 
 
 # -- third-party: only if already imported -----------------------------------
@@ -1971,6 +2012,7 @@ SEAM_WRAPS: tuple[str, ...] = (
     "_thread.start_new_thread",
     "ThreadPoolExecutor.submit",
     "ThreadPoolExecutor.map",
+    "multiprocessing.BaseProcess.start",
     "builtins.__import__",
     "importlib.import_module",
 )
