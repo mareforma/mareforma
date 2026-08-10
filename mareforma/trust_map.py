@@ -535,8 +535,19 @@ def build_trust_map(
     # the same one ``mareforma verify`` uses, so the standalone map is honest.
     sig_verified = None
     asserter_enrolled = None
-    if claim.get("asserter_keyid") and claim.get("signature_bundle"):
-        from mareforma.db import verify_claim_signatures
+    # EITHER column, not both. Gating on both let a row carrying a stapled
+    # ``asserter_keyid`` and no bundle skip the check entirely, so
+    # ``att_verified`` fell back to the stored ``verified`` gate below, which
+    # get_claim passes through True for PRELIMINARY rows. The map then read
+    # "signature re-verified on read" beside a keyid, for a claim with no
+    # signature at all, while ``mareforma verify`` called the same claim
+    # tampered. The MCP server now exposes this map standalone, with no verdict
+    # beside it, so the disagreement had nothing to correct it.
+    if claim.get("asserter_keyid") or claim.get("signature_bundle"):
+        from mareforma.db import (
+            _extract_signature_bundle_keyid,
+            verify_claim_signatures,
+        )
         from mareforma.validators import is_enrolled
 
         sig_verified, _ = verify_claim_signatures(conn, claim)
@@ -544,7 +555,16 @@ def build_trust_map(
         # it can only check the claim-binding, never the signature against a
         # pubkey (the lean model has no key to check it against). Tell the two
         # apart so the map does not claim "re-verified" for a binding-only pass.
-        asserter_enrolled = is_enrolled(conn, claim["asserter_keyid"])
+        #
+        # Read enrolment on the signer the BUNDLE names, the same keyid
+        # verify_claim_signatures checks, not the row's unsigned column: a row
+        # whose column disagrees with its envelope is refused above, and a row
+        # with no bundle has no signer to look up.
+        bundle_keyid = _extract_signature_bundle_keyid(
+            claim.get("signature_bundle")
+        )
+        if bundle_keyid is not None:
+            asserter_enrolled = is_enrolled(conn, bundle_keyid)
     effective = _effective_independence(conn, claim_id, disclose=disclose)
     return _assemble(
         claim, n_roots, has_inclusion,

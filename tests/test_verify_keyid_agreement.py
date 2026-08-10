@@ -287,3 +287,55 @@ class TestBundleWithNoSigner:
             assert ok is False
         finally:
             conn.close()
+
+
+class TestTrustMapDoesNotFailOpen:
+    """The map must not vouch for a signature that is not there.
+
+    ``build_trust_map`` gated its re-verification on ``asserter_keyid`` AND
+    ``signature_bundle``, so a row carrying a stapled keyid and no bundle
+    skipped the check and fell back to the stored ``verified`` gate, which
+    get_claim passes through True for PRELIMINARY rows. The map then printed
+    "signature re-verified on read" beside the root's keyid for a claim with no
+    signature at all, while ``mareforma verify`` called the same claim tampered.
+    The MCP server exposes this map standalone, with no verdict beside it.
+    """
+
+    def test_a_stapled_keyid_with_no_bundle_does_not_read_as_verified(
+        self, tmp_path: Path,
+    ) -> None:
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            anchor = g.assert_claim("anchor", generated_by="agent/x")
+            root_keyid = g.get_claim(anchor)["asserter_keyid"]
+        with mareforma.open(tmp_path, load_key=False) as g:
+            cid = g.assert_claim("unsigned finding", classification="ANALYTICAL")
+
+        conn = _db(tmp_path)
+        try:
+            # Allowed: the laundering trigger guards the keyid only WHEN the row
+            # already carried a bundle, so stapling onto an unsigned row slips it.
+            conn.execute(
+                "UPDATE claims SET asserter_keyid = ? WHERE claim_id = ?",
+                (root_keyid, cid),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with mareforma.open(tmp_path, load_key=False) as g:
+            props = g.trust_map(cid).to_dict()["properties"]
+        att = next(p for p in props if p["name"] == "attributability")
+        assert "failed re-verification" in att["residual"], att
+        assert "re-verified on read" != att["residual"]
+
+    def test_an_honest_signed_claim_still_reads_reverified(
+        self, tmp_path: Path,
+    ) -> None:
+        """The control: the fix must not demote a genuinely signed claim."""
+        root_key = _bootstrap_key(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            cid = g.assert_claim("honest finding", generated_by="agent/x")
+            props = g.trust_map(cid).to_dict()["properties"]
+        att = next(p for p in props if p["name"] == "attributability")
+        assert att["residual"] == "signature re-verified on read", att
