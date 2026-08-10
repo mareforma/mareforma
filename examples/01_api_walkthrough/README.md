@@ -11,6 +11,13 @@ python 01_api_walkthrough.py
 No external dependencies. Uses a temporary directory, safe to run anywhere.
 (`sep` and `show` in the listings are tiny print helpers; see the script.)
 
+Trust reads off the derived axes `graph.proposition_status(prop)` returns:
+`status` per `content_id` (the answer) and `question_status` per `frame_id` (the
+question). Sections 5 and 6 exercise the stored `support_level` ladder, the
+legacy per-claim axis whose `REPLICATED` / `ESTABLISHED` public labels are
+deprecated for v0.4.0. It is still functional this release, which is why the
+walkthrough still shows it.
+
 ## 1. Open
 
 ```python

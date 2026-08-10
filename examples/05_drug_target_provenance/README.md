@@ -27,6 +27,11 @@ did it find?" but "how did it find it?":
 An `INFERRED` finding and an `ANALYTICAL` finding can read identically. The graph
 records the distinction permanently, at assertion time.
 
+Trust itself reads off the derived axes `graph.proposition_status(prop)` returns:
+`status` per `content_id` (the answer) and `question_status` per `frame_id` (the
+question). The `support_level` ladder this example prints is the legacy stored
+per-claim axis, deprecated for v0.4.0.
+
 ## Two forks
 
 | Fork | Disease | Cell type |

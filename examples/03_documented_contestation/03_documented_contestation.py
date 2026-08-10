@@ -115,9 +115,12 @@ _, assert_finding_c = [tool(fn) for fn in graph.get_tools(
 
 sep("Setup, prior consensus (ESTABLISHED)")
 
+# support_level (PRELIMINARY / REPLICATED / ESTABLISHED) is the legacy stored
+# ladder, deprecated for v0.4.0; trust reads off the derived axes (status per
+# content_id, question_status per frame_id). It stays functional this release.
 # Bootstrap an ESTABLISHED upstream the two lab agents can converge on.
 # Under the ESTABLISHED-upstream rule, REPLICATED requires at least one
-# upstream claim with support_level='ESTABLISHED' in supports[] , 
+# upstream claim with support_level='ESTABLISHED' in supports[] ,
 # matches Cochrane/GRADE evidence chains. seed=True asserts directly
 # at ESTABLISHED with a signed seed envelope; only the loaded key
 # (auto-enrolled as root above) can produce one.

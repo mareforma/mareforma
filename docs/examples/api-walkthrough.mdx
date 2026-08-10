@@ -10,6 +10,13 @@ description: "Complete EpistemicGraph API in a single runnable script. No extern
 Every API method demonstrated in sequence: assert, query, get, validate.
 Runs in a temporary directory with no external dependencies.
 
+Trust reads off the derived axes `graph.proposition_status(prop)` returns:
+`status` per `content_id` (the answer) and `question_status` per `frame_id` (the
+question). Steps 5 and 6 below exercise the stored `support_level` ladder, the
+legacy per-claim axis whose `REPLICATED` / `ESTABLISHED` public labels are
+deprecated for v0.4.0; the walkthrough keeps them because they are still
+functional this release.
+
 ## What it covers
 
 1. **Open**: zero setup, no init required

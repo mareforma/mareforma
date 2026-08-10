@@ -248,6 +248,8 @@ ESTABLISHED omit both.
 
 REPLICATED / ESTABLISHED rows are re-verified on read: a row whose signature fails to verify is excluded from the result. Never raises.
 
+`min_support` and the `support_level` result key are the legacy stored promotion ladder. They stay functional this release, but their `REPLICATED` / `ESTABLISHED` public labels are deprecated for v0.4.0. To read trust, use the derived axes `graph.proposition_status(prop)` returns: `status` (the answer, per `content_id`) and `question_status` (the question, per `frame_id`).
+
 ---
 
 ### `search(query, *, min_support=None, classification=None, limit=20, include_unverified=False, include_invalidated=False)`

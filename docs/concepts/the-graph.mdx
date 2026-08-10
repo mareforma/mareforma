@@ -15,10 +15,16 @@ upstream_ref ──► ANALYTICAL claim (lab_b)  ──┘
                     └──► DERIVED synthesis ──► (human) ──► ESTABLISHED
 ```
 
-Trust is derived from this structure. The more independent paths converge
-on the same upstream evidence, the higher the support level. A single agent
-asserting the same claim a thousand times is still PRELIMINARY: independence
-of provenance paths is what matters.
+Trust is derived from this structure, and read off two derived axes: `Status`
+per `content_id` (the state of the answer) and `question_status` per `frame_id`
+(the state of the question), both computed on every read from
+`graph.proposition_status(prop)`. The more independent paths converge on the
+same upstream evidence, the stronger a proposition's status. A single agent
+asserting the same claim a thousand times stays at the bottom of the scale:
+independence of provenance paths is what matters. The stored `support_level`
+ladder (`PRELIMINARY` / `REPLICATED` / `ESTABLISHED`) shown above is the legacy
+per-claim axis; its `REPLICATED` / `ESTABLISHED` public labels are deprecated for
+v0.4.0.
 
 ## supports[]
 

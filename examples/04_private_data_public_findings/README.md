@@ -5,6 +5,13 @@ Provenance travels; proprietary data does not. Lab A publishes a provenance
 trace, Lab B reads the trace (not the data), replicates on its own private
 dataset, and the graph answers three replication questions automatically.
 
+Trust reads off the derived axes `graph.proposition_status(prop)` returns:
+`status` per `content_id` (the answer) and `question_status` per `frame_id` (the
+question). The `REPLICATED` convergence this example turns on lives on the stored
+`support_level` ladder, the legacy per-claim axis deprecated for v0.4.0; read the
+derived independence axis, not the stored label, to tell a real convergence from
+a spurious one.
+
 Each step below is the code from
 [`04_private_data_public_findings.py`](04_private_data_public_findings.py)
 followed by the console output it prints.

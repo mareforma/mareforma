@@ -6,6 +6,12 @@ Run:
 
 No external dependencies. Uses a temporary directory, safe to run anywhere.
 
+Trust reads off the derived axes graph.proposition_status(prop) returns: status
+per content_id (the answer) and question_status per frame_id (the question).
+Steps 5 and 6 exercise the stored support_level ladder, the legacy per-claim axis
+whose REPLICATED / ESTABLISHED public labels are deprecated for v0.4.0 and still
+functional this release.
+
 Sections
 --------
   1. Open                  zero setup, context manager
