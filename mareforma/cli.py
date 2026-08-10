@@ -1108,13 +1108,8 @@ def _verify_claim(target: str, as_json: bool, redact_home: bool) -> int:
     definite tamper/violation (1).
     """
     import mareforma
-    from mareforma.db import (
-        DatabaseError,
-        _extract_signature_bundle_keyid,
-        verify_claim_signatures,
-    )
-    from mareforma.observe._binding import check_grounding_binding
-    from mareforma.trust_map import build_trust_map, parse_grounding_record
+    from mareforma._verify import TAMPERED, VERIFIED, classify_claim_verdict
+    from mareforma.db import DatabaseError
 
     def emit_json(payload: dict) -> None:
         # Every JSON path, success AND failure, honors --redact-home. The
@@ -1161,106 +1156,40 @@ def _verify_claim(target: str, as_json: bool, redact_home: bool) -> int:
                     f"claim {target!r} not found in this project; cannot verify"
                 )
 
-            # Two lists, because the exit-code contract splits on exactly this:
-            # *problems* is a definite NO (exit 1), something was checked and
-            # failed; *unchecked* is missing material (exit 2), something could
-            # not be checked at all. A CI gate keys on the difference.
-            problems: list[str] = []
-            unchecked: list[str] = []
-            # Signature re-verification. Two complementary checks:
-            #  (a) the tier-gated read flag (ESTABLISHED validation envelope /
-            #      REPLICATED participant bundle), and
-            #  (b) an audit-grade, tier-INDEPENDENT re-check (signed-field
-            #      binding + asserter + role signatures) that catches a tampered
-            #      PRELIMINARY signed claim the flag would pass through.
-            if claim.get("signature_bundle") and not claim.get("verified"):
-                problems.append("signature failed re-verification on read")
-            sig_ok, sig_reason = verify_claim_signatures(graph._conn, claim)
-            if not sig_ok:
-                problems.append(sig_reason)
-            # Auditor mode verifies against enrolled validator pubkeys only. A
-            # signed claim whose named signer is not an enrolled validator cannot
-            # be authenticated from public material: verify_claim_signatures could
-            # only confirm the claim binding, never the signature. Reporting that
-            # as "verified" (exit 0) let a CI gate pass a forged all-zero signature
-            # under a keyid that was never enrolled, the sixth read surface that
-            # said something false about a rejected row. A named signer that does
-            # not authenticate is not a clean verdict.
-            #
-            # It is not a tamper verdict either. Nothing was checked here, so
-            # nothing was caught: the auditor is missing the signer's pubkey,
-            # which is the exit-2 case, the same reading the bundle path gives a
-            # bundle it has no key for. Calling it exit 1 told a CI gate a claim
-            # was tampered on the strength of a key the project never enrolled.
-            #
-            # Read enrollment on the SIGNER THE BUNDLE NAMES, the same keyid
-            # verify_claim_signatures checks, not the row's asserter_keyid column.
-            # The column is an unsigned denormalisation: a bundle signed by an
-            # unenrolled key stapled under a row naming the enrolled root would
-            # otherwise disclose the root's enrollment over a signature the root
-            # never made. The db guard already refuses that disagreement; reading
-            # the bundle keyid here keeps the two surfaces from ever disagreeing.
-            bundle_keyid = _extract_signature_bundle_keyid(
-                claim.get("signature_bundle"))
-            if bundle_keyid is not None:
-                from mareforma.validators import is_enrolled
-
-                if not is_enrolled(graph._conn, bundle_keyid):
-                    unchecked.append(
-                        "signer keyid is not an enrolled validator, so the "
-                        "signature cannot be authenticated from public "
-                        "material. This is unverifiable, not a failure; enroll "
-                        "the signer's key to reach a verdict."
-                    )
-
-            # Grounding→citation binding re-check. Bind on ``grounded_sources``
-            # (the cited sources a read was actually observed for), not the
-            # declared ``cited_sources``, matching the write side and the
-            # verify-on-read path (mareforma.db.restore). A producer who declares
-            # a dataset in cites but reads only a decoy grounds on the decoy, so
-            # the declared set would falsely MATCH. The check runs even when the
-            # set is EMPTY, because "finding cites data + verdict grounded on none
-            # of it" is itself a binding violation. A pre-binding verdict has no
-            # such field and is annotated by the trust map, not failed here.
-            grounding = parse_grounding_record(claim.get("observed_grounding"))
-            if (
-                isinstance(grounding, dict)
-                and grounding.get("grounding") == "GROUNDED"
-                and grounding.get("grounded_sources") is not None
-            ):
-                verdict_grounded = tuple(grounding.get("grounded_sources") or ())
-                finding_sources = _claim_bound_sources(claim)
-                result = check_grounding_binding(verdict_grounded, finding_sources)
-                if result.disjoint:
-                    problems.append(f"grounding binding violation: {result.reason}")
-
-            # build_trust_map re-fetches the row and runs its own audit-grade
-            # signature re-verification, so the standalone map is honest.
-            tmap = build_trust_map(graph._conn, target)
+            # One rule for "who signed this and what backs it", shared with the
+            # read-and-verify server so the two surfaces cannot drift apart.
+            result = classify_claim_verdict(graph._conn, claim, target)
+            tmap = result.trust_map
             tmap_dict = tmap.to_dict() if tmap else None
 
-            # A definite NO outranks missing material: a claim that is both
-            # tampered and signed by an unenrolled key is tampered. Reporting
-            # the softer verdict would let a gate that warns on exit 2 wave
-            # through a failure the check actually caught.
-            if problems:
+            # Compare the constants the classifier returns, and make exit 0 the
+            # branch that has to be earned. Matching on literals left "verified"
+            # as the fall-through: any verdict the classifier grows that these
+            # two ifs do not name would exit 0 with a "verified" JSON verdict,
+            # which is the one direction a verify surface must never fail in.
+            if result.verdict == TAMPERED:
                 if as_json:
                     emit_json({"target": target, "target_kind": "claim",
-                               "verdict": "tampered", "exit_code": _VERIFY_FAIL,
-                               "reason": "; ".join(problems),
+                               "verdict": TAMPERED, "exit_code": _VERIFY_FAIL,
+                               "reason": result.reason,
                                "trust_map": tmap_dict})
                 else:
-                    _err("; ".join(problems))
+                    _err(result.reason)
                     _info("")
                     _echo_trust_map(tmap, redact_home=redact_home)
                 return _VERIFY_FAIL
 
-            if unchecked:
-                return unverifiable("; ".join(unchecked), tmap)
+            if result.verdict != VERIFIED:
+                return unverifiable(
+                    result.reason
+                    or f"the claim classified as {result.verdict!r}, which this "
+                       "command does not know how to report",
+                    tmap,
+                )
 
             if as_json:
                 emit_json({"target": target, "target_kind": "claim",
-                           "verdict": "verified", "exit_code": _VERIFY_OK,
+                           "verdict": VERIFIED, "exit_code": _VERIFY_OK,
                            "trust_map": tmap_dict})
             else:
                 _ok(f"Claim {target} verified.")
@@ -1269,36 +1198,6 @@ def _verify_claim(target: str, as_json: bool, redact_home: bool) -> int:
             return _VERIFY_OK
     except DatabaseError as exc:
         return unverifiable(f"could not read the project graph: {exc}")
-
-
-def _claim_bound_sources(claim: dict) -> tuple[str, ...]:
-    """The finding's bound data-source identifiers for the binding re-check.
-
-    Read from the ``predicate_payload`` column and passed through
-    :func:`mareforma.observe._binding.predicate_citation_sources`, the one rule
-    the write side bound against and the verify-on-read path re-checks (see
-    :func:`mareforma.db.restore._verify_grounding_binding_on_read`). NOT the
-    claim's ``supports`` (claim-id / DOI upstreams that would never intersect a
-    data-path set), and NOT ``source_name`` (a free-text label that never binds).
-    A string-only ``data_id`` with no ``data_source`` yields an empty set, so the
-    binding reads as ``not_applicable``.
-
-    ``data_source`` is not a claim column, so the finding citation lives only in
-    ``predicate_payload``; reading it from anywhere else silently no-ops the
-    binding re-check. That column is a denormalisation the signed envelope does
-    not cover, so the append-only trigger locks it on a signed row: without that
-    lock, clearing it would empty this set and pass a violation as clean.
-    """
-    from mareforma.observe._binding import predicate_citation_sources
-
-    raw = claim.get("predicate_payload")
-    if not isinstance(raw, str):
-        return ()
-    try:
-        predicate = json.loads(raw)
-    except (ValueError, TypeError):
-        return ()
-    return predicate_citation_sources(predicate)
 
 
 def _verify_export_dir(

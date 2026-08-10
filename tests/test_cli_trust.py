@@ -19,7 +19,8 @@ from click.testing import CliRunner
 
 import mareforma
 from mareforma import signing
-from mareforma.cli import cli, _claim_bound_sources, _trust_map_plaintext
+from mareforma._verify import claim_bound_sources
+from mareforma.cli import cli, _trust_map_plaintext
 from mareforma.db import open_db
 from tests._helpers import _requires_repo_checkout
 
@@ -604,10 +605,10 @@ class TestVerifyGroundingBinding:
         real = "/data/real.csv"
         claim = {"predicate_payload": json.dumps(
             {"data_sources": [real], "data_ids": [ca, "string-token"]})}
-        assert _claim_bound_sources(claim) == (real, ca)
-        assert _claim_bound_sources({"data_source": "/x"}) == ()  # dead field ignored
-        assert _claim_bound_sources({}) == ()
-        assert _claim_bound_sources({"predicate_payload": "not json"}) == ()
+        assert claim_bound_sources(claim) == (real, ca)
+        assert claim_bound_sources({"data_source": "/x"}) == ()  # dead field ignored
+        assert claim_bound_sources({}) == ()
+        assert claim_bound_sources({"predicate_payload": "not json"}) == ()
 
     def test_matched_binding_verifies_exit_0(self, tmp_path: Path) -> None:
         # A GROUNDED verdict whose grounded set matches the finding's citation

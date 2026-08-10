@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mareforma"
 version = "0.3.11"
-description = "Epistemic infrastructure for AI scientists"
+description = "Local verification layer for AI-assisted research"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -43,6 +43,19 @@ Issues = "https://github.com/mareforma/mareforma/issues"
 # Chemistry forms. rdkit-canonical-smiles-v1 refuses without rdkit
 # rather than substituting the string form under the same name.
 chem = ["rdkit>=2023.3"]
+# Model Context Protocol server (`mareforma mcp serve`), read and verify only.
+# Opt-in because the SDK is heavy for a package whose pitch is six light runtime
+# deps. `mcp` requires anyio, httpx2, jsonschema, mcp-types, opentelemetry-api,
+# pydantic, pyjwt, python-multipart, sse-starlette, starlette, typing-extensions,
+# typing-inspection and uvicorn, which is 40 packages installed against 20
+# without it. The base `pip install mareforma` is unchanged; the server module
+# imports only under this extra.
+# Pinned below 3: the server calls `mcp.server.MCPServer`, `add_tool` and
+# `run(transport=)`, which is a 2.x API. The SDK already renamed this class
+# across one major bump, and a PyPI artefact cannot be corrected after the
+# fact, so an unbounded range would let a future 3.x break the import at
+# runtime for anyone installing this release.
+mcp = ["mcp>=2.0,<3"]
 dev = [
     "pytest>=9.0.3",
     "pytest-cov",
