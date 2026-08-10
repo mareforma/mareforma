@@ -177,7 +177,15 @@ def test_late_import_via_importlib_is_wrapped(tmp_path, cited_file, monkeypatch)
     # hook can see, so only the polars wrapper can record the read.
     (tmp_path / "polars.py").write_text("def read_csv(source):\n    return [1]\n")
     monkeypatch.syspath_prepend(str(tmp_path))
-    for key in [k for k in _loaders._reals if k.startswith("polars.")]:
+    # Wrapping is one-way and keyed on the name: a wrapper skips a reader whose
+    # key is already in _reals. The stand-in below wraps under the real module's
+    # names, so every key it leaves behind would tell a later pass that the REAL
+    # polars is already wrapped, and the real one would never be wrapped at all.
+    # Its reads would then be invisible and an honest finding would floor to
+    # UNGROUNDED. delitem restores only the keys that were there to delete, so
+    # the ones this test creates have to be removed by hand.
+    before = {k for k in _loaders._reals if k.startswith("polars.")}
+    for key in before:
         monkeypatch.delitem(_loaders._reals, key)
     real_polars = sys.modules.pop("polars", None)
     try:
@@ -186,6 +194,11 @@ def test_late_import_via_importlib_is_wrapped(tmp_path, cited_file, monkeypatch)
 
             polars.read_csv(cited_file)
     finally:
+        for key in [
+            k for k in list(_loaders._reals)
+            if k.startswith("polars.") and k not in before
+        ]:
+            del _loaders._reals[key]
         sys.modules.pop("polars", None)
         if real_polars is not None:
             sys.modules["polars"] = real_polars
