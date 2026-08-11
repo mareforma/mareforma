@@ -855,12 +855,22 @@ arm alongside the split: the distribution of the effective number (a single
 supporting line versus corroboration at two or more), the fraction UNVERIFIABLE
 where the lineage is soft, and the same-model-collapse rate (corroborations a
 signer-axis counter would call independent that were one computed model counted
-twice). `summarize_pilot` runs a slim natural-prevalence pilot over a receipts
-file, reporting both arms with the honest OPAQUE-coverage bound: when OPAQUE
-dominates, the grounded prevalence reads as a lower bound, not a trustworthy
-number. `mareforma audit` produces such receipts for a pipeline that never
-imports mareforma: one signed, verifiable receipt per finding from a single
-observed run, computed only from what the observer recorded.
+twice). When a receipt carries a per-source **influence** record, `measure`
+reports a third arm: for each cited source, whether the finding depends on the
+data (`INFLUENCED` / `NOT_INFLUENCED` / `UNDECIDABLE`) or was never tested
+(`NOT_TESTED`). Its unit is the edge, a finding-and-source pair, so a finding
+citing several sources contributes several edges; NOT_TESTED is excluded from the
+rate denominator but counted and bucketed by reason, and a rate never prints
+without the number of distinct runs behind it. `summarize_pilot` runs a slim
+natural-prevalence pilot over a receipts file, reporting all three arms with the
+honest OPAQUE-coverage bound: when OPAQUE dominates, the grounded prevalence reads
+as a lower bound, not a trustworthy number. `mareforma audit` produces such
+receipts for a pipeline that never imports mareforma: one signed, verifiable
+receipt per finding from a single observed run, computed only from what the
+observer recorded. Because the audit runs the target once and never perturbs it,
+the influence arm on real audit output reads NOT_TESTED: the record names that
+flow was observed and influence was not, rather than a grounding verdict standing
+in for an influence claim nobody measured.
 
 The verdict is computed from execution of a **cooperating producer**: the
 binding is tamper-evidence over what a cooperating run did, not a proof
@@ -873,19 +883,37 @@ signed after it closes; asserting a claim while its grounding scope is still
 open is refused.
 
 An independent **causal oracle** ([`observe/oracle.py`](mareforma/observe/oracle.py))
-validates the observer without reading its log: it perturbs the input,
-re-runs the pipeline, and checks whether the finding moves. Flow (did the
+validates the observer without reading its log: it destroys the cited data's
+content, re-runs the pipeline, and checks whether the finding moves. Flow (did the
 bytes arrive) and influence (does the finding depend on them) are different
 constructs, so the two can honestly disagree; `reconcile` labels
 "read the data then ignored it" a construct difference, not a detector error.
-A prose finding is reduced to a scalar by a declared reducer:
-`numeric_extraction_reducer` pulls the reported number out of an answer with no
-model, so the oracle stays model-independent, while a reducer that runs a model
-(an embedding or LLM judge) sets `reinserts_model=True` and the result records
-it. A `multiplicity` control widens the decision threshold when a finding is one
-of many (so the noisiest of a family cannot cross the bar by chance), and a
-thin-sigma guard widens it when the noise floor rests on too few repeats; both
-default off, so the scalar path is unchanged.
+
+The null is not a choice. A chosen null is a place to fish, so the oracle derives
+the whole family of nulls from the finding's data shape
+([`observe/scrambles.py`](mareforma/observe/scrambles.py), standard library only):
+content-destroying nulls (zero, constant) and marginal-preserving ones (permute,
+reverse). It runs the family and routes the verdict on the PROFILE of effects, not
+a single move: flat under every null is hollow (`NOT_INFLUENCED`), moves under
+every null is a dependency (`INFLUENCED`), and moves under some while holding
+invariant under others is `UNDECIDABLE`. That last case is the discipline the
+instrument rests on: a genuine mean is invariant under a permutation and must
+never be called hollow for it. A shape with no family, or a null that crashes the
+target, reads `NOT_TESTED`, naming why, never a verdict; the oracle declines on
+targets it cannot measure rather than inventing a number. On a deterministic
+target, where there is no run-to-run noise, a move is judged against a
+float-equality band relative to the finding's magnitude, so the zero-config oracle
+does not degenerate to exact float equality where any jitter reads influenced.
+
+Every influence verdict carries the statement that it grades a pipeline which does
+not attack its auditor. A prose finding is reduced to a scalar by a declared
+reducer: `numeric_extraction_reducer` pulls the reported number out of an answer
+with no model, so the oracle stays model-independent, while a reducer that runs a
+model (an embedding or LLM judge) sets `reinserts_model=True` and the result
+records it. A `multiplicity` control widens the decision threshold when a finding
+is one of many (so the noisiest of a family cannot cross the bar by chance), and
+`influence_sweep` computes it from the corpus size so it is not left uncorrected;
+a thin-sigma guard widens it when the noise floor rests on too few repeats.
 
 ## Honest scope
 

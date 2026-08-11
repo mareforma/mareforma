@@ -756,10 +756,10 @@ def influence_sweep(
     Each finding is one hypothesis in a family, so a fixed ``noise_multiplier``
     lets the noisiest of them clear the bar by chance and the corpus produces
     false INFLUENCED calls at a rate that grows with the count. The correction is
-    ``multiplicity = number of findings``, and leaving it at the default 1 is one
-    of the compromises the field run made. This runs each finding with the
-    multiplicity computed from the corpus size, so the caller passes the corpus
-    and never has to remember to pass the count.
+    ``multiplicity = number of findings``, and leaving it at the default 1 is easy
+    to forget and silently overcounts influence across a corpus. This runs each
+    finding with the multiplicity computed from the corpus size, so the caller
+    passes the corpus and never has to remember to pass the count.
 
     ``findings`` is a sequence of ``(run_fn, base_input)`` or
     ``(run_fn, base_input, metric)`` tuples. ``oracle_kwargs`` are forwarded to

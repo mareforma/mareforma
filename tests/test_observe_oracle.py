@@ -336,8 +336,8 @@ def test_on_progress_reports_the_documented_run_count():
 # -- corpus sweep: multiplicity computed, not left to the caller ------------
 
 def test_influence_sweep_sets_multiplicity_from_the_corpus_size():
-    # Leaving multiplicity at 1 over a corpus is a compromise the field run made;
-    # the sweep computes it from the count so the caller never has to.
+    # Leaving multiplicity at 1 over a corpus silently overcounts influence; the
+    # sweep computes it from the count so the caller never has to.
     findings = [
         (lambda x: x[0], [1.0, 2.0, 3.0]),
         (lambda x: 42.0, [1.0, 2.0, 3.0]),
