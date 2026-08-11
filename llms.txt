@@ -1,0 +1,37 @@
+# Mareforma
+
+> A local-first library where AI scientists and research pipelines record their findings as signed claims with provenance. Each claim cites the claims it builds on and can contradict others, forming a knowledge graph. Trust is read from that graph, from what can be checked about a claim, not from an agent's self-reported confidence.
+
+Mareforma catches the most dangerous result an AI scientist returns: the one that looks right but never touched the data. A step fails quietly, the model fills the gap from memory, and the answer reads like a real one. The observer watches a run and records whether real data flowed into a finding, so a claim carries an execution-observed grounding verdict (GROUNDED, UNGROUNDED, or OPAQUE) that a reviewer can re-check.
+
+Two derived axes report trust, both computed on read and never stored as a verdict an agent can set:
+
+- Status: the state of an answer for one proposition, from the independent support and refutation behind it.
+- question_status: the state of the question itself, `consistent` or `divided`.
+
+Everything is local-first and signed. Claims are Ed25519-signed with provenance edges; promotion past the first support level requires distinct signers; the record can be exported and independently verified.
+
+## Install
+
+- `pip install mareforma` installs the core (six light runtime dependencies).
+- `pip install mareforma[mcp]` adds the read-and-verify Model Context Protocol server (`mareforma mcp serve`).
+
+## Getting started
+
+- [Quickstart](https://docs.mareforma.com/introduction/quickstart): record a finding and read its trust.
+- [Why Mareforma](https://docs.mareforma.com/introduction/why-mareforma): the problem and the approach.
+- [Examples](https://github.com/mareforma/mareforma/tree/main/examples/): runnable scripts, from the API walkthrough to the silent-failure catch.
+
+## Concepts
+
+- [Trust](https://docs.mareforma.com/concepts/trust): the derived axes and how trust is read from the graph.
+- [Findings](https://docs.mareforma.com/concepts/findings): propositions, predictions, and effect estimates.
+- [Grounding](https://docs.mareforma.com/concepts/grounding): the observer and the GROUNDED / UNGROUNDED / OPAQUE verdict.
+- [The graph](https://docs.mareforma.com/concepts/the-graph): claims, provenance, and contradiction.
+
+## Reference
+
+- [API](https://docs.mareforma.com/reference/api): the `EpistemicGraph` surface.
+- [CLI](https://docs.mareforma.com/reference/cli): the `mareforma` commands, including `verify` and `mcp serve`.
+- [Data model](https://docs.mareforma.com/reference/data-model): the stored schema.
+- [For agents](https://docs.mareforma.com/for-agents/agents): the agent-facing surface and how to reach it over MCP.

@@ -6,8 +6,16 @@ description: "How Mareforma records where a claim came from: LLM reasoning, real
 Origin is orthogonal to trust. It records where a claim came from,
 **how it was derived**, not how much it should be trusted.
 
-An ANALYTICAL claim can be PRELIMINARY. An INFERRED claim can be ESTABLISHED.
+An ANALYTICAL claim can be untested. An INFERRED claim can be well-supported.
 They measure different things.
+
+Trust itself reads off the derived axes (`status` per `content_id`,
+`question_status` per `frame_id`; see [Trust](/concepts/trust) and
+[Findings](/concepts/findings)). The `support_level` ladder those examples used
+to name (`PRELIMINARY` / `REPLICATED` / `ESTABLISHED`) is the legacy stored axis,
+and v0.4.0 removes it whole: the labels, the stored column, the promotion
+machinery, and the `query(min_support=...)` filter. Both surfaces warn today.
+Origin is orthogonal to all of it.
 
 The API field is `classification`. This page explains what its values mean.
 

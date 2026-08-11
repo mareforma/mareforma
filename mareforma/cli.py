@@ -494,6 +494,14 @@ def status_cmd(as_json: bool) -> None:
             if count:
                 bar = "█" * min(count, 20)
                 click.echo(f"    {level:14} {bar}  {count}")
+        click.echo(
+            "  " + click.style(
+                "The support ladder (PRELIMINARY / REPLICATED / ESTABLISHED) is "
+                "a retired axis, removed in v0.4.0. A project stores one even if "
+                "no level was ever named. Read the computed status instead.",
+                fg="yellow",
+            )
+        )
 
     if report.failed_verification:
         click.echo(
@@ -511,6 +519,18 @@ def status_cmd(as_json: bool) -> None:
                 "(a promotion check was swallowed; run "
                 "graph.refresh_convergence() to re-run it)",
                 fg="yellow",
+            )
+        )
+
+    if report.policy_unverified:
+        click.echo(
+            "  " + click.style(
+                "Project policy unverified: the stored policy row's root "
+                "signature does not verify, so every rule reads at maximum "
+                "strictness (witnessing and strict promotion both required). "
+                "Re-sign the policy with the project root or restore from a "
+                "clean backup.",
+                fg="red", bold=True,
             )
         )
 
@@ -1088,9 +1108,8 @@ def _verify_claim(target: str, as_json: bool, redact_home: bool) -> int:
     definite tamper/violation (1).
     """
     import mareforma
-    from mareforma.db import DatabaseError, verify_claim_signatures
-    from mareforma.observe._binding import check_grounding_binding
-    from mareforma.trust_map import build_trust_map, parse_grounding_record
+    from mareforma._verify import TAMPERED, VERIFIED, classify_claim_verdict
+    from mareforma.db import DatabaseError
 
     def emit_json(payload: dict) -> None:
         # Every JSON path, success AND failure, honors --redact-home. The
@@ -1137,96 +1156,40 @@ def _verify_claim(target: str, as_json: bool, redact_home: bool) -> int:
                     f"claim {target!r} not found in this project; cannot verify"
                 )
 
-            # Two lists, because the exit-code contract splits on exactly this:
-            # *problems* is a definite NO (exit 1), something was checked and
-            # failed; *unchecked* is missing material (exit 2), something could
-            # not be checked at all. A CI gate keys on the difference.
-            problems: list[str] = []
-            unchecked: list[str] = []
-            # Signature re-verification. Two complementary checks:
-            #  (a) the tier-gated read flag (ESTABLISHED validation envelope /
-            #      REPLICATED participant bundle), and
-            #  (b) an audit-grade, tier-INDEPENDENT re-check (signed-field
-            #      binding + asserter + role signatures) that catches a tampered
-            #      PRELIMINARY signed claim the flag would pass through.
-            if claim.get("signature_bundle") and not claim.get("verified"):
-                problems.append("signature failed re-verification on read")
-            sig_ok, sig_reason = verify_claim_signatures(graph._conn, claim)
-            if not sig_ok:
-                problems.append(sig_reason)
-            # Auditor mode verifies against enrolled validator pubkeys only. A
-            # signed claim whose named signer is not an enrolled validator cannot
-            # be authenticated from public material: verify_claim_signatures could
-            # only confirm the claim binding, never the signature. Reporting that
-            # as "verified" (exit 0) let a CI gate pass a forged all-zero signature
-            # under a keyid that was never enrolled, the sixth read surface that
-            # said something false about a rejected row. A named signer that does
-            # not authenticate is not a clean verdict.
-            #
-            # It is not a tamper verdict either. Nothing was checked here, so
-            # nothing was caught: the auditor is missing the signer's pubkey,
-            # which is the exit-2 case, the same reading the bundle path gives a
-            # bundle it has no key for. Calling it exit 1 told a CI gate a claim
-            # was tampered on the strength of a key the project never enrolled.
-            if claim.get("signature_bundle") and claim.get("asserter_keyid"):
-                from mareforma.validators import is_enrolled
-
-                if not is_enrolled(graph._conn, claim["asserter_keyid"]):
-                    unchecked.append(
-                        "signer keyid is not an enrolled validator, so the "
-                        "signature cannot be authenticated from public "
-                        "material. This is unverifiable, not a failure; enroll "
-                        "the signer's key to reach a verdict."
-                    )
-
-            # Grounding→citation binding re-check. Bind on ``grounded_sources``
-            # (the cited sources a read was actually observed for), not the
-            # declared ``cited_sources``, matching the write side and the
-            # verify-on-read path (mareforma.db.restore). A producer who declares
-            # a dataset in cites but reads only a decoy grounds on the decoy, so
-            # the declared set would falsely MATCH. The check runs even when the
-            # set is EMPTY, because "finding cites data + verdict grounded on none
-            # of it" is itself a binding violation. A pre-binding verdict has no
-            # such field and is annotated by the trust map, not failed here.
-            grounding = parse_grounding_record(claim.get("observed_grounding"))
-            if (
-                isinstance(grounding, dict)
-                and grounding.get("grounding") == "GROUNDED"
-                and grounding.get("grounded_sources") is not None
-            ):
-                verdict_grounded = tuple(grounding.get("grounded_sources") or ())
-                finding_sources = _claim_bound_sources(claim)
-                result = check_grounding_binding(verdict_grounded, finding_sources)
-                if result.disjoint:
-                    problems.append(f"grounding binding violation: {result.reason}")
-
-            # build_trust_map re-fetches the row and runs its own audit-grade
-            # signature re-verification, so the standalone map is honest.
-            tmap = build_trust_map(graph._conn, target)
+            # One rule for "who signed this and what backs it", shared with the
+            # read-and-verify server so the two surfaces cannot drift apart.
+            result = classify_claim_verdict(graph._conn, claim, target)
+            tmap = result.trust_map
             tmap_dict = tmap.to_dict() if tmap else None
 
-            # A definite NO outranks missing material: a claim that is both
-            # tampered and signed by an unenrolled key is tampered. Reporting
-            # the softer verdict would let a gate that warns on exit 2 wave
-            # through a failure the check actually caught.
-            if problems:
+            # Compare the constants the classifier returns, and make exit 0 the
+            # branch that has to be earned. Matching on literals left "verified"
+            # as the fall-through: any verdict the classifier grows that these
+            # two ifs do not name would exit 0 with a "verified" JSON verdict,
+            # which is the one direction a verify surface must never fail in.
+            if result.verdict == TAMPERED:
                 if as_json:
                     emit_json({"target": target, "target_kind": "claim",
-                               "verdict": "tampered", "exit_code": _VERIFY_FAIL,
-                               "reason": "; ".join(problems),
+                               "verdict": TAMPERED, "exit_code": _VERIFY_FAIL,
+                               "reason": result.reason,
                                "trust_map": tmap_dict})
                 else:
-                    _err("; ".join(problems))
+                    _err(result.reason)
                     _info("")
                     _echo_trust_map(tmap, redact_home=redact_home)
                 return _VERIFY_FAIL
 
-            if unchecked:
-                return unverifiable("; ".join(unchecked), tmap)
+            if result.verdict != VERIFIED:
+                return unverifiable(
+                    result.reason
+                    or f"the claim classified as {result.verdict!r}, which this "
+                       "command does not know how to report",
+                    tmap,
+                )
 
             if as_json:
                 emit_json({"target": target, "target_kind": "claim",
-                           "verdict": "verified", "exit_code": _VERIFY_OK,
+                           "verdict": VERIFIED, "exit_code": _VERIFY_OK,
                            "trust_map": tmap_dict})
             else:
                 _ok(f"Claim {target} verified.")
@@ -1235,36 +1198,6 @@ def _verify_claim(target: str, as_json: bool, redact_home: bool) -> int:
             return _VERIFY_OK
     except DatabaseError as exc:
         return unverifiable(f"could not read the project graph: {exc}")
-
-
-def _claim_bound_sources(claim: dict) -> tuple[str, ...]:
-    """The finding's bound data-source identifiers for the binding re-check.
-
-    Read from the ``predicate_payload`` column and passed through
-    :func:`mareforma.observe._binding.predicate_citation_sources`, the one rule
-    the write side bound against and the verify-on-read path re-checks (see
-    :func:`mareforma.db.restore._verify_grounding_binding_on_read`). NOT the
-    claim's ``supports`` (claim-id / DOI upstreams that would never intersect a
-    data-path set), and NOT ``source_name`` (a free-text label that never binds).
-    A string-only ``data_id`` with no ``data_source`` yields an empty set, so the
-    binding reads as ``not_applicable``.
-
-    ``data_source`` is not a claim column, so the finding citation lives only in
-    ``predicate_payload``; reading it from anywhere else silently no-ops the
-    binding re-check. That column is a denormalisation the signed envelope does
-    not cover, so the append-only trigger locks it on a signed row: without that
-    lock, clearing it would empty this set and pass a violation as clean.
-    """
-    from mareforma.observe._binding import predicate_citation_sources
-
-    raw = claim.get("predicate_payload")
-    if not isinstance(raw, str):
-        return ()
-    try:
-        predicate = json.loads(raw)
-    except (ValueError, TypeError):
-        return ()
-    return predicate_citation_sources(predicate)
 
 
 def _verify_export_dir(
@@ -1467,6 +1400,13 @@ def diagnose_cmd(cites: tuple[str, ...], as_json: bool, redact_home: bool,
     Interpreter flags (-u, -O, -X, …) are rejected: the target runs
     in-process, so there is no interpreter to pass them to.
 
+    A target with a non-Python file extension is refused as a usage error
+    before anything runs. A JSON run spec is a valid Python dict literal, so it
+    would compile, exit cleanly, read nothing, and draw UNGROUNDED with "scope
+    fully observed" beside it. Everything runpy can run is accepted: .py, .pyw,
+    .pyz, .pyc, .zip, a directory with a __main__, an extensionless script, and
+    -m module.
+
     \b
     Examples:
         mareforma diagnose -- python analysis.py
@@ -1475,10 +1415,53 @@ def diagnose_cmd(cites: tuple[str, ...], as_json: bool, redact_home: bool,
     """
     from mareforma.diagnose import run_diagnose
 
+    _reject_non_python_target(tuple(command), "diagnose")
     sys.exit(run_diagnose(
         list(command), cites=list(cites), as_json=as_json,
         redact_home=(_redact_home if redact_home else None),
     ))
+
+
+# Extensions runpy actually executes. ``.pyw`` is a Python script on every
+# platform (the suffix only changes which launcher Windows picks), and a ``.zip``
+# carrying a ``__main__`` is a zipapp exactly as ``.pyz`` is; both ran before this
+# guard existed and must keep running.
+_RUNNABLE_PYTHON_SUFFIXES = (".py", ".pyw", ".pyz", ".pyc", ".zip")
+
+
+def _reject_non_python_target(command: tuple[str, ...], verb: str) -> None:
+    """Refuse an observed target that is not a Python program.
+
+    Both ``diagnose`` and ``audit`` run the target in-process via runpy, so a
+    data file handed to the wrong flag (a JSON run spec, a CSV, a shell script)
+    is compiled as Python: it never runs, observes no reads, and the command
+    then reports a grounding verdict for a target that did not execute. A JSON
+    object is a valid Python dict literal, so it compiles and exits cleanly, and
+    the report says ``UNGROUNDED`` with ``scope fully observed`` beside it: a
+    false accusation carrying a false completeness claim.
+
+    Both commands share this rule because both make the same promise about what
+    they watched. Refuse the one thing runpy cannot run as Python, an explicit
+    non-Python file extension, and leave everything it does run untouched: any
+    suffix in :data:`_RUNNABLE_PYTHON_SUFFIXES`, a directory or zipapp with a
+    ``__main__``, an extensionless script, a ``-m module``, or a bare
+    interpreter flag (whose usage error the runner raises).
+    """
+    from mareforma.diagnose import _looks_like_interpreter
+
+    argv = list(command)
+    if argv and _looks_like_interpreter(argv[0]):
+        argv = argv[1:]
+    if not argv or argv[0].startswith("-"):
+        return
+    suffix = Path(argv[0]).suffix
+    if suffix and suffix.lower() not in _RUNNABLE_PYTHON_SUFFIXES:
+        raise click.UsageError(
+            f"{verb} target {argv[0]!r} is not a Python program: {verb} runs the "
+            "target in-process, so it must be a Python script or a `-m module`. "
+            "A non-Python file is compiled as Python, observes nothing, and "
+            "would report a grounding verdict for a target that never ran."
+        )
 
 
 @cli.command("audit", context_settings={"ignore_unknown_options": True})
@@ -1559,6 +1542,7 @@ def audit_cmd(findings_path: str | None, corpus_dir: str | None, out_dir: str,
     if not command:
         raise click.UsageError(
             "audit needs a target after `--`, e.g. `-- python analysis.py`")
+    _reject_non_python_target(tuple(command), "audit")
     sys.exit(run_audit(
         list(command), findings_path=findings_path, out_dir=out_dir,
         key_path=key_path, as_json=as_json,
@@ -1877,8 +1861,9 @@ def claim() -> None:
     """Manage scientific claims.
 
     Claims are falsifiable assertions with a classification (INFERRED |
-    ANALYTICAL | DERIVED) and a graph-derived support level (PRELIMINARY →
-    REPLICATED → ESTABLISHED).
+    ANALYTICAL | DERIVED). Trust reads off the derived status a claim earns in
+    the graph; the stored support level (PRELIMINARY -> REPLICATED ->
+    ESTABLISHED) is the legacy promotion ladder, deprecated for v0.4.0.
 
     \b
     Examples:
@@ -2187,5 +2172,84 @@ def restore_cmd(claims_toml_path: Path | None) -> None:
     _ok(f"Restored graph.db from claims.toml ({_root()}/.mareforma/graph.db).")
     _info(f"validators_restored: {result['validators_restored']}")
     _info(f"claims_restored:     {result['claims_restored']}")
+
+
+# ---------------------------------------------------------------------------
+# mcp
+# ---------------------------------------------------------------------------
+
+@cli.group()
+def mcp() -> None:
+    """Serve one project to an agent over the Model Context Protocol.
+
+    Read and verify only. The server exposes tools that query the graph and
+    check a claim's signatures and grounding binding; it exposes no write
+    path. An agent can look a claim up and audit it across the process
+    boundary, but cannot assert one: a claim written over a transport carries
+    no observed grounding, and the record exists to hold claims to grounding
+    they earned, so that refusal is a designed bound, not a missing feature.
+    """
+
+
+@mcp.command("serve")
+@click.option(
+    "--project-root", "project_root", default=None, metavar="PATH",
+    type=click.Path(exists=False, file_okay=False, dir_okay=True),
+    help="Project to serve. Falls back to $MAREFORMA_PROJECT_ROOT, then to "
+         "discovery from the current directory. Resolved once at startup, "
+         "never per request.",
+)
+@click.option(
+    "--max-evidence-lines", "max_evidence_lines", type=int, default=1000,
+    metavar="N", show_default=True,
+    help=(
+        "Refuse to derive a target carrying more than N evidence lines. The "
+        "derivation cost is linear in this count and runs holding the one "
+        "read lock every tool call shares, so an unbounded target stalls "
+        "every other caller. Raise it if your propositions are legitimately "
+        "larger; the CLI has no shared lock and is not affected."
+    ),
+)
+@click.option(
+    "--transport", type=click.Choice(["stdio"]), default="stdio",
+    show_default=True,
+    help="Transport the server speaks. stdio is the Model Context Protocol "
+         "default.",
+)
+def mcp_serve(
+    project_root: "str | None", transport: str, max_evidence_lines: int,
+) -> None:
+    """Run the read-and-verify server on the chosen transport.
+
+    The project root is fixed for the server's lifetime, resolved once at
+    startup and never per request: the option wins, else
+    $MAREFORMA_PROJECT_ROOT, else discovery from the current directory (the
+    first ancestor holding a mareforma project). A per-request path would be
+    both non-deterministic and a directory-traversal surface. This callback
+    forwards the option-or-environment value; the server performs the discovery
+    fallback and pins the resolved root at startup.
+
+    The project has to be writable and the server refuses to start if it is
+    not. It signs nothing and writes no claims, but SQLite opens the graph
+    read-write and journals beside it even on a pure read. Serve from a copy if
+    the original must stay untouched.
+    """
+    import os
+
+    root = project_root or os.environ.get("MAREFORMA_PROJECT_ROOT")
+    from mareforma.mcp.server import MCPServerError, run_server
+
+    # Every startup refusal in the server names what was wrong and what to
+    # pass, which is worth nothing if it reaches the operator as a traceback.
+    # MCPServerError's own docstring says the message is meant for whoever ran
+    # this command; the other commands all report their errors this way.
+    try:
+        run_server(
+            project_root=root, transport=transport,
+            max_evidence_lines=max_evidence_lines,
+        )
+    except MCPServerError as exc:
+        _err(str(exc))
+        sys.exit(1)
 
 

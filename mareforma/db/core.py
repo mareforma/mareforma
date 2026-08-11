@@ -89,6 +89,22 @@ _SUPPORT_LEVEL_TIERS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _unknown_min_support_message(value: str | None) -> str:
+    """The rejection message for an unrecognised ``min_support`` value.
+
+    Lists the accepted levels, which still filter this release, and names the
+    retirement rather than teaching the ladder as the axis to read: a confused
+    reader meets the deprecation at the moment they are most likely to copy the
+    old vocabulary.
+    """
+    return (
+        f"Unknown min_support {value!r}. Use one of: "
+        f"{', '.join(VALID_SUPPORT_LEVELS)} (these still filter this release). "
+        "The support ladder is deprecated and removed in v0.4.0; read the "
+        "computed status instead as the trust axis."
+    )
+
+
 
 def _serialize_predicate_payload(payload: dict | None) -> str:
     """Serialize an adapter's structured predicate_payload for storage.
@@ -1309,7 +1325,6 @@ def _reconcile_idempotency_row(
     artifact_hash: str | None,
     evidence_dict: dict,
     observed_grounding: dict | None,
-    predicate_payload: dict | None = None,
     original_signature_bundle: str | None = None,
 ) -> str:
     """Compare a found row against the current call's semantic fields.
@@ -1528,7 +1543,6 @@ def add_claim(
                     row, idempotency_key, text, classification, generated_by,
                     supports, contradicts, source_name, artifact_hash,
                     evidence_dict, observed_grounding,
-                    predicate_payload=predicate_payload,
                     original_signature_bundle=original_signature_bundle,
                 )
                 return existing_id
@@ -1560,7 +1574,15 @@ def add_claim(
     # ESTABLISHED-upstream rule blocks the first REPLICATED forever).
     seed_envelope_json: str | None = None
     if seed:
-        # Seed envelopes sign claim_id + validator_keyid + seeded_at , 
+        # Deprecated this release, removed in v0.4.0. Fires once per seed call
+        # and never on the honest (seed=False) path, since it is gated on the
+        # ``if seed:`` branch. stacklevel aims past add_claim and the graph
+        # wrapper at the caller's assert_claim(seed=True); the message is
+        # self-identifying if a direct db-layer caller shifts the frame.
+        from mareforma._deprecation import warn_deprecated_seed
+
+        warn_deprecated_seed(stacklevel=6)
+        # Seed envelopes sign claim_id + validator_keyid + seeded_at ,
         # NOT status. A non-open seed could be flipped back to 'open'
         # via update_claim later (status is mutable on signed rows) and
         # the resurrection would carry no envelope evidence. Refuse the
@@ -1809,7 +1831,6 @@ def add_claim(
                     row, idempotency_key, text, classification, generated_by,
                     supports, contradicts, source_name, artifact_hash,
                     evidence_dict, observed_grounding,
-                    predicate_payload=predicate_payload,
                     original_signature_bundle=original_signature_bundle,
                 )
         translated = _state_error_from_integrity(exc)
@@ -4849,31 +4870,53 @@ def verify_claim_signatures(
     if mismatch is not None:
         return (False, f"signed field {mismatch!r} does not match the row (tampered)")
 
-    keyid = _extract_signature_bundle_keyid(bundle_json) or row.get("asserter_keyid")
-    if keyid is not None:
-        signer_row = _validators.get_validator(conn, keyid)
-        if signer_row is not None:
-            try:
-                pem = base64.standard_b64decode(signer_row["pubkey_pem"])
-                pub = _signing.public_key_from_pem(pem)
-                if not _signing.verify_envelope(env, pub):
-                    return (False, "asserter signature failed verification")
-            except Exception:
-                return (False, "asserter signature could not be verified")
-            # A row in the validators table is not an enrolment. The table has
-            # no INSERT guard, so one INSERT with a real pubkey and a junk
-            # envelope puts a key there; ``is_enrolled`` walks the chain back to
-            # the self-signed root, which is what "registered" means everywhere
-            # else. A signer whose chain does not walk back is not a stranger
-            # the lean model has no pubkey for, it is a forged enrolment, and an
-            # audit that answered "verified" over it would report the forgery as
-            # attribution.
-            if not _validators.is_enrolled(conn, keyid):
-                return (
-                    False,
-                    "asserter key has a validators row whose enrollment does "
-                    "not chain back to the project root",
-                )
+    # The signer the bundle itself names. ``asserter_keyid`` is an unsigned
+    # denormalisation of it, written from the bundle on the only honest path
+    # (see :func:`assert_claim`). A row whose column contradicts its own
+    # envelope was written outside that path, so refuse it rather than let the
+    # column pick the pubkey to check against. ``ak is None`` is the legacy row
+    # (bundle present, keyid never denormalised) and is not a disagreement. This
+    # mirrors the participant-side guard in _verify_participant_bundle_on_read,
+    # and keeps this surface reading the same keyid the CLI enrollment
+    # disclosure reads.
+    bundle_keyid = _extract_signature_bundle_keyid(bundle_json)
+    # A bundle that names no signer is not the legacy row. ``_extract`` answers
+    # None for two different things: a row that never denormalised its keyid
+    # (legacy, honest) and a bundle whose ``signatures`` array is empty or
+    # malformed (nothing to verify). Conflating them let an empty array satisfy
+    # the agreement check below, skip the pubkey block entirely, and fall
+    # through to verified: exit 0 over a bundle carrying no signature at all.
+    # The legacy row is bundle-with-a-signer plus a NULL column, which the
+    # ``ak is None`` arm below still admits.
+    if bundle_keyid is None:
+        return (False, "signature bundle names no signer, so nothing can be verified")
+    ak = row.get("asserter_keyid")
+    if not (ak is None or ak == bundle_keyid):
+        return (False, "row asserter keyid disagrees with its signature bundle")
+    keyid = bundle_keyid
+    signer_row = _validators.get_validator(conn, keyid)
+    if signer_row is not None:
+        try:
+            pem = base64.standard_b64decode(signer_row["pubkey_pem"])
+            pub = _signing.public_key_from_pem(pem)
+            if not _signing.verify_envelope(env, pub):
+                return (False, "asserter signature failed verification")
+        except Exception:
+            return (False, "asserter signature could not be verified")
+        # A row in the validators table is not an enrolment. The table has
+        # no INSERT guard, so one INSERT with a real pubkey and a junk
+        # envelope puts a key there; ``is_enrolled`` walks the chain back to
+        # the self-signed root, which is what "registered" means everywhere
+        # else. A signer whose chain does not walk back is not a stranger
+        # the lean model has no pubkey for, it is a forged enrolment, and an
+        # audit that answered "verified" over it would report the forgery as
+        # attribution.
+        if not _validators.is_enrolled(conn, keyid):
+            return (
+                False,
+                "asserter key has a validators row whose enrollment does "
+                "not chain back to the project root",
+            )
 
     if not _verify_role_signatures(conn, env):
         return (False, "a role signature failed verification")
@@ -5061,6 +5104,12 @@ def delete_claims_by_generated_by(
             return 0
         if _own_transaction:
             conn.execute("BEGIN IMMEDIATE")
+        # The f-string interpolates only ``?`` placeholders, one per id, never
+        # data, so this is the standard parameterised-IN idiom, not injection.
+        # The real bound is SQLite's host-parameter cap
+        # (SQLITE_LIMIT_VARIABLE_NUMBER): a cohort larger than the cap would need
+        # chunking, the same limit tests/test_sql_variable_limit.py pins for the
+        # convergence and dangling-support queries.
         placeholders = ",".join("?" * len(claim_ids))
         conn.execute(
             f"DELETE FROM claims WHERE claim_id IN ({placeholders})", claim_ids
@@ -5114,6 +5163,10 @@ _REPLICATION_VERDICT_FIELDS = (
     "confidence",
 )
 
+_CONTRADICTION_VERDICT_PAYLOAD_TYPE = (
+    "application/vnd.mareforma.contradiction-verdict+json"
+)
+
 _CONTRADICTION_VERDICT_FIELDS = (
     "verdict_id",
     "member_claim_id",
@@ -5151,6 +5204,20 @@ def _replication_verdict_pae(record: dict) -> bytes:
     return _signing.dsse_pae(
         _REPLICATION_VERDICT_PAYLOAD_TYPE,
         _verdict_canonical_payload(_REPLICATION_VERDICT_FIELDS, record),
+    )
+
+
+def _contradiction_verdict_pae(record: dict) -> bytes:
+    """The DSSE PAE a contradiction verdict's signature is made and checked over.
+
+    The signing path and restore's verify-before-INSERT both build the signed
+    bytes here, so the canonical form cannot drift into one version per caller,
+    the same discipline :func:`_replication_verdict_pae` holds for its sibling.
+    """
+    from mareforma import signing as _signing
+    return _signing.dsse_pae(
+        _CONTRADICTION_VERDICT_PAYLOAD_TYPE,
+        _verdict_canonical_payload(_CONTRADICTION_VERDICT_FIELDS, record),
     )
 
 
@@ -5424,10 +5491,7 @@ def record_contradiction_verdict(
         "other_claim_id": other_claim_id,
         "confidence": confidence_dict,
     }
-    payload = _verdict_canonical_payload(_CONTRADICTION_VERDICT_FIELDS, record)
-    pae = _signing.dsse_pae(
-        "application/vnd.mareforma.contradiction-verdict+json", payload,
-    )
+    pae = _contradiction_verdict_pae(record)
     signature = signer.sign(pae)
     created_at = _now()
     try:
@@ -5585,13 +5649,23 @@ def refutation_status(row: dict) -> dict:
             "fetched via list_claims / get_claim, not a partial dict."
         )
     if row.get("t_invalid") is not None:
+        # States what was read, not what was proved. This is a pure function
+        # over one row: it sees `t_invalid` and nothing else. The signed
+        # evidence sits untouched in contradiction_verdicts, and no trigger
+        # guards this column, so one UPDATE either fabricates a contradiction
+        # with zero verdicts present or erases a real one from every read
+        # surface. The old wording asserted a signed verdict had been checked,
+        # and the old signal name said so in machine-readable form; neither is
+        # something this function can know. Replaying the verdicts on read is
+        # deferred work, so until then the honest report is the column.
         return {
             "state": "contradicted",
             "reason": (
-                "a signed contradiction verdict marked this claim "
-                f"invalid at t_invalid={row['t_invalid']}"
+                "this claim's invalidation timestamp is set "
+                f"(t_invalid={row['t_invalid']}); the contradiction verdicts "
+                "behind it are not replayed on read"
             ),
-            "signal": "signed-verdict",
+            "signal": "invalidation-recorded",
         }
     status = row.get("status")
     if status == "retracted":
@@ -5854,10 +5928,7 @@ def query_claims(
 
     if min_support is not None:
         if min_support not in VALID_SUPPORT_LEVELS:
-            raise ValueError(
-                f"Unknown min_support '{min_support}'. "
-                f"Use one of: {', '.join(VALID_SUPPORT_LEVELS)}"
-            )
+            raise ValueError(_unknown_min_support_message(min_support))
         tiers = _SUPPORT_LEVEL_TIERS[min_support]
         tier_placeholders = ",".join("?" * len(tiers))
         conditions.append(f"support_level IN ({tier_placeholders})")
@@ -6057,10 +6128,7 @@ def search_claims(
     fts_query = _validate_fts5_query(query)
 
     if min_support is not None and min_support not in VALID_SUPPORT_LEVELS:
-        raise ValueError(
-            f"Unknown min_support '{min_support}'. "
-            f"Use one of: {', '.join(VALID_SUPPORT_LEVELS)}"
-        )
+        raise ValueError(_unknown_min_support_message(min_support))
     if classification is not None and classification not in VALID_CLASSIFICATIONS:
         raise ValueError(
             f"Unknown classification '{classification}'. "
@@ -6332,6 +6400,24 @@ def _verified_project_policy(conn: sqlite3.Connection) -> dict | None:
     if policy is None:
         return None
     return policy if _policy_envelope_binds(conn, policy) else _UNVERIFIED_POLICY
+
+
+def project_policy_unverified(conn: sqlite3.Connection) -> bool:
+    """True when a stored project policy exists but its root signature does not
+    back it, so every enforcement reads the fail-closed :data:`_UNVERIFIED_POLICY`.
+
+    The stalled state: the row is present, so the project declared a rule, but
+    the signed envelope no longer binds it. :func:`_verified_project_policy` then
+    hands every caller the strictest possible policy (both rules on, declared
+    before every claim), which is correct as a defence but silent as a signal.
+    An operator meets it as a promotion held closed or a restore refusing the
+    backup, with nothing on ``mareforma status`` to say why. This predicate is
+    what ``health()`` and ``status`` read to name it.
+    """
+    policy = get_project_policy(conn)
+    if policy is None:
+        return False
+    return not _policy_envelope_binds(conn, policy)
 
 
 def strict_promotion_required(conn: sqlite3.Connection) -> bool:

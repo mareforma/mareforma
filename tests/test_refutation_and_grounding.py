@@ -30,7 +30,7 @@ class TestRefutationStatusPresenter:
         row = {"t_invalid": "2026-05-22T00:00:00+00:00", "status": "open"}
         rs = mareforma.refutation_status(row)
         assert rs["state"] == "contradicted"
-        assert rs["signal"] == "signed-verdict"
+        assert rs["signal"] == "invalidation-recorded"
 
     def test_retracted_row(self) -> None:
         row = {"t_invalid": None, "status": "retracted"}

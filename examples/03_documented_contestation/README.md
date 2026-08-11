@@ -6,6 +6,12 @@ publishes a stronger, better-powered claim alongside the existing one. Both
 coexist in the graph. `ESTABLISHED` means human-validated evidence, not settled
 truth.
 
+`ESTABLISHED` is a label on the stored `support_level` ladder, the legacy
+per-claim axis whose public labels are deprecated for v0.4.0. Trust itself reads
+off the derived axes `graph.proposition_status(prop)` returns; the contestation
+this example documents is what turns the derived `question_status` for the frame
+to `divided`.
+
 Each step below is the code from
 [`03_documented_contestation.py`](03_documented_contestation.py) followed by the
 console output it prints.

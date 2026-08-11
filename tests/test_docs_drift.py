@@ -137,8 +137,14 @@ _SIGNING_NAME_EXEMPT = frozenset({"CHANGELOG.md", "changelog.mdx"})
 
 
 def _signing_name_sources():
-    """Yield every doc and package file the signing-name guard reads."""
-    for name in ("AGENTS.md", "ARCHITECTURE.md", "README.md"):
+    """Yield every doc and package file the signing-name guard reads.
+
+    ``CHANGELOG.md`` is scanned like the other root prose so its exemption is
+    live rather than dead: it records the ``canonical_payload`` rename and is
+    mirrored section for section onto ``changelog.mdx``, so both changelog
+    surfaces keep the old name and both are exempted below.
+    """
+    for name in ("AGENTS.md", "ARCHITECTURE.md", "README.md", "CHANGELOG.md"):
         yield ROOT / name
     yield from sorted(DOCS.rglob("*.mdx"))
     yield from sorted((ROOT / "mareforma").rglob("*.py"))
@@ -777,15 +783,22 @@ def test_replicated_recipes_sign_the_peers_with_distinct_keys():
     reader that a same-key rerun counts as corroboration.
     """
     unsigned = []
+    recipes_seen = 0
     for page in _REPLICATION_PAGES:
         for block in _python_blocks(page.read_text(encoding="utf-8")):
             if "assert_claim" not in block:
                 continue
             if "REPLICATED" not in _MIN_SUPPORT_RE.sub("", block):
                 continue
+            recipes_seen += 1
             if "signer=" in block or block.count("key_path=") >= 2:
                 continue
             unsigned.append(str(page.relative_to(ROOT)))
+    assert recipes_seen, (
+        "no REPLICATED convergence recipe found in the replication pages to "
+        "guard: the vocabulary pass removed the subject, so update or retire "
+        "this guard rather than letting it pass on nothing"
+    )
     assert not unsigned, (
         "REPLICATED recipes assert both peers under one key in: "
         + ", ".join(sorted(set(unsigned)))
@@ -1139,7 +1152,13 @@ def test_deprecated_label_note_matches_deprecated_labels(tmp_path=None):
     for page in (DOCS / "concepts" / "trust.mdx",
                  DOCS / "for-agents" / "agents.mdx"):
         text = page.read_text(encoding="utf-8")
-        idx = text.index("are deprecated public labels")
+        note = "are deprecated public labels"
+        assert note in text, (
+            f"{page.name} no longer carries the {note!r} note this guard reads: "
+            "a docs change removed it, so update or retire the guard rather than "
+            "letting it raise a bare lookup error"
+        )
+        idx = text.index(note)
         window = text[idx - 160:idx]
         listed = {label for label in known if f"`{label}`" in window}
         assert listed == expected, (
@@ -1150,6 +1169,11 @@ def test_deprecated_label_note_matches_deprecated_labels(tmp_path=None):
 
 def _section(text: str, heading: str) -> str:
     """Return *text* from *heading* up to the next same-or-higher heading."""
+    assert heading in text, (
+        f"expected heading {heading!r} not found: a docs change removed or "
+        "renamed the section this guard reads, so update the guard rather than "
+        "letting it raise a bare lookup error"
+    )
     start = text.index(heading)
     level = heading[: len(heading) - len(heading.lstrip("#"))]
     rest = text[start + len(heading):]
@@ -1931,6 +1955,11 @@ def test_get_tools_docstring_names_the_signing_key_as_the_axis():
     corroboration.
     """
     doc = " ".join((mareforma.EpistemicGraph.get_tools.__doc__ or "").split())
+    assert "REPLICATED" in doc, (
+        "get_tools docstring no longer mentions REPLICATED: the generated_by / "
+        "REPLICATED conflation this guard forbids can no longer occur, so update "
+        "or retire the guard rather than letting it pass on nothing"
+    )
     conflated = [
         s for s in doc.split(". ")
         if "generated_by" in s and "REPLICATED" in s

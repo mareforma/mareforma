@@ -37,8 +37,7 @@ import base64
 import json
 import sqlite3
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 from mareforma import signing as _signing
 from mareforma.db.errors import DatabaseError

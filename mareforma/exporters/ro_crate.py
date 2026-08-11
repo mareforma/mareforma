@@ -17,6 +17,12 @@ work:
   signed-envelope sidecars into a single ``.crate.zip``).
 * Embedding the evidence vector as ``additionalProperty``
   PropertyValue rows for quality-of-evidence downstream filters.
+
+Deprecation: the ``support_level`` PropertyValue carries the retired
+support ladder (PRELIMINARY / REPLICATED / ESTABLISHED). The ladder is
+deprecated; read the computed status axis instead. It still emits this
+release where present. What the crate carries once the stored column is
+removed at v0.4.0 is an open format question, not decided here.
 """
 
 from __future__ import annotations

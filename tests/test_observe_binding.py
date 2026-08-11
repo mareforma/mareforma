@@ -559,20 +559,20 @@ def test_write_gate_and_both_read_checks_read_one_citation_rule():
     # whether a stored one is still honest. A non-string data_source is not a
     # bindable identifier, so all three drop it; restore counted it, which
     # turned a finding with nothing to bind into a binding violation on read.
-    from mareforma.cli import _claim_bound_sources
+    from mareforma._verify import claim_bound_sources
     from mareforma.db.restore import _verify_grounding_binding_on_read
     from mareforma.observe._binding import predicate_citation_sources
 
     cited = normalize_identifier("/data/trial.csv")
     predicate = {"data_sources": [cited, 42], "data_ids": []}
     assert predicate_citation_sources(predicate) == (cited,)
-    assert _claim_bound_sources(
+    assert claim_bound_sources(
         {"predicate_payload": json.dumps(predicate)}
     ) == (cited,)
 
     unbindable = {"data_sources": [42], "data_ids": []}
     assert predicate_citation_sources(unbindable) == ()
-    assert _claim_bound_sources(
+    assert claim_bound_sources(
         {"predicate_payload": json.dumps(unbindable)}
     ) == ()
     record = {"grounding": "GROUNDED", "grounded_sources": [cited]}

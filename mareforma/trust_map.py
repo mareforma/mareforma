@@ -34,7 +34,7 @@ from ._canonical import canonicalize
 # Version of the trust-map shape. Bound into the rendered record so a consumer
 # knows which property set + tier semantics produced it, and a future revision
 # is distinguishable rather than silently reinterpreted.
-TRUST_MAP_VERSION = "v0.3.11"
+TRUST_MAP_VERSION = "v0.3.12"
 
 # Observed-grounding axis versions KNOWN to carry the verdict↔citation binding.
 # An ALLOWLIST, not a denylist: only a GROUNDED verdict stamped with one of these
@@ -476,11 +476,21 @@ def _witnessing_property(claim: dict, has_inclusion: bool) -> TrustProperty:
             residual="unsigned claim; nothing to witness in a transparency log",
         )
     if has_inclusion:
+        # States what was observed, not what was proved. `has_inclusion` comes
+        # from `SELECT 1 FROM rekor_inclusions`, so it answers "a record exists",
+        # and the stored `raw_response_b64` is never opened here. The Merkle
+        # proof is checked at restore, not on read, and the `rekor_inclusions`
+        # triggers block UPDATE and DELETE but permit INSERT, so a row with a
+        # junk proof reaches this branch. The old sentence asserted an inclusion
+        # proof had been checked, which is a claim this function cannot make.
         return TrustProperty(
             name="witnessing",
             tier=Tier.COMPUTED,
-            value="logged",
-            residual="signed and recorded in a transparency log with an inclusion proof",
+            value="inclusion record present",
+            residual=(
+                "signed, and a transparency-log inclusion record is stored; "
+                "the inclusion proof itself is not re-checked on read"
+            ),
         )
     if logged == 1:
         return TrustProperty(
@@ -535,8 +545,19 @@ def build_trust_map(
     # the same one ``mareforma verify`` uses, so the standalone map is honest.
     sig_verified = None
     asserter_enrolled = None
-    if claim.get("asserter_keyid") and claim.get("signature_bundle"):
-        from mareforma.db import verify_claim_signatures
+    # EITHER column, not both. Gating on both let a row carrying a stapled
+    # ``asserter_keyid`` and no bundle skip the check entirely, so
+    # ``att_verified`` fell back to the stored ``verified`` gate below, which
+    # get_claim passes through True for PRELIMINARY rows. The map then read
+    # "signature re-verified on read" beside a keyid, for a claim with no
+    # signature at all, while ``mareforma verify`` called the same claim
+    # tampered. The MCP server now exposes this map standalone, with no verdict
+    # beside it, so the disagreement had nothing to correct it.
+    if claim.get("asserter_keyid") or claim.get("signature_bundle"):
+        from mareforma.db import (
+            _extract_signature_bundle_keyid,
+            verify_claim_signatures,
+        )
         from mareforma.validators import is_enrolled
 
         sig_verified, _ = verify_claim_signatures(conn, claim)
@@ -544,7 +565,16 @@ def build_trust_map(
         # it can only check the claim-binding, never the signature against a
         # pubkey (the lean model has no key to check it against). Tell the two
         # apart so the map does not claim "re-verified" for a binding-only pass.
-        asserter_enrolled = is_enrolled(conn, claim["asserter_keyid"])
+        #
+        # Read enrolment on the signer the BUNDLE names, the same keyid
+        # verify_claim_signatures checks, not the row's unsigned column: a row
+        # whose column disagrees with its envelope is refused above, and a row
+        # with no bundle has no signer to look up.
+        bundle_keyid = _extract_signature_bundle_keyid(
+            claim.get("signature_bundle")
+        )
+        if bundle_keyid is not None:
+            asserter_enrolled = is_enrolled(conn, bundle_keyid)
     effective = _effective_independence(conn, claim_id, disclose=disclose)
     return _assemble(
         claim, n_roots, has_inclusion,

@@ -101,13 +101,26 @@ The same path runs whether you call `g.assert_claim(...)` from Python
 or `mareforma claim add ...` from the CLI. Both go through
 `mareforma.open()` and pick up the XDG-default signing key.
 
-## Trust ladder
+## Trust: the derived axes and the stored ladder
+
+Trust reads off two axes Mareforma **derives on every read**, not off a stored
+label. `status` per `content_id` is the state of the answer (a `Status` enum
+value: `UNTESTED` → `PRELIMINARY` → `CONVERGENT`, plus `REFUTED` and
+`CONTESTED`); `question_status` per `frame_id` is the state of the question
+(`consistent` / `divided`). Both come from `graph.proposition_status(prop)`, and
+the read-side trust map leads with the effective-independence number rather than
+a single word. These are the vocabulary a reader should reach for.
+
+The **stored `support_level` ladder** below is the legacy promotion mechanism a
+claim carries. It is still live and still gates as described, but its `REPLICATED`
+and `ESTABLISHED` public labels are deprecated for v0.4.0 (see the note after the
+rules). Read it as the deprecated stored axis, not as the trust vocabulary.
 
 ```
 PRELIMINARY ──(≥2 distinct signers share ESTABLISHED upstream)──▶ REPLICATED ──(graph.validate())──▶ ESTABLISHED
 ```
 
-Three rules:
+Three rules govern the stored ladder:
 
 1. **PRELIMINARY → REPLICATED is automatic, structural, and gated.**
    The new claim and a candidate peer must share at least one
@@ -157,15 +170,17 @@ directly. It exists to break the chicken-and-egg of "REPLICATED needs
 an ESTABLISHED upstream that doesn't exist on a fresh graph yet", and
 it is gated to enrolled human-typed validators only.
 
-**`REPLICATED` and `ESTABLISHED` are deprecated public labels.** A
-single support word never carried the independence a reader needs, so
-the public surface now leads with the effective-independence number the
-trust map reports, not a rung name. The stored `support_level` strings
-and the promotion machinery are unchanged; only the two public labels
-`mareforma.REPLICATED` and `mareforma.ESTABLISHED` are retired. They
-resolve for one release as string aliases and emit a
-`DeprecationWarning`, and a later release removes them. Read the
-independence axis of the trust map instead.
+**`REPLICATED` and `ESTABLISHED` are deprecated public labels, removed at
+v0.4.0.** A single support word never carried the independence a reader needs,
+so the public surface leads with the derived axes above and the
+effective-independence number the trust map reports, not a rung name. The stored
+`support_level` strings and the promotion machinery are unchanged this release;
+only the two public labels `mareforma.REPLICATED` and `mareforma.ESTABLISHED` are
+retired. They resolve for one release as string aliases and emit a
+`DeprecationWarning`, and v0.4.0 removes them (the `seed=True` bootstrap is
+deprecated on the same schedule and gains its replacement anchor there). Read
+`status`, `question_status`, and the trust map's independence axis instead of a
+rung name.
 
 ## Trust map
 
@@ -206,17 +221,37 @@ adding any signed field:
   run specs, one fresh interpreter per run, resumable (resume honors
   only a run record signed by the auditor's key), with a crashing
   target's partial receipts and its own exit code recorded.
+- `mareforma mcp serve` exposes the read side to an agent over the Model
+  Context Protocol (`mareforma/mcp/server.py`, the `mcp` optional extra). It
+  serves one project, pinned once at startup, through six read-and-verify
+  tools: query, search, fetch a claim, read a proposition's derived axes,
+  fetch a trust map, and verify a claim. It holds no write path, so an agent
+  can look a claim up and audit it across the transport but cannot assert one:
+  a claim written over the boundary would carry no observed grounding, and the
+  record exists to hold claims to the grounding they earned. It loads no
+  signing key, so it never signs or enrols one, and it runs the same verify
+  code path the `verify` command runs, so the two surfaces cannot drift. The
+  graph underneath still opens read-write, because SQLite journals even on a
+  pure read: the bound is on what the server can assert, not on what it touches
+  on disk, and a project that is not writable is refused at startup. Every row
+  it returns is sanitized and wrapped as untrusted data, since a tool result
+  lands in a model's context by definition of the protocol.
 
 The `map`, `verify`, `diagnose`, and `audit` commands live in
-`mareforma/cli.py` (the audit runner in `mareforma/audit.py`); the tier
-semantics and property placement live in `mareforma/trust_map.py`.
+`mareforma/cli.py` (the audit runner in `mareforma/audit.py`, the read-only
+MCP server in `mareforma/mcp/server.py`); the tier semantics and property
+placement live in `mareforma/trust_map.py`.
 
 ## Trust layer
 
-The trust ladder above derives a claim's `support_level` from provenance. The
-trust layer (`mareforma.trust`) adds a parallel, structured model for a single
-content-addressed proposition. It is additive: seven new tables, schema stays at
-v1, and every finding still rides a signed claim.
+The stored ladder above is the legacy per-claim axis. The trust layer
+(`mareforma.trust`) is where the derived axes come from: a structured model for a
+single content-addressed proposition, computed on every read. It is additive:
+seven new tables, schema stays at v1, and every finding still rides a signed
+claim. `graph.proposition_status(prop)` returns both derived axes under the keys
+`status` (the answer, per `content_id`, a `Status` enum value) and
+`question_status` (the question, per `frame_id`), alongside a `frame_status` key
+deprecated for v0.4.0 in favour of `question_status`.
 
 ```
 Proposition (content_id, frame_id)
@@ -543,6 +578,11 @@ mareforma's invariants without scrolling through thousands of lines of
 `db/core.py`.
 
 ### State-machine transitions
+
+These are the transitions of the stored `support_level` ladder, the legacy
+per-claim promotion axis (its `REPLICATED` / `ESTABLISHED` public labels are
+deprecated for v0.4.0). The machine itself is unchanged and still enforced by the
+triggers below.
 
 ```
                 seed=True               graph.validate()

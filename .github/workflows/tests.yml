@@ -61,6 +61,49 @@ jobs:
       - name: Run tests
         run: pytest
 
+  mcp:
+    # One pinned leg that installs the `mcp` extra (the Model Context Protocol
+    # SDK) so the `mareforma mcp serve` server and its tests actually run. The
+    # server module imports the SDK lazily, so every other leg skips its tests;
+    # without this leg the server would ship untested, the same miss caught for
+    # the scientific loaders and example 07. Pinned to 3.12.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev,mcp]"
+
+      - name: Run tests
+        run: pytest
+
+  docs:
+    # No docs build, link check or MDX lint runs anywhere else, so a page listed
+    # in docs.json but missing on disk, or an unclosed <Accordion>, would ship
+    # silently. A full Mintlify render needs Node and network; this is the
+    # offline floor, structural checks over docs.json and the MDX component tags.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Check the docs structure
+        run: pytest tests/test_docs_structure.py
+
   sdist:
     # The suite the sdist ships must pass from the unpacked archive too, or a
     # distro packager who runs it reads a red build off a fine release. The
@@ -83,10 +126,11 @@ jobs:
         run: pytest -m sdist
 
   examples:
-    # Smoke-test the LangChain quickstart examples end-to-end. These are
-    # what every first-time reader of the repo will run; if any break,
-    # the next negative review writes itself. Only examples 01-04, 05
-    # needs OPENAI_API_KEY + a 21 GB MedeaDB download.
+    # Smoke-test the quickstart examples end-to-end. These are what every
+    # first-time reader of the repo will run; if any break, the next negative
+    # review writes itself. Examples 01-04 run here; 05 needs OPENAI_API_KEY +
+    # a 21 GB MedeaDB download; 07 needs pandas (in the test-heavy extra) for
+    # its grounding-catch demo.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -99,7 +143,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -e ".[dev]"
+          pip install -e ".[dev,test-heavy]"
           pip install langchain-core
 
       - name: Example 01, API walkthrough
@@ -113,3 +157,9 @@ jobs:
 
       - name: Example 04, private data, public findings
         run: python examples/04_private_data_public_findings/04_private_data_public_findings.py
+
+      - name: Example 07, silent-failure catch
+        working-directory: examples/07_silent_failure_catch
+        run: |
+          mareforma diagnose --cites data.csv -- analysis.py | grep -q "Grounding: GROUNDED"
+          mareforma diagnose --cites data.csv -- analysis_fallback.py | grep -q "Grounding: UNGROUNDED"

@@ -35,13 +35,20 @@ from __future__ import annotations
 
 from enum import Enum, EnumMeta
 
-# The status-policy version, independent of the package version. It bumps only
-# when the status computation itself changes, not on every release. A finding's
+from mareforma._deprecation import warn_retired_status as _warn_retired_status
+
+# The status-policy version, independent of the package version. A finding's
 # Status carries the policy that computed it, so a later policy change stays
 # identifiable on old rows. Status is recomputed on read and never stored in the
 # schema, so a vocabulary change is a new policy over the same counts, not a
-# migration. v4 renamed the top label CORROBORATED to the convergence marker
-# CONVERGENT; the counting rule is unchanged.
+# migration.
+#
+# It bumps when the counting rule changes OR when a label a reader keys on is
+# renamed or removed, not on every release. v4 is a rename: CORROBORATED became
+# the convergence marker CONVERGENT, with the counting rule unchanged. Adding a
+# field beside an existing one is neither, which is why question_status arriving
+# next to frame_status did not bump it: nothing a reader already keyed on
+# changed meaning. Retiring frame_status will.
 STATUS_POLICY = "status_policy@v4"
 
 # Retired status label -> its live replacement. CORROBORATED named a
@@ -50,20 +57,6 @@ STATUS_POLICY = "status_policy@v4"
 # resolving for one release (by value and by attribute) and warns; a future
 # release removes it.
 _RETIRED_STATUS_ALIASES = {"CORROBORATED": "CONVERGENT"}
-
-
-def _warn_retired_status(old: str, new: str) -> None:
-    import warnings as _warnings
-
-    _warnings.warn(
-        f"Status.{old} is retired: it named a corroboration/independence "
-        f"verdict, but distinct-model is necessary, not sufficient, for "
-        f"independence. Use Status.{new}, a convergence marker for two or more "
-        f"lineage-distinct supporting lines converging. This alias resolves "
-        f"this release and is removed in a future release.",
-        DeprecationWarning,
-        stacklevel=3,
-    )
 
 
 class _StatusMeta(EnumMeta):
@@ -111,6 +104,32 @@ class Status(str, Enum, metaclass=_StatusMeta):
 class FrameStatus(str, Enum):
     CONSISTENT = "consistent"
     CONTESTED = "contested"
+
+
+class QuestionStatus(str, Enum):
+    """The state of a question (a frame): its propositions agree, or divide.
+
+    Reports the same underlying frame contest as :class:`FrameStatus`, under a
+    vocabulary that names the axis rather than echoing the answer's own
+    ``status``: ``status`` is the state of an answer, ``question_status`` is the
+    state of the question. ``FrameStatus`` is emitted beside it for one release
+    and is removed in a future release.
+    """
+    CONSISTENT = "consistent"
+    DIVIDED = "divided"
+
+
+def question_status_of(frame_status: FrameStatus) -> QuestionStatus:
+    """Map a computed :class:`FrameStatus` to its :class:`QuestionStatus`.
+
+    Both keys a proposition view carries are derived from this one computed
+    frame status, so they cannot disagree about whether the frame is contested.
+    """
+    return (
+        QuestionStatus.DIVIDED
+        if frame_status is FrameStatus.CONTESTED
+        else QuestionStatus.CONSISTENT
+    )
 
 
 def compute_status(independent_support: int, independent_refute: int) -> Status:

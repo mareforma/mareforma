@@ -91,6 +91,7 @@ from .core import (
     VALID_CLASSIFICATIONS,
     VALID_SUPPORT_LEVELS,
     _SUPPORT_LEVEL_TIERS,
+    _unknown_min_support_message,
     _SHA256_HEX_RE,
     _CLAIM_ID_RE,
     _REACHABLE_CLAIM_CAP,
@@ -101,6 +102,7 @@ from .core import (
     _VALID_REPLICATION_METHODS,
     _REPLICATION_VERDICT_PAYLOAD_TYPE,
     _REPLICATION_VERDICT_FIELDS,
+    _CONTRADICTION_VERDICT_PAYLOAD_TYPE,
     _CONTRADICTION_VERDICT_FIELDS,
     # Connection management.
     open_db,
@@ -183,6 +185,7 @@ from .core import (
     # Verdict protocol.
     _verdict_canonical_payload,
     _replication_verdict_pae,
+    _contradiction_verdict_pae,
     _require_enrolled_issuer,
     _require_claim_exists,
     record_replication_verdict,
@@ -242,6 +245,7 @@ from .core import (
     set_project_policy,
     project_policy_flags,
     project_policy_declared_at,
+    project_policy_unverified,
     strict_promotion_required,
     _UNVERIFIED_POLICY,
     _policy_envelope_binds,

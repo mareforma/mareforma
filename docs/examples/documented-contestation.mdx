@@ -11,7 +11,11 @@ An ESTABLISHED finding sits in the graph. A new agent runs a larger analysis
 and gets a different result. Using `contradicts=`, it names the tension
 explicitly. Both coexist, neither is overwritten.
 
-ESTABLISHED means human-validated evidence, not settled truth.
+`ESTABLISHED` here is a label on the stored `support_level` ladder (the legacy
+per-claim axis, deprecated for v0.4.0): it means human-validated evidence, not
+settled truth. The contestation itself surfaces on the derived question axis,
+`question_status` per `frame_id`, which reads `divided` once a contrary-direction
+proposition with independent support (support ≥ 1) sits in the same frame.
 
 ## Run
 

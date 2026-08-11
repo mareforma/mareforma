@@ -15,7 +15,6 @@ importable at this level after the split: the submodule layout is an
 internal organisation, not a public API change.
 """
 
-from .._urlguard import _LOOPBACK_DNS_NAMES
 from .core import (
     # Payload-type constants.
     PAYLOAD_TYPE_CLAIM,

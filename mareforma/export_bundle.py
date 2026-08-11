@@ -54,7 +54,7 @@ import base64
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from mareforma import __version__
 from mareforma._atomic import atomic_write_text

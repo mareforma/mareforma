@@ -89,7 +89,9 @@ graph = mareforma.open(tmp, key_path=key_path)
 
 # Each lab signs with its own key. Distinct signing keys drive the REPLICATED
 # support level (two claims that share an ESTABLISHED upstream, signed by DISTINCT
-# keys). Distinct signers are not effective independence, though: that counts
+# keys). support_level is the legacy stored ladder, deprecated for v0.4.0; trust
+# reads off the derived axes (status per content_id, question_status per
+# frame_id). Distinct signers are not effective independence, though: that counts
 # distinct MODELS, so two labs on one model stay at effective independence 1, and
 # the spurious case below shows REPLICATED firing on nothing. generated_by is a
 # display label, not what drives either. In real use each lab runs its own

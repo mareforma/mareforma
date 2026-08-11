@@ -19,17 +19,10 @@ from click.testing import CliRunner
 
 import mareforma
 from mareforma import signing
-from mareforma.cli import cli, _claim_bound_sources, _trust_map_plaintext
+from mareforma._verify import claim_bound_sources
+from mareforma.cli import cli, _trust_map_plaintext
 from mareforma.db import open_db
-from tests._helpers import _requires_repo_checkout
-
-
-def _bootstrap_default_key() -> None:
-    """Create the XDG-default signing key (XDG is isolated per test)."""
-    kp = signing.default_key_path()
-    kp.parent.mkdir(parents=True, exist_ok=True)
-    if not kp.exists():
-        signing.bootstrap_key(kp)
+from tests._helpers import _bootstrap_default_key, _requires_repo_checkout
 
 
 def _count_validators() -> int:
@@ -604,10 +597,10 @@ class TestVerifyGroundingBinding:
         real = "/data/real.csv"
         claim = {"predicate_payload": json.dumps(
             {"data_sources": [real], "data_ids": [ca, "string-token"]})}
-        assert _claim_bound_sources(claim) == (real, ca)
-        assert _claim_bound_sources({"data_source": "/x"}) == ()  # dead field ignored
-        assert _claim_bound_sources({}) == ()
-        assert _claim_bound_sources({"predicate_payload": "not json"}) == ()
+        assert claim_bound_sources(claim) == (real, ca)
+        assert claim_bound_sources({"data_source": "/x"}) == ()  # dead field ignored
+        assert claim_bound_sources({}) == ()
+        assert claim_bound_sources({"predicate_payload": "not json"}) == ()
 
     def test_matched_binding_verifies_exit_0(self, tmp_path: Path) -> None:
         # A GROUNDED verdict whose grounded set matches the finding's citation
@@ -707,7 +700,13 @@ class TestReadCommandsDoNotEnroll:
         with r.isolated_filesystem(temp_dir=tmp_path):
             cid = self._unsigned_project(tmp_path)
             res = r.invoke(cli, ["verify", cid])
-            assert res.exit_code == 0, res.output
+            # Exit 2, not 0: the project is unsigned, so nothing about the
+            # claim could be authenticated. This test is about the validators
+            # table staying empty, and it used to assert exit 0 only as
+            # scaffolding, which accidentally pinned the defect where verify
+            # blessed unsigned claims. The contract lives in
+            # tests/test_exit_code_corpus.py::TestUnsignedClaimIsUnverifiable.
+            assert res.exit_code == 2, res.output
             assert _count_validators() == 0
 
     def test_map_leaves_validators_empty(self, tmp_path: Path) -> None:

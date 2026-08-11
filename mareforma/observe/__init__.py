@@ -7,7 +7,9 @@ what data actually flowed. On exit the observer computes a
 what it saw, never from what the producer declared. Pass the verdict to
 ``assert_finding(..., grounding=verdict)`` to bind it into the signed envelope.
 
-    with mareforma.observe(cites="/data/trial.csv") as obs:
+    from mareforma.observe import observe
+
+    with observe(cites="/data/trial.csv") as obs:
         frame = pandas.read_csv("/data/trial.csv")
         estimate = analyze(frame)
     # author outside the scope, then sign:

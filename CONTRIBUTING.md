@@ -20,6 +20,10 @@ uv sync --extra dev   # or: python -m venv .venv && . .venv/bin/activate && pip 
 uv run pytest         # full suite must pass before any commit
 ```
 
+Add `--extra mcp` if you touch the Model Context Protocol server. Its tests
+skip without the SDK installed, so without that extra the suite passes while
+`tests/test_mcp_server.py` never runs. CI covers it on one pinned leg.
+
 Python ≥ 3.10. Dependencies are minimal (`click`, `tomli-w`, `tomli`,
 `httpx`, `cryptography`, `rfc8785`); we add new runtime deps reluctantly.
 
@@ -211,7 +215,11 @@ Examples in `examples/` must:
 - Use `seed=True` to bootstrap an ESTABLISHED upstream when the
   example demonstrates REPLICATED convergence (the
   ESTABLISHED-upstream rule means a plain string anchor or an
-  unsigned upstream will not trigger REPLICATED)
+  unsigned upstream will not trigger REPLICATED). Note: `seed=True`
+  emits a deprecation warning and is scheduled for removal in v0.4.0,
+  when a replacement anchor lands; it still writes a signed
+  ESTABLISHED claim for this release, so it stays the way to
+  demonstrate convergence in an example today
 
 ## Licence
 

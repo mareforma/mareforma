@@ -56,6 +56,7 @@ from mareforma.trust import (
     NonFalsifiablePropositionError,
     Prediction,
     Proposition,
+    QuestionStatus,
     Scale,
     Status,
     TestType,
@@ -426,6 +427,37 @@ class TestSuccessCriteria:
         # neither is silently corroborated; each stands at PRELIMINARY on its own row
         assert sd["status"] == Status.PRELIMINARY.value
         assert su["status"] == Status.PRELIMINARY.value
+
+    def test_opposite_findings_carry_both_status_keys(self, tmp_path: Path) -> None:
+        # The view carries the retired frame_status ("contested") and the
+        # successor question_status ("divided") side by side, each on its own
+        # vocabulary, both derived from one frame computation so they agree on
+        # the underlying fact (the frame is contested) while wording it in their
+        # own axis.
+        down = Proposition("X", "affects", "Y", Direction.DECREASES, {"pop": "P"})
+        up = Proposition("X", "affects", "Y", Direction.INCREASES, {"pop": "P"})
+        with open_graph(tmp_path) as graph:
+            graph.assert_finding(
+                down, _superiority(DirectionOfInterest.DECREASE), _smd(-2.5, p=0.004),
+                data_id="dA", generated_by="a",
+            )
+            graph.assert_finding(
+                up, _superiority(DirectionOfInterest.INCREASE), _smd(2.5, p=0.004),
+                data_id="dB", generated_by="b",
+            )
+            sd = graph.proposition_status(down)
+        assert sd["frame_status"] == FrameStatus.CONTESTED.value
+        assert sd["question_status"] == QuestionStatus.DIVIDED.value
+
+    def test_uncontested_frame_reads_consistent_on_both_keys(self, tmp_path: Path) -> None:
+        with open_graph(tmp_path) as graph:
+            graph.assert_finding(
+                _prop(), _superiority(DirectionOfInterest.DECREASE), _smd(-2.5, p=0.004),
+                data_id="dA", generated_by="a",
+            )
+            s = graph.proposition_status(_prop())
+        assert s["frame_status"] == FrameStatus.CONSISTENT.value
+        assert s["question_status"] == QuestionStatus.CONSISTENT.value
 
     def test_legacy_claims_coexist(self, tmp_path: Path) -> None:
         with open_graph(tmp_path) as graph:

@@ -73,6 +73,12 @@ PACKAGE_DIR = REPO_ROOT / "mareforma"
 # to build the sdist, and it never belongs in the test-heavy runtime extra.
 _BUILD_ONLY_IMPORTS = frozenset({"setuptools"})
 
+# Libs an importorskip gates on that are NOT grounding loaders and live in their
+# own extra with their own CI leg, so they are installed and their pins run,
+# just not on the test-heavy leg. ``mcp`` (the Model Context Protocol SDK) sits
+# in the ``mcp`` extra and installs on the ``mcp`` workflow job.
+_DEDICATED_LEG_IMPORTS = frozenset({"mcp"})
+
 # Files whose absence from an sdist turns the shipped suite into an
 # unrunnable pile of imports.
 _REQUIRED_SDIST_TEST_FILES = ("tests/conftest.py", "tests/_helpers.py")
@@ -581,7 +587,8 @@ def test_test_heavy_extra_matches_the_loaders_it_exercises():
     heavy = {_requirement_name(req) for req in data["project"]["optional-dependencies"]["test-heavy"]}
 
     # Direction 1: no importorskip'd loader is missing from the heavy extra.
-    gated = _importorskipped_modules() - _BUILD_ONLY_IMPORTS
+    # A lib installed by its own dedicated CI leg is covered elsewhere.
+    gated = _importorskipped_modules() - _BUILD_ONLY_IMPORTS - _DEDICATED_LEG_IMPORTS
     missing = sorted(gated - heavy)
     assert not missing, (
         f"the test-heavy extra omits libs the grounding tests importorskip, so "

@@ -33,6 +33,14 @@ class HealthReport:
     # not partition with open / resolved.
     claims_contradicted: int = 0
     support_level_breakdown: dict[str, int] = field(default_factory=dict)
+    # True when the project carries any support_level, which every project with
+    # claims does: the column is NOT NULL DEFAULT 'PRELIMINARY', so a project
+    # that never named a level still stores one. The support ladder
+    # (PRELIMINARY / REPLICATED / ESTABLISHED) is a retired axis, removed in
+    # v0.4.0; the computed status is the axis to read. Surfaced so an operator
+    # who never typed a level still learns the vocabulary is retired. Read off
+    # the census above, so no extra scan of the claims table.
+    support_level_retired: bool = False
     # REPLICATED / ESTABLISHED claims still standing: open, and not marked
     # invalid by a signed contradiction verdict. The breakdown above is the
     # full census and counts a retracted claim like any other.
@@ -54,6 +62,13 @@ class HealthReport:
     # on `mareforma status` rather than silent. Informational, not a defect, so it
     # does not gate the traffic light.
     convergence_retry_pending: int = 0
+    # A stored project-policy row whose root signature no longer backs it. Every
+    # enforcement then reads the fail-closed strictest policy (witnessing and
+    # strict promotion both required, dated before every claim), so promotions
+    # and restores refuse with no visible cause. Surfaced here so an operator
+    # meets the tampered policy on `mareforma status` rather than inferring it
+    # from a refusal. A project that never declared a policy reports False.
+    policy_unverified: bool = False
     traffic_light: str = "green"
     rationale: str = ""
 
@@ -109,6 +124,11 @@ def compute_health(conn: sqlite3.Connection) -> HealthReport:
         if level in ("REPLICATED", "ESTABLISHED"):
             report.standing_promoted += r["n_standing"]
 
+    # A non-empty census means the project stores support levels (it always
+    # does once it has a claim), so the retired-ladder disclosure applies. Read
+    # off the grouped census above, not a fresh scan.
+    report.support_level_retired = bool(report.support_level_breakdown)
+
     # Re-verify the promoted rows (only those; see count_unverified_promoted) so a
     # forged support level cannot read green. Kept separate from the grouped
     # census: the census counts levels as recorded, this counts the ones the
@@ -146,11 +166,48 @@ def compute_health(conn: sqlite3.Connection) -> HealthReport:
         )
         return report
 
+    # A stored policy whose envelope no longer binds reads maximally strict on
+    # every enforcement; name it here so the stall is visible on status rather
+    # than met only as a refused promotion or restore. A graph without the
+    # project_policy table (an older schema) simply has no policy to stall, so a
+    # read failure here is not substantive and leaves the flag False.
+    try:
+        from mareforma.db import project_policy_unverified
+
+        report.policy_unverified = project_policy_unverified(conn)
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, DatabaseError):
+        report.policy_unverified = False
+
     report.traffic_light, report.rationale = _compute_traffic_light(report)
     return report
 
 
 def _compute_traffic_light(report: HealthReport) -> tuple[str, str]:
+    light, rationale = _claim_census_light(report)
+
+    # A stored policy whose signature no longer backs it forces every rule to the
+    # strictest reading, so promotions and restores refuse without a visible
+    # cause. That bars green. It is orthogonal to the claim census, so it is
+    # layered on top rather than folded into the cascade: a green project turns
+    # yellow, and a project already flagged for a different reason (a forged
+    # promotion, say) keeps that reason and gains this one, so neither is masked.
+    if report.policy_unverified:
+        policy = (
+            "The project policy is present but its root signature does not "
+            "verify: enforcement has fallen back to the strictest reading "
+            "(witnessing and strict promotion both required, dated before every "
+            "claim). Re-sign the policy with the project root or restore from a "
+            "clean backup."
+        )
+        if light == "green":
+            return "yellow", policy
+        return light, f"{rationale} {policy}"
+
+    return light, rationale
+
+
+def _claim_census_light(report: HealthReport) -> tuple[str, str]:
+    """The traffic light from the claim census alone (no policy overlay)."""
     total = report.claims_open + report.claims_resolved
     if total == 0:
         return "red", "No claims recorded. Call graph.assert_claim() to start."
