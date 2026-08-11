@@ -178,7 +178,7 @@ def _conn_cache(conn: sqlite3.Connection) -> set[str]:
             # Graph connections come from db.open_db as the attribute-
             # accepting _GraphConnection subclass, so the cache persists
             # there; this fallback keeps a bare Connection correct (fresh
-            # set every call — slow but safe) instead of crashing.
+            # set every call, slow but safe) instead of crashing.
             return set()
     return cache
 
@@ -229,7 +229,7 @@ def invalidate_conn_cache(conn: sqlite3.Connection) -> None:
     except AttributeError:
         # Either the cache attribute was never set (a raw stdlib
         # connection, which rejects setattr in _conn_cache; or no
-        # is_enrolled call had populated it yet) — nothing to drop, no-op.
+        # is_enrolled call had populated it yet), nothing to drop, no-op.
         pass
 
 
@@ -316,10 +316,10 @@ def _verify_chain(conn: sqlite3.Connection, keyid: str) -> bool:
     depth = 0
     while True:
         if depth >= _MAX_CHAIN_DEPTH:
-            return False  # depth cap — refuse to walk pathological chains
+            return False  # depth cap, refuse to walk pathological chains
         depth += 1
         if current in seen:
-            return False  # cycle — not a tree rooted at a self-signed entry
+            return False  # cycle, not a tree rooted at a self-signed entry
         seen.add(current)
         path.append(current)
         row = get_validator(conn, current)
@@ -347,7 +347,7 @@ def _verify_chain(conn: sqlite3.Connection, keyid: str) -> bool:
             return False
         current = row["enrolled_by_keyid"]
 
-    # Whole chain verified — cache every link.
+    # Whole chain verified, cache every link.
     cache.update(path)
     return True
 

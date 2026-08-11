@@ -37,7 +37,7 @@ def test_core_name_reexported(name: str) -> None:
         f"{name!r} (defined in signing/core.py). Add it to the "
         f"`from .core import (...)` block AND, if public, to __all__."
     )
-    # Also assert `from mareforma.signing import <name>` works — the
+    # Also assert `from mareforma.signing import <name>` works, the
     # import-statement path is observably distinct from getattr() in
     # at least one Python edge case (lazy attribute hooks).
     module = importlib.import_module("mareforma.signing")

@@ -80,11 +80,11 @@ prior = json.loads(query_graph.invoke(
 established_ids = [c["claim_id"] for c in prior]
 
 # Step 2: the new analysis returns no significant effect. The agent does not
-# discard it — it asserts it with contradicts= pointing at the consensus, and
+# discard it. It asserts it with contradicts= pointing at the consensus, and
 # documents the methodological difference (a larger, more diverse cohort).
 challenge = assert_finding_c.invoke({
     "text": "Treatment X shows no significant effect on outcome Y in population P"
-            " (cohort_3, n=1240, p=0.21) — larger and more diverse cohort than prior studies",
+            " (cohort_3, n=1240, p=0.21): larger and more diverse cohort than prior studies",
     "classification": "ANALYTICAL", "supports": ["upstream_ref_B"],
     "contradicts": established_ids, "source": "dataset_gamma",
 })

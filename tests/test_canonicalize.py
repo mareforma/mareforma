@@ -117,7 +117,7 @@ class TestRegistry:
         try:
             assert canonicalize("abc", form="upper-bytes-v1") == b"ABC"
         finally:
-            # Module-level registry is shared — clean up to prevent
+            # Module-level registry is shared, clean up to prevent
             # leakage into other tests in the same session.
             from mareforma.canonicalize import _REGISTRY
             _REGISTRY.pop("upper-bytes-v1", None)

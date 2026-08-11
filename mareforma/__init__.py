@@ -1,7 +1,7 @@
 """Mareforma: local verification layer for AI-assisted research."""
 
 __description__ = "Mareforma: local verification layer for AI-assisted research."
-__version__ = "0.3.12"
+__version__ = "0.3.13"
 
 from pathlib import Path
 
@@ -110,7 +110,7 @@ def open(  # noqa: A001
         supplied AND ``<root>/.mareforma/rekor_log_pubkey.pem`` exists
         from a prior open(), it is loaded automatically.
     strict_promotion:
-        When True, REPLICATED promotion additionally requires non-NULL
+        When True, REPLICATED promotion also requires non-NULL
         ``artifact_hash`` on BOTH sides of a converging pair, an operator
         who wants data-distinctness as a hard gate, not just distinct
         signers. Off by default (the default rule promotes on the
@@ -552,7 +552,7 @@ from mareforma.validators import (
     ValidatorNotEnrolledError,
 )
 from mareforma.export_bundle import BundleVerificationError
-from mareforma.observe import ScopeNotClosedError
+from mareforma.observe import NoPerturbationsError, ScopeNotClosedError
 from mareforma.trust import (
     FindingPlanForkError,
     InconsistentEstimateError,
@@ -681,6 +681,7 @@ __all__ = [
     "PostHocPlanError",
     "ProjectPolicyError",
     "RestoreError",
+    "NoPerturbationsError",
     "ScopeNotClosedError",
     "SelfValidationError",
     "SignedClaimImmutableError",
@@ -731,17 +732,16 @@ def __getattr__(name: str) -> str:
     surface is not silently swallowed.
     """
     if name in _DEPRECATED_SUPPORT_LABELS:
-        import warnings as _warnings
+        from mareforma._deprecation import _emit
 
-        _warnings.warn(
+        _emit(
             f"The public support-level label `mareforma.{name}` is deprecated; "
             "the trust map now leads with the effective-independence number, "
             "not a support word. v0.4.0 removes the whole support ladder, not "
             "just this alias: the stored support_level column, the promotion "
             "machinery, and the query(min_support=...) filter go with it. Read "
             "the independence axis of the trust map instead.",
-            DeprecationWarning,
-            stacklevel=2,
+            3,  # +1 for _emit's own frame
         )
         return name
     raise AttributeError(f"module 'mareforma' has no attribute {name!r}")

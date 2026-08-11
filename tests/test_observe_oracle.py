@@ -14,8 +14,11 @@ import mareforma.observe as obs
 from mareforma.observe import ObservedGrounding as OG
 from mareforma.observe.measure import summarize
 from mareforma.observe.oracle import (
+    NotTestedReason,
     OracleInfluence,
+    OracleResult,
     Reconciliation,
+    influence_sweep,
     perturbation_oracle,
     reconcile,
 )
@@ -92,7 +95,7 @@ def test_oracle_noise_below_threshold_is_undecidable():
     # A stochastic pipeline whose perturbation effect clears one noise sd but not
     # the full noise margin must be UNDECIDABLE, never silently INFLUENCED nor
     # NOT_INFLUENCED. Base runs [0,1,2] give mean 1.0, noise_std ~0.816, margin
-    # ~2.449; perturbed runs [1.5,2.5,3.5] give mean 2.5, effect 1.5 — inside
+    # ~2.449; perturbed runs [1.5,2.5,3.5] give mean 2.5, effect 1.5, inside
     # (noise_std, margin], the exact UNDECIDABLE band. Asserted strictly so a
     # regression that collapses the band is caught.
     seq = iter([0.0, 1.0, 2.0, 1.5, 2.5, 3.5])
@@ -120,6 +123,300 @@ def test_oracle_below_domain_floor_is_not_influenced():
         effect_threshold=10.0, noise_multiplier=3.0,
     )
     assert res.influence is OracleInfluence.NOT_INFLUENCED
+
+
+# -- deterministic target: measured-zero, the modal case -------------------
+
+def test_deterministic_pipeline_does_not_read_influenced_on_float_noise():
+    # The defect this release corrects: with the noise floor measured at 0 the
+    # threshold was 0.0, so any nonzero move read INFLUENCED. A deterministic
+    # pipeline whose finding is ~1000 and moves by 0.0001 (1e-7 relative, deep
+    # inside the float-equality band) must read UNDECIDABLE, never INFLUENCED.
+    base = 1000.0
+    seq = iter([base, base, base, base, base,
+                base + 0.0001, base + 0.0001, base + 0.0001,
+                base + 0.0001, base + 0.0001])
+    run = lambda x: next(seq)
+    res = perturbation_oracle(run, 0.0, lambda x: x + 1.0, repeats=5)
+    assert res.influence is OracleInfluence.UNDECIDABLE
+    assert res.deterministic is True
+    assert res.noise_floor == 0.0
+    assert res.noise_measured is True
+
+
+def test_deterministic_pipeline_real_move_is_influenced():
+    # A deterministic pipeline whose finding genuinely tracks the input still
+    # reads INFLUENCED: the float-equality band is tiny relative to the finding,
+    # so a real dependency clears it. Guards against the band swallowing signal.
+    res = perturbation_oracle(lambda x: x * 2.0, 10.0, lambda x: x + 5.0, repeats=5)
+    assert res.influence is OracleInfluence.INFLUENCED
+    assert res.deterministic is True
+
+
+def test_deterministic_invariant_reads_not_influenced_not_hollow_undecidable():
+    # A provable invariant: the finding does not move at all under the null. On a
+    # deterministic pipeline that is an exact 0 effect, which is NOT_INFLUENCED
+    # (a genuine flat), distinct from a tiny nonzero move (UNDECIDABLE).
+    res = perturbation_oracle(lambda x: 42.0, 10.0, lambda x: x + 5.0, repeats=5)
+    assert res.influence is OracleInfluence.NOT_INFLUENCED
+    assert res.effect_size == 0.0
+    assert res.deterministic is True
+
+
+def test_near_zero_finding_gets_a_band_from_the_absolute_floor():
+    # A finding whose magnitude is ~0 has no relative float-equality band, so a
+    # summation-order artifact would read INFLUENCED. An absolute floor gives it
+    # a band: a 1e-9 move inside determinism_atol=1e-6 reads UNDECIDABLE.
+    base = 0.0
+    seq = iter([base, base, base, base, base,
+                1e-9, 1e-9, 1e-9, 1e-9, 1e-9])
+    run = lambda x: next(seq)
+    res = perturbation_oracle(run, 0.0, lambda x: x + 1.0, repeats=5,
+                              determinism_atol=1e-6)
+    assert res.influence is OracleInfluence.UNDECIDABLE
+    # Without the absolute floor the relative band is 0, so the same tiny move
+    # reads INFLUENCED: the knob is what closes the near-zero gap.
+    seq2 = iter([base, base, base, base, base,
+                 1e-9, 1e-9, 1e-9, 1e-9, 1e-9])
+    bare = perturbation_oracle(lambda x: next(seq2), 0.0, lambda x: x + 1.0,
+                               repeats=5)
+    assert bare.influence is OracleInfluence.INFLUENCED
+
+
+def test_measured_zero_is_distinct_from_never_measured():
+    # Measured-zero (repeats>1, floor sampled and found 0) carries
+    # deterministic=True; a single unmeasured base run does not, even though both
+    # have noise_floor 0. A consumer must be able to tell the two apart.
+    measured = perturbation_oracle(lambda x: x * 2.0, 10.0, lambda x: x + 5.0,
+                                   repeats=5)
+    never = perturbation_oracle(lambda x: x * 2.0, 10.0, lambda x: x + 5.0)
+    assert measured.deterministic is True
+    assert measured.noise_measured is True
+    assert never.deterministic is False
+    assert never.noise_measured is False
+    assert measured.noise_floor == never.noise_floor == 0.0
+    assert "deterministic pipeline" in measured.reason
+    assert "no noise estimate" in never.reason
+
+
+# -- NOT_TESTED: the oracle did not run -------------------------------------
+
+def test_not_tested_row_has_none_measurements_and_typed_reason():
+    # A never-run row carries None on all three measurement numbers (the only
+    # legal value there) so no consumer reads a zero as a measurement, and a
+    # typed reason a consumer branches on without parsing the English sentence.
+    res = OracleResult.not_tested(
+        NotTestedReason.CRASHED_UNDER_NULL, traceback="Traceback...\nValueError"
+    )
+    assert res.influence is OracleInfluence.NOT_TESTED
+    assert res.effect_size is None
+    assert res.noise_floor is None
+    assert res.decision_threshold is None
+    assert res.not_tested_reason is NotTestedReason.CRASHED_UNDER_NULL
+    assert res.traceback is not None
+    assert res.not_tested_reason.value in res.reason
+
+
+def test_every_not_tested_reason_has_a_path_that_produces_it():
+    # The enum is exactly the set of ways this module declines to measure, and
+    # every member is reachable. A member no code path produces reads as coverage
+    # of a state that cannot occur, and a consumer branching on it is never
+    # exercised, so the set is pinned against the paths rather than restated.
+    assert {r.value for r in NotTestedReason} == {
+        "unsupported-shape", "null-construction-failed", "target-failed",
+        "crashed-under-null", "unreducible-value", "non-finite-value",
+    }
+    produced = {
+        # no scramble family fits a string
+        perturbation_oracle(lambda x: 1.0, "a path").not_tested_reason,
+        # building the null raises
+        perturbation_oracle(
+            lambda x: 1.0, [1.0, 2.0], perturb=_raises
+        ).not_tested_reason,
+        # the unperturbed run raises
+        perturbation_oracle(_raises, [1.0, 2.0]).not_tested_reason,
+        # the target survives the base and dies on a null
+        perturbation_oracle(_dies_on_zeroed, [1.0, 2.0]).not_tested_reason,
+        # the reducer cannot reduce the finding
+        perturbation_oracle(lambda x: object(), [1.0, 2.0]).not_tested_reason,
+        # the run reduces to NaN
+        perturbation_oracle(lambda x: float("nan"), [1.0, 2.0]).not_tested_reason,
+    }
+    assert produced == set(NotTestedReason)
+
+
+def _raises(x):
+    raise RuntimeError("boom")
+
+
+def _dies_on_zeroed(x):
+    if all(v == 0.0 for v in x):
+        raise RuntimeError("the null killed the target")
+    return sum(x)
+
+
+# -- profile routing over the auto-derived null family ----------------------
+
+def test_profile_hollow_finding_is_not_influenced():
+    # A hardcoded fallback holds still under every null in the derived family, so
+    # the profile is flat everywhere: NOT_INFLUENCED (hollow).
+    res = perturbation_oracle(lambda x: 42.0, [1.0, 2.0, 3.0, 4.0], repeats=5)
+    assert res.influence is OracleInfluence.NOT_INFLUENCED
+    assert res.scramble_names == ("zeroed", "constant", "permuted", "reversed")
+
+
+def test_profile_position_dependent_finding_is_influenced():
+    # A finding that reads specific positions moves under every null (content and
+    # order both change it), so the profile is moves-everywhere: INFLUENCED.
+    res = perturbation_oracle(
+        lambda x: float(x[0]) * 10.0 + float(x[-1]), [1.0, 2.0, 3.0, 4.0],
+        repeats=5,
+    )
+    assert res.influence is OracleInfluence.INFLUENCED
+
+
+def test_profile_marginal_invariant_is_undecidable_not_hollow():
+    # The false-hollow discipline: a genuine mean is invariant under the
+    # marginal-preserving nulls (permute, reverse) and moves under the destroying
+    # ones. Moves under some, flat under others, so it reads UNDECIDABLE, never
+    # NOT_INFLUENCED. This is the trap the whole instrument rests on.
+    res = perturbation_oracle(
+        lambda x: sum(x) / len(x), [1.0, 2.0, 3.0, 4.0], repeats=5,
+    )
+    assert res.influence is OracleInfluence.UNDECIDABLE
+    assert "permuted" in res.reason and "reversed" in res.reason
+
+
+def test_profile_routing_is_the_default_no_caller_supplies_a_null():
+    # perturb defaults to None: the family is derived from the finding's shape,
+    # so a caller cannot choose (and cannot fish for) a null.
+    res = perturbation_oracle(lambda x: 42.0, 10.0)
+    assert res.influence is OracleInfluence.NOT_INFLUENCED
+    assert res.scramble_names  # a family was derived
+
+
+def test_profile_routing_governs_caller_supplied_sequences_too():
+    # The profile rule replaces the old max-based logic for EVERY family, not
+    # only the auto-derived one: a caller-supplied sequence where the finding
+    # moves under one null and holds invariant under another reads UNDECIDABLE,
+    # where the retired max-move logic would have called it INFLUENCED. The
+    # invariant under a valid null is the honest-hard case, not a clean pass.
+    res = perturbation_oracle(lambda x: x, 0.0, [5.0, 0.0], repeats=3)
+    assert res.perturbation_effects == (5.0, 0.0)
+    assert res.influence is OracleInfluence.UNDECIDABLE
+
+
+def test_unsupported_shape_is_not_tested_never_a_verdict():
+    # A shape the scramble library has no family for yields NOT_TESTED, and the
+    # pipeline is never run: no base value, no verdict invented.
+    ran = []
+    def run(x):
+        ran.append(x)
+        return len(x)
+    res = perturbation_oracle(run, "a prose finding")
+    assert res.influence is OracleInfluence.NOT_TESTED
+    assert res.not_tested_reason is NotTestedReason.UNSUPPORTED_SHAPE
+    assert res.effect_size is None
+    assert ran == []  # nothing was run
+
+
+# -- crash guard and progress -----------------------------------------------
+
+def test_crash_under_a_null_reads_not_tested_with_the_traceback():
+    # A null that kills the target must not abort the measurement: it reads
+    # NOT_TESTED(crashed-under-null), naming the null and carrying the traceback,
+    # never a raised exception.
+    def fragile(x):
+        if any(v == 0.0 for v in x):  # the zeroed null kills it
+            raise ZeroDivisionError("cannot divide by the zeroed input")
+        return sum(x)
+    res = perturbation_oracle(fragile, [1.0, 2.0, 3.0], repeats=3)
+    assert res.influence is OracleInfluence.NOT_TESTED
+    assert res.not_tested_reason is NotTestedReason.CRASHED_UNDER_NULL
+    assert res.traceback and "ZeroDivisionError" in res.traceback
+    assert res.effect_size is None
+
+
+def test_keyboard_interrupt_escapes_the_crash_guard():
+    # The guard catches Exception, not BaseException, so an abort the operator
+    # asked for ends the run rather than turning into a NOT_TESTED row.
+    def aborts(x):
+        raise KeyboardInterrupt()
+    with pytest.raises(KeyboardInterrupt):
+        perturbation_oracle(aborts, [1.0, 2.0], repeats=2)
+
+
+def test_a_value_the_reducer_cannot_reduce_is_not_tested():
+    # A finding the declared reducer cannot turn into a scalar is a different
+    # failure from a crash: NOT_TESTED(unreducible-value), not crashed-under-null.
+    res = perturbation_oracle(lambda x: object(), 1.0, perturb=[2.0])
+    assert res.influence is OracleInfluence.NOT_TESTED
+    assert res.not_tested_reason is NotTestedReason.UNREDUCIBLE_VALUE
+
+
+def test_on_progress_reports_the_documented_run_count():
+    # total = repeats * (1 + number of nulls). For [1,2,3] the derived family is
+    # zeroed, constant, permuted, reversed (4 nulls), so 2 * (1 + 4) = 10 runs.
+    calls = []
+    perturbation_oracle(lambda x: 1.0, [1.0, 2.0, 3.0], repeats=2,
+                        on_progress=lambda done, total: calls.append((done, total)))
+    assert len(calls) == 10
+    assert calls[-1] == (10, 10)
+    assert [d for d, _ in calls] == list(range(1, 11))
+
+
+# -- corpus sweep: multiplicity computed, not left to the caller ------------
+
+def test_influence_sweep_sets_multiplicity_from_the_corpus_size():
+    # Leaving multiplicity at 1 over a corpus silently overcounts influence; the
+    # sweep computes it from the count so the caller never has to.
+    findings = [
+        (lambda x: x[0], [1.0, 2.0, 3.0]),
+        (lambda x: 42.0, [1.0, 2.0, 3.0]),
+        (lambda x: sum(x) / len(x), [1.0, 2.0, 3.0]),
+    ]
+    results = influence_sweep(findings, repeats=5)
+    assert [r.multiplicity for r in results] == [3, 3, 3]
+    assert [r.influence for r in results] == [
+        OracleInfluence.INFLUENCED,
+        OracleInfluence.NOT_INFLUENCED,
+        OracleInfluence.UNDECIDABLE,
+    ]
+
+
+def test_influence_sweep_refuses_a_caller_supplied_multiplicity():
+    # The sweep owns multiplicity; passing it is a mistake, not a silent override.
+    with pytest.raises(TypeError):
+        influence_sweep([(lambda x: x, 1.0)], multiplicity=2)
+
+
+# -- per-verdict blind-spot line + threat model -----------------------------
+
+def test_blind_spot_line_names_the_invariant_nulls_and_the_threat_bound():
+    from mareforma.observe.oracle import THREAT_MODEL_STATEMENT
+
+    data = [1.0, 2.0, 3.0, 4.0]
+    # A genuine mean is invariant under the marginal-preserving nulls: those are
+    # the verdict's blind spots and the line names them.
+    mean = perturbation_oracle(lambda x: sum(x) / len(x), data, repeats=5)
+    assert set(mean.flat_nulls) == {"permuted", "reversed"}
+    assert "permuted" in mean.blind_spot_line()
+    assert THREAT_MODEL_STATEMENT in mean.blind_spot_line()
+
+    # An influenced finding moved under every null: no blind spot, but still the
+    # threat-model statement.
+    influenced = perturbation_oracle(lambda x: x[0], data, repeats=5)
+    assert influenced.flat_nulls == ()
+    assert "every null" in influenced.blind_spot_line()
+    assert THREAT_MODEL_STATEMENT in influenced.blind_spot_line()
+
+
+def test_not_tested_row_carries_the_threat_statement_without_blind_spots():
+    from mareforma.observe.oracle import THREAT_MODEL_STATEMENT
+
+    res = OracleResult.not_tested(NotTestedReason.UNSUPPORTED_SHAPE)
+    assert res.flat_nulls == ()
+    assert THREAT_MODEL_STATEMENT in res.blind_spot_line()
 
 
 # -- reconcile: flow vs influence -------------------------------------------
@@ -150,6 +447,62 @@ def test_reconcile_opaque_is_observer_blind():
     assert reconcile(OG.OPAQUE, OracleInfluence.INFLUENCED).relation is (
         Reconciliation.OBSERVER_BLIND
     )
+
+
+def test_reconcile_opaque_undecidable_keeps_its_opacity():
+    # REGRESSION (mandatory): the dispatch used to check UNDECIDABLE before
+    # OPAQUE, so an OPAQUE row whose oracle could not decide collapsed to
+    # INCONCLUSIVE, losing the opacity and folding two of the three coverage
+    # states into one. OPAQUE must win over UNDECIDABLE: the observer's blindness
+    # is the fact to report, not the oracle's inability to decide.
+    assert reconcile(OG.OPAQUE, OracleInfluence.UNDECIDABLE).relation is (
+        Reconciliation.OBSERVER_BLIND
+    )
+
+
+def test_reconcile_not_tested_is_guarded_first_and_never_accuses():
+    # NOT_TESTED is guarded before every other branch. In particular GROUNDED +
+    # NOT_TESTED must NOT fall through to CONSTRUCT_DIFFERENCE, the cited-but-
+    # hollow accusation, for a row the oracle never ran on.
+    assert reconcile(OG.GROUNDED, OracleInfluence.NOT_TESTED).relation is (
+        Reconciliation.NOT_TESTED
+    )
+    assert reconcile(OG.UNGROUNDED, OracleInfluence.NOT_TESTED).relation is (
+        Reconciliation.NOT_TESTED
+    )
+    assert reconcile(OG.OPAQUE, OracleInfluence.NOT_TESTED).relation is (
+        Reconciliation.NOT_TESTED
+    )
+
+
+def test_reconcile_is_exhaustive_over_the_full_grounding_by_influence_product():
+    # Every cell of the 3 grounding x 4 influence product has an asserted
+    # relation, so a fifth influence state (or a reordered dispatch) cannot ship
+    # a silent gap. Three grounding states, four influence states, twelve cells.
+    expected = {
+        (OG.GROUNDED, OracleInfluence.INFLUENCED): Reconciliation.AGREE,
+        (OG.GROUNDED, OracleInfluence.NOT_INFLUENCED): Reconciliation.CONSTRUCT_DIFFERENCE,
+        (OG.GROUNDED, OracleInfluence.UNDECIDABLE): Reconciliation.INCONCLUSIVE,
+        (OG.GROUNDED, OracleInfluence.NOT_TESTED): Reconciliation.NOT_TESTED,
+        (OG.UNGROUNDED, OracleInfluence.INFLUENCED): Reconciliation.TENSION,
+        (OG.UNGROUNDED, OracleInfluence.NOT_INFLUENCED): Reconciliation.AGREE,
+        (OG.UNGROUNDED, OracleInfluence.UNDECIDABLE): Reconciliation.INCONCLUSIVE,
+        (OG.UNGROUNDED, OracleInfluence.NOT_TESTED): Reconciliation.NOT_TESTED,
+        (OG.OPAQUE, OracleInfluence.INFLUENCED): Reconciliation.OBSERVER_BLIND,
+        (OG.OPAQUE, OracleInfluence.NOT_INFLUENCED): Reconciliation.OBSERVER_BLIND,
+        (OG.OPAQUE, OracleInfluence.UNDECIDABLE): Reconciliation.OBSERVER_BLIND,
+        (OG.OPAQUE, OracleInfluence.NOT_TESTED): Reconciliation.NOT_TESTED,
+    }
+    grounding_states = list(OG)
+    influence_states = list(OracleInfluence)
+    # The product the table claims to cover really is the whole enum product.
+    assert set(expected) == {
+        (g, i) for g in grounding_states for i in influence_states
+    }
+    for (grounding, influence), relation in expected.items():
+        assert reconcile(grounding, influence).relation is relation, (
+            f"reconcile({grounding}, {influence}) should be {relation}"
+        )
 
 
 def test_reconcile_result_type_is_on_the_package_surface():
@@ -264,7 +617,7 @@ def test_bound_load_once_reuse_is_ungrounded(tmp_path):
 def test_bound_wrong_read_stale_cache_is_grounded(tmp_path):
     # KNOWN BOUND (documented false-negative for GROUNDED): the observer sees a
     # non-empty read of the cited path and calls GROUNDED. It cannot tell the
-    # bytes are stale or wrong — flow is not correctness. Intended limit; pinned.
+    # bytes are stale or wrong, flow is not correctness. Intended limit; pinned.
     data = tmp_path / "d.csv"
     data.write_text("stale-but-nonempty\n")
     with obs.observe(cites=str(data)) as h:
@@ -404,3 +757,272 @@ def test_closing_sentence_names_the_dominant_seam():
     sentence = summarize(verdicts).closing_sentence()
     assert "subprocess" in sentence
     assert "OPAQUE dominates" in sentence
+
+
+# -- a verdict never rests on a number that was never measured --------------
+#
+# NOT_INFLUENCED is the instrument's accusation: this finding does not depend on
+# its data. These pin the paths that reached that accusation without a
+# measurement behind it, each of which read as "the finding held still" because
+# a non-finite number or a null identical to the input compares False against
+# every threshold.
+
+def test_a_null_that_reduces_to_nan_is_not_tested_never_hollow():
+    # A ratio whose denominator a null zeroes returns NaN. NaN > threshold and
+    # NaN <= threshold are both False, so an unguarded NaN falls through to
+    # "flat under every null" and earns the finding the hollow verdict off a
+    # measurement that never produced a number.
+    def coefficient_of_variation(xs):
+        mean = sum(xs) / len(xs)
+        spread = (sum((v - mean) ** 2 for v in xs) / len(xs)) ** 0.5
+        return spread / mean if mean else float("nan")
+
+    res = perturbation_oracle(coefficient_of_variation, [1.0, 2.0, 3.0, 4.0])
+    assert res.influence is OracleInfluence.NOT_TESTED
+    assert res.not_tested_reason is NotTestedReason.NON_FINITE_VALUE
+    assert res.influence is not OracleInfluence.NOT_INFLUENCED
+    # A never-run row carries no measurement numbers to be misread as zeros.
+    assert res.effect_size is None and res.decision_threshold is None
+
+
+def test_a_non_finite_base_run_is_not_tested_not_a_crash():
+    # The base runs feed statistics.pstdev, which raises an opaque AttributeError
+    # on a NaN. That escaped the guard the docstring promises, so a target that
+    # produced NaN crashed the measurement instead of being recorded.
+    res = perturbation_oracle(lambda x: float("nan"), [1.0, 2.0], repeats=3)
+    assert res.influence is OracleInfluence.NOT_TESTED
+    assert res.not_tested_reason is NotTestedReason.NON_FINITE_VALUE
+    assert "base run" in res.reason
+
+
+def test_an_infinite_effect_is_not_tested_not_a_large_move():
+    # Every value can be finite while the arithmetic between them overflows. An
+    # infinite effect is the absence of a comparable number, not a huge move, and
+    # it must not reach the router where it would count as INFLUENCED.
+    big = 1.0e308
+    res = perturbation_oracle(lambda x: big if x[0] == 0.0 else -big, [1.0, 2.0])
+    assert res.influence is OracleInfluence.NOT_TESTED
+    assert res.not_tested_reason is NotTestedReason.NON_FINITE_VALUE
+
+
+def test_a_broken_target_is_not_reported_as_a_null_breaking_it():
+    # The base is not a null. Bucketing a target that never ran under
+    # "crashed-under-null" counts a broken target as evidence about the null
+    # family's reach, and routes the reader to the wrong fix.
+    res = perturbation_oracle(_raises, [1.0, 2.0])
+    assert res.not_tested_reason is NotTestedReason.TARGET_FAILED
+    assert "base run" in res.reason and "null" not in res.reason.split("(")[1]
+    # A target that survives the base and dies on a null is the other reason.
+    assert (
+        perturbation_oracle(_dies_on_zeroed, [1.0, 2.0]).not_tested_reason
+        is NotTestedReason.CRASHED_UNDER_NULL
+    )
+
+
+def test_a_null_that_cannot_be_built_is_not_charged_to_the_target():
+    res = perturbation_oracle(lambda x: 1.0, [1.0, 2.0], perturb=_raises)
+    assert res.not_tested_reason is NotTestedReason.NULL_CONSTRUCTION_FAILED
+    assert res.traceback is not None
+
+
+def test_an_empty_perturb_sequence_raises_rather_than_reading_as_not_tested():
+    # A caller handing the oracle nothing to measure is a bug in the call. Turning
+    # it into NOT_TESTED would file it as a measurement outcome a report counts.
+    with pytest.raises(obs.NoPerturbationsError):
+        perturbation_oracle(lambda x: 1.0, [1.0, 2.0], perturb=[])
+
+
+# -- the result cannot contradict itself ------------------------------------
+
+def test_flat_nulls_reads_the_routers_classification_not_the_effects():
+    # flat_nulls used to be re-derived by comparing effects to the threshold, so a
+    # null the router had counted as ambiguous was described as held invariant,
+    # and a NaN effect vanished from the line while driving the verdict.
+    res = perturbation_oracle(lambda x: sum(x), [1.0, 2.0, 3.0, 4.0], repeats=3)
+    assert len(res.null_outcomes) == len(res.perturbation_effects)
+    named = dict(zip(res.scramble_names, res.null_outcomes))
+    assert named["zeroed"] is obs.NullOutcome.MOVED
+    # A sum is invariant under a reordering: flat, and named as such.
+    assert named["permuted"] is obs.NullOutcome.FLAT
+    assert "permuted" in res.flat_nulls
+    assert "zeroed" not in res.flat_nulls
+    assert res.blind_spot_line().startswith("Held invariant under")
+
+
+def test_an_ambiguous_null_is_never_described_as_held_invariant():
+    # A move inside the band moved. Calling it invariant claims the finding held
+    # still under a null it did not hold still under.
+    base = 1000.0
+    seq = iter([base] * 5 + [base + 1e-4] * 5)
+    res = perturbation_oracle(
+        lambda x: next(seq), 0.0, lambda x: x + 1.0, repeats=5
+    )
+    assert res.influence is OracleInfluence.UNDECIDABLE
+    assert res.ambiguous_nulls == ("perturbation",)
+    assert res.flat_nulls == ()
+    assert "less than the decision threshold" in res.blind_spot_line()
+
+
+# -- what the verdict did not try, said on the verdict ----------------------
+
+def test_a_family_the_input_narrowed_says_which_nulls_it_lost():
+    # Permuting a constant sequence changes nothing, so both marginal-preserving
+    # nulls are identical to the base and cannot run. The verdict then rests on
+    # the content-destroying nulls alone, which is a narrower claim than the same
+    # verdict over data that supports the whole family.
+    res = perturbation_oracle(lambda x: sum(x) / len(x), [5.0, 5.0, 5.0], repeats=3)
+    assert res.dropped_nulls == ("permuted", "reversed")
+    assert "ruled out" in res.reason
+    assert "permuted, reversed" in res.blind_spot_line()
+    # The same statistic over data that supports the family reaches the mixed
+    # profile instead, which is the verdict the narrowed family cannot produce.
+    full = perturbation_oracle(lambda x: sum(x) / len(x), [1.0, 2.0, 3.0, 4.0],
+                               repeats=3)
+    assert full.dropped_nulls == ()
+    assert full.influence is OracleInfluence.UNDECIDABLE
+
+
+def test_a_caller_chosen_null_says_so_on_the_verdict():
+    # The derived family exists because a chosen null is a place to fish: pick the
+    # one a mean is provably invariant to and it reads NOT_INFLUENCED however
+    # honest the pipeline is. The oracle still measures what it is asked to, but
+    # the result records who chose, so the row is not read as the family's verdict.
+    res = perturbation_oracle(
+        lambda x: sum(x) / len(x), [1.0, 2.0, 3.0],
+        perturb=lambda x: list(reversed(x)), repeats=3,
+    )
+    assert res.influence is OracleInfluence.NOT_INFLUENCED
+    assert res.caller_chose_nulls is True
+    assert "chosen by the caller" in res.reason
+    assert "chosen by the caller" in res.blind_spot_line()
+    # The derived family on the same finding does not reach that verdict.
+    derived = perturbation_oracle(lambda x: sum(x) / len(x), [1.0, 2.0, 3.0],
+                                  repeats=3)
+    assert derived.influence is OracleInfluence.UNDECIDABLE
+    assert derived.caller_chose_nulls is False
+
+
+def test_multiplicity_records_whether_the_widening_actually_applied():
+    # On a pipeline with no measurable noise there is no sigma to widen, so the
+    # correction is computed and discarded. Recording only the multiplicity would
+    # read as "this was corrected for" on the modal deterministic target.
+    det = perturbation_oracle(lambda x: x[0] * 2, [1.0, 2.0, 3.0],
+                              repeats=3, multiplicity=10_000)
+    assert det.multiplicity == 10_000
+    assert det.multiplicity_applied is False
+    noisy = iter([1.0, 1.4, 0.7, 1.2, 0.9] * 20)
+    stochastic = perturbation_oracle(lambda x: next(noisy), [1.0, 2.0, 3.0],
+                                     repeats=5, multiplicity=10)
+    assert stochastic.multiplicity_applied is True
+
+
+def test_the_sub_sigma_band_is_flat_not_ambiguous():
+    # Pins the pre-existing boundary the profile rule inherited: on a stochastic
+    # pipeline a move at or below one sigma is FLAT, not AMBIGUOUS, so a finding
+    # whose every null moves it less than the run-to-run spread reads
+    # NOT_INFLUENCED. Documented here so a change to that edge fails loudly.
+    base = iter([0.0, 1.0, 2.0] * 40)
+    res = perturbation_oracle(lambda x: next(base), [1.0, 2.0, 3.0], repeats=3)
+    assert res.noise_floor > 0
+    for effect, outcome in zip(res.perturbation_effects, res.null_outcomes):
+        if effect <= res.noise_floor:
+            assert outcome is obs.NullOutcome.FLAT
+
+
+def test_influence_sweep_takes_a_per_finding_metric_from_the_tuple():
+    doubled = obs.declared_reducer("doubled", lambda f: float(f) * 2)
+    results = influence_sweep([
+        (lambda x: sum(x), [1.0, 2.0], doubled),
+        (lambda x: sum(x), [1.0, 2.0]),
+    ], repeats=2)
+    assert results[0].reducer is doubled
+    assert results[1].reducer.name == "scalar"
+    assert all(r.multiplicity == 2 for r in results)
+
+
+def test_a_reducer_that_returns_a_non_number_does_not_abort_the_measurement():
+    # math.isfinite raises on None, a str, a complex, and an int too large for a
+    # float. Checked outside the reducer's own guard, those escaped
+    # perturbation_oracle and broke the promise that nothing about the target
+    # aborts the measurement into an exception. They are values the reducer could
+    # not reduce to a comparable scalar, which is what UNREDUCIBLE_VALUE names.
+    for value in (None, "not a number", 3j, 10 ** 400):
+        res = perturbation_oracle(
+            lambda x, v=value: v, [1.0, 2.0, 3.0, 4.0],
+            metric=obs.declared_reducer("identity", lambda f: f),
+        )
+        assert res.influence is OracleInfluence.NOT_TESTED, value
+        assert res.not_tested_reason is NotTestedReason.UNREDUCIBLE_VALUE, value
+
+
+def test_a_not_tested_row_still_says_who_chose_the_nulls_and_what_was_dropped():
+    # Both describe the FAMILY, not the measurement, and are known as soon as it
+    # resolves. Left at their defaults, a row said the caller did not choose the
+    # nulls when the caller did, on the field added to stop exactly that reading.
+    crashed = perturbation_oracle(
+        _dies_on_zeroed, [1.0, 2.0], perturb=[[0.0, 0.0]], repeats=1,
+    )
+    assert crashed.influence is OracleInfluence.NOT_TESTED
+    assert crashed.caller_chose_nulls is True
+
+    unreducible = perturbation_oracle(lambda x: object(), [5.0, 5.0, 5.0])
+    assert unreducible.influence is OracleInfluence.NOT_TESTED
+    assert unreducible.caller_chose_nulls is False
+    assert unreducible.dropped_nulls == ("permuted", "reversed")
+
+
+def test_multiplicity_is_not_recorded_as_applied_when_a_domain_floor_binds():
+    # The widening reaches the threshold only when the noise margin sets it. With
+    # a domain effect_threshold above the margin the threshold is the floor, so
+    # the correction touched nothing and the field must not say it did.
+    noisy = iter([1.0, 1.4, 0.7, 1.2, 0.9] * 40)
+    res = perturbation_oracle(
+        lambda x: next(noisy), [1.0, 2.0, 3.0], repeats=5,
+        multiplicity=10, effect_threshold=1e6,
+    )
+    assert res.multiplicity == 10
+    assert res.multiplicity_applied is False
+
+
+def test_a_move_below_a_domain_floor_is_not_called_held_invariant():
+    # With a domain effect_threshold set, band_driven goes False and AMBIGUOUS
+    # became unreachable, so every sub-threshold effect was classified FLAT no
+    # matter how large. A finding that moved by a million under the constant
+    # null was reported as having held invariant under it.
+    seq = iter([0.0, 1.0, 2.0, 5.0, 6.0, 7.0])
+    res = perturbation_oracle(
+        lambda x: next(seq), 0.0, lambda x: x + 1, repeats=3,
+        effect_threshold=10.0, noise_multiplier=3.0,
+    )
+    # The documented verdict is unchanged: below a domain floor is
+    # domain-insignificant, not ambiguous.
+    assert res.influence is OracleInfluence.NOT_INFLUENCED
+    assert res.flat_nulls == ()
+    assert res.below_domain_floor_nulls == ("perturbation",)
+    assert "less than the domain floor" in res.blind_spot_line()
+
+
+def test_the_hollow_verdict_states_that_it_cannot_see_a_size_dependence():
+    # Every derived null rewrites values and keeps the cardinality and keys, so
+    # an honest finding that depends on HOW MUCH data there is holds still under
+    # the whole family. The verdict is what it is; it must say what it cannot see.
+    res = perturbation_oracle(lambda xs: float(len(xs)), [1.0, 2.0, 3.0, 4.0],
+                              repeats=3)
+    assert res.influence is OracleInfluence.NOT_INFLUENCED
+    assert "how much data there is" in res.blind_spot_line()
+    # And a verdict that is not the accusation does not carry the caveat.
+    moved = perturbation_oracle(lambda xs: xs[0] * 2, [1.0, 2.0, 3.0, 4.0],
+                                repeats=3)
+    assert "how much data there is" not in moved.blind_spot_line()
+
+
+def test_the_reducer_declaration_carries_the_parameter_that_aims_it():
+    # A prose answer states several numbers, and WHICH one the oracle reads
+    # changes the verdict. A declaration naming only the reducer says the
+    # reduction is auditable while omitting the setting that decides it.
+    from mareforma.observe.oracle import numeric_extraction_reducer
+
+    assert numeric_extraction_reducer(index=1).declaration()["parameters"] == {
+        "index": 1
+    }
+    assert numeric_extraction_reducer().declaration()["parameters"] == {"index": 0}

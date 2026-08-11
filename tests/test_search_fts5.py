@@ -210,7 +210,7 @@ class TestSearchReputationProjection:
         assert "validator_reputation" in results[0]
         assert "generator_enrolled" in results[0]
         assert results[0]["generator_enrolled"] is True
-        # Not yet ESTABLISHED — reputation is 0.
+        # Not yet ESTABLISHED, reputation is 0.
         assert results[0]["validator_reputation"] == 0
 
 

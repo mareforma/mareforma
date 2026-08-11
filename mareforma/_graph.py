@@ -128,12 +128,10 @@ def _warn_min_support(value) -> None:
     """
     if value is None:
         return
-    import warnings as _warnings
+    from mareforma._deprecation import _emit
 
-    _warnings.warn(
-        _MIN_SUPPORT_DEPRECATION, DeprecationWarning,
-        stacklevel=_caller_stacklevel(),
-    )
+    # +1 for _emit's own frame; see its docstring.
+    _emit(_MIN_SUPPORT_DEPRECATION, _caller_stacklevel() + 1)
 
 
 def _model_lineage_of(grounding):
@@ -281,6 +279,17 @@ class EpistemicGraph:
         # enumerating surfaces cannot return them, so without this counter a
         # tampered graph reads as a graph with fewer claims.
         self._read_verify_exclusions = 0
+        self._read_unverified_exclusions = 0
+        # Whether any disclosure count stopped at its scan ceiling, so a reader
+        # knows the total is a floor rather than an exact number.
+        self._read_unverified_saturated = False
+        # Per-kind occurrence counts behind the health-log rate limit. Not the
+        # row totals: those are the numbers a reader wants, these only decide
+        # when a line is worth writing.
+        self._health_append_counts: dict[str, int] = {}
+        # The running total at the last line written for each kind, so a spike
+        # between two ordinary reads is not lost between powers of two.
+        self._health_append_totals: dict[str, int] = {}
         # The grounding record the finding path has already attested, held for
         # the one nested assert_claim call it makes. See _attest_grounding.
         self._attested_grounding: "dict | None" = None
@@ -790,6 +799,7 @@ class EpistemicGraph:
             include_invalidated=include_invalidated,
             refutation_filter=refutation_filter,
             on_verify_excluded=self._record_verify_exclusions,
+            on_unverified_excluded=self._record_unverified_exclusions,
         )
 
     @_synchronized
@@ -934,6 +944,7 @@ class EpistemicGraph:
             include_unverified=include_unverified,
             include_invalidated=include_invalidated,
             on_verify_excluded=self._record_verify_exclusions,
+            on_unverified_excluded=self._record_unverified_exclusions,
         )
 
     def _record_verify_exclusions(self, n: int) -> None:
@@ -942,12 +953,71 @@ class EpistemicGraph:
         Counted on the graph and appended to the health log, because no read
         surface can show the rows themselves: without this a tampered graph
         answers a query with a shorter list and nothing else.
+
+        The counter is exact; the health-log append is rate-limited by
+        :meth:`_health_append_due`. A dropped row is a STATE, not an event: the
+        signature stays broken, so every later read finds it again, and a
+        long-lived reader (``mareforma mcp serve`` holds one graph for the
+        process lifetime) would otherwise write one line per poll forever.
         """
         self._read_verify_exclusions += n
+        if not self._health_append_due(
+                "read_verify_excluded", self._read_verify_exclusions):
+            return
         from mareforma import health as _health
         _health.append_health_event(
-            self._root, "read_verify_excluded", outcome="fail", n=n,
+            self._root, "read_verify_excluded", outcome="fail",
+            n=n, total=self._read_verify_exclusions,
         )
+
+    def _record_unverified_exclusions(self, n: int, saturated: bool = False) -> None:
+        """Record that a read held back *n* rows behind the unverified filter.
+
+        A PRELIMINARY claim whose generator key is not enrolled is dropped from
+        an enumerating read unless the caller passes ``include_unverified=True``.
+        Held back silently, that turns a record written under an unenrolled key
+        into an empty answer, and a caller reads the empty list as "there is
+        nothing here" rather than "there is something here you did not ask to
+        see". Counted so a surface can say how many, and rate-limited in the
+        health log for the same reason the verify exclusions are: it is a state
+        every read re-encounters, not a new event each time.
+        """
+        self._read_unverified_exclusions += n
+        if saturated:
+            self._read_unverified_saturated = True
+        if not self._health_append_due(
+                "read_unverified_excluded", self._read_unverified_exclusions):
+            return
+        from mareforma import health as _health
+        _health.append_health_event(
+            self._root, "read_unverified_excluded", outcome="degraded",
+            n=n, total=self._read_unverified_exclusions,
+        )
+
+    def _health_append_due(self, kind: str, total: int) -> bool:
+        """Whether this occurrence of *kind* earns a health-log line.
+
+        Two triggers, because the two things a reader looks for are different.
+
+        Occurrence count, on the 1st, 2nd, 4th, 8th and so on, so a persistent
+        condition costs a logarithmic number of lines instead of one per read and
+        the first occurrence is always recorded. Counting occurrences rather than
+        rows because a read that drops three rows every time steps the row total
+        3, 6, 9, which never lands on a power of two, so gating on the total
+        alone would write nothing at all.
+
+        Magnitude, whenever the running total has at least doubled since the last
+        line written for this kind. Without it a sudden spike is silent: a read
+        that dropped 500 rows between two ordinary reads is the one a reader most
+        wants to see, and it lands on no power of two.
+        """
+        seen = self._health_append_counts.get(kind, 0) + 1
+        self._health_append_counts[kind] = seen
+        last = self._health_append_totals.get(kind, 0)
+        due = seen & (seen - 1) == 0 or total >= max(1, last * 2)
+        if due:
+            self._health_append_totals[kind] = total
+        return due
 
     # ------------------------------------------------------------------
     # Verdict-issuer protocol
@@ -3584,15 +3654,15 @@ class EpistemicGraph:
                 :meth:`EpistemicGraph.assert_finding`. This alias forwards
                 to ``record_claim`` and is kept for one release.
                 """
-                import warnings
-                warnings.warn(
+                from mareforma._deprecation import _emit
+
+                _emit(
                     "The 'assert_finding' agent tool was renamed to "
                     "'record_claim' (the old name shadowed "
                     "EpistemicGraph.assert_finding). Update your tool "
                     "wiring; this deprecated alias will be removed in a "
                     "future release.",
-                    DeprecationWarning,
-                    stacklevel=2,
+                    3,  # +1 for _emit's own frame
                 )
                 return record_claim(
                     text,
@@ -3642,8 +3712,29 @@ class EpistemicGraph:
         read, not that the graph is untampered. A non-zero value means a claim
         on disk failed re-verification; name it with :meth:`get_claim` or
         ``mareforma verify`` to see which.
+
+        The health-log line is rate-limited (written at 1, 2, 4, 8, ...
+        occurrences) because the exclusion is a state every later read finds
+        again; this counter is exact and is the one to read.
         """
         return self._read_verify_exclusions
+
+    @property
+    def read_unverified_exclusions(self) -> int:
+        """Rows :meth:`query` and :meth:`search` held back behind the filter.
+
+        A PRELIMINARY claim whose generator key is not in the validators table
+        is dropped from an enumerating read unless ``include_unverified=True``.
+        Unlike the verify exclusions above, a flag DOES bring these back: they
+        are not tampered rows, they are rows the default read does not vouch
+        for. Counted so an empty answer can be told from an empty record, which
+        is the difference between "there is nothing here" and "there is
+        something here you did not ask to see".
+
+        Resets to zero each time the graph is re-opened, and counts only the
+        reads this session made.
+        """
+        return self._read_unverified_exclusions
 
     @_synchronized
     def health(self) -> dict[str, int]:

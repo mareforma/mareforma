@@ -11,6 +11,7 @@ import hashlib
 import json
 import sqlite3
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -837,19 +838,34 @@ class SkipDisclosure:
 
     The root and the dedupe set live in one object so a reader that can emit is
     a reader that deduplicates; there is no way to arm the emitter without it.
+
+    The set is BOUNDED. It is fine for a CLI process, which exits, and wrong for
+    ``mareforma mcp serve``, which holds one graph for the process lifetime: an
+    unbounded set of every triple ever seen grows with the graph and is never
+    released. Bounded, the oldest keys fall out and a long-ago drop can be
+    disclosed a second time, which is the right way to be wrong here. The drop is
+    a real state, so re-disclosing it repeats something true; forgetting to
+    disclose it would not.
     """
+
+    # Enough that an ordinary session dedupes everything it sees, small enough
+    # that the worst case is bounded memory rather than a function of graph size.
+    _MAX_SEEN = 4096
 
     __slots__ = ("_root", "_seen")
 
     def __init__(self, root: "Path | str") -> None:
         self._root = root
-        self._seen: set[tuple[str, str, str]] = set()
+        self._seen: "OrderedDict[tuple[str, str, str], None]" = OrderedDict()
 
     def record(self, op: str, content_id: str, line_id: str, **detail) -> None:
         key = (op, content_id, line_id)
         if key in self._seen:
+            self._seen.move_to_end(key)
             return
-        self._seen.add(key)
+        self._seen[key] = None
+        while len(self._seen) > self._MAX_SEEN:
+            self._seen.popitem(last=False)
         from mareforma.health import append_health_event
         append_health_event(
             self._root, op, outcome="degraded",

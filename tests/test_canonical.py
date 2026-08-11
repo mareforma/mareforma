@@ -95,7 +95,7 @@ class TestBytestableAcrossRuns:
 
         # The subprocess runs the same interpreter (`sys.executable`), so
         # `mareforma` is on its sys.path via whatever install method the
-        # test runner used — no cwd or sys.path manipulation needed.
+        # test runner used, no cwd or sys.path manipulation needed.
         script = (
             "import sys; "
             "from mareforma._canonical import canonicalize; "

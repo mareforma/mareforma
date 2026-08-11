@@ -2609,3 +2609,152 @@ def test_scitt_guard_fails_on_an_empty_scan_set(tmp_path):
     """A moved package must fail loudly, not pass by auditing nothing."""
     with pytest.raises(AssertionError, match="audits nothing"):
         _assert_no_scitt_claim_without_cose(tmp_path / "moved")
+
+
+# -- every example is reachable from the surfaces people actually read ------
+
+def _example_dirs() -> list[pathlib.Path]:
+    return sorted(
+        d for d in (ROOT / "examples").iterdir()
+        if d.is_dir() and re.fullmatch(r"\d\d_\w+", d.name)
+    )
+
+
+def test_every_example_directory_appears_in_the_readme_table():
+    # The README table is the front door and the PyPI landing page. Example 07
+    # shipped in the release that added it and was absent from this table, so the
+    # cheapest demonstration of the product's core claim was unreachable from the
+    # two surfaces people read. README.md was edited without checking it against
+    # `ls examples/`; this guard is that check.
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    missing = [d.name for d in _example_dirs() if f"examples/{d.name}" not in readme]
+    assert not missing, (
+        f"README.md's example table does not link these example directories: "
+        f"{missing}. Add a row per example, or delete the directory."
+    )
+
+
+def test_every_example_directory_has_a_docs_page_in_the_nav():
+    # Same defect one surface over: a docs page that exists but is not in the
+    # navigation is only reachable by a reader who already knows the URL, and a
+    # directory with no page at all is invisible from the docs site entirely.
+    config = json.loads((DOCS / "docs.json").read_text(encoding="utf-8"))
+    nav_pages = set(re.findall(r'"(examples/[\w-]+)"', json.dumps(config)))
+    on_disk = {p.stem for p in (DOCS / "examples").glob("*.mdx")}
+    assert {p.split("/", 1)[1] for p in nav_pages} <= on_disk, (
+        "docs.json lists an examples page with no .mdx file behind it"
+    )
+    # Each example directory must be linked from exactly one docs page, matched
+    # by the GitHub link the page carries rather than by a filename convention,
+    # so renaming a page cannot silently orphan an example.
+    linked = "\n".join(
+        p.read_text(encoding="utf-8") for p in (DOCS / "examples").glob("*.mdx")
+        if f"examples/{p.stem}" in nav_pages
+    )
+    missing = [d.name for d in _example_dirs() if f"examples/{d.name}" not in linked]
+    assert not missing, (
+        f"no docs page in the navigation links these example directories: "
+        f"{missing}. Add a page under docs/examples/ and list it in docs.json."
+    )
+
+
+# -- the oracle's own vocabulary, held to the code that defines it ----------
+
+@pytest.mark.parametrize("enum_name", ["OracleInfluence", "NotTestedReason",
+                                       "NullOutcome"])
+def test_every_oracle_enum_member_is_documented(enum_name):
+    """The docs enumerate these in prose, and nothing held them to the enum.
+
+    That is how the reference came to list three of four `NullOutcome` members
+    and an audit docstring came to say "the four NotTestedReason values" when
+    there were six. A reader branching on the documented set hits an unhandled
+    value the moment they use the feature the missing member describes.
+    """
+    from mareforma.observe import oracle as oracle_mod
+
+    enum = getattr(oracle_mod, enum_name)
+    api = (DOCS / "reference" / "api.mdx").read_text(encoding="utf-8")
+    missing = [m.value for m in enum if m.value not in api]
+    assert not missing, (
+        f"{enum_name} members absent from reference/api.mdx: {missing}"
+    )
+
+
+def test_no_doc_miscounts_an_oracle_enum():
+    """A cardinal word beside an enum name goes stale the moment a member lands."""
+    from mareforma.observe.oracle import NotTestedReason, NullOutcome
+
+    words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+             "seven": 7, "eight": 8}
+    surfaces = [ROOT / "ARCHITECTURE.md", DOCS / "reference" / "api.mdx"]
+    surfaces += [p for p in (ROOT / "mareforma").rglob("*.py")]
+    for enum, name in ((NotTestedReason, "NotTestedReason"),
+                       (NullOutcome, "NullOutcome")):
+        pattern = re.compile(
+            r"\b(" + "|".join(words) + r")\s+" + name + r"\b", re.IGNORECASE)
+        for path in surfaces:
+            for word in pattern.findall(path.read_text(encoding="utf-8")):
+                assert words[word.lower()] == len(enum), (
+                    f"{path.name} says '{word} {name}' but the enum has "
+                    f"{len(enum)} members"
+                )
+
+
+def test_every_derived_null_name_is_documented():
+    """The null names are user-visible through `scramble_names`, `dropped_nulls`
+    and `blind_spot_line()`, and the docs stated the sequence family's names as
+    if they were every shape's. A scalar produces none of them."""
+    from mareforma.observe.scrambles import scramble_family
+
+    api = (DOCS / "reference" / "api.mdx").read_text(encoding="utf-8")
+    for value in (3.0, {"a": 1.0, "b": 2.0}, [1.0, 2.0, 3.0]):
+        family = scramble_family(value)
+        assert family is not None, value
+        for scramble in family:
+            assert f"`{scramble.name}`" in api, (
+                f"null {scramble.name!r} (from {type(value).__name__}) is "
+                f"produced but never named in reference/api.mdx"
+            )
+
+
+def test_every_shipped_subpackage_is_named_by_a_doc():
+    """`mareforma.selfcheck` shipped in the wheel with a public API and no doc,
+    and no guard would have noticed. pyproject's `include = ["mareforma*"]`
+    ships every subpackage, so every subpackage has to be findable."""
+    surfaces = "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in [ROOT / "README.md", ROOT / "ARCHITECTURE.md", ROOT / "AGENTS.md"]
+        + list(DOCS.rglob("*.mdx"))
+    )
+    shipped = [
+        d.name for d in (ROOT / "mareforma").iterdir()
+        if d.is_dir() and not d.name.startswith(("_", "."))
+        and (d / "__init__.py").exists()
+    ]
+    # Either the dotted module path or the CLI form counts as findable: the
+    # server is reached as `mareforma mcp serve` and documented that way, and a
+    # reader who can get to it does not care which spelling the doc used.
+    missing = [
+        n for n in shipped
+        if f"mareforma.{n}" not in surfaces and f"mareforma {n}" not in surfaces
+    ]
+    assert not missing, (
+        f"these subpackages ship in the wheel and no doc names them: {missing}"
+    )
+
+
+def test_every_cli_option_appears_in_its_options_table():
+    """Only `export` was held to its table, which is how `mcp serve
+    --max-evidence-lines` and `claim list --limit` both shipped undocumented."""
+    text = (DOCS / "reference" / "cli.mdx").read_text(encoding="utf-8")
+    missing = []
+    for name, command in sorted(cli.commands.items()):
+        subs = getattr(command, "commands", {})
+        for label, cmd in ([(name, command)] if not subs
+                           else [(f"{name} {s}", c) for s, c in subs.items()]):
+            for param in cmd.params:
+                if not isinstance(param, click.Option) or param.hidden:
+                    continue
+                if not any(o in text for o in param.opts):
+                    missing.append(f"{label} {param.opts[0]}")
+    assert not missing, f"CLI options absent from reference/cli.mdx: {missing}"

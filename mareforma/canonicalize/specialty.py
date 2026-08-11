@@ -40,7 +40,7 @@ __all__ = [
 ]
 
 
-try:  # pragma: no cover — environment-dependent
+try:  # pragma: no cover, environment-dependent
     from rdkit import Chem  # type: ignore[import-not-found]
     HAS_RDKIT = True
 except ImportError:
@@ -61,7 +61,7 @@ def canonicalize_rdkit_canonical_smiles_v1(value: str) -> bytes:
             "rdkit-canonical-smiles-v1 requires rdkit; install it "
             "(mareforma[chem]) or use smiles-nfc-fallback-v1"
         )
-    mol = Chem.MolFromSmiles(value)  # pragma: no cover — needs rdkit
+    mol = Chem.MolFromSmiles(value)  # pragma: no cover, needs rdkit
     if mol is None:
         raise ValueError(f"rdkit could not parse SMILES {value!r}")
     return Chem.MolToSmiles(mol, canonical=True).encode("utf-8")

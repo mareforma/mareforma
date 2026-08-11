@@ -160,3 +160,55 @@ def test_scan_ceiling_truncation_raises_instead_of_a_short_list(
             g.query(limit=5)
         with pytest.raises(mareforma.ScanCeilingReached, match="scan ceiling"):
             g.search("claim", limit=5)
+
+
+def test_the_read_ordering_is_served_by_an_index_not_a_temp_btree(tmp_path):
+    """`query()` orders by a CASE over support_level, which no column index can
+    serve, so every call scanned the table and built a temp B-tree to sort it.
+    The LIMIT bounded what came back, never what was read, and the whole cost was
+    paid under the process-wide graph lock. Pinned on the plan rather than on a
+    timing, so it cannot flake and it names the thing that regressed if the
+    index or the ORDER BY drifts apart."""
+    root_key = _bootstrap_key(tmp_path, "root.key")
+    with mareforma.open(tmp_path, key_path=root_key) as g:
+        for i in range(20):
+            g.assert_claim(f"claim number {i}", generated_by="x")
+        # The statement the READ issues, captured, not one copied into the
+        # test. A literal here cannot notice the production ORDER BY drifting
+        # away from the index, which is the whole thing this pins.
+        seen = []
+        g._conn.set_trace_callback(seen.append)
+        try:
+            g.query(limit=20)
+        finally:
+            g._conn.set_trace_callback(None)
+        ordered = [q for q in seen if "ORDER BY" in q and "FROM claims" in q]
+        assert ordered, f"no ordered read captured; saw {len(seen)} statements"
+        plan = [r[-1] for r in g._conn.execute("EXPLAIN QUERY PLAN " + ordered[0])]
+
+    # Exact name, not a substring: a renamed or shadowed index still contains
+    # the old name, so `in` would keep passing after the index it pins is gone.
+    assert any("idx_claims_read_order" in step.split() for step in plan), plan
+    assert not any("TEMP B-TREE" in step for step in plan), plan
+
+
+def test_the_read_order_index_reaches_a_graph_written_before_it_existed(tmp_path):
+    """The index lives in the additive SQL, not the fresh-database schema.
+
+    Statements that run only for a fresh database never reach a graph written by
+    an earlier release, which is the trap the
+    schema-if-not-exists-hides-constraint-change learning names. Simulated by
+    dropping the index and reopening: the next open must put it back."""
+    root_key = _bootstrap_key(tmp_path, "root.key")
+    with mareforma.open(tmp_path, key_path=root_key) as g:
+        g.assert_claim("a claim", generated_by="x")
+        g._conn.execute("DROP INDEX idx_claims_read_order")
+        g._conn.commit()
+
+    with mareforma.open(tmp_path, key_path=root_key) as g:
+        names = {
+            r[0] for r in g._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            )
+        }
+    assert "idx_claims_read_order" in names

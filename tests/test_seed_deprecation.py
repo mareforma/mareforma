@@ -69,3 +69,20 @@ def test_scoped_escalation_spares_the_root_enrollment_notice(tmp_path):
     root_key = _bootstrap_key(tmp_path, "root.key")
     with mareforma.open(tmp_path, key_path=root_key) as g:
         assert g.assert_claim("ordinary finding", generated_by="agent")
+
+    # And the assertion that actually proves the filter is MESSAGE-scoped: the
+    # root-enrollment notice is a UserWarning, so a CATEGORY-scoped filter over
+    # DeprecationWarning would spare it too and pass this test identically. What
+    # only a message-scoped filter allows is a sibling DeprecationWarning
+    # reaching the caller as a warning rather than an error.
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        warnings.filterwarnings(
+            "error", message=r"assert_claim\(seed=True\) is deprecated",
+            category=DeprecationWarning,
+        )
+        warnings.warn("an unrelated deprecation", DeprecationWarning)
+    assert [w.category for w in seen] == [DeprecationWarning], (
+        "the seed filter escalated a DeprecationWarning it does not name, so it "
+        "is category-scoped, not message-scoped"
+    )

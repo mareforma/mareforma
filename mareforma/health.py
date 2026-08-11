@@ -175,8 +175,35 @@ def compute_health(conn: sqlite3.Connection) -> HealthReport:
         from mareforma.db import project_policy_unverified
 
         report.policy_unverified = project_policy_unverified(conn)
-    except (sqlite3.OperationalError, sqlite3.DatabaseError, DatabaseError):
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc):
+            # OperationalError also covers a locked database, a disk I/O error
+            # and a missing column, none of which mean "there is no policy".
+            # Narrowing on the class alone left those reporting no stall, which
+            # is the direction this whole branch exists to stop.
+            report.policy_unverified = False
+            report.traffic_light = "error"
+            report.rationale = (
+                f"the project policy could not be read ({type(exc).__name__}: "
+                f"{exc}), so whether a policy is stalled is unknown, not answered"
+            )
+            return report
+        # The narrow case this tolerance was written for: an older schema with
+        # no project_policy table, where there is no policy to stall.
         report.policy_unverified = False
+    except (sqlite3.DatabaseError, DatabaseError) as exc:
+        # Everything else. DatabaseError is the base class of nearly every
+        # sqlite failure including corruption, so swallowing it here reported
+        # "no policy stall" for a graph that could not be read at all, while the
+        # three sibling reads above set traffic_light = "error" on the same
+        # exception. A status command that cannot read the policy must say so.
+        report.policy_unverified = False
+        report.traffic_light = "error"
+        report.rationale = (
+            f"the project policy could not be read ({type(exc).__name__}: "
+            f"{exc}), so whether a policy is stalled is unknown, not answered"
+        )
+        return report
 
     report.traffic_light, report.rationale = _compute_traffic_light(report)
     return report

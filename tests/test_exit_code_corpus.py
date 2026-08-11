@@ -154,7 +154,13 @@ class TestDiagnoseTargetContract:
             res = r.invoke(
                 cli, ["diagnose", "--cites", str(data), "--", str(spec)],
             )
-            assert res.exit_code == 2, res.output
+            # 3, not 2: `diagnose` and `audit` exit with the TARGET's own
+            # code, and 2 is one of the commonest codes a script exits with
+            # (argparse uses it for its own usage errors), so a gate could
+            # not tell a refused target from a target that refused its
+            # arguments. 3 is the package's usage-error code, the same one
+            # `verify` and `reexec` already use.
+            assert res.exit_code == 3, res.output
             assert "not a Python program" in res.output
             # The point of the guard: no verdict is printed for a target that
             # never ran, so neither the accusation nor the coverage claim ships.
@@ -208,9 +214,13 @@ class TestAuditTargetContract:
             res = r.invoke(
                 cli, ["audit", "--findings", str(findings), "--", str(spec)],
             )
-            # click usage error: exit 2, before any target runs, so no receipt
-            # and no grounding verdict for a target that never executed.
-            assert res.exit_code == 2, res.output
+            # 3, not 2: `diagnose` and `audit` exit with the TARGET's own
+            # code, and 2 is one of the commonest codes a script exits with
+            # (argparse uses it for its own usage errors), so a gate could
+            # not tell a refused target from a target that refused its
+            # arguments. 3 is the package's usage-error code, the same one
+            # `verify` and `reexec` already use.
+            assert res.exit_code == 3, res.output
             assert "not a Python program" in res.output
 
     def test_python_target_is_accepted(self, tmp_path: Path) -> None:
@@ -413,3 +423,206 @@ class TestUnsignedClaimIsUnverifiable:
             res = r.invoke(cli, ["verify", cid, "--json"])
             assert res.exit_code in (_VERIFY_FAIL, _VERIFY_UNVERIFIABLE), res.output
             assert json.loads(res.output)["verdict"] != "verified"
+
+
+class TestObserveUsageCodeIsApartFromTheTarget:
+    """`diagnose` and `audit` exit with the target's code, so usage cannot be 2.
+
+    argparse exits 2 for its own usage errors, which makes 2 one of the most
+    common codes a Python target exits with. While these commands used 2 for
+    their own usage errors, a CI gate reading 2 could not tell "you passed a
+    non-Python target" from "your script rejected its arguments".
+    """
+
+    def test_a_target_exiting_2_is_not_read_as_a_usage_error(self, tmp_path):
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            Path("argparse_like.py").write_text(
+                "import sys\nsys.exit(2)\n", encoding="utf-8",
+            )
+            res = r.invoke(cli, ["diagnose", "--", "argparse_like.py"])
+            assert res.exit_code == 2, res.output
+            # It ran: the report is there, which a usage error never prints.
+            assert "OBSERVATION REPORT" in res.output
+
+    def test_a_bad_flag_exits_3(self, tmp_path):
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            assert r.invoke(cli, ["diagnose", "--no-such-flag"]).exit_code == 3
+            assert r.invoke(cli, ["audit", "--no-such-flag"]).exit_code == 3
+
+    def test_a_version_suffixed_script_is_not_refused(self, tmp_path):
+        # Path("pipeline.v2").suffix is ".v2", which the non-Python guard read as
+        # a file type. A version marker names no format, and refusing it turned
+        # an ordinary Python script into a usage error.
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            Path("data.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+            for name in ("pipeline.v2", "model.v1.2"):
+                Path(name).write_text(
+                    "open('data.csv').read()\n", encoding="utf-8",
+                )
+                res = r.invoke(cli, ["diagnose", "--cites", "data.csv",
+                                     "--", name])
+                assert res.exit_code == 0, res.output
+                assert "GROUNDED" in res.output
+
+
+class TestNonPythonTargetDocstringMatchesCoverage:
+    """The rule's docstring promises what runs; the tests covered two of them.
+
+    ``_reject_non_python_target`` says it leaves untouched "any suffix in
+    _RUNNABLE_PYTHON_SUFFIXES, a directory or zipapp with a __main__, an
+    extensionless script, a `-m module`, or a bare interpreter flag". Only
+    ``.pyw`` and ``.zip`` were exercised, so the promise about the other three
+    rested on reading the code.
+    """
+
+    def test_an_extensionless_script_runs(self, tmp_path):
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            Path("data.csv").write_text("a\n1\n", encoding="utf-8")
+            Path("pipeline").write_text(
+                "open('data.csv').read()\n", encoding="utf-8",
+            )
+            res = r.invoke(cli, ["diagnose", "--cites", "data.csv",
+                                 "--", "pipeline"])
+            assert res.exit_code == 0, res.output
+            assert "GROUNDED" in res.output
+
+    def test_a_dash_m_module_is_not_refused(self, tmp_path):
+        # Whether the module IMPORTS is the target's business (runpy resolves it
+        # against sys.path, which a CliRunner does not extend to the temp cwd).
+        # What the guard promises is that it does not refuse the form, so the
+        # assertion is on the refusal, not on the run succeeding.
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            Path("data.csv").write_text("a\n1\n", encoding="utf-8")
+            Path("mod.py").write_text(
+                "open('data.csv').read()\n", encoding="utf-8",
+            )
+            res = r.invoke(cli, ["diagnose", "--cites", "data.csv",
+                                 "--", "-m", "mod"])
+            assert "not a Python program" not in res.output
+            assert res.exit_code != 3, res.output
+
+    def test_a_directory_with_a_dunder_main_runs(self, tmp_path):
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            Path("data.csv").write_text("a\n1\n", encoding="utf-8")
+            pkg = Path("app")
+            pkg.mkdir()
+            (pkg / "__main__.py").write_text(
+                "open('data.csv').read()\n", encoding="utf-8",
+            )
+            res = r.invoke(cli, ["diagnose", "--cites", "data.csv",
+                                 "--", "app"])
+            assert res.exit_code == 0, res.output
+
+
+class TestVersionMarkerDoesNotReopenTheGuard:
+    """The version-marker exemption must not readmit the data files it excludes.
+
+    Exempting any digit-looking suffix outright accepted `runspec.json.1`,
+    `dump.sql.001` and `app.log.1`: rotated logs and split archives all end in
+    digits, and every one of them is the data file this guard exists to refuse.
+    Stripping the version tag and judging what is UNDER it is the difference.
+    """
+
+    def _diagnose(self, r, name, body="print('ran')\n"):
+        Path("data.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+        Path(name).write_text(body, encoding="utf-8")
+        return r.invoke(cli, ["diagnose", "--cites", "data.csv", "--", name])
+
+    @pytest.mark.parametrize("name", [
+        "runspec.json.1", "dump.sql.001", "app.log.1", "data.csv.1",
+        "backup.tar.gz.001", "results.json.v2",
+    ])
+    def test_a_versioned_data_file_is_still_refused(self, tmp_path, name):
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            res = self._diagnose(r, name, body='{"steps": 3}')
+            assert res.exit_code == 3, res.output
+            assert "not a Python program" in res.output
+            # And no verdict is invented for a target that never ran.
+            assert "UNGROUNDED" not in res.output
+
+    @pytest.mark.parametrize("name", ["pipeline.v2", "model.v1.2"])
+    def test_a_versioned_python_script_still_runs(self, tmp_path, name):
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            res = self._diagnose(r, name, body="open('data.csv').read()\n")
+            assert res.exit_code == 0, res.output
+            assert "GROUNDED" in res.output
+
+
+class TestTargetUsageErrorIsNotOurs:
+    """A click-based target rejecting its own arguments is an aborted run.
+
+    `click.BadParameter`, `MissingParameter` and `NoSuchOption` all subclass
+    `UsageError`, and any pipeline calling `cli.main(standalone_mode=False)`
+    surfaces them as exceptions. Catching the base class around the target's
+    execution reported the TARGET's mistake as mareforma being invoked wrong:
+    mareforma's usage line printed, no receipts written, and the usage exit code.
+    """
+
+    def test_the_targets_own_usage_error_is_a_crashed_run_with_its_report(
+        self, tmp_path,
+    ):
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            Path("data.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+            Path("t.py").write_text(
+                "import click\n"
+                "open('data.csv').read()\n"
+                "raise click.UsageError('the TARGET rejects its arguments')\n",
+                encoding="utf-8",
+            )
+            res = r.invoke(cli, ["diagnose", "--cites", "data.csv", "--", "t.py"])
+        assert res.exit_code == 1, res.output
+        assert "OBSERVATION REPORT" in res.output
+        assert "Usage: cli diagnose" not in res.output
+
+    def test_our_own_usage_error_still_reports_as_one(self, tmp_path):
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            Path("t.py").write_text("pass\n", encoding="utf-8")
+            res = r.invoke(cli, ["diagnose", "--", "python", "-u", "t.py"])
+        assert res.exit_code == 3, res.output
+        assert "-u" in res.output
+
+
+def test_a_signed_run_record_does_not_authorise_skipping_a_different_run(tmp_path):
+    """Resume verified the signature and never checked WHICH run it was for.
+
+    The check was keyed on the run directory's name alone and ran before the
+    spec was loaded, so it could not compare. A hostile target that can write
+    outside its own directory then only needs to COPY a neighbouring run's
+    signed record, not forge one, and the sibling is skipped without executing.
+    """
+    import shutil
+
+    from mareforma import signing
+
+    r = CliRunner()
+    with r.isolated_filesystem(temp_dir=tmp_path):
+        Path("a.csv").write_text("a\n1\n", encoding="utf-8")
+        Path("b.csv").write_text("b\n2\n", encoding="utf-8")
+        Path("ta.py").write_text("open('a.csv').read()\n", encoding="utf-8")
+        Path("tb.py").write_text("open('b.csv').read()\n", encoding="utf-8")
+        corpus = Path("corpus")
+        corpus.mkdir()
+        (corpus / "runA.json").write_text(json.dumps(
+            {"command": ["python", "ta.py"], "findings": {"fa": "a.csv"}}))
+        (corpus / "runB.json").write_text(json.dumps(
+            {"command": ["python", "tb.py"], "findings": {"fb": "b.csv"}}))
+        key = Path("k.key")
+        signing.bootstrap_key(key)
+        args = ["audit", "--corpus", "corpus", "--out", "out", "--key", str(key)]
+        assert r.invoke(cli, args, catch_exceptions=False).exit_code == 0
+
+        shutil.copy("out/runA/run.json", "out/runB/run.json")
+        res = r.invoke(cli, args, catch_exceptions=False)
+
+    assert "skip runB" not in res.output, res.output
+    assert "run runB" in res.output

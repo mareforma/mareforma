@@ -187,6 +187,7 @@ Classification stays a secondary label the agent declares: `INFERRED` (model rea
 | 04 | [Private Data, Public Findings](https://github.com/mareforma/mareforma/tree/main/examples/04_private_data_public_findings/) | Two labs share how they reached a finding without sharing the data |
 | 05 | [Drug Target Provenance](https://github.com/mareforma/mareforma/tree/main/examples/05_drug_target_provenance/) | A real research agent that labels which findings come from real data and which from the model's guess |
 | 06 | [Verify in CI](https://github.com/mareforma/mareforma/tree/main/examples/06_ci_verify/) | `mareforma verify` as a GitHub Actions gate, keyed on exit codes |
+| 07 | [Silent Failure Catch](https://github.com/mareforma/mareforma/tree/main/examples/07_silent_failure_catch/) | Two pipelines print the same number; one read the data. `pip install` plus one command, no model |
 
 <hr>
 

@@ -36,7 +36,15 @@ not the system prompt.
 from __future__ import annotations
 
 import re
+import unicodedata
+from functools import lru_cache
 from typing import Final
+
+# What replaces a field that hid a delimiter behind a lookalike. The whole field
+# goes, because the alternative is repairing hostile text and serving the repair.
+_LOOKALIKE_STRIPPED: Final = (
+    "[stripped: this field hid a forged delimiter behind lookalike characters]"
+)
 
 # Hard ceiling on a single text field. A 1 MB claim is almost certainly
 # either an attack (token-flood DoS against the consuming LLM) or a
@@ -47,7 +55,7 @@ _TRUNCATION_MARKER: Final = "\n…[mareforma: truncated, original exceeded 100k 
 
 # Singleton zero-width / bidi-override / tag-lookalike codepoints we
 # refuse. Subset of ``validators._FORBIDDEN_DISPLAY_CHARS`` plus every
-# non-ASCII character that NFKC-folds to ``<``, ``>`` or ``/`` — a
+# non-ASCII character that NFKC-folds to ``<``, ``>`` or ``/``: a
 # hostile claim using ``＜/untrusted_data＞`` could survive both
 # sanitize and wrap if a downstream NFKC normaliser (logging, RAG
 # vectorizer, the LLM's own tokenizer) folds the glyphs to ASCII at
@@ -79,7 +87,7 @@ _FORBIDDEN_CODEPOINTS: Final = frozenset({
 
 
 # Codepoint ranges of invisible / steganographic characters. These are
-# known prompt-injection vectors — most famously the U+E0000–U+E007F
+# known prompt-injection vectors, most famously U+E0000 to U+E007F
 # "language tag" plane that Goodside-style "ASCII smuggler" attacks
 # use to hide instructions inside a payload that looks like plain
 # ASCII. Variation selectors and interlinear annotation are similar:
@@ -117,9 +125,18 @@ def _build_forbidden_re() -> re.Pattern[str]:
 _FORBIDDEN_RE: Final = _build_forbidden_re()
 
 
+@lru_cache(maxsize=8)
 def _forged_tag_re(tag: str) -> re.Pattern[str]:
     """Compile a case-insensitive regex that matches opening or closing
-    ``<{tag}>`` (with optional whitespace and trailing attributes)."""
+    ``<{tag}>`` (with optional whitespace and trailing attributes).
+
+    Memoised. This is called once per string field of every row on the
+    LLM-bound read paths, and the tag is a static identifier at every call site
+    we control, so the same pattern was being rebuilt thousands of times per
+    page. Measured over a 200-row page: 6.14 ms to 2.63 ms for the whole row
+    formatting. The cache is small on purpose: :func:`_validate_tag` bounds the
+    tag to a simple identifier, and the callers use one.
+    """
     return re.compile(
         rf"<\s*/?\s*{re.escape(tag)}\b[^>]*>",
         flags=re.IGNORECASE,
@@ -143,7 +160,30 @@ def strip_forged_tags(text: str | None, *, tag: str = "untrusted_data") -> str |
             f"strip_forged_tags expects str or None, got {type(text).__name__}"
         )
     _validate_tag(tag)
-    return _forged_tag_re(tag).sub("[stripped]", text)
+    pattern = _forged_tag_re(tag)
+    stripped = pattern.sub("[stripped]", text)
+    # A model reads the delimiter as a HUMAN does, and a fullwidth 'd' looks
+    # exactly like an ASCII one: `</untrusteｄ_data>` matches no pattern above and
+    # closes the wrapper on the way in. The codepoint stripper cannot catch it
+    # either, since that character folds to a LETTER, not to a delimiter, and a
+    # set of every letter lookalike is not a set anyone can keep.
+    #
+    # So folding is used to DETECT, never to produce the output. Returning the
+    # folded string rewrote every other character in the same field: `10⁻⁹`
+    # became `10−9`, `3½` became `31⁄2`, `6×10²³` became `6×1023`. That put
+    # different numbers in front of the model than the signed row holds, while
+    # the verify surfaces, which read the raw row, still called the claim
+    # verified. Silently changing a dose is worse than the injection it was
+    # guarding against.
+    #
+    # A field that needs the fold to reveal a delimiter is hostile, so it is
+    # replaced whole rather than repaired: no offset arithmetic to get wrong,
+    # and nothing of the attacker's survives. Ordinary text never reaches here.
+    if not stripped.isascii():
+        folded = unicodedata.normalize("NFKC", stripped)
+        if folded != stripped and pattern.search(folded):
+            return _LOOKALIKE_STRIPPED
+    return stripped
 
 
 def _validate_tag(tag: str) -> None:

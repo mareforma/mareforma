@@ -89,7 +89,9 @@
               "examples/compounding-agents",
               "examples/documented-contestation",
               "examples/private-data-public-findings",
-              "examples/drug-target-provenance"
+              "examples/drug-target-provenance",
+              "examples/ci-verify",
+              "examples/silent-failure-catch"
             ]
           }
         ]

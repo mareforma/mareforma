@@ -487,7 +487,10 @@ def status_cmd(as_json: bool) -> None:
         f"{report.claims_contradicted} contradicted"
     )
 
-    if report.support_level_breakdown:
+    # Read the computed flag rather than re-deriving the same predicate here.
+    # It was computed and no surface read it, which is how the two copies of one
+    # rule start to disagree about when the disclosure applies.
+    if report.support_level_retired:
         click.echo("  Support level breakdown:")
         for level in ("ESTABLISHED", "REPLICATED", "PRELIMINARY"):
             count = report.support_level_breakdown.get(level, 0)
@@ -620,13 +623,12 @@ def stats_cmd(ctx: click.Context, as_json: bool, last_n: int | None) -> None:
     renames the rolling-rates command to ``mareforma activity``. The
     old name is kept as an alias for one release; v0.4 removes it.
     """
-    import warnings as _warnings
-    _warnings.warn(
+    from mareforma._deprecation import _emit
+    _emit(
         "`mareforma stats` has been renamed to `mareforma activity` "
         "to break the stats/status homonym; the alias will be removed "
         "in v0.4. Switch your scripts to `mareforma activity`.",
-        DeprecationWarning,
-        stacklevel=2,
+        3,  # +1 for _emit's own frame
     )
     ctx.invoke(activity_cmd, as_json=as_json, last_n=last_n)
 
@@ -655,8 +657,8 @@ def stats_cmd(ctx: click.Context, as_json: bool, last_n: int | None) -> None:
     help=(
         "Export format. 'jsonld' (default) = mareforma-native JSON-LD; "
         "'in-toto-v1' = unsigned in-toto Statement v1 (sigstore / SLSA / "
-        "GUAC ecosystem); 'ro-crate-1.2' = RO-Crate 1.2 Process Run Crate "
-        "metadata (Galaxy / EuroScienceGateway / FAIR-EASE ecosystem); "
+        "GUAC tooling); 'ro-crate-1.2' = RO-Crate 1.2 Process Run Crate "
+        "metadata (read by Galaxy, EuroScienceGateway and FAIR-EASE); "
         "'prov-o' = W3C PROV-O JSON-LD for provenance-aware tooling. "
         "Use --bundle for a signed in-toto Statement v1 (different from "
         "--format=in-toto-v1 which is unsigned)."
@@ -840,6 +842,41 @@ class _VerifyCommand(click.Command):
     def parse_args(self, ctx, args):
         try:
             return super().parse_args(ctx, args)
+        except click.UsageError as exc:
+            exc.exit_code = _VERIFY_USAGE
+            raise
+
+
+class _ObserveCommand(click.Command):
+    """A command whose usage errors exit 3, apart from the target's own codes.
+
+    ``diagnose`` and ``audit`` run a target in-process and exit with the
+    TARGET's exit code, which is the contract their docstrings state. Click
+    exits a usage error with 2, and 2 is one of the most common codes a script
+    exits with (argparse uses it for exactly the same thing), so a gate reading
+    2 could not tell "you passed a non-Python target" from "your script rejected
+    its own arguments". ``verify`` and ``reexec`` already use ``_VerifyCommand``
+    for this reason; these two make the same promise about what they ran and
+    need the same separation.
+
+    3 is not collision-proof, since a target may exit with any code. It is the
+    package's existing usage-error code, and it moves the ambiguity off the most
+    common script exit code onto one that is rare.
+    """
+
+    def parse_args(self, ctx, args):
+        try:
+            return super().parse_args(ctx, args)
+        except click.UsageError as exc:
+            exc.exit_code = _VERIFY_USAGE
+            raise
+
+    def invoke(self, ctx):
+        # A UsageError raised from the command BODY (the non-Python target
+        # refusal is raised there, after parsing) has to be marked too, or the
+        # code the class exists to set is only set for flag errors.
+        try:
+            return super().invoke(ctx)
         except click.UsageError as exc:
             exc.exit_code = _VERIFY_USAGE
             raise
@@ -1371,7 +1408,8 @@ def map_cmd(claim_id: str, as_html: bool, as_json: bool,
     _echo_trust_map(tmap, redact_home=redact_home)
 
 
-@cli.command("diagnose", context_settings={"ignore_unknown_options": True})
+@cli.command("diagnose", cls=_ObserveCommand,
+             context_settings={"ignore_unknown_options": True})
 @click.option("--cites", "cites", multiple=True, metavar="SRC",
               help="A source the run should ground on (path/URL/sha256:). "
                    "Repeatable. Without it, diagnose reports observation only "
@@ -1429,6 +1467,31 @@ def diagnose_cmd(cites: tuple[str, ...], as_json: bool, redact_home: bool,
 _RUNNABLE_PYTHON_SUFFIXES = (".py", ".pyw", ".pyz", ".pyc", ".zip")
 
 
+def _strip_version_markers(name: str) -> str:
+    """Drop trailing version tags from *name* so the real suffix is visible.
+
+    ``Path("pipeline.v2").suffix`` is ``".v2"`` and ``Path("model.v1.2").suffix``
+    is ``".2"``. Neither names a format, so neither is evidence about what the
+    target is; what IS evidence is whatever suffix sits under them.
+
+    Stripping and re-checking, rather than exempting a version-looking suffix
+    outright, is the difference between accepting ``pipeline.v2`` and accepting
+    ``runspec.json.1``. Rotated logs, split archives and numbered dumps
+    (``dump.sql.1``, ``backup.tar.gz.001``, ``part.00001``) are exactly the data
+    files this guard exists to refuse, and every one of them ends in digits.
+    """
+    while True:
+        suffix = Path(name).suffix
+        if not suffix:
+            return name
+        body = suffix[1:].lower()
+        if body.startswith("v"):
+            body = body[1:]
+        if not body or not body.isdigit():
+            return name
+        name = name[: -len(suffix)]
+
+
 def _reject_non_python_target(command: tuple[str, ...], verb: str) -> None:
     """Refuse an observed target that is not a Python program.
 
@@ -1454,7 +1517,10 @@ def _reject_non_python_target(command: tuple[str, ...], verb: str) -> None:
         argv = argv[1:]
     if not argv or argv[0].startswith("-"):
         return
-    suffix = Path(argv[0]).suffix
+    # Version tags come off first, so `pipeline.v2` is judged on `pipeline` (no
+    # suffix, runnable) while `runspec.json.1` is judged on `runspec.json` and
+    # stays refused.
+    suffix = Path(_strip_version_markers(argv[0])).suffix
     if suffix and suffix.lower() not in _RUNNABLE_PYTHON_SUFFIXES:
         raise click.UsageError(
             f"{verb} target {argv[0]!r} is not a Python program: {verb} runs the "
@@ -1464,7 +1530,8 @@ def _reject_non_python_target(command: tuple[str, ...], verb: str) -> None:
         )
 
 
-@cli.command("audit", context_settings={"ignore_unknown_options": True})
+@cli.command("audit", cls=_ObserveCommand,
+             context_settings={"ignore_unknown_options": True})
 @click.option("--findings", "findings_path", default=None, metavar="FILE",
               help="JSON object mapping finding_id to its cited source(s). "
                    "Required unless --corpus is given.")
@@ -1627,7 +1694,9 @@ def measure_cmd(receipts_path: str, as_json: bool, redact_home: bool) -> None:
     from mareforma.observe import (
         GroundingAxisMismatchError,
         independence_records,
+        influence_records,
         summarize_independence,
+        summarize_influence,
         summarize_receipts,
     )
     from mareforma.observe.measure import PilotReport
@@ -1648,10 +1717,15 @@ def measure_cmd(receipts_path: str, as_json: bool, redact_home: bool) -> None:
     indep = summarize_independence(independence_records(receipts))
     indep_report = indep.to_dict() if indep.total else None
     indep_closing = indep.closing_sentence() if indep.total else None
+    influence = summarize_influence(influence_records(receipts))
+    influence_report = influence.to_dict() if influence.total else None
+    influence_closing = influence.closing_sentence() if influence.total else None
     # The always-on honesty bound: grounded prevalence is a lower bound to within
     # the OPAQUE coverage gap, whatever the OPAQUE fraction, never printed only
     # when OPAQUE dominates.
-    coverage_bound = PilotReport(grounding=grounding, independence=indep).coverage_bound()
+    coverage_bound = PilotReport(
+        grounding=grounding, independence=indep, influence=influence
+    ).coverage_bound()
     if redact_home:
         report = _redact_home(report)
         closing = _redact_home(closing)
@@ -1659,6 +1733,8 @@ def measure_cmd(receipts_path: str, as_json: bool, redact_home: bool) -> None:
         payload = {**report, "summary": closing, "coverage_bound": coverage_bound}
         if indep_report is not None:
             payload["independence"] = {**indep_report, "summary": indep_closing}
+        if influence_report is not None:
+            payload["influence"] = {**influence_report, "summary": influence_closing}
         click.echo(json.dumps(payload, indent=2, sort_keys=True))
         return
     _ok(f"Grounding report over {report['total']} findings")
@@ -1689,6 +1765,28 @@ def measure_cmd(receipts_path: str, as_json: bool, redact_home: bool) -> None:
             f"same-model-collapse rate: {indep_report['same_model_collapse_rate']:.0%}"
         )
         click.echo(indep_closing)
+    if influence_report is not None:
+        _ok(f"Influence report over {influence_report['total']} edges")
+        counts = influence_report["counts"]
+        _info(
+            "influence: "
+            + ", ".join(f"{state}={counts[state]}" for state in (
+                "INFLUENCED", "NOT_INFLUENCED", "UNDECIDABLE", "NOT_TESTED"
+            ))
+        )
+        if influence_report["not_tested_by_reason"]:
+            _info("NOT_TESTED by reason: " + ", ".join(
+                f"{k}={v}"
+                for k, v in sorted(influence_report["not_tested_by_reason"].items())
+            ))
+        if influence_report["decided"]:
+            runs = influence_report["distinct_runs"]
+            runs_note = f"over {runs} runs" if runs else "run count not recorded"
+            _info(
+                f"influenced fraction (of {influence_report['decided']} decided, "
+                f"{runs_note}): {influence_report['influenced_fraction']:.0%}"
+            )
+        click.echo(influence_closing)
 
 
 def _load_receipts(path: Path) -> list:
@@ -1937,8 +2035,11 @@ def claim_add(text, classification, status, source_name, supports, contradicts,
 @claim.command("list")
 @click.option("--status", default=None, help="Filter: open, contested, retracted.")
 @click.option("--source", "source_name", default=None, help="Filter by source name.")
+@click.option("--limit", default=None, type=click.IntRange(min=1),
+              help="Most claims to list. Unbounded by default; the listing says "
+                   "when a limit capped it.")
 @click.option("--json", "as_json", is_flag=True, default=False)
-def claim_list(status, source_name, as_json):
+def claim_list(status, source_name, limit, as_json):
     """List scientific claims, optionally filtered."""
     from mareforma.db import open_db, list_claims, DatabaseError
 
@@ -1946,7 +2047,17 @@ def claim_list(status, source_name, as_json):
     try:
         conn = open_db(root)
         try:
-            claims = list_claims(conn, status=status, source_name=source_name)
+            # One more than asked for, so the listing can say it was capped
+            # rather than printing a short list that reads as the whole record.
+            # It passed no limit at all, which on a large project meant loading
+            # and formatting every claim to print a screenful.
+            claims = list_claims(
+                conn, status=status, source_name=source_name,
+                limit=None if limit is None else limit + 1,
+            )
+            capped = limit is not None and len(claims) > limit
+            if capped:
+                claims = claims[:limit]
         finally:
             conn.close()
     except DatabaseError as exc:
@@ -1954,6 +2065,18 @@ def claim_list(status, source_name, as_json):
         sys.exit(1)
 
     if as_json:
+        # A bare list, unchanged: this is a published CLI contract and a script
+        # parsing it must keep working. The cap is surfaced on the human view
+        # and, when it applies, on stderr so a JSON consumer is not told a
+        # capped page is the whole record without any signal at all.
+        if capped:
+            # Not _err: that prefixes "Error:" and this run succeeded and exits
+            # 0, so a job treating stderr Error: lines as failures would fail on
+            # a documented use of --limit.
+            click.echo(
+                f"Listing capped at --limit {limit}; more claims exist.",
+                err=True,
+            )
         click.echo(json.dumps(claims, indent=2))
         return
 
@@ -1961,7 +2084,13 @@ def claim_list(status, source_name, as_json):
         _info("No claims found.")
         return
 
-    click.echo(click.style(f"CLAIMS  ({len(claims)} total)", bold=True, fg="cyan"))
+    # "total" would be a false word on a capped listing: a short page that does
+    # not say it was capped reads as the whole record.
+    heading = (
+        f"CLAIMS  ({len(claims)} shown, more available past --limit)"
+        if capped else f"CLAIMS  ({len(claims)} total)"
+    )
+    click.echo(click.style(heading, bold=True, fg="cyan"))
     click.echo("")
     for c in claims:
         # A high-trust row whose signature no longer re-verifies still prints,
@@ -2007,7 +2136,15 @@ def claim_show(claim_id, as_json):
     click.echo(f"  id             : {c['claim_id']}")
     click.echo(f"  text           : {c['text']}")
     click.echo(f"  classification : {c.get('classification', 'INFERRED')}")
-    click.echo(f"  support_level  : {c.get('support_level', 'PRELIMINARY')}")
+    # The support level never prints alone on a row whose signature no longer
+    # re-verifies. `claim list` already marks that row UNVERIFIED, and `claim
+    # show` is the command an auditor runs on the claim they suspect, so it is
+    # the last place that should print REPLICATED with nothing beside it.
+    level = c.get("support_level", "PRELIMINARY")
+    if not c.get("verified", True):
+        level += "  UNVERIFIED (the signature no longer re-verifies, so this "
+        level += "level is not backed; run `mareforma verify` on it)"
+    click.echo(f"  support_level  : {level}")
     click.echo(f"  generated_by   : {c.get('generated_by', 'agent')}")
     click.echo(f"  status         : {c['status']}")
     if c.get("source_name"):

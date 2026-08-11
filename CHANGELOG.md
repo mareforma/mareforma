@@ -2,6 +2,91 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.13] - 2026-08-11
+
+The influence oracle now picks its own nulls. Hand it the perturbation yourself
+and you can pick one the finding is provably invariant to, and read
+`NOT_INFLUENCED` however the pipeline works. The family is derived from the
+finding's own data shape now, and the verdict routes on the profile across it.
+
+### Added
+
+- **A derived null family.** `perturbation_oracle(perturb=None)`, the default,
+  builds the nulls from the input's shape: content-destroying ones (`zeroed`,
+  `constant`) and marginal-preserving ones (`permuted`, `reversed`). A null
+  identical to the base cannot perturb anything, so it is dropped and named in
+  `dropped_nulls` rather than run.
+- **The profile rule.** `INFLUENCED` needs every null to move the finding,
+  `NOT_INFLUENCED` needs none of them to, and anything between is
+  `UNDECIDABLE`. That last case is the point: a genuine mean is invariant under
+  a permutation, and calling it hollow for that would accuse an honest
+  computation.
+- **`NOT_TESTED`, with a typed reason.** A shape with no family, a null that
+  could not be built, a base run that failed, a null that crashed the target, a
+  value the reducer could not reduce, and a value that came out NaN or infinite
+  each read `NOT_TESTED` naming which. The three measurement numbers are `None`
+  on such a row, so no reader takes a zero off it as a measurement.
+- **The influence arm on `mareforma measure`.** Per cited source, whether the
+  finding depends on the data. `mareforma audit` runs its target once and never
+  perturbs it, so every edge on its receipts reads `NOT_TESTED`: the report says
+  influence was not tested rather than letting a grounding verdict stand in for
+  an influence claim nobody measured.
+- **A read says how many rows it held back.** `unverified_excluded` and
+  `verify_excluded` on the MCP pages, and `read_unverified_exclusions` on the
+  graph. A project whose claims were written under a key nobody enrolled used to
+  answer with an empty list and no way to tell that from an empty record.
+- **`mareforma.selfcheck`** ships in the wheel: four seeded failures a correct
+  instrument must catch, runnable without the source tree.
+
+### Changed
+
+- **`diagnose` and `audit` exit 3 on their own usage errors, not 2.** This is a
+  contract change. 2 is the code argparse uses for the same thing, so a gate
+  reading 2 could not tell "you passed a non-Python target" from "your script
+  rejected its arguments".
+- **A version marker is not a file extension.** `pipeline.v2` and `model.v1.2`
+  run; `runspec.json.1` and `app.log.1` stay refused.
+- **`claim list` takes `--limit`** and says when it capped. The flag is opt-in,
+  so the JSON output is unchanged for anything already parsing it.
+- **`claim show` marks an unbacked support level UNVERIFIED**, as `claim list`
+  already did. It is the command an auditor runs on the claim they suspect.
+
+### Fixed
+
+- **A withheld row no longer truncates the record.** `has_more` was computed
+  after rows were held back, so hiding one row could report thirty-nine
+  untouched claims as "the record ends here", with no way to page past it.
+- **A tampered claim no longer reaches a model as an ordinary row.** A claim
+  edited in the database file needs no SQL and fires no trigger, and the
+  enumerating tools served it while the same server's `verify_claim` called it
+  tampered. It is withheld and counted now.
+- **`verify_claim` no longer refuses the claims with the most evidence.** The
+  evidence ceiling gated the verdict instead of the trust map, so twenty-six
+  labs on one proposition made every claim answer "unverifiable" about
+  signatures that verify in 67 ms. The ceiling gates the map, which is the half
+  that grows.
+- **The forged-delimiter stripper no longer rewrites the field it checks.** It
+  returned NFKC-folded text, so `10⁻⁹` reached the model as `10−9` and `6×10²³`
+  as `6×1023` while the verify surfaces, which read the raw row, still called
+  the claim verified. Folding only detects now, and a field that needs it to
+  reveal a delimiter is replaced whole rather than repaired.
+- **Audit corpus resume binds a run record to its target.** It verified a
+  signature and read `completed` without checking the record belonged to the run
+  being skipped, so copying a neighbour's signed record skipped a sibling run
+  without executing it.
+- **A `click.UsageError` raised by the target** is an aborted run that keeps its
+  receipts, not a report that mareforma was invoked wrong. A target is allowed
+  to be a click program.
+- **The read ordering is served by an index.** `query()` ordered by an
+  expression no column index could serve, so every call scanned the table and
+  sorted it under the process-wide lock. Measured over 2,000 claims at limit 20:
+  0.918 ms per call before, 0.009 ms after, and the cost no longer grows with
+  the table.
+- **A long-lived reader stops growing without bound.** The health log took one
+  line per read that dropped a row, and the skipped-line dedupe set kept every
+  key it ever saw. Both are bounded, and the log still records a change of
+  scale.
+
 ## [0.3.12] - 2026-08-11
 
 An agent can now read and audit a project over the Model Context Protocol,

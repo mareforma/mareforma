@@ -348,7 +348,7 @@ class TestRestoreAdversarial:
         with pytest.raises(_db.RestoreError) as exc_info:
             mareforma.restore(tmp_path)
         # Either mode_inconsistent (the bundle exists but no validators)
-        # or orphan_signer — both indicate the tampering.
+        # or orphan_signer, both indicate the tampering.
         # The actual code path: signed_mode is False (no validators),
         # so claims with signature_bundle hit the orphan_signer check.
         assert exc_info.value.kind in ("orphan_signer", "mode_inconsistent")
@@ -468,7 +468,7 @@ class TestRestoreAdversarial:
                 signer=sb,
             )
             # Without the gate, both would be REPLICATED (distinct signers,
-            # shared anchor) — the retracted seed must block it.
+            # shared anchor), the retracted seed must block it.
             assert g.get_claim(a)["support_level"] == "PRELIMINARY"
 
     def test_missing_required_field_raises_restore_error(
@@ -528,7 +528,7 @@ class TestRestoreAdversarial:
         )
         # Forge: copy envelope onto victim, flip to ESTABLISHED. Match
         # validated_at to the donor's so the timestamp check would
-        # otherwise pass — the claim_id mismatch must be what trips us.
+        # otherwise pass, the claim_id mismatch must be what trips us.
         victim["support_level"] = "ESTABLISHED"
         victim["validation_signature"] = legitimate_env_json
         victim["validated_at"] = legitimate_validated_at
@@ -574,7 +574,7 @@ class TestRestoreAdversarial:
         ]
         assert signed_ids
         victim = signed_ids[0]
-        # Build a tampered evidence dict — flip risk_of_bias to -1
+        # Build a tampered evidence dict, flip risk_of_bias to -1
         # with a fabricated rationale.
         tampered_evidence = {
             "risk_of_bias": -1,

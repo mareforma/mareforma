@@ -41,7 +41,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
-from . import _audit, _doctor, _loaders, _scope, measure, oracle
+from . import _audit, _doctor, _loaders, _scope, measure, oracle, scrambles
 from ._binding import (
     BindingResult,
     BindingState,
@@ -64,26 +64,36 @@ from .measure import (
     GroundingAxisMismatchError,
     GroundingReport,
     IndependenceReport,
+    InfluenceReport,
     PilotReport,
     independence_records,
+    influence_records,
     summarize,
     summarize_independence,
     summarize_independence_receipts,
+    summarize_influence,
+    summarize_influence_receipts,
     summarize_pilot,
     summarize_receipts,
 )
 from .oracle import (
     MetricReducer,
+    THREAT_MODEL_STATEMENT,
+    NoPerturbationsError,
+    NotTestedReason,
+    NullOutcome,
     OracleInfluence,
     OracleResult,
     ReconcileResult,
     Reconciliation,
     declared_reducer,
+    influence_sweep,
     numeric_extraction_reducer,
     perturbation_oracle,
     reconcile,
     scalar_reducer,
 )
+from .scrambles import Scramble, ScrambleFamily, scramble_family
 
 
 def declare_model(
@@ -222,8 +232,16 @@ __all__ = [
     "GroundingCitationMismatchError",
     # Causal oracle (independent influence ground truth).
     "perturbation_oracle",
+    "influence_sweep",
     "OracleInfluence",
     "OracleResult",
+    "NotTestedReason",
+    "NullOutcome",
+    "NoPerturbationsError",
+    "THREAT_MODEL_STATEMENT",
+    "scramble_family",
+    "Scramble",
+    "ScrambleFamily",
     "reconcile",
     "ReconcileResult",
     "Reconciliation",
@@ -242,7 +260,12 @@ __all__ = [
     "summarize_independence",
     "summarize_independence_receipts",
     "independence_records",
-    # The slim natural-prevalence pilot (both arms + the OPAQUE-coverage bound).
+    # The influence arm of the measurement (does the finding depend on its data).
+    "InfluenceReport",
+    "summarize_influence",
+    "summarize_influence_receipts",
+    "influence_records",
+    # The slim natural-prevalence pilot (three arms + the OPAQUE-coverage bound).
     "PilotReport",
     "summarize_pilot",
 ]

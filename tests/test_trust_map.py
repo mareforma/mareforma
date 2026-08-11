@@ -79,6 +79,20 @@ _SHAPE_BY_VERSION = {
         # than the row's unsigned column.
         "independence_numeric": True,
     },
+    "v0.3.13": {
+        "properties": _EXPECTED_PROPERTIES,
+        # The shape does not move in v0.3.13 either: same properties, same
+        # independence values. The version tracks the PACKAGE version, and the
+        # builder fails closed when the two disagree, so a release bumps it
+        # whether or not the shape changed. This entry is where that gets said
+        # out loud rather than assumed.
+        #
+        # The release's own work sits outside the map: the influence oracle
+        # derives its own null family and routes on the profile across it, and
+        # the read surfaces disclose what they held back. Neither adds a
+        # property here.
+        "independence_numeric": True,
+    },
 }
 
 

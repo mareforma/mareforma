@@ -545,7 +545,9 @@ class TestDiagnose:
         script = self._script(tmp_path, "pass\n")
         r = CliRunner()
         res = r.invoke(cli, ["diagnose", "--", "python", "-u", str(script)])
-        assert res.exit_code == 2, res.output
+        # 3 is the usage-error code, kept apart from the target's own exit
+        # codes; see _ObserveCommand.
+        assert res.exit_code == 3, res.output
         assert "-u" in res.output
         assert "OBSERVATION REPORT" not in res.output
 

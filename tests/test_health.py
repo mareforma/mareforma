@@ -387,3 +387,159 @@ class TestSignature:
         must not ask for a project root it cannot consult.
         """
         assert list(inspect.signature(compute_health).parameters) == ["conn"]
+
+
+def test_a_policy_read_that_fails_is_not_reported_as_no_policy_stall(tmp_path):
+    """A status command that cannot read the policy must say so, not answer no.
+
+    The policy read caught ``sqlite3.DatabaseError``, the base class of nearly
+    every sqlite failure including corruption, and set ``policy_unverified =
+    False``, which prints as "no policy stall". Its three sibling reads set
+    ``traffic_light = 'error'`` on the same exception tuple, so one unreadable
+    graph produced a green-ish status beside three red ones.
+    """
+    import sqlite3
+
+    import mareforma
+    from mareforma import health as health_mod
+
+    with mareforma.open(tmp_path) as g:
+        conn = g._conn
+
+        def boom(_conn):
+            raise sqlite3.DatabaseError("database disk image is malformed")
+
+        import mareforma.db as db_mod
+        original = db_mod.project_policy_unverified
+        db_mod.project_policy_unverified = boom
+        try:
+            report = health_mod.compute_health(conn)
+        finally:
+            db_mod.project_policy_unverified = original
+
+    assert report.traffic_light == "error"
+    assert "could not be read" in report.rationale
+    assert report.policy_unverified is False  # unknown, and the light says so
+
+
+def test_claim_show_never_prints_a_support_level_without_its_verified_state(
+    tmp_path,
+):
+    """`claim show` is the command an auditor runs on the claim they suspect.
+
+    `claim list` marks a row whose signature no longer re-verifies UNVERIFIED;
+    `claim show` printed `support_level: REPLICATED` and never mentioned it, so
+    the more detailed view said less about the thing that matters.
+
+    Driven through the command, not through its source: a test that greps
+    `inspect.getsource()` for the word passes on a rename and passes on code
+    that keeps the word and stops printing it.
+    """
+    import json as _json
+
+    from click.testing import CliRunner
+
+    from mareforma.cli import cli
+
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        import mareforma
+        from mareforma import signing
+
+        key = Path("auditor.key")
+        signing.bootstrap_key(key)
+        with mareforma.open(".", key_path=key) as graph:
+            claim_id = graph.assert_claim("a finding under suspicion",
+                                          generated_by="x")
+            # The tamper the read path is built to catch: the row keeps its
+            # level and loses the signature that backed it. The promotion guard
+            # refuses this write, which is the guard working; dropping it is the
+            # precondition, and what is under test is what `claim show` prints
+            # once such a row exists.
+            for trigger in ("claims_signed_promotion_backed",
+                            "claims_signed_fields_no_laundering",
+                            "claims_update_state_check"):
+                graph._conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            graph._conn.execute(
+                "UPDATE claims SET support_level = 'REPLICATED', "
+                "signature_bundle = NULL WHERE claim_id = ?", (claim_id,),
+            )
+            graph._conn.commit()
+        shown = runner.invoke(cli, ["claim", "show", claim_id])
+        listed = runner.invoke(cli, ["claim", "list"])
+
+    assert shown.exit_code == 0, shown.output
+    assert "REPLICATED" in shown.output
+    assert "UNVERIFIED" in shown.output, (
+        "claim show printed a support level with nothing beside it saying the "
+        "signature no longer backs it"
+    )
+    # And the two surfaces agree about the same row.
+    assert "UNVERIFIED" in listed.output
+
+
+def test_every_deprecation_warning_goes_through_the_one_emitter():
+    """`_deprecation._emit` says it is "the one place the category and the warn
+    call live". Four of six emitters bypassed it, which is how a wrong
+    stacklevel shipped: a DeprecationWarning attributed to a mareforma file is
+    hidden by Python's default filter from the person whose code needs changing.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(cli_source_root())
+    offenders = []
+    for path in root.rglob("*.py"):
+        if path.name == "_deprecation.py":
+            continue
+        text = path.read_text(encoding="utf-8")
+        for match in re.finditer(r"warn\(\s*[^)]*DeprecationWarning", text):
+            line = text[: match.start()].count("\n") + 1
+            offenders.append(f"{path.name}:{line}")
+    assert not offenders, (
+        f"these sites emit a DeprecationWarning directly instead of through "
+        f"_deprecation._emit: {offenders}"
+    )
+
+
+def cli_source_root():
+    import mareforma
+    import pathlib
+
+    return pathlib.Path(mareforma.__file__).parent
+
+
+def test_an_operational_error_that_is_not_a_missing_table_is_not_swallowed(tmp_path):
+    """The narrowing has to be on the CASE, not on the exception class.
+
+    OperationalError covers a locked database, a disk I/O error and a missing
+    column as well as the older schema this tolerance was written for. Narrowing
+    on the class alone left all of those reporting "no policy stall", which is
+    the direction the branch exists to stop.
+    """
+    import sqlite3
+
+    import mareforma
+    import mareforma.db as db_mod
+    from mareforma import health as health_mod
+
+    def probe(exc):
+        with mareforma.open(tmp_path) as g:
+            original = db_mod.project_policy_unverified
+            db_mod.project_policy_unverified = lambda _c: (_ for _ in ()).throw(exc)
+            try:
+                return health_mod.compute_health(g._conn)
+            finally:
+                db_mod.project_policy_unverified = original
+
+    for exc in (sqlite3.OperationalError("disk I/O error"),
+                sqlite3.OperationalError("database is locked"),
+                sqlite3.DatabaseError("database disk image is malformed")):
+        report = probe(exc)
+        assert report.traffic_light == "error", exc
+        assert "could not be read" in report.rationale, exc
+
+    # The one case the tolerance is for stays tolerated.
+    tolerated = probe(sqlite3.OperationalError("no such table: project_policy"))
+    assert tolerated.traffic_light != "error"
+    assert tolerated.policy_unverified is False

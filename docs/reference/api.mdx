@@ -619,9 +619,25 @@ Read-only count of rows `query()` and `search()` dropped because their signature
 graph.read_verify_exclusions  # 0
 ```
 
-A REPLICATED or ESTABLISHED row that fails re-verification is excluded from every enumerating read and no flag brings it back, so the result reads exactly like a graph that never held those claims. This counter is what tells the two apart; the same event is appended to `.mareforma/health.jsonl` as `read_verify_excluded`.
+A REPLICATED or ESTABLISHED row that fails re-verification is excluded from every enumerating read and no flag brings it back, so the result reads exactly like a graph that never held those claims. This counter is what tells the two apart; the same event is appended to `.mareforma/health.jsonl` as `read_verify_excluded`, rate-limited to the 1st, 2nd, 4th, 8th occurrence and so on, and again whenever the running total has at least doubled since the last line, so a sudden spike is not lost between powers of two. The exclusion is a state every later read finds again, and a long-lived reader would otherwise write one line per poll. The counter itself is exact.
 
 Zero means nothing was excluded from the reads this session made, not that the graph is untampered. Non-zero means a claim on disk failed re-verification: name it with `get_claim()` or `mareforma verify`.
+
+**Returns** `int`, reset to zero on every open.
+
+---
+
+### `read_unverified_exclusions`
+
+Read-only count of rows `query()` and `search()` held back behind the default verified filter.
+
+```python
+graph.read_unverified_exclusions  # 0
+```
+
+A PRELIMINARY claim whose generator key is not in the validators table is dropped from an enumerating read unless you pass `include_unverified=True`. Unlike the verify exclusions above, a flag does bring these back: they are not tampered rows, they are rows the default read does not vouch for. Without the count, a project whose claims were written under an unenrolled key answers a query with an empty list, and a caller reads "there is nothing here" for a record that is not empty.
+
+The count is taken only when a read comes back short, since a full page already says `has_more`. It is bounded by its own fixed 5,000-row scan ceiling rather than the read's (which scales with `limit`), so the disclosed number does not move with the page size you asked for, and a count that stopped at the ceiling is reported as a floor. The MCP `query_claims` and `search_claims` tools report the per-call number as `unverified_excluded`, and add `unverified_excluded_is_at_least: true` when the count stopped at its ceiling. The same event is appended to `.mareforma/health.jsonl` as `read_unverified_excluded` with outcome `degraded`, under the same rate limit as `read_verify_excluded`.
 
 **Returns** `int`, reset to zero on every open.
 
@@ -880,6 +896,7 @@ catching looks like `from mareforma import RekorInclusionError`.
 | `VerifierError` | `mareforma.verifiers` | `MockNLIVerifier(score=...)` | The score is not a float in `[0.0, 1.0]`, or is NaN |
 | `MalformedRunError` | `mareforma.reexec` | `reexec()` | The run is neither a record dict nor a readable JSON record, or the record is missing a usable `reported_value`, `tolerance` or non-reexecutable reason |
 | `ScopeNotClosedError` | `mareforma.observe` | `ObserveHandle.verdict` | The verdict was read inside the open `observe()` block, before the observer had seen the whole span. Subclasses `RuntimeError` |
+| `NoPerturbationsError` | `mareforma.observe` | `perturbation_oracle()` | `perturb` was an empty sequence, so there is no null to run. A caller handing the oracle nothing to measure is a bug in the call, never a `NOT_TESTED` row a report would count. Subclasses `ValueError` |
 | `BundleVerificationError` | `mareforma.export_bundle` | `mareforma verify` | Signed export bundle failed a check: DSSE signature, per-claim subject digest, per-claim asserter signature, validator chain, or displayed support level |
 
 The submodule paths in the table tell you where the source lives. They
@@ -1329,25 +1346,79 @@ member), `reason` (str), `cited_sources`, `grounded_sources`, `reads`, `seams`,
   opened. Below 1.0 means a cited source was opened through a reader the
   observer could not read through.
 
-### `perturbation_oracle(run_fn, base_input, perturb, *, repeats=1, metric=None, effect_threshold=0.0, noise_multiplier=3.0, multiplicity=1, thin_sigma_guard=False)`
+### `perturbation_oracle(run_fn, base_input, perturb=None, *, repeats=1, metric=None, effect_threshold=0.0, noise_multiplier=3.0, multiplicity=1, thin_sigma_guard=False, determinism_rtol=1e-06, determinism_atol=0.0, on_progress=None)`
 
 The independent causal check. Runs `run_fn` on the base input and on perturbed
 inputs and returns an `OracleResult` whose `influence` is `INFLUENCED`,
-`NOT_INFLUENCED`, or `UNDECIDABLE`. With `repeats > 1` the spread of the base runs
-sets the noise floor a real effect must clear, so a stochastic pipeline does not
-read as influenced by its own jitter. At `repeats=1` no noise is measured, so the
-floor is 0; the result carries `noise_measured=False` and `noise_is_thin=True` and
-says so in its reason. When `perturb` is a sequence, each perturbation is scored
-against the base on its own and the effect is the largest move, so opposing
-perturbations do not cancel; `perturbation_effects` carries one effect per
-perturbation, and their count widens the threshold as `multiplicity` does.
+`NOT_INFLUENCED`, `UNDECIDABLE`, or `NOT_TESTED`. With `repeats > 1` the spread of
+the base runs sets the noise floor a real effect must clear, so a stochastic
+pipeline does not read as influenced by its own jitter. At `repeats=1` no noise is
+measured, so the floor is 0; the result carries `noise_measured=False` and
+`noise_is_thin=True` and says so in its reason.
+
+`perturb=None`, the default, derives the whole null family from the input's data
+shape through `scramble_family` (a scalar, a mapping of scalars, or a sequence of
+scalars, including a namedtuple or an array): content-destroying nulls (`zeroed`,
+`constant`) and marginal-preserving ones (`permuted`, `reversed`). The verdict
+routes on the PROFILE across that family, not on one move: `INFLUENCED` only when
+every null moves the finding past the threshold, `NOT_INFLUENCED` only when none
+does, and `UNDECIDABLE` when some move and others do not, which is the honest
+reading of a genuine mean (invariant under a reordering, moved by zeroing) and
+must never be called hollow. Each perturbation is scored against the base on its
+own, so opposing perturbations do not cancel; `perturbation_effects` carries one
+effect per null, `scramble_names` names them, and `null_outcomes` carries the
+classification the verdict was routed on (`MOVED` / `AMBIGUOUS` /
+`BELOW_DOMAIN_FLOOR` / `FLAT`), which `flat_nulls`, `ambiguous_nulls`,
+`below_domain_floor_nulls` and `blind_spot_line()` all read rather than
+re-deriving. `BELOW_DOMAIN_FLOOR` means the finding moved measurably but by less
+than the `effect_threshold` the caller declared; it routes like `FLAT` for the
+verdict and is named apart from it, because a null the finding moved a million
+units under did not hold invariant.
+
+`NOT_TESTED` means the oracle produced no verdict, with a typed
+`not_tested_reason`: `unsupported-shape` (no family fits the input),
+`null-construction-failed` (building a perturbed input raised),
+`target-failed` (the unperturbed run raised), `crashed-under-null`,
+`unreducible-value`, and `non-finite-value` (a run came out NaN or infinite, so
+there is no comparable number). It is never a verdict in disguise: the three
+measurement numbers are `None` on such a row, so no reader takes a zero off it.
+
+A null identical to the base cannot perturb anything, so it is dropped rather than
+run and its name goes in `dropped_nulls`; a constant sequence loses both
+marginal-preserving nulls this way, and the reason says so, because a verdict over
+a family the data narrowed is a narrower claim. Supplying `perturb` yourself (a
+callable for one null, a sequence for several) sets `caller_chose_nulls=True`: a
+chosen null is a place to fish, and a single one cannot reach the mixed profile at
+all, so its `NOT_INFLUENCED` is weaker than the derived family's. An empty
+sequence raises `NoPerturbationsError` rather than reading as `NOT_TESTED`.
 
 Two keywords widen the decision threshold before the influence call is made.
-`multiplicity=n` declares the finding is one of `n` and adds `sqrt(2 ln n)`
-sigmas, so the noisiest member of a family cannot cross the bar by chance.
-`thin_sigma_guard=True` widens the same margin when the noise floor rests on
-fewer than five repeats. Both default to a no-op, so a single finding measured
-on its own is scored the same either way.
+`multiplicity=n` declares the finding is one of `n`, and the widening is
+`sqrt(2 ln(n * number_of_nulls))` sigmas, because taking the max across the nulls
+is itself a multiple comparison; that is the expected size of the largest spurious
+deviation across a family that size, not a quantile, so it controls no stated
+error rate. `thin_sigma_guard=True` widens the same margin when the noise floor
+rests on fewer than five repeats, and defaults off. Neither is a no-op on the
+zero-config path: the derived family has several nulls, so the widening fires from
+the null count even at `multiplicity=1`. Neither reaches a pipeline with no
+measurable noise, where there is no sigma to widen; `multiplicity_applied` records
+whether the widening actually reached the threshold.
+
+A deterministic pipeline has no run-to-run noise, so the noise floor is measured
+at 0 and there is no sigma to build a threshold from. `determinism_rtol=1e-6`
+sets the float-equality band for that case: a move within `determinism_rtol * |base
+mean|` of the finding's magnitude is indistinguishable from summation-order
+artifacts (BLAS thread counts, reduction order) and is classified `AMBIGUOUS`,
+which routes the verdict to `UNDECIDABLE`, never `INFLUENCED`; a move above the
+band is `MOVED`; a move of exactly 0 is `FLAT`, a provable invariant. The verdict
+is then the profile over all of them, so exactly-0 under every null is
+`NOT_INFLUENCED` while exactly-0 under some and a real move under others is
+`UNDECIDABLE`. This is what keeps the zero-config oracle
+from degenerating to exact float equality on the modal deterministic target. A
+result also carries `deterministic=True` when the floor was measured at 0 over
+more than one repeat, distinct from an unmeasured single-run floor.
+`determinism_atol` adds an absolute lower bound to that band, for a finding whose
+magnitude is near 0 where the relative band alone would vanish; it defaults to 0.
 
 `reconcile(grounding, influence)` relates the observer's flow verdict to the
 oracle's influence verdict and returns a `ReconcileResult` carrying the
@@ -1358,8 +1429,90 @@ oracle's influence verdict and returns a `ReconcileResult` carrying the
 Aggregates an iterable of `GroundingVerdict` into the split a report states:
 `fractions()`, `incidental_read_rate`, `mean_read_coverage`, and
 `opaque_dominates(threshold=0.5)`. A sweep that reports an influence rate over a
-corpus should pass `multiplicity=len(findings)` to every `perturbation_oracle`
-call it aggregates, or the rate counts findings that cleared the bar on noise.
+corpus needs `multiplicity` set to the corpus size on every `perturbation_oracle`
+call, or the rate counts findings that cleared the bar on noise; use
+`influence_sweep(findings, ...)`, which runs the corpus and computes the
+multiplicity from the count so it is never left at 1.
+
+### `mareforma.exporters`
+
+`JSONLDExporter` is the class behind `mareforma export`. The CLI reference
+documents the formats and their conformance bounds; import it directly when you
+want the graph in a process rather than on disk.
+
+```python
+from mareforma.exporters import JSONLDExporter
+```
+
+### Oracle types
+
+`mareforma.observe` exports the types the oracle's fields are drawn from, so a
+caller branches on a value instead of matching prose.
+
+| Name | What it is |
+|---|---|
+| `OracleInfluence` | the verdict: `INFLUENCED`, `NOT_INFLUENCED`, `UNDECIDABLE`, `NOT_TESTED` |
+| `NotTestedReason` | why no verdict was produced: `unsupported-shape`, `null-construction-failed`, `target-failed`, `crashed-under-null`, `unreducible-value`, `non-finite-value` |
+| `NullOutcome` | how one null was classified: `MOVED`, `AMBIGUOUS`, `BELOW_DOMAIN_FLOOR`, `FLAT` |
+| `Scramble` / `ScrambleFamily` | one null, and the family that will run plus the ones the input ruled out |
+| `scramble_family(x)` | build that family from a value's shape, or `None` when no family fits |
+| `THREAT_MODEL_STATEMENT` | the standing bound every verdict is made under |
+| `NoPerturbationsError` | raised when `perturb` is an empty sequence |
+
+The derived family differs by shape, and the names appear in `scramble_names`,
+`dropped_nulls` and `blind_spot_line()`:
+
+| Shape | Nulls |
+|---|---|
+| a real scalar | `zeroed`, `negated`, `offset`, `scaled`, `replaced`, all value replacements; a scalar has no marginal-preserving null |
+| a mapping of scalars | `zeroed`, `constant`, `permuted` |
+| a sequence of scalars | `zeroed`, `constant`, `permuted`, `reversed` |
+
+A null identical to the base cannot perturb anything, so it is dropped and named
+in `dropped_nulls` rather than run.
+
+### `mareforma.selfcheck`
+
+Seeded failures a correct instrument must catch, shipped in the wheel so an
+installed user can run them without the source tree.
+
+```python
+from mareforma.selfcheck import run_selfcheck
+
+for outcome in run_selfcheck(tmp_path):
+    print(outcome.name, outcome.caught, outcome.observed)
+```
+
+`run_selfcheck(tmp_path)` returns a `KillSwitchOutcome` per fixture, each
+carrying `name`, `expectation`, `observed` and `caught`. The four are a silent
+zero-row fallback, an excluded partition, a number produced with no execution,
+and a decoy incidental read. `SELF_CHECKS` is the tuple of the underlying
+functions if you want to run one on its own.
+
+**This is a self-check, not a sensitivity demonstration.** Every fixture runs its
+own synthetic pipeline rather than your target, and all four are accidents rather
+than the evasive case. Passing them does not show the instrument is sensitive on
+your own pipeline's path.
+
+### `summarize_influence(records) -> InfluenceReport` and `influence_records(receipts)`
+
+The influence arm of the measurement. `influence_records(receipts)` flattens the
+`influence` list each receipt carries (one record per cited source) into a flat
+list of per-edge records; `summarize_influence(records)` aggregates them.
+`InfluenceReport` reports the count of each verdict (`INFLUENCED`,
+`NOT_INFLUENCED`, `UNDECIDABLE`, `NOT_TESTED`), the `not_tested_by_reason` bucket,
+`not_tested_dominates(threshold=0.5)`, and `influenced_fraction` over `decided`
+edges: INFLUENCED plus NOT_INFLUENCED, and nothing else. `UNDECIDABLE` is the
+oracle declining to call an edge, so it is excluded from the denominator and named
+separately in the summary line, and `tested` counts everything the oracle ran on
+at all. Without that split a corpus of honest invariants and a corpus of hollow
+findings print the same rate. The unit is the edge, so a finding citing several
+sources contributes several edges; the inference unit is the run, so
+`distinct_runs` rides alongside the rate, and a report whose writer stamped no run
+count says so rather than printing zero. A receipts file with no `influence`
+record yields an empty arm rather than a fabricated one.
+`summarize_influence_receipts(receipts)` is the two composed, and
+`summarize_pilot` returns all three arms on a `PilotReport`.
 
 ### `grounding=` on `assert_finding` and `submit_finding`
 

@@ -423,7 +423,7 @@ GroundingVerdict.__hash__ = None  # type: ignore[assignment]
 #
 # Eviction therefore reaches only a record whose verdict is already dead, and it
 # costs COMPUTED standing, never the reverse. The reason it leaves behind says
-# what is actually known — that no observer record in this process matches — and
+# what is actually known, that no observer record in this process matches, and
 # not that the caller declared it, which is what the earlier wording asserted and
 # could not know.
 #

@@ -198,7 +198,7 @@ def sign_bundle(
     ).encode("utf-8")
     # Sign over the DSSE PAE encoding, not the raw payload, so the envelope
     # verifies with mareforma's own verify_envelope and any standard DSSE
-    # verifier — the type is bound into the signature, not just carried beside
+    # verifier, the type is bound into the signature, not just carried beside
     # it.
     sig = private_key.sign(_signing.dsse_pae(BUNDLE_PAYLOAD_TYPE, payload_bytes))
     keyid = _signing.public_key_id(private_key.public_key())
@@ -361,7 +361,7 @@ def _verify_exported_validators(
             ) from exc
         verified_types[keyid] = v.get("validator_type")
 
-    # Every validator must reach the single root by walking parents — no
+    # Every validator must reach the single root by walking parents, no
     # island component and no cycle can smuggle in an off-root asserter key.
     for keyid in by_keyid:
         seen: set = set()
@@ -565,7 +565,7 @@ def verify_bundle(
     # Chain-verify the exported validator set: every validator descends from a
     # single root of trust. The bundle must then be signed BY that root, so the
     # public key the caller pins is the same key every per-claim asserter chains
-    # to — the whole bundle anchors to one key the caller chose to trust, not to
+    # to, the whole bundle anchors to one key the caller chose to trust, not to
     # the exporter as a separate party. This is the precondition every check
     # below rests on: a bundle either carries a single-rooted, chain-verified
     # validator set or it is refused here, so nothing downstream has to ask
@@ -657,7 +657,7 @@ def verify_bundle(
         # re-derive the subject digest from the validator-signed fields and
         # require it equals the bundle's subject digest. Without this the
         # asserter signs only an id while the exporter alone vouches for the
-        # displayed text/evidence — the signature would be decorative.
+        # displayed text/evidence, the signature would be decorative.
         asserter_digest = hashlib.sha256(
             _signing.canonical_statement({
                 "claim_id": claim_id,
@@ -681,8 +681,7 @@ def verify_bundle(
         # material, so the exporter cannot inflate it. ESTABLISHED needs a
         # validator-signed validation envelope for this claim; REPLICATED needs
         # distinct-signer corroboration on a shared upstream. Editorial status
-        # (retracted/contested) and comparison summaries are NOT attested here —
-        # they carry no signature in the data model (see the module docstring).
+        # (retracted/contested) and comparison summaries are NOT attested here,         # they carry no signature in the data model (see the module docstring).
         level = node.get("supportLevel", "PRELIMINARY")
         if level == "ESTABLISHED":
             _verify_established_level(

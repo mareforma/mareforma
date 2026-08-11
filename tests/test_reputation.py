@@ -62,7 +62,7 @@ class TestIncludeUnverifiedFilter:
         other_key = _bootstrap_key(tmp_path, "other.key")
 
         # Root opens first so it auto-enrolls. Then re-open with the
-        # other key — `other` is NOT enrolled and signs a PRELIMINARY
+        # other key, `other` is NOT enrolled and signs a PRELIMINARY
         # claim, which the default filter must exclude.
         with mareforma.open(tmp_path, key_path=root_key):
             pass
@@ -150,7 +150,7 @@ class TestValidatorReputationProjection:
         with mareforma.open(tmp_path, key_path=root_key) as g:
             results = g.query(min_support="ESTABLISHED", limit=50)
 
-        # The seed claim is also ESTABLISHED — filter to the promoted set.
+        # The seed claim is also ESTABLISHED, filter to the promoted set.
         promoted = [r for r in results if r["claim_id"] in rep_ids]
         assert len(promoted) == 3
         for r in promoted:
@@ -235,7 +235,7 @@ class TestGetValidatorReputation:
             reputation = g.get_validator_reputation()
 
         assert reputation[v_keyid] == 5
-        # The root signed the seed claim, which is ESTABLISHED — that
+        # The root signed the seed claim, which is ESTABLISHED, that
         # bootstrap event counts as one validation under the root keyid.
         root_keyid = _signing.public_key_id(
             _signing.load_private_key(root_key).public_key(),
@@ -249,7 +249,7 @@ class TestGetValidatorReputation:
         root_key = _bootstrap_key(tmp_path, "root.key")
         with mareforma.open(tmp_path, key_path=root_key) as g:
             reputation = g.get_validator_reputation()
-        # Only one entry — the root.
+        # Only one entry, the root.
         assert len(reputation) == 1
 
     def test_reputation_recomputed_each_call(self, tmp_path: Path) -> None:

@@ -24,7 +24,7 @@ from mareforma.events.protocol import (
 
 # Canonical source-name constants. EventPayload.source is a string for
 # wire-format compatibility, but adapters and handlers MUST use these
-# constants instead of string literals — a typo on a literal silently
+# constants instead of string literals, a typo on a literal silently
 # routes events to the wrong handler with no type-check or runtime
 # error. Mirrors the predicate-URI constants pattern.
 SOURCE_CLAWINSTITUTE = "clawinstitute"

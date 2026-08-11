@@ -21,7 +21,7 @@ HERE = Path(__file__).parent.resolve()
 
 # Load .env from the example directory if present. MEDEA's main.py does
 # this on its own, but run_experiment.py calls the MEDEA() agent class
-# directly without going through main.py — so the documented .env
+# directly without going through main.py, so the documented .env
 # config is otherwise silently ignored.
 try:
     import dotenv

@@ -51,7 +51,7 @@ from tests.epistemic._builders import (
 
 
 # ---------------------------------------------------------------------------
-# REPLICATED — genuine independent convergence
+# REPLICATED, genuine independent convergence
 # ---------------------------------------------------------------------------
 
 class TestReplicatedGenuine:
@@ -243,7 +243,7 @@ class TestReplicatedGenuine:
 
 
 # ---------------------------------------------------------------------------
-# REPLICATED — spurious convergence (detectable via classification)
+# REPLICATED, spurious convergence (detectable via classification)
 # ---------------------------------------------------------------------------
 
 class TestReplicatedSpurious:
@@ -280,7 +280,7 @@ class TestReplicatedSpurious:
             c_a = graph.get_claim(id_a)
             c_b = graph.get_claim(id_b)
 
-        # REPLICATED fires — topology is satisfied
+        # REPLICATED fires, topology is satisfied
         assert c_a["support_level"] == "REPLICATED"
         assert c_b["support_level"] == "REPLICATED"
 
@@ -377,7 +377,7 @@ class TestGraphFragmentation:
             c_a = graph.get_claim(id_a)
             c_b = graph.get_claim(id_b)
 
-        # Two separate claims — the graph has fragmented
+        # Two separate claims, the graph has fragmented
         assert id_a != id_b
         assert len(all_claims) == 2
         assert c_a["support_level"] == "PRELIMINARY"
@@ -458,13 +458,13 @@ class TestDerivedChain:
                 "derived claim with no upstream",
                 classification="DERIVED",
                 generated_by="agent/model-a/lab_a",
-                # no supports= — broken chain
+                # no supports=, broken chain
             )
             c_broken = graph.get_claim(broken)
 
         supports = json.loads(c_broken["supports_json"])
         assert c_broken["classification"] == "DERIVED"
-        assert supports == []   # chain is broken — detectable but not prevented
+        assert supports == []   # chain is broken, detectable but not prevented
 
 
 # ---------------------------------------------------------------------------

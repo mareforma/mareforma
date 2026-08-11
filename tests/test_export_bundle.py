@@ -169,7 +169,7 @@ class TestRoundTripVerification:
 
     def test_empty_graph_bundle_verifies(self, tmp_path: Path) -> None:
         key_path, pk = _bootstrap(tmp_path)
-        # No claims — fresh graph.
+        # No claims, fresh graph.
         with mareforma.open(tmp_path, key_path=key_path):
             pass
         bundle_path = tmp_path / "empty.json"

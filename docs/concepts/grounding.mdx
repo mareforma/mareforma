@@ -131,13 +131,25 @@ The observer measures **flow**: did the cited bytes arrive. The oracle measures
 input, re-runs the pipeline, and sees whether the finding moves. It never reads
 the observer's log, so a detector that agreed with itself cannot look correct here.
 
+The null is not yours to pick. A chosen null is a place to fish: choose the one a
+quantity is provably invariant to and the finding reads `NOT_INFLUENCED` however
+honest it is. So the oracle derives the whole family of nulls from the input's own
+shape and routes the verdict on the profile across the family.
+
 ```python
 from mareforma.observe import perturbation_oracle, reconcile
 
-result = perturbation_oracle(run_pipeline, base_input, perturb=drop_half_the_rows,
+result = perturbation_oracle(run_pipeline, base_input,
                              repeats=5, metric=lambda finding: finding.estimate)
-result.influence   # INFLUENCED, NOT_INFLUENCED, or UNDECIDABLE
+result.influence   # INFLUENCED, NOT_INFLUENCED, UNDECIDABLE, or NOT_TESTED
+result.blind_spot_line()   # what this verdict did not test, and under what bound
 ```
+
+`INFLUENCED` needs every null to move the finding; `NOT_INFLUENCED` needs none of
+them to. Anything in between is `UNDECIDABLE`, which is the honest reading of a
+genuine mean: it is invariant under a reordering and moves when you zero the data,
+and calling that hollow would accuse an honest computation. `NOT_TESTED` is the
+oracle declining, with a typed reason, on a target it could not measure at all.
 
 The oracle handles the honest hard case: a stochastic pipeline (an LLM at nonzero
 temperature) moves run to run even with fixed input. It measures that run-to-run
@@ -156,8 +168,12 @@ and the result records it, so a measurement declares when its ground truth is no
 longer model-free. Two controls tighten the noise call before it is made:
 `multiplicity=n` widens the threshold when a finding is one of `n` (so the
 noisiest of a family cannot cross the bar by chance), and `thin_sigma_guard`
-widens it when the noise floor rests on too few repeats to trust. Both default
-off, so a single scalar finding is scored exactly as before.
+widens it when the noise floor rests on too few repeats to trust. The thin-sigma
+guard defaults off; the multiplicity widening is not off by default, because the
+derived family's own null count feeds it. Neither reaches a pipeline with no
+measurable noise, where the threshold is a float-equality band instead of a
+multiple of sigma, and `multiplicity_applied` on the result says which case you
+got.
 
 Flow and influence are different constructs, so `reconcile` reads a mismatch as a
 construct difference, not a detector error. A finding can read the cited data

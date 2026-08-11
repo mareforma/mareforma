@@ -181,7 +181,7 @@ def test_subprocess_is_a_seam(cited):
 def test_socket_connect_is_a_seam():
     # A socket seam blocks UNGROUNDED for a URL citation: the bytes could have
     # arrived over that connection. (For a local-FILE citation the same seam is
-    # irrelevant and the verdict stays UNGROUNDED — see the seam-relevance tests
+    # irrelevant and the verdict stays UNGROUNDED, see the seam-relevance tests
     # in test_observe_scope.py.)
     with obs.observe(cites="https://example.org/data.csv") as h:
         try:
