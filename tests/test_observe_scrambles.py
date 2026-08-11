@@ -131,3 +131,84 @@ def test_numpy_bool_array_has_no_family():
     # A bool array is a mask, not a scalar metric, and must not be scrambled.
     numpy = pytest.importorskip("numpy")
     assert scramble_family(numpy.asarray([True, False, True])) is None
+
+
+# -- a null identical to the base is not a perturbation ---------------------
+
+def test_a_mapping_never_gets_a_null_equal_to_its_own_values():
+    # An all-zero mapping was handed its own values back under the name "zeroed".
+    # A finding cannot move under a null identical to its input, so the row read
+    # as "a provable invariant of a valid null" off a null that perturbed nothing.
+    fam = scramble_family({"a": 0.0, "b": 0.0})
+    assert [s.name for s in fam] == ["constant"]
+    assert "zeroed" in fam.dropped
+    assert all(s.perturbed != {"a": 0.0, "b": 0.0} for s in fam)
+
+
+def test_a_constant_sequence_reports_the_marginal_preserving_nulls_it_lost():
+    # Permuting or reversing a constant sequence produces the input, so both
+    # marginal-preserving nulls are unrunnable. The family must say so: without
+    # them it cannot tell an honest invariant from a hollow finding, and a verdict
+    # over what remains is narrower than the same verdict over ordinary data.
+    fam = scramble_family([5.0, 5.0, 5.0])
+    assert [s.name for s in fam] == ["zeroed", "constant"]
+    assert fam.dropped == ("permuted", "reversed")
+    assert fam.dropped_marginal_preserving == ("permuted", "reversed")
+
+
+def test_a_length_one_sequence_reports_the_same_loss():
+    fam = scramble_family([7.0])
+    assert fam.dropped_marginal_preserving == ("permuted", "reversed")
+
+
+def test_a_one_key_mapping_reports_that_it_cannot_permute():
+    fam = scramble_family({"only": 3.0})
+    assert fam.dropped_marginal_preserving == ("permuted",)
+
+
+def test_a_deduped_coincident_null_is_not_reported_as_a_loss():
+    # On a length-2 sequence permute and reverse are the same operation. Running
+    # it twice would inflate the family-size correction, but nothing is lost, so
+    # the dedup must not read as the family losing a marginal-preserving null.
+    fam = scramble_family([5.0, 6.0])
+    assert fam.dropped_marginal_preserving == ()
+    assert "permuted" in [s.name for s in fam]
+
+
+def test_mapping_values_are_gated_like_sequence_elements():
+    # float() succeeding is not the gate the rest of the module applies: a bool
+    # carries one bit and a numeric string is not a number. Both had a family.
+    assert scramble_family({"a": True, "b": False}) is None
+    assert scramble_family({"a": "3.5"}) is None
+
+
+# -- the perturbed input reaches the pipeline as the type it expects --------
+
+def test_a_namedtuple_is_rebuilt_as_itself_not_as_a_plain_tuple():
+    from collections import namedtuple
+
+    point = namedtuple("Point", "x y z")
+    fam = scramble_family(point(1.0, 2.0, 3.0))
+    assert all(isinstance(s.perturbed, point) for s in fam)
+    # Rebuilt as a plain tuple, the pipeline's own field access raises and the
+    # oracle records the TARGET as having crashed under the null, blaming the
+    # target for what the harness handed it.
+    assert fam[0].perturbed.x == 0.0
+
+
+def test_a_tuple_subclass_that_cannot_be_rebuilt_has_no_family():
+    class Weird(tuple):
+        def __new__(cls, a, b):  # not constructible from a value list
+            return super().__new__(cls, (a, b))
+
+    assert scramble_family(Weird(1.0, 2.0)) is None
+
+
+def test_a_labelled_series_keeps_its_labels():
+    pandas = pytest.importorskip("pandas")
+    series = pandas.Series([1.0, 2.0, 3.0], index=["a", "b", "c"])
+    fam = scramble_family(series)
+    assert fam is not None
+    for s in fam:
+        assert isinstance(s.perturbed, pandas.Series)
+        assert list(s.perturbed.index) == ["a", "b", "c"]

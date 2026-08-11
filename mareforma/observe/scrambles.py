@@ -47,21 +47,70 @@ class Scramble:
     perturbed: Any
 
 
-def scramble_family(base_input: Any) -> "list[Scramble] | None":
+# The nulls that hold a distribution's marginal invariant while changing the
+# ordering. They are what separates a genuine mean (flat under these, moves under
+# the destroying ones) from a hollow finding (flat under everything), so a family
+# that lost them cannot make that distinction and the oracle has to say so.
+MARGINAL_PRESERVING = frozenset({"permuted", "reversed"})
+
+
+@dataclass(frozen=True)
+class ScrambleFamily:
+    """The nulls that will run, and the ones the input itself ruled out.
+
+    A null identical to the base input is not a perturbation, so it is dropped
+    rather than run. Which nulls were dropped is part of the measurement, not
+    bookkeeping: a constant-valued sequence drops both marginal-preserving nulls
+    (permuting constants changes nothing), so a verdict over what remains rests on
+    a narrower family than the shape normally supplies. ``dropped`` carries those
+    names so the oracle can say which nulls its verdict never tried, instead of
+    reporting "under every null" about a family the data quietly shrank.
+
+    Iterating, indexing and ``len`` see the nulls that will run, so a caller that
+    only wants the family reads it like the sequence it replaces.
+    """
+
+    scrambles: "tuple[Scramble, ...]"
+    dropped: "tuple[str, ...]" = ()
+
+    def __iter__(self):
+        return iter(self.scrambles)
+
+    def __len__(self) -> int:
+        return len(self.scrambles)
+
+    def __getitem__(self, index):
+        return self.scrambles[index]
+
+    @property
+    def dropped_marginal_preserving(self) -> "tuple[str, ...]":
+        """The marginal-preserving nulls the input ruled out, if any.
+
+        Non-empty means the family cannot separate an honest invariant from a
+        hollow finding, because the nulls that would have shown the difference
+        could not be built from this input.
+        """
+        return tuple(n for n in self.dropped if n in MARGINAL_PRESERVING)
+
+
+def scramble_family(base_input: Any) -> "ScrambleFamily | None":
     """Build the family of nulls for ``base_input`` from its data shape.
 
-    Returns the list of scrambles to run the pipeline against, or ``None`` when
-    no family fits the shape (the caller reads that as a NOT_TESTED verdict with
-    reason ``unsupported-shape``). The shapes handled:
+    Returns a :class:`ScrambleFamily` (the nulls to run, plus the ones the input
+    ruled out), or ``None`` when no family fits the shape (the caller reads that
+    as a NOT_TESTED verdict with reason ``unsupported-shape``). The shapes handled:
 
     - a real scalar (``int`` / ``float``, never ``bool``): value-replacement nulls;
     - a mapping of scalars: nulls over the values (zero, constant, permute across
       keys);
-    - a sequence of scalars (``list`` / ``tuple``, or a numpy array): content-
-      destroying and marginal-preserving nulls.
+    - a sequence of scalars (``list`` / ``tuple``, a namedtuple, or a numpy array):
+      content-destroying and marginal-preserving nulls.
 
-    A string, a boolean, an empty container, or a container of non-scalars has no
-    family and yields ``None``.
+    A string, a boolean, an empty container, a container of non-scalars, or a
+    container that cannot be rebuilt in its own type has no family and yields
+    ``None``. Every family drops a null that would equal the base input, since
+    running the base against itself measures nothing; the dropped names stay on
+    the family so the verdict can name what it never tried.
     """
     if isinstance(base_input, bool):
         # bool is an int subclass but not a metric: it carries one bit, so there
@@ -79,63 +128,92 @@ def scramble_family(base_input: Any) -> "list[Scramble] | None":
     return None
 
 
-def _scalar_family(x: float) -> "list[Scramble] | None":
+def _scalar_family(x: float) -> "ScrambleFamily | None":
     """Value-replacement nulls for a bare scalar.
 
     A scalar has no internal structure to permute, so every null simply replaces
     it with a different value: a finding that depends on it moves under all of
     them, a constant fallback under none. The replacements are de-duplicated and
     forced to differ from ``x`` (a null equal to the input is not a perturbation),
-    so a scalar near one of the sentinels still gets a real family.
+    so a scalar near one of the sentinels still gets a real family. A scalar has
+    no marginal-preserving null at all, so a dropped sentinel narrows the family
+    without changing what it can distinguish.
     """
     candidates = [0.0, -x, x + 1.0, x * 2.0, 1.0e6]
     seen: set[float] = set()
     family: list[Scramble] = []
+    dropped: list[str] = []
     names = ["zeroed", "negated", "offset", "scaled", "replaced"]
     for name, value in zip(names, candidates):
-        if value == x or value in seen:
+        if value == x:
+            dropped.append(name)  # identical to the base: nothing to perturb
             continue
+        if value in seen:
+            continue  # coincident with a null already here: a dedup, not a loss
         seen.add(value)
         family.append(Scramble(name, value))
     if not family:
-        # x coincided with every sentinel (only possible for a degenerate set);
-        # fall back to a single guaranteed-distinct null.
+        # Unreachable today: the candidates include both 0.0 and 1.0e6 and one
+        # float cannot equal both. Kept as a guard so a future sentinel change
+        # cannot silently return an empty family.
         family.append(Scramble("offset", x + 1.0))
-    return family
+    return ScrambleFamily(tuple(family), tuple(dropped))
 
 
-def _mapping_family(mapping: "dict") -> "list[Scramble] | None":
+def _mapping_family(mapping: "dict") -> "ScrambleFamily | None":
     """Nulls over the values of a mapping of scalars.
 
     Zero and constant destroy the values; permuting the values across the keys
     holds the value multiset invariant while breaking the key-to-value pairing,
     so a finding that reads one key's value moves but a finding over the whole
     multiset (a sum, a mean) does not.
+
+    Every null is compared against the base values and dropped when it matches:
+    an all-zero mapping would otherwise be handed its own values back under the
+    name ``zeroed``, and a finding that necessarily fails to move under a null
+    identical to its input would read as invariant under a null nothing perturbed.
+    The mapping values are gated on ``numbers.Real`` (never ``bool``), the same
+    rule the sequence path applies to its elements, so a mapping of flags or of
+    numeric strings has no family rather than a silently coerced one.
     """
     if not mapping:
         return None
     keys = list(mapping)
-    try:
-        values = [float(mapping[k]) for k in keys]
-    except (TypeError, ValueError):
-        return None
-    family = [
-        Scramble("zeroed", {k: 0.0 for k in keys}),
-        Scramble("constant", {k: 1.0e6 for k in keys}),
+    values: list[float] = []
+    for k in keys:
+        v = mapping[k]
+        if isinstance(v, bool) or not isinstance(v, numbers.Real):
+            return None
+        values.append(float(v))
+    shuffled = list(values)
+    random.Random(_SEED).shuffle(shuffled)
+    # ``permuted`` is always a candidate, including on a one-key mapping where it
+    # cannot differ from the base, so a family that loses it reports the loss
+    # instead of quietly shipping without a marginal-preserving null.
+    candidates = [
+        ("zeroed", [0.0] * len(keys)),
+        ("constant", [1.0e6] * len(keys)),
+        ("permuted", shuffled),
     ]
-    if len(keys) > 1:
-        shuffled = list(values)
-        random.Random(_SEED).shuffle(shuffled)
-        # A permutation that leaves the key-to-value pairing unchanged is not a
-        # perturbation; skip it rather than run a null identical to the base.
-        if shuffled != values:
-            family.append(Scramble("permuted", dict(zip(keys, shuffled))))
-    return family
+    family: list[Scramble] = []
+    dropped: list[str] = []
+    seen: list[list[float]] = []
+    for name, vs in candidates:
+        if vs == values:
+            dropped.append(name)  # identical to the base: a real loss
+            continue
+        if vs in seen:
+            continue  # coincident with a null already here: a dedup, not a loss
+        seen.append(vs)
+        family.append(Scramble(name, dict(zip(keys, vs))))
+    if not family:
+        return None
+    return ScrambleFamily(tuple(family), tuple(dropped))
 
 
 def _sequence_family(
     base_input: Any, values: "list[float]"
-) -> "list[Scramble] | None":
+) -> "ScrambleFamily | None":
     """Content-destroying and marginal-preserving nulls for a scalar sequence.
 
     Zero and constant destroy the content; permute and reverse hold the multiset
@@ -158,19 +236,34 @@ def _sequence_family(
         ("zeroed", [0.0] * n),
         ("constant", [1.0e6] * n),
     ]
-    if n > 1:
-        shuffled = list(values)
-        random.Random(_SEED).shuffle(shuffled)
-        candidates.append(("permuted", shuffled))
-        candidates.append(("reversed", list(reversed(values))))
+    shuffled = list(values)
+    random.Random(_SEED).shuffle(shuffled)
+    # The marginal-preserving nulls are always CANDIDATES, even on a length-1
+    # sequence where they cannot differ from the base. Listing them and dropping
+    # them is what lets the family report that it lost them: silently skipping
+    # them would leave a narrowed family indistinguishable from a full one.
+    candidates.append(("permuted", shuffled))
+    candidates.append(("reversed", list(reversed(values))))
     family: list[Scramble] = []
-    seen: list[list[float]] = [values]
+    dropped: list[str] = []
+    seen: list[list[float]] = []
     for name, vs in candidates:
+        if vs == values:
+            # Identical to the base: this null cannot perturb anything, and the
+            # family is genuinely narrower for losing it. Recorded.
+            dropped.append(name)
+            continue
         if vs in seen:
+            # Coincident with a null already in the family (permute and reverse
+            # agree on a length-2 sequence). Running it twice would measure the
+            # same thing twice and inflate the family-size correction, but
+            # nothing is lost, so this is a dedup, not a drop.
             continue
         seen.append(vs)
         family.append(Scramble(name, rebuild(vs)))
-    return family or None
+    if not family:
+        return None
+    return ScrambleFamily(tuple(family), tuple(dropped))
 
 
 def _as_scalar_sequence(base_input: Any) -> "list[float] | None":
@@ -212,16 +305,39 @@ def _as_scalar_sequence(base_input: Any) -> "list[float] | None":
 def _rebuilder(base_input: Any):
     """A callable that rebuilds a scrambled value list in the input's own type.
 
-    Returns None when the type cannot be rebuilt from a list of floats. A numpy
-    array is rebuilt through a lazy import so the module still imports without
-    numpy installed; the import only runs when a numpy array was actually passed,
-    which means numpy is present.
+    Returns None when the type cannot be rebuilt from a list of floats, which the
+    caller reads as a shape with no family. Refusing is the honest outcome: a
+    container rebuilt as the wrong type reaches the pipeline as something it did
+    not expect, and the AttributeError that follows would be recorded as the
+    TARGET crashing under a null when the harness handed it the wrong thing.
+
+    A numpy array and a pandas-style labelled series are rebuilt through a lazy
+    import so the module still imports with the standard library alone; the import
+    only runs when such an input was actually passed, which means the library that
+    produced it is already installed.
     """
     if isinstance(base_input, list):
         return lambda vs: list(vs)
     if isinstance(base_input, tuple):
-        return lambda vs: tuple(vs)
+        fields = getattr(type(base_input), "_fields", None)
+        if fields is None:
+            if type(base_input) is not tuple:
+                # A tuple subclass we cannot construct positionally from values.
+                return None
+            return lambda vs: tuple(vs)
+        # A namedtuple: rebuild it as its own type so the pipeline still reads
+        # its fields by name.
+        return lambda vs: type(base_input)(*vs)
     if hasattr(base_input, "__array__"):
+        index = getattr(base_input, "index", None)
+        if index is not None:
+            # A labelled series: the labels are part of what the pipeline reads,
+            # so a null must keep them rather than hand back a bare array.
+            def rebuild_labelled(vs):
+                return type(base_input)(vs, index=index)
+
+            return rebuild_labelled
+
         def rebuild(vs):
             import numpy  # lazy: only for a numpy input, never at module import
 
