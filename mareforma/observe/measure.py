@@ -388,6 +388,21 @@ def summarize_independence_receipts(receipts: Iterable[dict]) -> IndependenceRep
 _INFLUENCE_VERDICTS = ("INFLUENCED", "NOT_INFLUENCED", "UNDECIDABLE", "NOT_TESTED")
 
 
+def _not_tested_reasons() -> frozenset:
+    """The typed not-tested reasons this version defines, as their wire values.
+
+    Read from the oracle's own enum rather than restated here, so a reason added
+    or renamed there cannot leave the reader silently filing it as unknown. The
+    import is deferred to keep this module's import cost off the oracle.
+    """
+    from .oracle import NotTestedReason
+
+    return frozenset(r.value for r in NotTestedReason)
+
+
+_NOT_TESTED_REASONS = _not_tested_reasons()
+
+
 @dataclass(frozen=True)
 class InfluenceReport:
     """The influence arm of the measurement, over per-EDGE influence records.
@@ -421,8 +436,23 @@ class InfluenceReport:
     distinct_runs: int = 0
 
     @property
-    def resolved(self) -> int:
-        """Edges the oracle actually decided: the rate denominator (NOT_TESTED out)."""
+    def decided(self) -> int:
+        """Edges the oracle actually decided: the rate denominator.
+
+        INFLUENCED plus NOT_INFLUENCED, and nothing else. UNDECIDABLE is the
+        oracle saying it could not decide, so counting it here would put the
+        non-answer in the denominator of an answer and make a corpus the oracle
+        refused to call read as a corpus it called not-influenced. That matters
+        more here than it looks: a finding that is a provable invariant of a valid
+        null (any mean under a permutation) routes to UNDECIDABLE by design, so
+        UNDECIDABLE is the expected verdict for honest statistics, not a rare
+        edge. NOT_TESTED is excluded for the separate reason that nothing ran.
+        """
+        return self.influenced + self.not_influenced
+
+    @property
+    def tested(self) -> int:
+        """Edges the oracle ran on at all: everything but NOT_TESTED."""
         return self.total - self.not_tested
 
     def not_tested_dominates(self, threshold: float = 0.5) -> bool:
@@ -436,13 +466,14 @@ class InfluenceReport:
 
     @property
     def influenced_fraction(self) -> float:
-        """INFLUENCED over RESOLVED edges, never over the NOT_TESTED-inflated total."""
-        return 0.0 if self.resolved == 0 else self.influenced / self.resolved
+        """INFLUENCED over DECIDED edges: never over the undecided or the untested."""
+        return 0.0 if self.decided == 0 else self.influenced / self.decided
 
     def to_dict(self) -> dict:
         return {
             "total": self.total,
-            "resolved": self.resolved,
+            "decided": self.decided,
+            "tested": self.tested,
             "counts": {
                 "INFLUENCED": self.influenced,
                 "NOT_INFLUENCED": self.not_influenced,
@@ -456,11 +487,17 @@ class InfluenceReport:
         }
 
     def closing_sentence(self) -> str:
-        """A plain-English one-line summary a reviewer can read without the JSON."""
+        """A plain-English one-line summary a reviewer can read without the JSON.
+
+        Every state is named. A line that reports only the influenced fraction
+        cannot be told apart between a corpus the oracle called hollow and one it
+        refused to call, which are the instrument's headline catch and its
+        non-answer, so the sentence carries the whole split or it carries nothing.
+        """
         if self.total == 0:
             return "No influence records to measure."
-        if self.resolved == 0:
-            # Every edge NOT_TESTED: say exactly that, never what a resolved
+        if self.tested == 0:
+            # Every edge NOT_TESTED: say exactly that, never what a measured
             # report says. A report with no scrambles declared reads differently.
             reasons = ", ".join(
                 f"{r}={n}" for r, n in sorted(self.not_tested_by_reason.items())
@@ -470,14 +507,41 @@ class InfluenceReport:
                 f"Influence not tested on any of {self.total} edges{tail}: the "
                 f"oracle did not run, so no influence prevalence is claimed."
             )
-        lead = (
-            f"Across {self.resolved} of {self.total} edges the oracle decided "
-            f"(over {self.distinct_runs} distinct runs): {self.influenced_fraction:.0%} "
-            f"INFLUENCED."
-        )
+        if self.decided == 0:
+            lead = (
+                f"The oracle ran on {self.tested} of {self.total} edges and "
+                f"decided none of them: all {self.undecidable} read UNDECIDABLE, "
+                f"so no influence prevalence is claimed."
+            )
+        else:
+            lead = (
+                f"Across {self.decided} of {self.total} edges the oracle decided"
+                f"{self._run_clause()}: {self.influenced_fraction:.0%} INFLUENCED, "
+                f"{1 - self.influenced_fraction:.0%} NOT_INFLUENCED."
+            )
+            if self.undecidable:
+                lead += (
+                    f" {self.undecidable} edges UNDECIDABLE, which the oracle ran "
+                    f"and could not call, excluded from the rate."
+                )
         if self.not_tested:
-            lead += f" {self.not_tested} edges NOT_TESTED, excluded from the rate."
+            lead += (
+                f" {self.not_tested} edges NOT_TESTED, never run, excluded from "
+                f"the rate."
+            )
         return lead
+
+    def _run_clause(self) -> str:
+        """The run count beside a rate, or an honest statement that it is missing.
+
+        A rate is over edges but the inference unit is the run, so the count
+        belongs beside it. When no writer stamped one, say the count is missing:
+        printing "over 0 distinct runs" beside a percentage claims a rate stands
+        on nothing, which is a stronger and falser statement than not knowing.
+        """
+        if self.distinct_runs <= 0:
+            return " (run count not recorded by the writer)"
+        return f" (over {self.distinct_runs} distinct runs)"
 
 
 def influence_records(receipts: Iterable[dict]) -> list[dict]:
@@ -523,11 +587,21 @@ def summarize_influence(records: Iterable[dict]) -> InfluenceReport:
             undecidable += 1
         else:
             not_tested += 1
-            reason = rec.get("not_tested_reason")
-            if not reason:
-                # NOT_TESTED with no typed reason is the audit path (the oracle
-                # did not run at all); an unrecognized verdict is malformed.
-                reason = "not-run" if verdict == "NOT_TESTED" else "unknown"
+            # The VERDICT is judged before the record's own reason is trusted. A
+            # malformed verdict carrying a well-formed reason string would
+            # otherwise be filed under that reason and read as a legitimate
+            # not-tested state, so one bad record would launder itself into the
+            # bucket a reader counts. Only a record that says NOT_TESTED gets to
+            # name why, and only with a reason this version defines.
+            reason = "unknown"
+            if verdict == "NOT_TESTED":
+                claimed = rec.get("not_tested_reason")
+                if not claimed:
+                    # NOT_TESTED with no typed reason is the audit path: the
+                    # oracle did not run at all.
+                    reason = "not-run"
+                elif claimed in _NOT_TESTED_REASONS:
+                    reason = claimed
             by_reason[reason] = by_reason.get(reason, 0) + 1
         # A record's own run count, summed across edges. A writer that flattens
         # one finding's oracle result into N source-edges must stamp the run

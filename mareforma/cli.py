@@ -1712,11 +1712,12 @@ def measure_cmd(receipts_path: str, as_json: bool, redact_home: bool) -> None:
                 f"{k}={v}"
                 for k, v in sorted(influence_report["not_tested_by_reason"].items())
             ))
-        if influence_report["resolved"]:
+        if influence_report["decided"]:
+            runs = influence_report["distinct_runs"]
+            runs_note = f"over {runs} runs" if runs else "run count not recorded"
             _info(
-                f"influenced fraction (of {influence_report['resolved']} resolved, "
-                f"over {influence_report['distinct_runs']} runs): "
-                f"{influence_report['influenced_fraction']:.0%}"
+                f"influenced fraction (of {influence_report['decided']} decided, "
+                f"{runs_note}): {influence_report['influenced_fraction']:.0%}"
             )
         click.echo(influence_closing)
 

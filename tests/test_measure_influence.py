@@ -55,7 +55,7 @@ def test_not_tested_is_excluded_from_the_rate_denominator():
     ]
     report = summarize_influence(records)
     assert report.total == 10
-    assert report.resolved == 1
+    assert report.decided == 1
     assert report.influenced_fraction == 1.0
     assert report.not_tested_dominates() is True
 
@@ -154,4 +154,126 @@ def test_audit_writes_the_arm_and_measure_reads_it(tmp_path: Path):
     # The audit path never perturbs, so every edge is NOT_TESTED: the honest
     # state, not a fabricated influence number.
     assert report.not_tested == report.total
-    assert report.resolved == 0
+    assert report.decided == 0
+    assert report.tested == 0
+
+
+# -- the reported line names every state it came from -----------------------
+
+def test_undecidable_is_not_counted_as_an_edge_the_oracle_decided():
+    # UNDECIDABLE is the oracle saying it could not decide, and it is the EXPECTED
+    # verdict for any statistic that is a provable invariant of a valid null (a
+    # mean under a permutation). Counting it as decided put the non-answer in the
+    # denominator of an answer, so a corpus the oracle refused to call and a
+    # corpus it called hollow printed the same sentence.
+    undecided = summarize_influence([_edge("UNDECIDABLE", runs=5) for _ in range(8)])
+    hollow = summarize_influence([_edge("NOT_INFLUENCED", runs=5) for _ in range(8)])
+    assert undecided.decided == 0
+    assert undecided.tested == 8
+    assert hollow.decided == 8
+    assert undecided.closing_sentence() != hollow.closing_sentence()
+    assert "decided none of them" in undecided.closing_sentence()
+    assert "no influence prevalence is claimed" in undecided.closing_sentence()
+
+
+def test_a_rate_names_the_undecided_edges_it_excluded():
+    records = [_edge("INFLUENCED", runs=2), _edge("NOT_INFLUENCED", runs=2),
+               _edge("UNDECIDABLE", runs=2)]
+    sentence = summarize_influence(records).closing_sentence()
+    assert "50% INFLUENCED" in sentence and "50% NOT_INFLUENCED" in sentence
+    assert "1 edges UNDECIDABLE" in sentence
+    assert "excluded from the rate" in sentence
+
+
+def test_a_rate_with_no_run_count_says_the_count_is_missing():
+    # The arm's stated guarantee is that a rate never prints without the run
+    # count behind it. Printing "over 0 distinct runs" claims a rate stands on
+    # nothing, which is a stronger and falser statement than not knowing.
+    sentence = summarize_influence([_edge("INFLUENCED")]).closing_sentence()
+    assert "over 0 distinct runs" not in sentence
+    assert "run count not recorded" in sentence
+
+
+def test_a_malformed_verdict_cannot_launder_itself_into_a_real_reason():
+    # The verdict is judged before the record's own reason is trusted. Otherwise a
+    # record with an unrecognized verdict and a well-formed reason string was
+    # filed under that reason and read as a legitimate not-tested state.
+    report = summarize_influence([
+        {"influence": "GARBAGE", "not_tested_reason": "unsupported-shape"},
+        {"influence": "NOT_TESTED", "not_tested_reason": "invented-by-a-writer"},
+        {"influence": "NOT_TESTED", "not_tested_reason": "unsupported-shape"},
+    ])
+    assert report.not_tested_by_reason == {"unknown": 2, "unsupported-shape": 1}
+
+
+def test_to_dict_carries_the_keys_the_cli_reads():
+    # The CLI indexes these by name, so a rename ships as a KeyError in
+    # `mareforma measure` rather than a test failure.
+    payload = summarize_influence([_edge("INFLUENCED", runs=2)]).to_dict()
+    for key in ("total", "decided", "tested", "counts", "not_tested_by_reason",
+                "not_tested_dominates", "distinct_runs", "influenced_fraction"):
+        assert key in payload
+    assert set(payload["counts"]) == {
+        "INFLUENCED", "NOT_INFLUENCED", "UNDECIDABLE", "NOT_TESTED"
+    }
+
+
+def test_the_pilot_carries_the_influence_arm_when_receipts_have_one():
+    from mareforma.observe.measure import summarize_pilot
+
+    receipts = [{
+        "grounding": "GROUNDED", "reads": [], "cited_sources": [],
+        "influence": [_edge("INFLUENCED", runs=2)],
+    }]
+    pilot = summarize_pilot(receipts)
+    assert pilot.influence.total == 1
+    assert pilot.to_dict()["influence"] is not None
+    assert "INFLUENCED" in pilot.closing_sentence()
+    # And a pilot without the arm reports exactly as it did before it existed.
+    bare = summarize_pilot([{"grounding": "GROUNDED", "reads": [],
+                             "cited_sources": []}])
+    assert bare.influence.total == 0
+    assert bare.to_dict()["influence"] is None
+
+
+def test_audit_writes_one_edge_per_cited_source(tmp_path: Path):
+    # The arm's unit is the EDGE, so a finding citing two sources must contribute
+    # two records. A writer regressing to one record per finding would pass every
+    # hand-authored flattening test in this file and silently halve the arm.
+    from click.testing import CliRunner
+
+    from mareforma import signing
+    from mareforma.cli import cli
+    from mareforma.observe.oracle import THREAT_MODEL_STATEMENT
+
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        Path("target.py").write_text(
+            "with open('a.csv') as f:\n    f.read()\n"
+            "with open('b.csv') as f:\n    f.read()\n",
+            encoding="utf-8",
+        )
+        Path("a.csv").write_text("a\n1\n", encoding="utf-8")
+        Path("b.csv").write_text("b\n2\n", encoding="utf-8")
+        Path("findings.json").write_text(
+            json.dumps({"finding-1": ["a.csv", "b.csv"]}), encoding="utf-8"
+        )
+        key = Path("auditor.key")
+        signing.bootstrap_key(key)
+        res = runner.invoke(
+            cli,
+            ["audit", "--findings", "findings.json", "--out", "out",
+             "--key", str(key), "--", "python", "target.py"],
+            catch_exceptions=False,
+        )
+        assert res.exit_code == 0, res.output
+        receipts = [
+            json.loads(line)
+            for line in Path("out/receipts.jsonl").read_text().splitlines()
+        ]
+
+    edges = influence_records(receipts)
+    assert len(edges) == 2
+    assert len({e["cited_source"] for e in edges}) == 2
+    # The bound the record makes its claim under travels with the record.
+    assert all(THREAT_MODEL_STATEMENT in e["reason"] for e in edges)
