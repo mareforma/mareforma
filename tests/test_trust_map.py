@@ -235,10 +235,23 @@ class TestWitnessingHonesty:
                          n_roots=1, has_inclusion=False)
         assert tmap.get("witnessing").value == "not witnessed"
 
-    def test_actual_inclusion_is_logged(self) -> None:
+    def test_actual_inclusion_reports_the_record_not_a_proof(self) -> None:
+        """The axis reports what it read, which is that a record exists.
+
+        It used to read "logged" with the residual "signed and recorded in a
+        transparency log with an inclusion proof". Nothing here opens the
+        stored proof: the source is `SELECT 1 FROM rekor_inclusions`, the
+        Merkle check happens at restore, and the table's triggers block UPDATE
+        and DELETE but permit INSERT. So a row carrying a junk proof reached
+        that sentence, and the sentence asserted a check that never ran.
+        """
         tmap = _assemble(_claim(transparency_logged=1),
                          n_roots=1, has_inclusion=True)
-        assert tmap.get("witnessing").value == "logged"
+        witnessing = tmap.get("witnessing")
+        assert witnessing.value == "inclusion record present"
+        assert "not re-checked on read" in witnessing.residual
+        # The claim the axis must never make again.
+        assert "with an inclusion proof" not in witnessing.residual
 
     def test_unsigned_claim_has_nothing_to_witness(self) -> None:
         tmap = _assemble(_claim(signature_bundle=None),

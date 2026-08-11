@@ -5649,13 +5649,23 @@ def refutation_status(row: dict) -> dict:
             "fetched via list_claims / get_claim, not a partial dict."
         )
     if row.get("t_invalid") is not None:
+        # States what was read, not what was proved. This is a pure function
+        # over one row: it sees `t_invalid` and nothing else. The signed
+        # evidence sits untouched in contradiction_verdicts, and no trigger
+        # guards this column, so one UPDATE either fabricates a contradiction
+        # with zero verdicts present or erases a real one from every read
+        # surface. The old wording asserted a signed verdict had been checked,
+        # and the old signal name said so in machine-readable form; neither is
+        # something this function can know. Replaying the verdicts on read is
+        # deferred work, so until then the honest report is the column.
         return {
             "state": "contradicted",
             "reason": (
-                "a signed contradiction verdict marked this claim "
-                f"invalid at t_invalid={row['t_invalid']}"
+                "this claim's invalidation timestamp is set "
+                f"(t_invalid={row['t_invalid']}); the contradiction verdicts "
+                "behind it are not replayed on read"
             ),
-            "signal": "signed-verdict",
+            "signal": "invalidation-recorded",
         }
     status = row.get("status")
     if status == "retracted":

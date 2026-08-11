@@ -476,11 +476,21 @@ def _witnessing_property(claim: dict, has_inclusion: bool) -> TrustProperty:
             residual="unsigned claim; nothing to witness in a transparency log",
         )
     if has_inclusion:
+        # States what was observed, not what was proved. `has_inclusion` comes
+        # from `SELECT 1 FROM rekor_inclusions`, so it answers "a record exists",
+        # and the stored `raw_response_b64` is never opened here. The Merkle
+        # proof is checked at restore, not on read, and the `rekor_inclusions`
+        # triggers block UPDATE and DELETE but permit INSERT, so a row with a
+        # junk proof reaches this branch. The old sentence asserted an inclusion
+        # proof had been checked, which is a claim this function cannot make.
         return TrustProperty(
             name="witnessing",
             tier=Tier.COMPUTED,
-            value="logged",
-            residual="signed and recorded in a transparency log with an inclusion proof",
+            value="inclusion record present",
+            residual=(
+                "signed, and a transparency-log inclusion record is stored; "
+                "the inclusion proof itself is not re-checked on read"
+            ),
         )
     if logged == 1:
         return TrustProperty(
