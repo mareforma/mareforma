@@ -1,0 +1,46 @@
+---
+title: "Verify in CI"
+description: "mareforma verify as a GitHub Actions gate, keyed on exit codes a job can branch on without parsing text."
+---
+
+<Card title="View on GitHub" icon="github" href="https://github.com/mareforma/mareforma/tree/main/examples/06_ci_verify">
+  `examples/06_ci_verify/`
+</Card>
+
+`mareforma verify` is the trust gate, and it is built to sit inside a real gate.
+Its exit codes are stable, so a CI job can branch on them without parsing text.
+
+| Code | Meaning | CI action |
+|---|---|---|
+| `0` | verified | pass |
+| `1` | tamper or binding violation, a definite no | fail the build |
+| `2` | unverifiable, the check could not run | fail, or warn |
+| `3` | usage error (bad flag or missing argument) | fail the build |
+
+## The gate
+
+```yaml
+name: verify findings
+on: [push, pull_request]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install mareforma
+      - run: mareforma verify "$CLAIM_ID"
+        env:
+          CLAIM_ID: ${{ vars.CLAIM_ID }}
+```
+
+## Why exit 2 is its own code
+
+Exit `1` says a check ran and refused. Exit `2` says the check could not run at
+all: no signature to verify, a key that is not enrolled, a bundle that could not be
+read. Collapsing the two would let a missing signature pass as a passing build,
+which is the failure the separate code exists to prevent. Treat `2` as a failure
+unless you have a stated reason to warn instead, and say what that reason is.
+
+The full workflow, including the loop over several claims, is in the example's
+[README](https://github.com/mareforma/mareforma/tree/main/examples/06_ci_verify).

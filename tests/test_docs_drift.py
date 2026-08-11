@@ -2609,3 +2609,50 @@ def test_scitt_guard_fails_on_an_empty_scan_set(tmp_path):
     """A moved package must fail loudly, not pass by auditing nothing."""
     with pytest.raises(AssertionError, match="audits nothing"):
         _assert_no_scitt_claim_without_cose(tmp_path / "moved")
+
+
+# -- every example is reachable from the surfaces people actually read ------
+
+def _example_dirs() -> list[pathlib.Path]:
+    return sorted(
+        d for d in (ROOT / "examples").iterdir()
+        if d.is_dir() and re.fullmatch(r"\d\d_\w+", d.name)
+    )
+
+
+def test_every_example_directory_appears_in_the_readme_table():
+    # The README table is the front door and the PyPI landing page. Example 07
+    # shipped in the release that added it and was absent from this table, so the
+    # cheapest demonstration of the product's core claim was unreachable from the
+    # two surfaces people read. The docs pass that missed it edited README.md
+    # without checking it against `ls examples/`; this guard is that check.
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    missing = [d.name for d in _example_dirs() if f"examples/{d.name}" not in readme]
+    assert not missing, (
+        f"README.md's example table does not link these example directories: "
+        f"{missing}. Add a row per example, or delete the directory."
+    )
+
+
+def test_every_example_directory_has_a_docs_page_in_the_nav():
+    # Same defect one surface over: a docs page that exists but is not in the
+    # navigation is only reachable by a reader who already knows the URL, and a
+    # directory with no page at all is invisible from the docs site entirely.
+    config = json.loads((DOCS / "docs.json").read_text(encoding="utf-8"))
+    nav_pages = set(re.findall(r'"(examples/[\w-]+)"', json.dumps(config)))
+    on_disk = {p.stem for p in (DOCS / "examples").glob("*.mdx")}
+    assert {p.split("/", 1)[1] for p in nav_pages} <= on_disk, (
+        "docs.json lists an examples page with no .mdx file behind it"
+    )
+    # Each example directory must be linked from exactly one docs page, matched
+    # by the GitHub link the page carries rather than by a filename convention,
+    # so renaming a page cannot silently orphan an example.
+    linked = "\n".join(
+        p.read_text(encoding="utf-8") for p in (DOCS / "examples").glob("*.mdx")
+        if f"examples/{p.stem}" in nav_pages
+    )
+    missing = [d.name for d in _example_dirs() if f"examples/{d.name}" not in linked]
+    assert not missing, (
+        f"no docs page in the navigation links these example directories: "
+        f"{missing}. Add a page under docs/examples/ and list it in docs.json."
+    )
