@@ -731,3 +731,110 @@ def test_the_skip_disclosure_dedupe_set_is_bounded(tmp_path):
     disclose.record("op", "content-9999", "line-9999")
     disclose.record("op", "content-9999", "line-9999")
     assert len(disclose._seen) == before
+
+
+def test_an_unsigned_claim_is_disclosed_like_an_unenrolled_one(tmp_path):
+    """The disclosure has to see the class that dominates the drain.
+
+    The enrolled-generator condition is NULL, not false, for a row with no
+    signature bundle at all: json_valid(NULL) is NULL and NULL IN (...) is NULL.
+    The read excludes such a row, since WHERE NULL is not true, and a bare NOT
+    over the same condition is also NULL, so the count came back zero for every
+    unsigned claim in the project. The condition's own docstring calls unsigned
+    traffic the dominant drain, which made it the one class the disclosure
+    could not report, and the earlier tests missed it because a claim SIGNED by
+    an unenrolled key evaluates to false rather than NULL.
+    """
+    import mareforma as _mf
+
+    with _mf.open(tmp_path) as g:  # bootstraps and enrols a root validator
+        pass
+    with _mf.open(tmp_path) as g:
+        for i in range(3):
+            g._conn.execute(
+                "INSERT INTO claims (claim_id, text, classification, status, "
+                "support_level, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
+                (f"unsigned-{i}", f"an unsigned claim {i}", "ANALYTICAL", "open",
+                 "PRELIMINARY", "2026-08-11T00:00:00+00:00",
+                 "2026-08-11T00:00:00+00:00"),
+            )
+        g._conn.commit()
+
+    with _mf.open(tmp_path) as g:
+        tools = ReadVerifyTools(g)
+        assert tools.query_claims()["unverified_excluded"] == 3
+        assert tools.search_claims("unsigned")["unverified_excluded"] == 3
+        assert g.read_unverified_exclusions == 6
+
+
+def test_one_calls_exclusions_are_not_reported_on_another_calls_page(tmp_path):
+    """The counters are process-wide, so the snapshot has to hold the lock.
+
+    Tool calls are dispatched on threads. An unguarded before/after window spans
+    whatever another thread read in between and absorbs its exclusions, so a page
+    that held nothing back told the agent rows were withheld.
+    """
+    import threading
+
+    import mareforma as _mf
+
+    root, _ = _unenrolled_project(tmp_path)
+    with _mf.open(tmp_path, key_path=root) as g:
+        # Claims that DO survive the filter, so a read for them is clean.
+        for i in range(4):
+            g.assert_claim(f"beta finding {i}", generated_by="x")
+
+    with _mf.open(tmp_path, key_path=root) as g:
+        tools = ReadVerifyTools(g)
+        clean_pages = []
+        stop = threading.Event()
+
+        def noisy():
+            while not stop.is_set():
+                tools.query_claims(text="finding")  # holds 3 back every time
+
+        def clean():
+            for _ in range(200):
+                clean_pages.append(tools.query_claims(text="beta"))
+
+        worker = threading.Thread(target=noisy, daemon=True)
+        worker.start()
+        try:
+            clean()
+        finally:
+            stop.set()
+            worker.join(timeout=5)
+
+    assert clean_pages, "the clean reader made no calls"
+    assert all(p["count"] == 4 for p in clean_pages)
+    misattributed = [p for p in clean_pages if "unverified_excluded" in p]
+    assert not misattributed, (
+        f"{len(misattributed)} of {len(clean_pages)} pages reported another "
+        f"call's exclusions"
+    )
+
+
+def test_a_spike_in_held_back_rows_reaches_the_health_log(tmp_path):
+    """Rate-limiting on occurrence alone made a sudden jump invisible.
+
+    A read that drops 500 rows between two ordinary reads is the one a reader
+    most wants to see, and it lands on no power of two.
+    """
+    import mareforma as _mf
+
+    with _mf.open(tmp_path) as g:
+        g._record_unverified_exclusions(1)   # occurrence 1: written
+        g._record_unverified_exclusions(1)   # occurrence 2: written
+        g._record_unverified_exclusions(500)  # occurrence 3: a spike
+        g._record_unverified_exclusions(1)   # occurrence 4: written
+
+    lines = [
+        line for line in
+        (tmp_path / ".mareforma" / "health.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if "read_unverified_excluded" in line
+    ]
+    assert any('"total": 502' in line or '"total":502' in line for line in lines), (
+        f"the spike wrote no line; got {lines}"
+    )

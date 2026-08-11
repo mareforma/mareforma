@@ -258,7 +258,11 @@ def register(uri: str, owner: str | None = None) -> None:
                     f"{owner!r}. Pre-empt by dropping the register() "
                     "call from your adapter and treating the URI as "
                     "core-owned.",
-                    4,  # +1 for _emit's own frame
+                    # 1 is _emit, 2 is register, 3 is register's caller. The
+                    # base this was raised from was already one too high, so
+                    # the warning landed above the caller and printed nothing
+                    # under the default filter.
+                    3,
                 )
             return
         if uri in _registry:

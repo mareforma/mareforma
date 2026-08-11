@@ -212,3 +212,38 @@ def test_a_labelled_series_keeps_its_labels():
     for s in fam:
         assert isinstance(s.perturbed, pandas.Series)
         assert list(s.perturbed.index) == ["a", "b", "c"]
+
+
+def test_a_decimal_mapping_still_has_a_family():
+    # decimal.Decimal is a Number but not a numbers.Real, and it is an ordinary
+    # way to carry a measured quantity. Gating on Real alone stopped measuring a
+    # shape that used to be measured.
+    from decimal import Decimal
+
+    fam = scramble_family({"a": Decimal("1.5"), "b": Decimal("2.5")})
+    assert fam is not None
+    assert [s.name for s in fam] == ["zeroed", "constant", "permuted"]
+
+
+def test_a_sequence_protocol_index_method_is_not_read_as_a_label_index():
+    # The Sequence protocol mandates an index() METHOD. Testing for the
+    # attribute name alone rebuilt an ordinary array-like as
+    # type(x)(values, index=<bound method>), which raises, and the finding then
+    # read as the null failing to build.
+    from mareforma.observe.scrambles import _rebuilder
+
+    class Labelled:
+        index = ["a", "b", "c"]           # sized, not callable: a label index
+
+        def __array__(self, *a, **k):     # pragma: no cover - shape only
+            raise AssertionError("not called")
+
+    class SequenceLike:
+        def index(self, value):           # the protocol's method
+            return 0
+
+        def __array__(self, *a, **k):     # pragma: no cover - shape only
+            raise AssertionError("not called")
+
+    assert _rebuilder(Labelled()).__name__ == "rebuild_labelled"
+    assert _rebuilder(SequenceLike()).__name__ == "rebuild"

@@ -330,6 +330,8 @@ class OracleResult:
         traceback: "str | None" = None,
         reducer: "MetricReducer | None" = None,
         perturbation_effects: tuple[float, ...] = (),
+        dropped_nulls: "tuple[str, ...]" = (),
+        caller_chose_nulls: bool = False,
     ) -> "OracleResult":
         """Build a NOT_TESTED result: the oracle produced no influence verdict.
 
@@ -337,6 +339,12 @@ class OracleResult:
         never-run row, so no consumer reads a zero as a measurement. ``detail``
         is folded into the English reason; the typed ``reason`` is what a
         consumer branches on.
+
+        ``dropped_nulls`` and ``caller_chose_nulls`` describe the FAMILY, not the
+        measurement, so they are carried here too: they are known as soon as the
+        family resolves, and a row that says the caller did not choose the nulls
+        when the caller did is a false statement on the field added to keep a
+        caller's own null from reading as the derived family's.
         """
         sentence = f"the oracle did not run: {reason.value}"
         if detail:
@@ -351,6 +359,8 @@ class OracleResult:
             reducer=reducer,
             not_tested_reason=reason,
             traceback=traceback,
+            dropped_nulls=dropped_nulls,
+            caller_chose_nulls=caller_chose_nulls,
         )
 
     @property
@@ -676,6 +686,7 @@ def perturbation_oracle(
             detail="building the perturbed input raised",
             traceback=_traceback.format_exc(),
             reducer=reducer,
+            caller_chose_nulls=perturb is not None,
         )
     if resolved is None:
         return OracleResult.not_tested(
@@ -716,11 +727,18 @@ def perturbation_oracle(
                 raise _NullFailure(crashed, label, _traceback.format_exc())
             try:
                 value = m(finding)
+                # Inside the same guard as the reduction. A reducer that hands
+                # back None, a string, a complex, or an int too large for a
+                # float is a value that could not be reduced to a comparable
+                # scalar, which is what UNREDUCIBLE_VALUE means; checked outside,
+                # math.isfinite raises those out of the call and breaks the
+                # promise that nothing about the target aborts the measurement.
+                finite = math.isfinite(value)
             except Exception:  # noqa: BLE001 — the reducer could not reduce it
                 raise _NullFailure(
                     NotTestedReason.UNREDUCIBLE_VALUE, label, _traceback.format_exc()
                 )
-            if not math.isfinite(value):
+            if not finite:
                 raise _NullFailure(
                     NotTestedReason.NON_FINITE_VALUE, label,
                     f"the run reduced to {value!r}, which has no comparable "
@@ -746,6 +764,8 @@ def perturbation_oracle(
             detail=where,
             traceback=failure.tb,
             reducer=reducer,
+            dropped_nulls=tuple(dropped_nulls),
+            caller_chose_nulls=caller_chose,
         )
 
     try:
@@ -779,6 +799,8 @@ def perturbation_oracle(
                     f"which has no comparable magnitude"
                 ),
                 reducer=reducer,
+                dropped_nulls=tuple(dropped_nulls),
+                caller_chose_nulls=caller_chose,
             )
     effect_size = max(perturbation_effects)
 
@@ -950,7 +972,7 @@ def perturbation_oracle(
         scramble_names=tuple(null_names),
         reducer=reducer,
         multiplicity=multiplicity,
-        multiplicity_applied=not zero_noise and family > 1,
+        multiplicity_applied=band_driven and not zero_noise and family > 1,
         noise_is_thin=noise_is_thin,
         noise_measured=noise_measured,
         deterministic=zero_noise and noise_measured,

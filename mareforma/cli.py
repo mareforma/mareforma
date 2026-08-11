@@ -1467,19 +1467,29 @@ def diagnose_cmd(cites: tuple[str, ...], as_json: bool, redact_home: bool,
 _RUNNABLE_PYTHON_SUFFIXES = (".py", ".pyw", ".pyz", ".pyc", ".zip")
 
 
-def _looks_like_a_version_marker(suffix: str) -> bool:
-    """Whether *suffix* is a version tag rather than a file type.
+def _strip_version_markers(name: str) -> str:
+    """Drop trailing version tags from *name* so the real suffix is visible.
 
-    ``.2`` (from ``model.v1.2``) and ``.v2`` (from ``pipeline.v2``) are what
-    ``Path.suffix`` returns for a versioned script name. Neither names a format,
-    so neither is evidence that the target is not Python.
+    ``Path("pipeline.v2").suffix`` is ``".v2"`` and ``Path("model.v1.2").suffix``
+    is ``".2"``. Neither names a format, so neither is evidence about what the
+    target is; what IS evidence is whatever suffix sits under them.
+
+    Stripping and re-checking, rather than exempting a version-looking suffix
+    outright, is the difference between accepting ``pipeline.v2`` and accepting
+    ``runspec.json.1``. Rotated logs, split archives and numbered dumps
+    (``dump.sql.1``, ``backup.tar.gz.001``, ``part.00001``) are exactly the data
+    files this guard exists to refuse, and every one of them ends in digits.
     """
-    if not suffix:
-        return False
-    body = suffix[1:].lower()
-    if body.startswith("v"):
-        body = body[1:]
-    return body.isdigit()
+    while True:
+        suffix = Path(name).suffix
+        if not suffix:
+            return name
+        body = suffix[1:].lower()
+        if body.startswith("v"):
+            body = body[1:]
+        if not body or not body.isdigit():
+            return name
+        name = name[: -len(suffix)]
 
 
 def _reject_non_python_target(command: tuple[str, ...], verb: str) -> None:
@@ -1507,13 +1517,10 @@ def _reject_non_python_target(command: tuple[str, ...], verb: str) -> None:
         argv = argv[1:]
     if not argv or argv[0].startswith("-"):
         return
-    suffix = Path(argv[0]).suffix
-    if _looks_like_a_version_marker(suffix):
-        # `pipeline.v2` and `model.v1.2` are ordinary Python scripts carrying a
-        # version in the name, and Path.suffix reports ".v2" / ".2" for them.
-        # Refusing those is a false refusal: the rule exists to catch a data file
-        # handed to the wrong flag, and a version marker names no file type.
-        return
+    # Version tags come off first, so `pipeline.v2` is judged on `pipeline` (no
+    # suffix, runnable) while `runspec.json.1` is judged on `runspec.json` and
+    # stays refused.
+    suffix = Path(_strip_version_markers(argv[0])).suffix
     if suffix and suffix.lower() not in _RUNNABLE_PYTHON_SUFFIXES:
         raise click.UsageError(
             f"{verb} target {argv[0]!r} is not a Python program: {verb} runs the "
@@ -2044,8 +2051,6 @@ def claim_list(status, source_name, limit, as_json):
             # rather than printing a short list that reads as the whole record.
             # It passed no limit at all, which on a large project meant loading
             # and formatting every claim to print a screenful.
-            # One more than asked for, so the listing can say it was capped
-            # rather than printing a short list that reads as the whole record.
             claims = list_claims(
                 conn, status=status, source_name=source_name,
                 limit=None if limit is None else limit + 1,
@@ -2065,7 +2070,13 @@ def claim_list(status, source_name, limit, as_json):
         # and, when it applies, on stderr so a JSON consumer is not told a
         # capped page is the whole record without any signal at all.
         if capped:
-            _err(f"Listing capped at --limit {limit}; more claims exist.")
+            # Not _err: that prefixes "Error:" and this run succeeded and exits
+            # 0, so a job treating stderr Error: lines as failures would fail on
+            # a documented use of --limit.
+            click.echo(
+                f"Listing capped at --limit {limit}; more claims exist.",
+                err=True,
+            )
         click.echo(json.dumps(claims, indent=2))
         return
 
@@ -2075,9 +2086,11 @@ def claim_list(status, source_name, limit, as_json):
 
     # "total" would be a false word on a capped listing: a short page that does
     # not say it was capped reads as the whole record.
-    heading = f"CLAIMS  ({len(claims)} shown"
-    heading += ", more available past --limit" if capped else " total"
-    click.echo(click.style(heading + ")", bold=True, fg="cyan"))
+    heading = (
+        f"CLAIMS  ({len(claims)} shown, more available past --limit)"
+        if capped else f"CLAIMS  ({len(claims)} total)"
+    )
+    click.echo(click.style(heading, bold=True, fg="cyan"))
     click.echo("")
     for c in claims:
         # A high-trust row whose signature no longer re-verifies still prints,

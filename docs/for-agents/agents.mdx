@@ -113,7 +113,9 @@ row, not by checking a bundle you read out of `get_claim`.
 
 `query_claims` and `search_claims` serve at most 200 rows, 20 by default. Every
 page carries `count`, the `limit` actually served, and `has_more`, so a short
-page is never mistaken for the whole record. A `limit` that was not honoured
+page is never mistaken for the whole record. A page that held rows back carries `unverified_excluded` and
+`verify_excluded` with the counts, so an empty list is never read as an
+empty record. A `limit` that was not honoured
 comes back as `limit_requested` rather than being silently swapped.
 
 The project root is fixed once at startup (from `--project-root`, then

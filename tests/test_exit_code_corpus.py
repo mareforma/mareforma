@@ -520,3 +520,39 @@ class TestNonPythonTargetDocstringMatchesCoverage:
             res = r.invoke(cli, ["diagnose", "--cites", "data.csv",
                                  "--", "app"])
             assert res.exit_code == 0, res.output
+
+
+class TestVersionMarkerDoesNotReopenTheGuard:
+    """The version-marker exemption must not readmit the data files it excludes.
+
+    Exempting any digit-looking suffix outright accepted `runspec.json.1`,
+    `dump.sql.001` and `app.log.1`: rotated logs and split archives all end in
+    digits, and every one of them is the data file this guard exists to refuse.
+    Stripping the version tag and judging what is UNDER it is the difference.
+    """
+
+    def _diagnose(self, r, name, body="print('ran')\n"):
+        Path("data.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+        Path(name).write_text(body, encoding="utf-8")
+        return r.invoke(cli, ["diagnose", "--cites", "data.csv", "--", name])
+
+    @pytest.mark.parametrize("name", [
+        "runspec.json.1", "dump.sql.001", "app.log.1", "data.csv.1",
+        "backup.tar.gz.001", "results.json.v2",
+    ])
+    def test_a_versioned_data_file_is_still_refused(self, tmp_path, name):
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            res = self._diagnose(r, name, body='{"steps": 3}')
+            assert res.exit_code == 3, res.output
+            assert "not a Python program" in res.output
+            # And no verdict is invented for a target that never ran.
+            assert "UNGROUNDED" not in res.output
+
+    @pytest.mark.parametrize("name", ["pipeline.v2", "model.v1.2"])
+    def test_a_versioned_python_script_still_runs(self, tmp_path, name):
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            res = self._diagnose(r, name, body="open('data.csv').read()\n")
+            assert res.exit_code == 0, res.output
+            assert "GROUNDED" in res.output

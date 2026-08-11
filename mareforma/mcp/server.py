@@ -359,21 +359,28 @@ class ReadVerifyTools:
         report every exclusion since startup on every call. Snapshotting the
         counters around the one read turns the running totals into a per-call
         answer, without threading a callback through the query signature.
+
+        Held under the graph's re-entrant lock for the whole window. The counters
+        are process-wide, so an unguarded snapshot spans any read another thread
+        makes in between and absorbs ITS exclusions: a page that held nothing
+        back then tells the agent rows were withheld. Tool calls are dispatched
+        on threads, which is why ``verify_claim`` already takes the same lock.
         """
-        before = (
-            self._graph.read_unverified_exclusions,
-            self._graph.read_verify_exclusions,
-        )
-        out: dict = {}
-        try:
-            yield out
-        finally:
-            out["unverified_excluded"] = (
-                self._graph.read_unverified_exclusions - before[0]
+        with self._graph._lock:
+            before = (
+                self._graph.read_unverified_exclusions,
+                self._graph.read_verify_exclusions,
             )
-            out["verify_excluded"] = (
-                self._graph.read_verify_exclusions - before[1]
-            )
+            out: dict = {}
+            try:
+                yield out
+            finally:
+                out["unverified_excluded"] = (
+                    self._graph.read_unverified_exclusions - before[0]
+                )
+                out["verify_excluded"] = (
+                    self._graph.read_verify_exclusions - before[1]
+                )
 
     def query_claims(
         self,
@@ -436,9 +443,10 @@ class ReadVerifyTools:
         agent asked, and the answer is no. This tool applies no verification
         filter, so it returns a claim the enumerating tools hold back.
 
-        ``generator_keyid_in_validators`` on the row is a membership test, not
-        the enrollment-chain walk. It is not a verdict on the claim: use
-        ``verify_claim``, which walks the chain and refuses a forged enrolment.
+        This row carries no ``generator_keyid_in_validators``: that projection
+        rides on the enumerating tools only. Nothing here is a verdict on the
+        claim; use ``verify_claim``, which walks the enrollment chain and refuses
+        a forged enrolment.
 
         Claim text arrives wrapped in ``<untrusted_data>`` markers, so the
         signature fields in this view are cleaned text rather than the signed

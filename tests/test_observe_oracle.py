@@ -938,3 +938,47 @@ def test_influence_sweep_takes_a_per_finding_metric_from_the_tuple():
     assert results[0].reducer is doubled
     assert results[1].reducer.name == "scalar"
     assert all(r.multiplicity == 2 for r in results)
+
+
+def test_a_reducer_that_returns_a_non_number_does_not_abort_the_measurement():
+    # math.isfinite raises on None, a str, a complex, and an int too large for a
+    # float. Checked outside the reducer's own guard, those escaped
+    # perturbation_oracle and broke the promise that nothing about the target
+    # aborts the measurement into an exception. They are values the reducer could
+    # not reduce to a comparable scalar, which is what UNREDUCIBLE_VALUE names.
+    for value in (None, "not a number", 3j, 10 ** 400):
+        res = perturbation_oracle(
+            lambda x, v=value: v, [1.0, 2.0, 3.0, 4.0],
+            metric=obs.declared_reducer("identity", lambda f: f),
+        )
+        assert res.influence is OracleInfluence.NOT_TESTED, value
+        assert res.not_tested_reason is NotTestedReason.UNREDUCIBLE_VALUE, value
+
+
+def test_a_not_tested_row_still_says_who_chose_the_nulls_and_what_was_dropped():
+    # Both describe the FAMILY, not the measurement, and are known as soon as it
+    # resolves. Left at their defaults, a row said the caller did not choose the
+    # nulls when the caller did, on the field added to stop exactly that reading.
+    crashed = perturbation_oracle(
+        _dies_on_zeroed, [1.0, 2.0], perturb=[[0.0, 0.0]], repeats=1,
+    )
+    assert crashed.influence is OracleInfluence.NOT_TESTED
+    assert crashed.caller_chose_nulls is True
+
+    unreducible = perturbation_oracle(lambda x: object(), [5.0, 5.0, 5.0])
+    assert unreducible.influence is OracleInfluence.NOT_TESTED
+    assert unreducible.caller_chose_nulls is False
+    assert unreducible.dropped_nulls == ("permuted", "reversed")
+
+
+def test_multiplicity_is_not_recorded_as_applied_when_a_domain_floor_binds():
+    # The widening reaches the threshold only when the noise margin sets it. With
+    # a domain effect_threshold above the margin the threshold is the floor, so
+    # the correction touched nothing and the field must not say it did.
+    noisy = iter([1.0, 1.4, 0.7, 1.2, 0.9] * 40)
+    res = perturbation_oracle(
+        lambda x: next(noisy), [1.0, 2.0, 3.0], repeats=5,
+        multiplicity=10, effect_threshold=1e6,
+    )
+    assert res.multiplicity == 10
+    assert res.multiplicity_applied is False

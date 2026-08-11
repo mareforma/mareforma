@@ -5753,9 +5753,32 @@ def _count_unverified_held_back(
     Called only when the read came back short, which is the only case where the
     answer could be mistaken for the whole record.
     """
-    negated = f"NOT {_enrolled_generator_condition(prefix)}"
-    clause = f"{where} AND {negated}" if where else f"WHERE {negated}"
-    sql = f"SELECT COUNT(*) FROM (SELECT 1 FROM {from_sql} {clause} LIMIT ?)"
+    # COALESCE, not a bare NOT. The condition is NULL for a row with no
+    # signature bundle at all (json_valid(NULL) is NULL, and NULL IN (...) is
+    # NULL), and NOT NULL is NULL, so a bare negation counts none of them. The
+    # read excludes those rows, since WHERE NULL is not true, which means the
+    # unsigned traffic the condition's own docstring calls "the dominant drain"
+    # is exactly the class a bare negation would report as zero. Reading NULL as
+    # "not enrolled" makes the count the exact complement of what the read served.
+    # Bound the SCAN, not the matches. A LIMIT on the negated predicate does not
+    # stop sqlite reading the whole table when nothing matches it, which is the
+    # healthy case, so the disclosure would be O(table) on every short read while
+    # the read it describes is index-bounded. Take the first `ceiling` rows the
+    # base conditions match, then count the held-back ones among those: the work
+    # is bounded by the same ceiling the read uses, and the number is "at least
+    # this many", which is how the caller already reads it.
+    #
+    # The inner select aliases the two columns back to their bare names so the
+    # one enrolled-generator rule can be reused verbatim rather than restated.
+    inner = (
+        f"SELECT {prefix}signature_bundle AS signature_bundle, "
+        f"{prefix}support_level AS support_level "
+        f"FROM {from_sql} {where} LIMIT ?"
+    )
+    sql = (
+        f"SELECT COUNT(*) FROM ({inner}) "
+        f"WHERE NOT COALESCE({_enrolled_generator_condition()}, 0)"
+    )
     try:
         row = conn.execute(sql, list(params) + [ceiling]).fetchone()
     except sqlite3.OperationalError:

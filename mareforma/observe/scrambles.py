@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import numbers
 import random
+from decimal import Decimal
 from dataclasses import dataclass
 from typing import Any
 
@@ -182,7 +183,10 @@ def _mapping_family(mapping: "dict") -> "ScrambleFamily | None":
     values: list[float] = []
     for k in keys:
         v = mapping[k]
-        if isinstance(v, bool) or not isinstance(v, numbers.Real):
+        # Real, or a Decimal: decimal.Decimal is a Number but not a Real, and it
+        # is an ordinary way to carry a measured quantity. A bool carries one bit
+        # and a numeric string is not a number; both stay refused.
+        if isinstance(v, bool) or not isinstance(v, (numbers.Real, Decimal)):
             return None
         values.append(float(v))
     shuffled = list(values)
@@ -330,7 +334,11 @@ def _rebuilder(base_input: Any):
         return lambda vs: type(base_input)(*vs)
     if hasattr(base_input, "__array__"):
         index = getattr(base_input, "index", None)
-        if index is not None:
+        # A LABEL index, not any attribute called index. The Sequence protocol
+        # mandates an index() METHOD, so testing the name alone rebuilt an
+        # ordinary array-like as type(x)(values, index=<bound method>), which
+        # raises and reads as the null failing to build.
+        if index is not None and not callable(index) and hasattr(index, "__len__"):
             # A labelled series: the labels are part of what the pipeline reads,
             # so a null must keep them rather than hand back a bare array.
             def rebuild_labelled(vs):

@@ -175,10 +175,21 @@ def compute_health(conn: sqlite3.Connection) -> HealthReport:
         from mareforma.db import project_policy_unverified
 
         report.policy_unverified = project_policy_unverified(conn)
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc):
+            # OperationalError also covers a locked database, a disk I/O error
+            # and a missing column, none of which mean "there is no policy".
+            # Narrowing on the class alone left those reporting no stall, which
+            # is the direction this whole branch exists to stop.
+            report.policy_unverified = False
+            report.traffic_light = "error"
+            report.rationale = (
+                f"the project policy could not be read ({type(exc).__name__}: "
+                f"{exc}), so whether a policy is stalled is unknown, not answered"
+            )
+            return report
         # The narrow case this tolerance was written for: an older schema with
-        # no project_policy table, where "no such table" means there is no
-        # policy to stall. Not substantive, so the flag stays False.
+        # no project_policy table, where there is no policy to stall.
         report.policy_unverified = False
     except (sqlite3.DatabaseError, DatabaseError) as exc:
         # Everything else. DatabaseError is the base class of nearly every

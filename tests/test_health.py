@@ -471,3 +471,39 @@ def cli_source_root():
     import pathlib
 
     return pathlib.Path(mareforma.__file__).parent
+
+
+def test_an_operational_error_that_is_not_a_missing_table_is_not_swallowed(tmp_path):
+    """The narrowing has to be on the CASE, not on the exception class.
+
+    OperationalError covers a locked database, a disk I/O error and a missing
+    column as well as the older schema this tolerance was written for. Narrowing
+    on the class alone left all of those reporting "no policy stall", which is
+    the direction the branch exists to stop.
+    """
+    import sqlite3
+
+    import mareforma
+    import mareforma.db as db_mod
+    from mareforma import health as health_mod
+
+    def probe(exc):
+        with mareforma.open(tmp_path) as g:
+            original = db_mod.project_policy_unverified
+            db_mod.project_policy_unverified = lambda _c: (_ for _ in ()).throw(exc)
+            try:
+                return health_mod.compute_health(g._conn)
+            finally:
+                db_mod.project_policy_unverified = original
+
+    for exc in (sqlite3.OperationalError("disk I/O error"),
+                sqlite3.OperationalError("database is locked"),
+                sqlite3.DatabaseError("database disk image is malformed")):
+        report = probe(exc)
+        assert report.traffic_light == "error", exc
+        assert "could not be read" in report.rationale, exc
+
+    # The one case the tolerance is for stays tolerated.
+    tolerated = probe(sqlite3.OperationalError("no such table: project_policy"))
+    assert tolerated.traffic_light != "error"
+    assert tolerated.policy_unverified is False
