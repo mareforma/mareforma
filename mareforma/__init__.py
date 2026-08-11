@@ -732,17 +732,16 @@ def __getattr__(name: str) -> str:
     surface is not silently swallowed.
     """
     if name in _DEPRECATED_SUPPORT_LABELS:
-        import warnings as _warnings
+        from mareforma._deprecation import _emit
 
-        _warnings.warn(
+        _emit(
             f"The public support-level label `mareforma.{name}` is deprecated; "
             "the trust map now leads with the effective-independence number, "
             "not a support word. v0.4.0 removes the whole support ladder, not "
             "just this alias: the stored support_level column, the promotion "
             "machinery, and the query(min_support=...) filter go with it. Read "
             "the independence axis of the trust map instead.",
-            DeprecationWarning,
-            stacklevel=2,
+            3,  # +1 for _emit's own frame
         )
         return name
     raise AttributeError(f"module 'mareforma' has no attribute {name!r}")

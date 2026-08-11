@@ -128,12 +128,10 @@ def _warn_min_support(value) -> None:
     """
     if value is None:
         return
-    import warnings as _warnings
+    from mareforma._deprecation import _emit
 
-    _warnings.warn(
-        _MIN_SUPPORT_DEPRECATION, DeprecationWarning,
-        stacklevel=_caller_stacklevel(),
-    )
+    # +1 for _emit's own frame; see its docstring.
+    _emit(_MIN_SUPPORT_DEPRECATION, _caller_stacklevel() + 1)
 
 
 def _model_lineage_of(grounding):
@@ -3638,15 +3636,15 @@ class EpistemicGraph:
                 :meth:`EpistemicGraph.assert_finding`. This alias forwards
                 to ``record_claim`` and is kept for one release.
                 """
-                import warnings
-                warnings.warn(
+                from mareforma._deprecation import _emit
+
+                _emit(
                     "The 'assert_finding' agent tool was renamed to "
                     "'record_claim' (the old name shadowed "
                     "EpistemicGraph.assert_finding). Update your tool "
                     "wiring; this deprecated alias will be removed in a "
                     "future release.",
-                    DeprecationWarning,
-                    stacklevel=2,
+                    3,  # +1 for _emit's own frame
                 )
                 return record_claim(
                     text,

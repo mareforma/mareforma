@@ -250,15 +250,15 @@ def register(uri: str, owner: str | None = None) -> None:
                         f"Cannot re-register built-in URI {uri!r} with "
                         f"owner={owner!r} (the core owns this URI)"
                     )
-                import warnings as _warnings
-                _warnings.warn(
+                from mareforma._deprecation import _emit
+
+                _emit(
                     f"URI {uri!r} is now core-reserved; the next "
                     f"release will refuse re-registration by owner "
                     f"{owner!r}. Pre-empt by dropping the register() "
                     "call from your adapter and treating the URI as "
                     "core-owned.",
-                    DeprecationWarning,
-                    stacklevel=3,
+                    4,  # +1 for _emit's own frame
                 )
             return
         if uri in _registry:

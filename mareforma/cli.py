@@ -623,13 +623,12 @@ def stats_cmd(ctx: click.Context, as_json: bool, last_n: int | None) -> None:
     renames the rolling-rates command to ``mareforma activity``. The
     old name is kept as an alias for one release; v0.4 removes it.
     """
-    import warnings as _warnings
-    _warnings.warn(
+    from mareforma._deprecation import _emit
+    _emit(
         "`mareforma stats` has been renamed to `mareforma activity` "
         "to break the stats/status homonym; the alias will be removed "
         "in v0.4. Switch your scripts to `mareforma activity`.",
-        DeprecationWarning,
-        stacklevel=2,
+        3,  # +1 for _emit's own frame
     )
     ctx.invoke(activity_cmd, as_json=as_json, last_n=last_n)
 
