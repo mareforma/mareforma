@@ -1627,7 +1627,9 @@ def measure_cmd(receipts_path: str, as_json: bool, redact_home: bool) -> None:
     from mareforma.observe import (
         GroundingAxisMismatchError,
         independence_records,
+        influence_records,
         summarize_independence,
+        summarize_influence,
         summarize_receipts,
     )
     from mareforma.observe.measure import PilotReport
@@ -1648,10 +1650,15 @@ def measure_cmd(receipts_path: str, as_json: bool, redact_home: bool) -> None:
     indep = summarize_independence(independence_records(receipts))
     indep_report = indep.to_dict() if indep.total else None
     indep_closing = indep.closing_sentence() if indep.total else None
+    influence = summarize_influence(influence_records(receipts))
+    influence_report = influence.to_dict() if influence.total else None
+    influence_closing = influence.closing_sentence() if influence.total else None
     # The always-on honesty bound: grounded prevalence is a lower bound to within
     # the OPAQUE coverage gap, whatever the OPAQUE fraction, never printed only
     # when OPAQUE dominates.
-    coverage_bound = PilotReport(grounding=grounding, independence=indep).coverage_bound()
+    coverage_bound = PilotReport(
+        grounding=grounding, independence=indep, influence=influence
+    ).coverage_bound()
     if redact_home:
         report = _redact_home(report)
         closing = _redact_home(closing)
@@ -1659,6 +1666,8 @@ def measure_cmd(receipts_path: str, as_json: bool, redact_home: bool) -> None:
         payload = {**report, "summary": closing, "coverage_bound": coverage_bound}
         if indep_report is not None:
             payload["independence"] = {**indep_report, "summary": indep_closing}
+        if influence_report is not None:
+            payload["influence"] = {**influence_report, "summary": influence_closing}
         click.echo(json.dumps(payload, indent=2, sort_keys=True))
         return
     _ok(f"Grounding report over {report['total']} findings")
@@ -1689,6 +1698,27 @@ def measure_cmd(receipts_path: str, as_json: bool, redact_home: bool) -> None:
             f"same-model-collapse rate: {indep_report['same_model_collapse_rate']:.0%}"
         )
         click.echo(indep_closing)
+    if influence_report is not None:
+        _ok(f"Influence report over {influence_report['total']} edges")
+        counts = influence_report["counts"]
+        _info(
+            "influence: "
+            + ", ".join(f"{state}={counts[state]}" for state in (
+                "INFLUENCED", "NOT_INFLUENCED", "UNDECIDABLE", "NOT_TESTED"
+            ))
+        )
+        if influence_report["not_tested_by_reason"]:
+            _info("NOT_TESTED by reason: " + ", ".join(
+                f"{k}={v}"
+                for k, v in sorted(influence_report["not_tested_by_reason"].items())
+            ))
+        if influence_report["resolved"]:
+            _info(
+                f"influenced fraction (of {influence_report['resolved']} resolved, "
+                f"over {influence_report['distinct_runs']} runs): "
+                f"{influence_report['influenced_fraction']:.0%}"
+            )
+        click.echo(influence_closing)
 
 
 def _load_receipts(path: Path) -> list:

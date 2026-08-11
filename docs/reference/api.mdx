@@ -1374,6 +1374,20 @@ Aggregates an iterable of `GroundingVerdict` into the split a report states:
 corpus should pass `multiplicity=len(findings)` to every `perturbation_oracle`
 call it aggregates, or the rate counts findings that cleared the bar on noise.
 
+### `summarize_influence(records) -> InfluenceReport` and `influence_records(receipts)`
+
+The influence arm of the measurement. `influence_records(receipts)` flattens the
+`influence` list each receipt carries (one record per cited source) into a flat
+list of per-edge records; `summarize_influence(records)` aggregates them.
+`InfluenceReport` reports the count of each verdict (`INFLUENCED`,
+`NOT_INFLUENCED`, `UNDECIDABLE`, `NOT_TESTED`), the `not_tested_by_reason` bucket,
+`not_tested_dominates(threshold=0.5)`, and `influenced_fraction` over the
+`resolved` edges only (NOT_TESTED is excluded from the denominator). The unit is
+the edge, so a finding citing several sources contributes several edges; the
+inference unit is the run, so `distinct_runs` rides alongside the rate. A receipts
+file with no `influence` record yields an empty arm rather than a fabricated one.
+`summarize_pilot` returns all three arms on a `PilotReport`.
+
 ### `grounding=` on `assert_finding` and `submit_finding`
 
 Both gain an optional `grounding` parameter that takes a `GroundingVerdict`. The

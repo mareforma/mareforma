@@ -156,6 +156,37 @@ def _finding_verdict(scope, cited: tuple[str, ...]):
         )
 
 
+def _influence_records(cited: tuple[str, ...]) -> list[dict]:
+    """The influence arm's per-source records for one finding's receipt.
+
+    The audit observes FLOW with a single run of the target: it never perturbs the
+    cited data and re-runs, which is what the causal oracle needs to measure
+    INFLUENCE. So on this path every cited source is NOT_TESTED for influence, one
+    record per source, keyed by source so ``mareforma measure`` can flatten the
+    arm across findings. This is the honest state the release exists to record:
+    the reader now sees that flow was observed and influence was not, rather than
+    a grounding verdict standing in for an influence claim nobody measured. A
+    target that re-runs cheaply is measured through the oracle's own library API,
+    not through this single-run path.
+
+    The typed reason is left absent: the four NotTestedReason values name ways the
+    oracle itself could not decide once it ran, and here the oracle did not run at
+    all, a different thing. The English reason carries the explanation.
+    """
+    return [
+        {
+            "cited_source": source,
+            "influence": "NOT_TESTED",
+            "not_tested_reason": None,
+            "reason": (
+                "the audit observes flow with a single run and does not perturb "
+                "the cited data, so influence was not tested on this path"
+            ),
+        }
+        for source in cited
+    ]
+
+
 def _safe_name(finding_id: str) -> str:
     """A filesystem-safe fragment of a finding id for the envelope filename.
 
@@ -320,6 +351,7 @@ def run_audit(
             "target": list(command),
             "exit_code": exit_code,
             "partial": crashed,
+            "influence": _influence_records(cited),
         })
 
     out.mkdir(parents=True, exist_ok=True)

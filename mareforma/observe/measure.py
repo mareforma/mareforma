@@ -381,6 +381,178 @@ def summarize_independence_receipts(receipts: Iterable[dict]) -> IndependenceRep
     return summarize_independence(independence_records(receipts))
 
 
+# The four influence verdicts a record can carry, matching
+# :class:`mareforma.observe.oracle.OracleInfluence`. A record whose verdict is
+# none of these is counted as NOT_TESTED with reason ``unknown``, the same
+# degrade-don't-raise discipline the independence arm uses for a malformed field.
+_INFLUENCE_VERDICTS = ("INFLUENCED", "NOT_INFLUENCED", "UNDECIDABLE", "NOT_TESTED")
+
+
+@dataclass(frozen=True)
+class InfluenceReport:
+    """The influence arm of the measurement, over per-EDGE influence records.
+
+    Where :class:`GroundingReport` answers "did the cited data flow" and
+    :class:`IndependenceReport` answers "how independent is the corroboration,"
+    this answers "does the finding depend on the data it cites." Its unit is the
+    EDGE, a (finding, cited source) pair, because one finding can cite several
+    sources and each is influenced or not on its own; a run's receipts flatten
+    1:N into edges (see :func:`influence_records`). The reporting unit is the edge,
+    but the inference unit is the run: a rate never prints without the number of
+    distinct runs behind it, so a reader cannot mistake many edges from one run
+    for many independent measurements.
+
+    NOT_TESTED is first-class, not a gap. The causal oracle declines on many
+    targets (it needs one that re-runs cheaply and near-deterministically), and
+    the ``mareforma audit`` path observes flow with a single run and never
+    perturbs, so on real audit output every edge is NOT_TESTED. That is the honest
+    state the release records rather than letting a grounding verdict stand in for
+    an influence claim nobody measured. NOT_TESTED is excluded from the rate
+    denominator (a rate is over edges the oracle actually decided) but counted and
+    bucketed by reason, and its dominance is a coverage signal like OPAQUE's.
+    """
+
+    total: int
+    influenced: int
+    not_influenced: int
+    undecidable: int
+    not_tested: int
+    not_tested_by_reason: dict[str, int] = field(default_factory=dict)
+    distinct_runs: int = 0
+
+    @property
+    def resolved(self) -> int:
+        """Edges the oracle actually decided: the rate denominator (NOT_TESTED out)."""
+        return self.total - self.not_tested
+
+    def not_tested_dominates(self, threshold: float = 0.5) -> bool:
+        """True when NOT_TESTED covers at least ``threshold`` of the edges.
+
+        The influence analog of :meth:`GroundingReport.opaque_dominates`: when most
+        edges were never tested, an influence rate over the few that were is not a
+        trustworthy prevalence number and the report says so.
+        """
+        return self.total > 0 and self.not_tested / self.total >= threshold
+
+    @property
+    def influenced_fraction(self) -> float:
+        """INFLUENCED over RESOLVED edges, never over the NOT_TESTED-inflated total."""
+        return 0.0 if self.resolved == 0 else self.influenced / self.resolved
+
+    def to_dict(self) -> dict:
+        return {
+            "total": self.total,
+            "resolved": self.resolved,
+            "counts": {
+                "INFLUENCED": self.influenced,
+                "NOT_INFLUENCED": self.not_influenced,
+                "UNDECIDABLE": self.undecidable,
+                "NOT_TESTED": self.not_tested,
+            },
+            "not_tested_by_reason": dict(self.not_tested_by_reason),
+            "not_tested_dominates": self.not_tested_dominates(),
+            "distinct_runs": self.distinct_runs,
+            "influenced_fraction": self.influenced_fraction,
+        }
+
+    def closing_sentence(self) -> str:
+        """A plain-English one-line summary a reviewer can read without the JSON."""
+        if self.total == 0:
+            return "No influence records to measure."
+        if self.resolved == 0:
+            # Every edge NOT_TESTED: say exactly that, never what a resolved
+            # report says. A report with no scrambles declared reads differently.
+            reasons = ", ".join(
+                f"{r}={n}" for r, n in sorted(self.not_tested_by_reason.items())
+            )
+            tail = f" ({reasons})" if reasons else ""
+            return (
+                f"Influence not tested on any of {self.total} edges{tail}: the "
+                f"oracle did not run, so no influence prevalence is claimed."
+            )
+        lead = (
+            f"Across {self.resolved} of {self.total} edges the oracle decided "
+            f"(over {self.distinct_runs} distinct runs): {self.influenced_fraction:.0%} "
+            f"INFLUENCED."
+        )
+        if self.not_tested:
+            lead += f" {self.not_tested} edges NOT_TESTED, excluded from the rate."
+        return lead
+
+
+def influence_records(receipts: Iterable[dict]) -> list[dict]:
+    """The per-EDGE influence records carried by a run's receipts, flattened 1:N.
+
+    A combined receipt carries a list under ``"influence"``, one record per cited
+    source, since one finding can cite several. This flattens those lists into a
+    flat list of edge records, so a finding that cites three sources contributes
+    three edges to the arm. A receipts file with no influence records yields an
+    empty list (the arm is simply not reported, never fabricated). This is the
+    1:N difference from :func:`independence_records`, which is 1:1 per finding.
+    """
+    out: list[dict] = []
+    for r in receipts:
+        recs = r.get("influence")
+        if isinstance(recs, list):
+            for rec in recs:
+                if isinstance(rec, dict):
+                    out.append(rec)
+    return out
+
+
+def summarize_influence(records: Iterable[dict]) -> InfluenceReport:
+    """Aggregate per-edge influence records into the influence report.
+
+    Each record carries an ``"influence"`` verdict and, when NOT_TESTED, an
+    optional typed ``"not_tested_reason"``. A record with an unrecognized verdict
+    degrades to NOT_TESTED(unknown) rather than raising, so one malformed record
+    never denies the whole arm. ``distinct_runs`` is summed from any record that
+    carries a run count, so a rate always has the run number beside it.
+    """
+    total = influenced = not_influenced = undecidable = not_tested = 0
+    by_reason: dict[str, int] = {}
+    distinct_runs = 0
+    for rec in records:
+        total += 1
+        verdict = rec.get("influence")
+        if verdict == "INFLUENCED":
+            influenced += 1
+        elif verdict == "NOT_INFLUENCED":
+            not_influenced += 1
+        elif verdict == "UNDECIDABLE":
+            undecidable += 1
+        else:
+            not_tested += 1
+            reason = rec.get("not_tested_reason")
+            if not reason:
+                # NOT_TESTED with no typed reason is the audit path (the oracle
+                # did not run at all); an unrecognized verdict is malformed.
+                reason = "not-run" if verdict == "NOT_TESTED" else "unknown"
+            by_reason[reason] = by_reason.get(reason, 0) + 1
+        runs = rec.get("distinct_runs")
+        if isinstance(runs, int) and runs > 0:
+            distinct_runs += runs
+    return InfluenceReport(
+        total=total,
+        influenced=influenced,
+        not_influenced=not_influenced,
+        undecidable=undecidable,
+        not_tested=not_tested,
+        not_tested_by_reason=dict(sorted(by_reason.items())),
+        distinct_runs=distinct_runs,
+    )
+
+
+def summarize_influence_receipts(receipts: Iterable[dict]) -> InfluenceReport:
+    """Aggregate the influence records carried by a run's receipts."""
+    return summarize_influence(influence_records(receipts))
+
+
+def _empty_influence() -> InfluenceReport:
+    """The default influence arm: no edges, for a report built without one."""
+    return InfluenceReport(0, 0, 0, 0, 0)
+
+
 @dataclass(frozen=True)
 class PilotReport:
     """A slim natural-prevalence pilot: both arms plus the honest coverage bound.
@@ -396,6 +568,11 @@ class PilotReport:
 
     grounding: GroundingReport
     independence: IndependenceReport
+    # The influence arm is defaulted so the two existing construction sites, which
+    # pass grounding and independence by keyword, keep working unchanged. A report
+    # built without influence records carries the empty arm and prints nothing for
+    # it, exactly as it did before the arm existed.
+    influence: InfluenceReport = field(default_factory=_empty_influence)
 
     def opaque_dominates(self, threshold: float = 0.5) -> bool:
         return self.grounding.opaque_dominates(threshold)
@@ -423,6 +600,9 @@ class PilotReport:
             "independence": (
                 self.independence.to_dict() if self.independence.total else None
             ),
+            "influence": (
+                self.influence.to_dict() if self.influence.total else None
+            ),
             "opaque_fraction": self.grounding.opaque_fraction,
             "opaque_dominates": self.opaque_dominates(),
             "coverage_bound": self.coverage_bound(),
@@ -432,19 +612,23 @@ class PilotReport:
         lead = self.grounding.closing_sentence()
         if self.independence.total:
             lead += " " + self.independence.closing_sentence()
+        if self.influence.total:
+            lead += " " + self.influence.closing_sentence()
         return lead + " " + self.coverage_bound()
 
 
 def summarize_pilot(receipts: Iterable[dict]) -> PilotReport:
     """Run the slim natural-prevalence pilot over a receipts file.
 
-    Reads the receipts once into a list (they are iterated twice: once for the
-    grounding split, once for the independence arm) and returns both reports plus
-    the OPAQUE-coverage bound. The independence arm is present only when a receipt
-    carries an ``independence`` record, so a grounding-only pilot still reports.
+    Reads the receipts once into a list (they are iterated three times: for the
+    grounding split, the independence arm, and the influence arm) and returns the
+    three reports plus the OPAQUE-coverage bound. The independence and influence
+    arms are present only when a receipt carries the matching record, so a
+    grounding-only pilot still reports.
     """
     receipts = list(receipts)
     return PilotReport(
         grounding=summarize_receipts(receipts),
         independence=summarize_independence(independence_records(receipts)),
+        influence=summarize_influence(influence_records(receipts)),
     )

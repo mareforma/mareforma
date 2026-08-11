@@ -64,11 +64,15 @@ from .measure import (
     GroundingAxisMismatchError,
     GroundingReport,
     IndependenceReport,
+    InfluenceReport,
     PilotReport,
     independence_records,
+    influence_records,
     summarize,
     summarize_independence,
     summarize_independence_receipts,
+    summarize_influence,
+    summarize_influence_receipts,
     summarize_pilot,
     summarize_receipts,
 )
@@ -247,7 +251,12 @@ __all__ = [
     "summarize_independence",
     "summarize_independence_receipts",
     "independence_records",
-    # The slim natural-prevalence pilot (both arms + the OPAQUE-coverage bound).
+    # The influence arm of the measurement (does the finding depend on its data).
+    "InfluenceReport",
+    "summarize_influence",
+    "summarize_influence_receipts",
+    "influence_records",
+    # The slim natural-prevalence pilot (three arms + the OPAQUE-coverage bound).
     "PilotReport",
     "summarize_pilot",
 ]
