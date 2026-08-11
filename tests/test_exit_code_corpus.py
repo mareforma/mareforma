@@ -214,8 +214,6 @@ class TestAuditTargetContract:
             res = r.invoke(
                 cli, ["audit", "--findings", str(findings), "--", str(spec)],
             )
-            # click usage error: exit 2, before any target runs, so no receipt
-            # and no grounding verdict for a target that never executed.
             # 3, not 2: `diagnose` and `audit` exit with the TARGET's own
             # code, and 2 is one of the commonest codes a script exits with
             # (argparse uses it for its own usage errors), so a gate could

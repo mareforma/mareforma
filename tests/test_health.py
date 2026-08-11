@@ -422,24 +422,60 @@ def test_a_policy_read_that_fails_is_not_reported_as_no_policy_stall(tmp_path):
     assert report.policy_unverified is False  # unknown, and the light says so
 
 
-def test_claim_show_never_prints_a_support_level_without_its_verified_state():
+def test_claim_show_never_prints_a_support_level_without_its_verified_state(
+    tmp_path,
+):
     """`claim show` is the command an auditor runs on the claim they suspect.
 
     `claim list` marks a row whose signature no longer re-verifies UNVERIFIED;
     `claim show` printed `support_level: REPLICATED` and never mentioned it, so
     the more detailed view said less about the thing that matters.
+
+    Driven through the command, not through its source: a test that greps
+    `inspect.getsource()` for the word passes on a rename and passes on code
+    that keeps the word and stops printing it.
     """
-    import inspect
+    import json as _json
 
-    from mareforma import cli as cli_module
+    from click.testing import CliRunner
 
-    source = inspect.getsource(cli_module.claim_show.callback)
-    assert "verified" in source, (
-        "claim show does not consult the row's verified state"
+    from mareforma.cli import cli
+
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        import mareforma
+        from mareforma import signing
+
+        key = Path("auditor.key")
+        signing.bootstrap_key(key)
+        with mareforma.open(".", key_path=key) as graph:
+            claim_id = graph.assert_claim("a finding under suspicion",
+                                          generated_by="x")
+            # The tamper the read path is built to catch: the row keeps its
+            # level and loses the signature that backed it. The promotion guard
+            # refuses this write, which is the guard working; dropping it is the
+            # precondition, and what is under test is what `claim show` prints
+            # once such a row exists.
+            for trigger in ("claims_signed_promotion_backed",
+                            "claims_signed_fields_no_laundering",
+                            "claims_update_state_check"):
+                graph._conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            graph._conn.execute(
+                "UPDATE claims SET support_level = 'REPLICATED', "
+                "signature_bundle = NULL WHERE claim_id = ?", (claim_id,),
+            )
+            graph._conn.commit()
+        shown = runner.invoke(cli, ["claim", "show", claim_id])
+        listed = runner.invoke(cli, ["claim", "list"])
+
+    assert shown.exit_code == 0, shown.output
+    assert "REPLICATED" in shown.output
+    assert "UNVERIFIED" in shown.output, (
+        "claim show printed a support level with nothing beside it saying the "
+        "signature no longer backs it"
     )
-    # And the two surfaces agree on the word they use for it.
-    assert "UNVERIFIED" in source
-    assert "UNVERIFIED" in inspect.getsource(cli_module.claim_list.callback)
+    # And the two surfaces agree about the same row.
+    assert "UNVERIFIED" in listed.output
 
 
 def test_every_deprecation_warning_goes_through_the_one_emitter():

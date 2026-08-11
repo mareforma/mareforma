@@ -173,14 +173,22 @@ def test_the_read_ordering_is_served_by_an_index_not_a_temp_btree(tmp_path):
     with mareforma.open(tmp_path, key_path=root_key) as g:
         for i in range(20):
             g.assert_claim(f"claim number {i}", generated_by="x")
-        sql = (
-            "SELECT claim_id FROM claims WHERE t_invalid IS NULL "
-            "ORDER BY CASE support_level WHEN 'ESTABLISHED' THEN 3 "
-            "WHEN 'REPLICATED' THEN 2 ELSE 1 END DESC, created_at DESC LIMIT 20"
-        )
-        plan = [r[-1] for r in g._conn.execute("EXPLAIN QUERY PLAN " + sql)]
+        # The statement the READ issues, captured, not one copied into the
+        # test. A literal here cannot notice the production ORDER BY drifting
+        # away from the index, which is the whole thing this pins.
+        seen = []
+        g._conn.set_trace_callback(seen.append)
+        try:
+            g.query(limit=20)
+        finally:
+            g._conn.set_trace_callback(None)
+        ordered = [q for q in seen if "ORDER BY" in q and "FROM claims" in q]
+        assert ordered, f"no ordered read captured; saw {len(seen)} statements"
+        plan = [r[-1] for r in g._conn.execute("EXPLAIN QUERY PLAN " + ordered[0])]
 
-    assert any("idx_claims_read_order" in step for step in plan), plan
+    # Exact name, not a substring: a renamed or shadowed index still contains
+    # the old name, so `in` would keep passing after the index it pins is gone.
+    assert any("idx_claims_read_order" in step.split() for step in plan), plan
     assert not any("TEMP B-TREE" in step for step in plan), plan
 
 

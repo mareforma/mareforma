@@ -30,8 +30,6 @@ read UNDECIDABLE, and measured-zero must be recorded as its own state.
 """
 from __future__ import annotations
 
-import pytest
-
 from mareforma.observe.oracle import OracleInfluence, perturbation_oracle
 
 # A deterministic sequence finding, run at repeats>1 so the noise floor is

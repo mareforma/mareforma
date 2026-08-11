@@ -770,13 +770,10 @@ def test_the_restore_gate_reads_a_predicate_that_carries_no_citation(tmp_path):
     change. If a future release binds the citation into the signed predicate,
     this test fails and should be replaced by one asserting the gate fires.
     """
-    import json
-
     from mareforma import signing as _signing
     from mareforma.observe._binding import (
         BindingState, check_grounding_binding, predicate_citation_sources,
     )
-    from tests.epistemic._builders import _prop, _smd, _superiority, open_graph
 
     data = tmp_path / "trial.csv"
     data.write_text("a\n1\n", encoding="utf-8")

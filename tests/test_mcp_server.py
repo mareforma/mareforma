@@ -632,8 +632,7 @@ class TestEvidenceCeiling:
 
 def _unenrolled_project(tmp_path: Path) -> tuple[Path, str]:
     """A project whose claims were all written by a key nobody enrolled."""
-    from tests._helpers import _bootstrap_key
-    from tests.test_read_path_paging import _two_signers
+    from tests._helpers import _bootstrap_key, _two_signers
 
     signer, _ = _two_signers(tmp_path)
     root = _bootstrap_key(tmp_path, "root.key")
@@ -918,17 +917,57 @@ def test_the_evidence_ceiling_counts_what_the_derivation_walks(tmp_path):
 
     _claim, _content = _seed_project(tmp_path)
     with mareforma.open(tmp_path, load_key=False) as g:
-        by_content = _evidence_line_count(g._conn, content_id=_content)
-        by_claim = _evidence_line_count(g._conn, claim_id=_claim)
-        # Both counts are frame- and content-scoped now, so neither can be
-        # smaller than the rows the caller's own subject carries.
         own = g._conn.execute(
             "SELECT COUNT(*) FROM evidence_lines el JOIN findings f "
             "ON f.finding_id = el.finding_id WHERE f.content_id = ?",
             (_content,),
         ).fetchone()[0]
-    assert by_content >= own
-    assert by_claim >= own
+        frame_id = g._conn.execute(
+            "SELECT frame_id FROM propositions WHERE content_id = ?", (_content,),
+        ).fetchone()[0]
+        # A SIBLING in the same frame, carrying more evidence than the caller's
+        # own subject. Without one, the caller-scoped count and the frame-scoped
+        # count are equal and the assertion holds under the bug it exists for.
+        g._conn.execute(
+            "INSERT INTO propositions (content_id, frame_id, subject, relation, "
+            "object, direction, magnitude, scope_json, content_id_policy, "
+            "schema_version, created_at) SELECT 'sibling-content', frame_id, "
+            "subject, relation, object, direction, magnitude, scope_json, "
+            "content_id_policy, schema_version, created_at FROM propositions "
+            "WHERE content_id = ?", (_content,),
+        )
+        finding_id, = g._conn.execute(
+            "SELECT finding_id FROM findings WHERE content_id = ?", (_content,),
+        ).fetchone()
+        # The sibling's evidence hangs off a finding on the SIBLING's content
+        # id. Attached to the caller's own finding it would be counted by both
+        # implementations, and the test could not tell them apart.
+        fcols = [r[1] for r in g._conn.execute("PRAGMA table_info(findings)")]
+        frest = [c for c in fcols if c not in ("finding_id", "content_id")]
+        g._conn.execute(
+            f"INSERT INTO findings (finding_id, content_id, {','.join(frest)}) "
+            f"SELECT 'sibling-finding', 'sibling-content', {','.join(frest)} "
+            f"FROM findings WHERE finding_id = ?", (finding_id,),
+        )
+        ecols = [r[1] for r in g._conn.execute("PRAGMA table_info(evidence_lines)")]
+        erest = [c for c in ecols if c not in ("line_id", "data_id", "finding_id")]
+        for i in range(5):
+            g._conn.execute(
+                f"INSERT INTO evidence_lines "
+                f"(line_id, data_id, finding_id, {','.join(erest)}) "
+                f"SELECT ?, ?, 'sibling-finding', {','.join(erest)} "
+                f"FROM evidence_lines WHERE finding_id = ? LIMIT 1",
+                (f"sib-line-{i}", f"sib-data-{i}", finding_id),
+            )
+        g._conn.commit()
+        by_content = _evidence_line_count(g._conn, content_id=_content)
+        by_claim = _evidence_line_count(g._conn, claim_id=_claim)
+
+    assert by_content > own, (
+        "the count did not grow when a sibling in the same frame did, so it is "
+        "still counting only the caller's own rows"
+    )
+    assert by_claim > own
 
 
 def test_a_refusal_to_derive_is_not_an_answer_that_the_subject_is_absent(tmp_path):

@@ -75,8 +75,6 @@ def test_scoped_escalation_spares_the_root_enrollment_notice(tmp_path):
     # DeprecationWarning would spare it too and pass this test identically. What
     # only a message-scoped filter allows is a sibling DeprecationWarning
     # reaching the caller as a warning rather than an error.
-    import warnings
-
     with warnings.catch_warnings(record=True) as seen:
         warnings.simplefilter("always")
         warnings.filterwarnings(
