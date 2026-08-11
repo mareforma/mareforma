@@ -859,9 +859,13 @@ twice). When a receipt carries a per-source **influence** record, `measure`
 reports a third arm: for each cited source, whether the finding depends on the
 data (`INFLUENCED` / `NOT_INFLUENCED` / `UNDECIDABLE`) or was never tested
 (`NOT_TESTED`). Its unit is the edge, a finding-and-source pair, so a finding
-citing several sources contributes several edges; NOT_TESTED is excluded from the
-rate denominator but counted and bucketed by reason, and a rate never prints
-without the number of distinct runs behind it. `summarize_pilot` runs a slim
+citing several sources contributes several edges. The rate denominator is the
+edges the oracle DECIDED, INFLUENCED plus NOT_INFLUENCED and nothing else: an
+UNDECIDABLE edge is the oracle saying it could not call that one, so counting it
+would put the non-answer in the denominator of an answer, and NOT_TESTED means
+nothing ran at all. Both are counted, named in the summary line, and excluded from
+the rate, and a rate prints its number of distinct runs or says the writer did not
+record one. `summarize_pilot` runs a slim
 natural-prevalence pilot over a receipts file, reporting all three arms with the
 honest OPAQUE-coverage bound: when OPAQUE dominates, the grounded prevalence reads
 as a lower bound, not a trustworthy number. `mareforma audit` produces such
@@ -898,22 +902,42 @@ a single move: flat under every null is hollow (`NOT_INFLUENCED`), moves under
 every null is a dependency (`INFLUENCED`), and moves under some while holding
 invariant under others is `UNDECIDABLE`. That last case is the discipline the
 instrument rests on: a genuine mean is invariant under a permutation and must
-never be called hollow for it. A shape with no family, or a null that crashes the
-target, reads `NOT_TESTED`, naming why, never a verdict; the oracle declines on
-targets it cannot measure rather than inventing a number. On a deterministic
-target, where there is no run-to-run noise, a move is judged against a
-float-equality band relative to the finding's magnitude, so the zero-config oracle
-does not degenerate to exact float equality where any jitter reads influenced.
+never be called hollow for it. On a deterministic target, where there is no
+run-to-run noise, a move is judged against a float-equality band relative to the
+finding's magnitude, so the zero-config oracle does not degenerate to exact float
+equality where any jitter reads influenced.
 
-Every influence verdict carries the statement that it grades a pipeline which does
-not attack its auditor. A prose finding is reduced to a scalar by a declared
-reducer: `numeric_extraction_reducer` pulls the reported number out of an answer
-with no model, so the oracle stays model-independent, while a reducer that runs a
-model (an embedding or LLM judge) sets `reinserts_model=True` and the result
-records it. A `multiplicity` control widens the decision threshold when a finding
-is one of many (so the noisiest of a family cannot cross the bar by chance), and
-`influence_sweep` computes it from the corpus size so it is not left uncorrected;
-a thin-sigma guard widens it when the noise floor rests on too few repeats.
+`NOT_INFLUENCED` is an accusation, that the finding does not depend on the data it
+cites, so it is reachable only from a measurement that happened. A shape with no
+family, a null that could not be built, a base run that failed, a null that
+crashed the target, a value the reducer could not reduce, and a value that came
+out NaN or infinite all read `NOT_TESTED`, naming which, never a verdict: a
+non-finite number compares False against every threshold, so left unguarded it
+would have counted as the finding holding still. What the family could not cover
+travels with the verdict too. A null identical to the base input is dropped rather
+than run (permuting a constant sequence changes nothing), and the dropped names
+are on the result, so a verdict over a family the data narrowed does not read as
+broad as one over the full family. Nulls supplied by the caller instead of derived
+from the shape are marked as such, because a single chosen null cannot reach the
+mixed profile at all and its `NOT_INFLUENCED` is a weaker statement than the
+family's.
+
+Each verdict can state the bound it was made under through `blind_spot_line()`,
+which names the nulls the finding held still under, the ones whose move was inside
+the band, the ones the input ruled out, and the standing statement that the oracle
+grades a pipeline which does not attack its auditor; every influence record
+`mareforma audit` writes carries that statement in its reason. A prose finding is
+reduced to a scalar by a declared reducer: `numeric_extraction_reducer` pulls the
+reported number out of an answer with no model, so the oracle stays
+model-independent, while a reducer that runs a model (an embedding or LLM judge)
+sets `reinserts_model=True` and the result records it. A `multiplicity` control
+widens the decision threshold when a finding is one of many (so the noisiest of a
+family cannot cross the bar by chance), and `influence_sweep` computes it from the
+corpus size so it is not left uncorrected; an opt-in thin-sigma guard widens it
+further when the noise floor rests on too few repeats. Neither reaches a
+deterministic target: with no sigma to widen the threshold is the float-equality
+band, and the result records whether the widening applied rather than leaving a
+recorded multiplicity to read as a correction that happened.
 
 ## Honest scope
 
