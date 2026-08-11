@@ -222,6 +222,71 @@ def test_not_tested_reasons_are_the_four_that_survived():
     }
 
 
+# -- profile routing over the auto-derived null family ----------------------
+
+def test_profile_hollow_finding_is_not_influenced():
+    # A hardcoded fallback holds still under every null in the derived family, so
+    # the profile is flat everywhere: NOT_INFLUENCED (hollow).
+    res = perturbation_oracle(lambda x: 42.0, [1.0, 2.0, 3.0, 4.0], repeats=5)
+    assert res.influence is OracleInfluence.NOT_INFLUENCED
+    assert res.scramble_names == ("zeroed", "constant", "permuted", "reversed")
+
+
+def test_profile_position_dependent_finding_is_influenced():
+    # A finding that reads specific positions moves under every null (content and
+    # order both change it), so the profile is moves-everywhere: INFLUENCED.
+    res = perturbation_oracle(
+        lambda x: float(x[0]) * 10.0 + float(x[-1]), [1.0, 2.0, 3.0, 4.0],
+        repeats=5,
+    )
+    assert res.influence is OracleInfluence.INFLUENCED
+
+
+def test_profile_marginal_invariant_is_undecidable_not_hollow():
+    # The false-hollow discipline: a genuine mean is invariant under the
+    # marginal-preserving nulls (permute, reverse) and moves under the destroying
+    # ones. Moves under some, flat under others, so it reads UNDECIDABLE, never
+    # NOT_INFLUENCED. This is the trap the whole instrument rests on.
+    res = perturbation_oracle(
+        lambda x: sum(x) / len(x), [1.0, 2.0, 3.0, 4.0], repeats=5,
+    )
+    assert res.influence is OracleInfluence.UNDECIDABLE
+    assert "permuted" in res.reason and "reversed" in res.reason
+
+
+def test_profile_routing_is_the_default_no_caller_supplies_a_null():
+    # perturb defaults to None: the family is derived from the finding's shape,
+    # so a caller cannot choose (and cannot fish for) a null.
+    res = perturbation_oracle(lambda x: 42.0, 10.0)
+    assert res.influence is OracleInfluence.NOT_INFLUENCED
+    assert res.scramble_names  # a family was derived
+
+
+def test_profile_routing_governs_caller_supplied_sequences_too():
+    # The profile rule replaces the old max-based logic for EVERY family, not
+    # only the auto-derived one: a caller-supplied sequence where the finding
+    # moves under one null and holds invariant under another reads UNDECIDABLE,
+    # where the retired max-move logic would have called it INFLUENCED. The
+    # invariant under a valid null is the honest-hard case, not a clean pass.
+    res = perturbation_oracle(lambda x: x, 0.0, [5.0, 0.0], repeats=3)
+    assert res.perturbation_effects == (5.0, 0.0)
+    assert res.influence is OracleInfluence.UNDECIDABLE
+
+
+def test_unsupported_shape_is_not_tested_never_a_verdict():
+    # A shape the scramble library has no family for yields NOT_TESTED, and the
+    # pipeline is never run: no base value, no verdict invented.
+    ran = []
+    def run(x):
+        ran.append(x)
+        return len(x)
+    res = perturbation_oracle(run, "a prose finding")
+    assert res.influence is OracleInfluence.NOT_TESTED
+    assert res.not_tested_reason is NotTestedReason.UNSUPPORTED_SHAPE
+    assert res.effect_size is None
+    assert ran == []  # nothing was run
+
+
 # -- reconcile: flow vs influence -------------------------------------------
 
 def test_reconcile_agreement():

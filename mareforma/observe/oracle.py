@@ -32,6 +32,7 @@ from enum import Enum
 from typing import Any, Callable, Sequence
 
 from ._verdict import ObservedGrounding
+from .scrambles import scramble_family
 
 # Below this many repeats the base-run spread is a THIN estimate of the
 # pipeline's noise: pstdev over 1-4 samples routinely understates the population
@@ -216,6 +217,11 @@ class OracleResult:
     # perturbation alone moved the finding from the base mean. effect_size is
     # the largest of these, so a reader can see which perturbation moved it.
     perturbation_effects: tuple[float, ...] = ()
+    # The name of each null in ``perturbation_effects`` order (``zeroed``,
+    # ``permuted``, ...) when the family was derived from the finding's shape, so
+    # a reader can see which null the finding held invariant under. Empty when the
+    # caller supplied its own perturbations.
+    scramble_names: tuple[str, ...] = ()
     # The declared reducer used to reduce each finding to a scalar, so the
     # measurement artifact is auditable about how prose became a number.
     reducer: "MetricReducer | None" = None
@@ -300,7 +306,7 @@ def _coerce_scalar(finding: Any) -> float:
 def perturbation_oracle(
     run_fn: Callable[[Any], Any],
     base_input: Any,
-    perturb: "Callable[[Any], Any] | Sequence[Any]",
+    perturb: "Callable[[Any], Any] | Sequence[Any] | None" = None,
     *,
     repeats: int = 1,
     metric: "Callable[[Any], float] | None" = None,
@@ -321,12 +327,21 @@ def perturbation_oracle(
     base_input:
         The unperturbed input.
     perturb:
-        Either a callable that maps the base input to a perturbed input, or a
-        sequence of already-perturbed inputs. Each perturbation is a different
-        way of changing the cited data; the finding should move if it depends
-        on that data. Each is scored against the base on its own and the effect
-        size is the largest move, so perturbations of opposite sign do not
-        cancel; the per-perturbation effects are on the result.
+        Either a callable that maps the base input to a perturbed input, a
+        sequence of already-perturbed inputs, or ``None`` to derive the whole
+        null family from the finding's data shape (see
+        :func:`mareforma.observe.scrambles.scramble_family`). Deriving the family
+        is the default because a chosen null is a place to fish: the finding's
+        own shape picks the family, the caller does not. An input shape with no
+        family yields a NOT_TESTED result (reason ``unsupported-shape``), never a
+        verdict. Each null is scored against the base on its own and the effect
+        size is the largest move, so nulls of opposite sign do not cancel; the
+        per-null effects are on the result, and the verdict routes on their
+        PROFILE, not on the single largest move. The profile rule governs a
+        caller-supplied sequence exactly as it governs the derived family: a
+        finding that moves under some nulls and holds invariant under others is
+        UNDECIDABLE, whoever chose the nulls, since an invariant under a valid
+        null is the honest-hard case rather than a clean pass.
     repeats:
         Runs per configuration. Above 1, the spread of the base runs measures
         the pipeline's run-to-run noise (LLM nondeterminism), which sets the
@@ -407,8 +422,19 @@ def perturbation_oracle(
         reducer = MetricReducer(name="custom", reduce=metric)
     m = reducer
 
+    # Resolve the null family before running anything: when the family is derived
+    # from the shape and the shape has none, the finding is NOT_TESTED and no run
+    # happens at all.
+    resolved = _resolve_perturbations(base_input, perturb)
+    if resolved is None:
+        return OracleResult.not_tested(
+            NotTestedReason.UNSUPPORTED_SHAPE,
+            detail="no scramble family fits the finding's input shape",
+            reducer=reducer,
+        )
+    perturbed_inputs, null_names = resolved
+
     base_values = tuple(m(run_fn(base_input)) for _ in range(repeats))
-    perturbed_inputs = _resolve_perturbations(base_input, perturb)
     perturbed_runs = tuple(
         tuple(m(run_fn(pin)) for _ in range(repeats)) for pin in perturbed_inputs
     )
@@ -492,24 +518,49 @@ def perturbation_oracle(
             f"from summation-order artifacts"
         )
 
-    if effect_size > decision_threshold:
-        influence = OracleInfluence.INFLUENCED
-        reason = (
-            f"perturbing the input moved the finding by {effect_size:.4g}, past "
-            f"the {decision_threshold:.4g} threshold: the data influences it"
-        )
-    elif band_driven and effect_size > band_floor:
-        # A move that clears the lower band edge but not the decision threshold:
-        # for a stochastic pipeline that is one noise sd; for a deterministic one
-        # it is any nonzero move inside the float-equality band. Real enough not
-        # to call NOT_INFLUENCED, not clear enough for INFLUENCED.
+    # Route on the PROFILE of effects across the null family, not on the single
+    # largest move. Classify each null against the shared threshold:
+    #   MOVED     the effect cleared the decision threshold;
+    #   AMBIGUOUS the band drives the threshold and the effect sits above the
+    #             band's lower edge but below the threshold (a noise or
+    #             float-equality move that cannot be called either way);
+    #   FLAT      otherwise, the finding held still under that null.
+    # The profile decides:
+    #   any AMBIGUOUS      -> UNDECIDABLE, a null landed inside the band;
+    #   every null MOVED   -> INFLUENCED, the finding depends on the data;
+    #   no null MOVED      -> NOT_INFLUENCED, flat under the whole family (hollow);
+    #   some MOVED, some FLAT -> UNDECIDABLE, the finding is a provable invariant
+    #             of at least one valid null (a mean under a permutation), so it
+    #             is not called hollow. This is the false-hollow discipline: an
+    #             invariant reads UNDECIDABLE, never NOT_INFLUENCED.
+    moved = [e > decision_threshold for e in perturbation_effects]
+    ambiguous = [
+        band_driven and (band_floor < e <= decision_threshold)
+        for e in perturbation_effects
+    ]
+    if any(ambiguous):
         influence = OracleInfluence.UNDECIDABLE
         reason = undecidable_reason
-    else:
+    elif all(moved):
+        influence = OracleInfluence.INFLUENCED
+        reason = (
+            f"the finding moved past the {decision_threshold:.4g} threshold under "
+            f"every null (largest move {effect_size:.4g}): the data influences it"
+        )
+    elif not any(moved):
         influence = OracleInfluence.NOT_INFLUENCED
         reason = (
-            f"perturbing the input barely moved the finding ({effect_size:.4g} "
-            f"<= {decision_threshold:.4g}): the finding does not depend on the data"
+            f"the finding stayed within {decision_threshold:.4g} under every null "
+            f"(largest move {effect_size:.4g}): it does not depend on the data"
+        )
+    else:
+        influence = OracleInfluence.UNDECIDABLE
+        held = [n for n, mv in zip(null_names, moved) if not mv]
+        held_note = f" (held invariant under: {', '.join(held)})" if held else ""
+        reason = (
+            f"the finding moved under some nulls but held invariant under others"
+            f"{held_note}: a provable invariant of at least one valid null, "
+            f"undecidable, not called hollow"
         )
 
     if zero_noise and noise_measured:
@@ -542,6 +593,7 @@ def perturbation_oracle(
         base_values=base_values,
         perturbed_values=perturbed_values,
         perturbation_effects=perturbation_effects,
+        scramble_names=tuple(null_names),
         reducer=reducer,
         multiplicity=multiplicity,
         noise_is_thin=noise_is_thin,
@@ -550,13 +602,25 @@ def perturbation_oracle(
     )
 
 
-def _resolve_perturbations(base_input, perturb) -> list:
+def _resolve_perturbations(base_input, perturb):
+    """Return ``(perturbed_inputs, null_names)`` or ``None`` for no family.
+
+    ``None`` is returned only when ``perturb`` is derived from the shape and the
+    shape has no scramble family, which the caller turns into a NOT_TESTED result.
+    A caller-supplied ``perturb`` always resolves: names are generic, since the
+    caller, not the shape library, chose the nulls.
+    """
+    if perturb is None:
+        family = scramble_family(base_input)
+        if family is None:
+            return None
+        return ([s.perturbed for s in family], [s.name for s in family])
     if callable(perturb):
-        return [perturb(base_input)]
+        return ([perturb(base_input)], ["perturbation"])
     perturbed = list(perturb)
     if not perturbed:
         raise ValueError("perturb must yield at least one perturbed input")
-    return perturbed
+    return (perturbed, [f"perturbation-{i}" for i in range(len(perturbed))])
 
 
 class Reconciliation(str, Enum):

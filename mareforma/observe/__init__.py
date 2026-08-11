@@ -41,7 +41,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
-from . import _audit, _doctor, _loaders, _scope, measure, oracle
+from . import _audit, _doctor, _loaders, _scope, measure, oracle, scrambles
 from ._binding import (
     BindingResult,
     BindingState,
@@ -85,6 +85,7 @@ from .oracle import (
     reconcile,
     scalar_reducer,
 )
+from .scrambles import Scramble, scramble_family
 
 
 def declare_model(
@@ -226,6 +227,8 @@ __all__ = [
     "OracleInfluence",
     "OracleResult",
     "NotTestedReason",
+    "scramble_family",
+    "Scramble",
     "reconcile",
     "ReconcileResult",
     "Reconciliation",
