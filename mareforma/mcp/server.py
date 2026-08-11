@@ -93,7 +93,8 @@ def _page(limit: int) -> "tuple[int, int | None]":
     return (requested, None)
 
 
-def _page_result(claims, served: int, adjusted, excluded: "dict | None" = None) -> dict:
+def _page_result(claims, served: int, adjusted, excluded: "dict | None" = None,
+                 pre_drop: "int | None" = None) -> dict:
     """Build a page response that never passes truncation off as completeness.
 
     *claims* holds one row more than *served* was asked to show, which is how
@@ -113,7 +114,13 @@ def _page_result(claims, served: int, adjusted, excluded: "dict | None" = None) 
     retrievable through this surface at all). Both are omitted when zero, so an
     ordinary page is unchanged.
     """
-    has_more = len(claims) > served
+    # From the list the GRAPH returned, before any row was withheld. Computing
+    # it after the drop let one withheld row turn a truncated page into "the
+    # record ends here": 21 equal-length byte edits inside the page window hid
+    # 39 untouched claims behind has_more: false, and the tool exposes no offset
+    # to page past it. A withheld row must cost a page slot, never the rest of
+    # the record.
+    has_more = (len(claims) if pre_drop is None else pre_drop) > served
     shown = claims[:served]
     out = {
         "claims": [_for_llm(c) for c in shown],
@@ -171,9 +178,9 @@ def _evidence_line_count(conn, *, claim_id=None, content_id=None) -> int:
             "JOIN findings f ON f.finding_id = el.finding_id "
             "WHERE f.content_id IN ("
             "  SELECT content_id FROM findings WHERE claim_id = ?"
-            ") OR f.claim_id = ?"
+            ")"
         )
-        params = (claim_id, claim_id)
+        params = (claim_id,)
     else:
         sql = (
             "SELECT COUNT(*) FROM evidence_lines el "
@@ -181,8 +188,8 @@ def _evidence_line_count(conn, *, claim_id=None, content_id=None) -> int:
             "WHERE f.content_id IN ("
             "  SELECT content_id FROM propositions WHERE frame_id IN ("
             "    SELECT frame_id FROM propositions WHERE content_id = ?"
-            "  )"
-            ") OR f.content_id = ?"
+            "  ) OR content_id = ?"
+            ")"
         )
         params = (content_id, content_id)
     return conn.execute(sql, params).fetchone()[0]
@@ -475,9 +482,13 @@ class ReadVerifyTools:
             claims = self._graph.query(
                 text, classification=classification, limit=served + 1,
             )
-        claims, unverifiable = self._drop_unverifiable(claims)
+            # Inside the lock window: the per-row check reads the shared
+            # connection, which sqlite3 isolates per CONNECTION and not per
+            # thread, so an unguarded read here races a concurrent tool call.
+            pre_drop = len(claims)
+            claims, unverifiable = self._drop_unverifiable(claims)
         excluded["verify_excluded"] = excluded.get("verify_excluded", 0) + unverifiable
-        return _page_result(claims, served, adjusted, excluded)
+        return _page_result(claims, served, adjusted, excluded, pre_drop)
 
     def search_claims(
         self,
@@ -497,9 +508,13 @@ class ReadVerifyTools:
             claims = self._graph.search(
                 query, classification=classification, limit=served + 1,
             )
-        claims, unverifiable = self._drop_unverifiable(claims)
+            # Inside the lock window: the per-row check reads the shared
+            # connection, which sqlite3 isolates per CONNECTION and not per
+            # thread, so an unguarded read here races a concurrent tool call.
+            pre_drop = len(claims)
+            claims, unverifiable = self._drop_unverifiable(claims)
         excluded["verify_excluded"] = excluded.get("verify_excluded", 0) + unverifiable
-        return _page_result(claims, served, adjusted, excluded)
+        return _page_result(claims, served, adjusted, excluded, pre_drop)
 
     def get_claim(self, claim_id: str) -> dict:
         """Fetch one claim by id.
@@ -593,18 +608,23 @@ class ReadVerifyTools:
         # check_same_thread=False, so an unguarded raw-connection read would race
         # a concurrent tool call dispatched on another thread.
         with self._graph._lock:
+            # The ceiling gates the MAP, never the verdict. Signature and
+            # binding work does not grow with the evidence; the map walks every
+            # line. Gating the verdict meant the more a finding was replicated
+            # the less this server would verify it: 26 labs on one proposition
+            # made every claim answer "unverifiable", a word this module
+            # documents as "material was missing", for signatures that verify in
+            # 67 ms, and it was the remedy `query_claims` points an agent at.
             try:
                 _check_evidence_ceiling(
                     self._graph._conn, self._max_evidence_lines,
                     claim_id=claim_id,
                 )
+                derive_map = True
+                map_refused = None
             except _TooMuchEvidence as exc:
-                return {
-                    "claim_id": _scrub(claim_id),
-                    "verdict": "unverifiable",
-                    "reason": _scrub(str(exc)),
-                    "trust_map": None,
-                }
+                derive_map = False
+                map_refused = str(exc)
             claim = self._graph.get_claim(claim_id)
             if claim is None:
                 return {
@@ -616,15 +636,22 @@ class ReadVerifyTools:
                     ),
                     "trust_map": None,
                 }
-            result = classify_claim_verdict(self._graph._conn, claim, claim_id)
-        return {
-            "claim_id": claim_id,
+            result = classify_claim_verdict(
+                self._graph._conn, claim, claim_id, with_trust_map=derive_map,
+            )
+        out = {
+            "claim_id": _scrub(claim_id),
             "verdict": result.verdict,
             "reason": _scrub(result.reason),
             "trust_map": (
                 _scrub(result.trust_map.to_dict()) if result.trust_map else None
             ),
         }
+        if map_refused is not None:
+            # A verdict WITH no map, said in its own words. `trust_map: null`
+            # alone would read as "this claim has no trust to show".
+            out["trust_map_refused"] = _scrub(map_refused)
+        return out
 
 
 def build_server(tools: ReadVerifyTools):

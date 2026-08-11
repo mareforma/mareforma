@@ -49,6 +49,7 @@ class ClaimVerdict:
 
 def classify_claim_verdict(
     conn: "sqlite3.Connection", claim: dict, target: str,
+    *, with_trust_map: bool = True,
 ) -> ClaimVerdict:
     """Auditor-mode verdict on a located *claim*, from public material only.
 
@@ -56,6 +57,12 @@ def classify_claim_verdict(
     against the frozen routine, and builds the trust map. Assumes the claim was
     already located; a missing claim or an unopenable project is the caller's to
     handle, because those are UNVERIFIABLE for reasons that never reach a map.
+
+    ``with_trust_map=False`` returns the same verdict with ``trust_map`` None.
+    The verdict costs the same whatever the evidence, while the map walks every
+    evidence line, so a caller that must bound its work can drop the map without
+    dropping the answer. Withdrawing the VERDICT instead would say "nothing
+    could be checked" about a signature that checks out.
     """
     from mareforma.db import (
         _extract_signature_bundle_keyid,
@@ -146,7 +153,7 @@ def classify_claim_verdict(
 
     # build_trust_map re-fetches the row and runs its own audit-grade signature
     # re-verification, so the standalone map is honest.
-    tmap = build_trust_map(conn, target)
+    tmap = build_trust_map(conn, target) if with_trust_map else None
 
     # A definite NO outranks missing material: a claim that is both tampered and
     # signed by an unenrolled key is tampered.

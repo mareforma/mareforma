@@ -40,6 +40,12 @@ import unicodedata
 from functools import lru_cache
 from typing import Final
 
+# What replaces a field that hid a delimiter behind a lookalike. The whole field
+# goes, because the alternative is repairing hostile text and serving the repair.
+_LOOKALIKE_STRIPPED: Final = (
+    "[stripped: this field hid a forged delimiter behind lookalike characters]"
+)
+
 # Hard ceiling on a single text field. A 1 MB claim is almost certainly
 # either an attack (token-flood DoS against the consuming LLM) or a
 # data-shape error. Truncate with a visible marker so the LLM sees the
@@ -157,18 +163,26 @@ def strip_forged_tags(text: str | None, *, tag: str = "untrusted_data") -> str |
     pattern = _forged_tag_re(tag)
     stripped = pattern.sub("[stripped]", text)
     # A model reads the delimiter as a HUMAN does, and a fullwidth 'd' looks
-    # exactly like an ASCII one: `</untrusteｄ_data>` matched no pattern here and
-    # closed the wrapper on the way in. The codepoint stripper does not catch it
-    # either, because the character folds to a letter, not to a delimiter.
+    # exactly like an ASCII one: `</untrusteｄ_data>` matches no pattern above and
+    # closes the wrapper on the way in. The codepoint stripper cannot catch it
+    # either, since that character folds to a LETTER, not to a delimiter, and a
+    # set of every letter lookalike is not a set anyone can keep.
     #
-    # So the same text is checked again under NFKC. Matching on the folded form
-    # and substituting on it is safe for this field because the result is a
-    # display string a model reads, never bytes anything verifies: the signature
-    # surfaces read the raw row. Only used when folding actually revealed a
-    # delimiter, so ordinary text is returned exactly as written.
-    folded = unicodedata.normalize("NFKC", stripped)
-    if folded != stripped and pattern.search(folded):
-        return pattern.sub("[stripped]", folded)
+    # So folding is used to DETECT, never to produce the output. Returning the
+    # folded string rewrote every other character in the same field: `10⁻⁹`
+    # became `10−9`, `3½` became `31⁄2`, `6×10²³` became `6×1023`. That put
+    # different numbers in front of the model than the signed row holds, while
+    # the verify surfaces, which read the raw row, still called the claim
+    # verified. Silently changing a dose is worse than the injection it was
+    # guarding against.
+    #
+    # A field that needs the fold to reveal a delimiter is hostile, so it is
+    # replaced whole rather than repaired: no offset arithmetic to get wrong,
+    # and nothing of the attacker's survives. Ordinary text never reaches here.
+    if not stripped.isascii():
+        folded = unicodedata.normalize("NFKC", stripped)
+        if folded != stripped and pattern.search(folded):
+            return _LOOKALIKE_STRIPPED
     return stripped
 
 

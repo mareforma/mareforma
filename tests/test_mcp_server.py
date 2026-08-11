@@ -576,17 +576,29 @@ class TestEvidenceCeiling:
             "a refusal must name the way out"
         )
 
-    def test_verify_refuses_as_unverifiable_not_as_a_crash(self, project):
-        """The refusal has to reach the verdict vocabulary, not escape as an error."""
+    def test_over_the_ceiling_verify_still_answers_and_drops_only_the_map(
+        self, project,
+    ):
+        """The ceiling gates the MAP, never the verdict.
+
+        Signature and binding work does not grow with the evidence; the trust
+        map walks every line. Gating the verdict meant the more a finding was
+        replicated the less this server would verify it, and it answered
+        "unverifiable", which this module documents as "material was missing",
+        about a signature that verifies fine. It is also the remedy
+        ``query_claims`` points an agent at for a withheld row.
+        """
         root, claim_id, _content_id = project
         graph = mareforma.open(root, load_key=False)
         try:
             result = ReadVerifyTools(graph, max_evidence_lines=-1).verify_claim(claim_id)
         finally:
             graph.close()
-        assert result["verdict"] == "unverifiable"
+        assert result["verdict"] == "verified"
         assert result["trust_map"] is None
-        assert result["reason"]
+        # And the missing map says so in its own words: `trust_map: null` alone
+        # would read as "this claim has no trust to show".
+        assert "evidence lines" in result["trust_map_refused"]
 
     def test_proposition_status_refuses_above_the_ceiling(self, project):
         root, _claim_id, content_id = project
@@ -856,6 +868,7 @@ def _byte_edit(root: Path, before: bytes, after: bytes) -> None:
     The append-only guards are UPDATE triggers, so an equal-length edit of the
     bytes on disk changes a claim without firing any of them.
     """
+    after = after.ljust(len(before))[:len(before)]
     assert len(before) == len(after), "the edit must not change the file length"
     db = root / ".mareforma" / "graph.db"
     raw = db.read_bytes()
@@ -955,3 +968,30 @@ def test_verify_claim_does_not_echo_its_own_argument_unscrubbed(tmp_path):
     assert out["verdict"] == "unverifiable"
     assert "</untrusted_data>" not in out["claim_id"]
     assert "</untrusted_data>" not in out["reason"]
+
+
+def test_withholding_a_row_costs_a_page_slot_not_the_rest_of_the_record(tmp_path):
+    """`has_more` must describe the RECORD, not what survived withholding.
+
+    Computed after the drop, one withheld row turned a truncated page into "the
+    record ends here": 21 equal-length byte edits inside the page window hid 39
+    untouched claims behind `has_more: false`, and the tool exposes no offset to
+    page past it. That is a censorship primitive costing one file write per row,
+    and it is the exact defect class the withholding was added to fix.
+    """
+    from tests._helpers import _bootstrap_key
+
+    root_key = _bootstrap_key(tmp_path, "root.key")
+    with mareforma.open(tmp_path, key_path=root_key) as g:
+        for i in range(25):
+            g.assert_claim(f"honest finding number {i:03d}", generated_by="x")
+    _byte_edit(tmp_path, b"honest finding number 024", b"HOSTILE EDIT number 024")
+
+    with mareforma.open(tmp_path, key_path=root_key) as g:
+        page = ReadVerifyTools(g).query_claims(limit=20)
+
+    assert page["verify_excluded"] == 1
+    assert page["has_more"] is True, (
+        "one withheld row told the agent the record was exhausted while 24 "
+        "honest claims remained"
+    )
