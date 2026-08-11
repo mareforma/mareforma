@@ -552,7 +552,7 @@ from mareforma.validators import (
     ValidatorNotEnrolledError,
 )
 from mareforma.export_bundle import BundleVerificationError
-from mareforma.observe import ScopeNotClosedError
+from mareforma.observe import NoPerturbationsError, ScopeNotClosedError
 from mareforma.trust import (
     FindingPlanForkError,
     InconsistentEstimateError,
@@ -681,6 +681,7 @@ __all__ = [
     "PostHocPlanError",
     "ProjectPolicyError",
     "RestoreError",
+    "NoPerturbationsError",
     "ScopeNotClosedError",
     "SelfValidationError",
     "SignedClaimImmutableError",

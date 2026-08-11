@@ -79,7 +79,9 @@ from .measure import (
 from .oracle import (
     MetricReducer,
     THREAT_MODEL_STATEMENT,
+    NoPerturbationsError,
     NotTestedReason,
+    NullOutcome,
     OracleInfluence,
     OracleResult,
     ReconcileResult,
@@ -91,7 +93,7 @@ from .oracle import (
     reconcile,
     scalar_reducer,
 )
-from .scrambles import Scramble, scramble_family
+from .scrambles import Scramble, ScrambleFamily, scramble_family
 
 
 def declare_model(
@@ -234,9 +236,12 @@ __all__ = [
     "OracleInfluence",
     "OracleResult",
     "NotTestedReason",
+    "NullOutcome",
+    "NoPerturbationsError",
     "THREAT_MODEL_STATEMENT",
     "scramble_family",
     "Scramble",
+    "ScrambleFamily",
     "reconcile",
     "ReconcileResult",
     "Reconciliation",

@@ -880,6 +880,7 @@ catching looks like `from mareforma import RekorInclusionError`.
 | `VerifierError` | `mareforma.verifiers` | `MockNLIVerifier(score=...)` | The score is not a float in `[0.0, 1.0]`, or is NaN |
 | `MalformedRunError` | `mareforma.reexec` | `reexec()` | The run is neither a record dict nor a readable JSON record, or the record is missing a usable `reported_value`, `tolerance` or non-reexecutable reason |
 | `ScopeNotClosedError` | `mareforma.observe` | `ObserveHandle.verdict` | The verdict was read inside the open `observe()` block, before the observer had seen the whole span. Subclasses `RuntimeError` |
+| `NoPerturbationsError` | `mareforma.observe` | `perturbation_oracle()` | `perturb` was an empty sequence, so there is no null to run. A caller handing the oracle nothing to measure is a bug in the call, never a `NOT_TESTED` row a report would count. Subclasses `ValueError` |
 | `BundleVerificationError` | `mareforma.export_bundle` | `mareforma verify` | Signed export bundle failed a check: DSSE signature, per-claim subject digest, per-claim asserter signature, validator chain, or displayed support level |
 
 The submodule paths in the table tell you where the source lives. They
@@ -1333,29 +1334,66 @@ member), `reason` (str), `cited_sources`, `grounded_sources`, `reads`, `seams`,
 
 The independent causal check. Runs `run_fn` on the base input and on perturbed
 inputs and returns an `OracleResult` whose `influence` is `INFLUENCED`,
-`NOT_INFLUENCED`, or `UNDECIDABLE`. With `repeats > 1` the spread of the base runs
-sets the noise floor a real effect must clear, so a stochastic pipeline does not
-read as influenced by its own jitter. At `repeats=1` no noise is measured, so the
-floor is 0; the result carries `noise_measured=False` and `noise_is_thin=True` and
-says so in its reason. When `perturb` is a sequence, each perturbation is scored
-against the base on its own and the effect is the largest move, so opposing
-perturbations do not cancel; `perturbation_effects` carries one effect per
-perturbation, and their count widens the threshold as `multiplicity` does.
+`NOT_INFLUENCED`, `UNDECIDABLE`, or `NOT_TESTED`. With `repeats > 1` the spread of
+the base runs sets the noise floor a real effect must clear, so a stochastic
+pipeline does not read as influenced by its own jitter. At `repeats=1` no noise is
+measured, so the floor is 0; the result carries `noise_measured=False` and
+`noise_is_thin=True` and says so in its reason.
+
+`perturb=None`, the default, derives the whole null family from the input's data
+shape through `scramble_family` (a scalar, a mapping of scalars, or a sequence of
+scalars, including a namedtuple or an array): content-destroying nulls (`zeroed`,
+`constant`) and marginal-preserving ones (`permuted`, `reversed`). The verdict
+routes on the PROFILE across that family, not on one move: `INFLUENCED` only when
+every null moves the finding past the threshold, `NOT_INFLUENCED` only when none
+does, and `UNDECIDABLE` when some move and others do not, which is the honest
+reading of a genuine mean (invariant under a reordering, moved by zeroing) and
+must never be called hollow. Each perturbation is scored against the base on its
+own, so opposing perturbations do not cancel; `perturbation_effects` carries one
+effect per null, `scramble_names` names them, and `null_outcomes` carries the
+classification the verdict was routed on (`MOVED` / `AMBIGUOUS` / `FLAT`), which
+`flat_nulls`, `ambiguous_nulls` and `blind_spot_line()` all read rather than
+re-deriving.
+
+`NOT_TESTED` means the oracle produced no verdict, with a typed
+`not_tested_reason`: `unsupported-shape` (no family fits the input),
+`null-construction-failed` (building a perturbed input raised),
+`target-failed` (the unperturbed run raised), `crashed-under-null`,
+`unreducible-value`, and `non-finite-value` (a run came out NaN or infinite, so
+there is no comparable number). It is never a verdict in disguise: the three
+measurement numbers are `None` on such a row, so no reader takes a zero off it.
+
+A null identical to the base cannot perturb anything, so it is dropped rather than
+run and its name goes in `dropped_nulls`; a constant sequence loses both
+marginal-preserving nulls this way, and the reason says so, because a verdict over
+a family the data narrowed is a narrower claim. Supplying `perturb` yourself (a
+callable for one null, a sequence for several) sets `caller_chose_nulls=True`: a
+chosen null is a place to fish, and a single one cannot reach the mixed profile at
+all, so its `NOT_INFLUENCED` is weaker than the derived family's. An empty
+sequence raises `NoPerturbationsError` rather than reading as `NOT_TESTED`.
 
 Two keywords widen the decision threshold before the influence call is made.
-`multiplicity=n` declares the finding is one of `n` and adds `sqrt(2 ln n)`
-sigmas, so the noisiest member of a family cannot cross the bar by chance.
-`thin_sigma_guard=True` widens the same margin when the noise floor rests on
-fewer than five repeats. Both default to a no-op, so a single finding measured
-on its own is scored the same either way.
+`multiplicity=n` declares the finding is one of `n`, and the widening is
+`sqrt(2 ln(n * number_of_nulls))` sigmas, because taking the max across the nulls
+is itself a multiple comparison; that is the expected size of the largest spurious
+deviation across a family that size, not a quantile, so it controls no stated
+error rate. `thin_sigma_guard=True` widens the same margin when the noise floor
+rests on fewer than five repeats, and defaults off. Neither is a no-op on the
+zero-config path: the derived family has several nulls, so the widening fires from
+the null count even at `multiplicity=1`. Neither reaches a pipeline with no
+measurable noise, where there is no sigma to widen; `multiplicity_applied` records
+whether the widening actually reached the threshold.
 
 A deterministic pipeline has no run-to-run noise, so the noise floor is measured
 at 0 and there is no sigma to build a threshold from. `determinism_rtol=1e-6`
 sets the float-equality band for that case: a move within `determinism_rtol * |base
 mean|` of the finding's magnitude is indistinguishable from summation-order
-artifacts (BLAS thread counts, reduction order) and reads `UNDECIDABLE`, never
-`INFLUENCED`; a move above it is a real dependency; a move of exactly 0 is a
-provable invariant (`NOT_INFLUENCED`). This is what keeps the zero-config oracle
+artifacts (BLAS thread counts, reduction order) and is classified `AMBIGUOUS`,
+which routes the verdict to `UNDECIDABLE`, never `INFLUENCED`; a move above the
+band is `MOVED`; a move of exactly 0 is `FLAT`, a provable invariant. The verdict
+is then the profile over all of them, so exactly-0 under every null is
+`NOT_INFLUENCED` while exactly-0 under some and a real move under others is
+`UNDECIDABLE`. This is what keeps the zero-config oracle
 from degenerating to exact float equality on the modal deterministic target. A
 result also carries `deterministic=True` when the floor was measured at 0 over
 more than one repeat, distinct from an unmeasured single-run floor.

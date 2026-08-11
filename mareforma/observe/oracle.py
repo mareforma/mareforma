@@ -44,6 +44,10 @@ from .scrambles import scramble_family
 # records the floor as missing rather than small.
 _THIN_REPEATS = 5
 
+# The label the unperturbed run is recorded under. Not a null name: it is the
+# configuration every null is compared against.
+_BASE_LABEL = "base"
+
 # Every influence verdict carries this: the oracle grades a COOPERATING pipeline.
 # A target that patches the observer, imports its internals, or fabricates reads
 # is out of scope and no verdict here rules it out. The bound used to live in one
@@ -75,21 +79,56 @@ class NotTestedReason(str, Enum):
 
     A typed field on the result, never string-matched from the English reason
     sentence, so a consumer branches on the reason without parsing prose. Each
-    value names a distinct way the measurement could not be taken:
+    value names a distinct way the measurement could not be taken, and each is
+    produced by exactly one path in this module:
 
     - ``UNSUPPORTED_SHAPE``: no scramble family fits the finding's input shape,
       so there was no null to perturb with.
+    - ``NULL_CONSTRUCTION_FAILED``: building the perturbed input raised, so the
+      null itself never existed. A caller's ``perturb`` callable is the usual
+      source. Distinct from a crash UNDER a null, where the null was built and
+      the target then failed on it.
+    - ``TARGET_FAILED``: the UNPERTURBED base run raised, so the target never ran
+      successfully and no null is implicated. Kept distinct from
+      ``CRASHED_UNDER_NULL`` because a broken target and a target broken BY a
+      null route to different fixes, and bucketing them together would count a
+      broken target as evidence about the null family's reach.
     - ``CRASHED_UNDER_NULL``: running the pipeline on a scrambled input raised,
       so the effect under that null is unknown; the traceback is recorded.
     - ``UNREDUCIBLE_VALUE``: a run produced a value the declared metric could
       not reduce to a comparable scalar.
-    - ``NO_VALUE``: a run produced no value to compare at all.
+    - ``NON_FINITE_VALUE``: a run reduced to NaN or an infinity, so there is no
+      comparable number. A ratio whose denominator a null zeroes does this on the
+      first null, and NaN compares False against every threshold, so an
+      unguarded non-finite value would be silently counted as "the finding held
+      still" and earn the finding the hollow verdict off a measurement that never
+      happened.
     """
 
     UNSUPPORTED_SHAPE = "unsupported-shape"
+    NULL_CONSTRUCTION_FAILED = "null-construction-failed"
+    TARGET_FAILED = "target-failed"
     CRASHED_UNDER_NULL = "crashed-under-null"
     UNREDUCIBLE_VALUE = "unreducible-value"
-    NO_VALUE = "no-value"
+    NON_FINITE_VALUE = "non-finite-value"
+
+
+class NullOutcome(str, Enum):
+    """How one null in the family was classified against the decision threshold.
+
+    The router computes this once per null and the result carries it, so every
+    reader (the reason sentence, :attr:`OracleResult.flat_nulls`, the blind-spot
+    line) describes the same classification the verdict was routed on. Deriving
+    it a second time from the effects is how a result comes to state one thing in
+    its verdict and the opposite in its prose.
+    """
+
+    MOVED = "MOVED"
+    # The effect landed inside the noise or float-equality band: it moved, but
+    # not by enough to be told from jitter. Never "held invariant": the finding
+    # did move, the measurement just cannot say whether the data caused it.
+    AMBIGUOUS = "AMBIGUOUS"
+    FLAT = "FLAT"
 
 
 @dataclass(frozen=True)
@@ -241,6 +280,13 @@ class OracleResult:
     # finding, no correction), and whether the noise floor rests on too few
     # repeats to be trusted. Both are recorded so the verdict is auditable.
     multiplicity: int = 1
+    # Whether the multiplicity and family-size widening actually reached the
+    # decision threshold. False on a pipeline with no measurable noise, where
+    # there is no sigma to widen and the threshold is the float-equality band
+    # instead: the correction was computed and did not apply. Recorded because
+    # ``multiplicity`` alone reads as "this was corrected for", and on the modal
+    # deterministic target it was not.
+    multiplicity_applied: bool = False
     noise_is_thin: bool = False
     # Whether the noise floor was measured at all. False means a single base run,
     # so the floor is 0 by construction and run-to-run jitter is not ruled out:
@@ -256,6 +302,24 @@ class OracleResult:
     # the traceback when a null crashed the pipeline. None on every measured row.
     not_tested_reason: "NotTestedReason | None" = None
     traceback: "str | None" = None
+    # How the router classified each null, in ``scramble_names`` order. Every
+    # reader of "which nulls held still" reads THIS rather than re-deriving it
+    # from the effects, so no line on the result can contradict the verdict.
+    # Empty on a NOT_TESTED row, where no null was classified.
+    null_outcomes: "tuple[NullOutcome, ...]" = ()
+    # Nulls the shape would normally supply that this input ruled out, because
+    # they would have been identical to the base (permuting a constant sequence
+    # changes nothing). The verdict rests on a narrower family than the shape
+    # normally gives, and saying which nulls are missing is the difference
+    # between a narrow verdict and a verdict that reads as broad.
+    dropped_nulls: "tuple[str, ...]" = ()
+    # True when the caller supplied the nulls instead of letting the shape derive
+    # them. A chosen null is a place to fish: pick one the finding is provably
+    # invariant to and it reads NOT_INFLUENCED however honest the pipeline is. The
+    # oracle still measures what it is asked to, but the result says who chose,
+    # so a NOT_INFLUENCED off a caller's own null is never read as the derived
+    # family's verdict.
+    caller_chose_nulls: bool = False
 
     @classmethod
     def not_tested(
@@ -303,44 +367,91 @@ class OracleResult:
         """The reducer's audit record, or None when no reducer was declared."""
         return self.reducer.declaration() if self.reducer else None
 
+    def _names(self) -> "tuple[str, ...]":
+        """The null names, falling back to positional labels for an old record."""
+        return self.scramble_names or tuple(
+            f"perturbation-{i}" for i in range(len(self.perturbation_effects))
+        )
+
+    def _nulls_classified(self, outcome: "NullOutcome") -> "tuple[str, ...]":
+        return tuple(
+            name
+            for name, got in zip(self._names(), self.null_outcomes)
+            if got is outcome
+        )
+
     @property
     def flat_nulls(self) -> "tuple[str, ...]":
         """The nulls the finding held invariant under: this verdict's blind spots.
 
-        A null the finding did not move past the threshold is one this verdict
-        does not rule out a dependence hidden behind. For a hollow finding that is
-        every null; for an influenced one, none; for the honest-invariant case,
-        the marginal-preserving nulls it was invariant to. Empty on a NOT_TESTED
-        row, where nothing was measured.
+        A null the finding held still under is one this verdict does not rule out
+        a dependence hidden behind. For a hollow finding that is every null; for
+        an influenced one, none; for the honest-invariant case, the
+        marginal-preserving nulls it was invariant to. Empty on a NOT_TESTED row,
+        where nothing was measured.
+
+        Read off the router's own classification, never re-derived by comparing
+        effects to the threshold: a null whose effect landed inside the band moved
+        and is not flat, and re-deriving is what let a result call a null
+        "invariant" that the verdict had counted as ambiguous.
         """
-        if self.decision_threshold is None:
-            return ()
-        names = self.scramble_names or tuple(
-            f"perturbation-{i}" for i in range(len(self.perturbation_effects))
-        )
-        return tuple(
-            name
-            for name, effect in zip(names, self.perturbation_effects)
-            if effect <= self.decision_threshold
-        )
+        return self._nulls_classified(NullOutcome.FLAT)
+
+    @property
+    def ambiguous_nulls(self) -> "tuple[str, ...]":
+        """The nulls whose effect landed inside the noise or float-equality band."""
+        return self._nulls_classified(NullOutcome.AMBIGUOUS)
 
     def blind_spot_line(self) -> str:
         """One line naming what this verdict does not see, with the threat bound.
 
-        Derived from which nulls were flat, so a reader sees the specific
-        invariances the verdict rests on rather than a bare label, and every
-        verdict carries the statement that the oracle grades a cooperating
-        pipeline.
+        Built from the router's classification, so it can never disagree with the
+        verdict beside it: the nulls the finding held still under, the nulls whose
+        move was inside the band, and the nulls this input ruled out before
+        anything ran. Every verdict carries the statement that the oracle grades a
+        cooperating pipeline.
         """
         if self.influence is OracleInfluence.NOT_TESTED:
             return f"Influence not tested. {THREAT_MODEL_STATEMENT}."
+        parts: list[str] = []
         flat = self.flat_nulls
         if flat:
-            lead = f"Held invariant under {', '.join(flat)}, so the verdict does "
-            lead += "not rule out a dependence those nulls cannot see. "
-        else:
-            lead = "Moved under every null tried. "
-        return lead + THREAT_MODEL_STATEMENT + "."
+            parts.append(
+                f"Held invariant under {', '.join(flat)}, so the verdict does not "
+                f"rule out a dependence those nulls cannot see."
+            )
+        ambiguous = self.ambiguous_nulls
+        if ambiguous:
+            parts.append(
+                f"Moved under {', '.join(ambiguous)} by less than the decision "
+                f"threshold, which is a move the measurement cannot tell from "
+                f"jitter."
+            )
+        if not flat and not ambiguous:
+            parts.append("Moved under every null that ran.")
+        if self.dropped_nulls:
+            parts.append(
+                f"The input ruled out {', '.join(self.dropped_nulls)}: those "
+                f"nulls would have been identical to it, so nothing here tested "
+                f"what they test."
+            )
+        if self.caller_chose_nulls:
+            parts.append(
+                "The nulls were chosen by the caller, not derived from the "
+                "finding's shape, so this verdict is only as strong as that "
+                "choice."
+            )
+        return " ".join(parts) + " " + THREAT_MODEL_STATEMENT + "."
+
+
+class NoPerturbationsError(ValueError):
+    """A caller passed an empty ``perturb`` sequence: there is nothing to run.
+
+    Raised, never turned into a NOT_TESTED result. NOT_TESTED records that the
+    oracle could not measure something; an empty null list is a caller handing it
+    nothing to measure, which is a bug in the call and must not be laundered into
+    a measurement outcome a report would then count.
+    """
 
 
 class _NullFailure(Exception):
@@ -396,7 +507,9 @@ def perturbation_oracle(
         [1] derive the null family from the data shape        [2] run the base
             (scalar / mapping / sequence), or use the             and each null
             caller's perturb; no family -> NOT_TESTED             repeats times,
-            (unsupported-shape)                                   guarded: a crash
+            (unsupported-shape); a null that would                guarded: a crash,
+            equal the base is dropped and recorded                an unreducible or
+            |                                                     non-finite value
             |                                                     -> NOT_TESTED
             +--------------------------> nulls ------------------------+
                                                                        v
@@ -417,9 +530,16 @@ def perturbation_oracle(
     base_input:
         The unperturbed input.
     perturb:
-        Either a callable that maps the base input to a perturbed input, a
-        sequence of already-perturbed inputs, or ``None`` to derive the whole
-        null family from the finding's data shape (see
+        ``None`` (the default) derives the whole null family from the finding's
+        data shape; a callable maps the base input to ONE perturbed input; a
+        sequence supplies the nulls directly. A caller-supplied family is recorded
+        on the result as :attr:`OracleResult.caller_chose_nulls`, because a chosen
+        null is a place to fish and a NOT_INFLUENCED off the caller's own null is
+        a weaker statement than one off the derived family. In particular a single
+        caller-supplied null cannot reach the mixed profile at all, so the
+        false-hollow protection below cannot fire for it: a genuine mean measured
+        against a permutation the caller picked reads NOT_INFLUENCED, which is
+        exactly what deriving the family prevents. See
         :func:`mareforma.observe.scrambles.scramble_family`). Deriving the family
         is the default because a chosen null is a place to fish: the finding's
         own shape picks the family, the caller does not. An input shape with no
@@ -455,13 +575,23 @@ def perturbation_oracle(
         The number of findings this call is one of. When influence is computed
         across many findings, a fixed ``noise_multiplier`` lets the noisiest
         finding cross the bar by chance, so the family produces false INFLUENCED
-        calls at a rate that grows with the count. Passing the family size adds
-        ``sqrt(2 * ln(multiplicity))`` sigmas to the multiplier, the scale of the
-        largest spurious deviation expected across ``multiplicity`` standard
-        draws, so the control is applied BEFORE any influence number is computed.
-        ``1`` (the default) adds nothing: a single finding tried against a single
-        perturbation needs no correction. The number of perturbations multiplies
-        the family, since the effect is the max across them.
+        calls at a rate that grows with the count. The correction adds
+        ``sqrt(2 * ln(multiplicity * n_nulls))`` sigmas to the multiplier: the
+        number of nulls counts because the effect is the max across them, which
+        is itself a multiple comparison. That is the scale of the largest
+        spurious deviation expected across a family that size, not a quantile, so
+        it controls no stated error rate; it is a widening sized to the family,
+        and calling it a family-wise guarantee would overstate it. The control is
+        applied BEFORE any influence number is computed. ``1`` (the default) is
+        NOT a no-op on the zero-config path: the derived family has several nulls,
+        so the widening fires from the null count alone.
+
+        It has NO effect on a pipeline with no measurable noise, which is the
+        modal deterministic target: with no sigma to widen, the threshold is the
+        float-equality band and a multiplicity of 1 and of 10,000 give the same
+        answer. :attr:`OracleResult.multiplicity_applied` records whether the
+        widening actually reached the threshold, so a corpus report cannot claim a
+        multiplicity-controlled rate it never got.
     thin_sigma_guard:
         When True, widen the noise margin by a small-sample factor whenever the
         noise floor rests on fewer than ``_THIN_REPEATS`` repeats (a thin pstdev
@@ -496,11 +626,20 @@ def perturbation_oracle(
         or more times with no other output, so a caller measuring a slow target
         can surface progress. Defaults to None (no callback).
 
-    A run of the pipeline (or its reducer) that RAISES under a null does not abort
-    the measurement: the result is NOT_TESTED, naming the null and carrying the
-    traceback, with reason ``crashed-under-null`` for a pipeline crash and
-    ``unreducible-value`` for a value the reducer cannot reduce. A
-    ``KeyboardInterrupt`` still ends the run.
+    Nothing about the target aborts the measurement into an exception: a crash, a
+    value the reducer cannot reduce, a value that reduces to NaN or an infinity,
+    and a null that could not be built all return NOT_TESTED naming where it
+    happened and carrying the traceback, with reasons ``target-failed`` (the
+    unperturbed base run), ``crashed-under-null``, ``unreducible-value``,
+    ``non-finite-value`` and ``null-construction-failed``. A ``KeyboardInterrupt``
+    still ends the run.
+
+    Raises
+    ------
+    NoPerturbationsError
+        When ``perturb`` is an empty sequence. A caller handing the oracle nothing
+        to measure is a bug in the call, not a measurement outcome, so it raises
+        rather than becoming a NOT_TESTED row a report would then count.
 
     Returns
     -------
@@ -527,14 +666,24 @@ def perturbation_oracle(
     # Resolve the null family before running anything: when the family is derived
     # from the shape and the shape has none, the finding is NOT_TESTED and no run
     # happens at all.
-    resolved = _resolve_perturbations(base_input, perturb)
+    try:
+        resolved = _resolve_perturbations(base_input, perturb)
+    except NoPerturbationsError:
+        raise  # a caller bug, not a measurement outcome; see the class docstring
+    except Exception:  # noqa: BLE001 — building a null is not the target's fault
+        return OracleResult.not_tested(
+            NotTestedReason.NULL_CONSTRUCTION_FAILED,
+            detail="building the perturbed input raised",
+            traceback=_traceback.format_exc(),
+            reducer=reducer,
+        )
     if resolved is None:
         return OracleResult.not_tested(
             NotTestedReason.UNSUPPORTED_SHAPE,
             detail="no scramble family fits the finding's input shape",
             reducer=reducer,
         )
-    perturbed_inputs, null_names = resolved
+    perturbed_inputs, null_names, dropped_nulls, caller_chose = resolved
 
     # The pipeline runs ``repeats`` times on the base and on each null, so the
     # total is ``repeats * (1 + len(family))`` invocations of run_fn. A long
@@ -543,47 +692,70 @@ def perturbation_oracle(
     total_runs = repeats * (1 + len(perturbed_inputs))
     done = 0
 
-    def _measure(label: str, pin: Any) -> tuple:
+    def _measure(label: str, pin: Any, *, is_base: bool = False) -> tuple:
         # Run and reduce one configuration, guarding each step. A crash in the
-        # pipeline is expected input (a null can kill a fragile target), and a
-        # value the reducer cannot turn into a scalar is a different failure; both
-        # abort THIS measurement into a NOT_TESTED naming the null, never a raised
-        # exception up the call stack. KeyboardInterrupt / SystemExit are
-        # BaseException, so they are not caught and an abort the operator asked
-        # for still ends the run.
+        # pipeline is expected input (a null can kill a fragile target), a value
+        # the reducer cannot turn into a scalar is a different failure, and a
+        # value that reduces to NaN or an infinity is a third: there is no
+        # comparable number, and a non-finite value compares False against every
+        # threshold, so leaving it in would have it counted as "the finding held
+        # still". All three abort THIS measurement into a NOT_TESTED naming the
+        # configuration, never a raised exception up the call stack.
+        # KeyboardInterrupt / SystemExit are BaseException, so they are not caught
+        # and an abort the operator asked for still ends the run.
         nonlocal done
+        crashed = (
+            NotTestedReason.TARGET_FAILED if is_base
+            else NotTestedReason.CRASHED_UNDER_NULL
+        )
         vals = []
         for _ in range(repeats):
             try:
                 finding = run_fn(pin)
             except Exception:  # noqa: BLE001 — a target crash is expected input
-                raise _NullFailure(
-                    NotTestedReason.CRASHED_UNDER_NULL, label, _traceback.format_exc()
-                )
+                raise _NullFailure(crashed, label, _traceback.format_exc())
             try:
-                vals.append(m(finding))
+                value = m(finding)
             except Exception:  # noqa: BLE001 — the reducer could not reduce it
                 raise _NullFailure(
                     NotTestedReason.UNREDUCIBLE_VALUE, label, _traceback.format_exc()
                 )
+            if not math.isfinite(value):
+                raise _NullFailure(
+                    NotTestedReason.NON_FINITE_VALUE, label,
+                    f"the run reduced to {value!r}, which has no comparable "
+                    f"magnitude",
+                )
+            vals.append(value)
             done += 1
             if on_progress is not None:
                 on_progress(done, total_runs)
         return tuple(vals)
 
+    def _not_tested_from(failure: "_NullFailure") -> OracleResult:
+        # The base is not a null, so it is never described as one, whatever went
+        # wrong on it: a reader bucketing these must be able to tell a broken
+        # target from a target a null broke.
+        where = (
+            "on the unperturbed base run"
+            if failure.label == _BASE_LABEL
+            else f"under the {failure.label!r} null"
+        )
+        return OracleResult.not_tested(
+            failure.reason,
+            detail=where,
+            traceback=failure.tb,
+            reducer=reducer,
+        )
+
     try:
-        base_values = _measure("base", base_input)
+        base_values = _measure(_BASE_LABEL, base_input, is_base=True)
         perturbed_runs = tuple(
             _measure(name, pin)
             for name, pin in zip(null_names, perturbed_inputs)
         )
     except _NullFailure as failure:
-        return OracleResult.not_tested(
-            failure.reason,
-            detail=f"under the {failure.label!r} null",
-            traceback=failure.tb,
-            reducer=reducer,
-        )
+        return _not_tested_from(failure)
     perturbed_values = tuple(v for runs in perturbed_runs for v in runs)
 
     base_mean = statistics.fmean(base_values)
@@ -593,6 +765,21 @@ def perturbation_oracle(
     perturbation_effects = tuple(
         abs(statistics.fmean(runs) - base_mean) for runs in perturbed_runs
     )
+    # Every value that fed these was finite, but the arithmetic between them can
+    # still overflow (two magnitudes near the float ceiling). An infinite effect
+    # is not a large effect, it is the absence of a comparable number, and it must
+    # not reach the router, where it would be compared against a threshold and
+    # counted as a move.
+    for name, effect in zip(null_names, perturbation_effects):
+        if not math.isfinite(effect):
+            return OracleResult.not_tested(
+                NotTestedReason.NON_FINITE_VALUE,
+                detail=(
+                    f"the effect under the {name!r} null came out {effect!r}, "
+                    f"which has no comparable magnitude"
+                ),
+                reducer=reducer,
+            )
     effect_size = max(perturbation_effects)
 
     # Noise floor from run-to-run spread of the base configuration. With a
@@ -679,11 +866,16 @@ def perturbation_oracle(
     #             of at least one valid null (a mean under a permutation), so it
     #             is not called hollow. This is the false-hollow discipline: an
     #             invariant reads UNDECIDABLE, never NOT_INFLUENCED.
-    moved = [e > decision_threshold for e in perturbation_effects]
-    ambiguous = [
-        band_driven and (band_floor < e <= decision_threshold)
-        for e in perturbation_effects
-    ]
+    def _classify(effect: float) -> NullOutcome:
+        if effect > decision_threshold:
+            return NullOutcome.MOVED
+        if band_driven and band_floor < effect:
+            return NullOutcome.AMBIGUOUS
+        return NullOutcome.FLAT
+
+    null_outcomes = tuple(_classify(e) for e in perturbation_effects)
+    moved = [o is NullOutcome.MOVED for o in null_outcomes]
+    ambiguous = [o is NullOutcome.AMBIGUOUS for o in null_outcomes]
     if any(ambiguous):
         influence = OracleInfluence.UNDECIDABLE
         reason = undecidable_reason
@@ -730,6 +922,22 @@ def perturbation_oracle(
             "out; raise repeats to measure it)"
         )
 
+    # What the family could not cover belongs on the same line as the verdict it
+    # produced, not only in a blind-spot line a reader has to ask for. A verdict
+    # that says "under every null" while the input silently dropped half the
+    # family reads as broader than it is.
+    if dropped_nulls:
+        reason += (
+            f" (the input ruled out the {', '.join(dropped_nulls)} "
+            f"null{'s' if len(dropped_nulls) > 1 else ''}, which would have been "
+            f"identical to it, so the family here is narrower than the shape "
+            f"normally supplies)"
+        )
+    if caller_chose:
+        reason += (
+            " (nulls chosen by the caller, not derived from the finding's shape)"
+        )
+
     return OracleResult(
         influence=influence,
         effect_size=effect_size,
@@ -742,9 +950,13 @@ def perturbation_oracle(
         scramble_names=tuple(null_names),
         reducer=reducer,
         multiplicity=multiplicity,
+        multiplicity_applied=not zero_noise and family > 1,
         noise_is_thin=noise_is_thin,
         noise_measured=noise_measured,
         deterministic=zero_noise and noise_measured,
+        null_outcomes=null_outcomes,
+        dropped_nulls=tuple(dropped_nulls),
+        caller_chose_nulls=caller_chose,
     )
 
 
@@ -790,24 +1002,40 @@ def influence_sweep(
 
 
 def _resolve_perturbations(base_input, perturb):
-    """Return ``(perturbed_inputs, null_names)`` or ``None`` for no family.
+    """Return ``(inputs, names, dropped, caller_chose)`` or ``None`` for no family.
 
     ``None`` is returned only when ``perturb`` is derived from the shape and the
     shape has no scramble family, which the caller turns into a NOT_TESTED result.
     A caller-supplied ``perturb`` always resolves: names are generic, since the
-    caller, not the shape library, chose the nulls.
+    caller, not the shape library, chose the nulls, and ``caller_chose`` records
+    that so the verdict can say whose nulls it rests on. ``dropped`` names the
+    nulls the shape would have supplied that this input ruled out; a
+    caller-supplied family drops nothing, because the caller's list is the family.
+
+    Raises whatever building a perturbed input raises (a caller's ``perturb``
+    callable, a container rebuild); the caller guards that into a NOT_TESTED with
+    reason ``null-construction-failed``, so a null that cannot be built is never
+    charged to the target as a crash.
     """
     if perturb is None:
         family = scramble_family(base_input)
         if family is None:
             return None
-        return ([s.perturbed for s in family], [s.name for s in family])
+        return (
+            [s.perturbed for s in family],
+            [s.name for s in family],
+            tuple(family.dropped),
+            False,
+        )
     if callable(perturb):
-        return ([perturb(base_input)], ["perturbation"])
+        return ([perturb(base_input)], ["perturbation"], (), True)
     perturbed = list(perturb)
     if not perturbed:
-        raise ValueError("perturb must yield at least one perturbed input")
-    return (perturbed, [f"perturbation-{i}" for i in range(len(perturbed))])
+        raise NoPerturbationsError(
+            "perturb must yield at least one perturbed input"
+        )
+    names = [f"perturbation-{i}" for i in range(len(perturbed))]
+    return (perturbed, names, (), True)
 
 
 class Reconciliation(str, Enum):
