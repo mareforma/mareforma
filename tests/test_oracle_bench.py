@@ -131,3 +131,22 @@ def test_deterministic_target_still_catches_a_real_dependence():
     res = perturbation_oracle(_positional, _DATA, repeats=_REPEATS)
     assert res.influence is OracleInfluence.INFLUENCED
     assert res.deterministic is True
+
+
+# -- the cell where the data itself narrows the family ----------------------
+
+def test_a_constant_input_cannot_run_the_marginal_preserving_nulls():
+    # The bench's three classes all assume the input supports the whole family.
+    # Constant data does not: permuting or reversing it is the identity, so the
+    # two nulls that separate a genuine mean from a hollow finding cannot run.
+    # The verdict is still reported, and it must say what it never tried, or the
+    # same statistic reads INFLUENCED here and UNDECIDABLE over ordinary data
+    # with nothing on the row to explain the difference.
+    narrow = perturbation_oracle(_marginal, [5.0, 5.0, 5.0], repeats=_REPEATS)
+    assert narrow.scramble_names == ("zeroed", "constant")
+    assert narrow.dropped_nulls == ("permuted", "reversed")
+    assert "ruled out" in narrow.reason
+
+    full = perturbation_oracle(_marginal, _DATA, repeats=_REPEATS)
+    assert full.influence is OracleInfluence.UNDECIDABLE
+    assert full.dropped_nulls == ()
