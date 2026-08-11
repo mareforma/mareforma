@@ -154,7 +154,13 @@ class TestDiagnoseTargetContract:
             res = r.invoke(
                 cli, ["diagnose", "--cites", str(data), "--", str(spec)],
             )
-            assert res.exit_code == 2, res.output
+            # 3, not 2: `diagnose` and `audit` exit with the TARGET's own
+            # code, and 2 is one of the commonest codes a script exits with
+            # (argparse uses it for its own usage errors), so a gate could
+            # not tell a refused target from a target that refused its
+            # arguments. 3 is the package's usage-error code, the same one
+            # `verify` and `reexec` already use.
+            assert res.exit_code == 3, res.output
             assert "not a Python program" in res.output
             # The point of the guard: no verdict is printed for a target that
             # never ran, so neither the accusation nor the coverage claim ships.
@@ -210,7 +216,13 @@ class TestAuditTargetContract:
             )
             # click usage error: exit 2, before any target runs, so no receipt
             # and no grounding verdict for a target that never executed.
-            assert res.exit_code == 2, res.output
+            # 3, not 2: `diagnose` and `audit` exit with the TARGET's own
+            # code, and 2 is one of the commonest codes a script exits with
+            # (argparse uses it for its own usage errors), so a gate could
+            # not tell a refused target from a target that refused its
+            # arguments. 3 is the package's usage-error code, the same one
+            # `verify` and `reexec` already use.
+            assert res.exit_code == 3, res.output
             assert "not a Python program" in res.output
 
     def test_python_target_is_accepted(self, tmp_path: Path) -> None:
@@ -413,3 +425,98 @@ class TestUnsignedClaimIsUnverifiable:
             res = r.invoke(cli, ["verify", cid, "--json"])
             assert res.exit_code in (_VERIFY_FAIL, _VERIFY_UNVERIFIABLE), res.output
             assert json.loads(res.output)["verdict"] != "verified"
+
+
+class TestObserveUsageCodeIsApartFromTheTarget:
+    """`diagnose` and `audit` exit with the target's code, so usage cannot be 2.
+
+    argparse exits 2 for its own usage errors, which makes 2 one of the most
+    common codes a Python target exits with. While these commands used 2 for
+    their own usage errors, a CI gate reading 2 could not tell "you passed a
+    non-Python target" from "your script rejected its arguments".
+    """
+
+    def test_a_target_exiting_2_is_not_read_as_a_usage_error(self, tmp_path):
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            Path("argparse_like.py").write_text(
+                "import sys\nsys.exit(2)\n", encoding="utf-8",
+            )
+            res = r.invoke(cli, ["diagnose", "--", "argparse_like.py"])
+            assert res.exit_code == 2, res.output
+            # It ran: the report is there, which a usage error never prints.
+            assert "OBSERVATION REPORT" in res.output
+
+    def test_a_bad_flag_exits_3(self, tmp_path):
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            assert r.invoke(cli, ["diagnose", "--no-such-flag"]).exit_code == 3
+            assert r.invoke(cli, ["audit", "--no-such-flag"]).exit_code == 3
+
+    def test_a_version_suffixed_script_is_not_refused(self, tmp_path):
+        # Path("pipeline.v2").suffix is ".v2", which the non-Python guard read as
+        # a file type. A version marker names no format, and refusing it turned
+        # an ordinary Python script into a usage error.
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            Path("data.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+            for name in ("pipeline.v2", "model.v1.2"):
+                Path(name).write_text(
+                    "open('data.csv').read()\n", encoding="utf-8",
+                )
+                res = r.invoke(cli, ["diagnose", "--cites", "data.csv",
+                                     "--", name])
+                assert res.exit_code == 0, res.output
+                assert "GROUNDED" in res.output
+
+
+class TestNonPythonTargetDocstringMatchesCoverage:
+    """The rule's docstring promises what runs; the tests covered two of them.
+
+    ``_reject_non_python_target`` says it leaves untouched "any suffix in
+    _RUNNABLE_PYTHON_SUFFIXES, a directory or zipapp with a __main__, an
+    extensionless script, a `-m module`, or a bare interpreter flag". Only
+    ``.pyw`` and ``.zip`` were exercised, so the promise about the other three
+    rested on reading the code.
+    """
+
+    def test_an_extensionless_script_runs(self, tmp_path):
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            Path("data.csv").write_text("a\n1\n", encoding="utf-8")
+            Path("pipeline").write_text(
+                "open('data.csv').read()\n", encoding="utf-8",
+            )
+            res = r.invoke(cli, ["diagnose", "--cites", "data.csv",
+                                 "--", "pipeline"])
+            assert res.exit_code == 0, res.output
+            assert "GROUNDED" in res.output
+
+    def test_a_dash_m_module_is_not_refused(self, tmp_path):
+        # Whether the module IMPORTS is the target's business (runpy resolves it
+        # against sys.path, which a CliRunner does not extend to the temp cwd).
+        # What the guard promises is that it does not refuse the form, so the
+        # assertion is on the refusal, not on the run succeeding.
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            Path("data.csv").write_text("a\n1\n", encoding="utf-8")
+            Path("mod.py").write_text(
+                "open('data.csv').read()\n", encoding="utf-8",
+            )
+            res = r.invoke(cli, ["diagnose", "--cites", "data.csv",
+                                 "--", "-m", "mod"])
+            assert "not a Python program" not in res.output
+            assert res.exit_code != 3, res.output
+
+    def test_a_directory_with_a_dunder_main_runs(self, tmp_path):
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            Path("data.csv").write_text("a\n1\n", encoding="utf-8")
+            pkg = Path("app")
+            pkg.mkdir()
+            (pkg / "__main__.py").write_text(
+                "open('data.csv').read()\n", encoding="utf-8",
+            )
+            res = r.invoke(cli, ["diagnose", "--cites", "data.csv",
+                                 "--", "app"])
+            assert res.exit_code == 0, res.output

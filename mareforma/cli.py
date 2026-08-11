@@ -487,7 +487,10 @@ def status_cmd(as_json: bool) -> None:
         f"{report.claims_contradicted} contradicted"
     )
 
-    if report.support_level_breakdown:
+    # Read the computed flag rather than re-deriving the same predicate here.
+    # It was computed and no surface read it, which is how the two copies of one
+    # rule start to disagree about when the disclosure applies.
+    if report.support_level_retired:
         click.echo("  Support level breakdown:")
         for level in ("ESTABLISHED", "REPLICATED", "PRELIMINARY"):
             count = report.support_level_breakdown.get(level, 0)
@@ -840,6 +843,41 @@ class _VerifyCommand(click.Command):
     def parse_args(self, ctx, args):
         try:
             return super().parse_args(ctx, args)
+        except click.UsageError as exc:
+            exc.exit_code = _VERIFY_USAGE
+            raise
+
+
+class _ObserveCommand(click.Command):
+    """A command whose usage errors exit 3, apart from the target's own codes.
+
+    ``diagnose`` and ``audit`` run a target in-process and exit with the
+    TARGET's exit code, which is the contract their docstrings state. Click
+    exits a usage error with 2, and 2 is one of the most common codes a script
+    exits with (argparse uses it for exactly the same thing), so a gate reading
+    2 could not tell "you passed a non-Python target" from "your script rejected
+    its own arguments". ``verify`` and ``reexec`` already use ``_VerifyCommand``
+    for this reason; these two make the same promise about what they ran and
+    need the same separation.
+
+    3 is not collision-proof, since a target may exit with any code. It is the
+    package's existing usage-error code, and it moves the ambiguity off the most
+    common script exit code onto one that is rare.
+    """
+
+    def parse_args(self, ctx, args):
+        try:
+            return super().parse_args(ctx, args)
+        except click.UsageError as exc:
+            exc.exit_code = _VERIFY_USAGE
+            raise
+
+    def invoke(self, ctx):
+        # A UsageError raised from the command BODY (the non-Python target
+        # refusal is raised there, after parsing) has to be marked too, or the
+        # code the class exists to set is only set for flag errors.
+        try:
+            return super().invoke(ctx)
         except click.UsageError as exc:
             exc.exit_code = _VERIFY_USAGE
             raise
@@ -1371,7 +1409,8 @@ def map_cmd(claim_id: str, as_html: bool, as_json: bool,
     _echo_trust_map(tmap, redact_home=redact_home)
 
 
-@cli.command("diagnose", context_settings={"ignore_unknown_options": True})
+@cli.command("diagnose", cls=_ObserveCommand,
+             context_settings={"ignore_unknown_options": True})
 @click.option("--cites", "cites", multiple=True, metavar="SRC",
               help="A source the run should ground on (path/URL/sha256:). "
                    "Repeatable. Without it, diagnose reports observation only "
@@ -1429,6 +1468,21 @@ def diagnose_cmd(cites: tuple[str, ...], as_json: bool, redact_home: bool,
 _RUNNABLE_PYTHON_SUFFIXES = (".py", ".pyw", ".pyz", ".pyc", ".zip")
 
 
+def _looks_like_a_version_marker(suffix: str) -> bool:
+    """Whether *suffix* is a version tag rather than a file type.
+
+    ``.2`` (from ``model.v1.2``) and ``.v2`` (from ``pipeline.v2``) are what
+    ``Path.suffix`` returns for a versioned script name. Neither names a format,
+    so neither is evidence that the target is not Python.
+    """
+    if not suffix:
+        return False
+    body = suffix[1:].lower()
+    if body.startswith("v"):
+        body = body[1:]
+    return body.isdigit()
+
+
 def _reject_non_python_target(command: tuple[str, ...], verb: str) -> None:
     """Refuse an observed target that is not a Python program.
 
@@ -1455,6 +1509,12 @@ def _reject_non_python_target(command: tuple[str, ...], verb: str) -> None:
     if not argv or argv[0].startswith("-"):
         return
     suffix = Path(argv[0]).suffix
+    if _looks_like_a_version_marker(suffix):
+        # `pipeline.v2` and `model.v1.2` are ordinary Python scripts carrying a
+        # version in the name, and Path.suffix reports ".v2" / ".2" for them.
+        # Refusing those is a false refusal: the rule exists to catch a data file
+        # handed to the wrong flag, and a version marker names no file type.
+        return
     if suffix and suffix.lower() not in _RUNNABLE_PYTHON_SUFFIXES:
         raise click.UsageError(
             f"{verb} target {argv[0]!r} is not a Python program: {verb} runs the "
@@ -1464,7 +1524,8 @@ def _reject_non_python_target(command: tuple[str, ...], verb: str) -> None:
         )
 
 
-@cli.command("audit", context_settings={"ignore_unknown_options": True})
+@cli.command("audit", cls=_ObserveCommand,
+             context_settings={"ignore_unknown_options": True})
 @click.option("--findings", "findings_path", default=None, metavar="FILE",
               help="JSON object mapping finding_id to its cited source(s). "
                    "Required unless --corpus is given.")
@@ -2038,7 +2099,15 @@ def claim_show(claim_id, as_json):
     click.echo(f"  id             : {c['claim_id']}")
     click.echo(f"  text           : {c['text']}")
     click.echo(f"  classification : {c.get('classification', 'INFERRED')}")
-    click.echo(f"  support_level  : {c.get('support_level', 'PRELIMINARY')}")
+    # The support level never prints alone on a row whose signature no longer
+    # re-verifies. `claim list` already marks that row UNVERIFIED, and `claim
+    # show` is the command an auditor runs on the claim they suspect, so it is
+    # the last place that should print REPLICATED with nothing beside it.
+    level = c.get("support_level", "PRELIMINARY")
+    if not c.get("verified", True):
+        level += "  UNVERIFIED (the signature no longer re-verifies, so this "
+        level += "level is not backed; run `mareforma verify` on it)"
+    click.echo(f"  support_level  : {level}")
     click.echo(f"  generated_by   : {c.get('generated_by', 'agent')}")
     click.echo(f"  status         : {c['status']}")
     if c.get("source_name"):

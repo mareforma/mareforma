@@ -387,3 +387,87 @@ class TestSignature:
         must not ask for a project root it cannot consult.
         """
         assert list(inspect.signature(compute_health).parameters) == ["conn"]
+
+
+def test_a_policy_read_that_fails_is_not_reported_as_no_policy_stall(tmp_path):
+    """A status command that cannot read the policy must say so, not answer no.
+
+    The policy read caught ``sqlite3.DatabaseError``, the base class of nearly
+    every sqlite failure including corruption, and set ``policy_unverified =
+    False``, which prints as "no policy stall". Its three sibling reads set
+    ``traffic_light = 'error'`` on the same exception tuple, so one unreadable
+    graph produced a green-ish status beside three red ones.
+    """
+    import sqlite3
+
+    import mareforma
+    from mareforma import health as health_mod
+
+    with mareforma.open(tmp_path) as g:
+        conn = g._conn
+
+        def boom(_conn):
+            raise sqlite3.DatabaseError("database disk image is malformed")
+
+        import mareforma.db as db_mod
+        original = db_mod.project_policy_unverified
+        db_mod.project_policy_unverified = boom
+        try:
+            report = health_mod.compute_health(conn)
+        finally:
+            db_mod.project_policy_unverified = original
+
+    assert report.traffic_light == "error"
+    assert "could not be read" in report.rationale
+    assert report.policy_unverified is False  # unknown, and the light says so
+
+
+def test_claim_show_never_prints_a_support_level_without_its_verified_state():
+    """`claim show` is the command an auditor runs on the claim they suspect.
+
+    `claim list` marks a row whose signature no longer re-verifies UNVERIFIED;
+    `claim show` printed `support_level: REPLICATED` and never mentioned it, so
+    the more detailed view said less about the thing that matters.
+    """
+    import inspect
+
+    from mareforma import cli as cli_module
+
+    source = inspect.getsource(cli_module.claim_show.callback)
+    assert "verified" in source, (
+        "claim show does not consult the row's verified state"
+    )
+    # And the two surfaces agree on the word they use for it.
+    assert "UNVERIFIED" in source
+    assert "UNVERIFIED" in inspect.getsource(cli_module.claim_list.callback)
+
+
+def test_every_deprecation_warning_goes_through_the_one_emitter():
+    """`_deprecation._emit` says it is "the one place the category and the warn
+    call live". Four of six emitters bypassed it, which is how a wrong
+    stacklevel shipped: a DeprecationWarning attributed to a mareforma file is
+    hidden by Python's default filter from the person whose code needs changing.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(cli_source_root())
+    offenders = []
+    for path in root.rglob("*.py"):
+        if path.name == "_deprecation.py":
+            continue
+        text = path.read_text(encoding="utf-8")
+        for match in re.finditer(r"warn\(\s*[^)]*DeprecationWarning", text):
+            line = text[: match.start()].count("\n") + 1
+            offenders.append(f"{path.name}:{line}")
+    assert not offenders, (
+        f"these sites emit a DeprecationWarning directly instead of through "
+        f"_deprecation._emit: {offenders}"
+    )
+
+
+def cli_source_root():
+    import mareforma
+    import pathlib
+
+    return pathlib.Path(mareforma.__file__).parent

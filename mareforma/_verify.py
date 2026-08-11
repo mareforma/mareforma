@@ -46,10 +46,6 @@ class ClaimVerdict:
     reason: str
     trust_map: "TrustMap | None"
 
-    @property
-    def ok(self) -> bool:
-        return self.verdict == VERIFIED
-
 
 def classify_claim_verdict(
     conn: "sqlite3.Connection", claim: dict, target: str,
