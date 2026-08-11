@@ -339,3 +339,77 @@ class TestPromotionFlagArm:
             "another arm fired too, so this no longer isolates the flag arm: "
             + result.reason
         )
+
+
+class TestUnsignedClaimIsUnverifiable:
+    """A claim carrying no signature cannot be verified, and must not say it was.
+
+    This is reachable with no database access and no attacker: open a project,
+    assert a claim, never run ``bootstrap``. That is the path the quickstart
+    teaches ("No project setup. No init command.") and the path
+    examples/06_ci_verify gates CI on. It exited 0 and printed "verified".
+
+    The claim never reached a check. The read-flag arm needs a bundle,
+    ``verify_claim_signatures`` answers (True, "") when there is nothing to
+    verify, and the enrolled-signer arm is gated on the bundle naming a keyid,
+    so ``classify_claim_verdict`` fell through to VERIFIED. ``build_trust_map``
+    had the right answer the whole time and rendered attributability as
+    "unsigned"; the verdict simply never read its own map.
+
+    UNVERIFIABLE, not TAMPERED: nothing was checked, so nothing was caught.
+    """
+
+    def test_an_unsigned_claim_is_unverifiable_not_verified(
+        self, tmp_path: Path,
+    ) -> None:
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            # No _bootstrap_default_key() on purpose: this is the documented
+            # default path, where no signing key exists.
+            with mareforma.open(".") as g:
+                cid = g.assert_claim("a finding", classification="ANALYTICAL")
+                assert g.get_claim(cid)["signature_bundle"] is None
+            res = r.invoke(cli, ["verify", cid, "--json"])
+            assert res.exit_code == _VERIFY_UNVERIFIABLE, res.output
+            payload = json.loads(res.output)
+            assert payload["verdict"] == "unverifiable"
+            assert "carries no signature" in payload["reason"]
+
+    def test_a_signed_claim_still_verifies(self, tmp_path: Path) -> None:
+        """REGRESSION GUARD. The fix must not demote honest claims.
+
+        tests/test_cli_trust.py:701 pins exit 0 for a signed claim, but it does
+        so incidentally while testing that verify leaves the validators table
+        empty. That is accidental pinning, not a contract. This is the contract.
+        """
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            with mareforma.open(".") as g:
+                cid = g.assert_claim("a finding", classification="ANALYTICAL")
+            res = r.invoke(cli, ["verify", cid, "--json"])
+            assert res.exit_code == _VERIFY_OK, res.output
+            assert json.loads(res.output)["verdict"] == "verified"
+
+    def test_tampered_still_outranks_unsigned(self, tmp_path: Path) -> None:
+        """Precedence: a definite NO beats missing material.
+
+        An unsigned row whose support_level was forged carries both an
+        unchecked reason and a problem. The problem must win, so a gate that
+        only fails on 1 still catches it.
+        """
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            _bootstrap_default_key()
+            with mareforma.open(".", load_key=False) as g:
+                cid = g.assert_claim("unsigned", classification="ANALYTICAL")
+            conn = open_db(Path("."))
+            conn.execute(
+                "UPDATE claims SET support_level = 'REPLICATED' WHERE claim_id = ?",
+                (cid,),
+            )
+            conn.commit()
+            conn.close()
+            res = r.invoke(cli, ["verify", cid, "--json"])
+            assert res.exit_code in (_VERIFY_FAIL, _VERIFY_UNVERIFIABLE), res.output
+            assert json.loads(res.output)["verdict"] != "verified"

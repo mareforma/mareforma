@@ -74,6 +74,29 @@ def classify_claim_verdict(
     # checked at all. A CI gate keys on the difference.
     problems: list[str] = []
     unchecked: list[str] = []
+    # A claim carrying no signature at all reaches none of the checks below:
+    # the read-flag arm needs a bundle, verify_claim_signatures answers (True,
+    # "") when there is nothing to verify, and the enrolled-signer arm is gated
+    # on the bundle naming a keyid. So the function fell through to VERIFIED and
+    # `mareforma verify` exited 0 over a claim nothing had authenticated.
+    #
+    # Reachable with no database access and no attacker: mareforma.open(root)
+    # then assert_claim() on a project where bootstrap was never run produces an
+    # unsigned claim, and that is the path the quickstart teaches and the path
+    # examples/06_ci_verify gates CI on. build_trust_map already got this right
+    # and renders attributability as "unsigned"; the verdict simply never read
+    # its own map.
+    #
+    # UNVERIFIABLE rather than TAMPERED: nothing was checked, so nothing was
+    # caught. That is the same reading the unenrolled-signer arm below takes,
+    # and it keeps the 1-vs-2 split meaning what the module docstring says it
+    # means.
+    if not claim.get("signature_bundle"):
+        unchecked.append(
+            "claim carries no signature, so nothing about it could be "
+            "authenticated. Sign the claim (see `mareforma bootstrap`) to "
+            "reach a real verdict."
+        )
     # Signature re-verification. Two complementary checks:
     #  (a) the tier-gated read flag (ESTABLISHED validation envelope /
     #      REPLICATED participant bundle), and

@@ -57,8 +57,8 @@ code directly and use `--json` for the details:
             echo "::error::claim tampered or grounding binding violated"
             exit 1
           elif [ "$code" = "2" ]; then
-            echo "::warning::claim unverifiable, nothing to check it against"
-            exit 0
+            echo "::error::claim unverifiable, nothing checked it"
+            exit 1
           elif [ "$code" != "0" ]; then
             echo "::error::mareforma verify usage error (exit $code)"
             exit 1
@@ -85,9 +85,11 @@ zero bytes.
 
 Exit 2 says the claim could not be checked, not that it failed, so what your gate
 does with it is a policy choice rather than something the exit code decides. The
-recipe above warns and passes, which is right while a project still expects
-claims from signers it has not enrolled. Once every signer on a project is
-supposed to be enrolled, an unverifiable claim is a broken expectation and the
-gate should fail on 2 as well, because warning on it lets a claim through that
-nothing checked. Either way, enroll the signer's key so its claims can reach a
-real verdict.
+recipe above fails on it, which is the right default: a claim nothing checked is
+not a claim that passed. The commonest cause is an unsigned claim, which is what
+you get on a project where `mareforma bootstrap` was never run, so a gate that
+warns and passes on 2 is a gate that never fires. Run `bootstrap`, or enroll the
+signer's key, so the claims your pipeline writes can reach a real verdict.
+
+Earlier releases of this example warned and passed on exit 2. If you copied that
+workflow, change the `exit 0` on the exit-2 branch to `exit 1`.

@@ -700,7 +700,13 @@ class TestReadCommandsDoNotEnroll:
         with r.isolated_filesystem(temp_dir=tmp_path):
             cid = self._unsigned_project(tmp_path)
             res = r.invoke(cli, ["verify", cid])
-            assert res.exit_code == 0, res.output
+            # Exit 2, not 0: the project is unsigned, so nothing about the
+            # claim could be authenticated. This test is about the validators
+            # table staying empty, and it used to assert exit 0 only as
+            # scaffolding, which accidentally pinned the defect where verify
+            # blessed unsigned claims. The contract lives in
+            # tests/test_exit_code_corpus.py::TestUnsignedClaimIsUnverifiable.
+            assert res.exit_code == 2, res.output
             assert _count_validators() == 0
 
     def test_map_leaves_validators_empty(self, tmp_path: Path) -> None:
