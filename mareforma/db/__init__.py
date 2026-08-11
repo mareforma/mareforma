@@ -205,6 +205,8 @@ from .core import (
     search_claims,
     _read_scan_ceiling,
     _require_non_negative_limit,
+    _count_unverified_held_back,
+    _disclose_unverified,
     _enrolled_generator_condition,
     _scan_ceiling_error,
     _read_path_row,

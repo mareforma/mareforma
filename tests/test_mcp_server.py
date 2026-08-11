@@ -606,3 +606,128 @@ class TestEvidenceCeiling:
 
         with pytest.raises(_TooMuchEvidence, match="could not measure"):
             _check_evidence_ceiling(_Broken(), 1000, claim_id="x")
+
+
+# ---------------------------------------------------------------------------
+# An empty answer is never passed off as an empty record
+# ---------------------------------------------------------------------------
+
+def _unenrolled_project(tmp_path: Path) -> tuple[Path, str]:
+    """A project whose claims were all written by a key nobody enrolled."""
+    from tests._helpers import _bootstrap_key
+    from tests.test_read_path_paging import _two_signers
+
+    signer, _ = _two_signers(tmp_path)
+    root = _bootstrap_key(tmp_path, "root.key")
+    with mareforma.open(tmp_path, key_path=root) as g:
+        ids = [
+            g.assert_claim(f"finding {i} by an unenrolled key", generated_by="x",
+                           signer=signer)
+            for i in range(3)
+        ]
+    return root, ids[0]
+
+
+class TestFalseEmptyAnswer:
+    """The read filter must not hand an agent an empty list for a full record.
+
+    ``query_claims`` and ``search_claims`` serve verified rows, so a project
+    written under a key nobody enrolled answers with nothing at all while
+    ``get_claim`` returns the claim. An agent reads ``count: 0`` as "this record
+    is empty", which is a false answer about the record. It is the same defect
+    class the module already refuses for truncation, its own comment reading "a
+    short page that does not say it was capped reads as 'that is all there is'".
+    """
+
+    def test_query_says_how_many_rows_the_filter_held_back(self, tmp_path):
+        root, claim_id = _unenrolled_project(tmp_path)
+        with mareforma.open(tmp_path, key_path=root) as g:
+            tools = ReadVerifyTools(g)
+            result = tools.query_claims()
+            assert result["count"] == 0
+            assert result["unverified_excluded"] == 3
+            # And the rows really are reachable, which is what makes the empty
+            # list a false answer rather than a true one.
+            assert tools.get_claim(claim_id)["found"] is True
+
+    def test_search_discloses_the_same_way(self, tmp_path):
+        root, _ = _unenrolled_project(tmp_path)
+        with mareforma.open(tmp_path, key_path=root) as g:
+            result = ReadVerifyTools(g).search_claims("finding")
+            assert result["count"] == 0
+            assert result["unverified_excluded"] == 3
+
+    def test_an_ordinary_read_carries_no_exclusion_noise(self, tmp_path):
+        # The disclosure must be silent when there is nothing to disclose, or
+        # every healthy answer grows a field that means nothing.
+        _seed_project(tmp_path)
+        with open_graph(tmp_path) as g:
+            result = ReadVerifyTools(g).query_claims()
+            assert result["count"] >= 1
+            assert "unverified_excluded" not in result
+            assert "verify_excluded" not in result
+
+    def test_the_count_is_per_call_not_cumulative(self, tmp_path):
+        # The graph counts for the session; a server holds one graph for its
+        # lifetime, so a cumulative number would report every exclusion since
+        # startup on every call.
+        root, _ = _unenrolled_project(tmp_path)
+        with mareforma.open(tmp_path, key_path=root) as g:
+            tools = ReadVerifyTools(g)
+            first = tools.query_claims()["unverified_excluded"]
+            second = tools.query_claims()["unverified_excluded"]
+            assert first == second == 3
+            assert g.read_unverified_exclusions == 6
+
+
+def test_the_generator_field_does_not_claim_the_authority_it_lacks(tmp_path):
+    # The stored field is a membership test against the validators table, which
+    # the library documents as a cheap pre-filter, while verify_claim walks the
+    # enrollment chain and refuses exactly that state as a forged enrolment. An
+    # agent that queries first was told a forgery had an enrolled generator.
+    _seed_project(tmp_path)
+    with open_graph(tmp_path) as g:
+        row = ReadVerifyTools(g).query_claims()["claims"][0]
+    assert "generator_enrolled" not in row
+    assert "generator_keyid_in_validators" in row
+
+
+# ---------------------------------------------------------------------------
+# A long-lived server does not grow without bound
+# ---------------------------------------------------------------------------
+
+def test_repeated_reads_do_not_write_one_health_line_per_poll(tmp_path):
+    # Both are fine for a CLI process and wrong for `mcp serve`, which holds one
+    # graph for the process lifetime. A dropped row is a STATE: the filter finds
+    # it again on every read, so an unrated append grows health.jsonl in
+    # proportion to polling. Rate-limited at 1, 2, 4, 8 ... the log still records
+    # a change of scale and stops recording the unchanged one.
+    root, _ = _unenrolled_project(tmp_path)
+    health = tmp_path / ".mareforma" / "health.jsonl"
+    with mareforma.open(tmp_path, key_path=root) as g:
+        tools = ReadVerifyTools(g)
+        for _ in range(30):
+            tools.query_claims()
+    lines = [
+        line for line in health.read_text(encoding="utf-8").splitlines()
+        if "read_unverified_excluded" in line
+    ]
+    # 30 polls of 3 held-back rows is 90 occurrences: powers of two up to 90 is
+    # seven lines, not ninety.
+    assert 0 < len(lines) <= 10, f"{len(lines)} health lines for 30 reads"
+
+
+def test_the_skip_disclosure_dedupe_set_is_bounded(tmp_path):
+    # An unbounded set of every (op, content_id, line_id) ever seen grows with
+    # the graph and is never released on a server that never exits.
+    from mareforma.trust._store import SkipDisclosure
+
+    disclose = SkipDisclosure(tmp_path)
+    for i in range(SkipDisclosure._MAX_SEEN + 500):
+        disclose.record("op", f"content-{i}", f"line-{i}")
+    assert len(disclose._seen) == SkipDisclosure._MAX_SEEN
+    # The recent working set still dedupes, which is what the set is for.
+    before = len(disclose._seen)
+    disclose.record("op", "content-9999", "line-9999")
+    disclose.record("op", "content-9999", "line-9999")
+    assert len(disclose._seen) == before

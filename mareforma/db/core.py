@@ -5727,6 +5727,74 @@ def _enrolled_generator_condition(prefix: str = "") -> str:
     )
 
 
+def _count_unverified_held_back(
+    conn: sqlite3.Connection,
+    from_sql: str,
+    where: str,
+    params: list,
+    *,
+    ceiling: int,
+    prefix: str = "",
+) -> int:
+    """How many rows the enrolled-generator filter held back from this read.
+
+    The filter runs in SQL (see :func:`_enrolled_generator_condition`) precisely
+    so the drained rows never enter the scan, which is what makes LIMIT count
+    survivors. The cost of that is that nothing downstream can see what was
+    dropped, and a read whose every match was dropped returns an empty list
+    indistinguishable from an empty record.
+
+    So the count is taken deliberately, with the same WHERE the read used and the
+    enrolled-generator condition NEGATED, bounded by the same scan ceiling so a
+    disclosure can never cost more than the read it describes. Returning a
+    ceiling-capped number is the honest shape: the caller learns rows were held
+    back, and a saturated count reads as "at least this many".
+
+    Called only when the read came back short, which is the only case where the
+    answer could be mistaken for the whole record.
+    """
+    negated = f"NOT {_enrolled_generator_condition(prefix)}"
+    clause = f"{where} AND {negated}" if where else f"WHERE {negated}"
+    sql = f"SELECT COUNT(*) FROM (SELECT 1 FROM {from_sql} {clause} LIMIT ?)"
+    try:
+        row = conn.execute(sql, list(params) + [ceiling]).fetchone()
+    except sqlite3.OperationalError:
+        # A disclosure must never be the thing that fails a read.
+        return 0
+    return int(row[0]) if row else 0
+
+
+def _disclose_unverified(
+    conn: sqlite3.Connection,
+    from_sql: str,
+    where: str,
+    params: list,
+    *,
+    ceiling: int,
+    limit: int,
+    served: int,
+    include_unverified: bool,
+    on_unverified_excluded: "Callable[[int], None] | None",
+    prefix: str = "",
+) -> None:
+    """Report what the enrolled-generator filter held back, when it could matter.
+
+    Skipped entirely when the caller asked for the unverified rows (nothing was
+    held back), when no callback wants the number, and when the page came back
+    full: a full page cannot be mistaken for the whole record, because
+    ``has_more`` already tells the caller to ask again. That leaves the short
+    page, which is the case where an empty or truncated answer reads as "that is
+    all there is" about a record that is not.
+    """
+    if include_unverified or on_unverified_excluded is None or served >= limit:
+        return
+    held = _count_unverified_held_back(
+        conn, from_sql, where, params, ceiling=ceiling, prefix=prefix,
+    )
+    if held:
+        on_unverified_excluded(held)
+
+
 def _scan_ceiling_error(surface: str, ceiling: int, found: int, limit: int):
     """The ScanCeilingReached a read surface raises when its scan ran out."""
     return ScanCeilingReached(
@@ -5808,6 +5876,13 @@ def _project_verified_rows(
     only trace of a tamper on an enumerating surface is a row that is not
     there, indistinguishable from a claim that never existed.
 
+    The OTHER exclusion class does not pass through here at all: a PRELIMINARY
+    row whose generator keyid is not in the validators table is filtered in SQL
+    (see :func:`_enrolled_generator_condition`) so LIMIT counts survivors, which
+    means it never reaches this loop to be counted. The ``return None`` branch of
+    :func:`_read_path_row` stays as the belt-and-braces check the SQL mirrors.
+    Its disclosure is taken separately by :func:`_disclose_unverified`.
+
     Returns ``(survivors, scanned)``. ``scanned`` is how many rows were pulled,
     which the caller compares against the scan ceiling to tell "that is all
     there is" from "the scan ran out before the survivors did".
@@ -5862,6 +5937,7 @@ def query_claims(
     include_invalidated: bool = False,
     refutation_filter: str | None = None,
     on_verify_excluded: Callable[[int], None] | None = None,
+    on_unverified_excluded: Callable[[int], None] | None = None,
 ) -> list[dict]:
     """Return claims ordered by support_level (desc) then recency (desc).
 
@@ -5993,6 +6069,12 @@ def query_claims(
             if "t_invalid IS NULL" in conditions:
                 conditions.remove("t_invalid IS NULL")
 
+    # Snapshot the conditions BEFORE the enrolled-generator filter is added. The
+    # disclosure counts what that filter held back, which means it has to ask the
+    # question this read did not: keeping the filter in and negating it asks for
+    # rows that are both enrolled and not, and the answer is always none.
+    disclose_where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    disclose_params = list(params)
     if not include_unverified:
         conditions.append(_enrolled_generator_condition())
 
@@ -6024,6 +6106,12 @@ def query_claims(
     )
     if scanned >= ceiling and len(results) < limit:
         raise _scan_ceiling_error("query", ceiling, len(results), limit)
+    _disclose_unverified(
+        conn, "claims", disclose_where, disclose_params,
+        ceiling=ceiling, limit=limit,
+        served=len(results), include_unverified=include_unverified,
+        on_unverified_excluded=on_unverified_excluded,
+    )
     return results
 
 
@@ -6107,6 +6195,7 @@ def search_claims(
     include_unverified: bool = False,
     include_invalidated: bool = False,
     on_verify_excluded: Callable[[int], None] | None = None,
+    on_unverified_excluded: Callable[[int], None] | None = None,
 ) -> list[dict]:
     """FTS5-ranked search over claim text.
 
@@ -6149,6 +6238,9 @@ def search_claims(
     if classification is not None:
         conditions.append("c.classification = ?")
         params.append(classification)
+    # As in query_claims: the disclosure must ask without the filter it reports on.
+    disclose_where = "WHERE " + " AND ".join(conditions)
+    disclose_params = list(params)
     if not include_unverified:
         conditions.append(_enrolled_generator_condition("c."))
 
@@ -6185,6 +6277,13 @@ def search_claims(
     )
     if scanned >= ceiling and len(results) < limit:
         raise _scan_ceiling_error("search", ceiling, len(results), limit)
+    _disclose_unverified(
+        conn,
+        "claims_fts f JOIN claims c ON c.claim_id = f.claim_id",
+        disclose_where, disclose_params, ceiling=ceiling, limit=limit,
+        served=len(results), include_unverified=include_unverified,
+        on_unverified_excluded=on_unverified_excluded, prefix="c.",
+    )
     return results
 
 
