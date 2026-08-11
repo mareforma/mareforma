@@ -280,6 +280,9 @@ class EpistemicGraph:
         # tampered graph reads as a graph with fewer claims.
         self._read_verify_exclusions = 0
         self._read_unverified_exclusions = 0
+        # Whether any disclosure count stopped at its scan ceiling, so a reader
+        # knows the total is a floor rather than an exact number.
+        self._read_unverified_saturated = False
         # Per-kind occurrence counts behind the health-log rate limit. Not the
         # row totals: those are the numbers a reader wants, these only decide
         # when a line is worth writing.
@@ -967,7 +970,7 @@ class EpistemicGraph:
             n=n, total=self._read_verify_exclusions,
         )
 
-    def _record_unverified_exclusions(self, n: int) -> None:
+    def _record_unverified_exclusions(self, n: int, saturated: bool = False) -> None:
         """Record that a read held back *n* rows behind the unverified filter.
 
         A PRELIMINARY claim whose generator key is not enrolled is dropped from
@@ -980,6 +983,8 @@ class EpistemicGraph:
         every read re-encounters, not a new event each time.
         """
         self._read_unverified_exclusions += n
+        if saturated:
+            self._read_unverified_saturated = True
         if not self._health_append_due(
                 "read_unverified_excluded", self._read_unverified_exclusions):
             return

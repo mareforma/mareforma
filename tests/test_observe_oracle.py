@@ -982,3 +982,47 @@ def test_multiplicity_is_not_recorded_as_applied_when_a_domain_floor_binds():
     )
     assert res.multiplicity == 10
     assert res.multiplicity_applied is False
+
+
+def test_a_move_below_a_domain_floor_is_not_called_held_invariant():
+    # With a domain effect_threshold set, band_driven goes False and AMBIGUOUS
+    # became unreachable, so every sub-threshold effect was classified FLAT no
+    # matter how large. A finding that moved by a million under the constant
+    # null was reported as having held invariant under it.
+    seq = iter([0.0, 1.0, 2.0, 5.0, 6.0, 7.0])
+    res = perturbation_oracle(
+        lambda x: next(seq), 0.0, lambda x: x + 1, repeats=3,
+        effect_threshold=10.0, noise_multiplier=3.0,
+    )
+    # The documented verdict is unchanged: below a domain floor is
+    # domain-insignificant, not ambiguous.
+    assert res.influence is OracleInfluence.NOT_INFLUENCED
+    assert res.flat_nulls == ()
+    assert res.below_domain_floor_nulls == ("perturbation",)
+    assert "less than the domain floor" in res.blind_spot_line()
+
+
+def test_the_hollow_verdict_states_that_it_cannot_see_a_size_dependence():
+    # Every derived null rewrites values and keeps the cardinality and keys, so
+    # an honest finding that depends on HOW MUCH data there is holds still under
+    # the whole family. The verdict is what it is; it must say what it cannot see.
+    res = perturbation_oracle(lambda xs: float(len(xs)), [1.0, 2.0, 3.0, 4.0],
+                              repeats=3)
+    assert res.influence is OracleInfluence.NOT_INFLUENCED
+    assert "how much data there is" in res.blind_spot_line()
+    # And a verdict that is not the accusation does not carry the caveat.
+    moved = perturbation_oracle(lambda xs: xs[0] * 2, [1.0, 2.0, 3.0, 4.0],
+                                repeats=3)
+    assert "how much data there is" not in moved.blind_spot_line()
+
+
+def test_the_reducer_declaration_carries_the_parameter_that_aims_it():
+    # A prose answer states several numbers, and WHICH one the oracle reads
+    # changes the verdict. A declaration naming only the reducer says the
+    # reduction is auditable while omitting the setting that decides it.
+    from mareforma.observe.oracle import numeric_extraction_reducer
+
+    assert numeric_extraction_reducer(index=1).declaration()["parameters"] == {
+        "index": 1
+    }
+    assert numeric_extraction_reducer().declaration()["parameters"] == {"index": 0}

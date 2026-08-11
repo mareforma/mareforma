@@ -47,7 +47,7 @@ from typing import BinaryIO, Callable, Iterator
 
 import click
 
-from mareforma.diagnose import _exit_code_of, _run_target
+from mareforma.diagnose import TargetUsageError, _exit_code_of, _run_target
 
 # The receipts file and per-run record the auditor emits. The run record is
 # written LAST, as a DSSE envelope under the auditor's key: the resume key is a
@@ -326,8 +326,12 @@ def run_audit(
     try:
         try:
             _run_target(list(command))
-        except click.UsageError:
-            # Bad invocation of audit itself, re-raise so click reports it.
+        except TargetUsageError:
+            # OUR usage error about the target's name, raised before the target
+            # ran. A plain click.UsageError from here is the target's own: a
+            # click-based pipeline rejecting its own arguments is an aborted
+            # run, not evidence that audit was invoked wrongly, and it must
+            # still produce the receipts for what was observed.
             raise
         except SystemExit as exc:
             # A non-zero exit is an aborted run, the same event as a raised
@@ -521,8 +525,8 @@ def _echo_summary(run_record: dict, verdicts: list[dict], out: Path,
 
 # -- corpus mode --------------------------------------------------------------
 
-def _run_completed(run_dir: Path, public_key) -> bool:
-    """Whether this run already holds a complete, auditor-signed record.
+def _run_completed(run_dir: Path, public_key, spec: "dict | None" = None) -> bool:
+    """Whether this run already holds a complete, auditor-signed record OF *spec*.
 
     The record sits where an audited target could write, so the ``completed``
     flag is honored only inside a run-record envelope that verifies against
@@ -530,6 +534,19 @@ def _run_completed(run_dir: Path, public_key) -> bool:
     (:func:`_sign_run_outputs` signs here, in the parent, after the child
     exits), so a hostile run A cannot mint the signature run B's record needs:
     whatever it plants reads as not complete and the run re-executes.
+
+    A valid signature is not enough, which is why *spec* is checked too. The
+    signature says the auditor produced this record; it does not say WHICH run
+    it was produced for, and the check was keyed on the run directory's name
+    alone. A target that can write outside its own directory then only needs to
+    COPY a neighbouring run's signed record, not forge one, and the sibling run
+    it lands in is skipped without ever executing: the corpus reports it
+    complete and its receipts describe a different target entirely. Binding the
+    record to the target and the finding ids it was signed over makes a copied
+    record read as not complete.
+
+    *spec* defaults to None for the post-run call, where the record was just
+    signed from that same run and there is nothing to confuse it with.
     """
     import base64
 
@@ -544,7 +561,15 @@ def _run_completed(run_dir: Path, public_key) -> bool:
         ):
             return False
         record = json.loads(base64.standard_b64decode(envelope["payload"]))
-        return bool(record.get("completed"))
+        if not record.get("completed"):
+            return False
+        if spec is None:
+            return True
+        # The signed record has to be a record OF the run being skipped.
+        return (
+            list(record.get("target") or []) == list(spec["command"])
+            and sorted(record.get("findings") or []) == sorted(spec["findings"])
+        )
     except Exception:  # noqa: BLE001, any defect in the record means re-run
         return False
 
@@ -810,10 +835,10 @@ def run_corpus(corpus_dir, *, out_dir, key_path) -> int:
     for spec_path in specs:
         run_id = spec_path.stem
         run_dir = out / run_id
-        if _run_completed(run_dir, public_key):
+        spec = _load_spec(spec_path)
+        if _run_completed(run_dir, public_key, spec):
             click.echo(f"  skip {run_id}: already complete")
             continue
-        spec = _load_spec(spec_path)
         run_dir.mkdir(parents=True, exist_ok=True)
         _clear_run_outputs(run_dir)
         (run_dir / "findings.json").write_text(

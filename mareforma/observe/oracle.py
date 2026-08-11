@@ -128,6 +128,14 @@ class NullOutcome(str, Enum):
     # not by enough to be told from jitter. Never "held invariant": the finding
     # did move, the measurement just cannot say whether the data caused it.
     AMBIGUOUS = "AMBIGUOUS"
+    # The effect cleared the noise band but not the DOMAIN floor the caller
+    # declared through ``effect_threshold``. The finding moved, measurably and
+    # perhaps enormously; the caller said a move that size does not matter. It
+    # routes like FLAT for the verdict, because that is the documented meaning of
+    # a domain floor, and it is described separately because calling a null the
+    # finding moved by a million under "held invariant" is a false statement
+    # about the measurement rather than a judgement about its significance.
+    BELOW_DOMAIN_FLOOR = "BELOW_DOMAIN_FLOOR"
     FLAT = "FLAT"
 
 
@@ -153,17 +161,26 @@ class MetricReducer:
     reduce: "Callable[[Any], float]"
     reinserts_model: bool = False
     description: str = ""
+    # Whatever else decides the reduction, recorded so the artifact carries it.
+    # A prose answer normally states several numbers ("we analysed 4 samples;
+    # the mean was 2.5; the reported effect was 0.42"), and WHICH one the oracle
+    # aims at changes the verdict. A declaration naming only the reducer's name
+    # says the reduction is auditable while omitting the setting that decides it.
+    parameters: "dict | None" = None
 
     def __call__(self, finding: Any) -> float:
         return self.reduce(finding)
 
     def declaration(self) -> dict:
         """The record a measurement artifact carries so the reducer is auditable."""
-        return {
+        record = {
             "name": self.name,
             "reinserts_model": self.reinserts_model,
             "description": self.description,
         }
+        if self.parameters:
+            record["parameters"] = dict(self.parameters)
+        return record
 
 
 # The default reducer: a numeric finding reduced by float(). Named and declared
@@ -182,6 +199,7 @@ def declared_reducer(
     *,
     reinserts_model: bool = False,
     description: str = "",
+    parameters: "dict | None" = None,
 ) -> MetricReducer:
     """Build a declared reducer for prose or structured findings.
 
@@ -193,7 +211,7 @@ def declared_reducer(
     """
     return MetricReducer(
         name=name, reduce=reduce, reinserts_model=reinserts_model,
-        description=description,
+        description=description, parameters=parameters,
     )
 
 
@@ -244,6 +262,7 @@ def numeric_extraction_reducer(
         name, reduce, reinserts_model=False,
         description=description
         or "extract the reported number from an answer string (model-free)",
+        parameters={"index": index},
     )
 
 
@@ -412,6 +431,17 @@ class OracleResult:
         """The nulls whose effect landed inside the noise or float-equality band."""
         return self._nulls_classified(NullOutcome.AMBIGUOUS)
 
+    @property
+    def below_domain_floor_nulls(self) -> "tuple[str, ...]":
+        """The nulls the finding moved under by less than the declared floor.
+
+        Empty unless the caller passed an ``effect_threshold``. These are not
+        blind spots in the measurement, they are moves the caller declared
+        immaterial, and they are named apart from :attr:`flat_nulls` because the
+        finding did move under them.
+        """
+        return self._nulls_classified(NullOutcome.BELOW_DOMAIN_FLOOR)
+
     def blind_spot_line(self) -> str:
         """One line naming what this verdict does not see, with the threat bound.
 
@@ -437,13 +467,33 @@ class OracleResult:
                 f"threshold, which is a move the measurement cannot tell from "
                 f"jitter."
             )
-        if not flat and not ambiguous:
+        below = self.below_domain_floor_nulls
+        if below:
+            parts.append(
+                f"Moved under {', '.join(below)} by less than the domain floor "
+                f"the caller declared, so the move is real and was called "
+                f"immaterial rather than absent."
+            )
+        if not flat and not ambiguous and not below:
             parts.append("Moved under every null that ran.")
         if self.dropped_nulls:
             parts.append(
                 f"The input ruled out {', '.join(self.dropped_nulls)}: those "
                 f"nulls would have been identical to it, so nothing here tested "
                 f"what they test."
+            )
+        if self.influence is OracleInfluence.NOT_INFLUENCED:
+            # The hollow verdict is the one that most needs its reach stated.
+            # Every derived null rewrites VALUES and holds the cardinality and
+            # the key set fixed by construction, so a finding whose dependence
+            # runs through HOW MUCH data there is rather than what is in it
+            # ("we analysed 4,182 cells", "1,247 genes passed QC") holds still
+            # under the whole family while depending on the data completely.
+            parts.append(
+                "Every null rewrote the values and kept the size and keys of "
+                "the data, so a finding that depends on how much data there is "
+                "rather than what is in it would hold still here too, and this "
+                "verdict does not rule that out."
             )
         if self.caller_chose_nulls:
             parts.append(
@@ -891,8 +941,16 @@ def perturbation_oracle(
     def _classify(effect: float) -> NullOutcome:
         if effect > decision_threshold:
             return NullOutcome.MOVED
-        if band_driven and band_floor < effect:
-            return NullOutcome.AMBIGUOUS
+        if band_floor < effect:
+            # Above the noise or float-equality floor, below the threshold. WHY
+            # it is below decides which of the two this is: the band says the
+            # measurement cannot tell the move from jitter, the domain floor says
+            # the caller declared a move that size immaterial. Only the first is
+            # ambiguous, and only FLAT means the finding held still.
+            return (
+                NullOutcome.AMBIGUOUS if band_driven
+                else NullOutcome.BELOW_DOMAIN_FLOOR
+            )
         return NullOutcome.FLAT
 
     null_outcomes = tuple(_classify(e) for e in perturbation_effects)

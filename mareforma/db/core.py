@@ -5727,6 +5727,14 @@ def _enrolled_generator_condition(prefix: str = "") -> str:
     )
 
 
+# The disclosure's own scan bound, deliberately NOT the read's. The read sizes
+# its ceiling from the caller's limit (max(limit * 50, 5000)), so borrowing it
+# made the disclosed number change with the page size the caller happened to
+# ask for: the same record reported 5,000 held back at limit=20 and 10,050 at
+# limit=200. A count that moves with the question is not a count.
+_DISCLOSURE_SCAN_CEILING = 5000
+
+
 def _count_unverified_held_back(
     conn: sqlite3.Connection,
     from_sql: str,
@@ -5735,7 +5743,7 @@ def _count_unverified_held_back(
     *,
     ceiling: int,
     prefix: str = "",
-) -> int:
+) -> "tuple[int, bool]":
     """How many rows the enrolled-generator filter held back from this read.
 
     The filter runs in SQL (see :func:`_enrolled_generator_condition`) precisely
@@ -5780,11 +5788,17 @@ def _count_unverified_held_back(
         f"WHERE NOT COALESCE({_enrolled_generator_condition()}, 0)"
     )
     try:
-        row = conn.execute(sql, list(params) + [ceiling]).fetchone()
+        row = conn.execute(
+            sql, list(params) + [_DISCLOSURE_SCAN_CEILING]
+        ).fetchone()
     except sqlite3.OperationalError:
         # A disclosure must never be the thing that fails a read.
-        return 0
-    return int(row[0]) if row else 0
+        return 0, False
+    n = int(row[0]) if row else 0
+    # Saturated means the scan stopped, not that the record holds exactly this
+    # many. Reported so the caller can tell a floor from a total, which is the
+    # same distinction `has_more` draws for the page itself.
+    return n, n >= _DISCLOSURE_SCAN_CEILING
 
 
 def _disclose_unverified(
@@ -5811,11 +5825,11 @@ def _disclose_unverified(
     """
     if include_unverified or on_unverified_excluded is None or served >= limit:
         return
-    held = _count_unverified_held_back(
+    held, saturated = _count_unverified_held_back(
         conn, from_sql, where, params, ceiling=ceiling, prefix=prefix,
     )
     if held:
-        on_unverified_excluded(held)
+        on_unverified_excluded(held, saturated)
 
 
 def _scan_ceiling_error(surface: str, ceiling: int, found: int, limit: int):

@@ -36,6 +36,7 @@ not the system prompt.
 from __future__ import annotations
 
 import re
+import unicodedata
 from functools import lru_cache
 from typing import Final
 
@@ -153,7 +154,22 @@ def strip_forged_tags(text: str | None, *, tag: str = "untrusted_data") -> str |
             f"strip_forged_tags expects str or None, got {type(text).__name__}"
         )
     _validate_tag(tag)
-    return _forged_tag_re(tag).sub("[stripped]", text)
+    pattern = _forged_tag_re(tag)
+    stripped = pattern.sub("[stripped]", text)
+    # A model reads the delimiter as a HUMAN does, and a fullwidth 'd' looks
+    # exactly like an ASCII one: `</untrusteｄ_data>` matched no pattern here and
+    # closed the wrapper on the way in. The codepoint stripper does not catch it
+    # either, because the character folds to a letter, not to a delimiter.
+    #
+    # So the same text is checked again under NFKC. Matching on the folded form
+    # and substituting on it is safe for this field because the result is a
+    # display string a model reads, never bytes anything verifies: the signature
+    # surfaces read the raw row. Only used when folding actually revealed a
+    # delimiter, so ordinary text is returned exactly as written.
+    folded = unicodedata.normalize("NFKC", stripped)
+    if folded != stripped and pattern.search(folded):
+        return pattern.sub("[stripped]", folded)
+    return stripped
 
 
 def _validate_tag(tag: str) -> None:

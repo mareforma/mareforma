@@ -126,6 +126,9 @@ def _page_result(claims, served: int, adjusted, excluded: "dict | None" = None) 
     for key, n in (excluded or {}).items():
         if n:
             out[key] = n
+    # The floor marker only means something beside the number it qualifies.
+    if not out.get("unverified_excluded"):
+        out.pop("unverified_excluded_is_at_least", None)
     return out
 
 
@@ -154,17 +157,35 @@ def _evidence_line_count(conn, *, claim_id=None, content_id=None) -> int:
     findings, ``idx_line_finding`` on evidence_lines), so the count costs far
     less than the derivation it is deciding whether to run.
     """
+    # Count what the DERIVATION will walk, not what the caller named. The two
+    # differ, and the gap was the whole ceiling: a proposition's derived status
+    # reads its frame, which includes the contrary proposition that answers the
+    # same question, and a claim's trust map reads every finding on its content
+    # id, not only its own. Counting the caller's own rows let a one-line
+    # proposition pass a ceiling of 1000 and then derive over a 1600-line
+    # sibling in the same frame, holding the shared lock for exactly the work
+    # the ceiling exists to refuse.
     if claim_id is not None:
-        sql = ("SELECT COUNT(*) FROM evidence_lines el "
-               "JOIN findings f ON f.finding_id = el.finding_id "
-               "WHERE f.claim_id = ?")
-        key = claim_id
+        sql = (
+            "SELECT COUNT(*) FROM evidence_lines el "
+            "JOIN findings f ON f.finding_id = el.finding_id "
+            "WHERE f.content_id IN ("
+            "  SELECT content_id FROM findings WHERE claim_id = ?"
+            ") OR f.claim_id = ?"
+        )
+        params = (claim_id, claim_id)
     else:
-        sql = ("SELECT COUNT(*) FROM evidence_lines el "
-               "JOIN findings f ON f.finding_id = el.finding_id "
-               "WHERE f.content_id = ?")
-        key = content_id
-    return conn.execute(sql, (key,)).fetchone()[0]
+        sql = (
+            "SELECT COUNT(*) FROM evidence_lines el "
+            "JOIN findings f ON f.finding_id = el.finding_id "
+            "WHERE f.content_id IN ("
+            "  SELECT content_id FROM propositions WHERE frame_id IN ("
+            "    SELECT frame_id FROM propositions WHERE content_id = ?"
+            "  )"
+            ") OR f.content_id = ?"
+        )
+        params = (content_id, content_id)
+    return conn.execute(sql, params).fetchone()[0]
 
 
 def _check_evidence_ceiling(conn, ceiling: int, **target) -> None:
@@ -349,6 +370,40 @@ class ReadVerifyTools:
         self._graph = graph
         self._max_evidence_lines = max_evidence_lines
 
+    def _drop_unverifiable(self, claims: list) -> "tuple[list, int]":
+        """Withhold rows whose asserter bundle no longer re-verifies.
+
+        The graph's own read gate exempts PRELIMINARY: those rows have an
+        enrolled-generator filter instead, which asks whether the SIGNER is
+        enrolled, never whether the SIGNATURE still covers the text. So a claim
+        edited in the database file, which needs no SQL and fires no trigger
+        because the append-only guards are UPDATE triggers, was served here with
+        its rewritten text while this same server's ``verify_claim`` called the
+        identical claim tampered.
+
+        Anywhere else that is a defect a reader can catch. Here the row goes
+        into a model's context as fact, and the model has no way to reach the
+        second opinion unless it thinks to ask. So this surface refuses the row
+        and counts it, which is what ``verify_excluded`` already means for the
+        levels the graph does gate. The check is the graph's own, not a second
+        implementation of it.
+        """
+        from mareforma.db import _verify_participant_bundle_on_read
+
+        kept, dropped, cache = [], 0, {}
+        for claim in claims:
+            try:
+                ok = _verify_participant_bundle_on_read(
+                    self._graph._conn, dict(claim), cache,
+                )
+            except Exception:  # noqa: BLE001 — a check that cannot run withholds
+                ok = False
+            if ok:
+                kept.append(claim)
+            else:
+                dropped += 1
+        return kept, dropped
+
     @contextmanager
     def _counting_exclusions(self):
         """Yield a dict that fills with what THIS read held back.
@@ -371,6 +426,7 @@ class ReadVerifyTools:
                 self._graph.read_unverified_exclusions,
                 self._graph.read_verify_exclusions,
             )
+            self._graph._read_unverified_saturated = False
             out: dict = {}
             try:
                 yield out
@@ -381,6 +437,12 @@ class ReadVerifyTools:
                 out["verify_excluded"] = (
                     self._graph.read_verify_exclusions - before[1]
                 )
+                if self._graph._read_unverified_saturated:
+                    # The count stopped at its scan ceiling, so it is a floor.
+                    # Saying so is the same discipline `has_more` applies to the
+                    # page: a saturated number that reads as exact is a false
+                    # answer about the size of the record.
+                    out["unverified_excluded_is_at_least"] = True
 
     def query_claims(
         self,
@@ -413,6 +475,8 @@ class ReadVerifyTools:
             claims = self._graph.query(
                 text, classification=classification, limit=served + 1,
             )
+        claims, unverifiable = self._drop_unverifiable(claims)
+        excluded["verify_excluded"] = excluded.get("verify_excluded", 0) + unverifiable
         return _page_result(claims, served, adjusted, excluded)
 
     def search_claims(
@@ -433,6 +497,8 @@ class ReadVerifyTools:
             claims = self._graph.search(
                 query, classification=classification, limit=served + 1,
             )
+        claims, unverifiable = self._drop_unverifiable(claims)
+        excluded["verify_excluded"] = excluded.get("verify_excluded", 0) + unverifiable
         return _page_result(claims, served, adjusted, excluded)
 
     def get_claim(self, claim_id: str) -> dict:
@@ -472,11 +538,21 @@ class ReadVerifyTools:
                 content_id=content_id,
             )
         except _TooMuchEvidence as exc:
-            return {"found": False, "status": None, "refused": str(exc)}
+            # `found: False` is the answer to "does this exist", and the answer
+            # here is "it exists and I would not derive it". Saying no to a
+            # different question teaches an agent the subject is absent, and the
+            # refusal is permanent for that subject, so the agent has no reason
+            # to ask again.
+            return {"found": True, "status": None, "refused": str(exc)}
         status = self._graph.proposition_status(content_id)
         if status is None:
             return {"found": False, "status": None}
-        return {"found": True, "status": status}
+        # Scrubbed like every other payload that reaches a model. This was the
+        # one LLM-bound tool handing its dict over raw, and it carries
+        # record-controlled strings (frame_id, the derived status vocabulary),
+        # so a forged delimiter written into the propositions table reached the
+        # model outside any wrapper.
+        return {"found": True, "status": _scrub(status)}
 
     def trust_map(self, claim_id: str) -> dict:
         """The audit-grade trust map for a claim: who signed it, what backs it.
@@ -493,7 +569,8 @@ class ReadVerifyTools:
                 self._graph._conn, self._max_evidence_lines, claim_id=claim_id,
             )
         except _TooMuchEvidence as exc:
-            return {"found": False, "trust_map": None, "refused": str(exc)}
+            # See proposition_status: refused is not absent.
+            return {"found": True, "trust_map": None, "refused": str(exc)}
         tmap = self._graph.trust_map(claim_id)
         if tmap is None:
             return {"found": False, "trust_map": None}
@@ -523,17 +600,17 @@ class ReadVerifyTools:
                 )
             except _TooMuchEvidence as exc:
                 return {
-                    "claim_id": claim_id,
+                    "claim_id": _scrub(claim_id),
                     "verdict": "unverifiable",
-                    "reason": str(exc),
+                    "reason": _scrub(str(exc)),
                     "trust_map": None,
                 }
             claim = self._graph.get_claim(claim_id)
             if claim is None:
                 return {
-                    "claim_id": claim_id,
+                    "claim_id": _scrub(claim_id),
                     "verdict": "unverifiable",
-                    "reason": (
+                    "reason": _scrub(
                         f"claim {claim_id!r} not found in this project; "
                         "cannot verify"
                     ),

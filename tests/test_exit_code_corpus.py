@@ -556,3 +556,75 @@ class TestVersionMarkerDoesNotReopenTheGuard:
             res = self._diagnose(r, name, body="open('data.csv').read()\n")
             assert res.exit_code == 0, res.output
             assert "GROUNDED" in res.output
+
+
+class TestTargetUsageErrorIsNotOurs:
+    """A click-based target rejecting its own arguments is an aborted run.
+
+    `click.BadParameter`, `MissingParameter` and `NoSuchOption` all subclass
+    `UsageError`, and any pipeline calling `cli.main(standalone_mode=False)`
+    surfaces them as exceptions. Catching the base class around the target's
+    execution reported the TARGET's mistake as mareforma being invoked wrong:
+    mareforma's usage line printed, no receipts written, and the usage exit code.
+    """
+
+    def test_the_targets_own_usage_error_is_a_crashed_run_with_its_report(
+        self, tmp_path,
+    ):
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            Path("data.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+            Path("t.py").write_text(
+                "import click\n"
+                "open('data.csv').read()\n"
+                "raise click.UsageError('the TARGET rejects its arguments')\n",
+                encoding="utf-8",
+            )
+            res = r.invoke(cli, ["diagnose", "--cites", "data.csv", "--", "t.py"])
+        assert res.exit_code == 1, res.output
+        assert "OBSERVATION REPORT" in res.output
+        assert "Usage: cli diagnose" not in res.output
+
+    def test_our_own_usage_error_still_reports_as_one(self, tmp_path):
+        r = CliRunner()
+        with r.isolated_filesystem(temp_dir=tmp_path):
+            Path("t.py").write_text("pass\n", encoding="utf-8")
+            res = r.invoke(cli, ["diagnose", "--", "python", "-u", "t.py"])
+        assert res.exit_code == 3, res.output
+        assert "-u" in res.output
+
+
+def test_a_signed_run_record_does_not_authorise_skipping_a_different_run(tmp_path):
+    """Resume verified the signature and never checked WHICH run it was for.
+
+    The check was keyed on the run directory's name alone and ran before the
+    spec was loaded, so it could not compare. A hostile target that can write
+    outside its own directory then only needs to COPY a neighbouring run's
+    signed record, not forge one, and the sibling is skipped without executing.
+    """
+    import shutil
+
+    from mareforma import signing
+
+    r = CliRunner()
+    with r.isolated_filesystem(temp_dir=tmp_path):
+        Path("a.csv").write_text("a\n1\n", encoding="utf-8")
+        Path("b.csv").write_text("b\n2\n", encoding="utf-8")
+        Path("ta.py").write_text("open('a.csv').read()\n", encoding="utf-8")
+        Path("tb.py").write_text("open('b.csv').read()\n", encoding="utf-8")
+        corpus = Path("corpus")
+        corpus.mkdir()
+        (corpus / "runA.json").write_text(json.dumps(
+            {"command": ["python", "ta.py"], "findings": {"fa": "a.csv"}}))
+        (corpus / "runB.json").write_text(json.dumps(
+            {"command": ["python", "tb.py"], "findings": {"fb": "b.csv"}}))
+        key = Path("k.key")
+        signing.bootstrap_key(key)
+        args = ["audit", "--corpus", "corpus", "--out", "out", "--key", str(key)]
+        assert r.invoke(cli, args, catch_exceptions=False).exit_code == 0
+
+        shutil.copy("out/runA/run.json", "out/runB/run.json")
+        res = r.invoke(cli, args, catch_exceptions=False)
+
+    assert "skip runB" not in res.output, res.output
+    assert "run runB" in res.output

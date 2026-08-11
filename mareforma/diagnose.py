@@ -52,6 +52,25 @@ def _exit_code_of(exc: SystemExit) -> int:
     return 1
 
 
+class TargetUsageError(click.UsageError):
+    """A usage error MAREFORMA raised about how the target was named.
+
+    Every one is raised before ``runpy`` starts, so it says the invocation was
+    wrong, not that the run failed. After that point a ``click.UsageError`` can
+    only have come from the target itself, and a target is allowed to be a click
+    program: ``click.BadParameter``, ``MissingParameter`` and ``NoSuchOption``
+    all subclass ``UsageError``, and any pipeline calling
+    ``cli.main(standalone_mode=False)`` surfaces them as exceptions rather than
+    exits.
+
+    Catching the base class around the target's execution therefore reported the
+    TARGET's own argument mistake as mareforma being invoked wrong: the run
+    printed mareforma's usage line, wrote no receipts at all, and exited with the
+    usage code. A target that rejects its own arguments is an aborted run, which
+    the surrounding handler already knows how to record.
+    """
+
+
 def _run_target(command: list[str]) -> None:
     """Execute the target in-process. Raises SystemExit / the target's exception.
 
@@ -66,11 +85,11 @@ def _run_target(command: list[str]) -> None:
     if argv and _looks_like_interpreter(argv[0]):
         argv = argv[1:]
     if not argv:
-        raise click.UsageError(
+        raise TargetUsageError(
             "diagnose needs a target after `--`, e.g. `-- python analysis.py`"
         )
     if argv[0].startswith("-") and argv[0] != "-m":
-        raise click.UsageError(
+        raise TargetUsageError(
             f"interpreter flag {argv[0]!r} is unsupported: the target runs "
             "in-process. Supported shapes: `-- script.py [args]`, "
             "`-- python script.py [args]`, `-- python -m module [args]`"
@@ -85,7 +104,7 @@ def _run_target(command: list[str]) -> None:
     try:
         if argv[0] == "-m":
             if len(argv) < 2:
-                raise click.UsageError("`-m` needs a module name")
+                raise TargetUsageError("`-m` needs a module name")
             module = argv[1]
             sys.argv = [module, *argv[2:]]
             runpy.run_module(module, run_name="__main__", alter_sys=True)
@@ -195,8 +214,11 @@ def run_diagnose(
     with observe(cites=tuple(cites) or None) as obs:
         try:
             _run_target(command)
-        except click.UsageError:
-            # Bad invocation of diagnose itself — re-raise so click reports it.
+        except TargetUsageError:
+            # OUR usage error about the target's name, raised before the target
+            # ran. Re-raise so click reports it. A plain click.UsageError from
+            # here is the target's own, and falls through to the crash handler
+            # below like any other exception it raises.
             raise
         except SystemExit as exc:
             # A non-zero exit is an aborted run, the same event as a raised
