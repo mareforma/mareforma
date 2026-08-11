@@ -1329,7 +1329,7 @@ member), `reason` (str), `cited_sources`, `grounded_sources`, `reads`, `seams`,
   opened. Below 1.0 means a cited source was opened through a reader the
   observer could not read through.
 
-### `perturbation_oracle(run_fn, base_input, perturb, *, repeats=1, metric=None, effect_threshold=0.0, noise_multiplier=3.0, multiplicity=1, thin_sigma_guard=False)`
+### `perturbation_oracle(run_fn, base_input, perturb, *, repeats=1, metric=None, effect_threshold=0.0, noise_multiplier=3.0, multiplicity=1, thin_sigma_guard=False, determinism_rtol=1e-06, determinism_atol=0.0)`
 
 The independent causal check. Runs `run_fn` on the base input and on perturbed
 inputs and returns an `OracleResult` whose `influence` is `INFLUENCED`,
@@ -1348,6 +1348,19 @@ sigmas, so the noisiest member of a family cannot cross the bar by chance.
 `thin_sigma_guard=True` widens the same margin when the noise floor rests on
 fewer than five repeats. Both default to a no-op, so a single finding measured
 on its own is scored the same either way.
+
+A deterministic pipeline has no run-to-run noise, so the noise floor is measured
+at 0 and there is no sigma to build a threshold from. `determinism_rtol=1e-6`
+sets the float-equality band for that case: a move within `determinism_rtol * |base
+mean|` of the finding's magnitude is indistinguishable from summation-order
+artifacts (BLAS thread counts, reduction order) and reads `UNDECIDABLE`, never
+`INFLUENCED`; a move above it is a real dependency; a move of exactly 0 is a
+provable invariant (`NOT_INFLUENCED`). This is what keeps the zero-config oracle
+from degenerating to exact float equality on the modal deterministic target. A
+result also carries `deterministic=True` when the floor was measured at 0 over
+more than one repeat, distinct from an unmeasured single-run floor.
+`determinism_atol` adds an absolute lower bound to that band, for a finding whose
+magnitude is near 0 where the relative band alone would vanish; it defaults to 0.
 
 `reconcile(grounding, influence)` relates the observer's flow verdict to the
 oracle's influence verdict and returns a `ReconcileResult` carrying the

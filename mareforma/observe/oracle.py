@@ -49,6 +49,35 @@ class OracleInfluence(str, Enum):
     INFLUENCED = "INFLUENCED"
     NOT_INFLUENCED = "NOT_INFLUENCED"
     UNDECIDABLE = "UNDECIDABLE"
+    # The oracle did not run on this finding, so it has no influence verdict at
+    # all. Distinct from UNDECIDABLE, where the oracle ran and the effect fell
+    # inside the noise band: NOT_TESTED is the absence of a measurement, never a
+    # measurement that came out ambiguous. A never-run row carries no effect
+    # size, noise floor, or threshold, and no consumer may read a zero off it as
+    # a measured value.
+    NOT_TESTED = "NOT_TESTED"
+
+
+class NotTestedReason(str, Enum):
+    """Why the oracle did not produce an influence verdict for a finding.
+
+    A typed field on the result, never string-matched from the English reason
+    sentence, so a consumer branches on the reason without parsing prose. Each
+    value names a distinct way the measurement could not be taken:
+
+    - ``UNSUPPORTED_SHAPE``: no scramble family fits the finding's input shape,
+      so there was no null to perturb with.
+    - ``CRASHED_UNDER_NULL``: running the pipeline on a scrambled input raised,
+      so the effect under that null is unknown; the traceback is recorded.
+    - ``UNREDUCIBLE_VALUE``: a run produced a value the declared metric could
+      not reduce to a comparable scalar.
+    - ``NO_VALUE``: a run produced no value to compare at all.
+    """
+
+    UNSUPPORTED_SHAPE = "unsupported-shape"
+    CRASHED_UNDER_NULL = "crashed-under-null"
+    UNREDUCIBLE_VALUE = "unreducible-value"
+    NO_VALUE = "no-value"
 
 
 @dataclass(frozen=True)
@@ -172,9 +201,14 @@ class OracleResult:
     """The oracle's measurement, with the numbers behind the verdict."""
 
     influence: OracleInfluence
-    effect_size: float
-    noise_floor: float
-    decision_threshold: float
+    # The three measurement numbers are None on a NOT_TESTED row and only there:
+    # a never-run finding has no effect size, no noise floor, and no threshold,
+    # and None is the ONLY legal value for those three when the oracle did not
+    # run, so no consumer can read a zero off a never-run row as if it were a
+    # measured value. On every other verdict they are floats.
+    effect_size: "float | None"
+    noise_floor: "float | None"
+    decision_threshold: "float | None"
     reason: str
     base_values: tuple[float, ...] = ()
     perturbed_values: tuple[float, ...] = ()
@@ -194,6 +228,48 @@ class OracleResult:
     # so the floor is 0 by construction and run-to-run jitter is not ruled out:
     # a missing estimate, not a small one. Never claimed without the runs to back it.
     noise_measured: bool = False
+    # Whether the pipeline was measured to be deterministic: the noise floor was
+    # measured over more than one repeat AND came out exactly 0. Distinct from a
+    # single unmeasured base run (``noise_measured`` False), where the floor is 0
+    # by construction rather than by measurement. A deterministic pipeline has no
+    # noise scale, so the threshold rests on the float-equality band, not sigmas.
+    deterministic: bool = False
+    # Set only on a NOT_TESTED row: the typed reason the oracle did not run, and
+    # the traceback when a null crashed the pipeline. None on every measured row.
+    not_tested_reason: "NotTestedReason | None" = None
+    traceback: "str | None" = None
+
+    @classmethod
+    def not_tested(
+        cls,
+        reason: "NotTestedReason",
+        *,
+        detail: str = "",
+        traceback: "str | None" = None,
+        reducer: "MetricReducer | None" = None,
+        perturbation_effects: tuple[float, ...] = (),
+    ) -> "OracleResult":
+        """Build a NOT_TESTED result: the oracle produced no influence verdict.
+
+        The three measurement numbers are left None, the only legal value for a
+        never-run row, so no consumer reads a zero as a measurement. ``detail``
+        is folded into the English reason; the typed ``reason`` is what a
+        consumer branches on.
+        """
+        sentence = f"the oracle did not run: {reason.value}"
+        if detail:
+            sentence += f" ({detail})"
+        return cls(
+            influence=OracleInfluence.NOT_TESTED,
+            effect_size=None,
+            noise_floor=None,
+            decision_threshold=None,
+            reason=sentence,
+            perturbation_effects=perturbation_effects,
+            reducer=reducer,
+            not_tested_reason=reason,
+            traceback=traceback,
+        )
 
     @property
     def reinserts_model(self) -> bool:
@@ -232,6 +308,8 @@ def perturbation_oracle(
     noise_multiplier: float = 3.0,
     multiplicity: int = 1,
     thin_sigma_guard: bool = False,
+    determinism_rtol: float = 1e-6,
+    determinism_atol: float = 0.0,
 ) -> OracleResult:
     """Measure whether the cited data causally influences the finding.
 
@@ -286,13 +364,34 @@ def perturbation_oracle(
         unchanged; ``noise_is_thin`` is recorded either way. The guard cannot
         rescue ``repeats=1``: there is no sigma to widen, which is what
         ``noise_measured`` reports.
+    determinism_rtol:
+        The float-equality band for a DETERMINISTIC pipeline, one with no
+        measurable run-to-run noise (``noise_floor`` 0). With no noise scale the
+        threshold cannot come from sigmas, so a move is judged against a band
+        relative to the finding's own magnitude: ``determinism_rtol * |base
+        mean|``. A move inside that band is indistinguishable from summation-order
+        artifacts (BLAS thread counts, reduction order) and reads UNDECIDABLE,
+        never INFLUENCED; a move above it is a real dependency; a move of exactly
+        0 is a provable invariant (NOT_INFLUENCED). This is what keeps the
+        zero-config oracle from degenerating to exact float equality, where any
+        nonzero jitter reads INFLUENCED. A domain ``effect_threshold`` still
+        overrides it when larger.
+    determinism_atol:
+        An ABSOLUTE float-equality floor, added to the band above as its lower
+        bound (``max(determinism_rtol * |base mean|, determinism_atol)``). The
+        relative band vanishes when the finding's magnitude is ~0, so a finding
+        that sits near zero has no float-equality band from ``determinism_rtol``
+        alone; pass an absolute floor sized to the finding's own artifact scale
+        to give a near-zero finding a band. Defaults to 0 so a finding with a
+        real magnitude is unaffected.
 
     Returns
     -------
     OracleResult
         INFLUENCED when the perturbation moves the finding past the threshold;
         NOT_INFLUENCED when the finding holds still; UNDECIDABLE when the effect
-        is real-signed but within the noise band (never silently INFLUENCED).
+        is real-signed but within the noise (or float-equality) band, never
+        silently INFLUENCED.
     """
     if repeats < 1:
         raise ValueError("repeats must be >= 1")
@@ -329,6 +428,15 @@ def perturbation_oracle(
     # effect_threshold alone decides.
     noise_measured = len(base_values) > 1
     noise_std = statistics.pstdev(base_values) if noise_measured else 0.0
+    # No noise scale: the floor is exactly 0, either because it was measured over
+    # more than one base run and came out 0 (a deterministic pipeline) OR because
+    # a single base run never measured it. Both take the float-equality path
+    # below, so the zero-config oracle does not degenerate to exact float
+    # equality in either case (the spec requires the fix at repeats=1 and
+    # repeats=5 alike). The two are told apart by ``noise_measured``: only the
+    # measured case sets the ``deterministic`` field, and each carries its own
+    # caveat in the reason.
+    zero_noise = noise_std == 0.0
 
     # A noise floor estimated from too few repeats is thin (pstdev understates
     # the population sigma), and a single repeat estimates nothing at all. Always
@@ -347,13 +455,42 @@ def perturbation_oracle(
         sigma_multiplier += math.sqrt(2.0 * math.log(family))
     if thin_sigma_guard and noise_is_thin:
         sigma_multiplier *= math.sqrt(_THIN_REPEATS / repeats)
-    noise_margin = sigma_multiplier * noise_std
-    decision_threshold = max(effect_threshold, noise_margin)
 
-    # UNDECIDABLE is a NOISE verdict: it applies only when noise, not the domain
-    # floor, sets the threshold. When effect_threshold is the binding constraint,
-    # an effect below it is domain-insignificant (NOT_INFLUENCED), not ambiguous.
-    noise_driven = noise_std > 0 and noise_margin >= effect_threshold
+    if not zero_noise:
+        # Stochastic pipeline: run-to-run noise sets the scale. Unchanged path.
+        noise_margin = sigma_multiplier * noise_std
+        decision_threshold = max(effect_threshold, noise_margin)
+        # UNDECIDABLE is a NOISE verdict: it applies only when noise, not the
+        # domain floor, sets the threshold. When effect_threshold is the binding
+        # constraint, an effect below it is domain-insignificant, not ambiguous.
+        band_driven = noise_margin >= effect_threshold
+        band_floor = noise_std
+        undecidable_reason = (
+            f"effect {effect_size:.4g} is within the noise band "
+            f"(<= {decision_threshold:.4g}); undecidable, not called grounded"
+        )
+    else:
+        # No measurable noise (floor 0): there is no noise scale, so the oracle
+        # must not degenerate to exact float equality where any nonzero jitter
+        # reads INFLUENCED. The threshold is the domain floor or the
+        # float-equality band, whichever is larger; the band is relative to the
+        # finding's magnitude plus an absolute floor for a finding whose
+        # magnitude is ~0 (where a relative band alone would vanish). A move
+        # inside that band is indistinguishable from summation-order artifacts
+        # (BLAS thread counts, reduction order) and reads UNDECIDABLE; a move of
+        # exactly 0 is a provable invariant (NOT_INFLUENCED). This is what makes
+        # UNDECIDABLE reachable on the modal deterministic target.
+        determinism_floor = max(
+            determinism_rtol * abs(base_mean), determinism_atol
+        )
+        decision_threshold = max(effect_threshold, determinism_floor)
+        band_driven = determinism_floor >= effect_threshold
+        band_floor = 0.0
+        undecidable_reason = (
+            f"effect {effect_size:.4g} is within the float-equality band "
+            f"(<= {decision_threshold:.4g}); undecidable, not distinguishable "
+            f"from summation-order artifacts"
+        )
 
     if effect_size > decision_threshold:
         influence = OracleInfluence.INFLUENCED
@@ -361,14 +498,13 @@ def perturbation_oracle(
             f"perturbing the input moved the finding by {effect_size:.4g}, past "
             f"the {decision_threshold:.4g} threshold: the data influences it"
         )
-    elif noise_driven and effect_size > noise_std:
-        # A signed move that clears one noise sd but not the full noise margin:
-        # real enough not to call NOT_INFLUENCED, not clear enough for INFLUENCED.
+    elif band_driven and effect_size > band_floor:
+        # A move that clears the lower band edge but not the decision threshold:
+        # for a stochastic pipeline that is one noise sd; for a deterministic one
+        # it is any nonzero move inside the float-equality band. Real enough not
+        # to call NOT_INFLUENCED, not clear enough for INFLUENCED.
         influence = OracleInfluence.UNDECIDABLE
-        reason = (
-            f"effect {effect_size:.4g} is within the noise band "
-            f"(<= {decision_threshold:.4g}); undecidable, not called grounded"
-        )
+        reason = undecidable_reason
     else:
         influence = OracleInfluence.NOT_INFLUENCED
         reason = (
@@ -376,7 +512,17 @@ def perturbation_oracle(
             f"<= {decision_threshold:.4g}): the finding does not depend on the data"
         )
 
-    if not noise_measured:
+    if zero_noise and noise_measured:
+        # Measured-zero: the noise floor WAS measured, over more than one repeat,
+        # and came out 0. A distinct state from an unmeasured floor, with its own
+        # caveat, so a reader never confuses a pipeline shown to be deterministic
+        # with one whose noise was simply never sampled.
+        reason += (
+            f" (deterministic pipeline: noise measured at 0 over {repeats} "
+            f"repeats, so the threshold is the float-equality band, not a "
+            f"noise margin)"
+        )
+    elif not noise_measured:
         # The threshold rested on a floor that was never measured. The caveat
         # belongs to the measurement, not to the verdict it produced, so every
         # reason carries it: a reader must be able to tell a missing floor from
@@ -400,6 +546,7 @@ def perturbation_oracle(
         multiplicity=multiplicity,
         noise_is_thin=noise_is_thin,
         noise_measured=noise_measured,
+        deterministic=zero_noise and noise_measured,
     )
 
 
@@ -420,6 +567,12 @@ class Reconciliation(str, Enum):
     OBSERVER_BLIND = "OBSERVER_BLIND"
     TENSION = "TENSION"
     INCONCLUSIVE = "INCONCLUSIVE"
+    # The oracle did not run, so there is no influence verdict to reconcile
+    # against the flow verdict. Distinct from INCONCLUSIVE (the oracle ran and
+    # could not decide): a row nothing measured must not borrow the meaning of a
+    # row measured and found ambiguous, or a never-tested finding reads as an
+    # accusation it never earned.
+    NOT_TESTED = "NOT_TESTED"
 
 
 @dataclass
@@ -436,25 +589,39 @@ def reconcile(
     Flow and influence are different constructs, so a mismatch is not
     automatically a detector error:
 
+    - anything + NOT_TESTED → NOT_TESTED: the oracle did not run, so there is no
+      influence verdict to reconcile. Guarded FIRST, before every other branch,
+      so a never-tested finding can never borrow another relation: a GROUNDED
+      row left unguarded would fall through to CONSTRUCT_DIFFERENCE, issuing the
+      cited-but-hollow accusation for a row nothing measured.
     - GROUNDED + INFLUENCED, UNGROUNDED + NOT_INFLUENCED → AGREE.
     - GROUNDED + NOT_INFLUENCED → CONSTRUCT_DIFFERENCE: the pipeline read the
       cited data and then did not use it. Flow without influence, not a bug.
     - OPAQUE + anything → OBSERVER_BLIND: the observer could not see, so there is
-      nothing to reconcile against the oracle.
+      nothing to reconcile against the oracle. Checked BEFORE the UNDECIDABLE
+      branch so an OPAQUE row whose oracle could not decide keeps its opacity
+      rather than collapsing to INCONCLUSIVE (two of the three coverage states
+      folding into one).
     - UNGROUNDED + INFLUENCED → TENSION: the data demonstrably influences the
       finding, yet the observer saw no cited read. This is the one combination
       worth investigating, the observer likely missed a read (a coverage gap).
-    - anything + UNDECIDABLE → INCONCLUSIVE: the oracle could not decide.
+    - the remaining + UNDECIDABLE → INCONCLUSIVE: the oracle ran but could not
+      decide above the noise floor.
     """
-    if oracle is OracleInfluence.UNDECIDABLE:
+    if oracle is OracleInfluence.NOT_TESTED:
         return ReconcileResult(
-            Reconciliation.INCONCLUSIVE,
-            "the oracle could not decide influence above the noise floor",
+            Reconciliation.NOT_TESTED,
+            "the oracle did not run; no influence verdict to reconcile",
         )
     if grounding is ObservedGrounding.OPAQUE:
         return ReconcileResult(
             Reconciliation.OBSERVER_BLIND,
             "the observer could not see the scope; no flow verdict to reconcile",
+        )
+    if oracle is OracleInfluence.UNDECIDABLE:
+        return ReconcileResult(
+            Reconciliation.INCONCLUSIVE,
+            "the oracle could not decide influence above the noise floor",
         )
     if grounding is ObservedGrounding.GROUNDED:
         if oracle is OracleInfluence.INFLUENCED:

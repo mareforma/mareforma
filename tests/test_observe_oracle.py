@@ -14,7 +14,9 @@ import mareforma.observe as obs
 from mareforma.observe import ObservedGrounding as OG
 from mareforma.observe.measure import summarize
 from mareforma.observe.oracle import (
+    NotTestedReason,
     OracleInfluence,
+    OracleResult,
     Reconciliation,
     perturbation_oracle,
     reconcile,
@@ -122,6 +124,104 @@ def test_oracle_below_domain_floor_is_not_influenced():
     assert res.influence is OracleInfluence.NOT_INFLUENCED
 
 
+# -- deterministic target: measured-zero, the modal case -------------------
+
+def test_deterministic_pipeline_does_not_read_influenced_on_float_noise():
+    # The defect this release corrects: with the noise floor measured at 0 the
+    # threshold was 0.0, so any nonzero move read INFLUENCED. A deterministic
+    # pipeline whose finding is ~1000 and moves by 0.0001 (1e-7 relative, deep
+    # inside the float-equality band) must read UNDECIDABLE, never INFLUENCED.
+    base = 1000.0
+    seq = iter([base, base, base, base, base,
+                base + 0.0001, base + 0.0001, base + 0.0001,
+                base + 0.0001, base + 0.0001])
+    run = lambda x: next(seq)
+    res = perturbation_oracle(run, 0.0, lambda x: x + 1.0, repeats=5)
+    assert res.influence is OracleInfluence.UNDECIDABLE
+    assert res.deterministic is True
+    assert res.noise_floor == 0.0
+    assert res.noise_measured is True
+
+
+def test_deterministic_pipeline_real_move_is_influenced():
+    # A deterministic pipeline whose finding genuinely tracks the input still
+    # reads INFLUENCED: the float-equality band is tiny relative to the finding,
+    # so a real dependency clears it. Guards against the band swallowing signal.
+    res = perturbation_oracle(lambda x: x * 2.0, 10.0, lambda x: x + 5.0, repeats=5)
+    assert res.influence is OracleInfluence.INFLUENCED
+    assert res.deterministic is True
+
+
+def test_deterministic_invariant_reads_not_influenced_not_hollow_undecidable():
+    # A provable invariant: the finding does not move at all under the null. On a
+    # deterministic pipeline that is an exact 0 effect, which is NOT_INFLUENCED
+    # (a genuine flat), distinct from a tiny nonzero move (UNDECIDABLE).
+    res = perturbation_oracle(lambda x: 42.0, 10.0, lambda x: x + 5.0, repeats=5)
+    assert res.influence is OracleInfluence.NOT_INFLUENCED
+    assert res.effect_size == 0.0
+    assert res.deterministic is True
+
+
+def test_near_zero_finding_gets_a_band_from_the_absolute_floor():
+    # A finding whose magnitude is ~0 has no relative float-equality band, so a
+    # summation-order artifact would read INFLUENCED. An absolute floor gives it
+    # a band: a 1e-9 move inside determinism_atol=1e-6 reads UNDECIDABLE.
+    base = 0.0
+    seq = iter([base, base, base, base, base,
+                1e-9, 1e-9, 1e-9, 1e-9, 1e-9])
+    run = lambda x: next(seq)
+    res = perturbation_oracle(run, 0.0, lambda x: x + 1.0, repeats=5,
+                              determinism_atol=1e-6)
+    assert res.influence is OracleInfluence.UNDECIDABLE
+    # Without the absolute floor the relative band is 0, so the same tiny move
+    # reads INFLUENCED: the knob is what closes the near-zero gap.
+    seq2 = iter([base, base, base, base, base,
+                 1e-9, 1e-9, 1e-9, 1e-9, 1e-9])
+    bare = perturbation_oracle(lambda x: next(seq2), 0.0, lambda x: x + 1.0,
+                               repeats=5)
+    assert bare.influence is OracleInfluence.INFLUENCED
+
+
+def test_measured_zero_is_distinct_from_never_measured():
+    # Measured-zero (repeats>1, floor sampled and found 0) carries
+    # deterministic=True; a single unmeasured base run does not, even though both
+    # have noise_floor 0. A consumer must be able to tell the two apart.
+    measured = perturbation_oracle(lambda x: x * 2.0, 10.0, lambda x: x + 5.0,
+                                   repeats=5)
+    never = perturbation_oracle(lambda x: x * 2.0, 10.0, lambda x: x + 5.0)
+    assert measured.deterministic is True
+    assert measured.noise_measured is True
+    assert never.deterministic is False
+    assert never.noise_measured is False
+    assert measured.noise_floor == never.noise_floor == 0.0
+    assert "deterministic pipeline" in measured.reason
+    assert "no noise estimate" in never.reason
+
+
+# -- NOT_TESTED: the oracle did not run -------------------------------------
+
+def test_not_tested_row_has_none_measurements_and_typed_reason():
+    # A never-run row carries None on all three measurement numbers (the only
+    # legal value there) so no consumer reads a zero as a measurement, and a
+    # typed reason a consumer branches on without parsing the English sentence.
+    res = OracleResult.not_tested(
+        NotTestedReason.CRASHED_UNDER_NULL, traceback="Traceback...\nValueError"
+    )
+    assert res.influence is OracleInfluence.NOT_TESTED
+    assert res.effect_size is None
+    assert res.noise_floor is None
+    assert res.decision_threshold is None
+    assert res.not_tested_reason is NotTestedReason.CRASHED_UNDER_NULL
+    assert res.traceback is not None
+    assert res.not_tested_reason.value in res.reason
+
+
+def test_not_tested_reasons_are_the_four_that_survived():
+    assert {r.value for r in NotTestedReason} == {
+        "unsupported-shape", "crashed-under-null", "unreducible-value", "no-value",
+    }
+
+
 # -- reconcile: flow vs influence -------------------------------------------
 
 def test_reconcile_agreement():
@@ -150,6 +250,62 @@ def test_reconcile_opaque_is_observer_blind():
     assert reconcile(OG.OPAQUE, OracleInfluence.INFLUENCED).relation is (
         Reconciliation.OBSERVER_BLIND
     )
+
+
+def test_reconcile_opaque_undecidable_keeps_its_opacity():
+    # REGRESSION (mandatory): the dispatch used to check UNDECIDABLE before
+    # OPAQUE, so an OPAQUE row whose oracle could not decide collapsed to
+    # INCONCLUSIVE, losing the opacity and folding two of the three coverage
+    # states into one. OPAQUE must win over UNDECIDABLE: the observer's blindness
+    # is the fact to report, not the oracle's inability to decide.
+    assert reconcile(OG.OPAQUE, OracleInfluence.UNDECIDABLE).relation is (
+        Reconciliation.OBSERVER_BLIND
+    )
+
+
+def test_reconcile_not_tested_is_guarded_first_and_never_accuses():
+    # NOT_TESTED is guarded before every other branch. In particular GROUNDED +
+    # NOT_TESTED must NOT fall through to CONSTRUCT_DIFFERENCE, the cited-but-
+    # hollow accusation, for a row the oracle never ran on.
+    assert reconcile(OG.GROUNDED, OracleInfluence.NOT_TESTED).relation is (
+        Reconciliation.NOT_TESTED
+    )
+    assert reconcile(OG.UNGROUNDED, OracleInfluence.NOT_TESTED).relation is (
+        Reconciliation.NOT_TESTED
+    )
+    assert reconcile(OG.OPAQUE, OracleInfluence.NOT_TESTED).relation is (
+        Reconciliation.NOT_TESTED
+    )
+
+
+def test_reconcile_is_exhaustive_over_the_full_grounding_by_influence_product():
+    # Every cell of the 3 grounding x 4 influence product has an asserted
+    # relation, so a fifth influence state (or a reordered dispatch) cannot ship
+    # a silent gap. Three grounding states, four influence states, twelve cells.
+    expected = {
+        (OG.GROUNDED, OracleInfluence.INFLUENCED): Reconciliation.AGREE,
+        (OG.GROUNDED, OracleInfluence.NOT_INFLUENCED): Reconciliation.CONSTRUCT_DIFFERENCE,
+        (OG.GROUNDED, OracleInfluence.UNDECIDABLE): Reconciliation.INCONCLUSIVE,
+        (OG.GROUNDED, OracleInfluence.NOT_TESTED): Reconciliation.NOT_TESTED,
+        (OG.UNGROUNDED, OracleInfluence.INFLUENCED): Reconciliation.TENSION,
+        (OG.UNGROUNDED, OracleInfluence.NOT_INFLUENCED): Reconciliation.AGREE,
+        (OG.UNGROUNDED, OracleInfluence.UNDECIDABLE): Reconciliation.INCONCLUSIVE,
+        (OG.UNGROUNDED, OracleInfluence.NOT_TESTED): Reconciliation.NOT_TESTED,
+        (OG.OPAQUE, OracleInfluence.INFLUENCED): Reconciliation.OBSERVER_BLIND,
+        (OG.OPAQUE, OracleInfluence.NOT_INFLUENCED): Reconciliation.OBSERVER_BLIND,
+        (OG.OPAQUE, OracleInfluence.UNDECIDABLE): Reconciliation.OBSERVER_BLIND,
+        (OG.OPAQUE, OracleInfluence.NOT_TESTED): Reconciliation.NOT_TESTED,
+    }
+    grounding_states = list(OG)
+    influence_states = list(OracleInfluence)
+    # The product the table claims to cover really is the whole enum product.
+    assert set(expected) == {
+        (g, i) for g in grounding_states for i in influence_states
+    }
+    for (grounding, influence), relation in expected.items():
+        assert reconcile(grounding, influence).relation is relation, (
+            f"reconcile({grounding}, {influence}) should be {relation}"
+        )
 
 
 def test_reconcile_result_type_is_on_the_package_surface():

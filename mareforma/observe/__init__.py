@@ -74,6 +74,7 @@ from .measure import (
 )
 from .oracle import (
     MetricReducer,
+    NotTestedReason,
     OracleInfluence,
     OracleResult,
     ReconcileResult,
@@ -224,6 +225,7 @@ __all__ = [
     "perturbation_oracle",
     "OracleInfluence",
     "OracleResult",
+    "NotTestedReason",
     "reconcile",
     "ReconcileResult",
     "Reconciliation",
