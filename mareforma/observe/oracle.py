@@ -27,6 +27,7 @@ from __future__ import annotations
 import math
 import re
 import statistics
+import traceback as _traceback
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Sequence
@@ -42,6 +43,16 @@ from .scrambles import scramble_family
 # repeat is the extreme of that: there is no estimate to widen, so ``noise_measured``
 # records the floor as missing rather than small.
 _THIN_REPEATS = 5
+
+# Every influence verdict carries this: the oracle grades a COOPERATING pipeline.
+# A target that patches the observer, imports its internals, or fabricates reads
+# is out of scope and no verdict here rules it out. The bound used to live in one
+# module docstring almost nobody reads; it belongs on the verdict, where the claim
+# is made.
+THREAT_MODEL_STATEMENT = (
+    "this verdict grades a pipeline that does not attack its auditor: a target "
+    "that patches the observer or fabricates its reads is out of scope"
+)
 
 
 class OracleInfluence(str, Enum):
@@ -291,6 +302,62 @@ class OracleResult:
         """The reducer's audit record, or None when no reducer was declared."""
         return self.reducer.declaration() if self.reducer else None
 
+    @property
+    def flat_nulls(self) -> "tuple[str, ...]":
+        """The nulls the finding held invariant under: this verdict's blind spots.
+
+        A null the finding did not move past the threshold is one this verdict
+        does not rule out a dependence hidden behind. For a hollow finding that is
+        every null; for an influenced one, none; for the honest-invariant case,
+        the marginal-preserving nulls it was invariant to. Empty on a NOT_TESTED
+        row, where nothing was measured.
+        """
+        if self.decision_threshold is None:
+            return ()
+        names = self.scramble_names or tuple(
+            f"perturbation-{i}" for i in range(len(self.perturbation_effects))
+        )
+        return tuple(
+            name
+            for name, effect in zip(names, self.perturbation_effects)
+            if effect <= self.decision_threshold
+        )
+
+    def blind_spot_line(self) -> str:
+        """One line naming what this verdict does not see, with the threat bound.
+
+        Derived from which nulls were flat, so a reader sees the specific
+        invariances the verdict rests on rather than a bare label, and every
+        verdict carries the statement that the oracle grades a cooperating
+        pipeline.
+        """
+        if self.influence is OracleInfluence.NOT_TESTED:
+            return f"Influence not tested. {THREAT_MODEL_STATEMENT}."
+        flat = self.flat_nulls
+        if flat:
+            lead = f"Held invariant under {', '.join(flat)}, so the verdict does "
+            lead += "not rule out a dependence those nulls cannot see. "
+        else:
+            lead = "Moved under every null tried. "
+        return lead + THREAT_MODEL_STATEMENT + "."
+
+
+class _NullFailure(Exception):
+    """Internal: a run, or its reduction, failed under one specific null.
+
+    Carries the typed NOT_TESTED reason, the null's name, and the traceback, so
+    the oracle can turn a crash under a scramble into a NOT_TESTED result naming
+    which null failed rather than aborting the whole measurement. A subclass of
+    ``Exception`` (never ``BaseException``), so a ``KeyboardInterrupt`` still
+    escapes the guard and ends the run.
+    """
+
+    def __init__(self, reason: "NotTestedReason", label: str, tb: str):
+        super().__init__(reason.value)
+        self.reason = reason
+        self.label = label
+        self.tb = tb
+
 
 def _coerce_scalar(finding: Any) -> float:
     try:
@@ -316,8 +383,30 @@ def perturbation_oracle(
     thin_sigma_guard: bool = False,
     determinism_rtol: float = 1e-6,
     determinism_atol: float = 0.0,
+    on_progress: "Callable[[int, int], None] | None" = None,
 ) -> OracleResult:
     """Measure whether the cited data causally influences the finding.
+
+    The measurement is a five-step pipeline::
+
+        base_input                                                  run_fn
+            |                                                         |
+            v                                                         v
+        [1] derive the null family from the data shape        [2] run the base
+            (scalar / mapping / sequence), or use the             and each null
+            caller's perturb; no family -> NOT_TESTED             repeats times,
+            (unsupported-shape)                                   guarded: a crash
+            |                                                     -> NOT_TESTED
+            +--------------------------> nulls ------------------------+
+                                                                       v
+        [5] route on the PROFILE            [4] set the threshold  [3] per-null
+            flat everywhere -> NOT_INFLUENCED   from noise (sigma)     effect =
+            moves everywhere -> INFLUENCED      or, at zero noise,     |mean(null)
+            moves under some  -> UNDECIDABLE    the float-equality      - mean(base)|
+            band lands a null -> UNDECIDABLE    band            <-------+
+            |
+            v
+        OracleResult(influence, effect_size, perturbation_effects, ...)
 
     Parameters
     ----------
@@ -399,6 +488,18 @@ def perturbation_oracle(
         alone; pass an absolute floor sized to the finding's own artifact scale
         to give a near-zero finding a band. Defaults to 0 so a finding with a
         real magnitude is unaffected.
+    on_progress:
+        Optional callback invoked after every run of the pipeline, as
+        ``on_progress(done, total)`` where ``total`` is
+        ``repeats * (1 + number of nulls)``. One call can run the pipeline twenty
+        or more times with no other output, so a caller measuring a slow target
+        can surface progress. Defaults to None (no callback).
+
+    A run of the pipeline (or its reducer) that RAISES under a null does not abort
+    the measurement: the result is NOT_TESTED, naming the null and carrying the
+    traceback, with reason ``crashed-under-null`` for a pipeline crash and
+    ``unreducible-value`` for a value the reducer cannot reduce. A
+    ``KeyboardInterrupt`` still ends the run.
 
     Returns
     -------
@@ -434,10 +535,54 @@ def perturbation_oracle(
         )
     perturbed_inputs, null_names = resolved
 
-    base_values = tuple(m(run_fn(base_input)) for _ in range(repeats))
-    perturbed_runs = tuple(
-        tuple(m(run_fn(pin)) for _ in range(repeats)) for pin in perturbed_inputs
-    )
+    # The pipeline runs ``repeats`` times on the base and on each null, so the
+    # total is ``repeats * (1 + len(family))`` invocations of run_fn. A long
+    # measurement (many repeats, many nulls) can report progress through
+    # ``on_progress(done, total)``, called after every run.
+    total_runs = repeats * (1 + len(perturbed_inputs))
+    done = 0
+
+    def _measure(label: str, pin: Any) -> tuple:
+        # Run and reduce one configuration, guarding each step. A crash in the
+        # pipeline is expected input (a null can kill a fragile target), and a
+        # value the reducer cannot turn into a scalar is a different failure; both
+        # abort THIS measurement into a NOT_TESTED naming the null, never a raised
+        # exception up the call stack. KeyboardInterrupt / SystemExit are
+        # BaseException, so they are not caught and an abort the operator asked
+        # for still ends the run.
+        nonlocal done
+        vals = []
+        for _ in range(repeats):
+            try:
+                finding = run_fn(pin)
+            except Exception:  # noqa: BLE001 — a target crash is expected input
+                raise _NullFailure(
+                    NotTestedReason.CRASHED_UNDER_NULL, label, _traceback.format_exc()
+                )
+            try:
+                vals.append(m(finding))
+            except Exception:  # noqa: BLE001 — the reducer could not reduce it
+                raise _NullFailure(
+                    NotTestedReason.UNREDUCIBLE_VALUE, label, _traceback.format_exc()
+                )
+            done += 1
+            if on_progress is not None:
+                on_progress(done, total_runs)
+        return tuple(vals)
+
+    try:
+        base_values = _measure("base", base_input)
+        perturbed_runs = tuple(
+            _measure(name, pin)
+            for name, pin in zip(null_names, perturbed_inputs)
+        )
+    except _NullFailure as failure:
+        return OracleResult.not_tested(
+            failure.reason,
+            detail=f"under the {failure.label!r} null",
+            traceback=failure.tb,
+            reducer=reducer,
+        )
     perturbed_values = tuple(v for runs in perturbed_runs for v in runs)
 
     base_mean = statistics.fmean(base_values)
@@ -600,6 +745,47 @@ def perturbation_oracle(
         noise_measured=noise_measured,
         deterministic=zero_noise and noise_measured,
     )
+
+
+def influence_sweep(
+    findings: "Sequence[tuple]",
+    **oracle_kwargs,
+) -> "list[OracleResult]":
+    """Run the oracle over a corpus, correcting multiplicity from the count.
+
+    Each finding is one hypothesis in a family, so a fixed ``noise_multiplier``
+    lets the noisiest of them clear the bar by chance and the corpus produces
+    false INFLUENCED calls at a rate that grows with the count. The correction is
+    ``multiplicity = number of findings``, and leaving it at the default 1 is one
+    of the compromises the field run made. This runs each finding with the
+    multiplicity computed from the corpus size, so the caller passes the corpus
+    and never has to remember to pass the count.
+
+    ``findings`` is a sequence of ``(run_fn, base_input)`` or
+    ``(run_fn, base_input, metric)`` tuples. ``oracle_kwargs`` are forwarded to
+    every :func:`perturbation_oracle` call; passing ``multiplicity`` is an error,
+    since the sweep owns it. A per-finding ``metric`` in the tuple overrides any
+    ``metric`` in ``oracle_kwargs`` for that finding.
+    """
+    if "multiplicity" in oracle_kwargs:
+        raise TypeError(
+            "influence_sweep computes multiplicity from the corpus size; do not "
+            "pass it"
+        )
+    specs = list(findings)
+    multiplicity = max(1, len(specs))
+    shared_metric = oracle_kwargs.pop("metric", None)
+    results: list[OracleResult] = []
+    for spec in specs:
+        run_fn, base_input = spec[0], spec[1]
+        metric = spec[2] if len(spec) > 2 else shared_metric
+        results.append(
+            perturbation_oracle(
+                run_fn, base_input,
+                multiplicity=multiplicity, metric=metric, **oracle_kwargs,
+            )
+        )
+    return results
 
 
 def _resolve_perturbations(base_input, perturb):

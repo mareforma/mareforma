@@ -49,6 +49,30 @@ def test_each_killswitch_is_distinct():
     assert len(set(names)) == len(names) == 6
 
 
+def test_shipped_selfcheck_runs_the_four_non_model_fixtures(tmp_path: Path):
+    # The four non-model fixtures ship in the wheel under mareforma.selfcheck, so
+    # an installed user can run the self-check without the test suite. They must
+    # still catch their seeded failures from the shipped module.
+    from mareforma.selfcheck import SELF_CHECKS, run_selfcheck
+
+    assert len(SELF_CHECKS) == 4
+    outcomes = run_selfcheck(tmp_path)
+    assert len(outcomes) == 4
+    missed = [o.name for o in outcomes if not o.caught]
+    assert not missed, f"shipped self-check missed: {missed}"
+
+
+def test_selfcheck_is_a_discoverable_package_so_it_ships_in_the_wheel():
+    # package-data is only py.typed, so anything that is not a discovered Python
+    # package silently vanishes from the wheel. Assert setuptools finds it: an
+    # __init__.py is what keeps mareforma.selfcheck in the build.
+    from setuptools import find_packages
+
+    repo_root = Path(__file__).resolve().parent.parent
+    packages = find_packages(where=str(repo_root), include=["mareforma*"])
+    assert "mareforma.selfcheck" in packages
+
+
 def test_model_axis_killswitches_break_when_provider_derivation_breaks(
     tmp_path: Path, monkeypatch, httpx_mock
 ):

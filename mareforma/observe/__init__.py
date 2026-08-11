@@ -78,12 +78,14 @@ from .measure import (
 )
 from .oracle import (
     MetricReducer,
+    THREAT_MODEL_STATEMENT,
     NotTestedReason,
     OracleInfluence,
     OracleResult,
     ReconcileResult,
     Reconciliation,
     declared_reducer,
+    influence_sweep,
     numeric_extraction_reducer,
     perturbation_oracle,
     reconcile,
@@ -228,9 +230,11 @@ __all__ = [
     "GroundingCitationMismatchError",
     # Causal oracle (independent influence ground truth).
     "perturbation_oracle",
+    "influence_sweep",
     "OracleInfluence",
     "OracleResult",
     "NotTestedReason",
+    "THREAT_MODEL_STATEMENT",
     "scramble_family",
     "Scramble",
     "reconcile",

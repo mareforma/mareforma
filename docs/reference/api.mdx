@@ -1329,7 +1329,7 @@ member), `reason` (str), `cited_sources`, `grounded_sources`, `reads`, `seams`,
   opened. Below 1.0 means a cited source was opened through a reader the
   observer could not read through.
 
-### `perturbation_oracle(run_fn, base_input, perturb, *, repeats=1, metric=None, effect_threshold=0.0, noise_multiplier=3.0, multiplicity=1, thin_sigma_guard=False, determinism_rtol=1e-06, determinism_atol=0.0)`
+### `perturbation_oracle(run_fn, base_input, perturb, *, repeats=1, metric=None, effect_threshold=0.0, noise_multiplier=3.0, multiplicity=1, thin_sigma_guard=False, determinism_rtol=1e-06, determinism_atol=0.0, on_progress=None)`
 
 The independent causal check. Runs `run_fn` on the base input and on perturbed
 inputs and returns an `OracleResult` whose `influence` is `INFLUENCED`,
@@ -1371,8 +1371,10 @@ oracle's influence verdict and returns a `ReconcileResult` carrying the
 Aggregates an iterable of `GroundingVerdict` into the split a report states:
 `fractions()`, `incidental_read_rate`, `mean_read_coverage`, and
 `opaque_dominates(threshold=0.5)`. A sweep that reports an influence rate over a
-corpus should pass `multiplicity=len(findings)` to every `perturbation_oracle`
-call it aggregates, or the rate counts findings that cleared the bar on noise.
+corpus needs `multiplicity` set to the corpus size on every `perturbation_oracle`
+call, or the rate counts findings that cleared the bar on noise; use
+`influence_sweep(findings, ...)`, which runs the corpus and computes the
+multiplicity from the count so it is never left at 1.
 
 ### `summarize_influence(records) -> InfluenceReport` and `influence_records(receipts)`
 

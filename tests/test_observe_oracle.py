@@ -18,6 +18,7 @@ from mareforma.observe.oracle import (
     OracleInfluence,
     OracleResult,
     Reconciliation,
+    influence_sweep,
     perturbation_oracle,
     reconcile,
 )
@@ -285,6 +286,105 @@ def test_unsupported_shape_is_not_tested_never_a_verdict():
     assert res.not_tested_reason is NotTestedReason.UNSUPPORTED_SHAPE
     assert res.effect_size is None
     assert ran == []  # nothing was run
+
+
+# -- crash guard and progress -----------------------------------------------
+
+def test_crash_under_a_null_reads_not_tested_with_the_traceback():
+    # A null that kills the target must not abort the measurement: it reads
+    # NOT_TESTED(crashed-under-null), naming the null and carrying the traceback,
+    # never a raised exception.
+    def fragile(x):
+        if any(v == 0.0 for v in x):  # the zeroed null kills it
+            raise ZeroDivisionError("cannot divide by the zeroed input")
+        return sum(x)
+    res = perturbation_oracle(fragile, [1.0, 2.0, 3.0], repeats=3)
+    assert res.influence is OracleInfluence.NOT_TESTED
+    assert res.not_tested_reason is NotTestedReason.CRASHED_UNDER_NULL
+    assert res.traceback and "ZeroDivisionError" in res.traceback
+    assert res.effect_size is None
+
+
+def test_keyboard_interrupt_escapes_the_crash_guard():
+    # The guard catches Exception, not BaseException, so an abort the operator
+    # asked for ends the run rather than turning into a NOT_TESTED row.
+    def aborts(x):
+        raise KeyboardInterrupt()
+    with pytest.raises(KeyboardInterrupt):
+        perturbation_oracle(aborts, [1.0, 2.0], repeats=2)
+
+
+def test_a_value_the_reducer_cannot_reduce_is_not_tested():
+    # A finding the declared reducer cannot turn into a scalar is a different
+    # failure from a crash: NOT_TESTED(unreducible-value), not crashed-under-null.
+    res = perturbation_oracle(lambda x: object(), 1.0, perturb=[2.0])
+    assert res.influence is OracleInfluence.NOT_TESTED
+    assert res.not_tested_reason is NotTestedReason.UNREDUCIBLE_VALUE
+
+
+def test_on_progress_reports_the_documented_run_count():
+    # total = repeats * (1 + number of nulls). For [1,2,3] the derived family is
+    # zeroed, constant, permuted, reversed (4 nulls), so 2 * (1 + 4) = 10 runs.
+    calls = []
+    perturbation_oracle(lambda x: 1.0, [1.0, 2.0, 3.0], repeats=2,
+                        on_progress=lambda done, total: calls.append((done, total)))
+    assert len(calls) == 10
+    assert calls[-1] == (10, 10)
+    assert [d for d, _ in calls] == list(range(1, 11))
+
+
+# -- corpus sweep: multiplicity computed, not left to the caller ------------
+
+def test_influence_sweep_sets_multiplicity_from_the_corpus_size():
+    # Leaving multiplicity at 1 over a corpus is a compromise the field run made;
+    # the sweep computes it from the count so the caller never has to.
+    findings = [
+        (lambda x: x[0], [1.0, 2.0, 3.0]),
+        (lambda x: 42.0, [1.0, 2.0, 3.0]),
+        (lambda x: sum(x) / len(x), [1.0, 2.0, 3.0]),
+    ]
+    results = influence_sweep(findings, repeats=5)
+    assert [r.multiplicity for r in results] == [3, 3, 3]
+    assert [r.influence for r in results] == [
+        OracleInfluence.INFLUENCED,
+        OracleInfluence.NOT_INFLUENCED,
+        OracleInfluence.UNDECIDABLE,
+    ]
+
+
+def test_influence_sweep_refuses_a_caller_supplied_multiplicity():
+    # The sweep owns multiplicity; passing it is a mistake, not a silent override.
+    with pytest.raises(TypeError):
+        influence_sweep([(lambda x: x, 1.0)], multiplicity=2)
+
+
+# -- per-verdict blind-spot line + threat model -----------------------------
+
+def test_blind_spot_line_names_the_invariant_nulls_and_the_threat_bound():
+    from mareforma.observe.oracle import THREAT_MODEL_STATEMENT
+
+    data = [1.0, 2.0, 3.0, 4.0]
+    # A genuine mean is invariant under the marginal-preserving nulls: those are
+    # the verdict's blind spots and the line names them.
+    mean = perturbation_oracle(lambda x: sum(x) / len(x), data, repeats=5)
+    assert set(mean.flat_nulls) == {"permuted", "reversed"}
+    assert "permuted" in mean.blind_spot_line()
+    assert THREAT_MODEL_STATEMENT in mean.blind_spot_line()
+
+    # An influenced finding moved under every null: no blind spot, but still the
+    # threat-model statement.
+    influenced = perturbation_oracle(lambda x: x[0], data, repeats=5)
+    assert influenced.flat_nulls == ()
+    assert "every null" in influenced.blind_spot_line()
+    assert THREAT_MODEL_STATEMENT in influenced.blind_spot_line()
+
+
+def test_not_tested_row_carries_the_threat_statement_without_blind_spots():
+    from mareforma.observe.oracle import THREAT_MODEL_STATEMENT
+
+    res = OracleResult.not_tested(NotTestedReason.UNSUPPORTED_SHAPE)
+    assert res.flat_nulls == ()
+    assert THREAT_MODEL_STATEMENT in res.blind_spot_line()
 
 
 # -- reconcile: flow vs influence -------------------------------------------

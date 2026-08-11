@@ -1,11 +1,14 @@
-"""Kill-switch A: six API-only fixtures a correct instrument MUST catch.
+"""Kill-switch A: six seeded fixtures a correct instrument MUST catch.
 
-Before spending on a natural-corpus run, the instrument has to prove it catches
-the failures it claims to. Each fixture below builds ONE such failure with the
-real observer / measurement / trust machinery, no mocks of the thing under test
-,  and reports whether the instrument caught it. If any one is missed, the
-measurement is not yet trustworthy and the run stops before any spend. These are
-seeded dissociation fixtures with known ground truth, not a prevalence estimate.
+Four of the six need only the observer and the filesystem, so they ship in the
+wheel under :mod:`mareforma.selfcheck` and are re-exported here. The other two are
+model-axis fixtures that stay in the test suite: they drive a real ``httpx.Client``
+call through the observer's socket seam, and only ``pytest_httpx`` leaves a genuine
+network transport in place (an offline ``MockTransport`` tiers PROXY and a
+non-provider host tiers UNVERIFIABLE), so no substitution preserves their outcome.
+
+``run_all(tmp_path, httpx_mock)`` runs all six and returns their outcomes; the test
+asserts every one was caught.
 
 The six failures:
 
@@ -15,38 +18,28 @@ The six failures:
 4. a number with no execution , a finding with no observed cited read is UNGROUNDED (empty provenance);
 5. a decoy incidental read    , a non-cited read is refused as grounding;
 6. an unrecognized-host model , a model call to an arbitrary host is UNVERIFIABLE, not a distinct model.
-
-``run_all(tmp_path)`` runs the six and returns their outcomes; the test asserts
-every one was caught.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 
 import mareforma
-from mareforma.observe import ObservedGrounding, observe
-from mareforma.observe._citation import normalize_identifier
 from mareforma.observe._lineage import ModelLineageTier
-from mareforma.observe.measure import summarize
+from mareforma.selfcheck import (
+    KillSwitchOutcome,
+    decoy_incidental_read,
+    excluded_partition,
+    number_with_no_execution,
+    silent_zero_row_fallback,
+)
 from mareforma.trust._store import effective_independence_receipt
 from tests._helpers import _bootstrap_key, _enroll_key, _est, _pred, _prop
 
 _CLAUDE = "claude-3-5-sonnet-20241022"  # a recognized-family COMPUTED root
 _ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"  # a recognized provider host
 _ARBITRARY_URL = "https://producer-chosen.example/v1/messages"  # an unrecognized host
-
-
-@dataclass(frozen=True)
-class KillSwitchOutcome:
-    """One kill-switch fixture's result: what a correct instrument must show."""
-
-    name: str
-    expectation: str
-    observed: str
-    caught: bool
 
 
 def register_model_responses(httpx_mock) -> None:
@@ -71,6 +64,8 @@ def _observed_grounding(client: httpx.Client, url: str, csv_path: Path):
     UNVERIFIABLE for an unrecognized host) because the seam earned it, not because
     a fixture handed the provider in.
     """
+    from mareforma.observe import observe
+
     with observe(cites=str(csv_path)) as h:
         client.post(
             url,
@@ -82,53 +77,6 @@ def _observed_grounding(client: httpx.Client, url: str, csv_path: Path):
         )
         open(str(csv_path)).read()
     return h.verdict
-
-
-def silent_zero_row_fallback(tmp_path: Path) -> KillSwitchOutcome:
-    data = tmp_path / "ks1_empty.csv"
-    data.write_text("")  # zero rows: the query "returned" nothing
-    with observe(cites=str(data)) as h:
-        open(str(data)).read()  # the read happens but carries nothing
-    v = h.verdict
-    # The honest shape, not merely "not GROUNDED": the observer saw the one
-    # read and saw that it carried nothing. A blind seam records no read and
-    # lands OPAQUE, which must not read as a catch.
-    caught = (
-        v.grounding is ObservedGrounding.UNGROUNDED
-        and len(v.reads) == 1
-        and not v.reads[0].nonempty
-    )
-    return KillSwitchOutcome(
-        "silent_zero_row_fallback",
-        "a zero-row cited read is observed and is never GROUNDED",
-        f"{v.grounding.value}, nonempty={[r.nonempty for r in v.reads]}",
-        caught,
-    )
-
-
-def excluded_partition(tmp_path: Path) -> KillSwitchOutcome:
-    part_a = tmp_path / "ks2_part_a.csv"
-    part_a.write_text("x\n1\n")
-    part_b = tmp_path / "ks2_part_b.csv"
-    part_b.write_text("x\n2\n")
-    with observe(cites=[str(part_a), str(part_b)]) as h:
-        open(str(part_a)).read()  # partition B is silently excluded
-    v = h.verdict
-    grounded = set(v.grounded_sources)
-    excluded = set(v.cited_sources) - grounded
-    # The excluded partition is named even though A grounded the finding, so
-    # check both halves against the verdict's own normalized identifiers. A
-    # binder that never binds reports BOTH partitions excluded, which is a
-    # blind observer, not a catch.
-    caught = (
-        grounded == {normalize_identifier(str(part_a))}
-        and excluded == {normalize_identifier(str(part_b))}
-    )
-    return KillSwitchOutcome(
-        "excluded_partition",
-        "a cited partition that was never read is named (cited minus grounded)",
-        f"grounded={sorted(grounded)}, excluded={sorted(excluded)}", caught,
-    )
 
 
 def same_model_corroboration(tmp_path: Path) -> KillSwitchOutcome:
@@ -164,44 +112,6 @@ def same_model_corroboration(tmp_path: Path) -> KillSwitchOutcome:
     )
 
 
-def number_with_no_execution(tmp_path: Path) -> KillSwitchOutcome:
-    data = tmp_path / "ks4.csv"
-    data.write_text("x\n1\n")
-    with observe(cites=str(data)) as h:
-        _ = 2 + 2  # a number produced with no observed cited read: empty provenance
-    v = h.verdict
-    # Blind-equivalent by construction: the scope contains no read, so a blind
-    # observer reports the same empty provenance. What makes this UNGROUNDED
-    # worth reading is the read-axis control in tests/test_killswitch_pilot.py,
-    # which proves the seam was live for the run.
-    caught = v.grounding is ObservedGrounding.UNGROUNDED and len(v.reads) == 0
-    return KillSwitchOutcome(
-        "number_with_no_execution",
-        "a number with no observed cited read is UNGROUNDED (empty provenance)",
-        f"{v.grounding.value}, reads={len(v.reads)}", caught,
-    )
-
-
-def decoy_incidental_read(tmp_path: Path) -> KillSwitchOutcome:
-    data = tmp_path / "ks5_data.csv"
-    data.write_text("x\n1\n")
-    decoy = tmp_path / "ks5_config.yaml"
-    decoy.write_text("k: v\n")
-    with observe(cites=str(data)) as h:
-        open(str(decoy)).read()  # a non-cited decoy read
-    v = h.verdict
-    report = summarize([v])
-    caught = (
-        v.grounding is not ObservedGrounding.GROUNDED
-        and report.incidental_reads == 1
-    )
-    return KillSwitchOutcome(
-        "decoy_incidental_read",
-        "a non-cited read is refused as grounding and flagged incidental",
-        f"{v.grounding.value}, incidental={report.incidental_reads}", caught,
-    )
-
-
 def unrecognized_host_model(tmp_path: Path) -> KillSwitchOutcome:
     # A body-parse to an UNRECOGNIZED host: the producer chose the endpoint, so the
     # "model" field is producer-controlled and cannot mint a distinct model. The
@@ -225,7 +135,8 @@ def unrecognized_host_model(tmp_path: Path) -> KillSwitchOutcome:
     )
 
 
-# The six kill-switches, in the order listed above.
+# The six kill-switches, in the order listed above: four shipped self-checks
+# plus the two model-axis fixtures that stay in the suite.
 KILL_SWITCHES = (
     silent_zero_row_fallback,
     excluded_partition,
@@ -236,7 +147,7 @@ KILL_SWITCHES = (
 )
 
 
-def run_all(tmp_path: Path, httpx_mock) -> list[KillSwitchOutcome]:
+def run_all(tmp_path: Path, httpx_mock) -> "list[KillSwitchOutcome]":
     """Run the six kill-switch fixtures and return their outcomes.
 
     The two model-axis fixtures drive real ``httpx.Client()`` calls through the

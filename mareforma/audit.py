@@ -173,15 +173,19 @@ def _influence_records(cited: tuple[str, ...]) -> list[dict]:
     oracle itself could not decide once it ran, and here the oracle did not run at
     all, a different thing. The English reason carries the explanation.
     """
+    from mareforma.observe.oracle import THREAT_MODEL_STATEMENT
+
+    reason = (
+        "the audit observes flow with a single run and does not perturb the "
+        "cited data, so influence was not tested on this path; "
+        f"{THREAT_MODEL_STATEMENT}"
+    )
     return [
         {
             "cited_source": source,
             "influence": "NOT_TESTED",
             "not_tested_reason": None,
-            "reason": (
-                "the audit observes flow with a single run and does not perturb "
-                "the cited data, so influence was not tested on this path"
-            ),
+            "reason": reason,
         }
         for source in cited
     ]
