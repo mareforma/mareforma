@@ -637,7 +637,7 @@ graph.read_unverified_exclusions  # 0
 
 A PRELIMINARY claim whose generator key is not in the validators table is dropped from an enumerating read unless you pass `include_unverified=True`. Unlike the verify exclusions above, a flag does bring these back: they are not tampered rows, they are rows the default read does not vouch for. Without the count, a project whose claims were written under an unenrolled key answers a query with an empty list, and a caller reads "there is nothing here" for a record that is not empty.
 
-The count is taken only when a read comes back short, since a full page already says `has_more`. It is bounded by its own fixed 5,000-row scan ceiling rather than the read's (which scales with `limit`), so the disclosed number does not move with the page size you asked for, and a count that stopped at the ceiling is reported as a floor. The MCP `query_claims` and `search_claims` tools report the per-call number as `unverified_excluded`.
+The count is taken only when a read comes back short, since a full page already says `has_more`. It is bounded by its own fixed 5,000-row scan ceiling rather than the read's (which scales with `limit`), so the disclosed number does not move with the page size you asked for, and a count that stopped at the ceiling is reported as a floor. The MCP `query_claims` and `search_claims` tools report the per-call number as `unverified_excluded`, and add `unverified_excluded_is_at_least: true` when the count stopped at its ceiling. The same event is appended to `.mareforma/health.jsonl` as `read_unverified_excluded` with outcome `degraded`, under the same rate limit as `read_verify_excluded`.
 
 **Returns** `int`, reset to zero on every open.
 
@@ -1433,6 +1433,66 @@ corpus needs `multiplicity` set to the corpus size on every `perturbation_oracle
 call, or the rate counts findings that cleared the bar on noise; use
 `influence_sweep(findings, ...)`, which runs the corpus and computes the
 multiplicity from the count so it is never left at 1.
+
+### `mareforma.exporters`
+
+`JSONLDExporter` is the class behind `mareforma export`. The CLI reference
+documents the formats and their conformance bounds; import it directly when you
+want the graph in a process rather than on disk.
+
+```python
+from mareforma.exporters import JSONLDExporter
+```
+
+### Oracle types
+
+`mareforma.observe` exports the types the oracle's fields are drawn from, so a
+caller branches on a value instead of matching prose.
+
+| Name | What it is |
+|---|---|
+| `OracleInfluence` | the verdict: `INFLUENCED`, `NOT_INFLUENCED`, `UNDECIDABLE`, `NOT_TESTED` |
+| `NotTestedReason` | why no verdict was produced: `unsupported-shape`, `null-construction-failed`, `target-failed`, `crashed-under-null`, `unreducible-value`, `non-finite-value` |
+| `NullOutcome` | how one null was classified: `MOVED`, `AMBIGUOUS`, `BELOW_DOMAIN_FLOOR`, `FLAT` |
+| `Scramble` / `ScrambleFamily` | one null, and the family that will run plus the ones the input ruled out |
+| `scramble_family(x)` | build that family from a value's shape, or `None` when no family fits |
+| `THREAT_MODEL_STATEMENT` | the standing bound every verdict is made under |
+| `NoPerturbationsError` | raised when `perturb` is an empty sequence |
+
+The derived family differs by shape, and the names appear in `scramble_names`,
+`dropped_nulls` and `blind_spot_line()`:
+
+| Shape | Nulls |
+|---|---|
+| a real scalar | `zeroed`, `negated`, `offset`, `scaled`, `replaced`, all value replacements; a scalar has no marginal-preserving null |
+| a mapping of scalars | `zeroed`, `constant`, `permuted` |
+| a sequence of scalars | `zeroed`, `constant`, `permuted`, `reversed` |
+
+A null identical to the base cannot perturb anything, so it is dropped and named
+in `dropped_nulls` rather than run.
+
+### `mareforma.selfcheck`
+
+Seeded failures a correct instrument must catch, shipped in the wheel so an
+installed user can run them without the source tree.
+
+```python
+from mareforma.selfcheck import run_selfcheck
+
+for outcome in run_selfcheck(tmp_path):
+    print(outcome.name, outcome.caught, outcome.observed)
+```
+
+`run_selfcheck(tmp_path)` returns a `KillSwitchOutcome` per fixture, each
+carrying `name`, `expectation`, `observed` and `caught`. The four are a silent
+zero-row fallback, an excluded partition, a number produced with no execution,
+and a decoy incidental read. `SELF_CHECKS` is the tuple of the underlying
+functions if you want to run one on its own.
+
+**This is a self-check, not a sensitivity demonstration.** Every fixture runs its
+own synthetic pipeline rather than your target, and all four are accidents rather
+than the evasive case. Passing them does not show the instrument is sensitive on
+your own pipeline's path.
 
 ### `summarize_influence(records) -> InfluenceReport` and `influence_records(receipts)`
 
