@@ -327,6 +327,32 @@ class TestQueryForLLM:
         assert "<untrusted_data>" not in rows[0]["generated_by"]
         assert "<untrusted_data>" not in rows[0]["source_name"]
 
+    def test_every_sanitize_field_is_covered_not_just_the_two_easy_ones(
+        self, open_graph,
+    ) -> None:
+        # The list has three members and the test above covers two, so the third
+        # (validated_by, the one that names a human) could lose its sanitizing
+        # without a red suite. Driven off the list itself, so a member added
+        # later is covered the day it is added rather than the day someone
+        # remembers to extend a test.
+        from mareforma._graph import _LLM_SANITIZE_FIELDS
+
+        hostile = "agent\u200ba\u202eX"
+        cid = open_graph.assert_claim("finding", generated_by=hostile,
+                                      source_name=hostile)
+        open_graph._conn.execute(
+            "UPDATE claims SET validated_by = ? WHERE claim_id = ?",
+            (hostile, cid),
+        )
+        open_graph._conn.commit()
+        row = open_graph.query_for_llm()[0]
+        for field in _LLM_SANITIZE_FIELDS:
+            value = row.get(field)
+            assert value is not None, f"{field} did not reach the LLM view"
+            assert "\u200b" not in value, f"{field} kept a zero-width space"
+            assert "\u202e" not in value, f"{field} kept an RTL override"
+            assert "<untrusted_data>" not in value, f"{field} was wrapped"
+
     def test_identifier_fields_untouched(self, open_graph) -> None:
         cid = open_graph.assert_claim("finding")
         rows = open_graph.query_for_llm()

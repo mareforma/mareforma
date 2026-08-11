@@ -751,3 +751,57 @@ def test_forged_verdict_is_unverified_on_the_replicated_read_path(tmp_path):
         )
         g._conn.commit()
         assert g.get_claim(cid)["verified"] is False
+
+
+def test_the_restore_gate_reads_a_predicate_that_carries_no_citation(tmp_path):
+    """Pin WHERE the citation lives, which the unit test above does not.
+
+    ``test_read_side_rejects_disjoint_grounded_record`` hands the gate a
+    hand-built ``{"data_sources": [...]}`` and proves the comparison works. It
+    does not prove the restore path ever supplies such a predicate, and it does
+    not: ``restore`` passes the SIGNED claim predicate, which carries
+    ``finding_record`` and no ``data_sources``, so the citation set comes back
+    empty, the comparison reads NOT_APPLICABLE, and the gate cannot raise on a
+    real row. The citation lives in the ``predicate_payload`` column, which the
+    live audit path reads (``mareforma._verify.claim_bound_sources``).
+
+    This test states the gap rather than hiding it. It is characterization, not
+    approval: the restore-side re-check is inert on the real path, and closing it
+    changes restore semantics, which is trust-core work, not a docs-and-surface
+    change. If a future release binds the citation into the signed predicate,
+    this test fails and should be replaced by one asserting the gate fires.
+    """
+    import json
+
+    from mareforma import signing as _signing
+    from mareforma.observe._binding import (
+        BindingState, check_grounding_binding, predicate_citation_sources,
+    )
+    from tests.epistemic._builders import _prop, _smd, _superiority, open_graph
+
+    data = tmp_path / "trial.csv"
+    data.write_text("a\n1\n", encoding="utf-8")
+    with open_graph(tmp_path) as g:
+        prop, pred = _prop(), _superiority()
+        g.register_plan(prop, pred)
+        res = g.submit_finding(
+            prop, pred, _smd(-0.8, p=0.001), data_id="dsA",
+            data_source=str(data), generated_by="a",
+        )
+        row = g.get_claim(res["claim_id"])
+
+    signed = _signing.claim_predicate_from_envelope(
+        json.loads(row["signature_bundle"])
+    )
+    assert "finding_record" in signed
+    assert "data_sources" not in signed
+    assert predicate_citation_sources(signed) == ()
+
+    # Which makes the comparison inert: no citation to be disjoint from.
+    verdict = check_grounding_binding(("/etc/hostname",),
+                                      predicate_citation_sources(signed))
+    assert verdict.state is BindingState.NOT_APPLICABLE
+
+    # The citation the gate would need is in the unsigned column beside it.
+    payload = json.loads(row["predicate_payload"])
+    assert predicate_citation_sources(payload) != ()

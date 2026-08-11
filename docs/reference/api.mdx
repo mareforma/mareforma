@@ -1437,11 +1437,17 @@ The influence arm of the measurement. `influence_records(receipts)` flattens the
 list of per-edge records; `summarize_influence(records)` aggregates them.
 `InfluenceReport` reports the count of each verdict (`INFLUENCED`,
 `NOT_INFLUENCED`, `UNDECIDABLE`, `NOT_TESTED`), the `not_tested_by_reason` bucket,
-`not_tested_dominates(threshold=0.5)`, and `influenced_fraction` over the
-`resolved` edges only (NOT_TESTED is excluded from the denominator). The unit is
-the edge, so a finding citing several sources contributes several edges; the
-inference unit is the run, so `distinct_runs` rides alongside the rate. A receipts
-file with no `influence` record yields an empty arm rather than a fabricated one.
+`not_tested_dominates(threshold=0.5)`, and `influenced_fraction` over `decided`
+edges: INFLUENCED plus NOT_INFLUENCED, and nothing else. `UNDECIDABLE` is the
+oracle declining to call an edge, so it is excluded from the denominator and named
+separately in the summary line, and `tested` counts everything the oracle ran on
+at all. Without that split a corpus of honest invariants and a corpus of hollow
+findings print the same rate. The unit is the edge, so a finding citing several
+sources contributes several edges; the inference unit is the run, so
+`distinct_runs` rides alongside the rate, and a report whose writer stamped no run
+count says so rather than printing zero. A receipts file with no `influence`
+record yields an empty arm rather than a fabricated one.
+`summarize_influence_receipts(receipts)` is the two composed, and
 `summarize_pilot` returns all three arms on a `PilotReport`.
 
 ### `grounding=` on `assert_finding` and `submit_finding`

@@ -2028,8 +2028,11 @@ def claim_add(text, classification, status, source_name, supports, contradicts,
 @claim.command("list")
 @click.option("--status", default=None, help="Filter: open, contested, retracted.")
 @click.option("--source", "source_name", default=None, help="Filter by source name.")
+@click.option("--limit", default=None, type=click.IntRange(min=1),
+              help="Most claims to list. Unbounded by default; the listing says "
+                   "when a limit capped it.")
 @click.option("--json", "as_json", is_flag=True, default=False)
-def claim_list(status, source_name, as_json):
+def claim_list(status, source_name, limit, as_json):
     """List scientific claims, optionally filtered."""
     from mareforma.db import open_db, list_claims, DatabaseError
 
@@ -2037,7 +2040,19 @@ def claim_list(status, source_name, as_json):
     try:
         conn = open_db(root)
         try:
-            claims = list_claims(conn, status=status, source_name=source_name)
+            # One more than asked for, so the listing can say it was capped
+            # rather than printing a short list that reads as the whole record.
+            # It passed no limit at all, which on a large project meant loading
+            # and formatting every claim to print a screenful.
+            # One more than asked for, so the listing can say it was capped
+            # rather than printing a short list that reads as the whole record.
+            claims = list_claims(
+                conn, status=status, source_name=source_name,
+                limit=None if limit is None else limit + 1,
+            )
+            capped = limit is not None and len(claims) > limit
+            if capped:
+                claims = claims[:limit]
         finally:
             conn.close()
     except DatabaseError as exc:
@@ -2045,6 +2060,12 @@ def claim_list(status, source_name, as_json):
         sys.exit(1)
 
     if as_json:
+        # A bare list, unchanged: this is a published CLI contract and a script
+        # parsing it must keep working. The cap is surfaced on the human view
+        # and, when it applies, on stderr so a JSON consumer is not told a
+        # capped page is the whole record without any signal at all.
+        if capped:
+            _err(f"Listing capped at --limit {limit}; more claims exist.")
         click.echo(json.dumps(claims, indent=2))
         return
 
@@ -2052,7 +2073,11 @@ def claim_list(status, source_name, as_json):
         _info("No claims found.")
         return
 
-    click.echo(click.style(f"CLAIMS  ({len(claims)} total)", bold=True, fg="cyan"))
+    # "total" would be a false word on a capped listing: a short page that does
+    # not say it was capped reads as the whole record.
+    heading = f"CLAIMS  ({len(claims)} shown"
+    heading += ", more available past --limit" if capped else " total"
+    click.echo(click.style(heading + ")", bold=True, fg="cyan"))
     click.echo("")
     for c in claims:
         # A high-trust row whose signature no longer re-verifies still prints,
