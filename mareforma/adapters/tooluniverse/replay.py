@@ -137,7 +137,7 @@ def replay_from_claim(
         diff_fields.append("tool_config_fingerprint")
 
     canonical_args = predicate["arguments_canonical"]
-    # Reverify arguments_digest before executing — protects against
+    # Reverify arguments_digest before executing, protects against
     # the bizarre case where the claim's stored canonical args were
     # tampered (and the graph trigger missed it).
     args_bytes = canonicalize(canonical_args, form=canonical_form)

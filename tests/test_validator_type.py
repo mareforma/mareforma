@@ -288,7 +288,7 @@ class TestSelfValidationRefused:
         with mareforma.open(tmp_path, key_path=bot_key) as g:
             # bot is root → auto-enrolled as 'human' by default. It signs
             # one converging peer (sb signs the other to reach REPLICATED),
-            # then tries to validate — the graph gate raises
+            # then tries to validate, the graph gate raises
             # SelfValidationError before reaching the LLM check.
             rep_id = _build_replicated(g, bot_signer, sb)
             with pytest.raises((_db.SelfValidationError,
@@ -311,7 +311,7 @@ class TestLLMValidatorSeedRefused:
 
         # Bootstrap the project with bot as an LLM-typed root validator
         # via the validators module directly (the public mareforma.open
-        # auto-enrolls 'human' by default — auto_enroll_root accepts an
+        # auto-enrolls 'human' by default, auto_enroll_root accepts an
         # explicit validator_type kwarg used here).
         conn = _db.open_db(tmp_path)
         try:

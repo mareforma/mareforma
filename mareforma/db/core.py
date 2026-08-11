@@ -4712,7 +4712,7 @@ def _verify_participant_bundle_on_read(
     read out of the bundle, never off the row: ``asserter_keyid`` is an unsigned
     denormalisation, so a row that disagrees with its own envelope is refused
     rather than trusted. When the signer IS enrolled the bundle signature is
-    additionally verified against that pubkey; a forged or tampered signature
+    also verified against that pubkey; a forged or tampered signature
     excludes the row. When it is not enrolled there is no pubkey in the lean
     model, so a claim-bound bundle is served (exempt on authenticity, never on
     the claim binding).

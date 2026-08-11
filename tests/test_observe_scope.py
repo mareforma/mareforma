@@ -130,7 +130,7 @@ def test_file_grounded_reason_does_not_overclaim_byte_flow(data_files):
 
 def test_sqlite_grounded_reason_keeps_observed_return_wording(tmp_path):
     # sqlite reads observe the actual returned rows, so the stronger wording is
-    # accurate and stays — only the file proxy is softened.
+    # accurate and stays, only the file proxy is softened.
     import sqlite3
 
     db = str(tmp_path / "r.db")

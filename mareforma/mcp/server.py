@@ -403,7 +403,7 @@ class ReadVerifyTools:
                 ok = _verify_participant_bundle_on_read(
                     self._graph._conn, dict(claim), cache,
                 )
-            except Exception:  # noqa: BLE001 — a check that cannot run withholds
+            except Exception:  # noqa: BLE001, a check that cannot run withholds
                 ok = False
             if ok:
                 kept.append(claim)

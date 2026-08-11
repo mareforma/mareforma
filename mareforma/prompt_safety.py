@@ -55,7 +55,7 @@ _TRUNCATION_MARKER: Final = "\n…[mareforma: truncated, original exceeded 100k 
 
 # Singleton zero-width / bidi-override / tag-lookalike codepoints we
 # refuse. Subset of ``validators._FORBIDDEN_DISPLAY_CHARS`` plus every
-# non-ASCII character that NFKC-folds to ``<``, ``>`` or ``/`` — a
+# non-ASCII character that NFKC-folds to ``<``, ``>`` or ``/``: a
 # hostile claim using ``＜/untrusted_data＞`` could survive both
 # sanitize and wrap if a downstream NFKC normaliser (logging, RAG
 # vectorizer, the LLM's own tokenizer) folds the glyphs to ASCII at
@@ -87,7 +87,7 @@ _FORBIDDEN_CODEPOINTS: Final = frozenset({
 
 
 # Codepoint ranges of invisible / steganographic characters. These are
-# known prompt-injection vectors — most famously the U+E0000–U+E007F
+# known prompt-injection vectors, most famously U+E0000 to U+E007F
 # "language tag" plane that Goodside-style "ASCII smuggler" attacks
 # use to hide instructions inside a payload that looks like plain
 # ASCII. Variation selectors and interlinear annotation are similar:

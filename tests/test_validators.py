@@ -72,7 +72,7 @@ class TestAutoEnrollRoot:
             assert _validators.is_enrolled(graph._conn, keyid)
 
     def test_no_signer_no_enrollment(self, tmp_path: Path) -> None:
-        # Open without a key — no validators table populated.
+        # Open without a key, no validators table populated.
         with mareforma.open(tmp_path, key_path=tmp_path / "absent") as graph:
             assert _validators.count_validators(graph._conn) == 0
 
@@ -181,13 +181,13 @@ class TestBootstrapRace:
         import warnings as _warnings
 
         key_path = _bootstrap_key(tmp_path)
-        # First open — warns. Drain it.
+        # First open, warns. Drain it.
         with _warnings.catch_warnings():
             _warnings.simplefilter("ignore")
             with mareforma.open(tmp_path, key_path=key_path):
                 pass
 
-        # Second open — must not warn.
+        # Second open, must not warn.
         with _warnings.catch_warnings(record=True) as caught:
             _warnings.simplefilter("always")
             with mareforma.open(tmp_path, key_path=key_path):
@@ -275,7 +275,7 @@ class TestSingletonRoot:
 
         # Open a fresh connection so the cache doesn't mask the issue.
         with mareforma.open(tmp_path, key_path=key_path) as graph:
-            # Both keyids must be refused — neither attacker nor legit root
+            # Both keyids must be refused, neither attacker nor legit root
             # passes because the singleton-root invariant is broken.
             assert _validators.is_enrolled(graph._conn, attacker_keyid) is False
             assert _validators.is_enrolled(graph._conn, root_keyid) is False
@@ -690,7 +690,7 @@ class TestIdentitySanitization:
         key_path = _bootstrap_key(tmp_path)
         new_pem = _signing.public_key_to_pem(_signing.generate_keypair().public_key())
         with mareforma.open(tmp_path, key_path=key_path) as graph:
-            # ANSI escape — would spoof the (root) marker in list output.
+            # ANSI escape, would spoof the (root) marker in list output.
             with pytest.raises(InvalidIdentityError, match="control character"):
                 _validators.enroll_validator(
                     graph._conn, graph._signer, new_pem,
@@ -761,7 +761,7 @@ class TestIdentityUnicodeSpoofing:
 
 
 # ---------------------------------------------------------------------------
-# graph.validate() — identity check + signed envelope
+# graph.validate(), identity check + signed envelope
 # ---------------------------------------------------------------------------
 
 class TestValidateIdentityCheck:
@@ -1242,7 +1242,7 @@ class TestCLIValidateProducesSignedEnvelope:
 
         # Root key signs the REPLICATED claim. Validator key (which lands
         # in XDG so the CLI picks it up) is enrolled separately and is
-        # the one allowed to promote — same-key validation is refused by
+        # the one allowed to promote, same-key validation is refused by
         # the graph as self-promotion.
         root_key_path = _bootstrap_key(tmp_path, "root.key")
         validator_key_path = _bootstrap_key(tmp_path, "validator.key")

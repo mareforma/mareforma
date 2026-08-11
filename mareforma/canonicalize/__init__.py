@@ -42,7 +42,7 @@ class CanonicalizationError(ValueError):
 
 DEFAULT_CANONICALIZER = "json-c14n-v1"
 
-# NFC-normalising JCS — mareforma's signed-envelope canonicalizer
+# NFC-normalising JCS, mareforma's signed-envelope canonicalizer
 # exposed under a registered name so adapters that need the same
 # byte-for-byte form as the envelope layer can opt in by form name
 # instead of importing the private mareforma._canonical module.
@@ -152,7 +152,7 @@ def fingerprint_tool_config(config: dict[str, Any]) -> str:
 # Register mareforma's NFC-normalising envelope canonicalizer as a
 # named form so adapters that need the SAME bytes the envelope layer
 # signs can opt in by form name. Delegates to mareforma._canonical
-# (the canonical envelope canonicaliser) — keeps a single
+# (the canonical envelope canonicaliser), keeps a single
 # implementation; this is just an alias under a registered name.
 def _canonicalize_dsse_jcs_nfc_v1(value: Any) -> bytes:
     """NFC-normalising JCS: same bytes as the signed-envelope layer."""
@@ -167,6 +167,6 @@ register_canonicalizer(DSSE_JCS_NFC_V1, _canonicalize_dsse_jcs_nfc_v1)
 # (rdkit-canonical-smiles-v1, smiles-nfc-fallback-v1, fasta-nfc-v1,
 # fasta-nfc-v2, pdb-atom-sorted-v1, pdb-atom-sorted-v2) are
 # available the moment `mareforma.canonicalize` is imported. Without
-# this the docstring promise — "specialty canonicalizers register
-# themselves" — is false: users have to discover the submodule import.
+# this the docstring promise, "specialty canonicalizers register
+# themselves", is false: users have to discover the submodule import.
 from mareforma.canonicalize import specialty as _specialty  # noqa: E402,F401

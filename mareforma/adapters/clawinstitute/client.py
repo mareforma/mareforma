@@ -35,7 +35,7 @@ __all__ = [
 
 
 # API version this client expects from the ClawInstitute REST surface.
-# Baked into every request URL — the path pin IS the version contract,
+# Baked into every request URL, the path pin IS the version contract,
 # and a 404 / 5xx surfaces a real mismatch from the server. The
 # api_version() probe below is an OPTIONAL caller-invoked check, not a
 # hot-path gate; callers who want fail-fast version-mismatch behaviour
@@ -51,11 +51,11 @@ class ClawInstituteApiError(Exception):
     """
 
 
-class ConnectionError(ClawInstituteApiError):  # noqa: A001 — typed parent
+class ConnectionError(ClawInstituteApiError):  # noqa: A001, typed parent
     """Network reachability failure (DNS, TCP, TLS)."""
 
 
-class TimeoutError(ClawInstituteApiError):  # noqa: A001 — typed parent
+class TimeoutError(ClawInstituteApiError):  # noqa: A001, typed parent
     """Request exceeded the configured per-call timeout."""
 
 
@@ -301,7 +301,7 @@ class HttpxClient:
                 "'version' field missing or not a string in /api/version"
             )
         # Exact-major match. A bare ``startswith`` accepts "v10" and
-        # "v1beta2" as compatible with "v1" — different majors that silently
+        # "v1beta2" as compatible with "v1", different majors that silently
         # slip past. Accept only the exact major or a minor/patch under it
         # ("v1", "v1.4", "v1.4.2"); reject "v10", "v1beta2", "v2".
         if not (

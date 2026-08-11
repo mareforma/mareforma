@@ -102,7 +102,7 @@ class TestIndirectCycles:
 
 class TestDOIPassThrough:
     def test_doi_only_supports_no_cycle_possible(self, tmp_path: Path) -> None:
-        # DOIs are not graph nodes — walker should skip them entirely.
+        # DOIs are not graph nodes, walker should skip them entirely.
         # No exception even though the DOI doesn't exist as a claim.
         with mareforma.open(tmp_path) as g:
             cid = g.assert_claim(
@@ -164,7 +164,7 @@ class TestEdgeCases:
         monkeypatch.setattr(_db_core, "_REACHABLE_CLAIM_CAP", 5)
         with mareforma.open(tmp_path) as g:
             ids = [g.assert_claim("genesis")]
-            # Build 7 hops — past the patched cap of 5. The 6th reaches 6
+            # Build 7 hops, past the patched cap of 5. The 6th reaches 6
             # distinct acyclic claims and trips the cap.
             for i in range(7):
                 try:

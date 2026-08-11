@@ -503,7 +503,7 @@ def compute_rekor_leaf_hash(entry_body_b64: str) -> bytes:
 #     <root hash base64>\n
 #     [optional extra body lines]\n
 #     \n                              <- blank separator line
-#     — <key name> <signature base64>\n
+#, <key name> <signature base64>\n
 #     [more signatures]\n
 #
 # The signature covers every byte before the blank line, INCLUDING the
@@ -597,7 +597,7 @@ def parse_rekor_checkpoint(checkpoint_text: str) -> dict[str, Any]:
         line = raw_line.rstrip("\r")
         if not line:
             continue
-        # Each line: "— <name> <base64-encoded-sig-with-prefix>"
+        # Each line: ", <name> <base64-encoded-sig-with-prefix>"
         prefix = _SIGNED_NOTE_DASH + " "
         if not line.startswith(prefix):
             raise RekorInclusionError(

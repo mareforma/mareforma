@@ -238,7 +238,7 @@ class ProvenanceToolAdapter:
         )
 
     # ------------------------------------------------------------------
-    # Internal helpers — shared between sync and async paths.
+    # Internal helpers, shared between sync and async paths.
     # ------------------------------------------------------------------
 
     def _assert_claim_from_result(

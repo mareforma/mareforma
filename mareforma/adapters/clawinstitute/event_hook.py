@@ -144,7 +144,7 @@ class EventHook:
         raw_bytes = raw_content.encode("utf-8", errors="replace")
         actual_too_big = len(raw_bytes) > _MAX_CONTENT_BYTES
 
-        # SHA-256 of the FULL raw bytes — content-addressable. A
+        # SHA-256 of the FULL raw bytes, content-addressable. A
         # downstream verifier can re-fetch the post body and confirm
         # the digest, regardless of whether the body was truncated
         # in the EventPayload.

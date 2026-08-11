@@ -198,8 +198,7 @@ def test_restore_rejects_a_tampered_verdict(tmp_path):
         _finding(g, tmp_path, _grounded(tmp_path))
     toml_path = tmp_path / "claims.toml"
     # The signed predicate rides inside the base64 DSSE bundle, so replacing the
-    # literal "GROUNDED" flips only the denormalized observed_grounding column —
-    # exactly the row-vs-envelope binding check. Pin that message so an unrelated
+    # literal "GROUNDED" flips only the denormalized observed_grounding column,     # exactly the row-vs-envelope binding check. Pin that message so an unrelated
     # restore failure cannot make this test pass by accident.
     toml_path.write_text(toml_path.read_text().replace("GROUNDED", "UNGROUNDED"))
     shutil.rmtree(tmp_path / ".mareforma", ignore_errors=True)
@@ -304,7 +303,7 @@ def test_idempotent_replay_of_disjoint_verdict_fires_no_event_and_no_raise(tmp_p
             grounding_strict=True,
         )
     assert replay["idempotent"] is True
-    # The stored verdict is the first write's GROUNDED, untouched — the disjoint
+    # The stored verdict is the first write's GROUNDED, untouched, the disjoint
     # replay was discarded, not applied. Without this the test would pass even if
     # the replay overwrote the stored verdict.
     assert replay["grounding"]["grounding"] == "GROUNDED"
@@ -325,7 +324,7 @@ def test_grounding_promotes_helper():
 
 def test_sql_promotion_guard_fails_closed_on_malformed_column():
     # The promotion query's grounding guard must fail closed on a malformed or
-    # empty observed_grounding column, matching the Python helper — NOT raise.
+    # empty observed_grounding column, matching the Python helper, NOT raise.
     # SQLite does not short-circuit `json_valid(x) AND json_extract(x, ...)`, so
     # json_extract is still evaluated and throws "malformed JSON"; the guard
     # must use CASE. A single corrupt row would otherwise abort the whole
@@ -422,7 +421,7 @@ def test_content_address_citation_binds(tmp_path):
 
 def test_finding_without_matchable_citation_is_not_applicable(tmp_path):
     # A finding whose only citation is a string-fallback data_id (no data_source,
-    # not content-addressed) has no matchable identifier to bind against — a bare
+    # not content-addressed) has no matchable identifier to bind against, a bare
     # token is not a path or content address, and normalizing it would need a
     # realpath the read side cannot reproduce. So the binding is not-applicable:
     # the verdict is kept and annotated, never silently downgraded or trusted.
@@ -452,7 +451,7 @@ def test_source_name_never_binds(tmp_path):
     # Collision guard: the free-text source_name must NEVER participate in
     # binding. Even a verdict that GROUNDED on the source_name string (it rides in
     # grounded_sources), with no data_source and a content-addressed data_id,
-    # stays disjoint — the finding's content address is never that free text.
+    # stays disjoint, the finding's content address is never that free text.
     with open_graph(tmp_path) as g:
         res = g.assert_finding(
             _prop(), _superiority(), _smd(-0.8, p=0.001),
@@ -472,7 +471,7 @@ def test_decoy_cite_does_not_bind_finding(tmp_path):
     # and an incidental decoy in its cited set, but a read was observed only for
     # the decoy (grounded_sources=(decoy,)). Binding checks the read-observed set,
     # not the declared cites, so the finding whose OWN data was never read does
-    # not earn GROUNDED — it downgrades to OPAQUE. If binding checked the declared
+    # not earn GROUNDED, it downgrades to OPAQUE. If binding checked the declared
     # cited set (the v0.3.9 pre-fix bug) this would wrongly MATCH and promote.
     decoy = _dataset(tmp_path, "decoy.csv")
     with open_graph(tmp_path) as g:
@@ -523,7 +522,7 @@ def test_assert_finding_annotation_is_not_doubled(tmp_path):
 def test_read_side_rejects_disjoint_grounded_record():
     # The read-side re-check (verify-on-read / restore / audit) must reject a
     # stored GROUNDED record whose grounded set is disjoint from the finding's
-    # citation — the defense against a hand-edited-then-re-signed row. A matching
+    # citation, the defense against a hand-edited-then-re-signed row. A matching
     # record passes untouched; a v0.3.8 record (no grounded_sources) is skipped.
     from mareforma.db.restore import _verify_grounding_binding_on_read, RestoreError
 
@@ -543,7 +542,7 @@ def test_read_side_rejects_disjoint_grounded_record():
     # A GROUNDED record with an empty-but-present grounded set (grounded_sources
     # == []) against a finding that DOES cite data is the hand-edited case the
     # write side would have downgraded to OPAQUE: empty is checkable (not None),
-    # disjoint from the citation, and must be rejected — not skipped like legacy.
+    # disjoint from the citation, and must be rejected, not skipped like legacy.
     empty = {"grounding": "GROUNDED", "grounded_sources": []}
     with pytest.raises(RestoreError, match="binding violation"):
         _verify_grounding_binding_on_read("claim-x", empty, predicate)

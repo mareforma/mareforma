@@ -95,7 +95,7 @@ def test_oracle_noise_below_threshold_is_undecidable():
     # A stochastic pipeline whose perturbation effect clears one noise sd but not
     # the full noise margin must be UNDECIDABLE, never silently INFLUENCED nor
     # NOT_INFLUENCED. Base runs [0,1,2] give mean 1.0, noise_std ~0.816, margin
-    # ~2.449; perturbed runs [1.5,2.5,3.5] give mean 2.5, effect 1.5 — inside
+    # ~2.449; perturbed runs [1.5,2.5,3.5] give mean 2.5, effect 1.5, inside
     # (noise_std, margin], the exact UNDECIDABLE band. Asserted strictly so a
     # regression that collapses the band is caught.
     seq = iter([0.0, 1.0, 2.0, 1.5, 2.5, 3.5])
@@ -617,7 +617,7 @@ def test_bound_load_once_reuse_is_ungrounded(tmp_path):
 def test_bound_wrong_read_stale_cache_is_grounded(tmp_path):
     # KNOWN BOUND (documented false-negative for GROUNDED): the observer sees a
     # non-empty read of the cited path and calls GROUNDED. It cannot tell the
-    # bytes are stale or wrong — flow is not correctness. Intended limit; pinned.
+    # bytes are stale or wrong, flow is not correctness. Intended limit; pinned.
     data = tmp_path / "d.csv"
     data.write_text("stale-but-nonempty\n")
     with obs.observe(cites=str(data)) as h:

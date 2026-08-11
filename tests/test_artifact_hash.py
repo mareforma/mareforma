@@ -91,7 +91,7 @@ class TestNormalizeArtifactHash:
             _db.normalize_artifact_hash("abc")
 
     def test_off_by_one_lengths_rejected(self) -> None:
-        # Pin the exact-length contract — 63 and 65 must both fail so a future
+        # Pin the exact-length contract, 63 and 65 must both fail so a future
         # regex refactor to `{64,}` or `{63,65}` is caught.
         with pytest.raises(ValueError, match="64-character"):
             _db.normalize_artifact_hash("a" * 63)
@@ -172,7 +172,7 @@ class TestArtifactHashSigned:
 
 
 # ---------------------------------------------------------------------------
-# REPLICATED gating — opt-in hash agreement
+# REPLICATED gating, opt-in hash agreement
 # ---------------------------------------------------------------------------
 
 class TestReplicatedHashGate:
@@ -350,7 +350,7 @@ class TestReplicatedHashGate:
         # Confirm B is held back by unresolved AND would also collapse on hash.
         assert open_graph.get_claim(b)["support_level"] == "PRELIMINARY"
         assert open_graph.get_claim(a)["support_level"] == "PRELIMINARY"
-        # Clear unresolved flag — should re-fire REPLICATED check.
+        # Clear unresolved flag, should re-fire REPLICATED check.
         _db.mark_claim_resolved(open_graph._conn, open_graph._root, b)
         # Hashes are EQUAL → the pair collapses → still PRELIMINARY.
         assert open_graph.get_claim(b)["support_level"] == "PRELIMINARY"
@@ -475,7 +475,7 @@ class TestCLIArtifactHash:
 
 
 # ---------------------------------------------------------------------------
-# Strict idempotency contract — every semantic field must match
+# Strict idempotency contract, every semantic field must match
 # ---------------------------------------------------------------------------
 #
 # Tightened from the silent-merge anti-pattern. Prior
@@ -484,7 +484,7 @@ class TestCLIArtifactHash:
 # destroying the second author's content and breaking the REPLICATED
 # story (different generated_by converging on shared upstream). For
 # cross-lab convergence, callers must assert two separate claims that
-# share a supports[] entry — the actual REPLICATED path.
+# share a supports[] entry, the actual REPLICATED path.
 
 
 class TestIdempotencyStrictContract:

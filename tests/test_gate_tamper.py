@@ -154,7 +154,7 @@ _READ_PATH_PROVEN_SEPARATELY = {
 # post-hoc one) but is deliberately excluded from ``compute_plan_id``: whether a plan
 # was registered before the numbers is a historical fact, not a property of the rule,
 # so nothing on read can reconstruct it. Its integrity rests on ``predictions_append_only``
-# (which watches ``preregistered``) alone — the same trigger-not-signature limit ``plan_id``
+# (which watches ``preregistered``) alone, the same trigger-not-signature limit ``plan_id``
 # carries. The sweep therefore keeps the guard for such a column and proves the write is
 # refused, rather than dropping the guard and expecting a read-path drop that cannot exist.
 _WRITE_TRIGGER_PROTECTED_ONLY = {

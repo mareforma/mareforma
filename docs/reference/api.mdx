@@ -619,7 +619,7 @@ Read-only count of rows `query()` and `search()` dropped because their signature
 graph.read_verify_exclusions  # 0
 ```
 
-A REPLICATED or ESTABLISHED row that fails re-verification is excluded from every enumerating read and no flag brings it back, so the result reads exactly like a graph that never held those claims. This counter is what tells the two apart; the same event is appended to `.mareforma/health.jsonl` as `read_verify_excluded`, rate-limited to the 1st, 2nd, 4th, 8th occurrence and so on, because the exclusion is a state every later read finds again and a long-lived reader would otherwise write one line per poll. The counter itself is exact.
+A REPLICATED or ESTABLISHED row that fails re-verification is excluded from every enumerating read and no flag brings it back, so the result reads exactly like a graph that never held those claims. This counter is what tells the two apart; the same event is appended to `.mareforma/health.jsonl` as `read_verify_excluded`, rate-limited to the 1st, 2nd, 4th, 8th occurrence and so on, and again whenever the running total has at least doubled since the last line, so a sudden spike is not lost between powers of two. The exclusion is a state every later read finds again, and a long-lived reader would otherwise write one line per poll. The counter itself is exact.
 
 Zero means nothing was excluded from the reads this session made, not that the graph is untampered. Non-zero means a claim on disk failed re-verification: name it with `get_claim()` or `mareforma verify`.
 
@@ -637,7 +637,7 @@ graph.read_unverified_exclusions  # 0
 
 A PRELIMINARY claim whose generator key is not in the validators table is dropped from an enumerating read unless you pass `include_unverified=True`. Unlike the verify exclusions above, a flag does bring these back: they are not tampered rows, they are rows the default read does not vouch for. Without the count, a project whose claims were written under an unenrolled key answers a query with an empty list, and a caller reads "there is nothing here" for a record that is not empty.
 
-The count is taken only when a read comes back short, since a full page already says `has_more`, and it is bounded by the same scan ceiling as the read it describes. The MCP `query_claims` and `search_claims` tools report the per-call number as `unverified_excluded`.
+The count is taken only when a read comes back short, since a full page already says `has_more`. It is bounded by its own fixed 5,000-row scan ceiling rather than the read's (which scales with `limit`), so the disclosed number does not move with the page size you asked for, and a count that stopped at the ceiling is reported as a floor. The MCP `query_claims` and `search_claims` tools report the per-call number as `unverified_excluded`.
 
 **Returns** `int`, reset to zero on every open.
 
@@ -1367,9 +1367,13 @@ reading of a genuine mean (invariant under a reordering, moved by zeroing) and
 must never be called hollow. Each perturbation is scored against the base on its
 own, so opposing perturbations do not cancel; `perturbation_effects` carries one
 effect per null, `scramble_names` names them, and `null_outcomes` carries the
-classification the verdict was routed on (`MOVED` / `AMBIGUOUS` / `FLAT`), which
-`flat_nulls`, `ambiguous_nulls` and `blind_spot_line()` all read rather than
-re-deriving.
+classification the verdict was routed on (`MOVED` / `AMBIGUOUS` /
+`BELOW_DOMAIN_FLOOR` / `FLAT`), which `flat_nulls`, `ambiguous_nulls`,
+`below_domain_floor_nulls` and `blind_spot_line()` all read rather than
+re-deriving. `BELOW_DOMAIN_FLOOR` means the finding moved measurably but by less
+than the `effect_threshold` the caller declared; it routes like `FLAT` for the
+verdict and is named apart from it, because a null the finding moved a million
+units under did not hold invariant.
 
 `NOT_TESTED` means the oracle produced no verdict, with a typed
 `not_tested_reason`: `unsupported-shape` (no family fits the input),

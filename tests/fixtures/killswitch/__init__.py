@@ -1,4 +1,4 @@
-"""Kill-switch A: six seeded fixtures a correct instrument MUST catch.
+"""The kill-switch fixtures: six seeded failures a correct instrument MUST catch.
 
 Four of the six need only the observer and the filesystem, so they ship in the
 wheel under :mod:`mareforma.selfcheck` and are re-exported here. The other two are

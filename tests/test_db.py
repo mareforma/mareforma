@@ -90,7 +90,7 @@ class TestOpenDb:
         (tmp_path / ".mareforma").mkdir(parents=True, exist_ok=True)
         db_path = tmp_path / ".mareforma" / "graph.db"
         raw = sqlite3.connect(str(db_path))
-        # Initialised marker but no tables created — simulates schema drift.
+        # Initialised marker but no tables created, simulates schema drift.
         raw.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
         raw.commit()
         raw.close()

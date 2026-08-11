@@ -288,8 +288,7 @@ class TestRetractedIsTerminal:
             )
             with pytest.raises(IllegalStateTransitionError):
                 update_claim(g._conn, g._root, adv, status="open")
-            # Honest peer can still REPLICATE with another honest peer —
-            # the adversary's retracted claim is invisible to convergence.
+            # Honest peer can still REPLICATE with another honest peer,             # the adversary's retracted claim is invisible to convergence.
             honest_a = g.assert_claim("Z", supports=[seed], generated_by="agent/h1", signer=sa)
             honest_b = g.assert_claim("Z", supports=[seed], generated_by="agent/h2", signer=sb)
             assert g.get_claim(adv)["support_level"] == "PRELIMINARY"
@@ -314,7 +313,7 @@ class TestLLMToolSurfacesStatus:
             a = g.assert_claim("W", supports=[seed], generated_by="agent/a", signer=sa)
             b = g.assert_claim("W", supports=[seed], generated_by="agent/b", signer=sb)
             assert g.get_claim(a)["support_level"] == "REPLICATED"
-            # Flip a to contested editorially — it remains REPLICATED but
+            # Flip a to contested editorially, it remains REPLICATED but
             # the LLM must see the taint.
             from mareforma.db import update_claim
             update_claim(g._conn, g._root, a, status="contested")

@@ -110,7 +110,7 @@ def open(  # noqa: A001
         supplied AND ``<root>/.mareforma/rekor_log_pubkey.pem`` exists
         from a prior open(), it is loaded automatically.
     strict_promotion:
-        When True, REPLICATED promotion additionally requires non-NULL
+        When True, REPLICATED promotion also requires non-NULL
         ``artifact_hash`` on BOTH sides of a converging pair, an operator
         who wants data-distinctness as a hard gate, not just distinct
         signers. Off by default (the default rule promotes on the

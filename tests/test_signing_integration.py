@@ -84,7 +84,7 @@ class TestOpenWithSigning:
             claim = graph.get_claim(claim_id)
 
         envelope = json.loads(claim["signature_bundle"])
-        # Statement v1 envelope — claim fields live in payload.predicate.
+        # Statement v1 envelope, claim fields live in payload.predicate.
         predicate = _signing.claim_predicate_from_envelope(envelope)
         assert predicate["claim_id"] == claim_id
         assert predicate["text"] == "anchor finding"

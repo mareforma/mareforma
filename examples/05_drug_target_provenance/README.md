@@ -63,7 +63,7 @@ The recorded Case B run is kept apart from it, under `recorded/`.
 
 ```python
 with mareforma.open(HERE) as graph:
-    # Check for prior REPLICATED findings before running — MEDEA can build on
+    # Check for prior REPLICATED findings before running. MEDEA can build on
     # them rather than starting from scratch.
     prior = graph.query("drug target", min_support="REPLICATED")
 ```

@@ -106,7 +106,7 @@ REQUIRED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
 })
 
 
-# Reserved keys callers MAY NOT supply in `payload` — they are owned
+# Reserved keys callers MAY NOT supply in `payload`, they are owned
 # by the adapter and must not be overrideable. The previous spread
 # order (`{..., **payload}`) allowed a hostile caller to override
 # predicate_type with an arbitrary URI; we now reject collisions

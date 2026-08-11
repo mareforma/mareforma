@@ -9,7 +9,7 @@ the target behind the observer's own subprocess seam and defeat the point.
 Honesty rules, inherited from the observer:
 
 - **No guessed citations.** Without ``--cites`` the report is observation-only:
-  the reads it saw, the seams it hit, the coverage fraction — but NO grounding
+  the reads it saw, the seams it hit, the coverage fraction, but NO grounding
   verdict. A grounding verdict requires a stated citation; inventing one would
   fabricate a grounding claim.
 - **A crash is still a report.** If the target raises, its traceback prints as
@@ -98,7 +98,7 @@ def _run_target(command: list[str]) -> None:
     old_argv = sys.argv
     # Snapshot the whole path list: run_path/run_module and the target itself
     # may insert entries (the common `sys.path.insert(0, here)` idiom), so
-    # restoring only index 0 would leak — or duplicate — entries into a
+    # restoring only index 0 would leak (or duplicate) entries into a
     # long-lived host process (tests). Restore the list wholesale.
     old_path = list(sys.path)
     try:
@@ -225,7 +225,7 @@ def run_diagnose(
             # exception; only a clean sys.exit(0) leaves the run complete.
             exit_code = _exit_code_of(exc)
             crashed = exit_code != 0
-        except BaseException:  # noqa: BLE001 — a target crash is expected input
+        except BaseException:  # noqa: BLE001, a target crash is expected input
             crashed = True
             exit_code = 1
             tb_text = traceback.format_exc()
@@ -236,7 +236,7 @@ def run_diagnose(
     report = _build_report(command, cites, verdict, exit_code, crashed, tb_text)
 
     if as_json:
-        # The traceback rides in the report's "traceback" field — the
+        # The traceback rides in the report's "traceback" field: the
         # machine-readable equivalent of Python's own stderr dump.
         text = json.dumps(report, indent=2)
         click.echo(redact_home(text) if redact_home else text)

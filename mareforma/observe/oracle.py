@@ -8,14 +8,46 @@ same with different data, which is the signature of a silent fallback.
 
 The oracle is the observer's validation because it is independent: it never
 reads the observer's log, so a detector that agreed with itself cannot look
-correct here. It also handles the honest hard case, a stochastic pipeline
-(an LLM at nonzero temperature) moves run to run even with fixed input, so a
-naive "did it change" test would call everything influenced. The oracle measures
-that run-to-run noise first and only calls INFLUENCED when the perturbation moves
-the finding by more than the noise floor. When the effect is comparable to the
-noise, the answer is UNDECIDABLE, never a silent INFLUENCED. Measuring the noise
-takes repeats: at the default ``repeats=1`` the floor is 0 because nothing was
-measured, and the result says so rather than passing 0 off as a trusted floor.
+correct here.
+
+THE NULL IS NOT A CHOICE. A caller who picks the perturbation can pick one the
+finding is provably invariant to and read NOT_INFLUENCED however the pipeline
+works. So ``perturb=None``, the default, derives the whole FAMILY of nulls from
+the input's own data shape (see :mod:`mareforma.observe.scrambles`): a scalar
+gets value replacements, a mapping and a sequence get content-destroying nulls
+(zero it, replace it with a constant) and marginal-preserving ones (permute it,
+reverse it).
+
+THE VERDICT ROUTES ON THE PROFILE across that family, not on one move:
+
+- moved past the threshold under EVERY null: INFLUENCED, the finding depends on
+  the data;
+- moved under NONE of them: NOT_INFLUENCED, the signature of a silent fallback;
+- moved under some and held still under others: UNDECIDABLE. That is the
+  discipline the instrument rests on. A genuine mean is a provable invariant of
+  a permutation and must never be called hollow for it;
+- any effect inside the noise or float-equality band: UNDECIDABLE too.
+
+NOT_INFLUENCED is an accusation, so it is reachable only from a measurement that
+happened. A shape with no family, a null that could not be built, a base run
+that failed, a null that crashed the target, a value the reducer could not
+reduce, and a value that came out NaN or infinite all read NOT_TESTED with a
+typed reason (:class:`NotTestedReason`), never a verdict.
+
+It also handles the honest hard case: a stochastic pipeline (an LLM at nonzero
+temperature) moves run to run even with fixed input, so a naive "did it change"
+test would call everything influenced. The oracle measures that run-to-run noise
+first and only calls INFLUENCED above it. Measuring the noise takes repeats: at
+the default ``repeats=1`` the floor is 0 because nothing was measured, and the
+result says so rather than passing 0 off as a trusted floor. On a deterministic
+target, where the floor is measured at 0, the threshold is a float-equality band
+relative to the finding's magnitude rather than a multiple of sigma.
+
+Every verdict states the bound it was made under through
+:meth:`OracleResult.blind_spot_line`, which names the nulls the finding held
+still under, the ones whose move was inside the band, the ones the input ruled
+out, and :data:`THREAT_MODEL_STATEMENT`: the oracle grades a pipeline that does
+not attack its auditor.
 
 Flow and influence are different constructs, so the observer and the oracle can
 honestly disagree: a finding can read the cited data (flow) and then ignore it
@@ -730,7 +762,7 @@ def perturbation_oracle(
         resolved = _resolve_perturbations(base_input, perturb)
     except NoPerturbationsError:
         raise  # a caller bug, not a measurement outcome; see the class docstring
-    except Exception:  # noqa: BLE001 — building a null is not the target's fault
+    except Exception:  # noqa: BLE001, building a null is not the target's fault
         return OracleResult.not_tested(
             NotTestedReason.NULL_CONSTRUCTION_FAILED,
             detail="building the perturbed input raised",
@@ -773,7 +805,7 @@ def perturbation_oracle(
         for _ in range(repeats):
             try:
                 finding = run_fn(pin)
-            except Exception:  # noqa: BLE001 — a target crash is expected input
+            except Exception:  # noqa: BLE001, a target crash is expected input
                 raise _NullFailure(crashed, label, _traceback.format_exc())
             try:
                 value = m(finding)
@@ -784,7 +816,7 @@ def perturbation_oracle(
                 # math.isfinite raises those out of the call and breaks the
                 # promise that nothing about the target aborts the measurement.
                 finite = math.isfinite(value)
-            except Exception:  # noqa: BLE001 — the reducer could not reduce it
+            except Exception:  # noqa: BLE001, the reducer could not reduce it
                 raise _NullFailure(
                     NotTestedReason.UNREDUCIBLE_VALUE, label, _traceback.format_exc()
                 )
@@ -863,7 +895,7 @@ def perturbation_oracle(
     # more than one base run and came out 0 (a deterministic pipeline) OR because
     # a single base run never measured it. Both take the float-equality path
     # below, so the zero-config oracle does not degenerate to exact float
-    # equality in either case (the spec requires the fix at repeats=1 and
+    # equality in either case (this has to hold at repeats=1 and
     # repeats=5 alike). The two are told apart by ``noise_measured``: only the
     # measured case sets the ``deterministic`` field, and each carries its own
     # caveat in the reason.

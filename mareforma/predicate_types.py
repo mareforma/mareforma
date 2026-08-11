@@ -45,7 +45,7 @@ __all__ = [
     "unregister",
     "PredicateTypeError",
     "BUILTIN_URIS",
-    # Capability-shaped URI constants — re-exported from mareforma top
+    # Capability-shaped URI constants, re-exported from mareforma top
     # level so adapter authors can import them ergonomically.
     "CLAIM_V1",
     "EPISTEMIC_GRAPH_V1",
@@ -79,7 +79,7 @@ __all__ = [
 
 
 # Named constants for the URIs in BUILTIN_URIS. Adapter authors import
-# these instead of string-passing — a typo on a constant name fails at
+# these instead of string-passing: a typo on a constant name fails at
 # import; a typo on a URI string would silently mis-classify a claim.
 CLAIM_V1 = "urn:mareforma:predicate:claim:v1"
 EPISTEMIC_GRAPH_V1 = "urn:mareforma:predicate:epistemic-graph:v1"
@@ -172,7 +172,7 @@ BUILTIN_URIS: tuple[str, ...] = (
     "urn:mareforma:predicate:peer-review:v1",
     "urn:mareforma:predicate:elo-match:v1",
     "urn:mareforma:predicate:tournament-bracket:v1",
-    # Reserve the parent slot too — leaving wet-lab-assay:v1 open
+    # Reserve the parent slot too. Leaving wet-lab-assay:v1 open
     # would let a third-party register the umbrella URI and poison
     # the namespace mareforma clearly intends to own.
     "urn:mareforma:predicate:wet-lab-assay:v1",
@@ -239,7 +239,7 @@ def register(uri: str, owner: str | None = None) -> None:
             existing = _registry[uri]
             if owner is not None and owner != existing:
                 # Core URIs owned by mareforma (the original three)
-                # always raise — those slots have writers in mareforma
+                # always raise: those slots have writers in mareforma
                 # and any third-party claim on them is wrong.
                 # Newly-reserved adapter URIs were previously open;
                 # foreign callers that registered them before

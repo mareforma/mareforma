@@ -2624,8 +2624,8 @@ def test_every_example_directory_appears_in_the_readme_table():
     # The README table is the front door and the PyPI landing page. Example 07
     # shipped in the release that added it and was absent from this table, so the
     # cheapest demonstration of the product's core claim was unreachable from the
-    # two surfaces people read. The docs pass that missed it edited README.md
-    # without checking it against `ls examples/`; this guard is that check.
+    # two surfaces people read. README.md was edited without checking it against
+    # `ls examples/`; this guard is that check.
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     missing = [d.name for d in _example_dirs() if f"examples/{d.name}" not in readme]
     assert not missing, (

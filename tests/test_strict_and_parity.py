@@ -179,7 +179,7 @@ class TestVerifyClaimSignatures:
             cid = g.assert_claim("has a forged role", classification="ANALYTICAL")
             claim = g.get_claim(cid)
         env = json.loads(claim["signature_bundle"])
-        # The asserter keyid IS enrolled (root) — so the forged sig is rejected
+        # The asserter keyid IS enrolled (root), so the forged sig is rejected
         # on the signature check, not merely on orphan-signer grounds.
         env["signatures"].append({
             "keyid": claim["asserter_keyid"],

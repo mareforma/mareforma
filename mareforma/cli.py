@@ -657,8 +657,8 @@ def stats_cmd(ctx: click.Context, as_json: bool, last_n: int | None) -> None:
     help=(
         "Export format. 'jsonld' (default) = mareforma-native JSON-LD; "
         "'in-toto-v1' = unsigned in-toto Statement v1 (sigstore / SLSA / "
-        "GUAC ecosystem); 'ro-crate-1.2' = RO-Crate 1.2 Process Run Crate "
-        "metadata (Galaxy / EuroScienceGateway / FAIR-EASE ecosystem); "
+        "GUAC tooling); 'ro-crate-1.2' = RO-Crate 1.2 Process Run Crate "
+        "metadata (read by Galaxy, EuroScienceGateway and FAIR-EASE); "
         "'prov-o' = W3C PROV-O JSON-LD for provenance-aware tooling. "
         "Use --bundle for a signed in-toto Statement v1 (different from "
         "--format=in-toto-v1 which is unsigned)."

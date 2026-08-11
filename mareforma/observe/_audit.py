@@ -27,12 +27,12 @@ from ._scope import current_scope
 # Thread-start audit events, version-dependent. CPython emits no thread-start
 # audit event before 3.12; 3.12 emits `_thread.start_new_thread` and 3.13+
 # `_thread.start_joinable_thread` (measured across 3.10-3.14). So thread-seam
-# detection cannot rest on the audit hook alone — the wrapper in _loaders.py
+# detection cannot rest on the audit hook alone, the wrapper in _loaders.py
 # (`_wrap_thread_seams`) is the primary, cross-version mechanism, and these
 # event names are extra coverage from 3.12 on for threads started via C paths
 # that bypass the Python-level wrapper. A cross-version test pins this set.
-# Missing a thread seam is a CONFIDENT FALSE UNGROUNDED — a read hidden in a
-# library thread would read as genuine absence — which is why the robust
+# Missing a thread seam is a CONFIDENT FALSE UNGROUNDED, a read hidden in a
+# library thread would read as genuine absence, which is why the robust
 # wrapper carries the guarantee.
 THREAD_SEAM_EVENTS: frozenset[str] = frozenset(
     {
@@ -61,7 +61,7 @@ SOCKET_SEAM_EVENTS: frozenset[str] = frozenset({"socket.connect"})
 
 # The generic open event. Fires for builtins.open, io.open, and os.open, so it
 # catches opens the builtins.open wrapper misses (the coverage caveat). It does
-# NOT reveal whether the read returned data — only that the path was opened — so
+# NOT reveal whether the read returned data, only that the path was opened, so
 # it drives COVERAGE, not the GROUNDED verdict.
 _OPEN_EVENT = "open"
 
@@ -103,7 +103,7 @@ def _audit_hook(event: str, args: tuple) -> None:
     except BaseException as exc:  # noqa: BLE001
         # A hook must never propagate: that would raise inside the host's own
         # call. Degrade the scope to opaque (we can no longer trust our own
-        # observation) and swallow. Only within our own frame — the host's
+        # observation) and swallow. Only within our own frame, the host's
         # audited call continues untouched.
         try:
             scope.mark_error(f"audit hook failed on {event!r}: {type(exc).__name__}")

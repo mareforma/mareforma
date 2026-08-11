@@ -99,7 +99,7 @@ class TestTextSha256:
 
 
 # ---------------------------------------------------------------------------
-# statement_cid — content identifier derivation
+# statement_cid, content identifier derivation
 # ---------------------------------------------------------------------------
 
 
@@ -128,7 +128,7 @@ class TestStatementCid:
         assert statement_cid(a) != statement_cid(b)
 
     def test_supports_order_invariant(self) -> None:
-        # canonicalize sorts dict keys but not list elements — supports
+        # canonicalize sorts dict keys but not list elements, supports
         # IS a list whose order is meaningful (chronological / authorial).
         # Different supports-order → different cid. Documenting this.
         a = _minimal_statement(supports=["c_a", "c_b"])

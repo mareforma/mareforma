@@ -218,7 +218,7 @@ class EvidenceLine:
     modality: str | None = None
     provenance_id: str | None = None
     design_type: str | None = None
-    # The location the evidence was read from — a path or URL. Distinct from
+    # The location the evidence was read from, a path or URL. Distinct from
     # ``data_id`` (a content address over the bytes) and from the free-text
     # ``source_name`` (which never binds). It exists so an observed GROUNDED
     # verdict, whose cited set is typically a PATH, can bind to a finding whose

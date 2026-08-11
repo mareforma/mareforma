@@ -15,7 +15,7 @@ works.
 Every individual capability mareforma uses exists in mature form
 elsewhere: Ed25519 signing (`cryptography`), DSSE envelopes (`in-toto`),
 Sigstore transparency (`rekor`), JSON canonicalization (RFC 8785-style),
-local-first SQLite (Datasette ecosystem). What is missing in OSS is
+local-first SQLite (Datasette, sqlite-utils). What is missing in OSS is
 the **combination**:
 a runtime, opt-in, local Python library that takes those primitives
 and gives an agent a place to assert a claim, cite its upstream

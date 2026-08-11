@@ -163,15 +163,15 @@ def _influence_records(cited: tuple[str, ...]) -> list[dict]:
     cited data and re-runs, which is what the causal oracle needs to measure
     INFLUENCE. So on this path every cited source is NOT_TESTED for influence, one
     record per source, keyed by source so ``mareforma measure`` can flatten the
-    arm across findings. This is the honest state the release exists to record:
+    arm across findings. This is the honest state to record here:
     the reader now sees that flow was observed and influence was not, rather than
     a grounding verdict standing in for an influence claim nobody measured. A
     target that re-runs cheaply is measured through the oracle's own library API,
     not through this single-run path.
 
-    The typed reason is left absent: the four NotTestedReason values name ways the
-    oracle itself could not decide once it ran, and here the oracle did not run at
-    all, a different thing. The English reason carries the explanation.
+    The typed reason is left absent: every NotTestedReason value names a way the
+    oracle could not decide once it ran, and here the oracle did not run at all, a
+    different thing. The English reason carries the explanation.
     """
     from mareforma.observe.oracle import THREAT_MODEL_STATEMENT
 

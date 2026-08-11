@@ -32,7 +32,7 @@ class TestPredicateTypeRegistry:
         self._snapshot = dict(_pt._registry)
 
     def teardown_method(self) -> None:
-        # Restore the registry — important because the registry is
+        # Restore the registry, important because the registry is
         # process-global state and other tests inherit it.
         _pt._registry.clear()
         _pt._registry.update(self._snapshot)
@@ -776,7 +776,7 @@ class TestRoCrateInputValidation:
         action = _claim_to_create_action({
             "claim_id": valid_uuid,
             "generated_by": "agent",
-            # Dict instead of list — should be ignored, not iterated.
+            # Dict instead of list, should be ignored, not iterated.
             "supports_json": '{"x": 1, "y": 2}',
         })
         assert "object" not in action  # No supports[] references emitted.
@@ -795,7 +795,7 @@ class TestRoCrateInputValidation:
             "generated_by": "agent",
             "supports_json": json.dumps([
                 other_uuid,
-                "10.1038/s41586-026-10652-y",  # DOI — should be filtered.
+                "10.1038/s41586-026-10652-y",  # DOI, should be filtered.
                 "external-ref-string",  # also filtered.
             ]),
         })
@@ -881,7 +881,7 @@ class TestRestoreTypeSafety:
                     "contradicts": [],
                     "comparison_summary": "",
                     "evidence_json": "{}",
-                    "predicate_payload": True,  # bool — refused.
+                    "predicate_payload": True,  # bool, refused.
                     "created_at": "2026-01-01T00:00:00+00:00",
                     "updated_at": "2026-01-01T00:00:00+00:00",
                 }
