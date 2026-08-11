@@ -160,3 +160,47 @@ def test_scan_ceiling_truncation_raises_instead_of_a_short_list(
             g.query(limit=5)
         with pytest.raises(mareforma.ScanCeilingReached, match="scan ceiling"):
             g.search("claim", limit=5)
+
+
+def test_the_read_ordering_is_served_by_an_index_not_a_temp_btree(tmp_path):
+    """`query()` orders by a CASE over support_level, which no column index can
+    serve, so every call scanned the table and built a temp B-tree to sort it.
+    The LIMIT bounded what came back, never what was read, and the whole cost was
+    paid under the process-wide graph lock. Pinned on the plan rather than on a
+    timing, so it cannot flake and it names the thing that regressed if the
+    index or the ORDER BY drifts apart."""
+    root_key = _bootstrap_key(tmp_path, "root.key")
+    with mareforma.open(tmp_path, key_path=root_key) as g:
+        for i in range(20):
+            g.assert_claim(f"claim number {i}", generated_by="x")
+        sql = (
+            "SELECT claim_id FROM claims WHERE t_invalid IS NULL "
+            "ORDER BY CASE support_level WHEN 'ESTABLISHED' THEN 3 "
+            "WHEN 'REPLICATED' THEN 2 ELSE 1 END DESC, created_at DESC LIMIT 20"
+        )
+        plan = [r[-1] for r in g._conn.execute("EXPLAIN QUERY PLAN " + sql)]
+
+    assert any("idx_claims_read_order" in step for step in plan), plan
+    assert not any("TEMP B-TREE" in step for step in plan), plan
+
+
+def test_the_read_order_index_reaches_a_graph_written_before_it_existed(tmp_path):
+    """The index lives in the additive SQL, not the fresh-database schema.
+
+    Statements that run only for a fresh database never reach a graph written by
+    an earlier release, which is the trap the
+    schema-if-not-exists-hides-constraint-change learning names. Simulated by
+    dropping the index and reopening: the next open must put it back."""
+    root_key = _bootstrap_key(tmp_path, "root.key")
+    with mareforma.open(tmp_path, key_path=root_key) as g:
+        g.assert_claim("a claim", generated_by="x")
+        g._conn.execute("DROP INDEX idx_claims_read_order")
+        g._conn.commit()
+
+    with mareforma.open(tmp_path, key_path=root_key) as g:
+        names = {
+            r[0] for r in g._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            )
+        }
+    assert "idx_claims_read_order" in names
