@@ -228,10 +228,11 @@ class OracleResult:
     # perturbation alone moved the finding from the base mean. effect_size is
     # the largest of these, so a reader can see which perturbation moved it.
     perturbation_effects: tuple[float, ...] = ()
-    # The name of each null in ``perturbation_effects`` order (``zeroed``,
-    # ``permuted``, ...) when the family was derived from the finding's shape, so
-    # a reader can see which null the finding held invariant under. Empty when the
-    # caller supplied its own perturbations.
+    # The name of each null in ``perturbation_effects`` order. A derived family
+    # names them by what they do (``zeroed``, ``permuted``, ...) so a reader can
+    # see which null the finding held invariant under; a caller-supplied family
+    # gets generic names (``perturbation`` for a callable, ``perturbation-0`` ...
+    # for a sequence). Empty only on a NOT_TESTED row that never ran a null.
     scramble_names: tuple[str, ...] = ()
     # The declared reducer used to reduce each finding to a scalar, so the
     # measurement artifact is auditable about how prose became a number.

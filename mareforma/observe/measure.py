@@ -529,6 +529,12 @@ def summarize_influence(records: Iterable[dict]) -> InfluenceReport:
                 # did not run at all); an unrecognized verdict is malformed.
                 reason = "not-run" if verdict == "NOT_TESTED" else "unknown"
             by_reason[reason] = by_reason.get(reason, 0) + 1
+        # A record's own run count, summed across edges. A writer that flattens
+        # one finding's oracle result into N source-edges must stamp the run
+        # count on ONE edge (or split it), never copy the finding's count onto
+        # all N, or a single N-source finding measured over one run would report
+        # N runs, the very "many edges from one run" confusion the edge/run split
+        # exists to prevent.
         runs = rec.get("distinct_runs")
         if isinstance(runs, int) and runs > 0:
             distinct_runs += runs
