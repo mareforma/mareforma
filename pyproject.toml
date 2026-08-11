@@ -71,6 +71,7 @@ dev = [
 # ONE pinned CI leg (see the test-heavy job). HTTP tests mock with
 # responses / pytest-httpx, never live network.
 test-heavy = [
+    "numpy>=1.24",
     "h5py>=3.8",
     "pandas>=2.0",
     "pyarrow>=14.0",
