@@ -28,6 +28,7 @@ from ..doi_resolver import is_doi
 from ._schema_sql import (  # noqa: F401
     _ADDITIVE_TABLES_SQL,
     _EXPECTED_TRIGGER_TABLES,
+    _SCHEMA_CENSUS_SQL,
     _CLAIM_COLUMNS,
     _CLAIM_SELECT,
     _MANAGED_TRIGGERS,
@@ -330,16 +331,19 @@ def _ensure_supports_revision_row(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-_SCHEMA_CENSUS_SQL = """
-CREATE TABLE IF NOT EXISTS schema_census (
-    observed_at TEXT NOT NULL PRIMARY KEY,
-    missing     TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS schema_guards_seen (
-    name       TEXT NOT NULL PRIMARY KEY,
-    first_seen TEXT NOT NULL
-);
-"""
+def _guards_seen(conn: sqlite3.Connection) -> "set[str]":
+    """Every guard this graph is known to have carried, or an empty set.
+
+    Tolerates the table being absent, which is not an error condition but the
+    state of every file written before the store existed, and the state the
+    census has to read from before it is allowed to create anything.
+    """
+    try:
+        return {
+            row[0] for row in conn.execute("SELECT name FROM schema_guards_seen")
+        }
+    except sqlite3.OperationalError:
+        return set()
 
 
 def _note_guards_seen(conn: sqlite3.Connection) -> None:
@@ -370,7 +374,7 @@ def _note_guards_seen(conn: sqlite3.Connection) -> None:
             "SELECT name FROM sqlite_master WHERE type = 'trigger'"
         )
     }
-    known = {row[0] for row in conn.execute("SELECT name FROM schema_guards_seen")}
+    known = _guards_seen(conn)
     fresh = sorted((present & set(_EXPECTED_TRIGGER_TABLES)) - known)
     if not fresh:
         return
@@ -416,29 +420,37 @@ def _record_schema_census(conn: sqlite3.Connection) -> "tuple[str, ...]":
 
     Returns the missing names so the caller can act on the open it happened on.
     """
-    conn.executescript(_SCHEMA_CENSUS_SQL)
+    # Look before creating anything, including the census store itself. The
+    # store's own no-delete guards are created by _SCHEMA_CENSUS_SQL, so running
+    # that script first would heal a dropped store guard and then report a
+    # healthy schema: exactly the blindness the ordering above exists to avoid,
+    # aimed at the one table that is the only record left. Four statements
+    # emptied the whole report that way, dropping the two store guards to get
+    # past them and deleting the rows behind.
     live = conn.execute(
         "SELECT type, name FROM sqlite_master WHERE type IN ('table', 'trigger')"
     ).fetchall()
     tables = {name for kind, name in live if kind == "table"}
     triggers = {name for kind, name in live if kind == "trigger"}
-    seen = {row[0] for row in conn.execute("SELECT name FROM schema_guards_seen")}
+    seen = _guards_seen(conn)
     expected = {
         name for name, table in _EXPECTED_TRIGGER_TABLES.items()
         if table in tables or name in seen
     }
     missing = tuple(sorted(expected - triggers))
+
+    conn.executescript(_SCHEMA_CENSUS_SQL)
     if not missing:
         return ()
 
     payload = json.dumps(list(missing))
     last = conn.execute(
-        "SELECT missing FROM schema_census ORDER BY observed_at DESC LIMIT 1"
+        "SELECT missing FROM schema_census "
+        "ORDER BY observed_at DESC, rowid DESC LIMIT 1"
     ).fetchone()
     if last is None or last[0] != payload:
         conn.execute(
-            "INSERT OR REPLACE INTO schema_census (observed_at, missing) "
-            "VALUES (?, ?)",
+            "INSERT INTO schema_census (observed_at, missing) VALUES (?, ?)",
             (_now(), payload),
         )
         # Commit here rather than leaning on the caller. The record would
@@ -479,23 +491,36 @@ def schema_census_missing(conn: sqlite3.Connection) -> "tuple[str, ...]":
 
 
 def _ensure_managed_triggers(conn: sqlite3.Connection) -> None:
-    """Reconcile the claims-table write guards with their wanted text.
+    """Reconcile every trigger in the schema with its wanted text.
 
     _SCHEMA_SQL never runs again on an initialised db, so a trigger whose
-    definition changed shape reaches an existing graph only from here. Doing
-    that as an unconditional drop-and-recreate would open a window on every
-    single open() in which another connection sees the claims table with no
-    laundering guard on it, which is exactly the substitution the triggers
-    exist to refuse. Compare against sqlite_master instead: the steady-state
-    open is a pure read, and a genuine rewrite runs inside one transaction so
-    the absence is never observable.
+    definition changed shape reaches an existing graph only from here, and a
+    trigger somebody dropped comes back only from here. Doing that as an
+    unconditional drop-and-recreate would open a window on every single open()
+    in which another connection sees a table with no guard on it, which is
+    exactly the substitution the triggers exist to refuse. Compare against
+    sqlite_master instead: the steady-state open is a pure read, and a genuine
+    rewrite runs inside one transaction so the absence is never observable.
+
+    One read for the whole set rather than a lookup per name. The set is now
+    every trigger the schema defines rather than the seventeen with authored
+    text, and a query each would put a statement per guard on the hot path of
+    every open to answer a question one scan of sqlite_master answers.
     """
+    live = conn.execute(
+        "SELECT type, name, sql FROM sqlite_master "
+        "WHERE type IN ('table', 'trigger')"
+    ).fetchall()
+    tables = {name for kind, name, _ in live if kind == "table"}
+    stored = {name: sql for kind, name, sql in live if kind == "trigger"}
     for name, wanted in _MANAGED_TRIGGERS:
-        stored = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
-            (name,),
-        ).fetchone()
-        if stored is not None and stored[0] == wanted:
+        if stored.get(name) == wanted:
+            continue
+        # A guard whose table is not here cannot be created, and its absence is
+        # not this function's to report. The same rule the census uses: a table
+        # that was never built here is an older file, and one that was built and
+        # taken away is already on the census under the guard's own name.
+        if _EXPECTED_TRIGGER_TABLES[name] not in tables:
             continue
         own_transaction = not conn.in_transaction
         if own_transaction:
@@ -677,6 +702,10 @@ def open_db(root: Path) -> sqlite3.Connection:
         if version == 0:
             conn.executescript(_SCHEMA_SQL)
             conn.executescript(_ADDITIVE_TABLES_SQL)
+            # With the census store here too, since its guards are reconciled
+            # like the rest and the reconciler cannot build a trigger on a
+            # table that does not exist yet.
+            conn.executescript(_SCHEMA_CENSUS_SQL)
             _ensure_supports_revision_row(conn)
             _ensure_managed_triggers(conn)
             # Seed the seen set while the graph is provably whole, so a graph
@@ -747,6 +776,7 @@ def open_db_from_db_path(db_path: "str | Path") -> sqlite3.Connection:
         if version == 0:
             conn.executescript(_SCHEMA_SQL)
             conn.executescript(_ADDITIVE_TABLES_SQL)
+            conn.executescript(_SCHEMA_CENSUS_SQL)
             _ensure_supports_revision_row(conn)
             conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
         else:

@@ -1,16 +1,22 @@
 """The schema census: what was missing when the file was opened.
 
 A dropped write guard is the one tamper a read cannot infer afterwards, because
-two repairs run silently on the way in. ``_ensure_managed_triggers`` reconciles
-the managed set against ``sqlite_master`` on every open, and
+the repairs run silently on the way in. ``_ensure_managed_triggers`` reconciles
+every trigger in the schema against ``sqlite_master`` on every open, and
 ``_ADDITIVE_TABLES_SQL`` re-runs its own ``CREATE TRIGGER IF NOT EXISTS``
 statements on every open too. So by the time anything reads a claim, a guard
 that was gone is back, and the deletes it permitted are indistinguishable from
 rows that were never written.
 
-These tests pin the three properties that make the census worth having: it runs
-BEFORE the repairs, its record survives every later open, and it tells a table
-this graph never had apart from one that was taken away.
+There used to be guards that stayed gone, created once by a script that never
+runs again, and a reader could at least see those missing in ``sqlite_master``.
+There are none now. Healing every guard on every open is the right behaviour
+and it costs the last witness a read had, which is what makes the census load
+bearing rather than a nicety.
+
+These tests pin the three properties that make it worth having: it runs BEFORE
+the repairs, its record survives every later open, and it tells a table this
+graph never had apart from one that was taken away.
 """
 
 from __future__ import annotations
@@ -31,12 +37,12 @@ from mareforma.db._schema_sql import (
 from mareforma.db.core import open_db, schema_census_missing
 from tests._helpers import _bootstrap_key
 
-# One guard from each home. The managed one is reconciled on every open, so it
-# comes back by itself; the unmanaged one is created only by a script that never
-# runs again on an initialised database, so it stays gone. The census must
-# record BOTH, and the difference between them is exactly why recording matters.
-_MANAGED_GUARD = "validators_no_delete"
-_UNMANAGED_GUARD = "contradiction_verdicts_no_delete"
+# One guard whose text is authored in Python, one whose text lives in the DDL.
+# Both are reconciled now, so both heal before the open returns and neither is
+# visible as missing to anything that reads afterwards. They are kept apart here
+# because the two homes are still where a definition can drift.
+_AUTHORED_GUARD = "validators_no_delete"
+_DDL_GUARD = "contradiction_verdicts_no_delete"
 
 # The tables _ADDITIVE_TABLES_SQL builds on the way into every open. A graph.db
 # written by an earlier mareforma has none of them, and dropping them here is
@@ -233,11 +239,11 @@ class TestAnOlderGraphIsNotTamper:
         _graph_with_one_claim(tmp_path)
         _make_legacy(tmp_path)
         open_db(tmp_path).close()                    # the upgrade open
-        _drop(tmp_path, _MANAGED_GUARD)
+        _drop(tmp_path, _AUTHORED_GUARD)
 
         conn = open_db(tmp_path)
         try:
-            assert _MANAGED_GUARD in schema_census_missing(conn)
+            assert _AUTHORED_GUARD in schema_census_missing(conn)
         finally:
             conn.close()
 
@@ -294,20 +300,26 @@ class TestTakingTheTableTooDoesNotHelp:
 
         A guard would enrol itself the first time it was expected, and the
         graph would go on expecting it for a reason with nothing to do with
-        ever having had it. Here the census expects this guard, because its
-        table is present, and reports it missing. The seen set must still
-        refuse to write it down, because it is not there.
+        ever having had it.
+
+        Every guard heals now, so the only way to hold one absent past the
+        repairs is to take its table with it, and rekor_inclusions is one of
+        the five the additive script does not rebuild. With nothing seen yet,
+        its guards are genuinely unknown to this graph and must stay unknown.
         """
         _graph_with_one_claim(tmp_path)
         _forget_the_bookkeeping(tmp_path)                # nothing seen yet
-        _drop(tmp_path, _UNMANAGED_GUARD)                # and it never heals
+        raw = sqlite3.connect(tmp_path / ".mareforma" / "graph.db")
+        raw.execute("PRAGMA legacy_alter_table = ON")
+        raw.execute("DROP TABLE rekor_inclusions")
+        raw.commit()
+        raw.close()
 
-        conn = open_db(tmp_path)
-        try:
-            assert _UNMANAGED_GUARD in schema_census_missing(conn)
-        finally:
-            conn.close()
-        assert _UNMANAGED_GUARD not in _seen_guards(tmp_path)
+        open_db(tmp_path).close()
+        seen = _seen_guards(tmp_path)
+        assert "rekor_inclusions_no_delete" not in seen
+        assert "rekor_inclusions_append_only" not in seen
+        assert _AUTHORED_GUARD in seen           # and the rest were recorded
 
     def test_an_upgrade_records_the_trust_layer_it_just_built(
         self, tmp_path: Path,
@@ -386,37 +398,27 @@ class TestTheCensusSeesWhatHeals:
         finally:
             conn.close()
 
-    def test_records_a_managed_guard_that_heals_on_the_same_open(
-        self, tmp_path: Path,
+    @pytest.mark.parametrize("guard", [_AUTHORED_GUARD, _DDL_GUARD])
+    def test_records_a_guard_that_heals_on_the_same_open(
+        self, tmp_path: Path, guard: str,
     ) -> None:
-        """The case the ordering exists for.
+        """The case the ordering exists for, and now it is every case.
 
-        This guard is back before the open returns. Re-deriving from
-        sqlite_master at read time would answer "nothing is missing" on a graph
-        that was demonstrably tampered with.
+        The guard is back before the open returns, whichever home its text
+        lives in. Re-deriving from sqlite_master at read time would answer
+        "nothing is missing" on a graph that was demonstrably tampered with,
+        and there is no longer any guard for which that answer happens to be
+        right.
         """
         _graph_with_one_claim(tmp_path)
-        _drop(tmp_path, _MANAGED_GUARD)
+        _drop(tmp_path, guard)
 
         conn = open_db(tmp_path)
         try:
-            assert _MANAGED_GUARD in schema_census_missing(conn)
+            assert guard in schema_census_missing(conn)
         finally:
             conn.close()
-        assert _MANAGED_GUARD in _live_triggers(tmp_path)   # healed, yet recorded
-
-    def test_records_an_unmanaged_guard_that_never_comes_back(
-        self, tmp_path: Path,
-    ) -> None:
-        _graph_with_one_claim(tmp_path)
-        _drop(tmp_path, _UNMANAGED_GUARD)
-
-        conn = open_db(tmp_path)
-        try:
-            assert _UNMANAGED_GUARD in schema_census_missing(conn)
-        finally:
-            conn.close()
-        assert _UNMANAGED_GUARD not in _live_triggers(tmp_path)
+        assert guard in _live_triggers(tmp_path)     # healed, yet recorded
 
     def test_the_record_survives_later_opens(self, tmp_path: Path) -> None:
         """A guard that came back is not a guard that was never gone.
@@ -426,7 +428,7 @@ class TestTheCensusSeesWhatHeals:
         to prevent, one level up.
         """
         _graph_with_one_claim(tmp_path)
-        _drop(tmp_path, _MANAGED_GUARD, _UNMANAGED_GUARD)
+        _drop(tmp_path, _AUTHORED_GUARD, _DDL_GUARD)
 
         seen = []
         for _ in range(3):
@@ -435,15 +437,15 @@ class TestTheCensusSeesWhatHeals:
             conn.close()
 
         for observed in seen:
-            assert _MANAGED_GUARD in observed
-            assert _UNMANAGED_GUARD in observed
+            assert _AUTHORED_GUARD in observed
+            assert _DDL_GUARD in observed
 
     def test_repeated_clean_opens_do_not_accumulate_rows(
         self, tmp_path: Path,
     ) -> None:
         """A row per open would grow without bound and bury the real one."""
         _graph_with_one_claim(tmp_path)
-        _drop(tmp_path, _UNMANAGED_GUARD)
+        _drop(tmp_path, _DDL_GUARD)
         for _ in range(4):
             open_db(tmp_path).close()
 
@@ -462,12 +464,12 @@ class TestTheSubstrateAxis:
         key = _bootstrap_key(tmp_path, "root.key")
         with mareforma.open(tmp_path, key_path=key) as g:
             cid = g.assert_claim("a claim")
-        _drop(tmp_path, _UNMANAGED_GUARD)
+        _drop(tmp_path, _DDL_GUARD)
 
         with mareforma.open(tmp_path, key_path=key) as g:
             root = g.trust_map(cid).get("trust_root")
         assert root.value == "TAMPERED"
-        assert _UNMANAGED_GUARD in root.residual
+        assert _DDL_GUARD in root.residual
 
     def test_a_planted_second_root_reads_tampered(self, tmp_path: Path) -> None:
         """validators blocks UPDATE and DELETE and permits INSERT.

@@ -40,8 +40,12 @@ def _now_iso() -> str:
 
 
 _UPDATE_OF_RE = re.compile(r"UPDATE\s+OF\s+(.+?)\s+ON\s", re.IGNORECASE | re.DOTALL)
-_UPDATE_ALL_RE = re.compile(r"BEFORE\s+UPDATE\s+ON\s+(\w+)", re.IGNORECASE)
-_DELETE_RE = re.compile(r"BEFORE\s+DELETE\s+ON\s+(\w+)", re.IGNORECASE)
+_UPDATE_ALL_RE = re.compile(
+    r"(?:BEFORE|AFTER)\s+UPDATE\s+ON\s+(\w+)", re.IGNORECASE)
+_DELETE_RE = re.compile(
+    r"(?:BEFORE|AFTER)\s+DELETE\s+ON\s+(\w+)", re.IGNORECASE)
+_INSERT_RE = re.compile(
+    r"(?:BEFORE|AFTER)\s+INSERT\s+ON\s+(\w+)", re.IGNORECASE)
 _UPDATE_OF_TABLE_RE = re.compile(
     r"UPDATE\s+OF\s+.+?\s+ON\s+(\w+)", re.IGNORECASE | re.DOTALL
 )
@@ -54,15 +58,19 @@ def _watched_columns(trigger_sql: str) -> list[str]:
     return [col.strip() for col in match.group(1).split(",")]
 
 
-def _noop_dml_for_trigger(trigger_sql: str) -> list[str]:
+def _noop_dml_for_trigger(conn, trigger_sql: str) -> list[str]:
     """No-op DML statements that attach a managed trigger's subprogram.
 
     SQLite compiles a trigger's body when it compiles a DML statement on the
     trigger's table and event, so exercising each managed trigger means running
-    the matching statement with ``WHERE 0`` (no row touched, the body still
-    compiles). Covers the three managed-trigger shapes: ``BEFORE UPDATE OF
-    <cols>`` (one statement per watched column), a whole-table ``BEFORE UPDATE``
-    (append-only guards), and ``BEFORE DELETE`` (no-delete guards).
+    the matching statement in a form that touches no row. ``WHERE 0`` does that
+    for UPDATE and DELETE; an INSERT drawing from ``SELECT ... WHERE 0`` does it
+    for INSERT.
+
+    Every event shape in the schema, because the reconciled set is now every
+    trigger rather than the seventeen with authored text: the claims
+    state-machine checks fire BEFORE INSERT, and the FTS sync triggers fire
+    AFTER all three.
     """
     of_table = _UPDATE_OF_TABLE_RE.search(trigger_sql)
     if of_table is not None:
@@ -74,23 +82,28 @@ def _noop_dml_for_trigger(trigger_sql: str) -> list[str]:
     update_all = _UPDATE_ALL_RE.search(trigger_sql)
     if update_all is not None:
         table = update_all.group(1)
-        col = _any_column(table)
+        col = _any_column(conn, table)
         return [f"UPDATE {table} SET {col} = {col} WHERE 0"]
     delete = _DELETE_RE.search(trigger_sql)
-    assert delete is not None, trigger_sql
-    return [f"DELETE FROM {delete.group(1)} WHERE 0"]
+    if delete is not None:
+        return [f"DELETE FROM {delete.group(1)} WHERE 0"]
+    insert = _INSERT_RE.search(trigger_sql)
+    assert insert is not None, trigger_sql
+    table = insert.group(1)
+    return [f"INSERT INTO {table} SELECT * FROM {table} WHERE 0"]
 
 
-def _any_column(table: str) -> str:
-    """One column name of *table*, for a whole-table no-op UPDATE."""
-    return {
-        "findings": "content_id",
-        "evidence_lines": "data_id",
-        "propositions": "subject",
-        "contrasts": "control_type",
-        "effect_estimates": "estimate_value",
-        "validators": "pubkey_pem",
-    }[table]
+def _any_column(conn, table: str) -> str:
+    """One column name of *table*, for a whole-table no-op UPDATE.
+
+    Read off the live schema rather than from a table kept here by hand. The
+    hand-kept version had six entries and covered the six tables that happened
+    to be reconciled at the time, so adding a guard elsewhere failed with a
+    KeyError in the helper rather than a verdict about the guard.
+    """
+    cols = [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
+    assert cols, f"no such table: {table}"
+    return cols[0]
 
 
 # ---------------------------------------------------------------------------
@@ -678,7 +691,7 @@ class TestSignedPromotionBacked:
         observer = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
         try:
             for _, sql in _MANAGED_TRIGGERS:
-                for statement in _noop_dml_for_trigger(sql):
+                for statement in _noop_dml_for_trigger(observer, sql):
                     observer.execute(statement)
         finally:
             observer.close()

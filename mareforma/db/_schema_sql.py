@@ -844,9 +844,12 @@ BEGIN
 END"""
 
 
-# The triggers open_db reconciles against sqlite_master on every open, name
-# first so a definition that changed shape reaches an existing graph.
-_MANAGED_TRIGGERS = (
+# Triggers whose text lives in Python rather than in a DDL script, because
+# these are the ones a release rewrites and the reconciler needs the new text
+# by name. Every trigger in the schema is reconciled, not just these: see
+# _MANAGED_TRIGGERS below, which is the whole set. This tuple is only about
+# where a definition is written down.
+_AUTHORED_TRIGGERS = (
     (_SIGNED_FIELDS_TRIGGER_NAME, _SIGNED_FIELDS_TRIGGER_SQL),
     (_PROMOTION_TRIGGER_NAME, _PROMOTION_TRIGGER_SQL),
     (_FINDINGS_APPEND_ONLY_TRIGGER_NAME, _FINDINGS_APPEND_ONLY_TRIGGER_SQL),
@@ -1137,6 +1140,54 @@ CREATE TABLE IF NOT EXISTS supports_revision (
 """
 
 
+# The census store. Its DDL lives here with the rest of the schema, but unlike
+# the two scripts above it is run by _record_schema_census rather than by the
+# open sequence, because the census has to have its tables before it looks and
+# it looks before anything else runs.
+#
+# Guarded like every other table that carries evidence, and the reason is
+# sharper here than elsewhere. Once every guard is reconciled on every open,
+# almost no tamper stays visible in sqlite_master by the time anything reads:
+# these two tables are the only record that it happened. A store of tamper
+# evidence that the tamperer can empty is not a record of anything.
+#
+# observed_at carries no PRIMARY KEY on purpose. It had one, with INSERT OR
+# REPLACE behind it, and REPLACE resolves a conflict by deleting the row first,
+# which the guard below would refuse. Appending instead means the guards can be
+# absolute, and the "only when it differs from the last" rule already keeps the
+# table from growing.
+_SCHEMA_CENSUS_SQL = """
+CREATE TABLE IF NOT EXISTS schema_census (
+    observed_at TEXT NOT NULL,
+    missing     TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS schema_guards_seen (
+    name       TEXT NOT NULL PRIMARY KEY,
+    first_seen TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS schema_census_no_delete
+BEFORE DELETE ON schema_census
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:no_delete:schema_census_locked');
+END;
+CREATE TRIGGER IF NOT EXISTS schema_census_append_only
+BEFORE UPDATE ON schema_census
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:schema_census_locked');
+END;
+CREATE TRIGGER IF NOT EXISTS schema_guards_seen_no_delete
+BEFORE DELETE ON schema_guards_seen
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:no_delete:schema_guards_seen_locked');
+END;
+CREATE TRIGGER IF NOT EXISTS schema_guards_seen_append_only
+BEFORE UPDATE ON schema_guards_seen
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:schema_guards_seen_locked');
+END;
+"""
+
+
 def _extract_triggers(script: str) -> "tuple[tuple[str, str], ...]":
     """Every ``CREATE TRIGGER`` in *script*, as SQLite will store it.
 
@@ -1187,8 +1238,30 @@ def _extract_triggers(script: str) -> "tuple[tuple[str, str], ...]":
 _ALL_EXPECTED_TRIGGERS: "dict[str, str]" = {
     **dict(_extract_triggers(_SCHEMA_SQL)),
     **dict(_extract_triggers(_ADDITIVE_TABLES_SQL)),
-    **{name: sql.rstrip().rstrip(";") for name, sql in _MANAGED_TRIGGERS},
+    **dict(_extract_triggers(_SCHEMA_CENSUS_SQL)),
+    **{name: sql.rstrip().rstrip(";") for name, sql in _AUTHORED_TRIGGERS},
 }
+
+
+# Every trigger in the schema is reconciled against sqlite_master on every
+# open, not the seventeen whose text happens to be authored in Python.
+#
+# The split those seventeen used to represent was not a decision about which
+# guards matter. _SCHEMA_SQL runs once, on a fresh database, and never again,
+# so a trigger created only there could be dropped and would simply stay
+# dropped: contradiction_verdicts_no_delete, the append-only guards on
+# rekor_inclusions and replication_verdicts, the claims state-machine checks.
+# Seventeen guards whose removal was permanent, next to seventeen whose removal
+# lasted until the next open, and nothing about the tables told you which was
+# which.
+#
+# Deriving the reconciled set from the expected set makes the two the same
+# thing by construction, so a trigger cannot be added to the schema and left
+# out of the reconciler. That was the other half of the old failure: the list
+# was maintained by hand beside a growing schema.
+_MANAGED_TRIGGERS: "tuple[tuple[str, str], ...]" = tuple(
+    _ALL_EXPECTED_TRIGGERS.items()
+)
 
 
 def _trigger_base_table(sql: str) -> str:

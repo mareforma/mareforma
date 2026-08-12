@@ -352,6 +352,51 @@ derived alongside it from the same computation. Both are what a reader should
 read trust off; the stored `support_level` ladder above is the deprecated legacy
 axis.
 
+## schema_census and schema_guards_seen tables
+
+Two tables that record the state of the schema's own write guards, because a
+dropped guard is the one tamper a read cannot infer afterwards. Every trigger in
+the schema is reconciled against `sqlite_master` on every open, and
+`_ADDITIVE_TABLES_SQL` recreates its own triggers on every open as well, so a
+guard that was gone is back before the open returns. Nothing in the file
+afterwards says it had gone, while the rows it let someone delete stay deleted.
+
+The census runs first, ahead of both repairs, and writes down what was absent.
+Ordering is the whole mechanism: run after either repair and it sees a healed
+schema and reports clean forever. A read surface consults the record rather than
+re-deriving from `sqlite_master`, and reads the union of every observation, not
+the latest: a guard that came back is not a guard that was never gone.
+
+`schema_guards_seen` is what separates "this graph never had that table" from
+"somebody took that table away". A guard is expected while its table is present,
+which keeps a graph written before a table existed off the tamper report, and a
+guard this graph has carried stays expected however its table is treated after.
+It is written at the end of an open, from the guards actually present, and it
+only grows.
+
+Both tables carry no-delete and append-only guards of their own. Once every
+guard heals on every open they are the only record that anything happened, and a
+store of tamper evidence the tamperer can empty is not a record of anything.
+
+`schema_census`:
+
+| Field | Type | Description |
+|---|---|---|
+| `observed_at` | TEXT | UTC ISO 8601: when the open that found them ran |
+| `missing` | TEXT | JSON array of trigger names absent at that open |
+
+A row is written only when something is missing, and only when the set differs
+from the last one recorded, so a long-lived process does not bury the
+observation that matters. `observed_at` carries no primary key: appending rather
+than replacing is what lets the delete guard be absolute.
+
+`schema_guards_seen`:
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | TEXT (PK) | A trigger this graph has carried |
+| `first_seen` | TEXT | UTC ISO 8601: the open that first saw it |
+
 ## Schema versioning
 
 The schema version is stored in SQLite's `user_version` pragma.
