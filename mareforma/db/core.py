@@ -27,6 +27,7 @@ from .._canonical import signed_value_matches
 from ..doi_resolver import is_doi
 from ._schema_sql import (  # noqa: F401
     _ADDITIVE_TABLES_SQL,
+    _EXPECTED_TRIGGER_TABLES,
     _CLAIM_COLUMNS,
     _CLAIM_SELECT,
     _MANAGED_TRIGGERS,
@@ -329,6 +330,154 @@ def _ensure_supports_revision_row(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+_SCHEMA_CENSUS_SQL = """
+CREATE TABLE IF NOT EXISTS schema_census (
+    observed_at TEXT NOT NULL PRIMARY KEY,
+    missing     TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS schema_guards_seen (
+    name       TEXT NOT NULL PRIMARY KEY,
+    first_seen TEXT NOT NULL
+);
+"""
+
+
+def _note_guards_seen(conn: sqlite3.Connection) -> None:
+    """Add every expected guard the graph currently carries to its seen set.
+
+    The seen set is what makes "this table was never built here" separable from
+    "somebody took this table away". A guard is expected while its table is
+    present, which is what keeps an older graph.db off the tamper report, but on
+    its own that rule hands an attacker a way out: drop the table and its guards
+    leave the expected set along with it, and the additive script rebuilds the
+    table empty on the same open. Once a guard is in this set it stays expected
+    whatever happens to its table.
+
+    Called at the END of an open, after the repairs, and that is not the same
+    moment as the census. The census has to look before anything heals or it
+    sees a mended schema; this has to look after, or the guards an open just
+    built are not recorded until the next one and a table dropped in between
+    walks out through the gap it was closing.
+
+    Monotone, and only ever written when it grows. It records what is present,
+    never what is expected. A guard absent when this looks is not written down
+    however much the census wanted it, so a drop cannot enrol itself as normal,
+    and nothing here forgets: a graph cannot un-know a guard it once had.
+    """
+    conn.executescript(_SCHEMA_CENSUS_SQL)
+    present = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+        )
+    }
+    known = {row[0] for row in conn.execute("SELECT name FROM schema_guards_seen")}
+    fresh = sorted((present & set(_EXPECTED_TRIGGER_TABLES)) - known)
+    if not fresh:
+        return
+    now = _now()
+    conn.executemany(
+        "INSERT OR IGNORE INTO schema_guards_seen (name, first_seen) VALUES (?, ?)",
+        [(name, now) for name in fresh],
+    )
+    conn.commit()
+
+
+def _record_schema_census(conn: sqlite3.Connection) -> "tuple[str, ...]":
+    """Record which write guards are absent, BEFORE anything recreates them.
+
+    A dropped trigger is the one tamper the read path cannot infer afterwards,
+    because two different repairs run on the way in and both are silent. The
+    managed set is reconciled against ``sqlite_master`` on every open, and
+    ``_ADDITIVE_TABLES_SQL`` re-runs its own ``CREATE TRIGGER IF NOT EXISTS``
+    statements on every open as well. By the time a caller reads a claim, a
+    guard that was missing when the file was opened is back, with nothing
+    anywhere saying it had gone, and the deletes it permitted while it was down
+    are already indistinguishable from rows that were never written.
+
+    So this runs first and writes down what it saw. Ordering is the whole
+    mechanism: called after the repair, it observes a healed schema and reports
+    clean forever.
+
+    Only a non-empty result is recorded, and only when it differs from the last
+    record: an unconditional row per open would grow without bound on a
+    long-lived process and bury the one observation that matters.
+
+    A guard is expected when its table is here, or when this graph has carried
+    that guard before. Both halves are load-bearing. The first keeps an older
+    graph.db off the report: :data:`_EXPECTED_TRIGGER_TABLES` explains that the
+    additive script builds nine tables on the way in, a file written before they
+    existed has none of them, and measured against the flat set it would show
+    every guard on those tables as absent on the very open that creates them.
+    The second closes what the first would otherwise open, because a guard
+    cannot outlive its table: dropping the table would take the guard out of the
+    expected set too, and the additive script rebuilds the table empty on the
+    same open, so the rows would be gone with nothing said. A guard this graph
+    has seen stays expected however its table is treated.
+
+    Returns the missing names so the caller can act on the open it happened on.
+    """
+    conn.executescript(_SCHEMA_CENSUS_SQL)
+    live = conn.execute(
+        "SELECT type, name FROM sqlite_master WHERE type IN ('table', 'trigger')"
+    ).fetchall()
+    tables = {name for kind, name in live if kind == "table"}
+    triggers = {name for kind, name in live if kind == "trigger"}
+    seen = {row[0] for row in conn.execute("SELECT name FROM schema_guards_seen")}
+    expected = {
+        name for name, table in _EXPECTED_TRIGGER_TABLES.items()
+        if table in tables or name in seen
+    }
+    missing = tuple(sorted(expected - triggers))
+    if not missing:
+        return ()
+
+    payload = json.dumps(list(missing))
+    last = conn.execute(
+        "SELECT missing FROM schema_census ORDER BY observed_at DESC LIMIT 1"
+    ).fetchone()
+    if last is None or last[0] != payload:
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_census (observed_at, missing) "
+            "VALUES (?, ?)",
+            (_now(), payload),
+        )
+        # Commit here rather than leaning on the caller. The record would
+        # otherwise survive only because the additive executescript further down
+        # the open commits the transaction on its way past, and this function's
+        # whole contract is that it can be moved to stay ahead of the repairs.
+        # Moved, it would go on returning the right names and silently stop
+        # writing them down.
+        conn.commit()
+    return missing
+
+
+def schema_census_missing(conn: sqlite3.Connection) -> "tuple[str, ...]":
+    """Every write guard any open has found absent, or ``()``.
+
+    Read surfaces must consult this rather than re-deriving from
+    ``sqlite_master``: the repairs described in :func:`_record_schema_census`
+    have already run by then, so a live re-derivation answers "nothing is
+    missing" on exactly the graph that was tampered with.
+
+    The union of every record, not the most recent one. A guard that came back
+    is not a guard that was never gone: the rows it let someone delete while it
+    was down are still gone, and no later open can see that. Reporting only the
+    latest census would let one subsequent open bury the observation, which is
+    the same disappearance this function exists to prevent, one level up.
+    """
+    try:
+        rows = conn.execute("SELECT missing FROM schema_census").fetchall()
+    except sqlite3.OperationalError:
+        return ()          # no census table: nothing was ever missing
+    seen: set[str] = set()
+    for row in rows:
+        try:
+            seen.update(json.loads(row[0]))
+        except (ValueError, TypeError):
+            continue
+    return tuple(sorted(seen))
+
+
 def _ensure_managed_triggers(conn: sqlite3.Connection) -> None:
     """Reconcile the claims-table write guards with their wanted text.
 
@@ -450,6 +599,13 @@ def _open_existing_db(
         raise DatabaseError(
             f"graph.db schema mismatch ({'; '.join(parts)}). {remedy}"
         )
+    # Census BEFORE any repair. Everything below this line can recreate a
+    # missing write guard: the additive script re-runs its own CREATE TRIGGER
+    # statements, and _ensure_managed_triggers reconciles the managed set after
+    # this function returns. Both are silent. Move this call after either one
+    # and it observes a healed schema, which is the same as not running it.
+    _record_schema_census(conn)
+
     # Additive tables (project_policy, the trust layer) must be
     # present on every initialised db, not just fresh ones ,
     # otherwise an existing legacy graph.db lacks them and the first
@@ -523,6 +679,12 @@ def open_db(root: Path) -> sqlite3.Connection:
             conn.executescript(_ADDITIVE_TABLES_SQL)
             _ensure_supports_revision_row(conn)
             _ensure_managed_triggers(conn)
+            # Seed the seen set while the graph is provably whole, so a graph
+            # this build creates never carries an empty baseline. Without it a
+            # brand-new file could have a table taken away before its first
+            # reopen, and with nothing seen yet the guards on that table would
+            # never have been expected.
+            _note_guards_seen(conn)
             conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             conn.commit()
             _attach_supports_cache(conn, root)
@@ -531,6 +693,9 @@ def open_db(root: Path) -> sqlite3.Connection:
         _open_existing_db(conn, root, version)
         _attach_supports_cache(conn, root)
         _ensure_managed_triggers(conn)
+        # After the repairs, so an upgrade records the trust layer it just
+        # built rather than leaving it unseen until the next open.
+        _note_guards_seen(conn)
         conn.commit()
         return conn
 
@@ -587,6 +752,9 @@ def open_db_from_db_path(db_path: "str | Path") -> sqlite3.Connection:
         else:
             _open_existing_db(conn, db_file.parent, version)
         _ensure_managed_triggers(conn)
+        # Same seeding as the conventional path: a db reached by a literal path
+        # meets the contract a db reached by project root meets.
+        _note_guards_seen(conn)
         conn.commit()
         # Attach the rebuildable supports cache just like open_db does. Without
         # it add_claim's unconditional supports-edge maintenance hits

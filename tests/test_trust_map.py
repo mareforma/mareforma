@@ -81,16 +81,35 @@ _SHAPE_BY_VERSION = {
     },
     "v0.3.13": {
         "properties": _EXPECTED_PROPERTIES,
-        # The shape does not move in v0.3.13 either: same properties, same
-        # independence values. The version tracks the PACKAGE version, and the
-        # builder fails closed when the two disagree, so a release bumps it
-        # whether or not the shape changed. This entry is where that gets said
-        # out loud rather than assumed.
+        # The shape did not move in v0.3.13: same properties, same independence
+        # values. The version tracks the PACKAGE version, and the builder fails
+        # closed when the two disagree, so a release bumps it whether or not the
+        # shape changed. This entry is where that gets said out loud.
         #
         # The release's own work sits outside the map: the influence oracle
         # derives its own null family and routes on the profile across it, and
         # the read surfaces disclose what they held back. Neither adds a
         # property here.
+        "independence_numeric": True,
+    },
+    "v0.3.14": {
+        "properties": _EXPECTED_PROPERTIES,
+        # Same property set, but two VALUES changed meaning, which is why this
+        # entry exists ahead of the stamp.
+        #
+        # independence: MULTI_ROOT is gone. Two self-signed roots is not a
+        # convergence prior, it is a tamper report, because the chain walk
+        # refuses every keyid in the table once a second root exists. The axis
+        # now reads TAMPERED there and keeps the discarded count in the residual.
+        #
+        # trust_root: was DEFERRED with a three-value disclosure. It now reads
+        # COMPUTED / TAMPERED for a planted root or for a write guard the census
+        # found missing on open, and keeps the old disclosure otherwise.
+        #
+        # The stamp itself still says v0.3.13, because TRUST_MAP_VERSION is
+        # pinned to __version__ and the package version bumps at ship, not in
+        # the build. This entry is waiting for that bump; the live-version guard
+        # keeps passing against the v0.3.13 key until then.
         "independence_numeric": True,
     },
 }
@@ -139,9 +158,12 @@ class TestVersionShapeIsPinned:
         shape = _SHAPE_BY_VERSION.get(TRUST_MAP_VERSION)
         assert shape is not None, f"no pinned shape for {TRUST_MAP_VERSION}"
         # A finding with an effective-independence record exercises the per-finding
-        # numeric value that v0.3.10 introduced onto this axis.
+        # numeric value that v0.3.10 introduced onto this axis. One root, not two:
+        # a second self-signed root is a tamper state, and the axis deliberately
+        # refuses to emit a count computed on a substrate where every enrolment
+        # check fails, so n_roots=2 no longer exercises the numeric shape.
         tmap = _assemble(
-            _claim(), n_roots=2, has_inclusion=False,
+            _claim(), n_roots=1, has_inclusion=False,
             effective_independence={"number": 2, "soft": False},
         )
         value = tmap.get("independence").value
@@ -442,10 +464,66 @@ class TestZeroRootIndependence:
         assert tmap.get("independence").value == "UNVERIFIABLE"
         assert tmap.get("trust_root").value == "single trust domain"
 
-    def test_two_roots_is_multi_root(self) -> None:
+    def test_two_roots_is_tamper_not_an_upgrade(self) -> None:
+        """A second self-signed root is tamper, and it used to read as a bonus.
+
+        No code path enrols one: the chain walk refuses the whole table once a
+        second exists, trust_domain_root answers None, and restore refuses a
+        backup carrying one. But validators permits INSERT, so one statement
+        plants it, and the old axis moved UP in response, from the single-domain
+        disclosure to a "weak convergence prior". An axis that improves when the
+        substrate breaks is worse than no axis.
+        """
         tmap = _assemble(_claim(), n_roots=2, has_inclusion=False)
-        assert tmap.get("independence").value == "MULTI_ROOT"
-        assert tmap.get("trust_root").value == "multiple roots"
+        assert tmap.get("independence").value == "TAMPERED"
+        assert tmap.get("trust_root").value == "TAMPERED"
+
+    def test_two_roots_discards_the_count_but_keeps_it_for_forensics(self) -> None:
+        tmap = _assemble(
+            _claim(), n_roots=2, has_inclusion=False,
+            effective_independence={"number": 2, "soft": False},
+        )
+        ind = tmap.get("independence")
+        assert ind.value == "TAMPERED"
+        assert "discarded count was 2" in ind.residual
+
+    def test_a_missing_write_guard_is_tamper_on_the_substrate_axis(self) -> None:
+        """The census result reaches the map even though the guard has healed."""
+        tmap = _assemble(
+            _claim(), n_roots=1, has_inclusion=False,
+            census_missing=("contradiction_verdicts_no_delete",),
+        )
+        root = tmap.get("trust_root")
+        assert root.value == "TAMPERED"
+        assert "contradiction_verdicts_no_delete" in root.residual
+
+    @pytest.mark.parametrize("n_roots, census", [
+        (1, ()),                                        # the clean branch
+        (2, ()),                                        # the tamper branch
+        (1, ("contradiction_verdicts_no_delete",)),     # and the other one
+    ])
+    def test_the_axis_says_what_the_census_cannot_reach(
+        self, n_roots: int, census: tuple,
+    ) -> None:
+        """The census covers guards. The search index is not one.
+
+        A guard is reconciled on every open, so the census is what remembers one
+        that came back. The index is built once and never reconciled, so there
+        is no repair for a record to be the memory of, and nothing anywhere
+        notices. Measured: an emptied index leaves writes working and search
+        returning nothing, while query returns every claim.
+
+        Said on every branch of the axis, because it is true on every branch. A
+        clean substrate report that quietly excludes a whole class of substrate
+        damage is the overclaim this map exists to avoid.
+        """
+        tmap = _assemble(
+            _claim(), n_roots=n_roots, has_inclusion=False,
+            census_missing=census,
+        )
+        residual = tmap.get("trust_root").residual
+        assert "search index" in residual
+        assert "never reconciled" in residual
 
     def test_builder_takes_no_topology_bool(self, graph) -> None:
         """The builder reads the topology itself and accepts no bool override.

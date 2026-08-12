@@ -72,6 +72,29 @@ _FAITHFULNESS_PROXY_NOTE = (
     "not an independent line of evidence"
 )
 
+# What the schema census does not reach, on the axis that reports what it does.
+#
+# The census records write guards, which are reconciled on every open, so the
+# census is what remembers a guard that came back. The full-text index is
+# neither. It is built once, by a script that does not run again on an
+# initialised graph, and nothing reconciles it, so there is no repair for the
+# census to be the memory of.
+#
+# Measured, both states. Dropped outright, the next write and the next search
+# both fail with SQLite's own message, and no open puts it back. Emptied in
+# place, writes keep working and later claims are indexed as usual, so search
+# answers and its answer is short by the rows that were removed, while ``query``
+# returns all of them. The second is the dangerous one: it looks like a result.
+#
+# Named here rather than repaired. Rebuilding an index from the claims table is
+# a write on the read path, and this axis reports rather than repairs.
+CENSUS_REACH_RESIDUAL = (
+    "the census covers write guards and not the search index, which is built "
+    "once and never reconciled: rows can be taken out of it with nothing "
+    "recorded here, and search then answers short rather than failing, so use "
+    "query rather than search where completeness matters"
+)
+
 
 class TrustMapVersionError(RuntimeError):
     """The trust-map code version disagrees with the package it ships inside.
@@ -388,6 +411,16 @@ def _independence_property(
         # controls. The number is producer-assertable within one trust domain,
         # not certified cross-model independence, so the residual names it; a
         # certified number needs distinct trust roots.
+        if n_roots >= 2:
+            # A number computed on a broken substrate is worse than no number.
+            # Every count on this axis rests on is_enrolled, and is_enrolled
+            # walks the chain through _count_self_signed_rows, which refuses the
+            # whole table the moment a second self-signed row exists. So with
+            # two roots the count was assembled from checks that all answered
+            # False, and printing it invites the reader to trust the one figure
+            # the tamper guarantees is meaningless. The number is kept in the
+            # residual for forensics, not offered as the value.
+            return _multi_root_is_tamper(f"; the discarded count was {number}")
         if n_roots < 2:
             detail = (
                 "no trust root is enrolled" if n_roots == 0
@@ -422,16 +455,40 @@ def _independence_property(
                 "validator topology, not a per-claim measure)"
             ),
         )
+    return _MULTI_ROOT_IS_TAMPER
+
+
+def _multi_root_is_tamper(extra: str = "") -> TrustProperty:
+    """The independence axis when a second self-signed root exists.
+
+    There is no legitimate multi-root state in this product, which is why this
+    reads as tamper rather than as the weak convergence prior it used to claim.
+    Three places say so independently: ``validators._verify_chain`` refuses
+    every keyid in the table when more than one self-signed row is present,
+    ``validators.trust_domain_root`` answers None for the same condition, and
+    ``db.restore`` refuses a backup that carries a second root outright. No
+    code path enrols one.
+
+    A writer with SQL access, on the other hand, can INSERT one: the validators
+    table blocks UPDATE and DELETE and permits INSERT. That single statement
+    turns every enrolment check in the graph False while the old value of this
+    axis moved UP, from the single-domain disclosure to a convergence prior. An
+    axis that improves when the substrate breaks is worse than no axis.
+    """
     return TrustProperty(
         name="independence",
         tier=Tier.COMPUTED,
-        value="MULTI_ROOT",
+        value="TAMPERED",
         residual=(
-            "more than one root of trust is enrolled; distinct signers under "
-            "distinct roots is a weak convergence prior, not proof of independence "
-            "(graph-level validator topology, not a per-claim measure)"
+            "more than one self-signed root is enrolled, which no code path "
+            "creates; the chain walk therefore refuses every keyid in the "
+            "table, so no enrolment-dependent count on this axis means "
+            "anything" + extra
         ),
     )
+
+
+_MULTI_ROOT_IS_TAMPER = _multi_root_is_tamper()
 
 
 def _standing_property(claim: dict) -> TrustProperty:
@@ -576,11 +633,14 @@ def build_trust_map(
         if bundle_keyid is not None:
             asserter_enrolled = is_enrolled(conn, bundle_keyid)
     effective = _effective_independence(conn, claim_id, disclose=disclose)
+    from mareforma.db.core import schema_census_missing
+
     return _assemble(
         claim, n_roots, has_inclusion,
         sig_verified=sig_verified, asserter_enrolled=asserter_enrolled,
         reexec_record=reexec_record,
         effective_independence=effective,
+        census_missing=schema_census_missing(conn),
     )
 
 
@@ -629,12 +689,16 @@ def _assemble(
     claim: dict, n_roots: int, has_inclusion: bool, *, sig_verified: "bool | None" = None,
     asserter_enrolled: "bool | None" = None, reexec_record: "dict | None" = None,
     effective_independence: "dict | None" = None,
+    census_missing: "tuple[str, ...]" = (),
 ) -> TrustMap:
     """Assemble a TrustMap from an already-fetched claim dict (pure).
 
-    ``n_roots`` is the number of enrolled trust roots. Fewer than two (zero or
-    one) means independence cannot be verified; only two or more is the
-    weak-convergence-prior case. ``sig_verified`` is the result of an ACTUAL
+    ``n_roots`` is the number of self-signed trust roots. Zero or one means
+    independence cannot be verified; two or more is not a stronger case but a
+    tamper report, because no code path enrols a second root and the chain walk
+    refuses the whole table once one exists. ``census_missing`` names write
+    guards a previous open found absent, which the read path cannot re-derive
+    because they heal silently on the way in. ``sig_verified`` is the result of an ACTUAL
     audit-grade signature re-verification (``verify_claim_signatures``); when
     ``None`` (a direct caller that did not run one) it falls back to the stored
     ``verified`` column, which is the support-level read gate, NOT a signature
@@ -723,19 +787,49 @@ def _assemble(
 
     standing = _standing_property(claim)
 
-    trust_root = TrustProperty(
-        name="trust_root",
-        tier=Tier.DEFERRED,
-        value=(
-            "no trust root enrolled" if n_roots == 0
-            else "single trust domain" if n_roots == 1
-            else "multiple roots"
-        ),
-        residual=(
-            "trust-root concentration is disclosed, not established: a private or "
-            "externally-anchored root of trust is not evaluated this release"
-        ),
-    )
+    # The substrate axis. Two conditions make it a tamper report rather than a
+    # disclosure, and both are things a SQL writer can do that no code path
+    # does: plant a second self-signed root, or drop a write guard. Neither is
+    # visible on any other axis, and the second is invisible by the time a read
+    # happens, because two repairs run silently on the way in. That is what the
+    # census exists to have written down beforehand.
+    if n_roots >= 2 or census_missing:
+        reasons = []
+        if n_roots >= 2:
+            reasons.append(
+                f"{n_roots} self-signed roots are enrolled and no code path "
+                "creates a second one, so every enrolment check in this graph "
+                "now fails"
+            )
+        if census_missing:
+            reasons.append(
+                "a write guard was found missing on open: "
+                + ", ".join(census_missing)
+                + ". Whatever it permitted while it was down is not "
+                "recoverable, and a guard that came back is not a guard that "
+                "was never gone"
+            )
+        reasons.append(CENSUS_REACH_RESIDUAL)
+        trust_root = TrustProperty(
+            name="trust_root",
+            tier=Tier.COMPUTED,
+            value="TAMPERED",
+            residual="; ".join(reasons),
+        )
+    else:
+        trust_root = TrustProperty(
+            name="trust_root",
+            tier=Tier.DEFERRED,
+            value=(
+                "no trust root enrolled" if n_roots == 0
+                else "single trust domain"
+            ),
+            residual=(
+                "trust-root concentration is disclosed, not established: a private or "
+                "externally-anchored root of trust is not evaluated this release; "
+                + CENSUS_REACH_RESIDUAL
+            ),
+        )
 
     witnessing = _witnessing_property(claim, has_inclusion)
 

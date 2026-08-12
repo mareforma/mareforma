@@ -1137,6 +1137,99 @@ CREATE TABLE IF NOT EXISTS supports_revision (
 """
 
 
+def _extract_triggers(script: str) -> "tuple[tuple[str, str], ...]":
+    """Every ``CREATE TRIGGER`` in *script*, as SQLite will store it.
+
+    Two normalisations, both required for the text to compare equal against
+    ``sqlite_master.sql``. SQLite drops ``IF NOT EXISTS`` from what it stores,
+    so a wanted text that keeps it never matches and a reconciler keyed on
+    equality would drop and recreate the trigger on every single open. And the
+    trailing semicolon is not part of the stored statement.
+
+    Statement boundaries come from :func:`sqlite3.complete_statement`, not from
+    a regex: a trigger body contains ``CASE ... END;`` before its own ``END;``,
+    so the first semicolon-terminated span that looks complete is usually the
+    inner one, and matching it truncates the trigger mid-body.
+    """
+    import re
+    import sqlite3
+
+    start = re.compile(r"CREATE\s+TRIGGER\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)", re.I)
+    out: list[tuple[str, str]] = []
+    for m in start.finditer(script):
+        i = m.start()
+        for j in range(i, len(script)):
+            if script[j] != ";":
+                continue
+            stmt = script[i:j + 1]
+            if not sqlite3.complete_statement(stmt):
+                continue
+            stmt = re.sub(
+                r"CREATE\s+TRIGGER\s+IF\s+NOT\s+EXISTS\s+",
+                "CREATE TRIGGER ", stmt, count=1,
+            )
+            out.append((m.group(1), stmt.rstrip().rstrip(";")))
+            break
+    return tuple(out)
+
+
+# Every trigger a correct graph carries, derived from the DDL rather than
+# listed by hand: three of them embed SQL comments that SQLite stores verbatim,
+# so a hand-copied table would drift on the first reformat and the drift would
+# be invisible until a reconciler compared texts.
+#
+# This is the census's expected set. It deliberately spans BOTH homes, because
+# a trigger's home decides whether a dropped guard comes back: the managed ones
+# are reconciled against sqlite_master on every open, while the rest are
+# created once, on a fresh database, by a script that never runs again. Before
+# this constant the expected set existed only as that split, so nothing could
+# ask the single question "is every guard still here".
+_ALL_EXPECTED_TRIGGERS: "dict[str, str]" = {
+    **dict(_extract_triggers(_SCHEMA_SQL)),
+    **dict(_extract_triggers(_ADDITIVE_TABLES_SQL)),
+    **{name: sql.rstrip().rstrip(";") for name, sql in _MANAGED_TRIGGERS},
+}
+
+
+def _trigger_base_table(sql: str) -> str:
+    """The table a ``CREATE TRIGGER`` statement fires on.
+
+    The first ``ON`` in the statement, which the grammar puts between the event
+    and the body: ``CREATE TRIGGER <name> <BEFORE|AFTER|INSTEAD OF> <event> ON
+    <table>``. Nothing earlier can match, because ``INSTEAD OF`` and ``UPDATE
+    OF`` both spell ``OF``, not ``ON``.
+    """
+    import re
+
+    m = re.search(r"\bON\s+(\w+)", sql, re.I)
+    if m is None:                                    # pragma: no cover
+        raise ValueError(f"trigger names no base table: {sql[:80]}")
+    return m.group(1)
+
+
+# The table each expected trigger hangs off, so the census can tell a guard
+# somebody removed from one that was never created.
+#
+# A trigger cannot outlive its table, and _ADDITIVE_TABLES_SQL builds nine
+# tables that carry sixteen of these guards. A graph.db written by an earlier
+# mareforma has none of those tables yet, which is the whole reason that script
+# re-runs on every open, and it passes the user_version gate because adding a
+# table is additive and never bumped the version. Censused against the flat
+# expected set, such a file reports sixteen absent guards on the open that is
+# about to create them, and the substrate axis brands every claim in it
+# TAMPERED for good.
+#
+# So a guard is only expected when its table is present. The gap that leaves is
+# worth saying plainly: dropping a whole table takes its guards out of the
+# expected set along with it. That is a far louder act than dropping a trigger,
+# because the rows go too, where the point of dropping a guard is to leave the
+# rows editable in silence.
+_EXPECTED_TRIGGER_TABLES: "dict[str, str]" = {
+    name: _trigger_base_table(sql)
+    for name, sql in _ALL_EXPECTED_TRIGGERS.items()
+}
+
+
 # Explicit column list, avoids SELECT * coupling to schema changes.
 # Source of truth for the column-presence check in open_db().
 _CLAIM_COLUMNS = (

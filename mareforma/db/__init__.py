@@ -57,6 +57,10 @@ from ._schema_sql import (
     _PROJECT_POLICY_NO_DELETE_TRIGGER_NAME,
     _PROJECT_POLICY_NO_DELETE_TRIGGER_SQL,
     _MANAGED_TRIGGERS,
+    _ALL_EXPECTED_TRIGGERS,
+    _EXPECTED_TRIGGER_TABLES,
+    _extract_triggers,
+    _trigger_base_table,
     _CLAIM_COLUMNS,
     _CLAIM_SELECT,
 )
@@ -253,6 +257,10 @@ from .core import (
     _UNVERIFIED_POLICY,
     _policy_envelope_binds,
     _verified_project_policy,
+    _SCHEMA_CENSUS_SQL,
+    _note_guards_seen,
+    _record_schema_census,
+    schema_census_missing,
 )
 from .restore import (
     restore,
