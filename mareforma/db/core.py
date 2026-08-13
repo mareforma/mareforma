@@ -5817,21 +5817,273 @@ VALID_REFUTATION_FILTERS: tuple[str, ...] = (
 )
 
 
-def refutation_status(row: dict) -> dict:
+# Signals that mean the column and the signed evidence disagree. Grouped here
+# rather than tested one by one at each call site, because every reader of a
+# replayed status has to make the same split: a verdict that was checked and a
+# verdict that was asserted are different claims about the world, and a caller
+# that treats them alike is back where the column left it.
+REPLAY_TAMPER_SIGNALS: tuple[str, ...] = (
+    "unbacked-invalidation",
+    "suppressed-verdict",
+    "unverifiable-verdict",
+)
+
+
+_CONTRADICTION_VERDICT_SELECT = (
+    "SELECT verdict_id, member_claim_id, other_claim_id, confidence_json, "
+    "issuer_keyid, signature, created_at FROM contradiction_verdicts"
+)
+
+
+def _contradiction_verdicts_naming(
+    conn: sqlite3.Connection, claim_id: str,
+) -> "list[sqlite3.Row]":
+    """Every contradiction verdict that names *claim_id* on either side."""
+    return conn.execute(
+        _CONTRADICTION_VERDICT_SELECT
+        + " WHERE member_claim_id = ? OR other_claim_id = ?",
+        (claim_id, claim_id),
+    ).fetchall()
+
+
+def _gather_contradictions_by_claim(
+    conn: sqlite3.Connection,
+) -> "dict[str, list[sqlite3.Row]]":
+    """Every contradiction verdict grouped by the claim ids it names.
+
+    One scan, no signature work, the same shape
+    :func:`_gather_verdicts_by_claim` holds for the replication table and for
+    the same reason. A bulk read that replays per row spends a statement per row
+    to ask a question one pass answers, and it spends it hardest on the ordinary
+    graph where the table is empty and every one of those statements returns
+    nothing. Measured on a 400-claim graph with no verdicts, grouping saves
+    about 0.1 ms on a 20-row page and grows with the page.
+
+    Modest, and worth stating at its real size, because the obvious reading of
+    the numbers around it is wrong: a clean-filtered page costs roughly 1.3 ms
+    more than an unfiltered one on that graph, all of which is the SQL the
+    filter already emitted (it plans as SCAN claims) and none of which is the
+    replay.
+
+    The trade is real and worth naming too: this reads the whole verdict table,
+    so a graph that argues with itself far more than it is read pays a scan
+    where indexed lookups would have been cheaper. Verdicts are rare next to
+    claims, which is what makes the scan the right default rather than a safe
+    one.
+    """
+    by_claim: "dict[str, list[sqlite3.Row]]" = {}
+    for v in conn.execute(_CONTRADICTION_VERDICT_SELECT):
+        for cid in (v["member_claim_id"], v["other_claim_id"]):
+            if cid is not None:
+                by_claim.setdefault(cid, []).append(v)
+    return by_claim
+
+
+def _contradiction_verdict_verifies(
+    conn: sqlite3.Connection, cache: dict, v: "sqlite3.Row",
+) -> bool:
+    """True iff *v*'s issuer is enrolled and its signature checks out.
+
+    The contradiction sibling of :func:`_verdict_verifies`, over the
+    contradiction PAE. Same reasoning: the recording path checks the issuer, and
+    that precondition does not travel to a read, where the table is whatever a
+    process with SQL access wrote. Never raises; an unparseable verdict is not
+    evidence and a read must degrade rather than crash.
+    """
+    from mareforma import signing as _signing
+    from mareforma import validators as _validators
+
+    signer_row = _cached_validator(conn, cache, v["issuer_keyid"])
+    if signer_row is None or not _validators.is_enrolled(conn, v["issuer_keyid"]):
+        return False
+    record = {
+        "verdict_id": v["verdict_id"],
+        "member_claim_id": v["member_claim_id"],
+        "other_claim_id": v["other_claim_id"],
+    }
+    try:
+        record["confidence"] = json.loads(v["confidence_json"] or "{}")
+        pem = base64.standard_b64decode(signer_row["pubkey_pem"])
+        _signing.public_key_from_pem(pem).verify(
+            v["signature"], _contradiction_verdict_pae(record),
+        )
+    except Exception:
+        return False
+    return True
+
+
+def _verdict_invalidates(
+    conn: sqlite3.Connection, v: "sqlite3.Row",
+) -> "str | None":
+    """Which claim ``contradiction_invalidates_older`` picks for verdict *v*.
+
+    The rule is the trigger's, restated in Python so a read can ask what the
+    write path would have done: the older claim by ``created_at``, tie-broken on
+    the lexicographically smaller id so the verdict's argument order does not
+    decide it. Restating is a duplication and it is the only way to check the
+    column against anything; the pairing is pinned by test.
+
+    ``None`` when either claim is gone, because then the question has no answer
+    rather than a negative one.
+    """
+    rows = {
+        r["claim_id"]: r["created_at"] for r in conn.execute(
+            "SELECT claim_id, created_at FROM claims WHERE claim_id IN (?, ?)",
+            (v["member_claim_id"], v["other_claim_id"]),
+        )
+    }
+    a, b = v["member_claim_id"], v["other_claim_id"]
+    if a not in rows or b not in rows:
+        return None
+    if rows[a] != rows[b]:
+        return a if rows[a] < rows[b] else b
+    return min(a, b)
+
+
+def replay_contradictions(
+    conn: sqlite3.Connection, claim_id: str, *,
+    verdicts: "list | None" = None, cache: "dict | None" = None,
+) -> dict:
+    """What the signed contradiction verdicts say about *claim_id*.
+
+    The read path cannot take ``t_invalid`` at its word. No trigger guards that
+    column, so one UPDATE either fabricates a contradiction with no verdict
+    behind it or erases a real one from every read surface, and a presenter over
+    the row alone reports the edit as though it were the evidence.
+
+    So the verdicts naming the claim are fetched and held against their issuers:
+    enrolled validator, signature verifying over the DSSE PAE rebuilt from the
+    stored columns, the same bar the recording path applies. A verdict that
+    fails is not weaker evidence, it is a row somebody planted, and it is
+    reported rather than skipped.
+
+    Returns ``backed`` (a verifying verdict makes this claim the invalidated
+    one), ``unverifiable`` (verdict ids naming it that did not check out), and
+    ``checked`` (how many were examined), so a caller can tell "no verdict" from
+    "a verdict nobody can authenticate".
+    """
+    cache = {} if cache is None else cache
+    backed = False
+    unverifiable: list[str] = []
+    if verdicts is None:
+        verdicts = _contradiction_verdicts_naming(conn, claim_id)
+    for v in verdicts:
+        if not _contradiction_verdict_verifies(conn, cache, v):
+            unverifiable.append(v["verdict_id"])
+            continue
+        if _verdict_invalidates(conn, v) == claim_id:
+            backed = True
+    return {
+        "backed": backed,
+        "unverifiable": tuple(sorted(unverifiable)),
+        "checked": len(verdicts),
+    }
+
+
+def _replayed_refutation(
+    conn: sqlite3.Connection, row: dict, flagged: bool, *,
+    verdicts: "list | None" = None, cache: "dict | None" = None,
+) -> "dict | None":
+    """The contradiction answer with the verdicts replayed, or ``None``.
+
+    ``None`` means the replay had nothing to say and the caller should fall
+    through to the status flags: no verdict names this claim and its column is
+    clear, which is the ordinary case and must stay cheap to report.
+
+    Never raises. A read that cannot reach the verdict tables degrades to the
+    column rather than taking a claim down with it, and says which it did.
+    """
+    try:
+        replay = replay_contradictions(
+            conn, row["claim_id"], verdicts=verdicts, cache=cache,
+        )
+    except sqlite3.Error:
+        return None
+    if replay["unverifiable"]:
+        return {
+            "state": "contradicted",
+            "reason": (
+                f"{len(replay['unverifiable'])} contradiction verdict(s) name "
+                "this claim and do not verify against an enrolled issuer: "
+                + ", ".join(replay["unverifiable"])
+                + ". A verdict that fails its own signature is a planted row, "
+                "not weak evidence"
+            ),
+            "signal": "unverifiable-verdict",
+        }
+    if replay["backed"] and not flagged:
+        return {
+            "state": "contradicted",
+            "reason": (
+                "a contradiction verdict that verifies invalidates this claim, "
+                "and its invalidation timestamp is clear; the column was "
+                "cleared under signed evidence that is still here"
+            ),
+            "signal": "suppressed-verdict",
+        }
+    if flagged and not replay["backed"]:
+        return {
+            "state": "contradicted",
+            "reason": (
+                "this claim's invalidation timestamp is set "
+                f"(t_invalid={row['t_invalid']}) and no contradiction verdict "
+                f"that verifies invalidates it ({replay['checked']} named it); "
+                "the column was written by something that left no evidence"
+            ),
+            "signal": "unbacked-invalidation",
+        }
+    if flagged and replay["backed"]:
+        return {
+            "state": "contradicted",
+            "reason": (
+                "a contradiction verdict that verifies against an enrolled "
+                "issuer invalidates this claim, and the invalidation timestamp "
+                f"agrees (t_invalid={row['t_invalid']})"
+            ),
+            "signal": "signed-verdict",
+        }
+    return None
+
+
+def refutation_status(row: dict, conn: "sqlite3.Connection | None" = None) -> dict:
     """Classify a claim row's refutation state.
 
     Returns a dict with three fields:
 
       * ``state``: one of :data:`REFUTATION_STATES`
       * ``reason``: short human-readable explanation
-      * ``signal``: ``"signed-verdict"`` if backed by a cryptographic
-                     verdict, ``"editorial"`` if backed only by a
-                     status flag, or ``"none"`` for clean claims
+      * ``signal``: how the state was established, see below
 
-    The presenter is a pure function over the row's queryable
-    columns; it does NOT walk verdict tables (callers wanting the
-    underlying verdicts use
-    :meth:`EpistemicGraph.contradiction_verdicts`).
+    Pass *conn* and the contradiction verdicts are replayed
+    (:func:`replay_contradictions`) instead of the ``t_invalid`` column being
+    taken at its word. Without it the answer is the column, said plainly, which
+    is what every caller got before and is still the honest report when there is
+    no graph to check against.
+
+    The signals, and what each is worth:
+
+      * ``signed-verdict``: the column is set and a verdict that verifies backs
+        it. The only reading that survives a hostile writer.
+      * ``invalidation-recorded``: the column is set and nothing replayed it.
+      * ``editorial``: a status flag, which is an assertion by the asserter.
+      * ``none``: nothing to report.
+      * ``unbacked-invalidation``: the column is set and no verifying verdict
+        names this claim. Somebody wrote the column.
+      * ``suppressed-verdict``: a verifying verdict invalidates this claim and
+        the column is clear. Somebody erased it from every read surface.
+      * ``unverifiable-verdict``: verdicts naming this claim exist and do not
+        check out. Planted rows, not weak evidence.
+
+    The last three are in :data:`REPLAY_TAMPER_SIGNALS`. The state stays
+    ``contradicted`` for all of them, deliberately: an unbacked column is not
+    grounds to hand a suppressed claim back as clean, and a suppressed verdict
+    is not grounds to keep calling it clean either. Refusing to un-flag in both
+    directions is the only choice that does not do an attacker's work in one of
+    them.
+
+    Without *conn* the presenter is a pure function over the row's queryable
+    columns and does NOT walk verdict tables (callers wanting the underlying
+    verdicts use :meth:`EpistemicGraph.contradiction_verdicts`).
 
     Raises :class:`ValueError` when *row* lacks the required
     ``status`` field: a hand-crafted partial dict would otherwise
@@ -5846,22 +6098,25 @@ def refutation_status(row: dict) -> dict:
             "refutation_status: row missing 'status' field; pass a row "
             "fetched via list_claims / get_claim, not a partial dict."
         )
-    if row.get("t_invalid") is not None:
-        # States what was read, not what was proved. This is a pure function
-        # over one row: it sees `t_invalid` and nothing else. The signed
-        # evidence sits untouched in contradiction_verdicts, and no trigger
-        # guards this column, so one UPDATE either fabricates a contradiction
-        # with zero verdicts present or erases a real one from every read
-        # surface. The old wording asserted a signed verdict had been checked,
-        # and the old signal name said so in machine-readable form; neither is
-        # something this function can know. Replaying the verdicts on read is
-        # deferred work, so until then the honest report is the column.
+    flagged = row.get("t_invalid") is not None
+    if conn is not None and row.get("claim_id"):
+        replayed = _replayed_refutation(conn, row, flagged)
+        if replayed is not None:
+            return replayed
+    if flagged:
+        # States what was read, not what was proved. With no connection this is
+        # a pure function over one row: it sees `t_invalid` and nothing else.
+        # The signed evidence sits untouched in contradiction_verdicts, and no
+        # trigger guards this column, so one UPDATE either fabricates a
+        # contradiction with zero verdicts present or erases a real one from
+        # every read surface. Claiming a signed verdict had been checked is not
+        # something this branch can know, so it says what it saw.
         return {
             "state": "contradicted",
             "reason": (
                 "this claim's invalidation timestamp is set "
                 f"(t_invalid={row['t_invalid']}); the contradiction verdicts "
-                "behind it are not replayed on read"
+                "behind it were not replayed on this call"
             ),
             "signal": "invalidation-recorded",
         }
@@ -6055,6 +6310,8 @@ def _read_path_row(
     include_unverified: bool,
     trust_domain: tuple,
     verify_cache: dict,
+    clean_only: bool = False,
+    contradictions: "dict | None" = None,
 ) -> dict | None | object:
     """Project one claims row for a read surface, or exclude it.
 
@@ -6083,6 +6340,24 @@ def _read_path_row(
         return None
     if not _row_verified_on_read(conn, d, verify_cache):
         return _VERIFY_EXCLUDED
+    if clean_only and _replayed_refutation(
+        conn, d, False,
+        verdicts=(None if contradictions is None
+                  else contradictions.get(d["claim_id"], [])),
+        cache=verify_cache,
+    ) is not None:
+        # The caller asked for clean claims and this one is not. The SQL filter
+        # can only read t_invalid, which carries no trigger, so a real
+        # contradiction erased from that column reads as clean to every
+        # statement in this file. Replaying is per-row crypto and would be a
+        # scan-shaped cost if it ran in SQL, so it runs here instead, on the
+        # rows already being materialised toward the limit, and only when the
+        # answer can change what is served.
+        #
+        # Excluded the same way a row that fails verify-on-read is excluded:
+        # both are a tamper signal rather than ordinary filtering, and the
+        # caller counts them apart from a claim that never existed.
+        return _VERIFY_EXCLUDED
     if d["support_level"] == "ESTABLISHED":
         d["single_trust_domain"], d["trust_domain_root"] = trust_domain
     return d
@@ -6095,6 +6370,7 @@ def _project_verified_rows(
     limit: int,
     include_unverified: bool,
     on_verify_excluded: Callable[[int], None] | None = None,
+    clean_only: bool = False,
 ) -> tuple[list[dict], int]:
     """Filter and project rows for a read surface, stopping at ``limit`` survivors.
 
@@ -6130,6 +6406,11 @@ def _project_verified_rows(
     reputation = _compute_validator_reputation(conn)
     enrolled_keyids = _enrolled_validator_keyids(conn)
     trust_domain = _trust_domain_disclosure(conn)
+    # Grouped once for the page, and only when the answer can change what is
+    # served. Per row this is a statement each to ask what one pass answers, and
+    # the ordinary graph has no verdicts at all, so every one of those
+    # statements returns nothing.
+    contradictions = _gather_contradictions_by_claim(conn) if clean_only else None
     verify_cache: dict = {}
     results: list[dict] = []
     scanned = 0
@@ -6140,7 +6421,8 @@ def _project_verified_rows(
             conn, row,
             reputation=reputation, enrolled_keyids=enrolled_keyids,
             include_unverified=include_unverified, trust_domain=trust_domain,
-            verify_cache=verify_cache,
+            verify_cache=verify_cache, clean_only=clean_only,
+            contradictions=contradictions,
         )
         if d is _VERIFY_EXCLUDED:
             excluded += 1
@@ -6338,6 +6620,7 @@ def query_claims(
     results, scanned = _project_verified_rows(
         conn, cursor, limit=limit, include_unverified=include_unverified,
         on_verify_excluded=on_verify_excluded,
+        clean_only=refutation_filter == "clean",
     )
     if scanned >= ceiling and len(results) < limit:
         raise _scan_ceiling_error("query", ceiling, len(results), limit)

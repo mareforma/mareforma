@@ -1137,6 +1137,22 @@ CREATE TABLE IF NOT EXISTS supports_revision (
     id       INTEGER PRIMARY KEY CHECK (id = 1),
     revision INTEGER NOT NULL DEFAULT 0
 );
+
+-- The other half of the contradiction lookup. idx_contradiction_member sits
+-- next to its table in _SCHEMA_SQL and covers member_claim_id alone, so the
+-- replay's "names this claim on either side" reads as
+--   WHERE member_claim_id = ? OR other_claim_id = ?
+-- and SQLite answers it with SCAN contradiction_verdicts: an OR it cannot
+-- satisfy from one index defeats the index it has. Every clean read pays a
+-- full scan of the verdict table for it, which is nothing at ten verdicts and
+-- linear in a graph that argues with itself. With both sides indexed the
+-- planner takes each arm on its own index and unions the results.
+--
+-- It lives here rather than beside its table because _SCHEMA_SQL runs once, on
+-- a fresh database, and an existing graph would never get it. Additive is what
+-- this script is for.
+CREATE INDEX IF NOT EXISTS idx_contradiction_other
+    ON contradiction_verdicts(other_claim_id);
 """
 
 

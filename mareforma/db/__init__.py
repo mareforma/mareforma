@@ -200,6 +200,14 @@ from .core import (
     list_contradiction_verdicts,
     # Refutation + queries.
     REFUTATION_STATES,
+    REPLAY_TAMPER_SIGNALS,
+    replay_contradictions,
+    _replayed_refutation,
+    _CONTRADICTION_VERDICT_SELECT,
+    _contradiction_verdicts_naming,
+    _gather_contradictions_by_claim,
+    _contradiction_verdict_verifies,
+    _verdict_invalidates,
     VALID_REFUTATION_FILTERS,
     refutation_status,
     verify_claim_signatures,
@@ -361,6 +369,8 @@ __all__ = [
     "list_contradiction_verdicts",
     # Refutation + queries.
     "REFUTATION_STATES",
+    "REPLAY_TAMPER_SIGNALS",
+    "replay_contradictions",
     "VALID_REFUTATION_FILTERS",
     "refutation_status",
     "verify_claim_signatures",

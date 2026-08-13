@@ -151,6 +151,51 @@ def classify_claim_verdict(
         if result.disjoint:
             problems.append(f"grounding binding violation: {result.reason}")
 
+    # The contradiction verdicts, replayed. This is a definite NO about THIS
+    # claim, not a fact about the graph around it: either its invalidation
+    # timestamp asserts a contradiction no verdict backs, or a verdict that
+    # verifies invalidates it and the timestamp was cleared, or a verdict naming
+    # it does not check out. Each was checked and each failed, which is what
+    # separates `problems` from `unchecked` here. Without this the map said
+    # TAMPERED and the verdict still exited 0, which is the exit code a CI gate
+    # reads and the only one most callers ever see.
+    from mareforma.db import REPLAY_TAMPER_SIGNALS, refutation_status
+
+    contestation = refutation_status(claim, conn)
+    if contestation["signal"] in REPLAY_TAMPER_SIGNALS:
+        problems.append(
+            f"contradiction record does not hold up ({contestation['signal']}): "
+            + contestation["reason"]
+        )
+
+    # The substrate this claim sits on, and it lands in `unchecked` rather than
+    # `problems` on purpose. A dropped write guard or a planted second root is a
+    # fact about the whole file, not about this claim, and it does not show the
+    # claim is bad: its own signature may be perfect. What it shows is that
+    # evidence around it could have been removed with nothing left to say so,
+    # which is missing material, the thing UNVERIFIABLE means here.
+    #
+    # Computed rather than read off the map, because the map is optional and the
+    # verdict may not differ by whether the caller asked for one.
+    from mareforma.db.core import schema_census_missing
+    from mareforma.validators import enrollment_roots
+
+    census_missing = schema_census_missing(conn)
+    if census_missing:
+        unchecked.append(
+            "a write guard was found missing when this graph was opened ("
+            + ", ".join(census_missing)
+            + "), so rows it would have refused cannot be ruled out and no "
+            "per-claim answer from this file is worth more than that"
+        )
+    n_roots = len(enrollment_roots(conn))
+    if n_roots >= 2:
+        unchecked.append(
+            f"{n_roots} self-signed trust roots are enrolled and no code path "
+            "creates a second one; the chain walk refuses every keyid in the "
+            "table while that holds, so enrolment could not be checked at all"
+        )
+
     # build_trust_map re-fetches the row and runs its own audit-grade signature
     # re-verification, so the standalone map is honest.
     tmap = build_trust_map(conn, target) if with_trust_map else None

@@ -633,7 +633,7 @@ def build_trust_map(
         if bundle_keyid is not None:
             asserter_enrolled = is_enrolled(conn, bundle_keyid)
     effective = _effective_independence(conn, claim_id, disclose=disclose)
-    from mareforma.db.core import schema_census_missing
+    from mareforma.db.core import refutation_status, schema_census_missing
 
     return _assemble(
         claim, n_roots, has_inclusion,
@@ -641,6 +641,7 @@ def build_trust_map(
         reexec_record=reexec_record,
         effective_independence=effective,
         census_missing=schema_census_missing(conn),
+        refutation_contestation=refutation_status(claim, conn),
     )
 
 
@@ -690,6 +691,7 @@ def _assemble(
     asserter_enrolled: "bool | None" = None, reexec_record: "dict | None" = None,
     effective_independence: "dict | None" = None,
     census_missing: "tuple[str, ...]" = (),
+    refutation_contestation: "dict | None" = None,
 ) -> TrustMap:
     """Assemble a TrustMap from an already-fetched claim dict (pure).
 
@@ -711,7 +713,7 @@ def _assemble(
     # package version cannot vouch that this map's residuals match the shipped
     # logic, so it fails closed rather than present a possibly under-named axis.
     _require_consistent_version()
-    from mareforma.db import refutation_status
+    from mareforma.db import REPLAY_TAMPER_SIGNALS, refutation_status
 
     supports = claim.get("supports_json")
     contradicts = claim.get("contradicts_json")
@@ -777,11 +779,20 @@ def _assemble(
 
     independence = _independence_property(claim, n_roots, effective_independence)
 
-    ref = refutation_status(claim)
+    # The contestation axis reads the replay when the builder was handed a
+    # graph, and the column when it was not. A disagreement between the two is
+    # a tamper report rather than a weaker contradiction: t_invalid carries no
+    # trigger, so one UPDATE fabricates a contradiction with no verdict behind
+    # it or erases a real one from every read surface, and either way the axis
+    # used to render the edit as though it were the finding.
+    ref = refutation_contestation
+    if ref is None:
+        ref = refutation_status(claim)
+    tampered = ref["signal"] in REPLAY_TAMPER_SIGNALS
     contestation = TrustProperty(
         name="contestation",
         tier=Tier.COMPUTED,
-        value=ref["state"],
+        value="TAMPERED" if tampered else ref["state"],
         residual=f"{ref['reason']} (signal: {ref['signal']})",
     )
 

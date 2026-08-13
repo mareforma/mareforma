@@ -873,9 +873,14 @@ class EpistemicGraph:
         ``state`` is one of :data:`mareforma.db.REFUTATION_STATES`
         (``"clean"`` | ``"contradicted"`` | ``"contested"`` |
         ``"retracted"``), ``reason`` is a short human-readable
-        explanation, and ``signal`` is ``"signed-verdict"`` /
-        ``"editorial"`` / ``"none"`` indicating the strength of the
-        underlying evidence.
+        explanation, and ``signal`` says how the state was
+        established. This method holds the graph open, so it replays
+        the contradiction verdicts rather than reporting the
+        ``t_invalid`` column: no trigger guards that column, and one
+        UPDATE can either fabricate a contradiction or erase a real
+        one from every read surface. The signals in
+        :data:`mareforma.db.REPLAY_TAMPER_SIGNALS` are the cases where
+        the column and the signed evidence disagree.
 
         Raises :class:`ClaimNotFoundError` if no such claim exists.
         """
@@ -885,7 +890,7 @@ class EpistemicGraph:
             raise _db.ClaimNotFoundError(
                 f"Claim '{claim_id}' not found."
             )
-        return _db.refutation_status(row)
+        return _db.refutation_status(row, self._conn)
 
     @_synchronized
     def search(

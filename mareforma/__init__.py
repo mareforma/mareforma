@@ -530,6 +530,8 @@ from mareforma.db import (
     ProjectPolicyError,
     VerdictIssuerError,
     REFUTATION_STATES,
+    REPLAY_TAMPER_SIGNALS,
+    replay_contradictions,
     VALID_REFUTATION_FILTERS,
     refutation_status,
 )
@@ -694,6 +696,8 @@ __all__ = [
     "VerifierError",
     # Refutation taxonomy + presenter.
     "REFUTATION_STATES",
+    "REPLAY_TAMPER_SIGNALS",
+    "replay_contradictions",
     "VALID_REFUTATION_FILTERS",
     "refutation_status",
     # Grounding sensor protocol + reference impl.
