@@ -738,7 +738,10 @@ INDEPENDENCE_COUNTS_SQL = (
     " est.ci_lower, est.ci_upper, est.ci_level, est.n_total, "
     " pr.test_type, pr.direction_of_interest, pr.equivalence_lower, "
     " pr.equivalence_upper, pr.alpha, pr.inference_regime, "
-    " pr.preregistered AS preregistered "
+    " pr.preregistered AS preregistered, "
+    # The read path re-applies the pre-registration timing rule assert_finding
+    # enforces at write, so registered_at travels with the flag it qualifies.
+    " pr.registered_at AS plan_registered_at "
     "FROM findings f "
     "LEFT JOIN evidence_lines el ON el.finding_id = f.finding_id "
     "LEFT JOIN contrasts c ON c.line_id = el.line_id "

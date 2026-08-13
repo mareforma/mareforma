@@ -565,11 +565,17 @@ class TestSchemaColumnSweep:
     def test_post_hoc_disclosure_rests_on_the_write_trigger(
         self, tmp_path: Path,
     ) -> None:
-        """``preregistered`` feeds ``post_hoc`` but is not re-derivable on read, so
-        its guard is ``predictions_append_only``. With the trigger in place the flip
-        that would relabel a post-hoc gate as pre-registered is refused; the schema
-        sweep proves the same for every predictions row. This pins the write-side
-        guarantee the disclosure integrity of ``post_hoc`` rests on."""
+        """``preregistered`` feeds ``post_hoc`` and ``predictions_append_only``
+        refuses the flip that would relabel a post-hoc gate as pre-registered;
+        the schema sweep proves the same for every predictions row. This pins
+        the write-side guard.
+
+        It is no longer the only thing standing there. The read re-derives
+        pre-registration rather than reading the column, and
+        tests/test_preregistration_on_read.py drops this trigger, makes the
+        flip, and shows it buys nothing. The two cover different ground: the
+        trigger stops the edit, the re-derivation stops the edit being believed,
+        and the census says the trigger was down."""
         state = _known_state(tmp_path)
         with mareforma.open(tmp_path, key_path=state["root"]) as g:
             cid = state["main_cid"]
