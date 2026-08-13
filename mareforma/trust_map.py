@@ -48,6 +48,31 @@ _BINDING_AXIS_VERSIONS = frozenset({"v0.3.9", "v0.3.11"})
 # golden-file test pins this exact text; do not reword without updating it.
 PRE_BINDING_GROUNDED_LABEL = "GROUNDED (pre-binding axis; citation binding not checkable)"
 
+# The value an axis carries when what it read is not a weaker answer but a
+# broken one: a planted trust root, a write guard that was missing on open, a
+# contradiction record the signed verdicts do not support, a transparency-log
+# entry that does not verify. Spelled once so the axes and every renderer agree
+# on it, because a renderer that does not recognise the word paints a tamper
+# report in the colour it uses for a healthy computed axis, which is what both
+# of them did.
+#
+# Distinct from ``mareforma._verify.TAMPERED`` and deliberately not merged with
+# it. That one is a claim VERDICT ("tampered", lowercase) and this is the state
+# of one axis of a map; a claim can carry a tampered axis and still be the wrong
+# thing to hand a caller as a verdict, which is the whole reason the substrate
+# axis reaches the verdict as UNVERIFIABLE rather than as this.
+TAMPERED_VALUE = "TAMPERED"
+
+
+def is_tamper_value(value) -> bool:
+    """True when an axis value reports a broken substrate rather than a weak one.
+
+    The one predicate every renderer asks, so "does this need to look alarming"
+    cannot be answered differently in the terminal and in the HTML view.
+    """
+    return value == TAMPERED_VALUE
+
+
 # Rendered when a claim carries no stored value for a property that would
 # otherwise be computed (a pre-observer claim has no grounding verdict). Never
 # inferred to a confident answer.
@@ -421,19 +446,20 @@ def _independence_property(
             # the tamper guarantees is meaningless. The number is kept in the
             # residual for forensics, not offered as the value.
             return _multi_root_is_tamper(f"; the discarded count was {number}")
-        if n_roots < 2:
-            detail = (
-                "no trust root is enrolled" if n_roots == 0
-                else "all validators trace to a single trust root"
-            )
-            residual += (
-                f"; {detail}, so every axis of distinctness is "
-                "operator-assertable: the signer keys are operator-mintable and "
-                "the model lineage is signed by the operator's own key, so a "
-                "distinct model is not cross-checked by an independent party. "
-                "The count is producer-assertable within one trust domain, not "
-                "certified independence across operators"
-            )
+        # Only zero or one root reaches here, since two or more returned above.
+        # The condition this used to test is now the shape of the function.
+        detail = (
+            "no trust root is enrolled" if n_roots == 0
+            else "all validators trace to a single trust root"
+        )
+        residual += (
+            f"; {detail}, so every axis of distinctness is "
+            "operator-assertable: the signer keys are operator-mintable and "
+            "the model lineage is signed by the operator's own key, so a "
+            "distinct model is not cross-checked by an independent party. "
+            "The count is producer-assertable within one trust domain, not "
+            "certified independence across operators"
+        )
         return TrustProperty(
             name="independence",
             tier=Tier.COMPUTED,
@@ -478,7 +504,7 @@ def _multi_root_is_tamper(extra: str = "") -> TrustProperty:
     return TrustProperty(
         name="independence",
         tier=Tier.COMPUTED,
-        value="TAMPERED",
+        value=TAMPERED_VALUE,
         residual=(
             "more than one self-signed root is enrolled, which no code path "
             "creates; the chain walk therefore refuses every keyid in the "
@@ -561,7 +587,7 @@ def _witnessing_property(
             return TrustProperty(
                 name="witnessing",
                 tier=Tier.COMPUTED,
-                value="TAMPERED",
+                value=TAMPERED_VALUE,
                 residual=(
                     "a transparency-log inclusion record is stored and it does "
                     "not verify against the pinned log key (" + detail
@@ -921,7 +947,7 @@ def _assemble(
     contestation = TrustProperty(
         name="contestation",
         tier=Tier.COMPUTED,
-        value="TAMPERED" if tampered else ref["state"],
+        value=TAMPERED_VALUE if tampered else ref["state"],
         residual=f"{ref['reason']} (signal: {ref['signal']})",
     )
 
@@ -953,7 +979,7 @@ def _assemble(
         trust_root = TrustProperty(
             name="trust_root",
             tier=Tier.COMPUTED,
-            value="TAMPERED",
+            value=TAMPERED_VALUE,
             residual="; ".join(reasons),
         )
     else:

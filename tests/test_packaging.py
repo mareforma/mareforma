@@ -906,3 +906,40 @@ def test_built_artifacts_carry_model_lineage_authentication():
         f"independence to CONVERGENT: {stale}. Rebuild dist/ from current "
         "source before publishing."
     )
+
+
+def test_no_shipped_module_uses_syntax_newer_than_the_floor():
+    """Every shipped module has to parse on the oldest Python we claim.
+
+    ``requires-python`` says 3.10, and a backslash inside an f-string
+    expression is a syntax error until 3.12. That is not a runtime failure on
+    an edge path: the module does not import at all, so the package is broken
+    for anyone on the floor and green for everyone developing above it. Checked
+    from the source rather than by running an old interpreter, because the
+    check has to hold on whichever Python the suite happens to run under, and
+    ``ast.parse(feature_version=(3, 10))`` does not reject it.
+    """
+    import ast
+
+    floor = tomllib.loads(
+        (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]["requires-python"]
+    assert floor == ">=3.10", (
+        f"the floor moved to {floor}; this guard names 3.10 in its reasoning"
+    )
+
+    offenders = []
+    for path in sorted((REPO_ROOT / "mareforma").rglob("*.py")):
+        src = path.read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FormattedValue):
+                segment = ast.get_source_segment(src, node.value) or ""
+                if "\\" in segment:
+                    offenders.append(
+                        f"{path.relative_to(REPO_ROOT)}:{node.lineno}"
+                    )
+    assert not offenders, (
+        "a backslash inside an f-string expression does not parse before "
+        f"Python 3.12: {offenders}"
+    )
