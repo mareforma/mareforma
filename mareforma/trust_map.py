@@ -513,7 +513,10 @@ def _standing_property(claim: dict) -> TrustProperty:
     )
 
 
-def _witnessing_property(claim: dict, has_inclusion: bool) -> TrustProperty:
+def _witnessing_property(
+    claim: dict, has_inclusion: bool,
+    inclusion: "tuple[str, str] | None" = None,
+) -> TrustProperty:
     """Place witnessing honestly against the actual transparency-log inclusion.
 
     ``transparency_logged`` defaults to 1 even when no transparency log is in
@@ -533,20 +536,46 @@ def _witnessing_property(claim: dict, has_inclusion: bool) -> TrustProperty:
             residual="unsigned claim; nothing to witness in a transparency log",
         )
     if has_inclusion:
-        # States what was observed, not what was proved. `has_inclusion` comes
-        # from `SELECT 1 FROM rekor_inclusions`, so it answers "a record exists",
-        # and the stored `raw_response_b64` is never opened here. The Merkle
-        # proof is checked at restore, not on read, and the `rekor_inclusions`
-        # triggers block UPDATE and DELETE but permit INSERT, so a row with a
-        # junk proof reaches this branch. The old sentence asserted an inclusion
-        # proof had been checked, which is a claim this function cannot make.
+        # The record used to be reported as though its existence were the
+        # evidence. rekor_inclusions refuses UPDATE and DELETE and permits
+        # INSERT, so a row carrying a junk proof reaches this branch exactly as
+        # a real one does, and the proof was checked at restore and never again.
+        #
+        # It is checked here now, against the log key pinned for this project,
+        # and the three outcomes are kept apart. Verified is the only one that
+        # earns the word. A proof that fails is a definite finding. And with no
+        # pinned key nothing was checked at all, which is neither evidence for
+        # the entry nor against it, and is the state most projects are in.
+        state, detail = inclusion or (_INCLUSION_NO_KEY, "not re-checked")
+        if state == _INCLUSION_VERIFIED:
+            return TrustProperty(
+                name="witnessing",
+                tier=Tier.COMPUTED,
+                value="inclusion proof verified",
+                residual=(
+                    "signed, and the stored transparency-log entry was "
+                    "re-verified on this read: " + detail
+                ),
+            )
+        if state == _INCLUSION_FAILED:
+            return TrustProperty(
+                name="witnessing",
+                tier=Tier.COMPUTED,
+                value="TAMPERED",
+                residual=(
+                    "a transparency-log inclusion record is stored and it does "
+                    "not verify against the pinned log key (" + detail
+                    + "); the table permits INSERT, so a row witnessing nothing "
+                    "reaches a read looking exactly like one that does"
+                ),
+            )
         return TrustProperty(
             name="witnessing",
             tier=Tier.COMPUTED,
-            value="inclusion record present",
+            value="inclusion record present, unchecked",
             residual=(
-                "signed, and a transparency-log inclusion record is stored; "
-                "the inclusion proof itself is not re-checked on read"
+                "signed, and a transparency-log inclusion record is stored, but "
+                "it was not re-checked on this read: " + detail
             ),
         )
     if logged == 1:
@@ -642,6 +671,8 @@ def build_trust_map(
         effective_independence=effective,
         census_missing=schema_census_missing(conn),
         refutation_contestation=refutation_status(claim, conn),
+        inclusion=(_recheck_inclusion(conn, claim_id, claim)
+                   if has_inclusion else None),
     )
 
 
@@ -671,6 +702,103 @@ def _effective_independence(conn, claim_id: str, *, disclose=None) -> "dict | No
     return effective_independence(conn, row["content_id"], disclose=disclose)
 
 
+# What a stored inclusion record is worth on this read, and the three answers
+# are genuinely different. The proof is only checkable against the transparency
+# log's own public key, and mareforma never fetches that during a read: the key
+# is pinned at <root>/.mareforma/rekor_log_pubkey.pem on the first open that is
+# handed one, and a read with no pinned key has nothing to check against. So the
+# axis is key-conditional, and it says which of the three it is rather than
+# collapsing "nobody could check" into "checked".
+_INCLUSION_VERIFIED = "verified"
+_INCLUSION_NO_KEY = "no-log-key"
+_INCLUSION_FAILED = "failed"
+
+
+def _pinned_log_pubkey(conn) -> "bytes | None":
+    """The transparency log's pinned public key for this project, or None.
+
+    Read off the connection's own file rather than taken as an argument,
+    because every caller of the map builder would otherwise have to know about
+    Rekor to ask a question about witnessing. ``PRAGMA database_list`` names the
+    main database file, and the project root is its grandparent.
+    """
+    from pathlib import Path
+
+    try:
+        for _, name, path in conn.execute("PRAGMA database_list"):
+            if name == "main" and path:
+                pem = Path(path).parent / "rekor_log_pubkey.pem"
+                return pem.read_bytes() if pem.is_file() else None
+    except Exception:
+        return None
+    return None
+
+
+def _recheck_inclusion(conn, claim_id: str, claim: dict) -> "tuple[str, str]":
+    """Re-verify the stored inclusion proof; return ``(state, detail)``.
+
+    ``rekor_inclusions`` refuses UPDATE and DELETE and permits INSERT, so a row
+    carrying a junk proof reaches a read exactly as a real one does, and the
+    axis used to report both as "an inclusion record is stored". The proof was
+    checked at restore and never again, which is to say never, for anyone whose
+    graph was not restored.
+
+    Three answers, and the middle one is the point. With a pinned log key the
+    proof either verifies end to end (Merkle path, the log's signed checkpoint,
+    and the binding to this claim's own envelope) or it does not, and a failure
+    is a definite finding rather than a weaker record. With no pinned key
+    nothing was checked, and saying so is the honest report: it is not evidence
+    against the entry, and it is not evidence for it either.
+    """
+    import base64
+    import json as _json
+    import sqlite3
+
+    try:
+        row = conn.execute(
+            "SELECT raw_response_b64 FROM rekor_inclusions WHERE claim_id = ?",
+            (claim_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return _INCLUSION_NO_KEY, "no inclusions table on this schema"
+    if row is None:
+        return _INCLUSION_NO_KEY, "no inclusion record"
+
+    pem = _pinned_log_pubkey(conn)
+    if pem is None:
+        return _INCLUSION_NO_KEY, (
+            "no transparency-log public key is pinned for this project, so the "
+            "proof could not be checked against the log that would have to "
+            "stand behind it; pin one with mareforma.open(rekor_log_pubkey_pem=)"
+        )
+
+    from mareforma.signing.rekor import RekorInclusionError, verify_rekor_inclusion
+
+    try:
+        body = _json.loads(base64.standard_b64decode(row[0]))
+        envelope = _json.loads(claim.get("signature_bundle") or "null")
+    except Exception:
+        return _INCLUSION_FAILED, (
+            "the stored Rekor response is not readable as an entry, so the "
+            "record witnesses nothing"
+        )
+    if not isinstance(envelope, dict):
+        return _INCLUSION_NO_KEY, (
+            "the claim carries no signature envelope for the entry to bind to"
+        )
+    try:
+        verify_rekor_inclusion(body, pem, envelope)
+    except RekorInclusionError as exc:
+        return _INCLUSION_FAILED, f"{exc.reason}: {exc}"
+    except Exception as exc:                                # pragma: no cover
+        return _INCLUSION_FAILED, f"the proof could not be checked: {exc}"
+    return _INCLUSION_VERIFIED, (
+        "the Merkle inclusion path, the log's signed checkpoint and the "
+        "binding to this claim's envelope all check out against the pinned "
+        "log key"
+    )
+
+
 def _has_rekor_inclusion(conn, claim_id: str) -> bool:
     """True iff a transparency-log inclusion record exists for this claim."""
     import sqlite3
@@ -692,6 +820,7 @@ def _assemble(
     effective_independence: "dict | None" = None,
     census_missing: "tuple[str, ...]" = (),
     refutation_contestation: "dict | None" = None,
+    inclusion: "tuple[str, str] | None" = None,
 ) -> TrustMap:
     """Assemble a TrustMap from an already-fetched claim dict (pure).
 
@@ -842,7 +971,7 @@ def _assemble(
             ),
         )
 
-    witnessing = _witnessing_property(claim, has_inclusion)
+    witnessing = _witnessing_property(claim, has_inclusion, inclusion)
 
     properties = (
         attributability,

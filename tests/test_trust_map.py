@@ -298,8 +298,11 @@ class TestWitnessingHonesty:
         tmap = _assemble(_claim(transparency_logged=1),
                          n_roots=1, has_inclusion=True)
         witnessing = tmap.get("witnessing")
-        assert witnessing.value == "inclusion record present"
-        assert "not re-checked on read" in witnessing.residual
+        # _assemble is the pure form and holds no graph, so it has no pinned log
+        # key and nothing to check the proof against. It says so. The builder
+        # does hold one and re-verifies; see tests/test_rekor_inclusion_recheck.
+        assert witnessing.value == "inclusion record present, unchecked"
+        assert "not re-checked on this read" in witnessing.residual
         # The claim the axis must never make again.
         assert "with an inclusion proof" not in witnessing.residual
 

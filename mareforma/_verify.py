@@ -69,7 +69,9 @@ def classify_claim_verdict(
         verify_claim_signatures,
     )
     from mareforma.observe._binding import check_grounding_binding
-    from mareforma.trust_map import build_trust_map, parse_grounding_record
+    from mareforma.trust_map import (
+        _has_rekor_inclusion, build_trust_map, parse_grounding_record,
+    )
 
     # Two lists, because the exit-code contract splits on exactly this:
     # *problems* is a definite NO (TAMPERED), something was checked and failed;
@@ -167,6 +169,21 @@ def classify_claim_verdict(
             f"contradiction record does not hold up ({contestation['signal']}): "
             + contestation["reason"]
         )
+
+    # A stored transparency-log entry that does not verify against the log key
+    # this project pinned. Checked and failed, about this claim, so it belongs
+    # with the problems: the entry claims a log witnessed the claim and the log
+    # did not. An entry nobody could check because no key is pinned is a
+    # different thing and reaches neither list, which is why the map's three
+    # states are kept apart rather than reduced to witnessed / not.
+    from mareforma.trust_map import _INCLUSION_FAILED, _recheck_inclusion
+
+    if _has_rekor_inclusion(conn, target):
+        state, detail = _recheck_inclusion(conn, target, claim)
+        if state == _INCLUSION_FAILED:
+            problems.append(
+                f"transparency-log inclusion record does not verify: {detail}"
+            )
 
     # The substrate this claim sits on, and it lands in `unchecked` rather than
     # `problems` on purpose. A dropped write guard or a planted second root is a
