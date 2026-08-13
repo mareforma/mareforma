@@ -108,7 +108,7 @@ def build_statement(root: Path) -> dict[str, Any]:
     Raises ``FileNotFoundError`` if *root* holds no graph: ``open_db``
     would otherwise create one and sign an empty statement.
     """
-    from mareforma.db import open_db, list_claims
+    from mareforma.db import open_db, list_claims, list_replication_verdicts
     from mareforma.exporters.jsonld import JSONLDExporter
     from mareforma import validators as _validators
 
@@ -125,6 +125,15 @@ def build_statement(root: Path) -> dict[str, Any]:
         single_trust_domain = _validators.single_trust_domain(conn)
         trust_domain_root = _validators.trust_domain_root(conn)
         validator_rows = _validators.list_validators(conn)
+        # Carried for the same reason the enrollment envelopes are: without
+        # them the bundle cannot tell an honest REPLICATED from an inflated
+        # one, because a signed replication verdict is one of the two things
+        # that earns the level and nothing else in the bundle records it. In
+        # audit mode, so a verdict whose claim was later invalidated still
+        # travels: a promotion that happened is a fact about the past, and
+        # dropping it would make the bundle unable to explain a level the graph
+        # legitimately granted.
+        verdict_rows = list_replication_verdicts(conn, include_invalidated=True)
     finally:
         conn.close()
     subjects = [_subject_for_claim(c) for c in claims]
@@ -172,6 +181,20 @@ def build_statement(root: Path) -> dict[str, Any]:
                 "enrollment_envelope": v["enrollment_envelope"],
             }
             for v in validator_rows
+        ],
+        "mare:replicationVerdicts": [
+            {
+                "verdict_id": v["verdict_id"],
+                "cluster_id": v["cluster_id"],
+                "member_claim_id": v["member_claim_id"],
+                "other_claim_id": v["other_claim_id"],
+                "method": v["method"],
+                "confidence": v.get("confidence") or {},
+                "issuer_keyid": v["issuer_keyid"],
+                "signature": base64.standard_b64encode(
+                    v["signature"]).decode("ascii"),
+            }
+            for v in verdict_rows
         ],
     }
     return {
@@ -389,6 +412,119 @@ def _string_supports(supports: Any) -> list[str]:
     return [s for s in supports if isinstance(s, str)]
 
 
+def _verified_replication_verdicts(
+    predicate: dict, verified_validators: dict,
+) -> "dict[str, set]":
+    """Replication verdicts that verify, grouped by the claim each names.
+
+    The bundle now carries them, so the verdict path a live promotion can take
+    is checkable offline instead of invisible. Each is held against the same bar
+    the recording path applies and the read path re-applies: the issuer must be
+    a validator whose enrollment chain verified in this bundle, and the
+    signature must verify over the DSSE PAE rebuilt from the carried fields. A
+    verdict that fails names nobody, exactly as ``_verdict_verifies`` treats it
+    on the live path.
+
+    Never raises. A malformed verdict is not evidence, and it must not take a
+    bundle down: what it costs is the claim it would have backed, which then has
+    to stand on the convergence path or fail.
+    """
+    from mareforma.db import _replication_verdict_pae
+
+    by_claim: "dict[str, set]" = {}
+    for v in predicate.get("mare:replicationVerdicts", []) or []:
+        try:
+            issuer = v["issuer_keyid"]
+            if issuer not in verified_validators:
+                continue
+            record = {
+                "verdict_id": v["verdict_id"],
+                "cluster_id": v["cluster_id"],
+                "member_claim_id": v["member_claim_id"],
+                "other_claim_id": v["other_claim_id"],
+                "method": v["method"],
+                "confidence": v.get("confidence") or {},
+            }
+            # The map holds a loaded public key, not a PEM: it is built by
+            # _verify_exported_validators, which has already chain-verified it.
+            verified_validators[issuer].verify(
+                base64.standard_b64decode(v["signature"]),
+                _replication_verdict_pae(record),
+            )
+        except Exception:
+            continue
+        for cid in (v.get("member_claim_id"), v.get("other_claim_id")):
+            if cid:
+                by_claim.setdefault(cid, set()).add(v["verdict_id"])
+    return by_claim
+
+
+def _distinct_artifact(own_hash: "str | None", peer_hash: "str | None") -> bool:
+    """The graph's artifact-hash term, restated: two NULLs are not one artifact.
+
+    ``_QUALIFYING_PEER_SQL`` disqualifies a peer only when both hashes are
+    present and equal, because a missing hash records that no artifact was
+    named, not that the same one was. Reading it as "the hashes must differ"
+    rejects every honest convergence between two claims that recorded no
+    artifact, which is the ordinary case for a text finding.
+    """
+    return own_hash is None or peer_hash is None or peer_hash != own_hash
+
+
+def _verify_replicated_level(
+    node: dict, claim_id: str, support_peers: dict,
+    established_anchors: set, verified_verdicts: dict,
+) -> None:
+    """Refuse a displayed REPLICATED the bundle's own material does not back.
+
+    The two paths are the graph's, not this file's. ``_CorroborationIndex``
+    holds that a stored REPLICATED is legitimate on either an enrolled
+    validator's signed replication verdict naming the claim, or convergence: a
+    shared ESTABLISHED anchor with a peer under a distinct asserter key and a
+    different artifact hash. This applied neither. It asked only whether two
+    distinct asserters shared any upstream, which is weaker than convergence in
+    three ways and blind to the verdict path in full.
+
+    Being blind to the verdict path was the worse half, because it was a false
+    rejection rather than a permissive one: a claim the graph promoted on a
+    signed verdict, exported and then handed to this verifier, raised. mareforma
+    produced bundles it refused to verify.
+
+    One condition of convergence is NOT re-applied here and the bundle cannot
+    apply it: the observed-grounding gate, whose column no node carries. So this
+    is the graph's rule minus that term, which makes it a weaker check than the
+    read path rather than a different one, and the difference is stated rather
+    than papered over.
+    """
+    if verified_verdicts.get(claim_id):
+        return
+    own = _node_asserter(node)
+    own_hash = node.get("artifactHash")
+    for sup in _string_supports(node.get("supports")):
+        if sup not in established_anchors:
+            continue
+        # Both terms on the SAME peer. Asking whether some peer has a distinct
+        # key and some peer has a distinct artifact would pass on two peers that
+        # each satisfy one, which is not a corroboration by anybody.
+        for peer_key, peer_hash in support_peers.get(sup, ()):
+            if peer_key != own and _distinct_artifact(own_hash, peer_hash):
+                return
+    raise BundleVerificationError(
+        f"claim:{claim_id} is shown REPLICATED but this bundle carries "
+        "neither a replication verdict that verifies against an enrolled "
+        "issuer nor a shared ESTABLISHED anchor with a distinct-signer peer "
+        "on a different artifact hash"
+    )
+
+
+def _node_asserter(node: dict) -> "str | None":
+    """The keyid on a node's own asserter bundle, or None."""
+    try:
+        return node["signatureBundle"]["signatures"][0]["keyid"]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
 def _verify_established_level(
     node: dict, claim_id: str, verified_validators: dict,
     validator_types: dict, _signing,
@@ -584,21 +720,27 @@ def verify_bundle(
     # the distinct-signer corroboration that support level requires. Necessary
     # condition, so a genuine REPLICATED never false-rejects; it forbids a lone
     # claim from displaying REPLICATED with no independent corroborator.
-    support_asserters: dict[str, set] = {}
+    # Two indexes over the bundle's own nodes, for the convergence half of the
+    # REPLICATED rule: which distinct signer-and-artifact pairs sit on each
+    # upstream, and which upstreams are ESTABLISHED. The rule the graph enforces
+    # needs the pair, so an index of signers alone was dropped with the weaker
+    # check it fed.
+    support_peers: dict[str, set] = {}
+    established_anchors: set = set()
     for n in nodes:
         if not n.get("@id", "").startswith("mare:claim/"):
             continue
-        n_sig = n.get("signatureBundle")
-        if not n_sig:
-            continue
-        try:
-            n_asserter = n_sig["signatures"][0]["keyid"]
-        except (KeyError, IndexError, TypeError):
-            continue
-        if n_asserter not in verified_validators:
+        if n.get("supportLevel") == "ESTABLISHED":
+            established_anchors.add(n["@id"][len("mare:claim/"):])
+        n_asserter = _node_asserter(n)
+        if n_asserter is None or n_asserter not in verified_validators:
             continue
         for sup in _string_supports(n.get("supports")):
-            support_asserters.setdefault(sup, set()).add(n_asserter)
+            support_peers.setdefault(sup, set()).add(
+                (n_asserter, n.get("artifactHash")))
+    verified_verdicts = _verified_replication_verdicts(
+        predicate, verified_validators,
+    )
     for node in nodes:
         node_id = node.get("@id", "")
         if not node_id.startswith("mare:claim/"):
@@ -688,16 +830,10 @@ def verify_bundle(
                 node, claim_id, verified_validators, validator_types, _signing,
             )
         elif level == "REPLICATED":
-            corroborated = any(
-                len(support_asserters.get(sup, set())) >= 2
-                for sup in _string_supports(node.get("supports"))
+            _verify_replicated_level(
+                node, claim_id, support_peers, established_anchors,
+                verified_verdicts,
             )
-            if not corroborated:
-                raise BundleVerificationError(
-                    f"claim:{claim_id} is shown REPLICATED but no shared "
-                    "upstream carries a second distinct-signer claim in the "
-                    "bundle"
-                )
         # Re-derive the canonical Statement v1 hash from the @graph
         # node. evidence is part of the signed predicate, so the
         # JSON-LD node carries it and verify uses the same shape that

@@ -677,7 +677,8 @@ class TestSupportLevelAttestation:
         bundle_path = tmp_path / "bundle.json"
         bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
         with pytest.raises(
-            BundleVerificationError, match="no shared upstream carries a second",
+            BundleVerificationError,
+            match="neither a replication verdict that verifies",
         ):
             verify_bundle(bundle_path, pk.public_key())
 
