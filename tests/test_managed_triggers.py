@@ -359,3 +359,30 @@ class TestAGuardWithNoTableIsSkipped:
     def test_every_guard_names_a_table_the_reconciler_can_check(self) -> None:
         """The skip reads _EXPECTED_TRIGGER_TABLES by name and would KeyError."""
         assert set(_EXPECTED_TRIGGER_TABLES) == {n for n, _ in _MANAGED_TRIGGERS}
+
+
+class TestOnlyTheReconcilerCreatesGuards:
+    def test_the_additive_script_creates_no_triggers(self) -> None:
+        """Two creators, one owner of the wanted text, is how they drift.
+
+        Three guards were created by _ADDITIVE_TABLES_SQL, which executes on
+        every open, while the reconciler also owned them. Their text now lives
+        in _RECONCILED_ONLY_TRIGGERS_SQL, which is parsed and never executed, so
+        the DDL keeps a home and creation has exactly one path.
+        """
+        from mareforma.db._schema_sql import (
+            _ADDITIVE_TABLES_SQL, _RECONCILED_ONLY_TRIGGERS_SQL, _extract_triggers,
+        )
+        assert _extract_triggers(_ADDITIVE_TABLES_SQL) == ()
+        lifted = {n for n, _ in _extract_triggers(_RECONCILED_ONLY_TRIGGERS_SQL)}
+        assert lifted == {"predictions_no_delete", "plan_retirements_append_only",
+                          "plan_retirements_no_delete"}
+        assert lifted <= set(_ALL_EXPECTED_TRIGGERS)
+
+    def test_they_are_still_built_on_a_fresh_graph(self, tmp_path: Path) -> None:
+        """Lifting the text out must not lift the guards out with it."""
+        open_db(tmp_path).close()
+        live = _triggers(tmp_path)
+        for guard in ("predictions_no_delete", "plan_retirements_append_only",
+                      "plan_retirements_no_delete"):
+            assert guard in live

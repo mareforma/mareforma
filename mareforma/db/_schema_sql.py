@@ -1006,11 +1006,6 @@ CREATE INDEX IF NOT EXISTS idx_pred_content ON predictions(content_id);
 -- other immutable columns, and a managed definition reaches an existing graph
 -- whose trigger predates the plan_id addition, which an IF NOT EXISTS here would
 -- not.
-CREATE TRIGGER IF NOT EXISTS predictions_no_delete
-BEFORE DELETE ON predictions
-BEGIN
-    SELECT RAISE(ABORT, 'mareforma:append_only:prediction_delete_blocked');
-END;
 
 -- A retired plan. A plan written by a release with a wider alpha bound can
 -- carry a rule the gates cannot run, and the row above can be neither corrected
@@ -1035,16 +1030,6 @@ CREATE TABLE IF NOT EXISTS plan_retirements (
 -- A retirement is append-only like the plan it retires: an operator who could
 -- re-point or drop one could move a proposition's counts by rewriting which
 -- rule its evidence stands under, with nothing on the read saying so.
-CREATE TRIGGER IF NOT EXISTS plan_retirements_append_only
-BEFORE UPDATE ON plan_retirements
-BEGIN
-    SELECT RAISE(ABORT, 'mareforma:append_only:plan_retirement_locked');
-END;
-CREATE TRIGGER IF NOT EXISTS plan_retirements_no_delete
-BEFORE DELETE ON plan_retirements
-BEGIN
-    SELECT RAISE(ABORT, 'mareforma:append_only:plan_retirement_delete_blocked');
-END;
 
 -- A finding: one attestation (claim_id) plus its computed bearing_direction on
 -- a proposition under a plan. The direction is denormalised here for queryable
@@ -1251,9 +1236,35 @@ def _extract_triggers(script: str) -> "tuple[tuple[str, str], ...]":
 # created once, on a fresh database, by a script that never runs again. Before
 # this constant the expected set existed only as that split, so nothing could
 # ask the single question "is every guard still here".
+
+# Guards whose text lives in DDL and whose creation belongs to the reconciler.
+# They sat in _ADDITIVE_TABLES_SQL, which executes on every open, so two paths
+# created them and only one owned the wanted text. Now that every trigger is
+# reconciled there is one owner, and this constant exists so the text still has
+# a DDL home: hand-copying it into a Python string is the drift _extract_triggers
+# was introduced to remove. Never executed. _ALL_EXPECTED_TRIGGERS reads it.
+_RECONCILED_ONLY_TRIGGERS_SQL = """
+CREATE TRIGGER IF NOT EXISTS predictions_no_delete
+BEFORE DELETE ON predictions
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:prediction_delete_blocked');
+END;
+CREATE TRIGGER IF NOT EXISTS plan_retirements_append_only
+BEFORE UPDATE ON plan_retirements
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:plan_retirement_locked');
+END;
+CREATE TRIGGER IF NOT EXISTS plan_retirements_no_delete
+BEFORE DELETE ON plan_retirements
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:plan_retirement_delete_blocked');
+END;
+"""
+
 _ALL_EXPECTED_TRIGGERS: "dict[str, str]" = {
     **dict(_extract_triggers(_SCHEMA_SQL)),
     **dict(_extract_triggers(_ADDITIVE_TABLES_SQL)),
+    **dict(_extract_triggers(_RECONCILED_ONLY_TRIGGERS_SQL)),
     **dict(_extract_triggers(_SCHEMA_CENSUS_SQL)),
     **{name: sql.rstrip().rstrip(";") for name, sql in _AUTHORED_TRIGGERS},
 }
@@ -1278,6 +1289,7 @@ _ALL_EXPECTED_TRIGGERS: "dict[str, str]" = {
 _MANAGED_TRIGGERS: "tuple[tuple[str, str], ...]" = tuple(
     _ALL_EXPECTED_TRIGGERS.items()
 )
+
 
 
 def _trigger_base_table(sql: str) -> str:

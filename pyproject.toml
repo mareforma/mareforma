@@ -113,6 +113,11 @@ filterwarnings = [
     # sites pass it as scaffolding for tests about something else. It is proved
     # to fire in tests/test_min_support_deprecation.py.
     'ignore:query\(min_support=\.\.\.\) is deprecated:DeprecationWarning',
+    # Same treatment, same reason: the row-only refutation_status now warns,
+    # and the suite exercises that signature deliberately in the tests that pin
+    # what a caller with no graph is told. Proved to fire in
+    # tests/test_contradiction_replay.py::TestWithoutAConnection.
+    'ignore:refutation_status\(row\) without a connection:DeprecationWarning',
 ]
 markers = [
     "adapters: tests exercising the mareforma.adapters.* namespace",

@@ -651,3 +651,71 @@ class TestACleanListingIsClean:
         finally:
             conn.close()
         assert verdict is _VERIFY_EXCLUDED
+
+
+class TestTheRowOnlyFormIsDeprecated:
+    """It answers off a column no trigger guards, and says so in `signal`.
+
+    A caller reading only `state` cannot see that, which is what the warning is
+    for. Suppressed suite-wide in pyproject because the tests above exercise the
+    signature on purpose; escalated back to an error here so the suppression
+    cannot quietly outlive the warning.
+    """
+
+    def test_it_warns(self) -> None:
+        import warnings
+
+        row = {"claim_id": "c1", "status": "active", "t_invalid": None}
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            with pytest.raises(DeprecationWarning, match="without a connection"):
+                refutation_status(row)
+
+    def test_the_warning_is_attributed_to_the_caller(self) -> None:
+        """Emitting it is not the same as anyone seeing it.
+
+        Python shows a DeprecationWarning by default only when it is attributed
+        to ``__main__``. At the wrong stacklevel this one pointed at core.py,
+        inside the library, so the default filter swallowed it and the row-only
+        form would have been removed with no notice ever given. The test above
+        cannot see that: it forces the filter to error, which fires whatever the
+        attribution is.
+        """
+        import warnings
+
+        row = {"claim_id": "c1", "status": "active", "t_invalid": None}
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            refutation_status(row)
+        assert caught, "no warning was emitted at all"
+        assert caught[0].filename == __file__, (
+            f"attributed to {caught[0].filename}, not the calling file, so "
+            "the default filter hides it"
+        )
+
+    def test_passing_a_connection_does_not(self, tmp_path: Path) -> None:
+        import warnings
+
+        key = _bootstrap_key(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=key) as g:
+            cid = g.assert_claim("a claim")
+        conn = open_db(tmp_path)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", DeprecationWarning)
+                refutation_status(get_claim(conn, cid), conn)
+        finally:
+            conn.close()
+
+    def test_the_pure_column_path_does_not_warn(self) -> None:
+        """_assemble is pure by contract and holds no graph. That is a
+        legitimate absence, not a caller who should have passed one."""
+        import warnings
+
+        from mareforma.db.core import refutation_from_column
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            out = refutation_from_column(
+                {"claim_id": "c1", "status": "active", "t_invalid": None})
+        assert out["signal"] == "none"

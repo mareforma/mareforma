@@ -59,3 +59,30 @@ def warn_deprecated_seed(*, stacklevel: int = 6) -> None:
         "signed ESTABLISHED claim; a replacement anchor arrives in v0.4.0.",
         stacklevel,
     )
+
+
+def warn_refutation_status_without_conn(*, stacklevel: int = 4) -> None:
+    """Warn that the row-only ``refutation_status`` cannot replay the verdicts.
+
+    Four frames: this function, ``_emit``, ``refutation_status``, the caller.
+    At three the warning was attributed to ``core.py`` rather than to the code
+    that called it, and Python's default filter only shows a DeprecationWarning
+    attributed to ``__main__``, so it reached nobody. A deprecation nobody sees
+    is a removal with no notice, which is what the next release would have been.
+
+    The signature that takes a row and nothing else answers off ``t_invalid``,
+    a column no trigger guards, so a caller on this path is told a
+    contradiction exists (or does not) on the strength of an edit nobody
+    signed. Passing the connection lets the same function hold the signed
+    verdicts against their issuers instead. The old form still answers, and it
+    still says in its ``signal`` that nothing was replayed; the warning is here
+    because a caller reading only ``state`` cannot see that.
+    """
+    _emit(
+        "refutation_status(row) without a connection reports the t_invalid "
+        "column, which no trigger guards, so a fabricated or erased "
+        "contradiction reads back as fact. Pass the graph connection, "
+        "refutation_status(row, conn), to replay the signed contradiction "
+        "verdicts instead. The row-only form is removed in a future release.",
+        stacklevel,
+    )

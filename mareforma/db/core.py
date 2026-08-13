@@ -6098,11 +6098,34 @@ def refutation_status(row: dict, conn: "sqlite3.Connection | None" = None) -> di
             "refutation_status: row missing 'status' field; pass a row "
             "fetched via list_claims / get_claim, not a partial dict."
         )
-    flagged = row.get("t_invalid") is not None
-    if conn is not None and row.get("claim_id"):
-        replayed = _replayed_refutation(conn, row, flagged)
+    if conn is None:
+        from .._deprecation import warn_refutation_status_without_conn
+
+        warn_refutation_status_without_conn()
+        return refutation_from_column(row)
+    if row.get("claim_id"):
+        replayed = _replayed_refutation(
+            conn, row, row.get("t_invalid") is not None,
+        )
         if replayed is not None:
             return replayed
+    return refutation_from_column(row)
+
+
+def refutation_from_column(row: dict) -> dict:
+    """The refutation state as the row's own columns record it, no replay.
+
+    The honest floor: what a reader can say with the row in front of them and
+    nothing else. ``refutation_status`` falls through to it when the replay has
+    nothing to add, and :func:`mareforma.trust_map._assemble` calls it directly
+    because that function is pure by contract and holds no graph, which is a
+    legitimate absence rather than a caller who should have passed one.
+
+    Carries no deprecation warning for that reason. The warning belongs on
+    ``refutation_status(row)``, where a connection was available and was not
+    handed over.
+    """
+    flagged = row.get("t_invalid") is not None
     if flagged:
         # States what was read, not what was proved. With no connection this is
         # a pure function over one row: it sees `t_invalid` and nothing else.

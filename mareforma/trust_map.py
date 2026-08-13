@@ -868,7 +868,7 @@ def _assemble(
     # package version cannot vouch that this map's residuals match the shipped
     # logic, so it fails closed rather than present a possibly under-named axis.
     _require_consistent_version()
-    from mareforma.db import REPLAY_TAMPER_SIGNALS, refutation_status
+    from mareforma.db import REPLAY_TAMPER_SIGNALS, refutation_from_column
 
     supports = claim.get("supports_json")
     contradicts = claim.get("contradicts_json")
@@ -942,7 +942,7 @@ def _assemble(
     # used to render the edit as though it were the finding.
     ref = refutation_contestation
     if ref is None:
-        ref = refutation_status(claim)
+        ref = refutation_from_column(claim)
     tampered = ref["signal"] in REPLAY_TAMPER_SIGNALS
     contestation = TrustProperty(
         name="contestation",
