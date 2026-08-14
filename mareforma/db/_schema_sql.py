@@ -798,6 +798,15 @@ END"""
 # that check at all.
 _POLICY_MARKER_TABLE = "mareforma_policy_open"
 
+# The marker a table rebuild has to run inside. Unlike the two above it guards
+# no trigger: nothing in SQL can refuse a DROP TABLE. It is a gate in Python,
+# and it exists because the rebuild is a laundering primitive. It drops every
+# guard on claims along with the table, including claims_signed_no_delete, and
+# it runs with foreign keys off. Reachable from the versioned upgrade path and
+# from nowhere else, so a caller who wants those guards gone for a moment
+# cannot borrow the one function that legitimately takes them off.
+_UPGRADE_MARKER_TABLE = "mareforma_upgrade_open"
+
 _PROJECT_POLICY_APPEND_ONLY_TRIGGER_NAME = "project_policy_append_only"
 
 _PROJECT_POLICY_APPEND_ONLY_TRIGGER_SQL = f"""\
@@ -1305,6 +1314,55 @@ def _extract_triggers(script: str) -> "tuple[tuple[str, str], ...]":
             out.append((m.group(1), stmt.rstrip().rstrip(";")))
             break
     return tuple(out)
+
+
+def _extract_table(script: str, name: str) -> str:
+    """The ``CREATE TABLE`` statement for *name* in *script*.
+
+    Derived from the authored DDL for the reason the trigger set is: a rebuild
+    that carried a hand-copied copy of the claims definition would drift from
+    the one a fresh database gets, and the drift would show up as two graphs
+    that accept different rows while both call themselves current.
+    """
+    import re
+    import sqlite3
+
+    start = re.compile(
+        rf"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?{name}\s*\(", re.I
+    )
+    m = start.search(script)
+    if m is None:                                        # pragma: no cover
+        raise ValueError(f"no CREATE TABLE for {name!r} in the schema")
+    i = m.start()
+    for j in range(i, len(script)):
+        if script[j] != ";":
+            continue
+        stmt = script[i:j + 1]
+        if sqlite3.complete_statement(stmt):
+            return stmt.rstrip().rstrip(";")
+    raise ValueError(f"unterminated CREATE TABLE for {name!r}")  # pragma: no cover
+
+
+def claims_rebuild_sql(table_name: str) -> str:
+    """The claims definition, under *table_name*, for a table rebuild.
+
+    One source of truth with the schema a fresh database gets. A rebuild builds
+    its replacement under a temporary name and renames it, so the only thing
+    that changes is the name in the header.
+
+    A column-dropping rebuild does NOT come through here. It needs a definition
+    with the column gone, and filtering one out of this text means parsing it;
+    a parser that mishandles a CHECK clause writes a table that accepts what the
+    old one refused. Such a migration authors its own definition and passes it
+    in, and the column list it copies is checked against the result.
+    """
+    import re
+
+    ddl = _extract_table(_SCHEMA_SQL, "claims")
+    return re.sub(
+        r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?claims\s*\(",
+        f"CREATE TABLE {table_name} (", ddl, count=1, flags=re.I,
+    )
 
 
 # Every trigger a correct graph carries, derived from the DDL rather than

@@ -35,6 +35,8 @@ from ._schema_sql import (  # noqa: F401
     _POLICY_MARKER_TABLE,
     _PROMOTION_MARKER_TABLE,
     _SCHEMA_SQL,
+    _UPGRADE_MARKER_TABLE,
+    claims_rebuild_sql,
     _SIGNED_FIELDS_TRIGGER_NAME,
     _SIGNED_FIELDS_TRIGGER_SQL,
 )
@@ -552,6 +554,23 @@ def _note_guards_seen(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+# Guards this release adds to a table that ALREADY existed. Held back from the
+# expected set for one release, because the census looks before the reconciler
+# creates them and every graph written before this release would otherwise
+# report them missing on its first open, permanently.
+#
+# Empty, and that is the current state rather than the permanent one: the tables
+# this release added are new, so table-presence already keeps their guards off
+# an older graph's report. A release that puts a guard on an existing table adds
+# its name here and removes it in the release after, once every opened graph
+# carries it in its seen set.
+#
+# Verified rather than assumed: adding one guard to `claims` and opening an
+# existing graph once was measured turning a verified claim into UNVERIFIABLE,
+# with no migration involved.
+_GUARDS_INTRODUCED_THIS_RELEASE: "frozenset[str]" = frozenset()
+
+
 def _record_schema_census(conn: sqlite3.Connection) -> "tuple[str, ...]":
     """Record which write guards are absent, BEFORE anything recreates them.
 
@@ -572,17 +591,33 @@ def _record_schema_census(conn: sqlite3.Connection) -> "tuple[str, ...]":
     record: an unconditional row per open would grow without bound on a
     long-lived process and bury the one observation that matters.
 
-    A guard is expected when its table is here, or when this graph has carried
-    that guard before. Both halves are load-bearing. The first keeps an older
-    graph.db off the report: :data:`_EXPECTED_TRIGGER_TABLES` explains that the
-    additive script builds nine tables on the way in, a file written before they
-    existed has none of them, and measured against the flat set it would show
-    every guard on those tables as absent on the very open that creates them.
-    The second closes what the first would otherwise open, because a guard
-    cannot outlive its table: dropping the table would take the guard out of the
-    expected set too, and the additive script rebuilds the table empty on the
+    A guard is expected when its table is here and this release did not just
+    introduce it, or when this graph has carried that guard before. Three parts,
+    and each closes something the others open.
+
+    Table-presence keeps an older graph.db off the report:
+    :data:`_EXPECTED_TRIGGER_TABLES` explains that the additive script builds
+    nine tables on the way in, a file written before they existed has none of
+    them, and measured against the flat set it would show every guard on those
+    tables as absent on the very open that creates them.
+
+    The seen set closes what table-presence would otherwise open, because a
+    guard cannot outlive its table: dropping the table would take its guards out
+    of the expected set, and the additive script rebuilds the table empty on the
     same open, so the rows would be gone with nothing said. A guard this graph
-    has seen stays expected however its table is treated.
+    has carried stays expected however its table is treated. It is also what
+    makes the census store un-emptiable: deleting every row of the seen set does
+    not lower what is expected of a table that is still present.
+
+    :data:`_GUARDS_INTRODUCED_THIS_RELEASE` closes the case both of the others
+    miss, which is the ordinary shape of a schema release. A guard added to a
+    table that ALREADY exists is expected of every graph written before it, on
+    the first open, because the census looks before the reconciler creates it.
+    The record is a union over every open and nothing here forgets, so one added
+    guard would brand every claim in every existing graph as tampered,
+    permanently, with no way to clear it. Declaring it holds it back for exactly
+    one release, after which every graph that has been opened carries it in its
+    seen set and the declaration can go.
 
     Returns the missing names so the caller can act on the open it happened on.
     """
@@ -601,7 +636,8 @@ def _record_schema_census(conn: sqlite3.Connection) -> "tuple[str, ...]":
     seen = _guards_seen(conn)
     expected = {
         name for name, table in _EXPECTED_TRIGGER_TABLES.items()
-        if table in tables or name in seen
+        if (table in tables and name not in _GUARDS_INTRODUCED_THIS_RELEASE)
+        or name in seen
     }
     missing = tuple(sorted(expected - triggers))
 
@@ -709,30 +745,56 @@ def _open_existing_db(
     served. *root* is the project root used for the grandfather event and the
     claims.toml remediation hint.
     """
-    # No in-place migrations in this release. A db whose user_version
-    # is neither 0 nor _SCHEMA_VERSION was written by a different
-    # build of the dev branch and may carry a partial schema (e.g.
-    # a v2-stranded db is missing the retracted-is-terminal trigger
-    # that the fix relies on, even though its column set
-    # happens to match). Refuse rather than open silently.
-    if version != _SCHEMA_VERSION:
+    # A graph from a later release is refused before anything touches it. No
+    # census, no ALTER, no migration: this code does not know what it is looking
+    # at, and the census store forgets nothing, so a guard this build expects
+    # and a newer one retired would be written into that graph as a permanent
+    # tamper record by the build least able to judge it.
+    if version > _SCHEMA_VERSION:
         conn.close()
         raise DatabaseError(
-            f"graph.db has user_version={version} but this mareforma "
-            f"expects user_version={_SCHEMA_VERSION}. The dev branch does "
-            "not migrate schemas. Delete .mareforma/graph.db to start "
-            "fresh; claims.toml is a human-readable record of the prior "
-            "state (the chain and signatures cannot be reconstructed "
-            "from it)."
+            f"graph.db has user_version={version}, which is ahead of the "
+            f"user_version={_SCHEMA_VERSION} this mareforma understands. It "
+            "was written by a newer release and may carry schema this one "
+            "does not know how to read, so opening it could report on a graph "
+            "it is misreading. Nothing is wrong with the file. Upgrade "
+            "mareforma to the version that wrote it. Do not delete graph.db: "
+            "it holds the chain and every signature, and claims.toml cannot "
+            "reconstruct them."
         )
 
-    # Initialised db, validate the schema by exact column-set match.
-    # Catching extras as well as missing columns means a partially-migrated
-    # or hand-edited claims table fails loudly instead of silently passing
-    # through code that assumes _CLAIM_COLUMNS is exhaustive.
     existing_cols = {
         row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()
     }
+
+    # Census ahead of every repair below, and only into a file that is a graph.
+    # A migration's rebuild calls the trigger reconciler, and the reconciler
+    # restores the whole managed set rather than the guards the rebuild dropped,
+    # on tables it never touched. Censused after that, one migration reports a
+    # clean schema on a graph somebody had taken guards off, which is the
+    # observation the census exists to keep. The claims check comes first
+    # because pointing this at an unrelated SQLite file should refuse it, not
+    # write mareforma's own tables into it on the way to refusing it.
+    # A version with no route is refused before any ALTER commits AND before the
+    # census writes. The ALTERs below commit one at a time, so refusing after
+    # them leaves a file this release will not open and the release that wrote it
+    # now rejects for carrying columns it does not know. And the census store
+    # forgets nothing, so a guard this build expects that an unroutable old file
+    # never had would be written into it as a permanent tamper record, by a
+    # build that has just said it cannot interpret the file. The release that
+    # wrote it then reads that record and brands every claim in it. Both
+    # directions of an unrecognised version are now refused before anything is
+    # written, which is the ordering this had before the route check arrived.
+    if version < _SCHEMA_VERSION:
+        try:
+            _plan_migration(version)
+        except MigrationError:
+            conn.close()
+            raise
+
+    if existing_cols:
+        _record_schema_census(conn)
+
     # Auto-migrate the two columns added between v0.3.0 and v0.3.1.
     # Both are non-signed, non-CHECK'd query-side denormalisations with
     # safe defaults, so ALTER ADD COLUMN is a non-disruptive in-place
@@ -746,9 +808,38 @@ def _open_existing_db(
     # already have the column and skip the ALTER.
     if "asserter_keyid" in added_cols:
         _grandfather_legacy_replicated(conn, root)
+
+    # Migrate AFTER the column ALTERs and before the exact-set check. A step
+    # copies the column list this release knows, and an older file is missing
+    # some of those columns until the ALTERs above have run, so migrating first
+    # fails on exactly the graphs migrations exist for. The exact-set check has
+    # to come after, because changing that set is what a migration is for.
+    if version < _SCHEMA_VERSION:
+        try:
+            version = _migrate_to_current(conn, version)
+        except BaseException:
+            conn.close()
+            raise
+        # Re-gate. The version above was read before any lock was taken, so a
+        # concurrent opener can have moved the file past this release while this
+        # one waited, and the future check has already run.
+        if version != _SCHEMA_VERSION:
+            conn.close()
+            raise MigrationError(
+                f"graph.db reached user_version={version} while this open was "
+                f"waiting, which this mareforma does not understand "
+                f"(it expects {_SCHEMA_VERSION}). Another process upgraded it. "
+                "Do not delete graph.db. Upgrade mareforma to the version that "
+                "did, and open it again."
+            )
+
     existing_cols = {
         row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()
     }
+    # Validate the schema by exact column-set match. Catching extras as well as
+    # missing columns means a partially-migrated or hand-edited claims table
+    # fails loudly instead of silently passing through code that assumes
+    # _CLAIM_COLUMNS is exhaustive.
     expected_cols = set(_CLAIM_COLUMNS)
     if existing_cols != expected_cols:
         missing = expected_cols - existing_cols
@@ -790,12 +881,6 @@ def _open_existing_db(
         raise DatabaseError(
             f"graph.db schema mismatch ({'; '.join(parts)}). {remedy}"
         )
-    # Census BEFORE any repair. Everything below this line can recreate a
-    # missing write guard: the additive script re-runs its own CREATE TRIGGER
-    # statements, and _ensure_managed_triggers reconciles the managed set after
-    # this function returns. Both are silent. Move this call after either one
-    # and it observes a healed schema, which is the same as not running it.
-    _record_schema_census(conn)
 
     # Additive tables (project_policy, the trust layer) must be
     # present on every initialised db, not just fresh ones ,
@@ -970,6 +1055,712 @@ def open_db_from_db_path(db_path: "str | Path") -> sqlite3.Connection:
             "If the file is corrupt or truncated, delete it and restore "
             "from claims.toml.",
         ) from exc
+
+
+class MigrationError(DatabaseError):
+    """A schema migration could not complete, and nothing was changed.
+
+    Distinct from :class:`DatabaseError` so the remedy can be too. The generic
+    one tells an operator to delete graph.db and start from claims.toml, which
+    is right for a file this code cannot recognise and wrong for one it failed
+    to migrate: the migration is a single transaction, so a failure leaves the
+    graph exactly as it was, and deleting it would throw away a chain that is
+    still intact over a fault that changed nothing.
+    """
+
+
+@contextmanager
+def _upgrade_window(conn: sqlite3.Connection):
+    """Open the marker a table rebuild is only allowed to run inside.
+
+    The sibling windows mark a write so a trigger will permit it. This one
+    marks nothing in SQL, because no trigger can refuse a ``DROP TABLE``: the
+    rebuild takes every guard on the table away with the table itself, and runs
+    with foreign keys off. So the gate is in Python and this is the only thing
+    that opens it, from the versioned upgrade path.
+
+    A temp table, so it lives on this connection and cannot be left open for
+    another one, and it is dropped in a ``finally`` so a failed migration does
+    not leave the door open behind it.
+    """
+    conn.execute(
+        f"CREATE TEMP TABLE IF NOT EXISTS {_UPGRADE_MARKER_TABLE} (id INTEGER)"
+    )
+    try:
+        yield
+    finally:
+        try:
+            conn.execute(f"DROP TABLE IF EXISTS temp.{_UPGRADE_MARKER_TABLE}")
+        except sqlite3.Error:
+            # Closing the window can only fail on a connection that is already
+            # failing every statement, which is what an interrupted migration
+            # leaves. Raising here would replace the migration's own error with
+            # the noise that followed it. The marker is a temp table, so it
+            # cannot outlive this connection however this ends.
+            pass
+
+
+def _upgrade_window_open(conn: sqlite3.Connection) -> bool:
+    """True while :func:`_upgrade_window` is open on this connection."""
+    row = conn.execute(
+        "SELECT 1 FROM temp.sqlite_master WHERE type = 'table' AND name = ?",
+        (_UPGRADE_MARKER_TABLE,),
+    ).fetchone()
+    return row is not None
+
+
+def _table_index_sql(
+    conn: sqlite3.Connection, table: str,
+) -> "tuple[str, ...]":
+    """The CREATE INDEX statements a rebuild of *table* has to put back.
+
+    Read from ``sqlite_master`` rather than from a constant, for the same reason
+    the trigger reconciler reads the DDL rather than a hand-copied list, and
+    with one more reason on top: an upgraded graph carries indexes this code
+    never authored, and a rebuild that replayed only the authored set would
+    drop them silently.
+
+    Implicit indexes are skipped. SQLite gives ``sqlite_autoindex_*`` rows a
+    NULL ``sql`` because the PRIMARY KEY and UNIQUE clauses in the table's own
+    DDL create them, so the new table already has them and replaying is neither
+    possible nor needed.
+    """
+    return tuple(
+        row[0] for row in conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' "
+            "AND tbl_name = ? AND sql IS NOT NULL ORDER BY name",
+            (table,),
+        )
+    )
+
+
+def _unmanaged_trigger_sql(
+    conn: sqlite3.Connection, table: str,
+) -> "tuple[str, ...]":
+    """Triggers on *table* the reconciler will not put back after a rebuild.
+
+    The reconciler recreates the managed set, which is the set this release
+    names. A graph can carry a guard an earlier release wrote and this one no
+    longer lists, and dropping the table takes it away with everything else. The
+    reconciler would then not miss it, the census would not report it, and a
+    write guard on an append-only store would be gone with no record.
+
+    So they are captured and replayed, for the reason
+    :func:`_table_index_sql` captures indexes rather than replaying an authored
+    list. A rebuild is not the place to decide which guards a graph is allowed
+    to have; its job is to leave the table as it found it.
+    """
+    managed = {name for name, _ in _MANAGED_TRIGGERS}
+    return tuple(
+        row[1] for row in conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' "
+            "AND tbl_name = ? AND sql IS NOT NULL ORDER BY name",
+            (table,),
+        )
+        if row[0] not in managed
+    )
+
+
+# The name a rebuild renames the table to and back, to make SQLite reparse.
+_REPARSE_PROBE = "_mareforma_reparse_probe"
+
+
+def _canary_targets(conn: sqlite3.Connection, table: str) -> "tuple[str, ...]":
+    """The tables a rebuild of *table* could have left unable to take a write.
+
+    The rebuilt table, and every ordinary table carrying a trigger. A trigger
+    body is the only place a reference to a dropped column can hide where a
+    write will find it: a CHECK constraint cannot name another table, and a
+    foreign key is :func:`_require_references_resolve`'s business.
+
+    Virtual tables are left out. Their write path belongs to the module that
+    implements them, and preparing a statement against a full-text index proves
+    nothing about the schema this migration changed.
+    """
+    owners = {
+        row[0] for row in conn.execute(
+            "SELECT DISTINCT tbl_name FROM sqlite_master WHERE type = 'trigger'"
+        )
+    }
+    ordinary = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name NOT LIKE 'sqlite_%' "
+            "AND sql NOT LIKE 'CREATE VIRTUAL%'"
+        )
+    }
+    return tuple(sorted(ordinary & (owners | {table})))
+
+
+def _uncompilable_writes(
+    conn: sqlite3.Connection, table: str,
+) -> "dict[str, str]":
+    """Which tables will not accept a write, without writing to any of them.
+
+    SQLite compiles a statement's whole trigger program when it prepares it, so
+    a trigger body naming a column that is gone fails at prepare time. Preparing
+    one insert, one update and one delete per table therefore reaches every
+    trigger a write on it could fire, including one fired by another trigger.
+
+    This is what closes the shape no check that matches names can see. A trigger
+    doing ``INSERT INTO archive SELECT * FROM claims`` never spells the dropped
+    column, and the reparse resolves it happily because every name in it still
+    exists; only the arity changed. Measured: the migration committed, reported
+    success, and the next write died with "table claims_archive has 36 columns
+    but 35 values were supplied". Preparing the same write raises that inside
+    the transaction, where a failure rolls the rebuild back.
+
+    Preparing rather than writing is what makes it safe to run on a real graph.
+    There is no synthetic row to build, so no CHECK constraint to satisfy and no
+    unique key to collide with; no write guard fires, so a table that refuses
+    deletes by design is not read as a broken one; and nothing has to be undone,
+    so a crash here cannot leave a canary row behind.
+
+    The update names every column. A trigger declared ``AFTER UPDATE OF`` one
+    column is compiled only by a statement that writes that column, so an update
+    touching one column reaches one trigger and says nothing about the rest.
+
+    All three statements are tried even after one fails, because the caller
+    compares this against the same probe run before the rebuild. Stopping at the
+    first failure would report the same first error on a table that arrived
+    broken and that the rebuild then broke a second way, and the comparison would
+    read the two as equal and let the new one through.
+    """
+    broken: "dict[str, str]" = {}
+    for target in _canary_targets(conn, table):
+        columns = [
+            row[1] for row in conn.execute(f'PRAGMA table_info("{target}")')
+        ]
+        if not columns:
+            continue
+        assignments = ", ".join(f'"{c}" = "{c}"' for c in columns)
+        failures = []
+        for kind, statement in (
+            ("insert", f'INSERT INTO "{target}" DEFAULT VALUES'),
+            ("update", f'UPDATE "{target}" SET {assignments}'),
+            ("delete", f'DELETE FROM "{target}"'),
+        ):
+            try:
+                conn.execute(f"EXPLAIN {statement}")
+            except sqlite3.Error as exc:
+                failures.append(f"{kind}: {exc}")
+        if failures:
+            broken[target] = "; ".join(failures)
+    return broken
+
+
+def _require_writes_still_compile(
+    conn: sqlite3.Connection, table: str, before: "dict[str, str]",
+) -> None:
+    """Refuse a rebuild that left a table unable to take a write.
+
+    Compared against the same probe run before the rebuild, so a graph that
+    arrived carrying a broken trigger is neither refused for it nor told the
+    migration did it. A migration answers for what it changed.
+    """
+    for target, detail in sorted(_uncompilable_writes(conn, table).items()):
+        if before.get(target) == detail:
+            continue
+        raise MigrationError(
+            f"after rebuilding {table!r} a write to {target!r} no longer "
+            f"compiles: {detail}. Something in this graph reaches what the "
+            "migration removed, and this release does not manage it so it "
+            "cannot rewrite it. Left in place it would commit a graph whose "
+            "next write fails. Nothing has been changed."
+        )
+
+
+def _unresolved_references(
+    conn: sqlite3.Connection, table: str,
+) -> "dict[str, str]":
+    """Which foreign keys onto *table* no longer resolve.
+
+    ``PRAGMA foreign_key_check`` raises "foreign key mismatch" for a REFERENCES
+    clause whose parent no longer has the column, and it has to be asked about
+    the CHILD. Measured: the same pragma scoped to the rebuilt parent returns no
+    rows on exactly that graph, so the check that shipped here first was looking
+    in the wrong place and could not have caught the case its own comment
+    claimed it caught.
+
+    Scoped to the rebuilt table and its children rather than the whole database,
+    so a mismatch elsewhere in a graph that arrived with one is neither blamed on
+    this migration nor able to mask one this migration made.
+
+    Ordinary orphan rows come back as rows rather than an exception and are
+    deliberately not reported: a graph that already had them is not this
+    migration's to refuse.
+    """
+    children = [
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        )
+    ]
+    broken: "dict[str, str]" = {}
+    for child in children:
+        parents = {
+            row[2] for row in conn.execute(
+                f'PRAGMA foreign_key_list("{child}")'
+            )
+        }
+        if child != table and table not in parents:
+            continue
+        try:
+            conn.execute(f'PRAGMA foreign_key_check("{child}")').fetchall()
+        except sqlite3.Error as exc:
+            broken[child] = str(exc)
+    return broken
+
+
+def _require_references_resolve(
+    conn: sqlite3.Connection, table: str, before: "dict[str, str]",
+) -> None:
+    """Refuse a rebuild that left a foreign key naming a column that is gone.
+
+    Compared against the same probe run before the rebuild, on the same rule the
+    write probe follows: a graph that arrived with a dangling reference is not
+    refused for it and, worse, not told the migration did it.
+    """
+    for child, detail in sorted(_unresolved_references(conn, table).items()):
+        if before.get(child) == detail:
+            continue
+        raise MigrationError(
+            f"after rebuilding {table!r} a foreign key on {child!r} no longer "
+            f"resolves: {detail}. A REFERENCES clause names what the migration "
+            "removed, and this release does not manage it so it cannot rewrite "
+            "it. Nothing has been changed."
+        )
+
+
+def _require_schema_resolves(conn: sqlite3.Connection, table: str) -> None:
+    """Refuse a rebuild that left any object naming something that is gone.
+
+    SQLite resolves a trigger or view body when it runs, not when it is created,
+    so a narrowing rebuild can commit a schema whose next write dies on a column
+    the migration removed. Atomicity is no help: nothing failed inside the
+    transaction, and the graph is left unwritable by a migration that reported
+    success.
+
+    A rename with ``legacy_alter_table`` off reparses the WHOLE schema and fails
+    if anything in it no longer resolves, so renaming the table aside and back
+    is a full check with an exact error naming the object. It runs inside the
+    caller's transaction, so a failure rolls the rebuild back.
+
+    Pattern-matching column names against trigger text was tried first and was
+    wrong twice over. It missed anything the check did not scan or spell the
+    same way, since SQLite identifiers are case-insensitive and objects on other
+    tables were never looked at, and it fired on the word appearing inside an
+    error string, blocking a legitimate migration with advice to delete a write
+    guard. The reparse has neither failure: it asks SQLite the question instead
+    of guessing at it.
+    """
+    squatter = conn.execute(
+        "SELECT name FROM sqlite_master WHERE name = ?", (_REPARSE_PROBE,),
+    ).fetchone()
+    if squatter is not None:
+        raise MigrationError(
+            f"an object named {_REPARSE_PROBE!r} is already in this graph, and "
+            "the rebuild needs that name free to make SQLite recheck the "
+            "schema. Nothing has been changed. Rename or drop it, then migrate."
+        )
+    # Set the pragma here rather than inheriting it. The check IS the reference
+    # rewriting, so a connection that already had the legacy behaviour on turned
+    # the whole thing into a no-op that passed everything.
+    was_legacy = conn.execute("PRAGMA legacy_alter_table").fetchone()[0]
+    conn.execute("PRAGMA legacy_alter_table = OFF")
+    try:
+        conn.execute(f"ALTER TABLE {table} RENAME TO {_REPARSE_PROBE}")
+        conn.execute(f"ALTER TABLE {_REPARSE_PROBE} RENAME TO {table}")
+    except sqlite3.Error as exc:
+        raise MigrationError(
+            f"after rebuilding {table!r} the schema no longer resolves: {exc}. "
+            "Something in this graph, a trigger or a view, names what the "
+            "migration removed, and this release does not manage it so it "
+            "cannot rewrite it. Left alone it would commit a graph whose next "
+            "write fails. Nothing has been changed."
+        ) from exc
+    finally:
+        if was_legacy:
+            try:
+                conn.execute("PRAGMA legacy_alter_table = ON")
+            except sqlite3.Error:
+                # Same rule as the other three restores. On an interrupted
+                # connection this raises too, and it would replace the exact
+                # "schema no longer resolves" message, which names the offending
+                # object, with a bare "interrupted".
+                pass
+
+
+def _rebuild_table(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    create_sql: str,
+    columns: "tuple[str, ...]",
+    drops: "tuple[str, ...]" = (),
+) -> None:
+    """Rebuild *table* under a new definition, carrying *columns* across.
+
+    The seven steps SQLite's own ALTER procedure prescribes, in the order that
+    survives them: build the replacement, copy, drop the original, rename,
+    then put the triggers and indexes back.
+
+    **The column list is a parameter, and both sides of the copy name it.**
+    A same-schema rebuild could get away with ``INSERT INTO new SELECT * FROM
+    old``, and a column-dropping one cannot: it needs an explicit list against a
+    wider source, and a positional copy is then the one way this can corrupt a
+    graph in silence. Naming the columns on both sides makes the ordering of
+    either table irrelevant, so the shape that ships here is the shape a
+    column-dropping migration reuses without a rewrite.
+
+    *create_sql* builds the replacement under a temporary name and is supplied
+    rather than derived. Filtering a column out of authored DDL means parsing
+    it, and a parser that gets a CHECK clause wrong writes a table that accepts
+    what the old one refused.
+
+    Two pragmas, and they behave differently, which is why neither is left to
+    the caller's memory. ``foreign_keys`` must already be off, and it cannot be
+    turned off here: it is a silent no-op inside a transaction, so the runner
+    sets it outside one. ``legacy_alter_table`` does take effect inside a
+    transaction and is set here, around the rename alone. Without it step four
+    fails: ``contradiction_invalidates_older`` is a trigger on another table
+    whose body names ``claims``, and a modern rename reparses the whole schema,
+    which cannot resolve that name in the window where the table is gone. It is
+    connection-scoped, so it is restored immediately: left on, every later
+    rename would quietly stop rewriting references, which is the laundering
+    primitive this whole path is gated to prevent.
+
+    **A narrowing rebuild is checked three ways, and each sees what the others
+    cannot.** The reparse resolves view bodies and ``NEW``/``OLD`` references.
+    The write probe compiles a write against the rebuilt table and every table
+    carrying a trigger, which reaches everything a statement compiles, including
+    a body that gets at the dropped column through a star and never spells its
+    name. The reference check reads a ``REFERENCES`` clause, which neither of
+    the others looks at. A name-matching scan of the stored SQL sat here first
+    and is gone: every shape it caught, one of these three catches by asking
+    SQLite rather than by guessing, and the shape it could never catch is the
+    one the write probe exists for.
+
+    Assumes an open transaction. The caller owns it, because the version bump
+    has to commit with the rebuild or not at all.
+    """
+    if not _upgrade_window_open(conn):
+        raise MigrationError(
+            f"the rebuild of {table!r} was called outside the upgrade path. It "
+            "drops every write guard on the table and runs with foreign keys "
+            "off, so it is reachable from a versioned migration and from "
+            "nowhere else."
+        )
+    live = tuple(
+        row[1] for row in conn.execute(f"PRAGMA table_info({table})")
+    )
+    # A rebuild copies the columns it is given and the rest are gone with the
+    # old table. The exact column-set check on the open path is what catches a
+    # hand-edited claims table, and it runs after this, so an undeclared
+    # narrowing would leave that check comparing against the laundered result
+    # and finding nothing to report. Every column that goes has to be named.
+    unnamed = set(live) - set(columns) - set(drops)
+    if unnamed:
+        raise MigrationError(
+            f"the rebuild of {table!r} would drop {sorted(unnamed)}, which the "
+            "step did not declare. A column this migration does not know about "
+            "is a column somebody else put there, and dropping it here would "
+            "erase it and the check that would have reported it. Nothing has "
+            "been changed."
+        )
+    absent = set(drops) - set(live)
+    if absent:
+        raise MigrationError(
+            f"the rebuild of {table!r} declares it drops {sorted(absent)}, "
+            f"which {table!r} does not have. The step and the table disagree "
+            "about what is there, so the rest of what it declares cannot be "
+            "trusted either. Nothing has been changed."
+        )
+
+    # Before anything changes, so the checks afterwards can tell what this
+    # rebuild broke from what arrived broken.
+    already_broken = _uncompilable_writes(conn, table)
+    already_dangling = _unresolved_references(conn, table)
+    indexes = _table_index_sql(conn, table)
+    unmanaged = _unmanaged_trigger_sql(conn, table)
+    names = ", ".join(columns)
+    temp = f"{table}_new"
+    was_legacy = conn.execute("PRAGMA legacy_alter_table").fetchone()[0]
+
+    conn.execute(create_sql)                                        # 1
+    # The replacement has to agree with what the step said it was doing. A
+    # declared drop the definition still carries is the dangerous shape: the
+    # column survives, the copy does not carry it, every row silently loses its
+    # value or takes a DEFAULT, and the exact column-set check on the open path
+    # compares set against set, sees no difference and reports nothing.
+    built = {row[1] for row in conn.execute(f"PRAGMA table_info({temp})")}
+    if not set(drops).isdisjoint(built):
+        raise MigrationError(
+            f"the rebuild of {table!r} declares it drops "
+            f"{sorted(set(drops) & built)}, and the replacement definition "
+            "still has those columns. The copy would leave them empty on every "
+            "row and nothing downstream would notice. Nothing has been changed."
+        )
+    if not set(columns) <= built:
+        raise MigrationError(
+            f"the rebuild of {table!r} copies "
+            f"{sorted(set(columns) - built)}, which the replacement definition "
+            "does not have. Nothing has been changed."
+        )
+    # rowid travels with the rows. The claim chain's tip is read in rowid order,
+    # so a copy that let SQLite choose its own order could move the tip with
+    # nothing raising. Naming it keeps the order the chain is defined by.
+    conn.execute(                                                   # 2
+        f"INSERT INTO {temp} (rowid, {names}) SELECT rowid, {names} FROM {table}"
+    )
+    conn.execute(f"DROP TABLE {table}")                             # 3
+    conn.execute("PRAGMA legacy_alter_table = ON")
+    try:
+        conn.execute(f"ALTER TABLE {temp} RENAME TO {table}")       # 4
+    finally:
+        try:
+            conn.execute(
+                f"PRAGMA legacy_alter_table = {'ON' if was_legacy else 'OFF'}"
+            )
+        except sqlite3.Error:
+            # Same rule as the other two restores: on a connection that is
+            # already failing, do not replace the real error with this one. The
+            # transaction is about to roll back and the connection is closed by
+            # every caller that gets a migration failure, so the pragma cannot
+            # outlive the fault and go on suppressing reference rewriting.
+            pass
+    _ensure_managed_triggers(conn)                                  # 5
+    for statement in unmanaged:
+        conn.execute(statement)
+    for statement in indexes:                                       # 6
+        conn.execute(statement)
+    # Three checks, because each sees something the other two do not. The
+    # reparse resolves view bodies and NEW/OLD references. The write probe
+    # reaches everything a statement compiles, including a trigger body that
+    # never spells the dropped column's name. The reference check reads a
+    # REFERENCES clause, which neither of the others looks at.
+    _require_schema_resolves(conn, table)
+    _require_writes_still_compile(conn, table, already_broken)
+    _require_references_resolve(conn, table, already_dangling)
+
+
+def _run_migration(
+    conn: sqlite3.Connection,
+    *,
+    to_version: int,
+    steps: "Callable[[sqlite3.Connection], None]",
+    from_version: "int | None" = None,
+) -> None:
+    """Apply *steps* and bump ``user_version``, in one transaction or none.
+
+    Atomicity is the whole guarantee. Verified rather than assumed: no statement
+    in the rebuild forces an implicit commit, ``sqlite_master`` rolls back to
+    exactly what it was, and ``user_version`` rolls back with it. So a crash at
+    any step leaves a graph that opens on the old code, with its rows, its
+    guards and its version untouched. There is no half-migrated state to
+    recover from, which is why nothing here tells an operator to delete
+    anything.
+
+    ``foreign_keys`` is toggled outside the transaction because inside one the
+    pragma is a silent no-op, and the rebuild needs it off: dropping the old
+    table would otherwise fail against the six tables that reference it.
+    Restored in a ``finally``, since it is connection-scoped and every later
+    write on this connection depends on it.
+    """
+    was_on = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+    conn.execute("PRAGMA foreign_keys = OFF")
+    ok = False
+    try:
+        try:
+            # Inside the guarded block, so lock contention becomes a migration
+            # failure rather than a raw sqlite error. Outside it, two people
+            # upgrading at once put "database is locked" through the generic
+            # open handler, and the loser is told to delete graph.db, which is
+            # the advice this whole path exists to stop giving.
+            conn.execute("BEGIN IMMEDIATE")
+            # Re-read the version under the lock. It was read before the lock
+            # was taken, so two openers can both have seen the old one and both
+            # decide to run this step. The rebuild that ships here happens to be
+            # idempotent, which hides it; a step that backfills a column or
+            # inserts a row is not, and would apply twice with no error and a
+            # correct-looking version afterwards.
+            if from_version is not None:
+                current = conn.execute("PRAGMA user_version").fetchone()[0]
+                if current != from_version:
+                    conn.execute("ROLLBACK")
+                    # Not a failure: somebody else did this step. The connection
+                    # goes back to a caller either way, so the pragma restore
+                    # below is held to the success rule, not the unwinding one.
+                    ok = True
+                    return
+            steps(conn)
+            conn.execute(f"PRAGMA user_version = {int(to_version)}")
+            conn.execute("COMMIT")
+            ok = True
+        except BaseException as exc:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise MigrationError(
+                f"the schema migration to version {to_version} failed and was "
+                f"rolled back: {exc}. This step changed nothing: the graph is "
+                "at the version it was at when the step began, with every "
+                "claim, signature and chain link intact. Do not delete it."
+            ) from exc
+    finally:
+        if was_on:
+            try:
+                conn.execute("PRAGMA foreign_keys = ON")
+            except sqlite3.Error as exc:
+                # Swallowed only while unwinding. A connection that cannot run
+                # this statement is failing every statement, which is how an
+                # interrupt behaves, and raising would replace the migration's
+                # own error with the noise that followed it. On the success path
+                # it is not swallowed: the connection is about to be handed back
+                # to a caller, and handing back one with foreign keys off is an
+                # unenforced schema for every write that follows.
+                #
+                # Raised as a MigrationError rather than the sqlite error it
+                # came from. open_db wraps any sqlite3.Error in the generic
+                # open failure, whose remedy is to delete graph.db and start
+                # fresh, and the migration has already committed by this point.
+                if ok:
+                    raise MigrationError(
+                        "the schema migration committed, and foreign-key "
+                        f"enforcement could not be turned back on: {exc}. "
+                        "graph.db is migrated and intact; do not delete it. "
+                        "Close this connection and open the graph again."
+                    ) from exc
+
+
+def _rebuild_claims_unchanged(conn: sqlite3.Connection) -> None:
+    """Rebuild ``claims`` under the definition it already has.
+
+    A migration step that changes nothing about the schema, which is the point:
+    it exercises the rebuild against the graphs users actually hold, so the
+    machinery a column-dropping migration will reuse is proven before anything
+    irreversible depends on it. The column list is the full set and the
+    definition comes from the same DDL a fresh database gets, so the table
+    after is the table before.
+    """
+    _rebuild_table(
+        conn, table="claims",
+        create_sql=claims_rebuild_sql("claims_new"),
+        columns=_CLAIM_COLUMNS,
+    )
+
+
+# from-version -> (to-version, the steps that get there).
+#
+# Empty in this release, and that is the design rather than an omission. The
+# rebuild ships as production code on a path nothing reaches, because
+# _SCHEMA_VERSION does not move here: a migration is the one change that cannot
+# be taken back, so the machinery lands and is proven a release before anything
+# depends on it. What a later release adds is an entry, not a rewrite.
+_MIGRATIONS: "dict[int, tuple[int, Callable[[sqlite3.Connection], None]]]" = {}
+
+
+def _plan_migration(version: int) -> "tuple[int, ...]":
+    """The whole route from *version* to current, or refuse before anything runs.
+
+    Every link is checked, not just the first. Checking only the first asks "is
+    there a step from here", and a chain with a gap two links along passes that,
+    commits the steps before the gap, and then refuses with a message saying
+    nothing was changed. The file is left at a version this release will not
+    open and the release that wrote it now rejects as too new, which is the
+    bricked-forward outcome the pre-check exists to prevent, reached one link
+    later.
+
+    Also refuses a route that does not advance, which would loop forever
+    committing a rebuild each pass inside an open, and one that overshoots the
+    current version, which commits a version this release then treats as from
+    the future. Both are one typo in a registry entry.
+    """
+    seen = []
+    at = version
+    while at < _SCHEMA_VERSION:
+        route = _MIGRATIONS.get(at)
+        if route is None:
+            raise MigrationError(
+                f"graph.db is at user_version={version} and this mareforma "
+                f"cannot route it to user_version={_SCHEMA_VERSION}: there is "
+                f"no migration from {at}. Nothing has been changed. Open it "
+                "with the release that wrote it, or with one that names this "
+                "version as a supported upgrade source. Do not delete graph.db."
+            )
+        to_version = route[0]
+        if not at < to_version <= _SCHEMA_VERSION:
+            raise MigrationError(
+                f"the migration registry routes user_version={at} to "
+                f"{to_version}, which does not move forward toward "
+                f"{_SCHEMA_VERSION}. Nothing has been changed. This is a "
+                "defect in mareforma, not in graph.db; please report it."
+            )
+        seen.append(to_version)
+        at = to_version
+    return tuple(seen)
+
+
+def _migrate_to_current(conn: sqlite3.Connection, version: int) -> int:
+    """Walk *version* up to :data:`_SCHEMA_VERSION`, one registered step at a
+    time, and return where it got to.
+
+    Each step is its own transaction, so a chain of them stops at the first
+    failure with every earlier step committed and the version recording exactly
+    that. Refuses a version with no route rather than guessing: a file this code
+    has no step for is a file it does not know the shape of.
+    """
+    started_at = version
+    _plan_migration(version)
+    while version < _SCHEMA_VERSION:
+        to_version, steps = _MIGRATIONS[version]
+        try:
+            with _upgrade_window(conn):
+                _run_migration(
+                    conn, to_version=to_version, steps=steps,
+                    from_version=version,
+                )
+        except MigrationError as exc:
+            if version == started_at:
+                raise
+            # Some steps already committed. The step's own message says the
+            # graph is at the version it was at when that step began, which is
+            # true of the step and false of the graph, so quote the underlying
+            # cause rather than the sentence built around it. Saying "unchanged"
+            # here would also point at a remedy that cannot work: the release
+            # that wrote this file refuses the version the chain has reached.
+            cause = exc.__cause__ if exc.__cause__ is not None else exc
+            raise MigrationError(
+                f"the schema migration reached user_version={version} of "
+                f"{_SCHEMA_VERSION} and then failed: {cause}. The steps that "
+                f"completed are committed, and graph.db opens at "
+                f"{version} with this release. Do not delete it. Re-run the "
+                "open to continue from here."
+            ) from exc
+        # Re-read rather than trusting to_version, because the step may have
+        # found another process had already done it. Guard the re-read the same
+        # way the registry entry is guarded: a version that did not advance
+        # loops here forever, committing a full table rebuild each pass inside
+        # an open(), and one past this release is a graph this code must not go
+        # on repairing.
+        seen = conn.execute("PRAGMA user_version").fetchone()[0]
+        if seen > _SCHEMA_VERSION:
+            raise MigrationError(
+                f"graph.db moved to user_version={seen} while this migration "
+                f"was running, past the {_SCHEMA_VERSION} this mareforma "
+                "understands. Another process upgraded it. Nothing further has "
+                "been changed here. Do not delete graph.db."
+            )
+        if seen <= version:
+            raise MigrationError(
+                f"the migration to user_version={to_version} committed and "
+                f"graph.db still reads {seen}, so it did not advance. Stopping "
+                "rather than repeating the step. Do not delete graph.db; "
+                "report this."
+            )
+        version = seen
+    return version
 
 
 def _ensure_claims_columns_for_upgrade(

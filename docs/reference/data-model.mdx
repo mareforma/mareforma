@@ -508,14 +508,20 @@ The schema version is stored in SQLite's `user_version` pragma.
 |---|---|
 | `0` | Fresh database: full schema applied on first `open_db()` |
 | `1` | the current schema |
-| Any other | `DatabaseError`: delete `graph.db` to start fresh; `claims.toml` is the backup |
+| Ahead of this build | `DatabaseError`: a newer release wrote it. Upgrade mareforma. Do not delete `graph.db` |
+| Behind, with no route | `MigrationError`: nothing is changed, and the graph opens on the release that wrote it |
 
-No in-place migrations in this release. Adding a column, index, or
-trigger means updating the schema in place; existing development
-databases get the schema-validation error and the operator deletes
-`graph.db` (`claims.toml` is the restore artifact). Versioned
-migrations become relevant only after a 1.0 release establishes a
-stable schema with real users on it.
+**Do not delete `graph.db`.** It holds the claim chain and every signature, and
+`claims.toml` cannot reconstruct them: the backup carries what each row says, and
+the chain is what says which rows were there. A graph this build will not open is
+almost always a graph a newer build wrote, and the answer is to upgrade rather
+than to start again.
+
+A migration runner exists and its registry is empty. Nothing in this release
+moves `user_version`, so no graph migrates. When a release does add a route, the
+schema change and the version bump commit in one transaction or neither does, so
+a crash leaves the graph at the version it started from with every claim,
+signature and chain link intact.
 
 ## Storage
 
