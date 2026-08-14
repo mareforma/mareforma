@@ -76,6 +76,17 @@ from .measure import (
     summarize_pilot,
     summarize_receipts,
 )
+from .provenance import (
+    CrossTab,
+    Direction,
+    NumericProvenance,
+    ProvenanceFinding,
+    ProvenanceReport,
+    ReleasedValue,
+    ReportedValue,
+    cross_tabulate,
+    provenance_diff,
+)
 from .oracle import (
     MetricReducer,
     THREAT_MODEL_STATEMENT,
@@ -90,6 +101,7 @@ from .oracle import (
     influence_sweep,
     numeric_extraction_reducer,
     perturbation_oracle,
+    QuantityClass,
     reconcile,
     scalar_reducer,
 )
@@ -232,6 +244,16 @@ __all__ = [
     "GroundingCitationMismatchError",
     # Causal oracle (independent influence ground truth).
     "perturbation_oracle",
+    "QuantityClass",
+    "CrossTab",
+    "Direction",
+    "NumericProvenance",
+    "ProvenanceFinding",
+    "ProvenanceReport",
+    "ReleasedValue",
+    "ReportedValue",
+    "cross_tabulate",
+    "provenance_diff",
     "influence_sweep",
     "OracleInfluence",
     "OracleResult",
