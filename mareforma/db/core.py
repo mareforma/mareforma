@@ -6289,6 +6289,8 @@ def _disclose_unverified(
     include_unverified: bool,
     on_unverified_excluded: "Callable[[int], None] | None",
     prefix: str = "",
+    contested: int = 0,
+    on_contested: "Callable[[int], None] | None" = None,
 ) -> None:
     """Report what the enrolled-generator filter held back, when it could matter.
 
@@ -6299,6 +6301,19 @@ def _disclose_unverified(
     page, which is the case where an empty or truncated answer reads as "that is
     all there is" about a record that is not.
     """
+    # One disclosure function, two facts, and they are counted apart because
+    # they are not the same fact. A held-back row was NOT served, and the
+    # caller's list is short by it. A contested row WAS served, and what is
+    # wrong with it is that its contradiction record does not hold up. Routing
+    # the second through the first would have logged a served row as an
+    # excluded one, which is a false sentence in the health record and inflates
+    # a counter that means something else.
+    #
+    # Reported ahead of the full-page return below, because a contested row is
+    # a property of the rows served and a full page does not make it moot the
+    # way it does a held-back count.
+    if contested and on_contested is not None:
+        on_contested(contested)
     if include_unverified or on_unverified_excluded is None or served >= limit:
         return
     held, saturated = _count_unverified_held_back(
@@ -6333,8 +6348,6 @@ def _read_path_row(
     include_unverified: bool,
     trust_domain: tuple,
     verify_cache: dict,
-    clean_only: bool = False,
-    contradictions: "dict | None" = None,
 ) -> dict | None | object:
     """Project one claims row for a read surface, or exclude it.
 
@@ -6363,12 +6376,6 @@ def _read_path_row(
         return None
     if not _row_verified_on_read(conn, d, verify_cache):
         return _VERIFY_EXCLUDED
-    if clean_only and _replayed_refutation(
-        conn, d, False,
-        verdicts=(None if contradictions is None
-                  else contradictions.get(d["claim_id"], [])),
-        cache=verify_cache,
-    ) is not None:
         # The caller asked for clean claims and this one is not. The SQL filter
         # can only read t_invalid, which carries no trigger, so a real
         # contradiction erased from that column reads as clean to every
@@ -6394,7 +6401,7 @@ def _project_verified_rows(
     include_unverified: bool,
     on_verify_excluded: Callable[[int], None] | None = None,
     clean_only: bool = False,
-) -> tuple[list[dict], int]:
+) -> tuple[list[dict], int, int]:
     """Filter and project rows for a read surface, stopping at ``limit`` survivors.
 
     Computes the per-call reputation, enrolled set, and trust-domain disclosure
@@ -6425,7 +6432,7 @@ def _project_verified_rows(
         # The loop appends a survivor before testing the stop condition, so it
         # would hand back one row for a limit of zero. Nothing was asked for:
         # return nothing, and skip the per-call reputation and trust-domain work.
-        return [], 0
+        return [], 0, 0
     reputation = _compute_validator_reputation(conn)
     enrolled_keyids = _enrolled_validator_keyids(conn)
     trust_domain = _trust_domain_disclosure(conn)
@@ -6433,7 +6440,12 @@ def _project_verified_rows(
     # served. Per row this is a statement each to ask what one pass answers, and
     # the ordinary graph has no verdicts at all, so every one of those
     # statements returns nothing.
-    contradictions = _gather_contradictions_by_claim(conn) if clean_only else None
+    # Grouped once for the page whether or not the filter will act on the
+    # answer, because the count is disclosed either way: a caller who did not
+    # ask for clean claims still has to be told that one of the rows it was
+    # handed carries a contradiction record the signed verdicts do not support.
+    contradictions = _gather_contradictions_by_claim(conn)
+    contested = 0
     verify_cache: dict = {}
     results: list[dict] = []
     scanned = 0
@@ -6444,12 +6456,26 @@ def _project_verified_rows(
             conn, row,
             reputation=reputation, enrolled_keyids=enrolled_keyids,
             include_unverified=include_unverified, trust_domain=trust_domain,
-            verify_cache=verify_cache, clean_only=clean_only,
-            contradictions=contradictions,
+            verify_cache=verify_cache,
         )
         if d is _VERIFY_EXCLUDED:
             excluded += 1
         elif d is not None:
+            # One replay per served row, doing both jobs. The disagreement is
+            # counted whatever the caller asked for, and only a caller who asked
+            # for clean claims has the row withheld: dropping it from an
+            # unfiltered listing would be this function deciding what the caller
+            # meant, and counting it nowhere is the silence this exists to end.
+            replayed = _replayed_refutation(
+                conn, d, d.get("t_invalid") is not None,
+                verdicts=contradictions.get(d["claim_id"], []),
+                cache=verify_cache,
+            )
+            if replayed is not None and replayed["signal"] in REPLAY_TAMPER_SIGNALS:
+                contested += 1
+                if clean_only:
+                    excluded += 1
+                    continue
             results.append(d)
             if len(results) >= limit:
                 break
@@ -6463,7 +6489,7 @@ def _project_verified_rows(
         )
         if on_verify_excluded is not None:
             on_verify_excluded(excluded)
-    return results, scanned
+    return results, scanned, contested
 
 
 def query_claims(
@@ -6478,6 +6504,7 @@ def query_claims(
     refutation_filter: str | None = None,
     on_verify_excluded: Callable[[int], None] | None = None,
     on_unverified_excluded: Callable[[int], None] | None = None,
+    on_contested: Callable[[int], None] | None = None,
 ) -> list[dict]:
     """Return claims ordered by support_level (desc) then recency (desc).
 
@@ -6640,7 +6667,7 @@ def query_claims(
     # at `limit` survivors, and on the common path (the first `limit` rows all
     # survive) that break stops fetching too, so the ceiling stays the worst-case
     # bound for the adversarial drain path instead of the per-call materialisation.
-    results, scanned = _project_verified_rows(
+    results, scanned, contested = _project_verified_rows(
         conn, cursor, limit=limit, include_unverified=include_unverified,
         on_verify_excluded=on_verify_excluded,
         clean_only=refutation_filter == "clean",
@@ -6651,7 +6678,8 @@ def query_claims(
         conn, "claims", disclose_where, disclose_params,
         ceiling=ceiling, limit=limit,
         served=len(results), include_unverified=include_unverified,
-        on_unverified_excluded=on_unverified_excluded,
+        on_unverified_excluded=on_unverified_excluded, contested=contested,
+        on_contested=on_contested,
     )
     return results
 
@@ -6737,6 +6765,7 @@ def search_claims(
     include_invalidated: bool = False,
     on_verify_excluded: Callable[[int], None] | None = None,
     on_unverified_excluded: Callable[[int], None] | None = None,
+    on_contested: Callable[[int], None] | None = None,
 ) -> list[dict]:
     """FTS5-ranked search over claim text.
 
@@ -6812,7 +6841,7 @@ def search_claims(
         raise DatabaseError(f"Failed to search claims: {exc}") from exc
     # Step the ranked cursor lazily: _project_verified_rows stops at `limit`
     # survivors, so the common path fetches a handful, not the whole ceiling.
-    results, scanned = _project_verified_rows(
+    results, scanned, contested = _project_verified_rows(
         conn, cursor, limit=limit, include_unverified=include_unverified,
         on_verify_excluded=on_verify_excluded,
     )
@@ -6824,6 +6853,14 @@ def search_claims(
         disclose_where, disclose_params, ceiling=ceiling, limit=limit,
         served=len(results), include_unverified=include_unverified,
         on_unverified_excluded=on_unverified_excluded, prefix="c.",
+        # The contested count reaches the caller here as it does from query.
+        # The shared projection replays the signed verdicts for both surfaces
+        # and hands the count back to both, and this one bound it to a local
+        # and dropped it, leaving `on_contested` in the signature with nothing
+        # to call it. So a claim whose contradiction verdict is signed and
+        # whose t_invalid somebody erased was served by search in silence and
+        # by query with a disclosure, on the same graph, in the same process.
+        contested=contested, on_contested=on_contested,
     )
     return results
 

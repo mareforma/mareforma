@@ -628,6 +628,7 @@ def build_trust_map(
     *,
     reexec_record: "dict | None" = None,
     disclose=None,
+    key_provenance: "str | None" = None,
 ) -> "TrustMap | None":
     """Build the trust map for a stored claim, or ``None`` if it does not exist.
 
@@ -697,7 +698,7 @@ def build_trust_map(
         effective_independence=effective,
         census_missing=schema_census_missing(conn),
         refutation_contestation=refutation_status(claim, conn),
-        inclusion=(_recheck_inclusion(conn, claim_id, claim)
+        inclusion=(_recheck_inclusion(conn, claim_id, claim, key_provenance)
                    if has_inclusion else None),
     )
 
@@ -735,6 +736,31 @@ def _effective_independence(conn, claim_id: str, *, disclose=None) -> "dict | No
 # handed one, and a read with no pinned key has nothing to check against. So the
 # axis is key-conditional, and it says which of the three it is rather than
 # collapsing "nobody could check" into "checked".
+# How the log key reached this read, and the three are not worth the same. A
+# key the caller passed in this session is the caller vouching for the log. A
+# path they named is that promise indirected through a file they chose. The pin
+# is this project trusting whatever it was handed first and never checking
+# again, so a proof "verified" against a wrong first pin verifies against the
+# wrong log and says nothing. Collapsed into one variable at _graph.py:270,
+# none of that could be said, and the axis said the strongest of the three.
+_KEY_PROVENANCE_PHRASE = {
+    "explicit-bytes": (
+        "the log key this caller supplied for this session"
+    ),
+    "explicit-path": (
+        "the log key read from the file this caller named for this session"
+    ),
+    "tofu-pin": (
+        "the log key pinned in this project on first use, which is trusted "
+        "because it was the first one seen and not because anything checked it "
+        "against the log"
+    ),
+    None: (
+        "the log key pinned in this project, whose provenance this read cannot "
+        "establish because the graph was not opened through mareforma.open()"
+    ),
+}
+
 _INCLUSION_VERIFIED = "verified"
 _INCLUSION_NO_KEY = "no-log-key"
 _INCLUSION_FAILED = "failed"
@@ -760,7 +786,9 @@ def _pinned_log_pubkey(conn) -> "bytes | None":
     return None
 
 
-def _recheck_inclusion(conn, claim_id: str, claim: dict) -> "tuple[str, str]":
+def _recheck_inclusion(
+    conn, claim_id: str, claim: dict, key_provenance: "str | None" = None,
+) -> "tuple[str, str]":
     """Re-verify the stored inclusion proof; return ``(state, detail)``.
 
     ``rekor_inclusions`` refuses UPDATE and DELETE and permits INSERT, so a row
@@ -820,8 +848,9 @@ def _recheck_inclusion(conn, claim_id: str, claim: dict) -> "tuple[str, str]":
         return _INCLUSION_FAILED, f"the proof could not be checked: {exc}"
     return _INCLUSION_VERIFIED, (
         "the Merkle inclusion path, the log's signed checkpoint and the "
-        "binding to this claim's envelope all check out against the pinned "
-        "log key"
+        "binding to this claim's envelope all check out against "
+        + _KEY_PROVENANCE_PHRASE.get(
+            key_provenance, _KEY_PROVENANCE_PHRASE[None])
     )
 
 

@@ -265,3 +265,62 @@ class TestTheVerdictReadsIt:
                 conn, get_claim(conn, cid), cid).verdict == VERIFIED
         finally:
             conn.close()
+
+
+class TestTheKeyProvenanceIsNamed:
+    """Three ways a log key arrives, and they are not worth the same.
+
+    Bytes the caller passed in are the caller vouching for the log. A path they
+    named is that promise indirected through a file they chose. The pin is this
+    project trusting whatever it was handed first and never checking again, so a
+    proof verified against a wrong first pin verifies against the wrong log.
+    _graph.py collapsed all three into one variable, and the axis said the
+    strongest of the three whichever one it had.
+    """
+
+    def _axis_for(self, root: Path, **open_kwargs):
+        key, cid = _witnessed_claim(root, pin_key=False)
+        log_pem = (root / "log.pem")
+        return key, cid, log_pem
+
+    def test_the_pin_says_it_is_a_pin(self, tmp_path: Path) -> None:
+        key, cid = _witnessed_claim(tmp_path)          # writes the pin file
+        axis = _witnessing(tmp_path, key, cid)
+        assert axis.value == "inclusion proof verified"
+        assert "pinned in this project on first use" in axis.residual
+        assert "not because anything checked it against the log" in axis.residual
+
+    def test_explicit_bytes_say_so(self, tmp_path: Path) -> None:
+        key, cid = _witnessed_claim(tmp_path)
+        pem = (tmp_path / ".mareforma" / "rekor_log_pubkey.pem").read_bytes()
+        with mareforma.open(tmp_path, key_path=key,
+                            rekor_log_pubkey_pem=pem) as g:
+            axis = g.trust_map(cid).get("witnessing")
+        assert axis.value == "inclusion proof verified"
+        assert "this caller supplied for this session" in axis.residual
+
+    def test_an_explicit_path_says_so(self, tmp_path: Path) -> None:
+        key, cid = _witnessed_claim(tmp_path)
+        pem_path = tmp_path / "log.pem"
+        pem_path.write_bytes(
+            (tmp_path / ".mareforma" / "rekor_log_pubkey.pem").read_bytes())
+        with mareforma.open(tmp_path, key_path=key,
+                            rekor_log_pubkey_path=str(pem_path)) as g:
+            axis = g.trust_map(cid).get("witnessing")
+        assert axis.value == "inclusion proof verified"
+        assert "read from the file this caller named" in axis.residual
+
+    def test_a_graph_built_directly_does_not_claim_provenance(
+        self, tmp_path: Path,
+    ) -> None:
+        """build_trust_map is reachable without mareforma.open(), and a read
+        that cannot tell which of the three it has must not pick one."""
+        from mareforma.trust_map import build_trust_map
+
+        key, cid = _witnessed_claim(tmp_path)
+        conn = open_db(tmp_path)
+        try:
+            axis = build_trust_map(conn, cid).get("witnessing")
+        finally:
+            conn.close()
+        assert "whose provenance this read cannot establish" in axis.residual

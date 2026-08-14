@@ -625,32 +625,88 @@ class TestACleanListingIsClean:
                                                      limit=50)}
         assert ids <= served
 
-    def test_no_index_means_look_it_up_not_assume_none(
+    def test_the_disagreement_is_disclosed_even_unfiltered(
         self, tmp_path: Path,
     ) -> None:
-        """The page groups the verdicts once and hands the group down.
+        """A caller who did not ask for clean claims still has to be told.
 
-        A caller that asks for the clean filter without grouping must still get
-        the right answer. Reading "no index" as "no verdicts" would serve a
-        suppressed claim as clean and look like the feature working.
+        Dropping the row from an unfiltered listing would be the read deciding
+        what the caller meant. Counting it nowhere would be the silence: a
+        contradiction record the signed verdicts do not support, served as an
+        ordinary row, with the only trace being a field nobody reads.
         """
-        from mareforma.db.core import _read_path_row, _trust_domain_disclosure
-
+        seen: list = []
         key, older, _ = _contradicted_pair(tmp_path)
         _raw(tmp_path, ("UPDATE claims SET t_invalid = NULL WHERE claim_id = ?",
                         (older,)))
         conn = open_db(tmp_path)
         try:
-            from mareforma.db.core import _VERIFY_EXCLUDED
-            verdict = _read_path_row(
-                conn, get_claim(conn, older),
-                reputation={}, enrolled_keyids=set(), include_unverified=True,
-                trust_domain=_trust_domain_disclosure(conn), verify_cache={},
-                clean_only=True, contradictions=None,
-            )
+            from mareforma.db.core import query_claims
+
+            rows = query_claims(conn, limit=20,
+                                on_contested=lambda n: seen.append(n))
         finally:
             conn.close()
-        assert verdict is _VERIFY_EXCLUDED
+        assert older in {r["claim_id"] for r in rows}      # served, not withheld
+        assert seen and sum(seen) >= 1                     # and disclosed
+
+    def test_search_discloses_it_the_same_way_query_does(
+        self, tmp_path: Path,
+    ) -> None:
+        """Two read surfaces, one graph, and they must not answer differently.
+
+        Both go through the same projection, which replays the signed verdicts
+        and hands the contested count back to each. query passed it on. search
+        bound it to a local and dropped it, so ``on_contested`` sat in its
+        signature with nothing to call it, and the graph handle wired a live
+        callback into it that could never fire. A claim whose contradiction is
+        signed and whose t_invalid somebody erased was served by search in
+        silence and by query with a disclosure, in the same process.
+
+        The whole class above covers query. That is why this survived.
+        """
+        from mareforma.db.core import query_claims, search_claims
+
+        key, older, _ = _contradicted_pair(tmp_path)
+        _raw(tmp_path, ("UPDATE claims SET t_invalid = NULL WHERE claim_id = ?",
+                        (older,)))
+        from_query: list = []
+        from_search: list = []
+        conn = open_db(tmp_path)
+        try:
+            q = query_claims(conn, limit=20,
+                             on_contested=lambda n: from_query.append(n))
+            s = search_claims(conn, "claim", limit=20,
+                              on_contested=lambda n: from_search.append(n))
+        finally:
+            conn.close()
+        assert older in {r["claim_id"] for r in q}
+        assert older in {r["claim_id"] for r in s}, (
+            "the fixture must have search serve the suppressed row, or this "
+            "tests nothing"
+        )
+        assert sum(from_query) >= 1
+        assert sum(from_search) >= 1, (
+            "search served a contested row and told the caller nothing"
+        )
+
+    def test_it_is_not_counted_as_an_exclusion(self, tmp_path: Path) -> None:
+        """A served row filed under "excluded" is a false sentence in the
+        health record, and it inflates a count that answers a different
+        question: how much of the list is missing."""
+        excluded: list = []
+        key, older, _ = _contradicted_pair(tmp_path)
+        _raw(tmp_path, ("UPDATE claims SET t_invalid = NULL WHERE claim_id = ?",
+                        (older,)))
+        conn = open_db(tmp_path)
+        try:
+            from mareforma.db.core import query_claims
+
+            query_claims(conn, limit=20,
+                         on_unverified_excluded=lambda n, s=False: excluded.append(n))
+        finally:
+            conn.close()
+        assert excluded == []
 
 
 class TestTheRowOnlyFormIsDeprecated:

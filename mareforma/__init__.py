@@ -242,7 +242,16 @@ def open(  # noqa: A001
             "Pass either rekor_log_pubkey_pem or rekor_log_pubkey_path, "
             "not both, the two are mutually exclusive."
         )
+    # How the key was obtained, not just what it is. The three paths carry
+    # different weight and collapsing them into one variable meant a read could
+    # not say which it had: bytes the caller passed in are the caller vouching
+    # for the log, a path they named is the same promise indirected through a
+    # file they chose, and the pin is this project trusting whatever it was
+    # handed first and never checked again. The witnessing axis leans on that
+    # distinction, so it has to survive the trip.
+    rekor_key_provenance = None
     if rekor_log_pubkey_path is not None:
+        rekor_key_provenance = "explicit-path"
         try:
             rekor_log_pubkey_pem = Path(rekor_log_pubkey_path).read_bytes()
         except OSError as exc:
@@ -257,7 +266,10 @@ def open(  # noqa: A001
     conn = open_db(root)
     try:
         _pinned_path = root / ".mareforma" / "rekor_log_pubkey.pem"
+        if rekor_log_pubkey_pem is not None and rekor_key_provenance is None:
+            rekor_key_provenance = "explicit-bytes"
         if rekor_log_pubkey_pem is None and _pinned_path.exists():
+            rekor_key_provenance = "tofu-pin"
             # Continue with the pinned key from a prior session. Parse it
             # before trusting it: a pin truncated by a crash mid-write is
             # not None, so it would otherwise flow into every submit and
@@ -355,6 +367,7 @@ def open(  # noqa: A001
             require_rekor=require_rekor,
             trust_insecure_rekor=trust_insecure_rekor,
             rekor_log_pubkey_pem=rekor_log_pubkey_pem,
+            rekor_key_provenance=rekor_key_provenance,
             strict_promotion=strict_promotion,
             validator_type=validator_type,
         )
