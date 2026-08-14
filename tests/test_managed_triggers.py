@@ -369,14 +369,19 @@ class TestOnlyTheReconcilerCreatesGuards:
         every open, while the reconciler also owned them. Their text now lives
         in _RECONCILED_ONLY_TRIGGERS_SQL, which is parsed and never executed, so
         the DDL keeps a home and creation has exactly one path.
+
+        The first assertion is the rule and holds for every guard, including
+        ones authored into the reconciled-only home later: a table added to the
+        additive script puts its guards there, never beside it. The three named
+        below are the ones that were moved, pinned so they cannot drift back.
         """
         from mareforma.db._schema_sql import (
             _ADDITIVE_TABLES_SQL, _RECONCILED_ONLY_TRIGGERS_SQL, _extract_triggers,
         )
         assert _extract_triggers(_ADDITIVE_TABLES_SQL) == ()
         lifted = {n for n, _ in _extract_triggers(_RECONCILED_ONLY_TRIGGERS_SQL)}
-        assert lifted == {"predictions_no_delete", "plan_retirements_append_only",
-                          "plan_retirements_no_delete"}
+        assert {"predictions_no_delete", "plan_retirements_append_only",
+                "plan_retirements_no_delete"} <= lifted
         assert lifted <= set(_ALL_EXPECTED_TRIGGERS)
 
     def test_they_are_still_built_on_a_fresh_graph(self, tmp_path: Path) -> None:

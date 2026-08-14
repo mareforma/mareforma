@@ -943,3 +943,42 @@ def test_no_shipped_module_uses_syntax_newer_than_the_floor():
         "a backslash inside an f-string expression does not parse before "
         f"Python 3.12: {offenders}"
     )
+
+
+def test_nothing_imports_tomllib_without_the_backport():
+    """``tomllib`` is stdlib from 3.11, and the floor is 3.10.
+
+    Below that it is the ``tomli`` backport under another name, which is why it
+    is a conditional dependency. A bare ``import tomllib`` therefore fails on
+    the oldest Python we claim, and it fails at import time, so the module does
+    not load at all. The shipped tests are graft-ed into the sdist for distro
+    packagers to run, so they are held to the same rule as the package.
+    """
+    import ast
+
+    offenders = []
+    for root in ("mareforma", "tests"):
+        for path in sorted((REPO_ROOT / root).rglob("*.py")):
+            src = path.read_text(encoding="utf-8")
+            tree = ast.parse(src)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Import):
+                    continue
+                if not any(a.name == "tomllib" for a in node.names):
+                    continue
+                # Guarded when it sits inside a try that falls back to tomli.
+                guarded = any(
+                    isinstance(parent, ast.Try)
+                    and "tomli" in (ast.get_source_segment(src, parent) or "")
+                    for parent in ast.walk(tree)
+                    if isinstance(parent, ast.Try)
+                    and node in list(ast.walk(parent))
+                )
+                if not guarded:
+                    offenders.append(
+                        f"{path.relative_to(REPO_ROOT)}:{node.lineno}"
+                    )
+    assert not offenders, (
+        "import tomllib without a tomli fallback breaks Python 3.10: "
+        f"{offenders}"
+    )

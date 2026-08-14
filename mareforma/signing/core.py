@@ -112,6 +112,19 @@ PAYLOAD_TYPE_SEED = "application/vnd.mareforma.seed+json"
 PAYLOAD_TYPE_PROJECT_POLICY = "application/vnd.mareforma.project-policy+json"
 PAYLOAD_TYPE_AUDIT_RECEIPT = "application/vnd.mareforma.audit-receipt+json"
 PAYLOAD_TYPE_AUDIT_RUN = "application/vnd.mareforma.audit-run+json"
+# A link in the verdict-set chain. Its own type, so a signature made over a
+# chain link can never be read as a signature over the verdict it covers, or
+# the other way round: both are made by the same issuer key over bytes that
+# name the same verdict_id.
+PAYLOAD_TYPE_VERDICT_CHAIN_LINK = (
+    "application/vnd.mareforma.verdict-chain-link+json"
+)
+# The observer's own record that it computed a grounding verdict, carried in the
+# file so recovery can be held to the standard the write path holds. Its own
+# type, so it can never be read as the claim envelope it names.
+PAYLOAD_TYPE_GROUNDING_ATTESTATION = (
+    "application/vnd.mareforma.grounding-attestation+json"
+)
 
 # Predicate fields bound by a claim signature. After Statement v1 these
 # live inside ``statement.predicate``; the tuple is the contract restore

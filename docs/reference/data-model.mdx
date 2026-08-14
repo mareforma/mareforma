@@ -397,6 +397,109 @@ than replacing is what lets the delete guard be absolute.
 | `name` | TEXT (PK) | A trigger this graph has carried |
 | `first_seen` | TEXT | UTC ISO 8601: the open that first saw it |
 
+## grounding_attestations table
+
+What the observer computed, carried in `claims.toml` so recovery can be held to
+the standard the write path holds.
+
+`observed_grounding` is the one signal on a claim meant not to be the producer's
+own word. The write path enforces that: a verdict the process's observer minted
+is stored as the observer's snapshot, and anything else is marked DECLARED with
+its GROUNDED claim neutralised to OPAQUE. Restore never passed through that
+check. It writes the axis straight out of `claims.toml`, so a producer could
+export a claim, edit GROUNDED into it, re-sign with their own key, restore, and
+every read surface rendered the result exactly like an execution mareforma
+watched.
+
+Restore cannot re-run the check instead. The register it reads is in-process and
+keyed on a receipt digest, so it dies with the process that built it, and a
+fresh restore would strip the axis off every honest claim along with the forged
+one. So the observer's word travels in the file.
+
+| Field | Type | Description |
+|---|---|---|
+| `claim_id` | TEXT (PK) | The claim whose verdict this attests, FK to `claims` |
+| `statement_cid` | TEXT | The exact signed claim, so an attestation cannot move |
+| `receipt_digest` | TEXT | The observer's receipt for the verdict |
+| `grounding` | TEXT | The state attested |
+| `signer_keyid` | TEXT | The key that asserted the claim |
+| `signature` | BLOB | Over the attestation's own DSSE payload type |
+| `created_at` | TEXT | UTC ISO 8601 |
+
+A row exists only where the observer's own record was kept. A declared verdict
+gets none, and that absence is the signal.
+
+`grounding_attestation_state()` answers in one word. `attested` means a row is
+present, binds this claim's current statement, names the axis the claim stores,
+and verifies under the asserting key. `unattested` means no row, which is the
+ordinary state for a declared verdict and for any claim written before the table
+existed. `broken` means a row is present and fails one of those, which is a
+stronger signal than absence and is never folded into it.
+
+**What this buys is parity, not prevention.** The observer runs inside the
+producer's process and the producer holds the key, so a producer determined
+enough to re-sign a claim can build an attestation too. There is no
+cryptographic asymmetry between the producer at write time and the same producer
+later. What it ends is the ordinary act, editing the axis and nothing else, the
+same lazy path the schema census closes for a dropped trigger. The trust map's
+grounding residual says which state a claim is in rather than implying more.
+
+## verdict_chain table
+
+One row per verdict recorded from the version that introduced this table
+onwards, each carrying the tip of the chain behind it and a signature over that
+tip made by the verdict's own issuer.
+
+Every claim, validator and verdict in `claims.toml` carries its own signature,
+so nobody can change what a row says. Nothing in the file signs **which rows are
+in it**. Delete a verdict's entry and restore rebuilds a graph that never had
+it, reports clean, and nothing in the file disagrees. This table is what makes
+that absence speak.
+
+The issuer signs each link, not the project root. Nothing holds a private key
+when the backup is written, and the two verdict paths are the only mutations
+that require a signer, so that is where a real key is in hand. The issuer
+attests only what an issuer is entitled to attest: that the verdict set behind
+their verdict hashed to `prev_tip` when they issued it.
+
+| Field | Type | Description |
+|---|---|---|
+| `seq` | INTEGER (PK) | Position in the chain, from 1, no gaps |
+| `prev_tip` | TEXT | The previous link's `tip`, empty at the first link |
+| `tip` | TEXT (UNIQUE) | SHA-256 over this link's canonical payload |
+| `verdict_kind` | TEXT | CHECK enum `contradiction` / `replication` |
+| `verdict_id` | TEXT (UNIQUE) | The verdict this link covers |
+| `verdict_digest` | TEXT | SHA-256 of that verdict's signature |
+| `issuer_keyid` | TEXT | The key that signed both the verdict and this link |
+| `signature` | BLOB | Over the link's own DSSE payload type |
+| `created_at` | TEXT | UTC ISO 8601. Not signed, same as a verdict's |
+
+`verify_verdict_chain()` recomputes the chain and checks every signature. What a
+clean result rules out, stated as narrowly as it holds: no verdict has been
+taken out of the middle by anyone holding no enrolled key. Removing a verdict
+means removing its link, and the next link then has to be re-signed over the
+gap, its tip recomputed, and the verdict it covers made to verify under the key
+the link names. An outside attacker with file access and the project operator
+are held out by that.
+
+**An enrolled peer is not.** A verdict's signed payload carries no issuer, so a
+peer can claim a surviving verdict, re-sign it under its own key, and re-sign
+the link to match; every check then passes on a chain it just shortened. Closing
+that needs the issuer inside the verdict's signed bytes, which changes bytes an
+already-released reader rebuilds. Nor is the issuer of the verdicts held out,
+and it cannot be: a key can always restate its own view of its own verdicts.
+
+Two things it does not say. A removed suffix leaves a shorter chain that
+verifies, so length is reported by `verdict_chain_coverage()` rather than
+checked. And verdicts recorded before this table existed carry no link, which
+the same covered-versus-total pair is what makes visible.
+
+The link binds to the verdict's signature rather than its row, because the
+signature is the one field only the issuer could have produced. There is no
+foreign key on `verdict_id`: verdicts live in two tables, so the reference is
+not expressible, and a link left pointing at a verdict that is gone is the
+evidence rather than a violation to cascade away.
+
 ## Schema versioning
 
 The schema version is stored in SQLite's `user_version` pragma.
@@ -430,4 +533,4 @@ but it survives `graph.db` deletion.
 | PRAGMA | Value | Why |
 |---|---|---|
 | `journal_mode` | `WAL` | Concurrent readers + one writer without blocking |
-| `foreign_keys` | `ON` | SQLite default is OFF. The `replication_verdicts`, `contradiction_verdicts`, and `rekor_inclusions` tables have FK references to `validators(keyid)` and `claims(claim_id)`; without this PRAGMA, those constraints would be advisory and a direct-SQL INSERT with a fabricated keyid would silently succeed |
+| `foreign_keys` | `ON` | SQLite default is OFF. Every table carrying a `REFERENCES` clause points at `validators(keyid)` or `claims(claim_id)`; without this PRAGMA those constraints are advisory and a direct-SQL INSERT naming a fabricated keyid or a claim that does not exist succeeds in silence |

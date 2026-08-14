@@ -358,7 +358,7 @@ def restore(
     # AttributeError past the documented RestoreError contract.
     for _section_name in (
         "validators", "claims", "replication_verdicts", "contradiction_verdicts",
-        "rekor_inclusions",
+        "rekor_inclusions", "verdict_chain", "grounding_attestations",
     ):
         _validate_section_shape(data.get(_section_name), _section_name)
     # [project_policy] holds fields, not rows, so only the section shape is
@@ -863,6 +863,13 @@ def restore(
                 _verify_and_insert_contradiction_verdict(
                     conn, verdict_id, v, validators_section,
                 )
+
+            # The verdict-set chain, after the verdicts its links cover.
+            _replay_verdict_chain(conn, data.get("verdict_chain") or {})
+            # The grounding attestations, after the claims they name.
+            _replay_grounding_attestations(
+                conn, data.get("grounding_attestations") or {},
+            )
 
             # Rekor inclusion sidecar. Replay entries so post-restore
             # graphs carry the same Rekor proof data as the original.
@@ -1635,6 +1642,106 @@ def _verify_and_insert_contradiction_verdict(
     except sqlite3.IntegrityError as exc:
         raise RestoreError(
             f"{ctx} INSERT refused: {exc}",
+            kind="claim_unverified",
+        ) from exc
+
+
+def _replay_grounding_attestations(
+    conn: sqlite3.Connection, section: dict,
+) -> None:
+    """Round-trip the observer's grounding attestations out of the backup.
+
+    Replayed faithfully and not judged here, the same posture the verdict chain
+    takes: an attestation that does not check out is inserted as it was carried
+    and reported on read by
+    :func:`mareforma.db.core.grounding_attestation_state`. Dropping it on the
+    way in would turn a broken attestation into an absent one, and absence is a
+    weaker signal than breakage.
+
+    This release does not refuse a restored GROUNDED axis that arrives with no
+    attestation. It records what came, and the read surfaces say which claims
+    have one. The refusal is a later release, where a breaking change already
+    pays for it.
+    """
+    if not section:
+        return
+    rows = []
+    for claim_id, att in section.items():
+        try:
+            rows.append((
+                claim_id, att["statement_cid"], att["receipt_digest"],
+                att["grounding"], att["signer_keyid"],
+                base64.b64decode(att["signature"]), att["created_at"],
+            ))
+        except (KeyError, ValueError, TypeError) as exc:
+            raise RestoreError(
+                f"[grounding_attestations] entry {claim_id!r} is malformed: {exc}",
+                kind="claim_unverified",
+            ) from exc
+    try:
+        conn.executemany(
+            "INSERT INTO grounding_attestations(claim_id, statement_cid, "
+            "receipt_digest, grounding, signer_keyid, signature, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+    except sqlite3.IntegrityError as exc:
+        # An attestation naming a claim the file does not carry trips the
+        # foreign key. Every other replay path here turns that into a
+        # RestoreError with a kind; leaving it raw means the CLI, which catches
+        # RestoreError, prints a traceback and offers the operator no remedy.
+        raise RestoreError(
+            f"[grounding_attestations] does not fit the claims in this file: "
+            f"{exc}",
+            kind="claim_unverified",
+        ) from exc
+
+
+def _replay_verdict_chain(conn: sqlite3.Connection, chain_section: dict) -> None:
+    """Round-trip the verdict-set chain out of ``[verdict_chain]``.
+
+    Replayed faithfully and not checked here. A link that does not verify is
+    inserted exactly as the file carried it, for the same reason a contradiction
+    verdict that does not verify is a tamper state rather than an absent
+    verdict: dropping it on the way in would turn evidence of tampering into
+    silence, which is the direction this whole artifact exists to close.
+    :func:`mareforma.db.core.verify_verdict_chain` is what reads the result, and
+    it says so on every read rather than once at restore.
+
+    Absent section means a graph that recorded no verdict under a version that
+    had the chain. Nothing to replay and nothing to say about it.
+    """
+    if not chain_section:
+        return
+    rows = []
+    for seq, link in chain_section.items():
+        try:
+            rows.append((
+                int(seq),
+                link["prev_tip"], link["tip"], link["verdict_kind"],
+                link["verdict_id"], link["verdict_digest"],
+                link["issuer_keyid"],
+                base64.b64decode(link["signature"]),
+                link["created_at"],
+            ))
+        except (KeyError, ValueError, TypeError) as exc:
+            raise RestoreError(
+                f"[verdict_chain] entry {seq!r} is malformed: {exc}",
+                kind="claim_unverified",
+            ) from exc
+    try:
+        conn.executemany(
+            "INSERT INTO verdict_chain(seq, prev_tip, tip, verdict_kind, "
+            "verdict_id, verdict_digest, issuer_keyid, signature, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            sorted(rows),
+        )
+    except sqlite3.IntegrityError as exc:
+        # Two keys that normalise to one seq, or two links carrying one tip.
+        # Same rule as the sibling above: a hand-edited section is a tamper
+        # shape, and a tamper shape gets a refusal an operator can read.
+        raise RestoreError(
+            f"[verdict_chain] does not form a chain: {exc}",
             kind="claim_unverified",
         ) from exc
 

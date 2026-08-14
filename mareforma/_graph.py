@@ -3892,9 +3892,17 @@ class EpistemicGraph:
             # Flush any backup a still-open deferral window left pending, so a
             # graph closed mid-batch still leaves claims.toml current. Drain
             # every nesting level at once, before the connection closes.
-            _db._drain_backup_window(self._conn, self._root)
-            self._conn.close()
-            self._closed = True
+            #
+            # In a finally, because the drain can raise: a format artifact that
+            # cannot be written refuses rather than going quiet, and a graph
+            # that failed to close would leak the connection and go on reading
+            # as open. The close happens either way and the failure still
+            # reaches the caller.
+            try:
+                _db._drain_backup_window(self._conn, self._root)
+            finally:
+                self._conn.close()
+                self._closed = True
 
     def _check_open(self) -> None:
         """Guard against use after close. Public methods call this first."""

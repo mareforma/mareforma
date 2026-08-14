@@ -275,13 +275,25 @@ def _source_strings(value: object) -> list[str]:
     return [str(value)]
 
 
-def _grounding_property(claim: dict) -> TrustProperty:
+def _grounding_property(
+    claim: dict, attestation: "str | None" = None,
+) -> TrustProperty:
     """Place the observed-grounding axis, carrying the verdict reason + cited set.
 
     A pre-observer claim (no stored verdict) renders ``not present``, never
     inferred. A GROUNDED verdict on a pre-binding axis renders with the
     pre-binding label so an auditor sees the citation binding was not checkable
     when it was computed.
+
+    *attestation* is the observer-attestation state from
+    :func:`mareforma.db.core.grounding_attestation_state`, and it is named in the
+    residual because the axis alone cannot carry it. The write path refuses to
+    take this axis on the producer's word, and restore never passed through that
+    refusal, so a verdict edited into the backup and re-signed used to render
+    here exactly like one an observer computed. An attestation is what tells
+    them apart. It is not proof the read happened: the observer runs in the
+    producer's process, so a producer determined enough to re-sign a claim can
+    build one too, and the residual says so rather than implying otherwise.
     """
     record = parse_grounding_record(claim.get("observed_grounding"))
     if not isinstance(record, dict) or not record.get("grounding"):
@@ -328,7 +340,44 @@ def _grounding_property(claim: dict) -> TrustProperty:
             if cited else "; cited set: (none recorded)"
         )
     residual = f"{reason}{note}" if reason else f"observed axis{note}"
+    residual += _attestation_note(attestation)
     return TrustProperty(name="grounding", tier=tier, value=value, residual=residual)
+
+
+# What each attestation state adds to the grounding residual. Spelled out per
+# state rather than composed, because the three say different things and the
+# difference is the whole point: absent is the ordinary state of an older graph
+# and of every declared verdict, broken is a stronger signal than absent and
+# must never read as it, and attested is a named key's word rather than a proof.
+_ATTESTATION_NOTES: "dict[str, str]" = {
+    "attested": (
+        "; the observer that computed this verdict attested it under the "
+        "asserting key, so the axis did not arrive by a restore that rewrote it "
+        "(the attestation is that key's word, not proof the read happened)"
+    ),
+    "unattested": (
+        "; no observer attestation accompanies this verdict, which is the "
+        "ordinary state for a declared one and for any claim written before "
+        "attestations existed, and is also what a verdict edited into a backup "
+        "and restored looks like"
+    ),
+    "broken": (
+        "; an observer attestation is present and does not check out against "
+        "this claim, which is tampering with the attestation rather than the "
+        "absence of one"
+    ),
+}
+
+
+def _attestation_note(attestation: "str | None") -> str:
+    """The grounding residual's clause about the observer attestation.
+
+    Empty when the caller did not look, so a reader is never told an axis is
+    unattested by a surface that never asked.
+    """
+    if attestation is None:
+        return ""
+    return _ATTESTATION_NOTES.get(attestation, "")
 
 
 def _faithfulness_property(reexec_record: "dict | None") -> TrustProperty:
@@ -629,6 +678,7 @@ def build_trust_map(
     reexec_record: "dict | None" = None,
     disclose=None,
     key_provenance: "str | None" = None,
+    chain_problems: "tuple[str, ...] | None" = None,
 ) -> "TrustMap | None":
     """Build the trust map for a stored claim, or ``None`` if it does not exist.
 
@@ -689,7 +739,10 @@ def build_trust_map(
         if bundle_keyid is not None:
             asserter_enrolled = is_enrolled(conn, bundle_keyid)
     effective = _effective_independence(conn, claim_id, disclose=disclose)
-    from mareforma.db.core import refutation_status, schema_census_missing
+    from mareforma.db.core import (
+        grounding_attestation_state, refutation_status, schema_census_missing,
+        verify_verdict_chain,
+    )
 
     return _assemble(
         claim, n_roots, has_inclusion,
@@ -697,9 +750,23 @@ def build_trust_map(
         reexec_record=reexec_record,
         effective_independence=effective,
         census_missing=schema_census_missing(conn),
+        # Recomputed unless the caller already has it. The chain is a property
+        # of the graph rather than of this claim, and checking it costs an
+        # enrolment walk and two signature verifications per verdict: measured
+        # at 43ms on a graph with two hundred of them, against 0.2ms for the
+        # rest of the map. A caller that builds a map per claim, or that has
+        # already run the check for its own verdict, passes the result in and
+        # pays once. Nothing may pass an empty tuple to mean "do not check":
+        # None is the only way to say "I do not have it", so silence is never
+        # the default.
+        chain_problems=(
+            verify_verdict_chain(conn) if chain_problems is None
+            else chain_problems
+        ),
         refutation_contestation=refutation_status(claim, conn),
         inclusion=(_recheck_inclusion(conn, claim_id, claim, key_provenance)
                    if has_inclusion else None),
+        grounding_attestation=grounding_attestation_state(conn, claim_id),
     )
 
 
@@ -874,8 +941,10 @@ def _assemble(
     asserter_enrolled: "bool | None" = None, reexec_record: "dict | None" = None,
     effective_independence: "dict | None" = None,
     census_missing: "tuple[str, ...]" = (),
+    chain_problems: "tuple[str, ...]" = (),
     refutation_contestation: "dict | None" = None,
     inclusion: "tuple[str, str] | None" = None,
+    grounding_attestation: "str | None" = None,
 ) -> TrustMap:
     """Assemble a TrustMap from an already-fetched claim dict (pure).
 
@@ -936,7 +1005,7 @@ def _assemble(
         ),
     )
 
-    grounding = _grounding_property(claim)
+    grounding = _grounding_property(claim, grounding_attestation)
 
     faithfulness = _faithfulness_property(reexec_record)
 
@@ -988,8 +1057,21 @@ def _assemble(
     # visible on any other axis, and the second is invisible by the time a read
     # happens, because two repairs run silently on the way in. That is what the
     # census exists to have written down beforehand.
-    if n_roots >= 2 or census_missing:
+    if n_roots >= 2 or census_missing or chain_problems:
         reasons = []
+        if chain_problems:
+            # A verdict removed from the middle of the chain is a fact about
+            # the graph, not about this claim, and it lands here for the reason
+            # a dropped write guard does: this is the axis that reports what
+            # somebody did to the substrate. It had a checker and no caller, so
+            # the one tamper the chain exists to catch was reported by an API
+            # nothing on any read path called.
+            reasons.append(
+                "the verdict chain does not check out: "
+                + "; ".join(chain_problems[:3])
+                + (f" (and {len(chain_problems) - 3} more)"
+                   if len(chain_problems) > 3 else "")
+            )
         if n_roots >= 2:
             reasons.append(
                 f"{n_roots} self-signed roots are enrolled and no code path "

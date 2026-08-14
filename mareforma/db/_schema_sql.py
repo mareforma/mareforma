@@ -1138,6 +1138,88 @@ CREATE TABLE IF NOT EXISTS supports_revision (
 -- this script is for.
 CREATE INDEX IF NOT EXISTS idx_contradiction_other
     ON contradiction_verdicts(other_claim_id);
+
+-- What the observer computed, carried in the file so recovery can be held to
+-- the standard the write path holds.
+--
+-- The grounding axis is the one signal on a claim that is not meant to be the
+-- producer's own word. _attest_grounding is where the write path enforces that:
+-- a verdict the process's observer minted is stored as the observer's snapshot,
+-- and anything else is marked DECLARED with its GROUNDED claim neutralised.
+-- Restore never passed through there. It writes observed_grounding straight out
+-- of claims.toml, so a neutralised record could be exported, edited, re-signed
+-- by the producer's own key and restored as GROUNDED.
+--
+-- Restore cannot re-run the check instead. The register the check reads is
+-- in-process and keyed on a receipt digest, so it dies with the process that
+-- built it, and a fresh restore would neutralise every honest verdict along
+-- with the forged one.
+--
+-- What this buys, stated as narrowly as it holds: parity, not prevention. The
+-- observer runs inside the producer's process and the producer holds the key,
+-- so a determined producer can build one of these too. There is no
+-- cryptographic asymmetry between the producer at write time and the same
+-- producer later. What it closes is the ordinary path, editing the axis and
+-- nothing else, the same lazy act the schema census closes for a dropped
+-- trigger. Every surface that reports it says which.
+--
+-- statement_cid is what makes an attestation non-transferable: it names the
+-- exact signed claim, so one cannot be moved onto another claim, and changing
+-- the axis changes the statement and strands it.
+--
+-- A row exists only where the observer's own record was kept. A declared
+-- verdict gets none, and that absence is the signal.
+CREATE TABLE IF NOT EXISTS grounding_attestations (
+    claim_id       TEXT NOT NULL PRIMARY KEY
+                   REFERENCES claims(claim_id),
+    statement_cid  TEXT NOT NULL,
+    receipt_digest TEXT NOT NULL,
+    grounding      TEXT NOT NULL,
+    signer_keyid   TEXT NOT NULL,
+    signature      BLOB NOT NULL,
+    created_at     TEXT NOT NULL
+);
+
+-- The verdict-set chain. One row per verdict recorded from this version on,
+-- each carrying the tip of the chain behind it and a signature over that tip
+-- made by the verdict's own issuer.
+--
+-- claims.toml signs what every row says and nothing in it signs which rows are
+-- there, so deleting a verdict's entry leaves a file that restores clean and
+-- disagrees with nothing. That is the half of the drop-guard-delete-verdict
+-- path which survives both the guard reconciler and the contestation replay,
+-- because those speak about rows that are still present.
+--
+-- The issuer signs, not the project root. Nothing holds a private key at
+-- backup time, and the two verdict paths are the only mutations that require a
+-- signer, so this is where a real key is in hand. The issuer attests what an
+-- issuer is entitled to attest: that the verdict set behind their verdict
+-- hashed to prev_tip when they issued it. A root signature would have to be an
+-- out-of-band ceremony, leaving every verdict between ceremonies uncovered,
+-- and a peer signing a project-level tip could attest a set it had just
+-- emptied.
+--
+-- Taking a verdict out of the middle means taking its link too, and the next
+-- link's prev_tip then matches nothing that survives, so repairing the chain
+-- needs that link's issuer key. Taking a suffix leaves a consistent shorter
+-- chain: nothing inside the file records that it was ever longer, which is the
+-- residual this cannot close and the completeness section reports around.
+--
+-- No foreign key on verdict_id. Verdicts live in two tables, so the reference
+-- is not expressible, and a link left pointing at a verdict that is gone is
+-- the evidence, not a violation to be cascaded away.
+CREATE TABLE IF NOT EXISTS verdict_chain (
+    seq            INTEGER NOT NULL PRIMARY KEY,
+    prev_tip       TEXT NOT NULL,
+    tip            TEXT NOT NULL UNIQUE,
+    verdict_kind   TEXT NOT NULL
+                   CHECK (verdict_kind IN ('contradiction', 'replication')),
+    verdict_id     TEXT NOT NULL UNIQUE,
+    verdict_digest TEXT NOT NULL,
+    issuer_keyid   TEXT NOT NULL,
+    signature      BLOB NOT NULL,
+    created_at     TEXT NOT NULL
+);
 """
 
 
@@ -1258,6 +1340,26 @@ CREATE TRIGGER IF NOT EXISTS plan_retirements_no_delete
 BEFORE DELETE ON plan_retirements
 BEGIN
     SELECT RAISE(ABORT, 'mareforma:append_only:plan_retirement_delete_blocked');
+END;
+CREATE TRIGGER IF NOT EXISTS grounding_attestations_append_only
+BEFORE UPDATE ON grounding_attestations
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:grounding_attestation_locked');
+END;
+CREATE TRIGGER IF NOT EXISTS grounding_attestations_no_delete
+BEFORE DELETE ON grounding_attestations
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:no_delete:grounding_attestation_locked');
+END;
+CREATE TRIGGER IF NOT EXISTS verdict_chain_append_only
+BEFORE UPDATE ON verdict_chain
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:verdict_chain_locked');
+END;
+CREATE TRIGGER IF NOT EXISTS verdict_chain_no_delete
+BEFORE DELETE ON verdict_chain
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:no_delete:verdict_chain_locked');
 END;
 """
 

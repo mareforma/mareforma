@@ -245,6 +245,22 @@ class VerdictIssuerError(MareformaError):
     """
 
 
+class FormatArtifactError(MareformaError):
+    """Raised when a claims.toml format artifact cannot be built.
+
+    The backup writer treats every other failure as non-fatal: graph.db stays
+    authoritative, an ERROR line goes to stderr, and the next mutation rewrites
+    the file. That contract does not extend to these sections, and the reason is
+    particular to them.
+
+    Every other section degrades to a stale backup, which is a state the file
+    has been in before and recovers from on its own. An absent ``[completeness]``
+    section is indistinguishable from a backup written before the section
+    existed, so its silence has the same shape as the tamper it is there to
+    catch. A writer whose subject is absence cannot go absent quietly.
+    """
+
+
 class RekorSidecarSectionAbsentWarning(UserWarning):
     """Emitted once per restore when claims.toml has no ``[rekor_inclusions]`` section.
 

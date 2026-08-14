@@ -80,7 +80,13 @@ def test_wide_dag_build_rewrites_claims_toml_once(
     rewrites = []
 
     def counting_dumps(*args, **kwargs):
-        rewrites.append(1)
+        # Count body serialisations only. The backup also serialises the
+        # completeness table on its own, which is one small dict however many
+        # claims the graph holds, so counting every call would make this pin a
+        # constant per backup rather than the number of backups.
+        document = args[0] if args else kwargs.get("obj")
+        if not (isinstance(document, dict) and set(document) == {"completeness"}):
+            rewrites.append(1)
         return real_dumps(*args, **kwargs)
 
     monkeypatch.setattr(tomli_w, "dumps", counting_dumps)

@@ -194,7 +194,7 @@ def classify_claim_verdict(
     #
     # Computed rather than read off the map, because the map is optional and the
     # verdict may not differ by whether the caller asked for one.
-    from mareforma.db.core import schema_census_missing
+    from mareforma.db.core import schema_census_missing, verify_verdict_chain
     from mareforma.validators import enrollment_roots
 
     census_missing = schema_census_missing(conn)
@@ -204,6 +204,23 @@ def classify_claim_verdict(
             + ", ".join(census_missing)
             + "), so rows it would have refused cannot be ruled out and no "
             "per-claim answer from this file is worth more than that"
+        )
+    # Same class as the census, same answer. A chain that does not check out
+    # means a verdict may have been taken out of the set, so the evidence
+    # against any claim in this file may be short by one and no per-claim
+    # answer can be worth more than that. It reached the trust map's residual
+    # first and stopped there, which put it in the printed report and not in
+    # the verdict: a graph somebody had just removed a verdict from rendered
+    # TAMPERED on the map and exited 0, and the exit code is what a gate reads.
+    chain_problems = verify_verdict_chain(conn)
+    if chain_problems:
+        unchecked.append(
+            "the verdict chain does not check out ("
+            + "; ".join(chain_problems[:3])
+            + (f"; and {len(chain_problems) - 3} more"
+               if len(chain_problems) > 3 else "")
+            + "), so a verdict may have been removed from the set and the "
+            "evidence against this claim cannot be shown to be complete"
         )
     n_roots = len(enrollment_roots(conn))
     if n_roots >= 2:
@@ -215,7 +232,15 @@ def classify_claim_verdict(
 
     # build_trust_map re-fetches the row and runs its own audit-grade signature
     # re-verification, so the standalone map is honest.
-    tmap = build_trust_map(conn, target) if with_trust_map else None
+    #
+    # The chain result is handed over rather than recomputed. The map would
+    # otherwise run the same check this function just ran, which on a graph
+    # with two hundred verdicts doubled the cost of a verify from forty
+    # milliseconds to ninety, for an answer that cannot have changed in
+    # between.
+    tmap = build_trust_map(
+        conn, target, chain_problems=chain_problems,
+    ) if with_trust_map else None
 
     # A definite NO outranks missing material: a claim that is both tampered and
     # signed by an unenrolled key is tampered.

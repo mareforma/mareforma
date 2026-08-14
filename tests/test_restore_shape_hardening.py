@@ -58,6 +58,8 @@ ALL_SECTIONS = [
     "replication_verdicts",
     "contradiction_verdicts",
     "rekor_inclusions",
+    "verdict_chain",
+    "grounding_attestations",
     *SCALAR_FIELD_SECTIONS,
 ]
 TABLE_OF_TABLE_SECTIONS = [s for s in ALL_SECTIONS if s not in SCALAR_FIELD_SECTIONS]

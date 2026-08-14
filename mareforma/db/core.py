@@ -57,6 +57,7 @@ from .errors import (  # noqa: F401
     GraphTooLargeError,
     ProjectPolicyError,
     VerdictIssuerError,
+    FormatArtifactError,
 )
 
 _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -156,6 +157,171 @@ def _serialize_observed_grounding(record: dict | None) -> str | None:
         )
     from .._canonical import canonicalize
     return canonicalize(record).decode("utf-8")
+
+
+_GROUNDING_ATTESTATION_FIELDS = (
+    "claim_id",
+    "statement_cid",
+    "receipt_digest",
+    "grounding",
+)
+
+
+def _grounding_attestation_pae(record: dict) -> bytes:
+    """The DSSE PAE a grounding attestation is made and checked over.
+
+    Its own payload type, so an attestation can never be read as the claim
+    envelope it names, nor a claim envelope as an attestation.
+    """
+    from mareforma import signing as _signing
+    return _signing.dsse_pae(
+        _signing.PAYLOAD_TYPE_GROUNDING_ATTESTATION,
+        _verdict_canonical_payload(_GROUNDING_ATTESTATION_FIELDS, record),
+    )
+
+
+def _observer_minted(record: "dict | None") -> bool:
+    """True iff *record* is the observer's own, rather than a declaration.
+
+    The two are told apart by what the write path leaves on them: a declaration
+    is marked ``provenance: DECLARED`` and has its receipt digest stripped, so a
+    record carrying a digest and no such mark is one the observer minted. Both
+    halves are checked rather than either alone, because each is a field.
+    """
+    from mareforma.observe._verdict import DECLARED_PROVENANCE
+
+    if not isinstance(record, dict):
+        return False
+    digest = record.get("receipt_digest")
+    return (
+        isinstance(digest, str)
+        and bool(digest)
+        and record.get("provenance") != DECLARED_PROVENANCE
+    )
+
+
+def _write_grounding_attestation(
+    conn: sqlite3.Connection,
+    *,
+    claim_id: str,
+    statement_cid: str,
+    record: "dict | None",
+    signer: "object | None",
+    asserter_keyid: "str | None",
+    created_at: str,
+) -> None:
+    """Record that the observer computed this claim's grounding verdict.
+
+    Written only where the write path kept the observer's own record. A declared
+    verdict gets none, and that absence is the signal a reader looks for.
+
+    The axis is the one signal on a claim meant not to be the producer's word,
+    and ``_attest_grounding`` is where the write path enforces that. Restore
+    never passes through it: it takes ``observed_grounding`` straight from
+    ``claims.toml``, so a neutralised record could be exported, edited, re-signed
+    by the producer's own key and restored as GROUNDED. Re-running the check on
+    restore is not available, because the register it reads is in-process and
+    keyed on a receipt digest, so a fresh restore would strip the axis off every
+    honest claim too. This carries what the write path knew into the file
+    instead.
+
+    What it buys is parity, not prevention. The observer runs inside the
+    producer's process and the producer holds the key, so a producer determined
+    enough to re-sign a claim can build one of these as well. It closes the
+    ordinary act, editing the axis and nothing else, and every surface that
+    reports it says so.
+
+    Silent when there is no signer: an unsigned claim carries no signature worth
+    attesting beside.
+    """
+    if signer is None or not asserter_keyid or not _observer_minted(record):
+        return
+    payload = {
+        "claim_id": claim_id,
+        "statement_cid": statement_cid,
+        "receipt_digest": record["receipt_digest"],
+        "grounding": record.get("grounding"),
+    }
+    conn.execute(
+        "INSERT INTO grounding_attestations(claim_id, statement_cid, "
+        "receipt_digest, grounding, signer_keyid, signature, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            claim_id, statement_cid, payload["receipt_digest"],
+            payload["grounding"], asserter_keyid,
+            signer.sign(_grounding_attestation_pae(payload)), created_at,
+        ),
+    )
+
+
+def grounding_attestation_state(
+    conn: sqlite3.Connection, claim_id: str,
+) -> str:
+    """Whether this claim's grounding axis is attested, in one word.
+
+    ``"attested"`` when a row is present, binds this claim's current statement,
+    names the axis the claim stores, and verifies under the key that asserted
+    it. ``"unattested"`` when no row is there, which is the honest state for a
+    declared verdict and for every claim written before the table existed.
+    ``"broken"`` when a row is present and fails any of those, which is a
+    stronger signal than absence and must never be folded into it.
+
+    Never raises. A graph too damaged to answer from reports ``"broken"``
+    rather than taking a read down, and never ``"attested"``.
+    """
+    from mareforma import signing as _signing
+    from mareforma import validators as _validators
+
+    try:
+        row = conn.execute(
+            "SELECT statement_cid, receipt_digest, grounding, signer_keyid, "
+            "signature FROM grounding_attestations WHERE claim_id = ?",
+            (claim_id,),
+        ).fetchone()
+        if row is None:
+            return "unattested"
+        claim = conn.execute(
+            "SELECT statement_cid, observed_grounding, asserter_keyid FROM "
+            "claims WHERE claim_id = ?", (claim_id,),
+        ).fetchone()
+        if claim is None or claim["statement_cid"] != row["statement_cid"]:
+            return "broken"
+        stored = _json_object(claim["observed_grounding"]) or {}
+        if stored.get("grounding") != row["grounding"]:
+            return "broken"
+        if stored.get("receipt_digest") != row["receipt_digest"]:
+            return "broken"
+        # The asserting key, and only that one. An attestation is the producer's
+        # word that their own observer computed this axis, so a signature from
+        # any other enrolled key attests nothing about it. Without this the read
+        # surfaces printed "the observer that computed this verdict attested it
+        # under the asserting key" for an attestation re-signed by a peer that
+        # asserted nothing: a false attribution rather than a false axis, since
+        # a peer cannot create the axis, but the sentence was still untrue.
+        if row["signer_keyid"] != claim["asserter_keyid"]:
+            return "broken"
+        # The enrolment chain walk, the same bar the verdict chain applies to
+        # its own signers. A bare row lookup accepted a validator row that does
+        # not chain back to the root, so one check refused a key the other
+        # accepted, in the same file, two functions apart.
+        signer_row = _validators.get_validator(conn, row["signer_keyid"])
+        if signer_row is None or not _validators.is_enrolled(
+            conn, row["signer_keyid"],
+        ):
+            return "broken"
+        pem = base64.standard_b64decode(signer_row["pubkey_pem"])
+        _signing.public_key_from_pem(pem).verify(
+            row["signature"],
+            _grounding_attestation_pae({
+                "claim_id": claim_id,
+                "statement_cid": row["statement_cid"],
+                "receipt_digest": row["receipt_digest"],
+                "grounding": row["grounding"],
+            }),
+        )
+    except Exception:
+        return "broken"
+    return "attested"
 
 
 def _observed_grounding_promotes(stored: str | None) -> bool:
@@ -1990,6 +2156,14 @@ def add_claim(
         # and the next open rebuilds the cache.
         from mareforma import _supports
         _supports.record_supports_edges(conn, claim_id, supports)
+        # Inside the claim's own transaction: an attestation without its claim
+        # attests nothing, and a claim whose attestation did not land would read
+        # as a declared verdict on the next open.
+        _write_grounding_attestation(
+            conn, claim_id=claim_id, statement_cid=statement_cid,
+            record=observed_grounding, signer=signer,
+            asserter_keyid=asserter_keyid, created_at=now,
+        )
         if _own_transaction:
             conn.commit()
     except sqlite3.IntegrityError as exc:
@@ -5419,6 +5593,330 @@ def _contradiction_verdict_pae(record: dict) -> bytes:
     )
 
 
+_VERDICT_CHAIN_LINK_FIELDS = (
+    "seq",
+    "prev_tip",
+    "verdict_kind",
+    "verdict_id",
+    "verdict_digest",
+    # The author, inside the bytes. Left out, the link's signed payload and its
+    # tip were identical whoever signed it, so the column naming the author was
+    # free for an attacker to set and the tip did not notice. Safe to add here
+    # and nowhere else: this payload type ships for the first time in this
+    # release, so no reader anywhere rebuilds these bytes from a shorter list.
+    "issuer_keyid",
+)
+
+# The tip a chain starts from. Empty rather than a hash of nothing, so the
+# first link is recognisable as the first by reading it.
+_VERDICT_CHAIN_GENESIS = ""
+
+
+def _verdict_chain_link_pae(record: dict) -> bytes:
+    """The DSSE PAE a chain link's signature is made and checked over.
+
+    Its own payload type, so the signature cannot be confused with the one over
+    the verdict the link covers. Both are made by the same issuer key over
+    bytes naming the same ``verdict_id``, and only the type separates them.
+    """
+    from mareforma import signing as _signing
+    return _signing.dsse_pae(
+        _signing.PAYLOAD_TYPE_VERDICT_CHAIN_LINK,
+        _verdict_canonical_payload(_VERDICT_CHAIN_LINK_FIELDS, record),
+    )
+
+
+def _verdict_chain_tip(record: dict) -> str:
+    """The tip a link's own contents produce.
+
+    Over the canonical payload rather than the signature: the tip has to be
+    recomputable by anyone holding the file, including a reader with no key at
+    all, or the chain could only be checked by its own signers.
+    """
+    return hashlib.sha256(
+        _verdict_canonical_payload(_VERDICT_CHAIN_LINK_FIELDS, record)
+    ).hexdigest()
+
+
+def _verdict_chain_head(conn: sqlite3.Connection) -> "tuple[int, str]":
+    """The last link's ``(seq, tip)``, or ``(0, genesis)`` on an empty chain.
+
+    Read inside the caller's write transaction. Two writers that read the same
+    head would build two links claiming the same ``prev_tip``, and the chain
+    would fork with both halves verifying; the ``BEGIN IMMEDIATE`` around the
+    verdict write is what stops that, and the PRIMARY KEY on ``seq`` refuses
+    the loser if it ever does not.
+    """
+    row = conn.execute(
+        "SELECT seq, tip FROM verdict_chain ORDER BY seq DESC LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return (0, _VERDICT_CHAIN_GENESIS)
+    return (row["seq"], row["tip"])
+
+
+def _append_verdict_chain_link(
+    conn: sqlite3.Connection,
+    *,
+    verdict_kind: str,
+    verdict_id: str,
+    signature: bytes,
+    signer: "object",
+    issuer_keyid: str,
+    created_at: str,
+) -> None:
+    """Append the link covering one verdict, signed by that verdict's issuer.
+
+    Called from inside the verdict's own write transaction, never from the
+    backup writer. A verdict that committed without its link would break the
+    chain for a reason that is not tamper, and the reader cannot tell the two
+    apart, so the two writes are one write or neither.
+
+    The link binds to the verdict's signature rather than to its row. The
+    signature is the one field only the issuer could have produced, so a
+    re-signed lookalike carrying the same ids does not satisfy the link.
+    """
+    seq, prev_tip = _verdict_chain_head(conn)
+    record = {
+        "seq": seq + 1,
+        "prev_tip": prev_tip,
+        "verdict_kind": verdict_kind,
+        "verdict_id": verdict_id,
+        "verdict_digest": hashlib.sha256(signature).hexdigest(),
+        "issuer_keyid": issuer_keyid,
+    }
+    conn.execute(
+        """
+        INSERT INTO verdict_chain(
+            seq, prev_tip, tip, verdict_kind, verdict_id, verdict_digest,
+            issuer_keyid, signature, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            record["seq"], record["prev_tip"], _verdict_chain_tip(record),
+            verdict_kind, verdict_id, record["verdict_digest"],
+            issuer_keyid, signer.sign(_verdict_chain_link_pae(record)),
+            created_at,
+        ),
+    )
+
+
+def verdict_chain_tip(conn: sqlite3.Connection) -> str:
+    """The current tip of the verdict-set chain, ``""`` when it is empty."""
+    return _verdict_chain_head(conn)[1]
+
+
+def verdict_chain_coverage(conn: sqlite3.Connection) -> "tuple[int, int]":
+    """``(covered, total)`` verdicts, counting both verdict tables.
+
+    They differ on any graph that recorded verdicts before this version, and
+    the difference is the point: those verdicts have no link and the chain says
+    nothing about them. Reporting the pair keeps that a number an operator can
+    read rather than a silence in the middle of an artifact about absence.
+    """
+    total = conn.execute(
+        "SELECT (SELECT COUNT(*) FROM contradiction_verdicts) "
+        "     + (SELECT COUNT(*) FROM replication_verdicts)"
+    ).fetchone()[0]
+    covered = conn.execute("SELECT COUNT(*) FROM verdict_chain").fetchone()[0]
+    return (covered, total)
+
+
+def verify_verdict_chain(conn: sqlite3.Connection) -> "tuple[str, ...]":
+    """Every way the stored chain fails to account for the verdicts it covers.
+
+    Empty means all of: the links run 1..n with no gap, each carries the tip its
+    own contents produce, each names the tip of the link before it, each
+    signature verifies against an enrolled issuer, and each covers a verdict
+    that is still present carrying the signature the link was made over.
+
+    What a clean result rules out, stated as narrowly as it holds: no verdict
+    has been taken out of the middle of the chain by anyone holding no enrolled
+    key. Removing a verdict means removing its link, and the next link then has
+    to be re-signed over the gap, its tip recomputed over the new contents, and
+    the verdict it covers made to verify under the key the link names. An
+    outside attacker with file access and the project operator are held out by
+    that.
+
+    **An enrolled peer is not held out, and this used to say it was.** The
+    verdict's own signed payload carries no issuer, so a peer can put its keyid
+    on a surviving verdict, re-sign the verdict under its own key, and re-sign
+    the link to match. Every check here then passes, on a chain that peer just
+    shortened. Reproduced against this code, not reasoned about. Closing it
+    needs the issuer inside the verdict's signed bytes, which changes bytes an
+    already-released reader rebuilds, so it waits for a release that can pay
+    for that.
+
+    The issuer of the verdicts is not held out either, and cannot be: a key can
+    always restate its own view of its own verdicts, and on a graph where one
+    issuer signed everything that is the whole chain.
+
+    Two further things it does not say. A removed suffix leaves a shorter chain
+    that verifies, so length is reported by :func:`verdict_chain_coverage`
+    rather than checked here. And verdicts recorded before the chain existed
+    carry no link, which the same coverage pair is what makes visible.
+
+    Never raises. A graph too damaged to read the chain from reports that as a
+    problem rather than taking the caller down.
+    """
+    try:
+        links = conn.execute(
+            "SELECT seq, prev_tip, tip, verdict_kind, verdict_id, "
+            "verdict_digest, issuer_keyid, signature "
+            "FROM verdict_chain ORDER BY seq"
+        ).fetchall()
+    except sqlite3.Error as exc:
+        return (f"the verdict chain could not be read: {exc}",)
+
+    problems: list[str] = []
+    cache: dict = {}
+    expected_prev = _VERDICT_CHAIN_GENESIS
+    expected_seq = 1
+    for link in links:
+        name = f"link {link['seq']} (verdict {link['verdict_id']!r})"
+        try:
+            _check_verdict_chain_link(
+                conn, cache, link, name, expected_seq, expected_prev, problems,
+            )
+        except Exception as exc:      # noqa: BLE001, see the contract above
+            # Every exception, not only sqlite3's. The enrolment walk and the
+            # covered-verdict lookup read tables this function does not own, and
+            # on a graph somebody has taken apart they raise whatever they
+            # raise: a signature column holding TEXT where the schema says BLOB
+            # reached hashlib as a str and came out a TypeError, which walked
+            # straight past a handler scoped to sqlite3.Error and took the
+            # caller down. That column is one of the things an attacker edits,
+            # so the shape most likely to arrive here was the one shape this did
+            # not catch. A link that cannot be checked is reported as unchecked,
+            # never skipped: the damage is the finding.
+            problems.append(
+                f"{name} could not be checked, the graph is not readable "
+                f"here: {exc}"
+            )
+        expected_prev = link["tip"]
+        expected_seq = link["seq"] + 1
+    return tuple(problems)
+
+
+def _check_verdict_chain_link(
+    conn: sqlite3.Connection,
+    cache: dict,
+    link: sqlite3.Row,
+    name: str,
+    expected_seq: int,
+    expected_prev: str,
+    problems: "list[str]",
+) -> None:
+    """Append every way one link fails. See :func:`verify_verdict_chain`.
+
+    Split out so the caller can catch a database error per link. Raises
+    :class:`sqlite3.Error` when a table it reads has been taken away, which the
+    caller turns into a reported problem.
+    """
+    from mareforma import signing as _signing
+    from mareforma import validators as _validators
+
+    if link["seq"] != expected_seq:
+        problems.append(
+            f"{name} is out of sequence, expected seq {expected_seq}: "
+            "links are numbered without gaps, so a jump is a link that was "
+            "removed"
+        )
+    if link["prev_tip"] != expected_prev:
+        problems.append(
+            f"{name} names a previous tip no surviving link produced; the "
+            "chain is broken here and mending it needs this link's issuer "
+            "key"
+        )
+    record = {
+        "seq": link["seq"],
+        "prev_tip": link["prev_tip"],
+        "verdict_kind": link["verdict_kind"],
+        "verdict_id": link["verdict_id"],
+        "verdict_digest": link["verdict_digest"],
+        "issuer_keyid": link["issuer_keyid"],
+    }
+    if _verdict_chain_tip(record) != link["tip"]:
+        problems.append(
+            f"{name} stores a tip its own contents do not produce, so the "
+            "row was edited after it was written"
+        )
+    signer_row = _cached_validator(conn, cache, link["issuer_keyid"])
+    if signer_row is None or not _validators.is_enrolled(
+        conn, link["issuer_keyid"],
+    ):
+        problems.append(
+            f"{name} names an issuer that is not an enrolled validator"
+        )
+    else:
+        try:
+            pem = base64.standard_b64decode(signer_row["pubkey_pem"])
+            _signing.public_key_from_pem(pem).verify(
+                link["signature"], _verdict_chain_link_pae(record),
+            )
+        except Exception:
+            problems.append(
+                f"{name} does not verify against its issuer's key"
+            )
+    table = (
+        "contradiction_verdicts"
+        if link["verdict_kind"] == "contradiction"
+        else "replication_verdicts"
+    )
+    row = conn.execute(
+        f"SELECT signature, issuer_keyid FROM {table} WHERE verdict_id = ?",
+        (link["verdict_id"],),
+    ).fetchone()
+    if row is None:
+        problems.append(
+            f"{name} covers a verdict that is no longer in the graph"
+        )
+    else:
+        if hashlib.sha256(row["signature"]).hexdigest() != link["verdict_digest"]:
+            problems.append(
+                f"{name} covers a verdict whose signature is not the one "
+                "the link was made over"
+            )
+        # The link must be signed by the key that issued the verdict it covers,
+        # not by whoever happens to be enrolled. Otherwise an enrolled peer
+        # deletes a verdict, re-signs the following link over the gap, and the
+        # chain recomputes and reads clean: a valid signature over a set the
+        # signer had just emptied.
+        #
+        # Asked of the verdict's own signature, not of its issuer_keyid column.
+        # Both columns are outside their signed payloads, so comparing them was
+        # comparing two things an attacker sets together: put your own keyid on
+        # the verdict and on the link, sign both, and the two agreed. Verifying
+        # the verdict under the key the link names is a question only that key's
+        # holder can answer.
+        #
+        # What it does NOT close, and the docstring says so: the verdict payload
+        # carries no issuer, so an enrolled peer can re-sign the verdict itself
+        # under their own key and satisfy this. Binding the issuer inside the
+        # verdict's signed bytes is what closes that, and it changes bytes a
+        # released reader rebuilds.
+        if row["issuer_keyid"] != link["issuer_keyid"]:
+            problems.append(
+                f"{name} is signed by a key that did not issue the verdict "
+                "it covers, so the link was rewritten by somebody else"
+            )
+        else:
+            verifies = (
+                _contradiction_verdict_verifies
+                if link["verdict_kind"] == "contradiction"
+                else _verdict_verifies
+            )
+            verdict_row = conn.execute(
+                f"SELECT * FROM {table} WHERE verdict_id = ?",
+                (link["verdict_id"],),
+            ).fetchone()
+            if not verifies(conn, cache, verdict_row):
+                problems.append(
+                    f"{name} covers a verdict that does not verify under the "
+                    "key the link names as its issuer"
+                )
+
+
 def _require_enrolled_issuer(
     conn: sqlite3.Connection, issuer_keyid: str,
 ) -> None:
@@ -5550,6 +6048,13 @@ def record_replication_verdict(
                 method, confidence_json, issuer_keyid, signature, created_at,
             ),
         )
+        # Inside the same transaction as the verdict: see
+        # _append_verdict_chain_link on why the two are one write.
+        _append_verdict_chain_link(
+            conn, verdict_kind="replication", verdict_id=verdict_id,
+            signature=signature, signer=signer, issuer_keyid=issuer_keyid,
+            created_at=created_at,
+        )
         # Promote referenced claims to REPLICATED. The state-machine
         # trigger rejects PRELIMINARY → ESTABLISHED but accepts
         # PRELIMINARY → REPLICATED. Update only when the row is still
@@ -5614,6 +6119,13 @@ def record_replication_verdict(
         raise VerdictIssuerError(
             f"Replication verdict {verdict_id!r} INSERT refused: {exc}"
         ) from exc
+    except BaseException:
+        # See the sibling handler in record_contradiction_verdict. Same two
+        # writes, same open transaction, same silent loss of whatever is
+        # written next on this connection.
+        if _own_txn:
+            conn.rollback()
+        raise
 
     _backup_claims_toml(conn, root)
 
@@ -5649,12 +6161,6 @@ def record_contradiction_verdict(
             f"claim_id on both sides ({member_claim_id!r}), self-"
             "contradiction is not a valid verdict."
         )
-    # Asymmetry with record_replication_verdict (which wraps INSERT +
-    # promotion UPDATE in one BEGIN IMMEDIATE): contradiction is a
-    # single INSERT + one AFTER-INSERT trigger that fires inside the
-    # same auto-statement transaction. No second write follows, so no
-    # race window opens between INSERT and the trigger's UPDATE.
-    # Symmetric atomic-txn treatment would be a no-op.
     issuer_keyid = _signing.public_key_id(signer.public_key())
     _require_enrolled_issuer(conn, issuer_keyid)
     # Symmetric to validate_claim's LLM-validator gate: an LLM-typed
@@ -5692,7 +6198,16 @@ def record_contradiction_verdict(
     pae = _contradiction_verdict_pae(record)
     signature = signer.sign(pae)
     created_at = _now()
+    # One transaction, like its sibling. This used to be a bare INSERT on the
+    # grounds that the AFTER-INSERT trigger fires inside the same auto-statement
+    # transaction and no second write follows. A second write follows now: the
+    # chain link has to land with the verdict or not at all, and reading the
+    # chain head under BEGIN IMMEDIATE is what stops two writers building two
+    # links from the same tip.
+    _own_txn = not conn.in_transaction
     try:
+        if _own_txn:
+            conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             """
             INSERT INTO contradiction_verdicts(
@@ -5705,11 +6220,31 @@ def record_contradiction_verdict(
                 confidence_json, issuer_keyid, signature, created_at,
             ),
         )
-        conn.commit()
+        _append_verdict_chain_link(
+            conn, verdict_kind="contradiction", verdict_id=verdict_id,
+            signature=signature, signer=signer, issuer_keyid=issuer_keyid,
+            created_at=created_at,
+        )
+        if _own_txn:
+            conn.commit()
     except sqlite3.IntegrityError as exc:
+        if _own_txn:
+            conn.rollback()
         raise VerdictIssuerError(
             f"Contradiction verdict {verdict_id!r} INSERT refused: {exc}"
         ) from exc
+    except BaseException:
+        # Every other way this block can fail, and the transaction has to close
+        # on all of them. There are two writes in here now, and the second one
+        # can fail for reasons the first never could: a schema the graph no
+        # longer has, or a signer that goes away between the two. Left open, the
+        # transaction makes the NEXT write on this connection a silent no-op:
+        # add_claim sees in_transaction and does not commit, returns a claim id,
+        # raises nothing, and the row is discarded when the connection closes.
+        # Measured both ways before this handler existed.
+        if _own_txn:
+            conn.rollback()
+        raise
 
     _backup_claims_toml(conn, root)
 
@@ -7273,16 +7808,215 @@ def _backup_trust_tables(conn: sqlite3.Connection, data: dict) -> None:
         data[section] = section_data
 
 
+def _backup_grounding_attestations(
+    conn: sqlite3.Connection, data: dict,
+) -> None:
+    """Add the observer's grounding attestations to the backup ``data`` dict.
+
+    This is the section the whole artifact is for. The axis travels in the
+    claim's signed statement already; what did not travel was any record that an
+    observer, rather than the producer's typing, put it there. Round-tripping
+    these is what lets a restored graph be held to the standard the write path
+    holds.
+
+    Emitted only when populated, like every other optional section.
+    """
+    rows = conn.execute(
+        "SELECT claim_id, statement_cid, receipt_digest, grounding, "
+        "signer_keyid, signature, created_at FROM grounding_attestations "
+        "ORDER BY created_at, claim_id"
+    ).fetchall()
+    if not rows:
+        return
+    data["grounding_attestations"] = {
+        r["claim_id"]: {
+            "statement_cid": r["statement_cid"],
+            "receipt_digest": r["receipt_digest"],
+            "grounding": r["grounding"],
+            "signer_keyid": r["signer_keyid"],
+            "signature": base64.b64encode(r["signature"]).decode("ascii"),
+            "created_at": r["created_at"],
+        }
+        for r in rows
+    }
+
+
+def _backup_verdict_chain(conn: sqlite3.Connection, data: dict) -> None:
+    """Add the verdict-set chain to the backup ``data`` dict.
+
+    Keyed by sequence number as a string, because TOML table keys are strings.
+    Round-tripping it is what carries the chain through the recovery the file
+    exists for: a restore that dropped the chain would rebuild a graph whose
+    verdicts are all uncovered, which reads exactly like a graph somebody
+    stripped.
+
+    Emitted only when populated, so a graph that has recorded no verdict under
+    this version writes no section, the same rule every other optional section
+    follows.
+    """
+    rows = conn.execute(
+        "SELECT seq, prev_tip, tip, verdict_kind, verdict_id, verdict_digest, "
+        "issuer_keyid, signature, created_at FROM verdict_chain ORDER BY seq"
+    ).fetchall()
+    if not rows:
+        return
+    data["verdict_chain"] = {
+        str(r["seq"]): {
+            "prev_tip": r["prev_tip"],
+            "tip": r["tip"],
+            "verdict_kind": r["verdict_kind"],
+            "verdict_id": r["verdict_id"],
+            "verdict_digest": r["verdict_digest"],
+            "issuer_keyid": r["issuer_keyid"],
+            "signature": base64.b64encode(r["signature"]).decode("ascii"),
+            "created_at": r["created_at"],
+        }
+        for r in rows
+    }
+
+
+# The line that separates the backup's body from its completeness table. The
+# digest below covers every byte before it, so both the writer and
+# :func:`verify_completeness_digest` locate the split on this exact string.
+_COMPLETENESS_HEADER = "[completeness]\n"
+
+
+def _backup_completeness_tail(
+    conn: sqlite3.Connection, data: dict, body: str,
+) -> str:
+    """The ``[completeness]`` table: what this file says it contains.
+
+    Row counts per emitted section, the verdict-chain tip, the covered-versus-
+    total verdict pair, and a SHA-256 over *body*, which is every byte of the
+    file that precedes this table.
+
+    **The digest is not a signature and must never be described as one.**
+    Anyone editing the file recomputes it in a line. What it does is make
+    truncation, corruption and casual editing detectable, and make a deliberate
+    attacker be deliberate. Nothing signs at backup time because nothing holds a
+    key at backup time, which is the constraint the verdict chain works around
+    by signing where a key genuinely is, and which this table cannot.
+
+    It digests the serialized body rather than a second canonical form of the
+    same data, for two reasons. The writer has already paid for those bytes, and
+    hashing them again costs nothing, where canonicalizing the whole dict a
+    second time measured at about a third of the cost of writing a claim. And a
+    reader checks it by hashing the file it is holding, with no need to
+    reproduce a serialization byte for byte before it can agree.
+
+    The counts describe the file rather than the graph, so a file truncated
+    after it was written disagrees with itself. The verdict pair is the one
+    graph-side number here, because the gap between covered and total is how a
+    reader sees which verdicts predate the chain instead of guessing.
+    """
+    import tomli_w
+
+    covered, total = verdict_chain_coverage(conn)
+    table = {
+        "completeness": {
+            "sections": {
+                name: len(entries)
+                for name, entries in sorted(data.items())
+                if isinstance(entries, dict)
+            },
+            "verdict_chain_tip": verdict_chain_tip(conn),
+            "verdict_chain_covered": covered,
+            "verdicts_total": total,
+            "digest": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        }
+    }
+    tail = tomli_w.dumps(table)
+    if not tail.startswith(_COMPLETENESS_HEADER):
+        # tomli_w puts the table header first for a single-table document. If
+        # that ever stops being true the split point moves and every stored
+        # digest silently stops reproducing, so refuse rather than write one.
+        raise FormatArtifactError(
+            "the completeness table did not serialize with its own header "
+            f"first, so the digest boundary is not where readers look: {tail[:60]!r}"
+        )
+    return tail
+
+
+def verify_completeness_digest(claims_toml: "str | Path") -> bool:
+    """True iff the file's stored digest matches the bytes above it.
+
+    Splits on the last :data:`_COMPLETENESS_HEADER` and hashes everything
+    before it. No TOML is re-serialized, so the answer does not depend on
+    agreeing with the writer's formatting, only on the bytes on disk.
+
+    False for a file with no completeness table, which is every backup written
+    before the table existed, and for one whose digest does not reproduce.
+    Truncation, corruption and hand-editing all land here. A deliberate
+    attacker recomputes it, which is why this is not a signature and the
+    verdict chain exists beside it.
+    """
+    raw = Path(claims_toml).read_bytes()
+    marker = ("\n" + _COMPLETENESS_HEADER).encode("utf-8")
+    cut = raw.rfind(marker)
+    if cut == -1:
+        return False
+    body = raw[: cut + 1]
+    try:
+        import tomllib          # 3.11+ stdlib
+    except ModuleNotFoundError:  # 3.10, where it is the tomli backport
+        import tomli as tomllib  # type: ignore[no-redef]
+
+    try:
+        stored = tomllib.loads(raw.decode("utf-8"))["completeness"]["digest"]
+    except (ValueError, KeyError, UnicodeDecodeError):
+        return False
+    return hashlib.sha256(body).hexdigest() == stored
+
+
+def _format_artifact(build, *args):
+    """Run a format writer, raising rather than degrading to absent.
+
+    Every failure inside one becomes a :class:`FormatArtifactError`, which
+    :func:`_backup_claims_toml` re-raises instead of printing, for the reason on
+    the class.
+
+    In ordinary operation this cannot fire: the writers read one table and hash
+    bytes that are already in hand. The raise is reserved for a graph that is
+    already broken, and on such a graph a caller finding out is the point.
+    """
+    try:
+        return build(*args)
+    except FormatArtifactError:
+        raise
+    except Exception as exc:
+        raise FormatArtifactError(
+            f"a claims.toml format section could not be built: {exc}. "
+            "Whatever mutation triggered this backup is already committed to "
+            "graph.db, which stays authoritative; what did not happen is the "
+            "backup, and claims.toml still holds the previous good copy. This "
+            "refuses instead of printing because a completeness section that "
+            "is merely absent cannot be told apart from one that was never "
+            "written."
+        ) from exc
+
+
 def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
     """Write all claims AND validators to claims.toml in the project root.
 
     Called after every claim or validator mutation. The TOML file is
     the source of truth for ``mareforma restore`` after catastrophic
-    loss of ``graph.db``. Failure is non-fatal: an error line is
-    printed to stderr but the exception is not raised: graph.db is
-    still authoritative and the next successful mutation will rewrite
-    the file. Stderr-ERROR (not ``warnings.warn``, which production
-    callers often suppress) so divergence is visible by default.
+    loss of ``graph.db``.
+
+    **Most failures are non-fatal.** An error line goes to stderr and the
+    exception is not raised: graph.db is still authoritative and the next
+    successful mutation rewrites the file. Stderr-ERROR rather than
+    ``warnings.warn``, which production callers often suppress, so divergence
+    is visible by default.
+
+    **The completeness sections are the exception, and they raise.** Every
+    other section degrades to a stale backup that the next mutation repairs. An
+    absent completeness section cannot be told apart from a backup written
+    before the section existed, so its silence has the shape of the tamper it
+    exists to detect, and a writer whose job is detecting silence cannot fail
+    silently. :class:`~mareforma.db.errors.FormatArtifactError` therefore
+    reaches the caller, which means **every mutating call can raise it, after
+    the mutation itself has already committed**. The row is in graph.db; what
+    did not happen is the backup.
     """
     state = _backup_suspended.get(id(conn))
     if state is not None:
@@ -7505,6 +8239,12 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
             "supports_revision": _supports.supports_revision(conn),
         }
 
+        # Last section in the dict, so the completeness digest below covers it
+        # along with everything above. Raises where the sections above degrade:
+        # see _format_artifact.
+        _format_artifact(_backup_verdict_chain, conn, data)
+        _format_artifact(_backup_grounding_attestations, conn, data)
+
         # Rotate the previous backup aside before overwriting it. graph.db is
         # authoritative, so the threat this addresses is not a torn write (the
         # atomic replace below already rules that out) but the loss of the only
@@ -7522,14 +8262,25 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
         if prior is not None:
             atomic_write_bytes(root / "claims.toml.prev", prior)
 
+        # Serialize once. The completeness table is appended as text rather than
+        # added to the dict and dumped with it, so the digest can cover the body
+        # bytes without a second pass over every claim.
+        body = tomli_w.dumps(data)
+        tail = _format_artifact(_backup_completeness_tail, conn, data, body)
+
         # Atomic write: a crash during the rewrite must not destroy the sole DR
         # artifact on the exact crash class it exists for. A failure anywhere
         # before the rename leaves the previous good claims.toml untouched,
         # never truncated or empty.
         atomic_write_bytes(
-            toml_path, tomli_w.dumps(data).encode("utf-8"),
+            toml_path, (body + tail).encode("utf-8"),
         )
 
+    except FormatArtifactError:
+        # The one failure this writer does not absorb. Printing it would leave a
+        # claims.toml with no completeness section, which reads the same as a
+        # file written before the section existed. See FormatArtifactError.
+        raise
     except Exception as exc:  # noqa: BLE001
         import sys
         # stderr at an ERROR-line prefix is harder for production to
