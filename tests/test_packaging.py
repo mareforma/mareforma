@@ -46,6 +46,7 @@ import functools
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -105,21 +106,39 @@ _PYTEST_BUILTIN_MARKERS = frozenset(
 _DOC_MARKER = re.compile(r"@pytest\.mark\.(\w+)|pytest\s+-m\s+'?(\w+)")
 
 
-def _build_sdist_names():
-    """Build the sdist in-process (no network, no build frontend) and
-    return the archive member paths relative to the sdist root."""
+def _build_sdist(out) -> str:
+    """Build the sdist into *out* and return the archive name.
+
+    setuptools stages the archive in a ``<name>-<version>/`` tree under the
+    working directory, which has to be the repo root. Recent setuptools removes
+    that tree once the archive is written; this covers a version that does not,
+    and only when this build is what created it. An untracked copy of the
+    package inside the checkout is not cosmetic: a dirty tree aborts a rebase,
+    and one ``git add -A`` commits the package into itself.
+    """
     # The dev extra declares setuptools, so every CI leg and every documented
     # dev install runs this guard. Skip rather than hard-fail for the one case
     # left, a bare environment installed without the dev extra.
     build_meta = pytest.importorskip("setuptools.build_meta")
 
     cwd = os.getcwd()
+    before = {p.name for p in REPO_ROOT.iterdir()}
+    os.chdir(REPO_ROOT)
+    try:
+        name = build_meta.build_sdist(str(out))
+    finally:
+        os.chdir(cwd)
+    staged = REPO_ROOT / name.removesuffix(".tar.gz")
+    if staged.name not in before and staged.is_dir():
+        shutil.rmtree(staged, ignore_errors=True)
+    return name
+
+
+def _build_sdist_names():
+    """Build the sdist in-process (no network, no build frontend) and
+    return the archive member paths relative to the sdist root."""
     with tempfile.TemporaryDirectory() as out:
-        os.chdir(REPO_ROOT)
-        try:
-            name = build_meta.build_sdist(out)
-        finally:
-            os.chdir(cwd)
+        name = _build_sdist(out)
         with tarfile.open(os.path.join(out, name)) as tf:
             members = tf.getnames()
     # strip the leading "<pkg>-<version>/" component
@@ -160,14 +179,7 @@ def test_sdist_suite_runs_green_from_the_archive(tmp_path):
     release that is fine. Such tests skip downstream, and this catches the next
     one that does not. Marked ``sdist`` because it costs about 45 seconds.
     """
-    build_meta = pytest.importorskip("setuptools.build_meta")
-
-    cwd = os.getcwd()
-    os.chdir(REPO_ROOT)
-    try:
-        name = build_meta.build_sdist(str(tmp_path))
-    finally:
-        os.chdir(cwd)
+    name = _build_sdist(tmp_path)
     with tarfile.open(tmp_path / name) as tf:
         tf.extractall(tmp_path, filter="data")
 
