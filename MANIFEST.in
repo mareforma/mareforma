@@ -1,8 +1,7 @@
 # Ship a complete, runnable test suite in the sdist so distro packagers
-# can run it. setuptools' default sdist only sweeps up top-level
-# tests/test_*.py — it drops conftest.py, the shared helpers, and every
-# test subpackage, leaving an unrunnable pile of imports. Graft the whole
-# tree instead (see #45).
+# can run it. setuptools' default sdist sweeps up top-level tests/test_*.py
+# and nothing else: it drops conftest.py, the shared helpers, and every test
+# subpackage, leaving an unrunnable pile of imports. Graft the whole tree.
 graft tests
 include CHANGELOG.md
 include ARCHITECTURE.md
