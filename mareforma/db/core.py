@@ -605,9 +605,17 @@ def _record_schema_census(conn: sqlite3.Connection) -> "tuple[str, ...]":
     guard cannot outlive its table: dropping the table would take its guards out
     of the expected set, and the additive script rebuilds the table empty on the
     same open, so the rows would be gone with nothing said. A guard this graph
-    has carried stays expected however its table is treated. It is also what
-    makes the census store un-emptiable: deleting every row of the seen set does
-    not lower what is expected of a table that is still present.
+    has carried stays expected however its table is treated. Deleting every row
+    of the seen set does not lower what is expected of a table that is still
+    present, and the store's own guards refuse the delete anyway.
+
+    What it does not close, and no single-file scheme can: dropping the seen
+    store and the census along with the guarded table. All three are then
+    rebuilt empty on the same open, the guard is expected by neither route, and
+    nothing is recorded. The record lives in the file the attacker is holding.
+    What raises the cost is the second copy: the census rides in the backup, so
+    a graph emptied this way disagrees with a claims.toml the attacker has to
+    find and edit too.
 
     :data:`_GUARDS_INTRODUCED_THIS_RELEASE` closes the case both of the others
     miss, which is the ordinary shape of a schema release. A guard added to a
@@ -7258,6 +7266,7 @@ REPLAY_TAMPER_SIGNALS: tuple[str, ...] = (
     "unbacked-invalidation",
     "suppressed-verdict",
     "unverifiable-verdict",
+    "replay-unavailable",
 )
 
 
@@ -7427,15 +7436,38 @@ def _replayed_refutation(
     through to the status flags: no verdict names this claim and its column is
     clear, which is the ordinary case and must stay cheap to report.
 
-    Never raises. A read that cannot reach the verdict tables degrades to the
-    column rather than taking a claim down with it, and says which it did.
+    Never raises, and that has to hold for more than a database error. The
+    replay compares two ``created_at`` values, and that column has TEXT
+    affinity, so a value written around the write path stays whatever type it
+    was put in and the comparison raises a ``TypeError`` rather than a
+    ``sqlite3.Error``. A read that cannot reach the verdict tables, or cannot
+    make sense of what it found there, degrades to the column rather than taking
+    a claim down with it, and says which it did.
     """
     try:
         replay = replay_contradictions(
             conn, row["claim_id"], verdicts=verdicts, cache=cache,
         )
-    except sqlite3.Error:
-        return None
+    except Exception as exc:
+        # Reported, not None. None here means "the replay had nothing to say",
+        # and both callers then fall through to ``t_invalid``, the column with
+        # no trigger that this replay exists to distrust. So a graph where the
+        # replay cannot run served a suppressed contradiction as a clean row,
+        # which is worse than the crash this handler replaced: the crash was at
+        # least visible. A replay that could not run is a fact about the graph,
+        # not the absence of one, and it belongs with the other three signals
+        # for the same reason they are grouped: every reader has to make the
+        # same split, and a caller asking for clean claims must not be handed
+        # this one.
+        return {
+            "state": "contradicted" if flagged else "clean",
+            "reason": (
+                "the contradiction verdicts behind this claim could not be "
+                f"replayed ({type(exc).__name__}), so nothing signed stands "
+                "behind the invalidation column either way"
+            ),
+            "signal": "replay-unavailable",
+        }
     if replay["unverifiable"]:
         return {
             "state": "contradicted",
@@ -7510,13 +7542,17 @@ def refutation_status(row: dict, conn: "sqlite3.Connection | None" = None) -> di
         the column is clear. Somebody erased it from every read surface.
       * ``unverifiable-verdict``: verdicts naming this claim exist and do not
         check out. Planted rows, not weak evidence.
+      * ``replay-unavailable``: the replay itself could not run, so nothing
+        signed stands behind the column either way.
 
-    The last three are in :data:`REPLAY_TAMPER_SIGNALS`. The state stays
-    ``contradicted`` for all of them, deliberately: an unbacked column is not
+    Those last four are :data:`REPLAY_TAMPER_SIGNALS`. For the first three the
+    state stays ``contradicted``, deliberately: an unbacked column is not
     grounds to hand a suppressed claim back as clean, and a suppressed verdict
     is not grounds to keep calling it clean either. Refusing to un-flag in both
     directions is the only choice that does not do an attacker's work in one of
-    them.
+    them. ``replay-unavailable`` is the exception and follows the column,
+    because a replay that did not run is not evidence that one would have
+    found something.
 
     Without *conn* the presenter is a pure function over the row's queryable
     columns and does NOT walk verdict tables (callers wanting the underlying
@@ -7813,18 +7849,6 @@ def _read_path_row(
         return None
     if not _row_verified_on_read(conn, d, verify_cache):
         return _VERIFY_EXCLUDED
-        # The caller asked for clean claims and this one is not. The SQL filter
-        # can only read t_invalid, which carries no trigger, so a real
-        # contradiction erased from that column reads as clean to every
-        # statement in this file. Replaying is per-row crypto and would be a
-        # scan-shaped cost if it ran in SQL, so it runs here instead, on the
-        # rows already being materialised toward the limit, and only when the
-        # answer can change what is served.
-        #
-        # Excluded the same way a row that fails verify-on-read is excluded:
-        # both are a tamper signal rather than ordinary filtering, and the
-        # caller counts them apart from a claim that never existed.
-        return _VERIFY_EXCLUDED
     if d["support_level"] == "ESTABLISHED":
         d["single_trust_domain"], d["trust_domain_root"] = trust_domain
     return d
@@ -7861,9 +7885,15 @@ def _project_verified_rows(
     :func:`_read_path_row` stays as the belt-and-braces check the SQL mirrors.
     Its disclosure is taken separately by :func:`_disclose_unverified`.
 
-    Returns ``(survivors, scanned)``. ``scanned`` is how many rows were pulled,
-    which the caller compares against the scan ceiling to tell "that is all
-    there is" from "the scan ran out before the survivors did".
+    Returns ``(survivors, scanned, contested)``. ``scanned`` is how many rows
+    were pulled, which the caller compares against the scan ceiling to tell
+    "that is all there is" from "the scan ran out before the survivors did".
+    ``contested`` counts rows whose contradiction record the signed verdicts do
+    not support, and it is counted whatever the caller asked for: a clean-only
+    caller has those rows withheld, an ordinary caller is served them and has to
+    be told. It is kept apart from the excluded count because a row that fails
+    to re-verify and a row whose contradiction record does not hold up are
+    different news.
     """
     if limit <= 0:
         # The loop appends a survivor before testing the stop condition, so it
@@ -7873,20 +7903,23 @@ def _project_verified_rows(
     reputation = _compute_validator_reputation(conn)
     enrolled_keyids = _enrolled_validator_keyids(conn)
     trust_domain = _trust_domain_disclosure(conn)
-    # Grouped once for the page, and only when the answer can change what is
-    # served. Per row this is a statement each to ask what one pass answers, and
-    # the ordinary graph has no verdicts at all, so every one of those
-    # statements returns nothing.
-    # Grouped once for the page whether or not the filter will act on the
+    # Grouped once for the page, whether or not the filter will act on the
     # answer, because the count is disclosed either way: a caller who did not
     # ask for clean claims still has to be told that one of the rows it was
     # handed carries a contradiction record the signed verdicts do not support.
+    # Per row this would be a statement each to ask what one pass answers, and
+    # the ordinary graph has no verdicts at all, so every one of those
+    # statements returns nothing. It cannot move into the SQL filter either:
+    # that filter can only read t_invalid, which carries no trigger, so a real
+    # contradiction erased from that column reads as clean to every statement
+    # in this file.
     contradictions = _gather_contradictions_by_claim(conn)
     contested = 0
     verify_cache: dict = {}
     results: list[dict] = []
     scanned = 0
     excluded = 0
+    withheld = 0
     for row in rows:
         scanned += 1
         d = _read_path_row(
@@ -7911,7 +7944,12 @@ def _project_verified_rows(
             if replayed is not None and replayed["signal"] in REPLAY_TAMPER_SIGNALS:
                 contested += 1
                 if clean_only:
-                    excluded += 1
+                    # Counted apart from the verify-on-read exclusions. Both
+                    # withhold a row, and they are different news: one row's
+                    # signature did not re-verify, this one's contradiction
+                    # record does not hold up. Folding them told the operator
+                    # the wrong thing about which claim to go and look at.
+                    withheld += 1
                     continue
             results.append(d)
             if len(results) >= limit:
@@ -7926,6 +7964,14 @@ def _project_verified_rows(
         )
         if on_verify_excluded is not None:
             on_verify_excluded(excluded)
+    if withheld:
+        import logging
+        logging.getLogger("mareforma").warning(
+            "Read withheld %s claim(s) whose contradiction record the signed "
+            "verdicts do not support; call `mareforma verify` on the affected "
+            "claim_id for the detail.",
+            withheld,
+        )
     return results, scanned, contested
 
 
@@ -7980,9 +8026,16 @@ def query_claims(
       - ``validator_reputation`` (int): for ESTABLISHED rows, the number
         of ESTABLISHED claims signed by the same validator (≥ 1). For
         other rows, ``0``.
-      - ``generator_enrolled`` (bool): True iff the claim's
-        ``signature_bundle`` is signed by an enrolled validator. False
-        for unsigned claims and for signatures by unenrolled keys.
+      - ``generator_enrolled`` (bool): True iff the key on the claim's
+        ``signature_bundle`` has a row in the ``validators`` table. False
+        for unsigned claims and for keys that table does not name.
+
+        Membership, not enrolment. The table has no INSERT guard, so one
+        INSERT carrying a real pubkey and a junk enrollment envelope makes a
+        key a member without its chain walking back to the root. The walk is
+        what ``validators.is_enrolled`` does and what verify-on-read and
+        ``mareforma verify`` apply; a caller wanting that answer asks them,
+        and this field is the cheap listing-side filter it was built as.
     """
     _require_non_negative_limit(limit, "query")
 

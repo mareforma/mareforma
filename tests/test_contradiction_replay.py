@@ -320,6 +320,83 @@ class TestAVerdictThatDoesNotCheckOut:
         assert ref["signal"] == "unverifiable-verdict"
 
 
+class TestTheReplayNeverTakesAReadDown:
+    """"Never raises" has to hold for more than a database error.
+
+    The replay compares two ``created_at`` values. That column has TEXT
+    affinity, so a value written around the write path keeps whatever type it
+    was given, and comparing bytes with a string raises ``TypeError``, which is
+    not a ``sqlite3.Error``. A guard refuses the edit and an attacker with file
+    access drops the guard, so the read has to survive what it then finds.
+    """
+
+    def _blob_the_created_at(self, root: Path, claim_id: str) -> None:
+        raw = sqlite3.connect(_db(root))
+        for name in [
+            r[0] for r in raw.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger'"
+            )
+        ]:
+            raw.execute(f"DROP TRIGGER IF EXISTS {name}")
+        raw.execute(
+            "UPDATE claims SET created_at = X'00' WHERE claim_id = ?",
+            (claim_id,),
+        )
+        raw.commit()
+        raw.close()
+
+    def test_a_blob_timestamp_degrades_instead_of_raising(
+        self, tmp_path: Path,
+    ) -> None:
+        key, older, _ = _contradicted_pair(tmp_path)
+        self._blob_the_created_at(tmp_path, older)
+        conn = open_db(tmp_path)
+        try:
+            status = refutation_status(dict(get_claim(conn, older)), conn)
+        finally:
+            conn.close()
+        assert status["state"], "the read returned nothing at all"
+
+    def test_a_replay_that_cannot_run_reads_as_tamper_not_as_silence(
+        self, tmp_path: Path,
+    ) -> None:
+        """Degrading quietly would be the column speaking as the evidence.
+
+        A replay that cannot run is a fact about the graph, not the absence of
+        one. Reporting nothing let every caller fall through to ``t_invalid``,
+        the column with no trigger that the replay exists to distrust.
+        """
+        key, older, _ = _contradicted_pair(tmp_path)
+        self._blob_the_created_at(tmp_path, older)
+        conn = open_db(tmp_path)
+        try:
+            status = refutation_status(dict(get_claim(conn, older)), conn)
+        finally:
+            conn.close()
+        assert status["signal"] == "replay-unavailable"
+        assert status["signal"] in REPLAY_TAMPER_SIGNALS
+        assert "could not be" in status["reason"], status
+
+    def test_a_listing_does_not_serve_a_suppressed_row_as_clean(
+        self, tmp_path: Path,
+    ) -> None:
+        """The surface where falling through was worst.
+
+        With the invalidation column cleared and the replay unable to run, a
+        caller asking for clean claims was handed the row the signed verdict
+        invalidates. The crash this replaced was at least visible.
+        """
+        key, older, newer = _contradicted_pair(tmp_path)
+        _raw(tmp_path, ("UPDATE claims SET t_invalid = NULL "
+                        "WHERE claim_id = ?", (older,)))
+        self._blob_the_created_at(tmp_path, newer)
+        with mareforma.open(tmp_path, key_path=key) as g:
+            served = [c["claim_id"] for c in g.query(refutation_filter="clean")]
+        assert older not in served, (
+            "a suppressed contradiction was served as a clean claim"
+        )
+
+
 class TestWithoutAConnection:
     def test_the_pure_form_still_answers_off_the_column(self) -> None:
         """Every existing caller passes a row and nothing else, and keeps its

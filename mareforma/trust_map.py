@@ -295,6 +295,24 @@ def _grounding_property(
     producer's process, so a producer determined enough to re-sign a claim can
     build one too, and the residual says so rather than implying otherwise.
     """
+    if attestation == "broken":
+        # Checked, and failed, about this claim. An attestation that is present
+        # and does not check out is the one attestation state that is evidence
+        # of tampering rather than of an older graph, so it moves the axis
+        # instead of being carried in prose beside a value it leaves alone.
+        # Ahead of the record parse because the axis it attests can itself be
+        # removed, and a reader must not be told the axis is merely absent when
+        # the attestation over it is broken.
+        return TrustProperty(
+            name="grounding",
+            tier=Tier.COMPUTED,
+            value=TAMPERED_VALUE,
+            residual=(
+                "an observer attestation is present and does not check out "
+                "against this claim, which is tampering with the attestation "
+                "rather than the absence of one"
+            ),
+        )
     record = parse_grounding_record(claim.get("observed_grounding"))
     if not isinstance(record, dict) or not record.get("grounding"):
         return TrustProperty(
@@ -863,6 +881,13 @@ def _recheck_inclusion(
     axis used to report both as "an inclusion record is stored". The proof was
     checked at restore and never again, which is to say never, for anyone whose
     graph was not restored.
+
+    Both callers gate on :func:`_has_rekor_inclusion`, which already answers
+    False for a graph with no inclusions table and for a claim with no record,
+    so the two guards below cannot fire from where this is called today. They
+    stay because they are what makes it safe to call without the gate, and a
+    read that answers a question about a missing table by raising is worse than
+    one that answers "nothing to check".
 
     Three answers, and the middle one is the point. With a pinned log key the
     proof either verifies end to end (Merkle path, the log's signed checkpoint,

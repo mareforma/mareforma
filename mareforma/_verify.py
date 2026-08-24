@@ -185,6 +185,19 @@ def classify_claim_verdict(
                 f"transparency-log inclusion record does not verify: {detail}"
             )
 
+    # An observer attestation that is stored and does not check out. It belongs
+    # with the problems for the same reason: checked, failed, and about this
+    # claim. The attestation is what separates a grounding axis an observer
+    # computed from one a restore rewrote, so a broken one is not the absence of
+    # an attestation and must not exit the way absence does.
+    from mareforma.db.core import grounding_attestation_state
+
+    if grounding_attestation_state(conn, target) == "broken":
+        problems.append(
+            "observer attestation is present and does not check out against "
+            "this claim"
+        )
+
     # The substrate this claim sits on, and it lands in `unchecked` rather than
     # `problems` on purpose. A dropped write guard or a planted second root is a
     # fact about the whole file, not about this claim, and it does not show the

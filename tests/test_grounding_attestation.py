@@ -464,6 +464,81 @@ class TestAnAttestationIsNotTransferable:
         assert _state(tmp_path, key, claim_id) == "broken"
 
 
+def _break_the_attestation(root: Path, claim_id: str) -> None:
+    """Leave the attestation in place and make its signature fail."""
+    raw = sqlite3.connect(root / ".mareforma" / "graph.db")
+    raw.execute("DROP TRIGGER IF EXISTS grounding_attestations_append_only")
+    raw.execute(
+        "UPDATE grounding_attestations SET signature = ? WHERE claim_id = ?",
+        (b"\x00" * 64, claim_id),
+    )
+    raw.commit()
+    raw.close()
+
+
+class TestABrokenAttestationIsTamper:
+    """Broken is not absent, and no read surface may treat it as either absent
+    or fine.
+
+    The state is distinguished from ``unattested`` because absence is the
+    ordinary condition of an older graph and of every declared verdict, while a
+    stored attestation that does not check out is evidence somebody edited it.
+    Carrying that only in the residual leaves the axis reading GROUNDED, the
+    colour gold and the exit code 0, which is a report nobody acts on.
+    """
+
+    def test_the_axis_reads_tampered(self, tmp_path: Path) -> None:
+        key, claim_id, _ = _observed_claim(tmp_path)
+        _break_the_attestation(tmp_path, claim_id)
+        from mareforma.trust_map import is_tamper_value
+
+        with mareforma.open(tmp_path, key_path=key) as g:
+            grounding = next(
+                p for p in g.trust_map(claim_id).properties
+                if p.name == "grounding"
+            )
+        assert is_tamper_value(grounding.value), (
+            f"grounding rendered {grounding.value} over a broken attestation"
+        )
+
+    def test_the_verdict_says_tampered_not_unverifiable(
+        self, tmp_path: Path,
+    ) -> None:
+        """The half a caller reads as an exit code, and it has to say which.
+
+        A tampered axis alone already lifts the verdict off ``verified``, but it
+        lands on ``unverifiable``, which means the check could not be made. This
+        check was made and it failed, and the two are the distinction the
+        attestation exists to draw. Asked with and without a map, because the
+        verdict must not differ by whether the caller wanted one.
+        """
+        from mareforma._verify import classify_claim_verdict
+        from mareforma.db.core import get_claim
+
+        key, claim_id, _ = _observed_claim(tmp_path)
+        _break_the_attestation(tmp_path, claim_id)
+        with mareforma.open(tmp_path, key_path=key) as g:
+            claim = dict(get_claim(g._conn, claim_id))
+            with_map = classify_claim_verdict(g._conn, claim, claim_id)
+            without = classify_claim_verdict(
+                g._conn, claim, claim_id, with_trust_map=False,
+            )
+        assert with_map.verdict == "tampered", with_map.verdict
+        assert without.verdict == "tampered", without.verdict
+
+    def test_an_honest_attestation_is_left_alone(self, tmp_path: Path) -> None:
+        """The premise. Without this the two above pass on a broken graph."""
+        from mareforma.trust_map import is_tamper_value
+
+        key, claim_id, _ = _observed_claim(tmp_path)
+        with mareforma.open(tmp_path, key_path=key) as g:
+            grounding = next(
+                p for p in g.trust_map(claim_id).properties
+                if p.name == "grounding"
+            )
+        assert not is_tamper_value(grounding.value)
+
+
 class TestTheGuards:
     @pytest.mark.parametrize("statement, marker", [
         ("DELETE FROM grounding_attestations", "no_delete"),

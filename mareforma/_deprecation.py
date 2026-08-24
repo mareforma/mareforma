@@ -65,10 +65,10 @@ def warn_refutation_status_without_conn(*, stacklevel: int = 4) -> None:
     """Warn that the row-only ``refutation_status`` cannot replay the verdicts.
 
     Four frames: this function, ``_emit``, ``refutation_status``, the caller.
-    At three the warning was attributed to ``core.py`` rather than to the code
-    that called it, and Python's default filter only shows a DeprecationWarning
-    attributed to ``__main__``, so it reached nobody. A deprecation nobody sees
-    is a removal with no notice, which is what the next release would have been.
+    Any fewer attributes the warning to ``core.py`` rather than to the code that
+    called it, and Python's default filter only shows a DeprecationWarning
+    attributed to ``__main__``, so a warning that stops short reaches nobody. A
+    deprecation nobody sees is a removal with no notice.
 
     The signature that takes a row and nothing else answers off ``t_invalid``,
     a column no trigger guards, so a caller on this path is told a

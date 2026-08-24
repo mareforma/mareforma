@@ -543,3 +543,4 @@ def test_an_operational_error_that_is_not_a_missing_table_is_not_swallowed(tmp_p
     tolerated = probe(sqlite3.OperationalError("no such table: project_policy"))
     assert tolerated.traffic_light != "error"
     assert tolerated.policy_unverified is False
+

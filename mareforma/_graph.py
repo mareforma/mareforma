@@ -846,6 +846,17 @@ class EpistemicGraph:
         That produces a signed envelope plus a contradiction verdict
         that restore can re-verify.
 
+        One consequence worth stating plainly, because the live path
+        looks stricter than it is. ``retracted`` is terminal here: both
+        this method and the ``retracted_is_terminal`` trigger refuse to
+        move a claim back out of it. ``claims.toml`` carries the column
+        as written and :func:`mareforma.db.restore.restore` replays it,
+        because there is no signature over it to check it against. So a
+        backup round trip performs the edit the live path refuses, and
+        the terminal rule is a rule about this process rather than a
+        property of the record. A retraction that has to survive an
+        untrusted file is the supersede pattern above.
+
         Concurrency
         -----------
         Two processes calling ``update_claim`` on the same claim are
