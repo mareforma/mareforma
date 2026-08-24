@@ -686,9 +686,18 @@ def schema_census_missing(conn: sqlite3.Connection) -> "tuple[str, ...]":
     seen: set[str] = set()
     for row in rows:
         try:
-            seen.update(json.loads(row[0]))
+            names = json.loads(row[0])
         except (ValueError, TypeError):
             continue
+        # A list of names, and nothing else. `update` iterates whatever it is
+        # given, so a stored JSON string became one reported guard per
+        # character and a stored object became one per key. The writer only
+        # ever stores a list, and since the census travels in the backup the
+        # value can also arrive from a file, so the reader checks rather than
+        # assumes.
+        if not isinstance(names, list):
+            continue
+        seen.update(n for n in names if isinstance(n, str))
     return tuple(sorted(seen))
 
 
@@ -8768,6 +8777,37 @@ def _backup_verdict_chain(conn: sqlite3.Connection, data: dict) -> None:
     }
 
 
+def _backup_schema_census(conn: sqlite3.Connection, data: dict) -> None:
+    """Add the write-guard census to the backup ``data`` dict.
+
+    The census is the graph's memory that a guard was found missing, and a
+    guard that came back is not a guard that was never gone: the rows it let
+    somebody delete while it was down are gone, and no later open can see that.
+    Leaving the census out of the backup made a round trip erase exactly that
+    memory, so a graph could be tampered with, backed up and restored, and read
+    clean on every surface that had just called it tampered.
+
+    It is observation rather than evidence, which is why it rides as its own
+    section and not as a claim: the file records that something was seen
+    missing, and the restored graph goes on saying so.
+
+    Emitted only when populated, the rule every optional section follows.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT observed_at, missing FROM schema_census "
+            "ORDER BY observed_at, missing"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return          # no census table on this schema: nothing observed
+    if not rows:
+        return
+    data["schema_census"] = {
+        str(n): {"observed_at": r["observed_at"], "missing": r["missing"]}
+        for n, r in enumerate(rows, start=1)
+    }
+
+
 # The line that separates the backup's body from its completeness table. The
 # digest below covers every byte before it, so both the writer and
 # :func:`verify_completeness_digest` locate the split on this exact string.
@@ -9137,6 +9177,7 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
         # see _format_artifact.
         _format_artifact(_backup_verdict_chain, conn, data)
         _format_artifact(_backup_grounding_attestations, conn, data)
+        _format_artifact(_backup_schema_census, conn, data)
 
         # Rotate the previous backup aside before overwriting it. graph.db is
         # authoritative, so the threat this addresses is not a torn write (the

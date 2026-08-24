@@ -16,6 +16,7 @@ is a residual somebody will later mistake for a guarantee.
 from __future__ import annotations
 
 import base64
+import warnings
 import sqlite3
 try:
     import tomllib          # 3.11+ stdlib
@@ -905,6 +906,72 @@ class TestTheBackupSections:
         edited = tmp_path / "edited.toml"
         edited.write_text(raw.replace("claim 0", "claim 0 tampered", 1))
         assert not verify_completeness_digest(edited)
+
+    def test_restore_says_so_when_the_file_does_not_add_up(
+        self, tmp_path: Path,
+    ) -> None:
+        """The table is only worth writing if a restore consults it.
+
+        Nothing did, so a backup that had lost rows rebuilt a shorter graph and
+        reported success, and afterwards a graph short a few claims looks
+        exactly like a complete one. Disclosed rather than refused: this is the
+        recovery path and an operator who edited the file on purpose still has
+        to be able to recover from it.
+        """
+        # Plain claims, nothing referring to them, so the row can go without
+        # tripping a foreign key on the way in: what is under test is the file
+        # disagreeing with itself, not the graph refusing a dangling reference.
+        key = _bootstrap_key(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=key) as g:
+            for i in range(3):
+                g.assert_claim(f"claim {i}", generated_by=f"run{i}")
+        raw = (tmp_path / "claims.toml").read_text(encoding="utf-8")
+
+        # One claim entry removed, the completeness table left saying otherwise.
+        doc = tomllib.loads(raw)
+        victim = sorted(doc["claims"])[0]
+        del doc["claims"][victim]
+        import tomli_w
+        body = tomli_w.dumps({k: v for k, v in doc.items() if k != "completeness"})
+        tail = tomli_w.dumps({"completeness": doc["completeness"]})
+
+        short = tmp_path / "recovered"
+        short.mkdir()
+        (short / "claims.toml").write_text(body + tail, encoding="utf-8")
+
+        with pytest.warns(UserWarning, match="disagrees with itself"):
+            restore(short)
+
+    def test_a_truncation_that_takes_the_table_is_not_detectable(
+        self, tmp_path: Path,
+    ) -> None:
+        """The boundary of the check above, pinned so nobody trusts it further.
+
+        ``[completeness]`` is the last thing written, so a real truncation takes
+        it. The count that would have caught the loss went with the bytes that
+        were lost, and a file with no table is also what every backup written
+        before the table existed looks like. This records that the recovery
+        proceeds and says nothing, which is the honest state of it, not a bug
+        waiting to be filed twice.
+        """
+        key = _bootstrap_key(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=key) as g:
+            for i in range(3):
+                g.assert_claim(f"claim {i}", generated_by=f"run{i}")
+        raw = (tmp_path / "claims.toml").read_text(encoding="utf-8")
+
+        short = tmp_path / "recovered"
+        short.mkdir()
+        (short / "claims.toml").write_text(
+            raw[: raw.rindex("[claims.")], encoding="utf-8",
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            report = restore(short)
+        assert report["claims_restored"] == 2
+        assert not [
+            w for w in caught if "disagrees with itself" in str(w.message)
+        ], "the check claimed a truncation it cannot see"
 
     def test_a_backup_with_no_table_does_not_read_as_verified(
         self, tmp_path: Path,

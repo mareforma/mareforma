@@ -120,6 +120,17 @@ def _graph_with_a_chain(root: Path) -> Path:
         g.record_contradiction_verdict(
             verdict_id="v1", member_claim_id=newer, other_claim_id=older,
         )
+
+    # A census entry, so the section that carries one is in the file an older
+    # reader is handed. Without a guard having gone missing the section is
+    # absent, and the compatibility question about it would go unasked.
+    import sqlite3
+    raw = sqlite3.connect(root / ".mareforma" / "graph.db")
+    raw.execute("DROP TRIGGER findings_no_delete")
+    raw.commit()
+    raw.close()
+    with mareforma.open(root, key_path=root_key) as g:
+        g.assert_claim("written after the guard went", generated_by="run3")
     return root_key
 
 
@@ -143,6 +154,7 @@ def test_the_new_table_and_sections_are_actually_there(tmp_path: Path) -> None:
     data = tomllib.loads((tmp_path / "claims.toml").read_text())
     assert "verdict_chain" in data
     assert "grounding_attestations" in data
+    assert "schema_census" in data
     assert "completeness" in data
 
 
@@ -166,7 +178,7 @@ def test_0312_opens_a_graph_this_code_wrote(tmp_path: Path) -> None:
         """,
         str(project),
     )
-    assert "claims 3" in out
+    assert "claims 4" in out
 
 
 def test_0312_restores_a_backup_this_code_wrote(tmp_path: Path) -> None:
@@ -192,4 +204,4 @@ def test_0312_restores_a_backup_this_code_wrote(tmp_path: Path) -> None:
         """,
         str(project),
     )
-    assert "restored 3" in out
+    assert "restored 4" in out

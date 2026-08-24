@@ -282,6 +282,7 @@ from .core import (
     _migrate_to_current,
     _backup_claims_toml,
     _backup_verdict_chain,
+    _backup_schema_census,
     _backup_grounding_attestations,
     _GROUNDING_ATTESTATION_FIELDS,
     _grounding_attestation_pae,
@@ -343,6 +344,8 @@ from .restore import (
     _verify_and_insert_project_policy,
     _replay_verdict_chain,
     _replay_grounding_attestations,
+    _replay_schema_census,
+    _disclose_a_file_that_disagrees_with_itself,
     _required_field,
     _verify_claim_signatures_on_restore,
 )

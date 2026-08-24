@@ -229,6 +229,85 @@ class TestTheCensusStoreCannotBeEmptied:
         finally:
             conn.close()
 
+    def test_the_report_survives_a_backup_and_restore(
+        self, tmp_path: Path,
+    ) -> None:
+        """A round trip must not be the thing that forgets.
+
+        The census is the one record a later open cannot rebuild: by then the
+        guards have healed, so a live re-derivation answers "nothing is missing"
+        on exactly the graph that was tampered with. Leaving it out of the
+        backup made tamper, back up, restore into a laundry: every surface that
+        had just called the graph tampered went quiet.
+        """
+        from mareforma.db.restore import restore
+
+        key = _bootstrap_key(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=key) as g:
+            g.assert_claim("a claim to recover", generated_by="run1")
+        _raw(tmp_path, "DROP TRIGGER findings_no_delete")
+        # Reopening records the drop and heals it. The write is what makes the
+        # backup rewrite, which is the file that now has to carry the record;
+        # a session that changes nothing leaves the older backup in place, and
+        # that one predates the tamper anyway.
+        with mareforma.open(tmp_path, key_path=key) as g:
+            g.assert_claim("written after the guard went", generated_by="run2")
+
+        conn = open_db(tmp_path)
+        try:
+            assert "findings_no_delete" in schema_census_missing(conn)
+        finally:
+            conn.close()
+
+        recovered = tmp_path / "recovered"
+        recovered.mkdir()
+        (recovered / "claims.toml").write_text(
+            (tmp_path / "claims.toml").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        restore(recovered)
+
+        conn = open_db(recovered)
+        try:
+            assert "findings_no_delete" in schema_census_missing(conn), (
+                "the restored graph forgot that a guard had been missing"
+            )
+        finally:
+            conn.close()
+
+    @pytest.mark.parametrize("stored", [
+        '"COMPROMISED"',      # a JSON string: update() walks it per character
+        '{"a": 1}',           # a JSON object: update() walks the keys
+        "[1, 2]",             # a list of non-strings
+        "17",                 # a bare number
+    ])
+    def test_a_hostile_census_row_names_no_guards(
+        self, tmp_path: Path, stored: str,
+    ) -> None:
+        """The reader takes a list of names, and checks that it got one.
+
+        ``set.update`` iterates whatever it is handed, so a stored JSON string
+        reported one guard per character and a stored object reported one per
+        key. The writer only ever stores a list, but the census travels in the
+        backup now, so the value can arrive from a file somebody wrote.
+        """
+        key = _bootstrap_key(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=key) as g:
+            g.assert_claim("a claim", generated_by="r1")
+        raw = sqlite3.connect(_db(tmp_path))
+        raw.execute(
+            "INSERT INTO schema_census(observed_at, missing) VALUES (?, ?)",
+            ("2026-01-01T00:00:00+00:00", stored),
+        )
+        raw.commit()
+        raw.close()
+
+        conn = open_db(tmp_path)
+        try:
+            assert schema_census_missing(conn) == ()
+        finally:
+            conn.close()
+
     def test_dropping_the_stores_own_guard_is_reported(
         self, tmp_path: Path,
     ) -> None:
