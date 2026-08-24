@@ -413,7 +413,7 @@ def _string_supports(supports: Any) -> list[str]:
 
 
 def _verified_replication_verdicts(
-    predicate: dict, verified_validators: dict,
+    predicate: dict, verified_validators: dict, asserters: dict,
 ) -> "dict[str, set]":
     """Replication verdicts that verify, grouped by the claim each names.
 
@@ -453,9 +453,17 @@ def _verified_replication_verdicts(
             )
         except Exception:
             continue
-        for cid in (v.get("member_claim_id"), v.get("other_claim_id")):
-            if cid:
-                by_claim.setdefault(cid, set()).add(v["verdict_id"])
+        named = [c for c in (v.get("member_claim_id"), v.get("other_claim_id"))
+                 if c]
+        # Entitlement, the question a signature cannot answer. The recording
+        # path, the live read path and restore all refuse a verdict issued by a
+        # key that signed the claim it names, and this is the artifact whose
+        # whole point is being checkable offline by somebody holding nothing
+        # else. Both keyids are already in the bundle, so it costs a lookup.
+        if any(issuer in asserters.get(cid, ()) for cid in named):
+            continue
+        for cid in named:
+            by_claim.setdefault(cid, set()).add(v["verdict_id"])
     return by_claim
 
 
@@ -515,6 +523,27 @@ def _verify_replicated_level(
         "issuer nor a shared ESTABLISHED anchor with a distinct-signer peer "
         "on a different artifact hash"
     )
+
+
+def _node_signers(node: dict) -> "set[str]":
+    """Every keyid that signed a node's own envelope.
+
+    The entitlement rule this feeds is ``_refuse_self_verdict``, which walks
+    every signature through ``_claim_signer_keyids`` so a planner, executor or
+    reviewer on a roles envelope cannot also issue a verdict on the claim they
+    signed. Reading only the first signature would hold the bundle to a
+    narrower rule than the graph it is a copy of.
+    """
+    try:
+        signatures = node["signatureBundle"]["signatures"]
+    except (KeyError, TypeError):
+        return set()
+    if not isinstance(signatures, list):
+        return set()
+    return {
+        sig["keyid"] for sig in signatures
+        if isinstance(sig, dict) and isinstance(sig.get("keyid"), str)
+    }
 
 
 def _node_asserter(node: dict) -> "str | None":
@@ -738,8 +767,22 @@ def verify_bundle(
         for sup in _string_supports(n.get("supports")):
             support_peers.setdefault(sup, set()).add(
                 (n_asserter, n.get("artifactHash")))
+    # Accumulated per claim rather than assigned, because two nodes can carry
+    # the same @id and a comprehension would let the later one replace what the
+    # earlier one said about who signed that claim, which is a way to hide a
+    # signer from the check below.
+    asserters: "dict[str, set[str]]" = {}
+    for n in nodes:
+        if not isinstance(n, dict):
+            continue
+        node_id = str(n.get("@id", ""))
+        if not node_id.startswith("mare:claim/"):
+            continue
+        asserters.setdefault(
+            node_id[len("mare:claim/"):], set()
+        ).update(_node_signers(n))
     verified_verdicts = _verified_replication_verdicts(
-        predicate, verified_validators,
+        predicate, verified_validators, asserters,
     )
     for node in nodes:
         node_id = node.get("@id", "")

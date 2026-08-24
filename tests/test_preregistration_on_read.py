@@ -219,6 +219,47 @@ class TestTheTermsOfTheRule:
         finally:
             conn.close()
 
+    def test_an_attestation_written_after_the_row_does_not_honor_it(
+        self, tmp_path: Path,
+    ) -> None:
+        """The attestation has to be the one that created the row.
+
+        A one-shot registers and executes in the same breath, so the timing term
+        passes on its own and the flag is the only thing left. Registering the
+        same prediction later supplies an attestation for that plan_id through
+        the public API with nothing tampered, and the flag then rides in through
+        a backup, which replays the column raw where the live path refuses the
+        same edit. ``register_plan`` commits its claim before the row, so a
+        genuine pre-registration never attests after its own registered_at.
+        """
+        from mareforma.trust._gate import GateCache, _preregistration_holds
+        from mareforma.db.core import open_db
+
+        prop = _prop()
+        key = _bootstrap_key(tmp_path, "k.key")
+        with mareforma.open(tmp_path, key_path=key) as g:
+            g.assert_finding(prop, _pred(), _est(), data_id="d1",
+                             generated_by="r1", grounding=_verdict(_CLAUDE))
+            assert g.proposition_status(prop.content_id())["post_hoc"] is True
+            # The same prediction, registered after the fact.
+            g.register_plan(prop, _pred())
+
+        conn = open_db(tmp_path)
+        try:
+            row = conn.execute(
+                "SELECT plan_id, registered_at FROM predictions "
+                "WHERE content_id = ?", (prop.content_id(),),
+            ).fetchone()
+            # The flag as a backup would carry it: raised, everything else as
+            # the one-shot wrote it.
+            planted = {"preregistered": 1,
+                       "plan_registered_at": row["registered_at"],
+                       "generated_by": "r1",
+                       "plan_id": row["plan_id"]}
+            assert _preregistration_holds(conn, planted, GateCache()) is False
+        finally:
+            conn.close()
+
     def test_the_flag_still_has_to_be_set(self, tmp_path: Path) -> None:
         from mareforma.trust._gate import GateCache, _preregistration_holds
 

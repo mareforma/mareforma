@@ -198,6 +198,26 @@ def get_plan_claim_id(conn: sqlite3.Connection, plan_id: str) -> Optional[str]:
     return row["claim_id"] if row is not None else None
 
 
+def plan_attestation_written_at(
+    conn: sqlite3.Connection, plan_id: str
+) -> Optional[str]:
+    """When the plan attestation for *plan_id* was written, or None.
+
+    ``register_plan`` commits the attestation claim before the structured rows,
+    so on a plan that was genuinely pre-registered this is at or before the
+    ``predictions`` row's ``registered_at``. An attestation written afterwards
+    is vouching for a row it did not create, which is the shape a one-shot plan
+    takes when somebody registers the same prediction later and then raises the
+    flag: every other term of the rule passes, because a one-shot registers and
+    executes in the same breath.
+    """
+    row = conn.execute(
+        "SELECT created_at FROM claims WHERE idempotency_key = ? LIMIT 1",
+        (f"plan:{plan_id}",),
+    ).fetchone()
+    return row["created_at"] if row is not None else None
+
+
 def register_plan(
     conn: sqlite3.Connection,
     content_id: str,

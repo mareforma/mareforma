@@ -180,8 +180,10 @@ from .core import (
     _refuse_llm_contradiction_issuer,
     _canonical_envelope,
     _refuse_self_verdict,
+    _claim_asserting_keyid,
     _claim_signer_keyids,
     _refuse_self_validation,
+    _issuer_was_entitled,
     _verify_evidence_seen,
     validate_claim,
     # DOI helpers.

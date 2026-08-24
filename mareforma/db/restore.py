@@ -37,6 +37,8 @@ from .core import (
     _refuse_llm_contradiction_issuer,
     _refuse_llm_validator,
     _refuse_self_validation,
+    _claim_asserting_keyid,
+    _claim_signer_keyids,
     _refuse_self_verdict,
     _extract_validation_signer_keyid,
     _extract_signature_bundle_keyid,
@@ -2309,11 +2311,26 @@ def _verify_claim_signatures_on_restore(
         # that fails them here could not have been promoted there. Seed
         # envelopes are exempt: a born-ESTABLISHED claim is attested by its
         # own asserter by design and never climbs the ladder.
-        if declared_type == _signing.PAYLOAD_TYPE_VALIDATION:
-            try:
-                _refuse_llm_validator(conn, val_keyid)
+        try:
+            # The llm ceiling applies whatever the envelope calls itself: the
+            # live seed path refuses an llm signer for the same reason
+            # validate_claim does, so keying the gate on the payloadType let a
+            # signer pick which rule it was under.
+            _refuse_llm_validator(conn, val_keyid)
+            if declared_type == _signing.PAYLOAD_TYPE_VALIDATION:
                 _refuse_self_validation(claim_id, sig_bundle_json, val_keyid)
-            except (LLMValidatorPromotionError, SelfValidationError) as exc:
+            elif sig_bundle_json and val_keyid != _claim_asserting_keyid(
+                sig_bundle_json
+            ):
+                # A seed is exempt from the self-validation rule because a
+                # born-ESTABLISHED claim is attested by its own asserter. That
+                # is the premise, so require it rather than assume it.
+                raise SelfValidationError(
+                    f"seed envelope on claim '{claim_id}' is signed by "
+                    f"{val_keyid[:12]}…, which signed no role on the claim; a "
+                    "seed is the asserter's own attestation"
+                )
+        except (LLMValidatorPromotionError, SelfValidationError) as exc:
                 raise RestoreError(
                     f"Claim {claim_id} validation envelope fails a promotion "
                     f"gate the live path enforces: {exc}",

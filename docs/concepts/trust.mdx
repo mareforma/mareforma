@@ -267,7 +267,11 @@ every other property without being confused for truth or independence.
 
 `mareforma verify <target>` is the audit receipt at the moment of the check. It
 re-verifies signatures, the grounding-to-citation binding, and the support
-level, then prints the trust map. A directory target is an export dir and a
+level, then prints the trust map. A signature says who signed; the level is held
+to who was entitled to back it, which is the same rule the write path applies.
+An issuer does not corroborate a claim it signed, and neither an `llm` validator
+nor a claim's own asserter carries it to ESTABLISHED, whatever the stored column
+says. A directory target is an export dir and a
 target that is not a path is a claim id resolved against the local project. A
 file is told apart by its DSSE `payloadType`, never by its name: a per-finding
 audit receipt and a signed audit-run record each reach their own verifier, and

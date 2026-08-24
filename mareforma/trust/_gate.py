@@ -39,6 +39,7 @@ from ._store import (
     compute_plan_id,
     estimate_from_row,
     get_plan_claim_id,
+    plan_attestation_written_at,
     run_first_execution,
     estimates_digest_from_rows,
 )
@@ -863,7 +864,14 @@ def _preregistration_holds(
         # A flag with no registration time behind it says when nothing.
         return False
     plan_id = row["plan_id"]
-    if not plan_id or get_plan_claim_id(conn, plan_id) is None:
+    # The attestation has to be the one that created this row, not one written
+    # for the same prediction afterwards. register_plan commits the claim before
+    # the structured rows, so a genuine pre-registration attests at or before its
+    # own registered_at. Without this the one-shot case is open: it registers and
+    # executes in the same breath, so the timing term below passes on its own,
+    # and a later register_plan supplies the attestation the flag needs.
+    attested_at = plan_attestation_written_at(conn, plan_id) if plan_id else None
+    if not plan_id or attested_at is None or attested_at > registered_at:
         return False
     run_token = row["generated_by"] or _DEFAULT_RUN_TOKEN
     first_exec = cache.resolve(

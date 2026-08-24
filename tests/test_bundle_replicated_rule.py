@@ -135,6 +135,104 @@ class TestTheVerdictPath:
         with pytest.raises(BundleVerificationError, match="REPLICATED"):
             verify_bundle(_resign(root_tmp, statement, pk), pk.public_key())
 
+    def test_a_verdict_from_the_claims_own_asserter_does_not_back_it(
+        self, tmp_path: Path,
+    ) -> None:
+        """One key asserting and corroborating is one key, not two.
+
+        The recording path, the live read path and restore all refuse a verdict
+        issued by a key that signed the claim it names. This is the artifact a
+        third party checks holding nothing else, so it has to refuse it too,
+        and both keyids travel in the bundle already.
+        """
+        import base64
+
+        from mareforma.db import _replication_verdict_pae
+
+        _, pk, cid = self._verdict_promoted(root_tmp := tmp_path)
+        asserter = _load_signer(root_tmp / "member.key")
+        statement = build_statement(root_tmp)
+        for v in statement["predicate"]["mare:replicationVerdicts"]:
+            record = {
+                "verdict_id": v["verdict_id"],
+                "cluster_id": v["cluster_id"],
+                "member_claim_id": v["member_claim_id"],
+                "other_claim_id": v["other_claim_id"],
+                "method": v["method"],
+                "confidence": v.get("confidence") or {},
+            }
+            v["issuer_keyid"] = _signing.public_key_id(asserter.public_key())
+            v["signature"] = base64.standard_b64encode(
+                asserter.sign(_replication_verdict_pae(record))
+            ).decode("ascii")
+        assert cid
+        with pytest.raises(BundleVerificationError, match="REPLICATED"):
+            verify_bundle(_resign(root_tmp, statement, pk), pk.public_key())
+
+    def test_a_verdict_from_a_later_signature_on_the_claim_does_not_back_it(
+        self, tmp_path: Path,
+    ) -> None:
+        """Every signature on the claim, not just the first.
+
+        A roles envelope carries the asserter first and the role actors after
+        it. The rule this mirrors, ``_refuse_self_verdict``, walks all of them,
+        so a reviewer on the claim cannot also corroborate it. Reading only
+        ``signatures[0]`` held the bundle to a narrower rule than the graph it
+        is a copy of.
+        """
+        import base64
+
+        from mareforma.db import _replication_verdict_pae
+
+        key_path, pk, cid = self._verdict_promoted(root_tmp := tmp_path)
+        # A third key: enrolled so its signature verifies inside the bundle,
+        # and NOT the claim's asserter, so signatures[0] does not name it.
+        reviewer_key = _bootstrap_key(root_tmp, "reviewer.key")
+        _enroll_key(root_tmp, key_path, reviewer_key, identity="reviewer")
+        reviewer = _load_signer(reviewer_key)
+        reviewer_keyid = _signing.public_key_id(reviewer.public_key())
+        statement = build_statement(root_tmp)
+        asserter_first = statement["predicate"]["@graph"]
+        assert any(
+            n.get("@id") == f"mare:claim/{cid}"
+            and n["signatureBundle"]["signatures"][0]["keyid"] != reviewer_keyid
+            for n in asserter_first
+        ), "premise: the reviewer must not already be the first signature"
+
+        # The reviewer signs the claim in a later role slot, and issues the
+        # verdict. Under a signatures[0]-only reading it is a stranger to the
+        # claim and the verdict stands.
+        for node in statement["predicate"]["@graph"]:
+            if node.get("@id") != f"mare:claim/{cid}":
+                continue
+            sigs = node["signatureBundle"]["signatures"]
+            if all(sig["keyid"] != reviewer_keyid for sig in sigs):
+                pae = _signing.dsse_pae(
+                    _signing.PAYLOAD_TYPE_CLAIM,
+                    base64.standard_b64decode(node["signatureBundle"]["payload"]),
+                )
+                sigs.append({
+                    "keyid": reviewer_keyid,
+                    "sig": base64.standard_b64encode(
+                        reviewer.sign(pae)
+                    ).decode("ascii"),
+                    "role": "reviewer",
+                })
+        for v in statement["predicate"]["mare:replicationVerdicts"]:
+            record = {
+                "verdict_id": v["verdict_id"], "cluster_id": v["cluster_id"],
+                "member_claim_id": v["member_claim_id"],
+                "other_claim_id": v["other_claim_id"],
+                "method": v["method"],
+                "confidence": v.get("confidence") or {},
+            }
+            v["issuer_keyid"] = reviewer_keyid
+            v["signature"] = base64.standard_b64encode(
+                reviewer.sign(_replication_verdict_pae(record))
+            ).decode("ascii")
+        with pytest.raises(BundleVerificationError, match="REPLICATED"):
+            verify_bundle(_resign(root_tmp, statement, pk), pk.public_key())
+
     def test_a_verdict_naming_another_claim_does_not_back_it(
         self, root_tmp: Path,
     ) -> None:

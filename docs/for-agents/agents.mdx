@@ -575,8 +575,11 @@ changes without an explicit pin.
 signed verdict is one of the two things that earns a `REPLICATED` level, and
 without them a bundle could not tell an honest promotion from an inflated one.
 Verification holds each against the same bar the graph applies: the issuer must
-be a chain-verified validator in this bundle and the signature must verify over
-the verdict's DSSE PAE. A verdict that fails backs nothing.
+be a chain-verified validator in this bundle, the signature must verify over the
+verdict's DSSE PAE, and the issuer must not be one of the signers of a claim the
+verdict names. A signature says who signed; the third condition is whether they
+were entitled to, and one key that both asserts a claim and corroborates it is
+one key rather than two. A verdict that fails any of the three backs nothing.
 
 **What a REPLICATED display is checked against.** The same rule the graph
 enforces, on either of its two paths: a replication verdict that verifies and

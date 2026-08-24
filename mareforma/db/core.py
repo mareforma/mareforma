@@ -3762,6 +3762,26 @@ def _refuse_self_verdict(
         )
 
 
+def _claim_asserting_keyid(claim_signature_bundle: "str | None") -> "str | None":
+    """The one keyid that asserted the claim, or None.
+
+    The FIRST signature on the envelope, which is the asserter's: a
+    ``claim-with-roles:v1`` envelope carries the role actors after it. Kept
+    apart from :func:`_claim_signer_keyids` because the two answer opposite
+    questions. That one asks who is disqualified from judging this claim, and a
+    wider answer is a safer one. This asks who is entitled to attest it, and a
+    wider answer is a hole: role signatures cover the same PAE bytes, the role
+    label is the asserter's own metadata, and the bundle can be rewritten from
+    non-NULL to non-NULL, so any enrolled key can append itself to the signer
+    set. A capability must not rest on a set that grows.
+
+    Read out of the envelope rather than off ``claims.asserter_keyid``: no
+    signature covers that column.
+    """
+    keyids = _claim_signer_keyids(claim_signature_bundle)
+    return keyids[0] if keyids else None
+
+
 def _claim_signer_keyids(claim_signature_bundle: str | None) -> list[str]:
     """Return every keyid that signed the claim envelope.
 
@@ -5282,6 +5302,44 @@ def _gather_verdicts_by_claim(
     return by_claim
 
 
+def _issuer_was_entitled(
+    conn: sqlite3.Connection,
+    issuer_keyid: str,
+    claims: "tuple[tuple[str, str], ...]",
+    *,
+    verdict_kind: str,
+    refuse_llm_issuer: bool = False,
+) -> bool:
+    """Whether *issuer_keyid* was entitled to issue this verdict.
+
+    A signature proves who signed. Entitlement is the separate question of
+    whether that signer was allowed to, and the recording path and
+    :mod:`mareforma.db.restore` both ask it: an issuer may not verdict a claim
+    whose envelope it signed any role on, and a contradiction, which invalidates
+    the older claim through the insert trigger, may not come from an llm-typed
+    validator. A read that verified the signature and skipped these served a
+    level the same graph refuses to restore, which is one file disagreeing with
+    itself about whether a claim is corroborated.
+
+    False rather than raising. Every caller is a read, and a read degrades
+    rather than crashes; the write path keeps the exceptions, where refusing is
+    the whole point.
+    """
+    try:
+        if refuse_llm_issuer:
+            _refuse_llm_contradiction_issuer(conn, issuer_keyid)
+        for claim_id, relation in claims:
+            if claim_id is None:
+                continue
+            _refuse_self_verdict(
+                conn, issuer_keyid, claim_id,
+                relation=relation, verdict_kind=verdict_kind,
+            )
+    except Exception:
+        return False
+    return True
+
+
 def _verdict_verifies(
     conn: sqlite3.Connection, cache: dict, v: sqlite3.Row,
 ) -> bool:
@@ -5319,7 +5377,12 @@ def _verdict_verifies(
         )
     except Exception:
         return False
-    return True
+    return _issuer_was_entitled(
+        conn, v["issuer_keyid"],
+        ((v["member_claim_id"], "member_claim_id"),
+         (v["other_claim_id"], "other_claim_id")),
+        verdict_kind="replication",
+    )
 
 
 # The corroboration peer probe, at module scope so tests/test_corroboration_
@@ -5797,6 +5860,40 @@ def _verify_validation_on_read(
                         base64.standard_b64decode(env["payload"])
                     )
                     ok = payload.get("claim_id") == row.get("claim_id")
+                    if ok:
+                        # The envelope is genuine, binds this claim, and comes
+                        # from an enrolled key. Whether that key was entitled to
+                        # promote is a separate question, and it is the one the
+                        # write path asks. Skipping it here served an
+                        # ESTABLISHED the same graph refuses to write.
+                        #
+                        # The llm ceiling applies whatever the envelope calls
+                        # itself, because the write path applies it to both: the
+                        # seed path refuses an llm signer in as many words, so
+                        # that an llm validator cannot route around the
+                        # ESTABLISHED ceiling by seeding instead of validating.
+                        #
+                        # The self-validation rule is where the two types differ,
+                        # and the difference is not an exemption to assume. A
+                        # born-ESTABLISHED claim is attested by its own asserter,
+                        # so for a seed that is the thing to REQUIRE. The signer
+                        # picks the payloadType, and taking the word for it let
+                        # any enrolled key promote any claim by calling its
+                        # envelope a seed.
+                        try:
+                            _refuse_llm_validator(conn, keyid)
+                            if declared == _signing.PAYLOAD_TYPE_VALIDATION:
+                                _refuse_self_validation(
+                                    row.get("claim_id"),
+                                    row.get("signature_bundle"),
+                                    keyid,
+                                )
+                            elif row.get("signature_bundle") and keyid \
+                                    != _claim_asserting_keyid(
+                                        row["signature_bundle"]):
+                                ok = False
+                        except Exception:
+                            ok = False
             except Exception:
                 ok = False
         # No row, or a row whose chain does not walk back to the root -> the
@@ -7235,7 +7332,12 @@ def _contradiction_verdict_verifies(
         )
     except Exception:
         return False
-    return True
+    return _issuer_was_entitled(
+        conn, v["issuer_keyid"],
+        ((v["member_claim_id"], "member_claim_id"),
+         (v["other_claim_id"], "other_claim_id")),
+        verdict_kind="contradiction", refuse_llm_issuer=True,
+    )
 
 
 def _verdict_invalidates(
