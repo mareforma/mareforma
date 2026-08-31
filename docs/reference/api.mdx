@@ -480,7 +480,41 @@ graph.refutation_status(claim_id)
 # {"state": "clean", "reason": "no refutation signal on this claim", "signal": "none"}
 ```
 
-**Returns** `dict` with keys `state`, `reason`, `signal`. `state` is `clean` | `contradicted` | `contested` | `retracted`. `signal` names how strong the evidence behind that state is: `signed-verdict` for a contradiction verdict an enrolled validator signed, `editorial` for an unsigned status flip, `none` when there is no signal at all. A `contested` state reached editorially and one reached by signed verdict read the same in `state` and differ only here.
+**Returns** `dict` with keys `state`, `reason`, `signal`. `state` is `clean` | `contradicted` | `contested` | `retracted`. `signal` names how strong the evidence behind that state is. A `contested` state reached editorially and one reached by signed verdict read the same in `state` and differ only here.
+
+| `signal` | What it means |
+|---|---|
+| `signed-verdict` | The invalidation column is set and a contradiction verdict that verifies backs it. The only reading that survives a hostile writer. |
+| `invalidation-recorded` | The column is set and nothing replayed it. |
+| `editorial` | A status flag, which is an assertion by the asserter. |
+| `none` | Nothing to report. |
+| `unbacked-invalidation` | The column is set and no verifying verdict names this claim. Somebody wrote the column. |
+| `suppressed-verdict` | A verifying verdict invalidates this claim and the column is clear. Somebody erased it from every read surface. |
+| `unverifiable-verdict` | Verdicts naming this claim exist and do not check out. Planted rows, not weak evidence. |
+| `replay-unavailable` | The replay could not run, so nothing signed stands behind the column either way. |
+
+The last four are `REPLAY_TAMPER_SIGNALS`: the column and the signed evidence
+disagree. For the first three of those the state stays `contradicted` whichever
+way the disagreement runs, because handing back a suppressed claim as clean
+finishes the job for whoever wrote the column, and leaving a claim clean
+because the column is clear finishes it for whoever cleared it.
+`replay-unavailable` follows the column instead, since a replay that did not
+run is not evidence that one would have found something.
+
+`mareforma.replay_contradictions(conn, claim_id)` is the replay itself, for a
+caller who wants the verdicts rather than the verdict. It fetches every
+contradiction verdict naming the claim on either side and holds each against
+its issuer: enrolled validator, signature verifying over the DSSE PAE rebuilt
+from the stored columns, the same bar the recording path applies. A verdict
+that fails is not weaker evidence, it is a row somebody planted, and it is
+reported rather than skipped.
+
+The graph-bound method replays the verdicts. The module-level
+`mareforma.refutation_status(row)` reads the column and warns, because
+`t_invalid` carries no write guard: one `UPDATE` fabricates a contradiction and
+one erases a real one. Pass a connection as its second argument, or use
+`graph.refutation_status(claim_id)`, to get an answer checked against signed
+material. The row-only form is deprecated and removed in a future release.
 
 **Raises** `ClaimNotFoundError` if the claim does not exist.
 
@@ -640,6 +674,30 @@ A PRELIMINARY claim whose generator key is not in the validators table is droppe
 The count is taken only when a read comes back short, since a full page already says `has_more`. It is bounded by its own fixed 5,000-row scan ceiling rather than the read's (which scales with `limit`), so the disclosed number does not move with the page size you asked for, and a count that stopped at the ceiling is reported as a floor. The MCP `query_claims` and `search_claims` tools report the per-call number as `unverified_excluded`, and add `unverified_excluded_is_at_least: true` when the count stopped at its ceiling. The same event is appended to `.mareforma/health.jsonl` as `read_unverified_excluded` with outcome `degraded`, under the same rate limit as `read_verify_excluded`.
 
 **Returns** `int`, reset to zero on every open.
+
+---
+
+### Contested rows a read served
+
+There is no counter property for this one, because these rows are not held
+back. A claim whose `t_invalid` column disagrees with the signed contradiction
+verdicts is still returned by `query()` and `search()` unless you asked for the
+clean filter, so the disclosure goes to the `mareforma` logger and to
+`.mareforma/health.jsonl` rather than to a count of what you did not get.
+
+Two warnings, and they are different news. `Read withheld N claim(s) whose
+contradiction record the signed verdicts do not support` fires when the clean
+filter dropped a row. `Read served N claim(s) whose contradiction record the
+signed verdicts contradict` fires for the other direction, where a real
+invalidation was cleared and the row passed the filter and reached you looking
+ordinary. The second is the one worth acting on: `t_invalid` carries no write
+guard, so one `UPDATE` takes a contradiction off every listing.
+
+Served rows are appended to `.mareforma/health.jsonl` as
+`read_contested_served` with outcome `degraded`, under the same rate limit as
+`read_verify_excluded`. They are counted apart from the exclusion counters
+above on purpose: those rows are missing from your list, these were handed to
+you. Name the affected claims with `mareforma verify`.
 
 ---
 
@@ -1454,6 +1512,7 @@ caller branches on a value instead of matching prose.
 | `OracleInfluence` | the verdict: `INFLUENCED`, `NOT_INFLUENCED`, `UNDECIDABLE`, `NOT_TESTED` |
 | `NotTestedReason` | why no verdict was produced: `unsupported-shape`, `null-construction-failed`, `target-failed`, `crashed-under-null`, `unreducible-value`, `non-finite-value` |
 | `NullOutcome` | how one null was classified: `MOVED`, `AMBIGUOUS`, `BELOW_DOMAIN_FLOOR`, `FLAT` |
+| `QuantityClass` | what kind of quantity the finding reports: `CONTENT_DEPENDENT` (the default), `LENGTH_INVARIANT`, `DESIGN_FIXED` |
 | `Scramble` / `ScrambleFamily` | one null, and the family that will run plus the ones the input ruled out |
 | `scramble_family(x)` | build that family from a value's shape, or `None` when no family fits |
 | `THREAT_MODEL_STATEMENT` | the standing bound every verdict is made under |
@@ -1470,6 +1529,82 @@ The derived family differs by shape, and the names appear in `scramble_names`,
 
 A null identical to the base cannot perturb anything, so it is dropped and named
 in `dropped_nulls` rather than run.
+
+Declaring a quantity class only ever turns a hollow verdict into an undecidable
+one, so a target cannot buy itself a clean read by mislabelling what it
+reports. Every null in the sequence and mapping families returns a container of
+the same length, so a quantity determined by length alone comes out flat under
+all of them by construction. A reported sample size, a cell count or a
+degrees-of-freedom figure is unmoved for a reason that has nothing to do with
+the pipeline, and reading that as `NOT_INFLUENCED` turns the most common
+integers in any write-up into an accusation. `LENGTH_INVARIANT` and
+`DESIGN_FIXED` route those to `UNDECIDABLE` instead.
+
+### `provenance_diff(reported, released) -> ProvenanceReport`
+
+The second detector, and it asks a cheaper question than the oracle: does the
+number in the write-up appear in the outputs the work released. It runs
+nothing, opens nothing, and needs no key, so it reaches targets the oracle
+declines. The oracle needs a target that re-runs cheaply and near
+deterministically; most work is not that.
+
+```python
+from mareforma.observe import ReportedValue, ReleasedValue, provenance_diff
+
+report = provenance_diff(
+    reported=[ReportedValue(slot="auc", value=0.91, as_written="0.91", where="abstract")],
+    released=[ReleasedValue(slot="auc", value=0.9104, source="results.csv")],
+)
+report.findings[0].verdict   # NumericProvenance.TRACEABLE
+```
+
+Both sets are the caller's. Pulling numbers out of a write-up and collecting
+the outputs of a run differ per corpus, and building either one in would fit
+the detector to one corpus and no other.
+
+**Returns** a `ProvenanceReport` with `findings`, `inconsistent_slots` and
+`released_slots`. Each `ProvenanceFinding` carries the `reported` value, a
+`verdict`, a `reason`, and the `matched_sources` it was found in.
+
+| `NumericProvenance` | What it means |
+|---|---|
+| `TRACEABLE` | A released output for that slot carries this value, at the precision it was written to. |
+| `UNTRACEABLE` | Nothing released covers that slot. A gap in what was handed in, not an accusation. |
+| `CONTRADICTED` | The outputs cover the slot and none carry the value, or a stated direction of change disagrees with the numbers it is derived from. |
+
+`inconsistent_slots` is the check no per-number verdict can make. When one
+quantity is stated more than once with values that cannot all be right, each
+may trace to some run on its own while the write-up contradicts itself, so it
+is reported per slot rather than folded into the per-number verdicts.
+Restating a rounded value is not a conflict, so the comparison uses the coarser
+of the two precisions.
+
+What a `TRACEABLE` number is not: evidence the run was correct, that the output
+came from the pipeline described, or that the right output was selected. It
+appears in the outputs supplied, and the report says only that.
+
+### `cross_tabulate(influence, provenance) -> CrossTab`
+
+Place one finding on both detectors at once. Neither number means much alone: a
+hollow rate cannot tell a finding that ignores its data from one whose data was
+never in the outputs, and a provenance rate cannot tell a number that is merely
+absent from one that nothing computed. The two middle cells exist only because
+both arms ran on the same finding.
+
+| `CrossTab` | Influence arm | Provenance arm |
+|---|---|---|
+| `AGREE` | depends on its data | the number is there |
+| `AGREE_ABSENT` | no dependence | no coverage |
+| `TENSION` | the data matters | the number is not in the outputs |
+| `CONSTRUCT_DIFFERENCE` | no dependence | the number is there. The cited-but-hollow case |
+| `CONVERGENT_FAILURE` | no dependence | the outputs contradict the number. The worst cell |
+| `OBSERVER_BLIND` | the oracle could not see the target | any |
+| `INCONCLUSIVE` | either arm declined to call it | |
+
+Pass `None` for either arm when that detector did not run. Both arms accept
+their enum or its string form, and an unrecognised token raises rather than
+landing the finding in a cell it does not belong in. On real statistics
+`INCONCLUSIVE` is the modal answer, not a rare edge.
 
 ### `mareforma.selfcheck`
 

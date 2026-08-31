@@ -393,6 +393,17 @@ transitive falsification. When an enrolled validator signs a
 identical timestamps). Default `query()` excludes invalidated claims;
 `include_invalidated=True` returns the full audit set.
 
+`t_invalid` carries no write guard, so the read path does not take it at
+its word. One `UPDATE` fabricates a contradiction with no verdict behind
+it, and one erases a real one from every listing. Reads replay the signed
+verdicts in `contradiction_verdicts` instead: enrolled issuer, signature
+verifying over the DSSE PAE rebuilt from the stored columns, the same bar
+the recording path applies. Where the column and the evidence disagree the
+read discloses it and never silently corrects it, because handing a
+suppressed claim back as clean finishes the job for whoever wrote the
+column. A verdict that exists and does not verify is a planted row, not an
+absent verdict, and is reported as tamper.
+
 What contradiction does **not** do:
 - It does not propagate downstream. Claims that cited the
   now-invalidated one via `supports[]` are unaffected.

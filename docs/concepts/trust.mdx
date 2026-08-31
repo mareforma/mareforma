@@ -27,8 +27,19 @@ pairwise-distinct (model, data, signer) checks behind a finding. Two checks on
 the same model are one line of evidence, not two, so the count holds until a
 genuinely different model, or a human check, raises it. `mareforma map <claim>`
 reports the number and marks it `UNVERIFIABLE` when the model lineage is too soft
-to tell distinct checks apart, or when every validator traces to a single trust
-root. Read the number, not the label: `REPLICATED` and `ESTABLISHED` resolve
+to tell distinct checks apart. When every validator traces to a single trust
+root the number still reports, with that single root named on it: one operator
+could have minted every key, so the count rests on distinct model or human
+lines inside one trust domain, not on independence across operators.
+
+The axis reads `TAMPERED` in one case. More than one self-signed root is
+enrolled, which no code path creates. The chain walk refuses every keyid in the
+table the moment a second one exists, so every enrolment-dependent count was
+assembled from checks that all answered false. The discarded number moves to
+the residual for forensics rather than being offered as the value, because a
+number computed on a broken substrate is worse than no number.
+
+Read the number, not the label: `REPLICATED` and `ESTABLISHED` resolve
 this release as deprecated one-release aliases.
 
 ## Support levels
