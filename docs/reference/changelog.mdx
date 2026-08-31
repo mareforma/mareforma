@@ -7,6 +7,186 @@ The authoritative changelog lives in [CHANGELOG.md](https://github.com/mareforma
 This page mirrors it section for section from v0.3.1 on. v0.3.0 and the
 0.2.x line are summarized here; read CHANGELOG.md for their full entries.
 
+## v0.3.14 - 2026-09-08
+
+Reads stop taking the database's word for things nothing signs. A claim's
+contradiction state, its pre-registration flag and its transparency-log proof
+were all read straight off columns that no write guard protects, so one `UPDATE`
+could fabricate or erase any of them and every read surface would repeat the
+edit as though it were the evidence. Those three answers are now re-derived from
+signed material on the read path, and where the column and the evidence
+disagree the read says so rather than quietly picking one.
+
+Nothing here changes a column or the schema version, so the last published
+release still opens a graph this one wrote and still restores its backup.
+
+### Added
+
+- **A second detector, for work the causal oracle cannot reach.**
+  `provenance_diff(reported, released)` asks whether the number in a write-up
+  appears in the outputs the work released. It runs nothing, opens nothing and
+  needs no key, so it reaches targets the oracle declines for needing a cheap,
+  near-deterministic re-run. Three verdicts per number: `TRACEABLE`,
+  `UNTRACEABLE` (a gap in what was handed in, not an accusation) and
+  `CONTRADICTED`. `inconsistent_slots` catches the case no per-number verdict
+  can, where one quantity is stated more than once with values that cannot all
+  be right.
+- **`cross_tabulate(influence, provenance)`.** Places one finding on both
+  detectors at once, because neither number means much alone. The cell worth
+  the machinery is `CONSTRUCT_DIFFERENCE`: the number is in the outputs and the
+  finding does not depend on the data.
+- **`quantity_class=` on `perturbation_oracle`.** Every null holds the input's
+  length, so a reported sample size or cell count comes out flat under all of
+  them for a reason that has nothing to do with the pipeline. Undeclared, that
+  read as the verdict a silent fallback earns. `LENGTH_INVARIANT` and
+  `DESIGN_FIXED` route those to `UNDECIDABLE` instead. Declaring a class only
+  ever turns a hollow verdict into an undecidable one, so a target cannot buy a
+  clean read by mislabelling itself.
+- **A write-guard census.** A graph carries 42 triggers, and most of a
+  dropped one is repaired before the open returns, with nothing saying it had
+  gone while the rows it let someone delete stay gone. The census runs ahead of
+  every repair and records what was absent. `schema_census_missing()` returns
+  the union of every observation: a guard that came back is not a guard that was
+  never gone.
+- **A signed chain over the verdict set.** Each contradiction and replication
+  verdict now records the tip of the set behind it, signed by its own issuer.
+  Deleting a verdict's row from a backup used to leave a file that restored
+  clean and disagreed with nothing. What a clean chain rules out, and no more:
+  no verdict was taken out of the middle by anyone other than the issuers of
+  the links that follow it.
+- **A completeness witness in `claims.toml`.** The backup records a row count
+  per section and a digest over its body, and restore reads them. A file cut in
+  half used to restore short and report success. The digest is not a signature
+  and is not described as one: anyone editing the file recomputes it. It makes
+  truncation and casual editing visible. Three things it does not reach on its
+  own, each now checked beside it. The backup stamps which format wrote it, on
+  the first line, so a reader can tell a file that never carried a witness from
+  one whose witness was taken out, and so a file cut short still says what it
+  owed. Without the stamp the two are the same file, because a healthy project
+  writes no other new section: each is written only when it has rows. The digest
+  covers the bytes above the table, so a section appended below it was outside
+  both the digest and the row counts; restore now reports anything written
+  there. And the counts sit below the digest boundary, so they could be lifted
+  out while the digest still reproduced; a stamped file that carries none is now
+  reported too. Older releases reach named sections and walk past the stamp.
+- **Grounding attestations travel in the backup.** The write path refuses to
+  take the observed grounding axis on the producer's word, but restore never
+  passed through that check, so a neutralised record could be exported, edited,
+  re-signed and restored as `GROUNDED`. That buys parity, not prevention: the
+  observer runs inside the producer's process and the producer holds the key.
+  The trust map says which state a claim is in.
+- **A migration runner.** One transaction per step, so a failure anywhere leaves
+  the graph at its previous version with its rows, guards and chain untouched.
+  A full table rebuild takes **0.51 s on a 50,000-claim graph**, which matters
+  because it holds an exclusive lock and reports no progress. The registry is
+  empty and the schema version does not move in this release: a migration is the
+  one change that cannot be taken back, so the machinery lands and is proven a
+  release before anything depends on it.
+
+### Changed
+
+- **Two self-signed trust roots now read `TAMPERED` on the independence axis,
+  where they read `MULTI_ROOT` before.** No code path enrols a second root, and
+  the chain walk refuses every keyid in the table once one exists, so every
+  count on that axis was assembled from checks that all answered false. The old
+  value moved the axis *up*, from the single-root disclosure to a convergence
+  prior. An axis that improves when the substrate breaks is worse than no axis.
+  The discarded count moves to the residual for forensics.
+- **Contradiction state is replayed, not read.** `refutation_status` takes an
+  optional connection and replays the signed verdicts against their issuers when
+  it has one. Three ways the column and the evidence can disagree are each named
+  in `REPLAY_TAMPER_SIGNALS`, and a fourth reports that the replay itself could
+  not run. The state stays `contradicted` through all of them: handing a claim
+  back as clean because its invalidation is unbacked finishes the job for
+  whoever wrote the column.
+- **An enumerating read costs more, and small pages pay the most.** The verdict
+  index behind the disclosure is gathered once per page, whether or not the
+  clean filter will act on it, because the count is disclosed either way. On the
+  300-claim graph the committed read-path baseline measures, `query(limit=20)`
+  goes from 0.55 ms to 1.38 ms while `query(limit=200)` goes from 5.13 ms to
+  4.35 ms: the fixed per-page cost dominates a short page, and a long one
+  amortises it and wins back the table scan `idx_contradiction_other` removed.
+  Per-row signature verification is paid only for rows that carry a
+  contradiction record.
+- **Reads disclose contested rows in both directions.** A row the clean filter
+  withheld and a row it served both reach the caller as a warning, and served
+  rows are appended to `.mareforma/health.jsonl` as `read_contested_served`.
+  Being handed a row the signed verdicts call contradicted is the direction that
+  reads as a clean answer, so it is the one worth saying out loud.
+- **Pre-registration is re-derived on read.** `post_hoc` came straight off the
+  `preregistered` column, which no signature covers. A plan now counts as
+  pre-registered only when a signed plan attestation exists for it and it was
+  registered before its run first executed. Flipping the column is no longer
+  enough.
+- **Stored inclusion proofs are re-verified on read**, when the caller supplied
+  a log key at `open()`. The axis reported that a record was stored; the row
+  carrying a junk proof looked exactly like one that witnessed something. A
+  verifying proof costs 0.3 ms, and only a claim carrying an inclusion record
+  pays anything.
+- **The word "verified" is reserved for a key the caller brought.** A proof
+  checked against the key this project pinned on first use now reads as present
+  and unchecked, because checking a record against a key the graph itself
+  vouches for asks the record to confirm itself. The residual still says what
+  was checked and against which key.
+- **A signature is no longer enough to back a level.** The read path asked only
+  whether an issuer was enrolled and whether the signature verified, so a
+  verdict written straight through SQL was served as the corroboration a level
+  rests on. It now asks the entitlement questions the write path and restore
+  already ask: an issuer does not corroborate a claim it signed, and neither an
+  `llm` validator nor a claim's own asserter carries one to `ESTABLISHED`.
+- **Offline bundles check `REPLICATED` against the rule the graph enforces.**
+  The verifier asked whether two distinct asserters shared any upstream, which
+  is both weaker and differently shaped than the graph's rule. It also rejected
+  the signed-verdict path outright, so mareforma produced bundles it refused to
+  verify on a graph nobody had touched.
+- **All 42 of the schema's triggers are reconciled on every open**, where 17
+  were. A trigger
+  created only on a fresh database could be dropped and stay dropped. The
+  reconciled set is now derived from the expected set, so a guard cannot be
+  added to the schema and left out.
+- **A tamper report looks like one in both views of a map.** Every tamper state
+  is `COMPUTED`, so each printed its badge in the same green a healthy computed
+  axis gets: the word said `TAMPERED` and the colour said fine.
+- **A graph this build cannot read is no longer met with "delete graph.db".**
+  That advice destroyed exactly what the graph exists to protect, over a fault
+  that changed nothing. The message names the version and tells nobody to delete
+  anything.
+
+### Fixed
+
+- **`status` no longer reads green over a graph every other surface calls
+  tampered.** It reads the same three whole-file signals the trust map and the
+  verdict already read.
+- **A present observer attestation that does not check out now moves the axis
+  and the verdict.** It is the one attestation state that is evidence of
+  tampering rather than of an older graph, and it reached no verdict and no
+  colour, with the news carried in a clause of a residual.
+- **A withheld contested row is no longer counted as a verify-on-read
+  exclusion**, which sent operators looking for a signature problem that was not
+  there.
+- **The contradiction replay degrades instead of raising.** `created_at` has
+  TEXT affinity, so a value written around the write path keeps whatever type it
+  was given, and comparing bytes with a string raises `TypeError`, which is not
+  a `sqlite3.Error` and not what "never raises" promised.
+- **Building the sdist no longer leaves a copy of the package inside the
+  package.** A suite run ended with build output sitting in the source tree,
+  where one add-everything would commit it.
+
+### For contributors
+
+- A read-path baseline recorder lands at `tests/test_read_path_baseline.py`
+  with a committed snapshot. It prints the per-shape delta against the snapshot
+  and does not fail on a slow machine.
+- `idx_contradiction_other` gives the second arm of the contradiction lookup its
+  own index. The planner answered `SCAN contradiction_verdicts` on every clean
+  read; the plan is now a two-index union, flat at 0.0030 ms from ten verdicts
+  to four hundred.
+- The provenance detector was run over four released AI-scientist papers under a
+  pre-registered protocol, against a corpus pinned by digest. It reports four
+  contradicted numbers on a covered denominator of 106, with 9 of 115 reported
+  numbers unreachable by the extraction. Those four are one paper's defect. No
+  prevalence claim of any kind follows from a corpus of four.
+
 ## v0.3.13 - 2026-08-11
 
 The influence oracle now picks its own nulls. Hand it the perturbation yourself

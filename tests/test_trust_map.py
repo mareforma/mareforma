@@ -106,10 +106,9 @@ _SHAPE_BY_VERSION = {
         # COMPUTED / TAMPERED for a planted root or for a write guard the census
         # found missing on open, and keeps the old disclosure otherwise.
         #
-        # The stamp itself still says v0.3.13, because TRUST_MAP_VERSION is
-        # pinned to __version__ and the package version bumps at ship, not in
-        # the build. This entry is waiting for that bump; the live-version guard
-        # keeps passing against the v0.3.13 key until then.
+        # TRUST_MAP_VERSION is pinned to __version__ and the builder fails
+        # closed when the two disagree, so the stamp moved with the package
+        # version at ship and the live-version guard now reads this key.
         "independence_numeric": True,
     },
 }
