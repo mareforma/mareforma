@@ -609,10 +609,14 @@ def _record_schema_census(conn: sqlite3.Connection) -> "tuple[str, ...]":
     of the seen set does not lower what is expected of a table that is still
     present, and the store's own guards refuse the delete anyway.
 
-    What it does not close, and no single-file scheme can: dropping the seen
-    store and the census along with the guarded table. All three are then
-    rebuilt empty on the same open, the guard is expected by neither route, and
-    nothing is recorded. The record lives in the file the attacker is holding.
+    What it does not close, and no single-file scheme can: the census table
+    itself is droppable. ``DROP TABLE schema_census`` takes its own guards with
+    it, the additive script rebuilds both empty on the next open, and every
+    observation ever recorded is gone with the seen store and the guarded table
+    untouched. That is cheaper than it was once described here, which said all
+    three had to go; one does. The union over every record defends against a
+    later open burying an earlier one, and not against the store being
+    replaced. The record lives in the file the attacker is holding.
     What raises the cost is the second copy: the census rides in the backup, so
     a graph emptied this way disagrees with a claims.toml the attacker has to
     find and edit too.
@@ -637,10 +641,21 @@ def _record_schema_census(conn: sqlite3.Connection) -> "tuple[str, ...]":
     # emptied the whole report that way, dropping the two store guards to get
     # past them and deleting the rows behind.
     live = conn.execute(
-        "SELECT type, name FROM sqlite_master WHERE type IN ('table', 'trigger')"
+        "SELECT type, name, sql FROM sqlite_master "
+        "WHERE type IN ('table', 'trigger')"
     ).fetchall()
-    tables = {name for kind, name in live if kind == "table"}
-    triggers = {name for kind, name in live if kind == "trigger"}
+    tables = {name for kind, name, _ in live if kind == "table"}
+    # Present AND intact. A guard whose body has been replaced by a no-op is
+    # not a guard, and comparing names alone reported it as healthy: the
+    # reconciler further down this same open then repairs the text silently, so
+    # the tamper healed with nothing written down, which is the one thing this
+    # function exists to prevent. The comparison is the reconciler's own, so
+    # the two cannot disagree about what a guard is.
+    _wanted = dict(_MANAGED_TRIGGERS)
+    triggers = {
+        name for kind, name, sql in live
+        if kind == "trigger" and (name not in _wanted or sql == _wanted[name])
+    }
     seen = _guards_seen(conn)
     expected = {
         name for name, table in _EXPECTED_TRIGGER_TABLES.items()
@@ -966,6 +981,18 @@ def open_db(root: Path) -> sqlite3.Connection:
         conn.execute("PRAGMA foreign_keys = ON")
 
         version = conn.execute("PRAGMA user_version").fetchone()[0]
+
+        if version == 0 and conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='claims'"
+        ).fetchone() is not None:
+            # A fresh database has no tables. This one has claims, so whatever
+            # the pragma says, it is not fresh: `user_version` is a plain write
+            # no trigger can refuse, and zeroing it on a populated graph asks
+            # for the branch below, which heals every guard and records
+            # nothing. That is the census bypassed by one PRAGMA, on the graph
+            # the census exists for. Look before the repairs run, the same
+            # ordering the existing-graph path uses and for the same reason.
+            _record_schema_census(conn)
 
         if version == 0:
             conn.executescript(_SCHEMA_SQL)
@@ -7750,6 +7777,66 @@ def _count_unverified_held_back(
     return n, n >= _DISCLOSURE_SCAN_CEILING
 
 
+def _count_unbacked_invalidations(
+    conn: sqlite3.Connection,
+    from_sql: str,
+    where: str,
+    params: list,
+    *,
+    ceiling: int,
+    prefix: str = "",
+) -> "tuple[int, bool]":
+    """How many rows this read hid on an invalidation no signed verdict backs.
+
+    The sibling of :func:`_count_unverified_held_back`, and it exists for the
+    same reason stated there: the filter runs in SQL so the drained rows never
+    enter the scan, and nothing downstream can then see what was dropped. Here
+    the filter is ``t_invalid IS NULL``, and that column carries no trigger, so
+    one UPDATE hides a claim from every listing while the per-claim surfaces go
+    on reporting the disagreement to nobody who is looking.
+
+    The negated condition alone is not the answer, because a claim invalidated
+    by a verdict that verifies is honestly hidden. So each hidden row is
+    replayed against the signed verdicts, and only the ones no verdict backs are
+    counted. Bounded by the same scan ceiling for the same reason: a disclosure
+    must not cost more than the read it describes, and a saturated count reads
+    as "at least this many".
+
+    Cheap on an ordinary graph, which invalidates nothing: the bounded id query
+    comes back empty and no replay runs.
+    """
+    # The read's own WHERE with the invalidation condition NEGATED, which is
+    # how the sibling counter reaches its drained rows too. The literal is
+    # already treated as a token where the filter is assembled, and the assert
+    # says so out loud rather than silently counting nothing if it ever moves.
+    negated = where.replace("t_invalid IS NULL", "t_invalid IS NOT NULL")
+    if negated == where:
+        return 0, False
+    hidden = conn.execute(
+        f"SELECT {prefix}claim_id AS claim_id FROM {from_sql} {negated} "
+        f"LIMIT ?",
+        (*params, ceiling + 1),
+    ).fetchall()
+    if not hidden:
+        return 0, False
+    saturated = len(hidden) > ceiling
+    verdicts = _gather_contradictions_by_claim(conn)
+    cache: dict = {}
+    unbacked = 0
+    for row in hidden[:ceiling]:
+        claim_id = row[0]
+        try:
+            replay = replay_contradictions(
+                conn, claim_id, verdicts=verdicts.get(claim_id, []),
+                cache=cache,
+            )
+        except Exception:
+            continue
+        if not replay["backed"]:
+            unbacked += 1
+    return unbacked, saturated
+
+
 def _disclose_unverified(
     conn: sqlite3.Connection,
     from_sql: str,
@@ -7764,6 +7851,7 @@ def _disclose_unverified(
     prefix: str = "",
     contested: int = 0,
     on_contested: "Callable[[int], None] | None" = None,
+    include_invalidated: bool = True,
 ) -> None:
     """Report what the enrolled-generator filter held back, when it could matter.
 
@@ -7787,6 +7875,23 @@ def _disclose_unverified(
     # way it does a held-back count.
     if contested and on_contested is not None:
         on_contested(contested)
+    if not include_invalidated:
+        # Whatever the page length. A short page is the case the count above is
+        # about; here one hidden row among a full page of served ones is the
+        # whole of the attack, so a full page does not make it moot.
+        unbacked, unbacked_saturated = _count_unbacked_invalidations(
+            conn, from_sql, where, params, ceiling=ceiling, prefix=prefix,
+        )
+        if unbacked:
+            import logging
+            logging.getLogger("mareforma").warning(
+                "Read hid %s claim(s)%s behind an invalidation timestamp that "
+                "no signed verdict supports; that column carries no trigger, "
+                "so one UPDATE hides a claim from every listing. Call "
+                "`mareforma verify` on the project, or pass "
+                "include_invalidated=True to see them.",
+                unbacked, " (at least)" if unbacked_saturated else "",
+            )
     if include_unverified or on_unverified_excluded is None or served >= limit:
         return
     held, saturated = _count_unverified_held_back(
@@ -7971,6 +8076,21 @@ def _project_verified_rows(
             "verdicts do not support; call `mareforma verify` on the affected "
             "claim_id for the detail.",
             withheld,
+        )
+    if contested - withheld:
+        # The other direction, and the one that reads as a clean answer. A
+        # claim whose invalidation was cleared passes the SQL filter and is
+        # SERVED, so the caller is handed a row the signed verdicts say is
+        # contradicted. Counting it in the health record is not telling the
+        # person reading the list, and the disagreement has to reach them the
+        # same way the withheld one does.
+        import logging
+        logging.getLogger("mareforma").warning(
+            "Read served %s claim(s) whose contradiction record the signed "
+            "verdicts contradict; the invalidation column carries no trigger, "
+            "so one UPDATE clears a real contradiction from every listing. "
+            "Call `mareforma verify` on the affected claim_id for the detail.",
+            contested - withheld,
         )
     return results, scanned, contested
 
@@ -8170,6 +8290,7 @@ def query_claims(
         served=len(results), include_unverified=include_unverified,
         on_unverified_excluded=on_unverified_excluded, contested=contested,
         on_contested=on_contested,
+        include_invalidated=include_invalidated,
     )
     return results
 
@@ -8351,6 +8472,7 @@ def search_claims(
         # whose t_invalid somebody erased was served by search in silence and
         # by query with a disclosure, on the same graph, in the same process.
         contested=contested, on_contested=on_contested,
+        include_invalidated=include_invalidated,
     )
     return results
 

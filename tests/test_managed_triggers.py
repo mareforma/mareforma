@@ -308,6 +308,78 @@ class TestTheCensusStoreCannotBeEmptied:
         finally:
             conn.close()
 
+    def test_zeroing_the_schema_version_does_not_skip_the_census(
+        self, tmp_path: Path,
+    ) -> None:
+        """One PRAGMA must not buy the fresh-database path.
+
+        ``open_db`` branches on ``user_version``, and zero means "fresh": it
+        creates the schema, heals every guard, notes the seen set and returns
+        without recording a census. ``user_version`` is a plain write no trigger
+        can refuse, so on a populated graph that branch is a way to drop a guard
+        and have the record never written, with the pragma restored to 1 on the
+        way out so nothing looks touched afterwards.
+        """
+        key = _bootstrap_key(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=key) as g:
+            g.assert_claim("a claim", generated_by="r1")
+        raw = sqlite3.connect(_db(tmp_path))
+        raw.execute("DROP TRIGGER findings_no_delete")
+        raw.execute("PRAGMA user_version = 0")
+        raw.commit()
+        raw.close()
+
+        conn = open_db(tmp_path)
+        try:
+            assert "findings_no_delete" in schema_census_missing(conn), (
+                "zeroing user_version skipped the census"
+            )
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        finally:
+            conn.close()
+
+    def test_a_same_named_no_op_guard_is_reported_missing(
+        self, tmp_path: Path,
+    ) -> None:
+        """A guard is its body, not its name.
+
+        The census compared names, and the reconciler repairs a wrong body on
+        the same open, so replacing a guard with a same-named no-op healed
+        silently and the census stayed empty. A dropped write guard has to be
+        reported rather than silently healed, and a guard that no longer guards
+        is dropped in every sense that matters.
+        """
+        key = _bootstrap_key(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=key) as g:
+            g.assert_claim("a claim", generated_by="r1")
+        raw = sqlite3.connect(_db(tmp_path))
+        raw.execute("DROP TRIGGER findings_no_delete")
+        raw.execute(
+            "CREATE TRIGGER findings_no_delete BEFORE DELETE ON findings "
+            "BEGIN SELECT 1; END"
+        )
+        raw.commit()
+        raw.close()
+
+        conn = open_db(tmp_path)
+        try:
+            assert "findings_no_delete" in schema_census_missing(conn)
+        finally:
+            conn.close()
+
+    def test_a_healthy_graph_reports_nothing(self, tmp_path: Path) -> None:
+        """The premise. Comparing bodies must not flag every honest graph."""
+        key = _bootstrap_key(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=key) as g:
+            g.assert_claim("a claim", generated_by="r1")
+        with mareforma.open(tmp_path, key_path=key) as g:
+            g.assert_claim("another", generated_by="r2")
+        conn = open_db(tmp_path)
+        try:
+            assert schema_census_missing(conn) == ()
+        finally:
+            conn.close()
+
     def test_dropping_the_stores_own_guard_is_reported(
         self, tmp_path: Path,
     ) -> None:

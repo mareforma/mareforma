@@ -379,9 +379,10 @@ guard heals on every open they are the only record that anything happened, and a
 store of tamper evidence the tamperer can empty is not a record of anything.
 
 Those guards refuse a DELETE and an UPDATE. They cannot refuse a DROP TABLE.
-Somebody who drops the guarded table, the seen store and the census together
-gets all three rebuilt empty on the next open with nothing recorded, and no
-scheme confined to one file the attacker can write to will change that. What
+Dropping `schema_census` alone is enough: its guards go with it, the next open
+rebuilds it empty, and every observation ever recorded is gone while the seen
+store and the guarded table sit untouched. No scheme confined to one file the
+attacker can write to will change that. What
 the census does buy is that any smaller version of the attack is on the record,
 including dropping the guarded table by itself, and that the census travels in
 the backup, so a graph emptied this way disagrees with a `claims.toml` that has
