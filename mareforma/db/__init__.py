@@ -229,6 +229,7 @@ from .core import (
     _require_non_negative_limit,
     _DISCLOSURE_SCAN_CEILING,
     _count_unverified_held_back,
+    _count_unbacked_invalidations,
     _disclose_unverified,
     _enrolled_generator_condition,
     _scan_ceiling_error,

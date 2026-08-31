@@ -397,6 +397,88 @@ class TestTheReplayNeverTakesAReadDown:
         )
 
 
+class TestAListingDoesNotHideAClaimInSilence:
+    """A fabricated invalidation must fail on every read surface, not most.
+
+    The per-claim surfaces replay and report. The listings put
+    ``t_invalid IS NULL`` in SQL, so a fabricated invalidation drained the row
+    before any replay could run: one UPDATE on a column with no trigger hid a
+    claim from ``query`` and ``search`` alike, and nothing said so.
+    """
+
+    def test_a_fabricated_invalidation_is_disclosed(
+        self, tmp_path: Path, caplog,
+    ) -> None:
+        key = _bootstrap_key(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=key) as g:
+            victim = g.assert_claim("the claim to hide", generated_by="r1")
+            g.assert_claim("an untouched claim", generated_by="r2")
+        # No verdict behind it: the timestamp is the whole of the attack.
+        _raw(tmp_path, "DROP TRIGGER IF EXISTS claims_signed_fields_no_laundering",
+             ("UPDATE claims SET t_invalid = ? WHERE claim_id = ?",
+              ("2026-01-01T00:00:00+00:00", victim)))
+
+        import logging
+        with caplog.at_level(logging.WARNING, logger="mareforma"):
+            with mareforma.open(tmp_path, key_path=key) as g:
+                served = [c["claim_id"] for c in g.query()]
+        assert victim not in served, "premise: the filter hides it"
+        assert any("no signed verdict supports" in r.getMessage()
+                   for r in caplog.records), caplog.text
+
+    def test_an_honest_invalidation_says_nothing(
+        self, tmp_path: Path, caplog,
+    ) -> None:
+        """The other half, and the one that decides whether this is usable.
+
+        A claim invalidated by a verdict that verifies is honestly hidden, and
+        warning about it would cry wolf on every real contradiction.
+        """
+        key, older, _ = _contradicted_pair(tmp_path)
+        import logging
+        with caplog.at_level(logging.WARNING, logger="mareforma"):
+            with mareforma.open(tmp_path, key_path=key) as g:
+                served = [c["claim_id"] for c in g.query()]
+        assert older not in served, "premise: a real contradiction hides it"
+        assert not any("no signed verdict supports" in r.getMessage()
+                       for r in caplog.records), caplog.text
+
+
+class TestTheErasedDirectionIsDisclosedToo:
+    """The erased direction is the one that reads as a clean answer.
+
+    Clearing a real invalidation lets the row pass the SQL filter, so it is
+    SERVED. The replay runs on it and reports ``suppressed-verdict``, but that
+    reached a health counter and not the person reading the list.
+    """
+
+    def test_a_cleared_invalidation_is_disclosed(
+        self, tmp_path: Path, caplog,
+    ) -> None:
+        import logging
+
+        key, older, _ = _contradicted_pair(tmp_path)
+        _raw(tmp_path, "DROP TRIGGER IF EXISTS claims_signed_fields_no_laundering",
+             ("UPDATE claims SET t_invalid = NULL WHERE claim_id = ?", (older,)))
+        with caplog.at_level(logging.WARNING, logger="mareforma"):
+            with mareforma.open(tmp_path, key_path=key) as g:
+                served = [c["claim_id"] for c in g.query()]
+        assert older in served, "premise: clearing it puts the row back in the list"
+        assert any("signed verdicts contradict" in r.getMessage()
+                   for r in caplog.records), caplog.text
+
+    def test_an_honest_graph_says_nothing(self, tmp_path: Path, caplog) -> None:
+        """The premise. A real contradiction must not warn on every read."""
+        import logging
+
+        key, _, _ = _contradicted_pair(tmp_path)
+        with caplog.at_level(logging.WARNING, logger="mareforma"):
+            with mareforma.open(tmp_path, key_path=key) as g:
+                g.query()
+        assert not any("signed verdicts contradict" in r.getMessage()
+                       for r in caplog.records), caplog.text
+
+
 class TestWithoutAConnection:
     def test_the_pure_form_still_answers_off_the_column(self) -> None:
         """Every existing caller passes a row and nothing else, and keeps its
