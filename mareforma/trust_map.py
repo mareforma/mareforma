@@ -938,11 +938,31 @@ def _recheck_inclusion(
         return _INCLUSION_FAILED, f"{exc.reason}: {exc}"
     except Exception as exc:                                # pragma: no cover
         return _INCLUSION_FAILED, f"the proof could not be checked: {exc}"
+    checked_against = _KEY_PROVENANCE_PHRASE.get(
+        key_provenance, _KEY_PROVENANCE_PHRASE[None])
+    if key_provenance not in ("explicit-bytes", "explicit-path"):
+        # Only a key the CALLER supplied for this session earns the word
+        # verified. A pin this project adopted on first use is a key the graph
+        # vouches for, so reporting a proof checked against it as re-verified
+        # asks the record to confirm itself. The rule is to re-verify when the
+        # caller supplied a key and keep the older sentence otherwise, saying
+        # which happened, so the sentence below says both what was checked and
+        # why it is not being called verified.
+        #
+        # A proof that FAILS keeps its finding whatever the key's provenance,
+        # and that branch is above this one: a stored entry that does not
+        # verify against the key this project pinned is a definite thing to
+        # report, and withholding it because the caller brought no key of their
+        # own would be the worse silence.
+        return _INCLUSION_NO_KEY, (
+            "the proof checks out against " + checked_against + ", and no log "
+            "key was supplied for this session, so this read did not confirm "
+            "it against anything the caller brought"
+        )
     return _INCLUSION_VERIFIED, (
         "the Merkle inclusion path, the log's signed checkpoint and the "
         "binding to this claim's envelope all check out against "
-        + _KEY_PROVENANCE_PHRASE.get(
-            key_provenance, _KEY_PROVENANCE_PHRASE[None])
+        + checked_against
     )
 
 

@@ -117,17 +117,37 @@ def _witnessing(root: Path, key, cid):
 
 
 class TestAProofThatChecksOut:
-    def test_it_says_verified(self, tmp_path: Path) -> None:
+    """Only a key the caller brought earns the word verified.
+
+    The axis has to tell "re-verified against a key this caller supplied" from
+    "record present, not checked", and a pin the project adopted on first use
+    reads as the second. Checking a proof against a key the graph itself
+    vouches for and calling the result re-verified asks the record to confirm
+    itself.
+    """
+
+    def test_a_caller_supplied_key_says_verified(self, tmp_path: Path) -> None:
         key, cid = _witnessed_claim(tmp_path)
-        axis = _witnessing(tmp_path, key, cid)
+        pem = (tmp_path / ".mareforma" / "rekor_log_pubkey.pem").read_bytes()
+        with mareforma.open(tmp_path, key_path=key,
+                            rekor_log_pubkey_pem=pem) as g:
+            axis = g.trust_map(cid).get("witnessing")
         assert axis.value == "inclusion proof verified"
         assert "re-verified on this read" in axis.residual
 
-    def test_the_old_wording_is_gone(self, tmp_path: Path) -> None:
-        """It said the proof was not re-checked, which was true and is not now."""
+    def test_a_pinned_key_alone_does_not(self, tmp_path: Path) -> None:
         key, cid = _witnessed_claim(tmp_path)
         axis = _witnessing(tmp_path, key, cid)
-        assert "not re-checked" not in axis.residual
+        assert axis.value == "inclusion record present, unchecked"
+        assert "no log key was supplied for this session" in axis.residual
+
+    def test_the_pinned_case_still_says_what_it_did_check(
+        self, tmp_path: Path,
+    ) -> None:
+        """Not checked by the caller is not the same as nothing happened."""
+        key, cid = _witnessed_claim(tmp_path)
+        axis = _witnessing(tmp_path, key, cid)
+        assert "checks out against" in axis.residual
 
 
 class TestAProofThatDoesNot:
@@ -286,7 +306,7 @@ class TestTheKeyProvenanceIsNamed:
     def test_the_pin_says_it_is_a_pin(self, tmp_path: Path) -> None:
         key, cid = _witnessed_claim(tmp_path)          # writes the pin file
         axis = _witnessing(tmp_path, key, cid)
-        assert axis.value == "inclusion proof verified"
+        assert axis.value == "inclusion record present, unchecked"
         assert "pinned in this project on first use" in axis.residual
         assert "not because anything checked it against the log" in axis.residual
 
