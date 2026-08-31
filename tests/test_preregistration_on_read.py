@@ -260,6 +260,54 @@ class TestTheTermsOfTheRule:
         finally:
             conn.close()
 
+    def test_an_unsigned_row_under_the_plan_key_is_not_an_attestation(
+        self, tmp_path: Path,
+    ) -> None:
+        """The idempotency key is not the attestation.
+
+        Nothing signs that column, and a claims.toml an attacker holds can
+        carry any row under any key with any created_at. Taking the key at its
+        word made this term as unsigned as the flag it exists to check, so the
+        pair together restored a post-hoc plan reading pre-registered. A real
+        attestation is signed and carries the plan predicate naming its own
+        plan_id.
+        """
+        from mareforma.db.core import open_db
+        from mareforma.trust._store import plan_attestation_written_at
+
+        prop = _prop()
+        key = _bootstrap_key(tmp_path, "k.key")
+        with mareforma.open(tmp_path, key_path=key) as g:
+            g.register_plan(prop, _pred())
+
+        conn = open_db(tmp_path)
+        try:
+            row = conn.execute(
+                "SELECT plan_id FROM predictions WHERE content_id = ?",
+                (prop.content_id(),),
+            ).fetchone()
+            plan_id = row["plan_id"]
+            assert plan_attestation_written_at(conn, plan_id) is not None, (
+                "premise: the real attestation is found"
+            )
+        finally:
+            conn.close()
+
+        # Strip the signature the way a hand-written claims.toml row has none.
+        raw = sqlite3.connect(tmp_path / ".mareforma" / "graph.db")
+        raw.execute("DROP TRIGGER IF EXISTS claims_signed_fields_no_laundering")
+        raw.execute(
+            "UPDATE claims SET signature_bundle = NULL "
+            "WHERE idempotency_key = ?", (f"plan:{plan_id}",),
+        )
+        raw.commit()
+        raw.close()
+        conn = open_db(tmp_path)
+        try:
+            assert plan_attestation_written_at(conn, plan_id) is None
+        finally:
+            conn.close()
+
     def test_the_flag_still_has_to_be_set(self, tmp_path: Path) -> None:
         from mareforma.trust._gate import GateCache, _preregistration_holds
 
