@@ -162,12 +162,20 @@ def test_the_new_table_and_sections_are_actually_there(tmp_path: Path) -> None:
     assert "backup_format" in data
 
 
-def test_0312_opens_a_graph_this_code_wrote(tmp_path: Path) -> None:
-    """The column set and user_version are untouched, so the gate passes.
+def test_0312_is_refused_a_graph_this_code_wrote(tmp_path: Path) -> None:
+    """The schema version moved, so an older reader stops here. By design.
 
-    0.3.12 runs its own additive script over the file on the way in and knows
-    nothing about ``verdict_chain``. An unknown table is the one schema addition
-    an older reader opens straight past.
+    This is the half of the compatibility rule that a version bump spends, and
+    spending it once is the reason the bump is one release rather than several.
+
+    What the refusal says is not this code's to choose, and that is the point
+    worth recording. The sentence comes out of a reader that shipped long ago:
+    it calls itself a dev branch, and it tells the operator to delete the file
+    holding the chain and every signature, on a graph a newer reader opens
+    without complaint. Nothing written here can change it. The only thing that
+    can is being on a reader whose refusal was already fixed, which is the
+    release before this one, and that is an argument about upgrade order rather
+    than about code.
     """
     project = tmp_path / "project"
     project.mkdir()
@@ -175,14 +183,20 @@ def test_0312_opens_a_graph_this_code_wrote(tmp_path: Path) -> None:
     out = _run_under_v0312(
         _extract_v0312(tmp_path / "work"),
         """
-        with mareforma.open(root, key_path=root / "root.key") as g:
-            # Audit mode: the default filter drops the claim the contradiction
-            # invalidated, so the plain count would read 1 on a healthy graph.
-            print("claims", len(g.query(include_invalidated=True)))
+        try:
+            with mareforma.open(root, key_path=root / "root.key") as g:
+                print("opened", len(g.query(include_invalidated=True)))
+        except Exception as exc:
+            print("refused", type(exc).__name__)
+            print("said", str(exc))
         """,
         str(project),
     )
-    assert "claims 4" in out
+    assert "refused DatabaseError" in out
+    assert "user_version" in out
+    # Pinned rather than lamented. A test that only asserted the refusal would
+    # let this read as a clean stop, and it is not one.
+    assert "Delete .mareforma/graph.db" in out
 
 
 def test_0312_restores_a_backup_this_code_wrote(tmp_path: Path) -> None:

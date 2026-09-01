@@ -470,7 +470,7 @@ s["classifications"]   # ['INFERRED', 'ANALYTICAL', 'DERIVED']
 s["support_levels"]    # ['PRELIMINARY', 'REPLICATED', 'ESTABLISHED']
 s["statuses"]          # ['open', 'contested', 'retracted']
 s["transitions"]       # [{from: PRELIMINARY, to: REPLICATED, trigger: automatic}, ...]
-s["schema_version"]    # 1
+s["schema_version"]    # 2
 ```
 
 ---

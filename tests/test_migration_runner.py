@@ -1828,11 +1828,16 @@ class TestTheVersionGate:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
         conn.close()
 
-    def test_this_release_registers_no_migration(self) -> None:
-        """The rebuild ships on a path nothing reaches, and that is the design.
+    def test_every_registered_route_ends_at_the_current_version(self) -> None:
+        """The registry is walked, not trusted.
 
-        A migration is the one change that cannot be taken back, so the
-        machinery lands and is proven a release before anything depends on it.
+        The previous release shipped the machinery with an empty registry so
+        the rebuild was proven before anything irreversible used it. What that
+        release bought is that adding a route is an entry rather than a
+        rewrite, so what is checked here is the entry: every version below the
+        current one has a step, and the chain arrives exactly at the current
+        one rather than short of it or past it.
         """
-        assert _core._MIGRATIONS == {}
-        assert _core._SCHEMA_VERSION == 1
+        assert _core._MIGRATIONS, "no route out of any earlier version"
+        for start in range(1, _core._SCHEMA_VERSION):
+            assert _core._plan_migration(start)[-1] == _core._SCHEMA_VERSION

@@ -405,6 +405,62 @@ def test_literal_path_open_can_write_a_claim(tmp_path: Path) -> None:
         conn.close()
 
 
+def test_literal_path_migrates_a_graph_whose_version_was_lost(
+    tmp_path: Path,
+) -> None:
+    """A populated graph reading version zero must be migrated, not stamped.
+
+    The project-root path already treats a file holding claims as not fresh
+    whatever the pragma says. The literal path did not, so it ran the fresh
+    branch and wrote the current version onto a graph the migration had never
+    touched. Nothing could open the result afterwards: this release refuses the
+    columns the migration would have dropped, and the release that wrote it
+    refuses a version ahead of its own.
+
+    The route there is ordinary rather than adversarial. ``sqlite3 .dump`` does
+    not carry ``user_version``, so an operator who dumps and reloads to recover
+    a damaged file arrives holding exactly this.
+    """
+    import shutil
+    import sqlite3
+
+    from mareforma.db.core import _SCHEMA_VERSION
+
+    conn = open_db_from_db_path(tmp_path / "written.db")
+    try:
+        add_claim(conn, tmp_path, "a claim written before the upgrade")
+    finally:
+        conn.close()
+
+    # What a graph from a release that still had the column looks like after a
+    # dump and reload: the column is back, the version is gone.
+    recovered = tmp_path / "recovered.db"
+    shutil.copy(tmp_path / "written.db", recovered)
+    raw = sqlite3.connect(recovered)
+    try:
+        raw.execute("ALTER TABLE claims ADD COLUMN support_level TEXT")
+        raw.execute("PRAGMA user_version = 0")
+        raw.commit()
+    finally:
+        raw.close()
+
+    open_db_from_db_path(recovered).close()
+
+    raw = sqlite3.connect(recovered)
+    try:
+        columns = {row[1] for row in raw.execute("PRAGMA table_info(claims)")}
+        version = raw.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        raw.close()
+    assert "support_level" not in columns, (
+        "the graph was stamped as migrated with the migration never run"
+    )
+    assert version == _SCHEMA_VERSION
+
+    # The half that made it unrecoverable: a second open has to work.
+    open_db_from_db_path(recovered).close()
+
+
 def test_sanitized_text_is_signed_and_stored_as_one_string(
     tmp_path: Path,
 ) -> None:

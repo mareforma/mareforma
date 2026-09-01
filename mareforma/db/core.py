@@ -70,7 +70,7 @@ _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 # ---------------------------------------------------------------------------
 
 DB_FILENAME = "graph.db"
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 # Hard cap on a single claim's ``text`` field. 100k chars covers any
 # realistic scientific finding (≈ a 15k-word paragraph) and matches the
@@ -878,15 +878,17 @@ def _open_existing_db(
         extra = existing_cols - expected_cols
         conn.close()
 
-        # Extras-only is the downgrade case: the db was written by a
-        # newer mareforma. Direct the user to upgrade rather than to
-        # delete, claims.toml may not be a faithful backup for columns
-        # the older version does not understand.
+        # Extras-only means the db was written by a newer mareforma. Upgrade
+        # is the whole of the advice: an older release refuses a migrated graph
+        # and refuses the backup it writes, so there is no downgrade to prepare
+        # for. Saying otherwise sent an operator to take a backup that the
+        # release they were downgrading to would not read.
         if extra and not missing:
             raise DatabaseError(
                 f"graph.db was created by a newer mareforma version "
                 f"(extra columns: {sorted(extra)}). Upgrade the mareforma "
-                "package or back up claims.toml before downgrading."
+                "package. Downgrading is not a route: an older release refuses "
+                "this graph and refuses the claims.toml it writes."
             )
 
         parts: list[str] = []
@@ -993,6 +995,19 @@ def open_db(root: Path) -> sqlite3.Connection:
             # the census exists for. Look before the repairs run, the same
             # ordering the existing-graph path uses and for the same reason.
             _record_schema_census(conn)
+            # And then send it down the existing-graph path rather than the
+            # fresh one. The fresh branch ends by stamping the current version,
+            # so a zeroed graph came out marked as having had every migration,
+            # with none of them run. That was harmless only while the one
+            # registered step changed nothing, and the stamp is now the sole
+            # evidence a step ever ran. Normalised to the earliest version this
+            # release routes from: zero is not a state any release wrote on a
+            # populated file, and a graph already past that version meets a step
+            # that rebuilds the table it already has, which costs a rebuild and
+            # changes nothing.
+            version = 1
+            conn.execute(f"PRAGMA user_version = {version}")
+            conn.commit()
 
         if version == 0:
             conn.executescript(_SCHEMA_SQL)
@@ -1030,6 +1045,24 @@ def open_db(root: Path) -> sqlite3.Connection:
         # catch as a bare traceback. Catch the whole sqlite3.Error family so the
         # documented "Raises DatabaseError on SQLite errors" contract holds and
         # the corruption case reaches the claims.toml remediation.
+        #
+        # Contention is told apart first, because it is not a fault in the file
+        # and the remedy below is the worst possible advice for it. Several
+        # writes happen on the way in before any migration guard, the census and
+        # the column additions among them, and a lock held by another opener
+        # surfaced there as "delete graph.db and start fresh" on a file with
+        # every byte intact. Measured. This release makes it reachable in
+        # ordinary use, because the migration holds the lock for seconds on a
+        # large graph's first open.
+        if isinstance(exc, sqlite3.OperationalError) and (
+            "locked" in str(exc) or "busy" in str(exc)
+        ):
+            raise _open_failure(
+                path, exc,
+                "Another process is using this graph and is holding it while "
+                "it writes. Nothing here has been changed. Do not delete "
+                "graph.db; open it again in a moment.",
+            ) from exc
         raise _open_failure(
             path, exc,
             "If graph.db is corrupt or truncated, delete .mareforma/graph.db "
@@ -1068,6 +1101,23 @@ def open_db_from_db_path(db_path: "str | Path") -> sqlite3.Connection:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version == 0 and conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='claims'"
+        ).fetchone() is not None:
+            # The same normalisation the project-root path applies, for the
+            # same reason and on the same evidence: a file holding claims is
+            # not fresh whatever the pragma says, and the branch below stamps
+            # the current version, so it would come out marked as having had
+            # every migration with none of them run. That is worse here than
+            # there, because a literal path is what an operator reaches for
+            # after `sqlite3 .dump`, which does not carry `user_version` at
+            # all. Left alone, the recovery route ends in a graph no release
+            # will open: this one refuses the columns the migration would have
+            # dropped, and the release that wrote it refuses the stamp.
+            _record_schema_census(conn)
+            version = 1
+            conn.execute(f"PRAGMA user_version = {version}")
+            conn.commit()
         if version == 0:
             conn.executescript(_SCHEMA_SQL)
             conn.executescript(_ADDITIVE_TABLES_SQL)
@@ -1510,7 +1560,11 @@ def _rebuild_table(
             "step did not declare. A column this migration does not know about "
             "is a column somebody else put there, and dropping it here would "
             "erase it and the check that would have reported it. Nothing has "
-            "been changed."
+            "been changed. The usual cause is a graph a newer mareforma wrote, "
+            "so upgrade the package; downgrading is not a route, because an "
+            "older release refuses both this graph and the claims.toml it "
+            "writes. This used to be said by the column-set check, which now "
+            "runs after the migration and no longer gets the chance."
         )
     absent = set(drops) - set(live)
     if absent:
@@ -1529,6 +1583,21 @@ def _rebuild_table(
     unmanaged = _unmanaged_trigger_sql(conn, table)
     names = ", ".join(columns)
     temp = f"{table}_new"
+    # The scratch name has to be free before anything is built under it. A graph
+    # that merely holds a table by that name opened without complaint on every
+    # release before this one, and would now fail its upgrade on "table
+    # claims_new already exists", which names no remedy and leaves the operator
+    # with a graph no release will open. The cure is one statement, so say it.
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (temp,),
+    ).fetchone():
+        raise MigrationError(
+            f"this graph already has a table named {temp!r}, which is the name "
+            f"the rebuild of {table!r} builds its replacement under. Nothing "
+            f"has been changed. Rename or drop {temp!r} and open the graph "
+            "again; it holds nothing mareforma wrote."
+        )
     was_legacy = conn.execute("PRAGMA legacy_alter_table").fetchone()[0]
 
     conn.execute(create_sql)                                        # 1
@@ -1611,16 +1680,18 @@ def _run_migration(
     Restored in a ``finally``, since it is connection-scoped and every later
     write on this connection depends on it.
     """
-    was_on = conn.execute("PRAGMA foreign_keys").fetchone()[0]
-    conn.execute("PRAGMA foreign_keys = OFF")
+    # Both pragmas are inside the guarded block for the same reason the BEGIN
+    # is. They were outside it, and a failure on either escaped as a raw sqlite
+    # error into the generic open handler, whose remedy is to delete graph.db.
+    # Measured, by denying the pragma and by interrupting on it: a file with
+    # every byte intact was met with the delete advice this path exists to stop
+    # giving, before the migration had touched anything.
     ok = False
+    was_on = False
     try:
         try:
-            # Inside the guarded block, so lock contention becomes a migration
-            # failure rather than a raw sqlite error. Outside it, two people
-            # upgrading at once put "database is locked" through the generic
-            # open handler, and the loser is told to delete graph.db, which is
-            # the advice this whole path exists to stop giving.
+            was_on = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+            conn.execute("PRAGMA foreign_keys = OFF")
             conn.execute("BEGIN IMMEDIATE")
             # Re-read the version under the lock. It was read before the lock
             # was taken, so two openers can both have seen the old one and both
@@ -1646,6 +1717,19 @@ def _run_migration(
                 conn.execute("ROLLBACK")
             except sqlite3.Error:
                 pass
+            # Contention is not a fault in the file, and the sentence for it
+            # says the one thing that helps. Without this the loser of a race
+            # waits out the busy timeout and is handed a failure that reads
+            # like a defect and never mentions trying again.
+            if isinstance(exc, sqlite3.OperationalError) and (
+                "locked" in str(exc) or "busy" in str(exc)
+            ):
+                raise MigrationError(
+                    "another process is upgrading this graph and holds it while "
+                    f"it works: {exc}. Nothing has been changed here, and that "
+                    "upgrade is still running or has already finished. Do not "
+                    "delete graph.db. Open it again in a moment."
+                ) from exc
             raise MigrationError(
                 f"the schema migration to version {to_version} failed and was "
                 f"rolled back: {exc}. This step changed nothing: the graph is "
@@ -1697,12 +1781,19 @@ def _rebuild_claims_unchanged(conn: sqlite3.Connection) -> None:
 
 # from-version -> (to-version, the steps that get there).
 #
-# Empty in this release, and that is the design rather than an omission. The
-# rebuild ships as production code on a path nothing reaches, because
-# _SCHEMA_VERSION does not move here: a migration is the one change that cannot
-# be taken back, so the machinery lands and is proven a release before anything
-# depends on it. What a later release adds is an entry, not a rewrite.
-_MIGRATIONS: "dict[int, tuple[int, Callable[[sqlite3.Connection], None]]]" = {}
+# The entry the previous release built the machinery for, and it is an entry
+# rather than a rewrite, which was the thing that release set out to buy.
+#
+# The step rebuilds claims under the definition it already has. That is the
+# point rather than a placeholder: it carries every graph anyone holds through
+# the whole path, the copy, the drop, the rename, the triggers, the indexes and
+# the version bump, before a step that also changes the column list depends on
+# any of it. A narrowing step does not reuse this function, which hardcodes the
+# full column list and the unchanged definition; it calls _rebuild_table itself
+# with a shorter list and a definition it authors.
+_MIGRATIONS: "dict[int, tuple[int, Callable[[sqlite3.Connection], None]]]" = {
+    1: (2, _rebuild_claims_unchanged),
+}
 
 
 def _plan_migration(version: int) -> "tuple[int, ...]":

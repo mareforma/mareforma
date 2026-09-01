@@ -114,7 +114,7 @@ s = mareforma.schema()
 s["classifications"]  # ['INFERRED', 'ANALYTICAL', 'DERIVED']
 s["support_levels"]   # ['PRELIMINARY', 'REPLICATED', 'ESTABLISHED']
 s["statuses"]         # ['open', 'contested', 'retracted']
-s["schema_version"]   # 1
+s["schema_version"]   # 2
 ```
 
 ## replication_verdicts table
@@ -219,8 +219,8 @@ Three triggers keep it in lockstep with `claims`, all AFTER the write, so an `In
 ## Trust layer tables
 
 The trust layer (see [Findings](/concepts/findings)) adds seven tables for
-structured findings. They are **additive**: `CREATE TABLE IF NOT EXISTS`, no
-migration, `user_version` stays `1`. A finding is an evidence tree
+structured findings. They are **additive**: `CREATE TABLE IF NOT EXISTS`, and
+adding them moves no version. A finding is an evidence tree
 (`finding → evidence_lines → contrasts → effect_estimates`), anchored to a
 content-addressed `proposition` and a pre-registered `prediction`, and attested
 by an existing signed `claim`.
@@ -517,7 +517,8 @@ The schema version is stored in SQLite's `user_version` pragma.
 | Version | State |
 |---|---|
 | `0` | Fresh database: full schema applied on first `open_db()` |
-| `1` | the current schema |
+| `1` | written by an earlier release; migrates to `2` on open |
+| `2` | the current schema |
 | Ahead of this build | `DatabaseError`: a newer release wrote it. Upgrade mareforma. Do not delete `graph.db` |
 | Behind, with no route | `MigrationError`: nothing is changed, and the graph opens on the release that wrote it |
 
@@ -527,11 +528,15 @@ the chain is what says which rows were there. A graph this build will not open i
 almost always a graph a newer build wrote, and the answer is to upgrade rather
 than to start again.
 
-A migration runner exists and its registry is empty. Nothing in this release
-moves `user_version`, so no graph migrates. When a release does add a route, the
-schema change and the version bump commit in one transaction or neither does, so
-a crash leaves the graph at the version it started from with every claim,
-signature and chain link intact.
+The migration registry carries one route, `1` to `2`, so a graph written by an
+earlier release migrates on the open that meets it. The schema change and the
+version bump commit in one transaction or neither does, so a crash leaves the
+graph at the version it started from with every claim, signature and chain link
+intact. Nothing on that path tells anyone to delete a file.
+
+The upgrade is one way. A graph at `2` is refused by any release that expects
+`1`, which is every release before this one, so upgrade every machine that
+shares a project rather than a subset of them.
 
 ## Storage
 
