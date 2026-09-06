@@ -942,17 +942,36 @@ class TestTheBackupSections:
         with pytest.warns(UserWarning, match="disagrees with itself"):
             restore(short)
 
-    def test_a_truncation_that_takes_the_table_is_not_detectable(
+        # Held to the reason, not the opening. Re-serializing the file to drop
+        # a claim also breaks the digest, so this stayed green with the count
+        # comparison disabled entirely, reported by the other branch under the
+        # same first sentence.
+        from mareforma.db.restore import (
+            _disclose_a_file_that_disagrees_with_itself,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            reasons = _disclose_a_file_that_disagrees_with_itself(
+                short / "claims.toml",
+                tomllib.loads((short / "claims.toml").read_text()),
+            )
+        assert "section_count_mismatch" in reasons
+
+    def test_a_truncation_that_takes_the_table_is_reported_by_the_stamp(
         self, tmp_path: Path,
     ) -> None:
-        """The boundary of the check above, pinned so nobody trusts it further.
+        """``[completeness]`` is the last thing written, so a real truncation
+        takes it, and the count that would have reported the loss goes with the
+        bytes that were lost.
 
-        ``[completeness]`` is the last thing written, so a real truncation takes
-        it. The count that would have caught the loss went with the bytes that
-        were lost, and a file with no table is also what every backup written
-        before the table existed looks like. This records that the recovery
-        proceeds and says nothing, which is the honest state of it, not a bug
-        waiting to be filed twice.
+        What survives is the format stamp, which is written first for this
+        reason. The file still says it owed a table, so the recovery says the
+        graph is short instead of proceeding in silence.
+
+        Filtered on the whole disclosure rather than on the wording of one
+        branch of it. Keyed on a single phrase, this stayed green while a
+        different branch did the reporting, which is the same thing as not
+        testing it.
         """
         key = _bootstrap_key(tmp_path, "root.key")
         with mareforma.open(tmp_path, key_path=key) as g:
@@ -969,9 +988,9 @@ class TestTheBackupSections:
             warnings.simplefilter("always")
             report = restore(short)
         assert report["claims_restored"] == 2
-        assert not [
-            w for w in caught if "disagrees with itself" in str(w.message)
-        ], "the check claimed a truncation it cannot see"
+        assert [
+            w for w in caught if "claims.toml at" in str(w.message)
+        ], "a backup cut down to two claims restored without a word"
 
     def test_a_backup_with_no_table_does_not_read_as_verified(
         self, tmp_path: Path,

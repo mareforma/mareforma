@@ -8988,6 +8988,34 @@ def _backup_schema_census(conn: sqlite3.Connection, data: dict) -> None:
 # :func:`verify_completeness_digest` locate the split on this exact string.
 _COMPLETENESS_HEADER = "[completeness]\n"
 
+# Which shape of claims.toml this is, stamped at the top of every backup.
+#
+# The completeness table lets a reader ask whether a backup accounts for itself,
+# and a reader can only hold a file to that question if the file says it owes an
+# answer. Without this number it cannot: a backup of a healthy graph carries only
+# [validators], [claims] and [graph_meta] beside the table, because every other
+# section is written only when it has rows. Delete the table from such a file and
+# what is left has the same sections, and the same keys, as a backup written
+# before the table existed. Measured against the released trees, not reasoned
+# about. So absence could not be read as tamper, and the silence a stripped file
+# keeps was the same silence an honest older file keeps.
+#
+# It is a top-level key rather than a field inside a section, and that is the
+# whole of its truncation value. Inside [graph_meta] it sat seventeen bytes above
+# the table on a seven-kilobyte file, so all but one cut that took the table took
+# the stamp with it. On line one it survives every cut that leaves a parseable
+# file. Measured both ways.
+#
+# What it does not do: beat an editor who removes it along with the table. This
+# is a claim the file makes about itself and nothing signs it, so that edit puts
+# the file back where it was. It closes deleting the completeness table whole and
+# leaving the rest, which is one shape, not the class.
+#
+# The number rises when the set of sections a reader may rely on changes. A
+# reader that meets a number above its own cannot say what that file owes, and
+# says so rather than guessing in either direction.
+_BACKUP_FORMAT = 1
+
 
 def _backup_completeness_tail(
     conn: sqlite3.Connection, data: dict, body: str,
@@ -9058,7 +9086,15 @@ def verify_completeness_digest(claims_toml: "str | Path") -> bool:
     attacker recomputes it, which is why this is not a signature and the
     verdict chain exists beside it.
     """
-    raw = Path(claims_toml).read_bytes()
+    # Line endings normalised before the boundary is looked for, the same way
+    # and for the same reason as the reader that asks what follows the table.
+    # When only one of the two normalised, the pair could be made to locate
+    # different boundaries in one file: a decoy header written with carriage
+    # returns was invisible here and visible there, and a forged section between
+    # them was checked by neither while this still returned True. So the rule is
+    # that both find the boundary the same way, and the cost of that is that a
+    # line-ending conversion no longer reads as an edit, which it never was.
+    raw = Path(claims_toml).read_bytes().replace(b"\r\n", b"\n")
     marker = ("\n" + _COMPLETENESS_HEADER).encode("utf-8")
     cut = raw.rfind(marker)
     if cut == -1:
@@ -9074,6 +9110,66 @@ def verify_completeness_digest(claims_toml: "str | Path") -> bool:
     except (ValueError, KeyError, UnicodeDecodeError):
         return False
     return hashlib.sha256(body).hexdigest() == stored
+
+
+def tables_below_completeness(claims_toml: "str | Path") -> "tuple[str, ...]":
+    """The names of any tables written below the ``[completeness]`` table.
+
+    Empty for every file this writer produces, because the completeness table is
+    the last thing it writes.
+
+    This is the blind spot the digest cannot cover by construction. The digest
+    is taken over the bytes ABOVE the header, so bytes below it are outside what
+    it attests, and the row counts only walk the section names the table itself
+    declares, so a section the file never had is counted by neither. Measured
+    rather than reasoned about: a well-formed transparency-log entry appended
+    under the table restored into the graph, flipped a real claim to logged, and
+    the digest still verified with nothing said.
+
+    **The tail is parsed, not scanned.** Reading it line by line for something
+    that opens with a bracket and closes with one was the first version, and a
+    single trailing comment walked straight past it: ``[rekor_inclusions."..."]
+    # note`` is a table to TOML and was not one to that check, so the same
+    forged entry landed again in silence. Measured before and after. Every other
+    shape a header can take, whitespace, an array of tables, a quoted key with a
+    bracket in it, is the same class of mistake waiting, and the parser already
+    knows all of them.
+
+    Raises :class:`ValueError` when the tail cannot be parsed, rather than
+    reporting nothing found. The two are different answers and collapsing them
+    hands a caller "there is nothing below the table" for a file where there
+    demonstrably is: a multi-line string carrying the marker moves the boundary,
+    the tail then starts mid-string, and the parse fails. Restore has already
+    parsed the whole file by the time it asks, so it does not meet this; a
+    caller reaching the function directly does, and should hear about it.
+    """
+    try:
+        import tomllib          # 3.11+ stdlib
+    except ModuleNotFoundError:  # 3.10, where it is the tomli backport
+        import tomli as tomllib  # type: ignore[no-redef]
+
+    # Line endings are normalised before the boundary is looked for. The file is
+    # read as text everywhere else, which is newline-agnostic, so a backup that
+    # went through a Windows editor or a checkout that rewrites endings is an
+    # ordinary honest file. Searching it for a byte pattern that requires a bare
+    # newline found nothing, which made every such file look like it had no
+    # table below and let a forged section hide behind the digest complaint the
+    # conversion produced on its own.
+    raw = Path(claims_toml).read_bytes().replace(b"\r\n", b"\n")
+    marker = ("\n" + _COMPLETENESS_HEADER).encode("utf-8")
+    cut = raw.rfind(marker)
+    if cut == -1:
+        return ()
+    # From the header itself, so the tail is a document in its own right and
+    # its own table is named rather than inferred from what follows it.
+    try:
+        tail = tomllib.loads(raw[cut + 1:].decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, RecursionError) as exc:
+        raise ValueError(
+            f"the bytes below the completeness table of {claims_toml} are not "
+            f"a table this format writes: {exc}"
+        ) from exc
+    return tuple(name for name in tail if name != "completeness")
 
 
 def _format_artifact(build, *args):
@@ -9134,7 +9230,11 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
     try:
         import tomli_w
 
-        data: dict[str, Any] = {}
+        # First, and unconditionally. A stamp that is sometimes absent says
+        # nothing when it is absent, and one written low in the file goes with
+        # the bytes a truncation takes. tomli_w emits top-level keys ahead of
+        # every table, so this lands on line one whatever else the graph holds.
+        data: dict[str, Any] = {"backup_format": _BACKUP_FORMAT}
 
         # Validators first so a restore pass can verify enrollment
         # signatures before trying to verify the claims that reference

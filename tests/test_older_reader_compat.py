@@ -156,6 +156,10 @@ def test_the_new_table_and_sections_are_actually_there(tmp_path: Path) -> None:
     assert "grounding_attestations" in data
     assert "schema_census" in data
     assert "completeness" in data
+    # A top-level key rather than a table, so it is the one addition here that
+    # is not a section at all. The restore below is what says an older reader
+    # walks past it: those readers reach named sections and nothing else.
+    assert "backup_format" in data
 
 
 def test_0312_opens_a_graph_this_code_wrote(tmp_path: Path) -> None:
