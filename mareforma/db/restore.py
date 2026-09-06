@@ -321,6 +321,80 @@ def _disclose_a_rotated_copy_worth_trying(conn, toml_path) -> "tuple[str, ...]":
     return (reason,)
 
 
+# What a backup saying this about itself costs it. The release that wrote these
+# artifacts only disclosed them, because the population it could have refused
+# was still holding files written before the format and refusing them would have
+# taken their recovery away for a rule they never had. That window is closed,
+# and a witness nobody acts on is a witness nobody needs.
+#
+# `format_ahead` is here for the reason the graph's own version gate refuses a
+# newer file: a reader that cannot say what a file owes cannot say it is intact
+# either. Its message points at the release that wrote it rather than at this
+# one's flag, because upgrading is the answer and overriding is not.
+# The accounting, not the bytes. A file cannot account for itself when its own
+# counts are missing, unreadable, or disagree with what it holds, or when it
+# carries something the counts never named. Those are all statements about the
+# ledger.
+#
+# `digest_mismatch` is deliberately not among them. It says the bytes changed
+# while the ledger still adds up, and the table's contract has always been that
+# it makes careless editing visible rather than refusing it: it is not a
+# signature, anyone recomputes it in a line, and the file says so. Refusing on
+# it would turn every operator who repaired a corrupt row by hand away from
+# their own graph, on the one path they reach when everything else is already
+# gone, and would still not stop anyone who spent the line.
+_UNACCOUNTED = frozenset({
+    "completeness_absent", "content_below_table", "tail_unparseable",
+    "row_counts_absent", "row_count_not_a_number", "section_not_declared",
+    "section_count_mismatch",
+})
+
+
+def _refuse_a_file_that_cannot_account_for_itself(
+    reasons: "tuple[str, ...]", toml_path, trusted: bool,
+) -> None:
+    """Stop a recovery from a backup whose own account of itself does not hold.
+
+    A file that predates the format says nothing and reaches none of this, which
+    is what keeps every backup anyone is already holding restorable.
+
+    The override exists because this is the recovery path and its threat model
+    includes an operator who repaired a corrupt row by hand. Refusing them their
+    own graph over an edit they made deliberately would be the failure this
+    guards against, in the other direction. So the refusal names the flag, the
+    way the version gate names the upgrade, and taking it is a decision somebody
+    made rather than a default nobody saw.
+    """
+    fatal = sorted(set(reasons) & _UNACCOUNTED)
+    # Everything the file said about itself, in both refusals. Naming only the
+    # first was the shape that let one character reroute a truncated backup to
+    # a reassuring sentence one layer up, and a refusal that reports the
+    # newer format and swallows the missing rows is the same mistake wearing
+    # an exception. Whichever refusal fires, it carries the whole list.
+    also = f" It also reports: {', '.join(fatal)}." if fatal else ""
+    if "format_ahead" in reasons:
+        raise RestoreError(
+            f"claims.toml at {toml_path} was written in a backup format later "
+            "than this release understands, so what it holds cannot be checked "
+            "here and a restore from it could be missing whatever this release "
+            f"does not know to read.{also} Nothing has been changed. Do not "
+            "delete it. Restore it with the release that wrote it.",
+            kind="format_ahead",
+        )
+    if not fatal or trusted:
+        return
+    raise RestoreError(
+        f"claims.toml at {toml_path} cannot account for itself: "
+        + ", ".join(fatal)
+        + ". The file says what it should hold and does not hold it, so a graph "
+        "rebuilt from it would be missing rows with nothing recording that they "
+        "were ever there. Nothing has been changed and the file is untouched. "
+        "If you edited it deliberately, pass trust_unaccounted_backup=True to "
+        "restore it as it stands.",
+        kind="backup_unaccounted",
+    )
+
+
 def _disclose_a_file_that_disagrees_with_itself(
     toml_path, data: dict,
 ) -> "tuple[str, ...]":
@@ -584,6 +658,7 @@ def restore(
     claims_toml: Path | str | None = None,
     rekor_log_pubkey_pem: bytes | None = None,
     enforce_rekor_policy: bool = False,
+    trust_unaccounted_backup: bool = False,
 ) -> dict:
     """Rebuild a fresh graph.db from claims.toml.
 
@@ -698,11 +773,13 @@ def restore(
     # After the shape check, because that is what makes a named section safe to
     # measure: before it, a section holding a scalar turned the length below
     # into a TypeError and left the documented RestoreError contract.
-    # The complaints are returned rather than only warned, so a test can
-    # ask directly. Putting them in the report dict is a wider public shape
-    # than this release should take: two tests compare that dict for exact
-    # equality, which is the contract saying it is closed.
-    _disclose_a_file_that_disagrees_with_itself(toml_path, data)
+    # Disclosed here and refused further down, after every row has been
+    # verified. Refusing at this point made "cannot account for itself" the
+    # answer to a tampered signature, a swapped statement id and an orphan
+    # signer alike, because editing any of them also breaks the digest. The
+    # precise violation is the more useful sentence and it wins; this one is
+    # for the file that is short and otherwise honest.
+    _unaccounted = _disclose_a_file_that_disagrees_with_itself(toml_path, data)
     # [project_policy] holds fields, not rows, so only the section shape is
     # checked; _required_field reports a missing or malformed field.
     _validate_section_shape(
@@ -1209,6 +1286,12 @@ def restore(
             # The verdict-set chain, after the verdicts its links cover.
             _replay_verdict_chain(conn, data.get("verdict_chain") or {})
             _disclose_a_rotated_copy_worth_trying(conn, toml_path)
+            # Every row has verified by here, so anything left is the
+            # file disagreeing with its own account rather than a row
+            # disagreeing with its signature.
+            _refuse_a_file_that_cannot_account_for_itself(
+                _unaccounted, toml_path, trust_unaccounted_backup,
+            )
             # The grounding attestations, after the claims they name.
             _replay_grounding_attestations(
                 conn, data.get("grounding_attestations") or {},

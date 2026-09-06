@@ -27,6 +27,7 @@ import pytest
 
 import mareforma
 from mareforma import restore
+from mareforma.db.errors import RestoreError
 from mareforma.db.core import (
     _BACKUP_FORMAT, tables_below_completeness, verify_completeness_digest,
 )
@@ -79,12 +80,17 @@ def _restore_into(source: Path, target: Path) -> tuple[dict, list[str]]:
     Copied rather than re-serialized: re-serializing changes the body bytes and
     breaks the digest on its own, which would make every case here look caught
     for the wrong reason.
+
+    Takes the override, because these tests are about what a reader SAYS about a
+    file. Whether it also refuses is a different question, asked in its own
+    class below, and letting the refusal land here would stop every one of these
+    before it could read the sentence it exists to check.
     """
     target.mkdir(parents=True, exist_ok=True)
     shutil.copy(source, target / "claims.toml")
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        report = restore(target)
+        report = restore(target, trust_unaccounted_backup=True)
     return report, [
         str(w.message) for w in caught if "claims.toml at" in str(w.message)
     ]
@@ -419,9 +425,18 @@ class TestAStampCannotBuySilence:
     ) -> None:
         """The half that made this worse than silence: the wording."""
         bumped = self._truncated(tmp_path, _BACKUP_FORMAT + 1)
-        _, said = _restore_into(bumped, tmp_path / "recovered")
-        assert said
-        assert "Take the backup again" in said[0]
+        target = tmp_path / "recovered"
+        target.mkdir()
+        shutil.copy(bumped, target / "claims.toml")
+        with pytest.raises(RestoreError) as caught:
+            restore(target)
+        # The later format is why it stops, and the missing rows are still
+        # named. Reporting only the first was the shape that let one character
+        # turn a truncated backup into a reassuring sentence, and a refusal
+        # that swallows the loss is that mistake wearing an exception.
+        said = str(caught.value)
+        assert "later than this release understands" in said
+        assert "completeness_absent" in said
 
 
 class TestLineEndingsDoNotHideAnything:
@@ -539,9 +554,13 @@ class TestAFormatThisReleaseDoesNotKnow:
         assert verify_completeness_digest(ahead)
         assert "completeness" in tomllib.loads(ahead.read_text())
         assert _reasons_for(ahead) == ("format_ahead",)
-        _, said = _restore_into(ahead, tmp_path / "recovered")
-        assert said, "a file from a later format restored without a word"
-        assert "disagrees with itself" not in said[0]
+
+        target = tmp_path / "recovered"
+        target.mkdir()
+        shutil.copy(ahead, target / "claims.toml")
+        with pytest.raises(RestoreError) as caught:
+            restore(target)
+        assert caught.value.kind == "format_ahead"
 
     def test_a_later_stamp_is_not_called_tampering(self, tmp_path: Path) -> None:
         """A number above this release's own is not evidence of an edit.
@@ -559,14 +578,19 @@ class TestAFormatThisReleaseDoesNotKnow:
         ahead = tmp_path / "ahead.toml"
         ahead.write_text(tomli_w.dumps(doc))
 
-        report, said = _restore_into(ahead, tmp_path / "recovered")
-        assert report["claims_restored"] == 3
-        assert said, "a file from an unknown format restored without a word"
-        assert "later than the format" in said[0]
-        # The missing table is still reported. Saying only "this is newer" about
-        # a file that has lost its own account of itself is a misdirection, and
-        # the reasons carry both so a caller can tell them apart.
         assert set(_reasons_for(ahead)) == {"format_ahead", "completeness_absent"}
+
+        target = tmp_path / "recovered"
+        target.mkdir()
+        shutil.copy(ahead, target / "claims.toml")
+        with pytest.raises(RestoreError) as caught:
+            restore(target)
+        said = str(caught.value)
+        # Refused for being newer, not for being tampered with, and the
+        # override does not apply: this release cannot say what that file owes.
+        assert caught.value.kind == "format_ahead"
+        assert "Restore it with the release that wrote it" in said
+        assert "removed after it was written" not in said
 
     @pytest.mark.parametrize("value", [0, "1", 1.0, True, []])
     def test_a_stamp_of_any_other_shape_still_owes_a_table(
@@ -1060,3 +1084,103 @@ class TestTheCheckDoesNotDependOnWhereBytesSit:
         assert tables_below_completeness(with_tail) == ("rekor_inclusions",), (
             "the tail reader lost the boundary on a file with CRLF endings"
         )
+
+
+class TestWhatARefusalCosts:
+    """The release that binds these artifacts, and what it must not break.
+
+    The release before this one only disclosed. It could not refuse, because
+    the population it would have refused was holding files written before the
+    format and taking their recovery away for a rule they never had is not a
+    trade worth making. That window is closed now, and a witness nobody acts on
+    is a witness nobody needs.
+    """
+
+    def _short_by_one(self, tmp_path: Path) -> Path:
+        raw = _healthy_project(tmp_path).read_text()
+        first = raw.index("[claims.")
+        second = raw.index("[claims.", first + 1)
+        third = raw.index("[claims.", second + 1)
+        out = tmp_path / "short.toml"
+        out.write_text(raw[:second] + raw[third:])
+        return out
+
+    def _restore(self, source: Path, target: Path, **kw):
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copy(source, target / "claims.toml")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return restore(target, **kw)
+
+    def test_a_backup_that_cannot_account_for_itself_is_refused(
+        self, tmp_path: Path,
+    ) -> None:
+        with pytest.raises(RestoreError) as caught:
+            self._restore(self._short_by_one(tmp_path), tmp_path / "r")
+        assert caught.value.kind == "backup_unaccounted"
+
+    def test_the_refusal_changes_nothing_on_disk(self, tmp_path: Path) -> None:
+        """A refusal is not a half-restore. The graph a failed recovery leaves
+        behind is the one an operator tries the next thing with."""
+        target = tmp_path / "r"
+        with pytest.raises(RestoreError):
+            self._restore(self._short_by_one(tmp_path), target)
+        assert not (target / ".mareforma").exists()
+
+    def test_an_operator_who_edited_it_can_still_recover(
+        self, tmp_path: Path,
+    ) -> None:
+        """The other direction, and the reason the override exists.
+
+        This is the recovery path. Its threat model includes somebody who
+        repaired a corrupt row by hand, and refusing them their own graph over
+        an edit they made deliberately is the same failure pointed the other
+        way. The refusal names the flag so taking it is a decision.
+        """
+        report = self._restore(
+            self._short_by_one(tmp_path), tmp_path / "r",
+            trust_unaccounted_backup=True,
+        )
+        assert report["claims_restored"] == 2
+
+    def test_a_backup_written_before_the_format_still_restores(
+        self, tmp_path: Path,
+    ) -> None:
+        """The compatibility this refusal must not cost.
+
+        Every backup written before the completeness table carries neither it
+        nor the stamp, reaches none of these reasons, and restores untouched.
+        Without that, binding the witness would refuse every file anyone was
+        already holding.
+        """
+        import tomli_w
+
+        doc = tomllib.loads(_healthy_project(tmp_path).read_text())
+        doc.pop("backup_format", None)
+        doc.pop("completeness")
+        legacy = tmp_path / "legacy.toml"
+        legacy.write_text(tomli_w.dumps(doc))
+
+        report = self._restore(legacy, tmp_path / "r")
+        assert report["claims_restored"] == 3
+
+    def test_an_untouched_backup_still_restores(self, tmp_path: Path) -> None:
+        report = self._restore(_healthy_project(tmp_path), tmp_path / "r")
+        assert report["claims_restored"] == 3
+
+    def test_a_tampered_row_still_reports_the_row(self, tmp_path: Path) -> None:
+        """The precise violation wins over the general one.
+
+        Editing a claim breaks its signature and the file's digest at once.
+        Refusing on the digest first made "cannot account for itself" the
+        answer to a forged signature, a swapped statement id and an orphan
+        signer alike, which is a worse sentence than the one it replaced.
+        """
+        source = _healthy_project(tmp_path)
+        raw = source.read_text()
+        edited = tmp_path / "edited.toml"
+        edited.write_text(raw.replace("the first finding", "the FIRST finding"))
+
+        with pytest.raises(RestoreError) as caught:
+            self._restore(edited, tmp_path / "r")
+        assert caught.value.kind == "claim_unverified"

@@ -322,3 +322,38 @@ def _bootstrap_default_key() -> None:
     kp.parent.mkdir(parents=True, exist_ok=True)
     if not kp.exists():
         signing.bootstrap_key(kp)
+
+
+def rewrite_backup(toml_path, doc) -> None:
+    """Write *doc* as a claims.toml that still accounts for itself.
+
+    A test that edits a backup to plant one tamper has to leave the file's own
+    account of itself intact. Otherwise the reader refuses the file before the
+    planted tamper is reached, and the test proves nothing about the thing it
+    was written for.
+
+    This rebuilds the completeness table over the edited body the way the
+    writer would: counts taken from what the document now holds, digest over
+    the bytes above the table. It is also the faithful position to test from,
+    because an attacker who reaches a downstream check has recomputed that
+    digest too. Recomputing it is free and always was; the table catches the
+    careless edit and never claimed to catch the deliberate one.
+    """
+    import hashlib
+
+    import tomli_w
+
+    previous = doc.get("completeness") or {}
+    body_doc = {k: v for k, v in doc.items() if k != "completeness"}
+    body = tomli_w.dumps(body_doc)
+    tail = tomli_w.dumps({"completeness": {
+        "verdict_chain_tip": previous.get("verdict_chain_tip", ""),
+        "verdict_chain_covered": previous.get("verdict_chain_covered", 0),
+        "verdicts_total": previous.get("verdicts_total", 0),
+        "digest": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        "sections": {
+            name: len(rows) for name, rows in sorted(body_doc.items())
+            if isinstance(rows, dict)
+        },
+    }})
+    Path(toml_path).write_text(body + tail, encoding="utf-8")

@@ -454,6 +454,7 @@ def restore(
     claims_toml: "str | Path | None" = None,
     rekor_log_pubkey_pem: "bytes | None" = None,
     enforce_rekor_policy: bool = False,
+    trust_unaccounted_backup: bool = False,
 ) -> dict:
     """Rebuild a fresh graph.db from claims.toml.
 
@@ -504,8 +505,17 @@ def restore(
         toml_not_found, toml_unreadable, toml_malformed,
         enrollment_unverified, claim_unverified, trust_row_rejected,
         mode_inconsistent, orphan_signer, rekor_inclusion_invalid,
-        policy_unverified, policy_absent, policy_unverifiable, or
-        policy_violation.
+        policy_unverified, policy_absent, policy_unverifiable,
+        policy_violation, backup_unaccounted, or format_ahead.
+
+    A backup whose completeness table does not match what the file holds is
+    refused as ``backup_unaccounted``: it says what it should contain and
+    does not contain it, so the rebuilt graph would be short rows with
+    nothing recording that they were ever there. Pass
+    ``trust_unaccounted_backup=True`` to restore such a file anyway, which
+    is the path for an operator who edited it deliberately. A backup from a
+    later format is refused as ``format_ahead`` and the override does not
+    apply, because this release cannot say what that file owes.
     """
     from mareforma.db import restore as _restore
     return _restore(
@@ -513,6 +523,7 @@ def restore(
         claims_toml=claims_toml,
         rekor_log_pubkey_pem=rekor_log_pubkey_pem,
         enforce_rekor_policy=enforce_rekor_policy,
+        trust_unaccounted_backup=trust_unaccounted_backup,
     )
 
 

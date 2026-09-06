@@ -40,7 +40,7 @@ from mareforma import signing
 from mareforma.db.core import grounding_attestation_state
 from mareforma.db.restore import restore
 from mareforma.observe import observe
-from tests._helpers import _bootstrap_key, _enroll_key, _load_signer
+from tests._helpers import rewrite_backup, _bootstrap_key, _enroll_key, _load_signer
 
 
 def _dataset(root: Path) -> Path:
@@ -131,9 +131,7 @@ def _forge_axis_in_backup(root: Path, claim_id: str, key: Path) -> None:
     claim["statement_cid"] = hashlib.sha256(
         signing.canonical_statement(fields, evidence)
     ).hexdigest()
-    toml_path.write_text(
-        tomli_w.dumps({k: v for k, v in doc.items() if k != "completeness"})
-    )
+    rewrite_backup(toml_path, doc)
 
 
 class TestWhoGetsOne:

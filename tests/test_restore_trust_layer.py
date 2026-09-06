@@ -74,7 +74,7 @@ def test_signed_non_rekor_claim_keeps_transparency_and_still_converges(
         assert g.get_claim(c1)["support_level"] == "PRELIMINARY"
 
     _wipe_graph_db(tmp_path)
-    mareforma.restore(tmp_path)
+    mareforma.restore(tmp_path, trust_unaccounted_backup=True)
 
     # The honest transparency flag survives the round-trip.
     assert _trust_columns(tmp_path)[c1]["transparency_logged"] == 1
@@ -121,7 +121,7 @@ def test_restore_refuses_a_forged_rekor_uuid_in_the_bundle(
     toml_path.write_text(tomli_w.dumps(data), encoding="utf-8")
 
     _wipe_graph_db(tmp_path)
-    mareforma.restore(tmp_path)
+    mareforma.restore(tmp_path, trust_unaccounted_backup=True)
 
     # No [rekor_inclusions] entry backs the forged uuid: not witnessed.
     assert _trust_columns(tmp_path)[cid]["transparency_logged"] == 0
@@ -153,7 +153,7 @@ def test_restore_refuses_a_forged_replicated_support_level(
 
     _wipe_graph_db(tmp_path)
     with pytest.raises(RestoreError):
-        mareforma.restore(tmp_path)
+        mareforma.restore(tmp_path, trust_unaccounted_backup=True)
 
 
 def test_restore_preserves_a_corroborated_replicated(tmp_path: Path) -> None:
@@ -178,7 +178,7 @@ def test_restore_preserves_a_corroborated_replicated(tmp_path: Path) -> None:
         assert g.get_claim(c2)["support_level"] == "REPLICATED"
 
     _wipe_graph_db(tmp_path)
-    mareforma.restore(tmp_path)
+    mareforma.restore(tmp_path, trust_unaccounted_backup=True)
     cols = _trust_columns(tmp_path)
     assert cols[c1]["support_level"] == "REPLICATED"
     assert cols[c2]["support_level"] == "REPLICATED"
@@ -201,7 +201,7 @@ def _forge_replicated_and_restore(tmp_path: Path, claim_id: str) -> None:
     toml_path.write_text(tomli_w.dumps(data), encoding="utf-8")
 
     _wipe_graph_db(tmp_path)
-    mareforma.restore(tmp_path)
+    mareforma.restore(tmp_path, trust_unaccounted_backup=True)
 
 
 def test_restore_refuses_a_replicated_backed_by_an_identical_artifact(
@@ -325,7 +325,7 @@ def test_restore_keeps_a_replicated_the_verdict_path_promoted(
         )
 
     _wipe_graph_db(tmp_path)
-    mareforma.restore(tmp_path)
+    mareforma.restore(tmp_path, trust_unaccounted_backup=True)
     cols = _trust_columns(tmp_path)
     assert cols[a]["support_level"] == "REPLICATED"
     assert cols[b]["support_level"] == "REPLICATED"
@@ -396,7 +396,7 @@ def _forge_established_and_restore(
     toml_path.write_text(tomli_w.dumps(data), encoding="utf-8")
 
     _wipe_graph_db(tmp_path)
-    mareforma.restore(tmp_path)
+    mareforma.restore(tmp_path, trust_unaccounted_backup=True)
 
 
 def test_restore_refuses_an_established_the_ladder_never_produced(
@@ -490,7 +490,7 @@ def test_restore_pends_an_unwitnessed_claim_under_a_rekor_policy(
         g.require_rekor_witnessing()
 
     _wipe_graph_db(tmp_path)
-    mareforma.restore(tmp_path)  # deliberately without enforce_rekor_policy
+    mareforma.restore(tmp_path, trust_unaccounted_backup=True)  # deliberately without enforce_rekor_policy
     assert _trust_columns(tmp_path)[cid]["transparency_logged"] == 0
 
 
@@ -503,7 +503,7 @@ def test_project_policy_round_trips_through_restore(tmp_path: Path) -> None:
         g.require_rekor_witnessing()
 
     _wipe_graph_db(tmp_path)
-    mareforma.restore(tmp_path)
+    mareforma.restore(tmp_path, trust_unaccounted_backup=True)
 
     from mareforma.db import open_db, get_project_policy
     conn = open_db(tmp_path)
@@ -525,7 +525,7 @@ def test_strict_promotion_policy_round_trips_through_restore(
         g.assert_claim("anchored", generated_by="x")
 
     _wipe_graph_db(tmp_path)
-    mareforma.restore(tmp_path)
+    mareforma.restore(tmp_path, trust_unaccounted_backup=True)
 
     from mareforma.db import open_db, strict_promotion_required
     conn = open_db(tmp_path)
@@ -568,7 +568,7 @@ def test_restore_accepts_a_policy_envelope_signed_before_the_strict_field(
     toml_path.write_text(tomli_w.dumps(data), encoding="utf-8")
 
     _wipe_graph_db(tmp_path)
-    mareforma.restore(tmp_path)
+    mareforma.restore(tmp_path, trust_unaccounted_backup=True)
 
     from mareforma.db import get_project_policy, open_db
     conn = open_db(tmp_path)
@@ -621,7 +621,7 @@ def test_restore_dates_an_undated_policy_envelope_by_its_created_at(
     toml_path.write_text(tomli_w.dumps(data), encoding="utf-8")
 
     _wipe_graph_db(tmp_path)
-    mareforma.restore(tmp_path)
+    mareforma.restore(tmp_path, trust_unaccounted_backup=True)
 
     from mareforma.db import (
         get_project_policy, open_db, project_policy_declared_at,
@@ -653,7 +653,7 @@ def test_restore_refuses_a_declaration_time_the_envelope_does_not_carry(
 
     _wipe_graph_db(tmp_path)
     with pytest.raises(RestoreError) as exc:
-        mareforma.restore(tmp_path)
+        mareforma.restore(tmp_path, trust_unaccounted_backup=True)
     assert "not match the signed envelope" in str(exc.value)
 
 
@@ -672,7 +672,7 @@ def test_restore_refuses_a_stripped_strict_promotion_flag(tmp_path: Path) -> Non
 
     _wipe_graph_db(tmp_path)
     with pytest.raises(RestoreError) as exc:
-        mareforma.restore(tmp_path)
+        mareforma.restore(tmp_path, trust_unaccounted_backup=True)
     assert "not match the signed envelope" in str(exc.value)
 
 
@@ -789,7 +789,8 @@ def test_enforce_requires_a_signed_policy(tmp_path: Path) -> None:
     log_pubkey = _pem_of(_bootstrap_key(tmp_path, "log.key"))
     with pytest.raises(RestoreError) as exc:
         mareforma.restore(
-            tmp_path, rekor_log_pubkey_pem=log_pubkey, enforce_rekor_policy=True,
+            tmp_path, rekor_log_pubkey_pem=log_pubkey,
+            enforce_rekor_policy=True, trust_unaccounted_backup=True,
         )
     assert "no root-signed policy" in str(exc.value)
 
@@ -804,7 +805,7 @@ def test_enforce_requires_a_pinned_log_key(tmp_path: Path) -> None:
 
     _wipe_graph_db(tmp_path)
     with pytest.raises(RestoreError) as exc:
-        mareforma.restore(tmp_path, enforce_rekor_policy=True)
+        mareforma.restore(tmp_path, enforce_rekor_policy=True, trust_unaccounted_backup=True)
     assert "requires rekor_log_pubkey_pem" in str(exc.value)
 
 
@@ -823,7 +824,7 @@ def test_restore_refuses_a_tampered_project_policy(tmp_path: Path) -> None:
 
     _wipe_graph_db(tmp_path)
     with pytest.raises(RestoreError) as exc:
-        mareforma.restore(tmp_path)
+        mareforma.restore(tmp_path, trust_unaccounted_backup=True)
     assert "not match the signed envelope" in str(exc.value)
 
 
@@ -852,7 +853,8 @@ def test_enforced_policy_rejects_an_empty_inclusion_body(tmp_path: Path) -> None
     log_pubkey = _pem_of(_bootstrap_key(tmp_path, "log.key"))
     with pytest.raises(RestoreError) as exc:
         mareforma.restore(
-            tmp_path, rekor_log_pubkey_pem=log_pubkey, enforce_rekor_policy=True,
+            tmp_path, rekor_log_pubkey_pem=log_pubkey,
+            enforce_rekor_policy=True, trust_unaccounted_backup=True,
         )
     assert "missing required fields" in str(exc.value)
 
@@ -912,7 +914,7 @@ def test_restore_rejects_a_rekor_proof_copied_from_another_claim(
     _wipe_graph_db(tmp_path)
     log_pubkey = _pem_of(_bootstrap_key(tmp_path, "log.key"))
     with pytest.raises(RestoreError) as exc:
-        mareforma.restore(tmp_path, rekor_log_pubkey_pem=log_pubkey)
+        mareforma.restore(tmp_path, rekor_log_pubkey_pem=log_pubkey, trust_unaccounted_backup=True)
     assert "does not bind" in str(exc.value)
 
 
@@ -944,7 +946,7 @@ def test_restore_names_a_sidecar_that_carries_no_proof(tmp_path: Path) -> None:
     _wipe_graph_db(tmp_path)
     log_pubkey = _pem_of(_bootstrap_key(tmp_path, "log.key"))
     with pytest.raises(RestoreError) as exc:
-        mareforma.restore(tmp_path, rekor_log_pubkey_pem=log_pubkey)
+        mareforma.restore(tmp_path, rekor_log_pubkey_pem=log_pubkey, trust_unaccounted_backup=True)
     assert "no inclusion proof" in str(exc.value)
 
 
@@ -988,7 +990,7 @@ def test_restore_refuses_an_incomplete_sidecar_entry(
 
     _wipe_graph_db(tmp_path)
     with pytest.raises(RestoreError) as exc:
-        mareforma.restore(tmp_path)
+        mareforma.restore(tmp_path, trust_unaccounted_backup=True)
     assert exc.value.kind == "rekor_inclusion_invalid"
 
 
@@ -1033,7 +1035,7 @@ def test_restore_preserves_the_full_trust_layer(tmp_path: Path) -> None:
 
     pre = _trust_columns(tmp_path)
     _wipe_graph_db(tmp_path)
-    mareforma.restore(tmp_path)
+    mareforma.restore(tmp_path, trust_unaccounted_backup=True)
     post = _trust_columns(tmp_path)
 
     assert set(pre) == set(post)
@@ -1081,7 +1083,7 @@ def test_restore_rebuilds_the_finding_evidence_tree(tmp_path: Path) -> None:
         assert pre_lineage is not None
 
     _wipe_graph_db(tmp_path)
-    mareforma.restore(tmp_path)
+    mareforma.restore(tmp_path, trust_unaccounted_backup=True)
 
     with mareforma.open(tmp_path, key_path=key) as g:
         conn = g._conn
@@ -1171,7 +1173,7 @@ def test_restore_refuses_a_repointed_finding_edge(tmp_path: Path) -> None:
 
     _wipe_graph_db(tmp_path)
     with pytest.raises(RestoreError) as exc:
-        mareforma.restore(tmp_path)
+        mareforma.restore(tmp_path, trust_unaccounted_backup=True)
     assert exc.value.kind == "claim_unverified"
     assert "does not attest" in str(exc.value)
 
@@ -1289,7 +1291,7 @@ def test_restore_recovers_a_plan_registered_under_the_older_alpha_bound(
         conn.close()
 
     _wipe_graph_db(tmp_path)
-    mareforma.restore(tmp_path)
+    mareforma.restore(tmp_path, trust_unaccounted_backup=True)
 
     with mareforma.open(tmp_path, key_path=key) as g:
         assert g.get_claim(claim_id) is not None
@@ -1323,6 +1325,6 @@ def test_restore_names_a_rejected_trust_row_rather_than_a_bad_signature(
 
     _wipe_graph_db(tmp_path)
     with pytest.raises(RestoreError) as exc:
-        mareforma.restore(tmp_path)
+        mareforma.restore(tmp_path, trust_unaccounted_backup=True)
     assert exc.value.kind == "trust_row_rejected"
     assert "claims.toml" in str(exc.value)

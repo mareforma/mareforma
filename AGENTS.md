@@ -291,7 +291,7 @@ self-contained HTML file.
 
 ---
 
-### `mareforma.restore(project_root, *, claims_toml=None, rekor_log_pubkey_pem=None, enforce_rekor_policy=False) → dict`
+### `mareforma.restore(project_root, *, claims_toml=None, rekor_log_pubkey_pem=None, enforce_rekor_policy=False, trust_unaccounted_backup=False) → dict`
 
 Rebuild a fresh `graph.db` from `claims.toml` (catastrophic-loss recovery).
 Refuses to run if the target `graph.db` already contains claims:
@@ -314,7 +314,18 @@ Returns `{"validators_restored": N, "claims_restored": M}`.
 `enrollment_unverified`, `claim_unverified`, `trust_row_rejected`,
 `mode_inconsistent`,
 `orphan_signer`, `policy_absent`, `policy_unverifiable`,
-`policy_unverified`, `policy_violation`, `rekor_inclusion_invalid`.
+`policy_unverified`, `policy_violation`, `rekor_inclusion_invalid`,
+`backup_unaccounted`, `format_ahead`.
+
+A backup whose completeness table does not match what the file holds is
+refused as `backup_unaccounted`: it says what it should contain and does
+not, so the rebuilt graph would be short rows with nothing recording that
+they were ever there. Pass `trust_unaccounted_backup=True` to restore such
+a file anyway, which is the path for an operator who repaired it by hand.
+A backup written in a later format is refused as `format_ahead` and the
+override does not apply, because this release cannot say what that file
+owes. A backup written before the completeness table carries neither it nor
+the format stamp, reaches neither refusal, and restores unchanged.
 `docs/reference/api.mdx` spells out what each one means.
 
 ---

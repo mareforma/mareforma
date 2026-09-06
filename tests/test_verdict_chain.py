@@ -35,9 +35,9 @@ from mareforma.db.core import (
     verdict_chain_tip,
     verify_verdict_chain,
 )
-from mareforma.db.errors import FormatArtifactError
+from mareforma.db.errors import FormatArtifactError, RestoreError
 from mareforma.db.restore import restore
-from tests._helpers import _bootstrap_key, _enroll_key, _load_signer
+from tests._helpers import rewrite_backup, _bootstrap_key, _enroll_key, _load_signer
 
 
 def _db(root: Path) -> Path:
@@ -569,11 +569,9 @@ class TestTheReadPathReportsIt:
         toml_path = tmp_path / "claims.toml"
         doc = tomllib.loads(toml_path.read_text())
         del doc["contradiction_verdicts"]["v2"]
-        toml_path.write_text(
-            tomli_w.dumps({k: v for k, v in doc.items() if k != "completeness"})
-        )
+        rewrite_backup(toml_path, doc)
         _shutil.rmtree(tmp_path / ".mareforma")
-        restore(tmp_path)
+        restore(tmp_path, trust_unaccounted_backup=True)
 
         conn = open_db(tmp_path)
         try:
@@ -939,8 +937,13 @@ class TestTheBackupSections:
         short.mkdir()
         (short / "claims.toml").write_text(body + tail, encoding="utf-8")
 
-        with pytest.warns(UserWarning, match="disagrees with itself"):
+        # Disclosed by the release that wrote the witness, refused by the one
+        # that binds it. Same file, and the pairing is the whole point.
+        with pytest.raises(RestoreError) as caught:
             restore(short)
+        assert caught.value.kind == "backup_unaccounted"
+        with pytest.warns(UserWarning, match="disagrees with itself"):
+            restore(short, trust_unaccounted_backup=True)
 
         # Held to the reason, not the opening. Re-serializing the file to drop
         # a claim also breaks the digest, so this stayed green with the count
@@ -984,9 +987,16 @@ class TestTheBackupSections:
         (short / "claims.toml").write_text(
             raw[: raw.rindex("[claims.")], encoding="utf-8",
         )
+        # The stamp survives the cut, so the file still says it owed a table.
+        # This release stops there rather than rebuilding a graph it knows is
+        # short.
+        with pytest.raises(RestoreError) as refused:
+            restore(short)
+        assert refused.value.kind == "backup_unaccounted"
+
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            report = restore(short)
+            report = restore(short, trust_unaccounted_backup=True)
         assert report["claims_restored"] == 2
         assert [
             w for w in caught if "claims.toml at" in str(w.message)
@@ -1035,7 +1045,7 @@ class TestItSurvivesRecovery:
 
         import shutil
         shutil.rmtree(tmp_path / ".mareforma")
-        restore(tmp_path)
+        restore(tmp_path, trust_unaccounted_backup=True)
 
         with mareforma.open(tmp_path, key_path=root_key) as g:
             assert verdict_chain_tip(g._conn) == before
@@ -1063,7 +1073,7 @@ class TestItSurvivesRecovery:
 
         import shutil
         shutil.rmtree(tmp_path / ".mareforma")
-        restore(tmp_path)
+        restore(tmp_path, trust_unaccounted_backup=True)
 
         with mareforma.open(tmp_path, key_path=root_key) as g:
             assert verify_verdict_chain(g._conn) != ()
@@ -1136,11 +1146,11 @@ class TestItSurvivesRecovery:
             "nothing"
         )
         edit(data)
-        toml_path.write_text(tomli_w.dumps(data))
+        rewrite_backup(toml_path, data)
 
         shutil.rmtree(tmp_path / ".mareforma")
         with pytest.raises(RestoreError, match=match):
-            restore(tmp_path)
+            restore(tmp_path, trust_unaccounted_backup=True)
 
 
 class TestAFailedVerdictWriteClosesItsTransaction:

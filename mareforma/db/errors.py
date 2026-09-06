@@ -184,6 +184,10 @@ class RestoreError(MareformaError):
       - ``'policy_unverifiable'``      : enforced policy has no pinned Rekor log key
       - ``'policy_unverified'``        : project_policy envelope fails verify
       - ``'policy_violation'``         : rebuilt row breaks the signed policy
+      - ``'backup_unaccounted'``       : the file does not hold what its
+        completeness table says it holds
+      - ``'format_ahead'``             : written in a backup format later
+        than this release understands
       - ``'rekor_inclusion_invalid'``  : Rekor inclusion entry or proof invalid
     """
 

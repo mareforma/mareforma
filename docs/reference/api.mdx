@@ -121,6 +121,8 @@ keyless write.
 | `policy_absent` | `enforce_rekor_policy=True` but no root-signed policy requiring witnessing is present. |
 | `policy_unverifiable` | `enforce_rekor_policy=True` without a pinned `rekor_log_pubkey_pem` to verify inclusion proofs. |
 | `policy_violation` | A rebuilt row breaks the project's signed policy, such as a REPLICATED claim with no `artifact_hash` under strict promotion. |
+| `backup_unaccounted` | The file does not hold what its `[completeness]` table says it holds, so the rebuilt graph would be short rows with nothing recording they were there. Pass `trust_unaccounted_backup=True` to restore a file you edited deliberately. A backup written before the table reaches this check not at all. |
+| `format_ahead` | The backup was written in a later format than this release understands, so what it owes cannot be checked here. The override does not apply; restore it with the release that wrote it. |
 
 ---
 
