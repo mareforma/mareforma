@@ -351,6 +351,8 @@ from .restore import (
     _disclose_a_file_that_disagrees_with_itself,
     _disclose_a_rotated_copy_worth_trying,
     _refuse_a_file_that_cannot_account_for_itself,
+    _refuse_a_broken_verdict_chain,
+    _refuse_a_grounding_axis_nothing_attests,
     _UNACCOUNTED,
     _required_field,
     _verify_claim_signatures_on_restore,

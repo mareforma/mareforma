@@ -315,7 +315,8 @@ Returns `{"validators_restored": N, "claims_restored": M}`.
 `mode_inconsistent`,
 `orphan_signer`, `policy_absent`, `policy_unverifiable`,
 `policy_unverified`, `policy_violation`, `rekor_inclusion_invalid`,
-`backup_unaccounted`, `format_ahead`.
+`backup_unaccounted`, `format_ahead`, `verdict_chain_broken`,
+`grounding_unattested`.
 
 A backup whose completeness table does not match what the file holds is
 refused as `backup_unaccounted`: it says what it should contain and does

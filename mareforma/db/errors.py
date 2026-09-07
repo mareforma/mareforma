@@ -188,6 +188,10 @@ class RestoreError(MareformaError):
         completeness table says it holds
       - ``'format_ahead'``             : written in a backup format later
         than this release understands
+      - ``'verdict_chain_broken'``     : a verdict was taken out of the
+        backup and the chain no longer accounts for the set
+      - ``'grounding_unattested'``     : a GROUNDED axis arrived with
+        nothing in the file attesting it
       - ``'rekor_inclusion_invalid'``  : Rekor inclusion entry or proof invalid
     """
 

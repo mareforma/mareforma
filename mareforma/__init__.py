@@ -506,7 +506,8 @@ def restore(
         enrollment_unverified, claim_unverified, trust_row_rejected,
         mode_inconsistent, orphan_signer, rekor_inclusion_invalid,
         policy_unverified, policy_absent, policy_unverifiable,
-        policy_violation, backup_unaccounted, or format_ahead.
+        policy_violation, backup_unaccounted, format_ahead,
+        verdict_chain_broken, or grounding_unattested.
 
     A backup whose completeness table does not match what the file holds is
     refused as ``backup_unaccounted``: it says what it should contain and
@@ -516,6 +517,14 @@ def restore(
     is the path for an operator who edited it deliberately. A backup from a
     later format is refused as ``format_ahead`` and the override does not
     apply, because this release cannot say what that file owes.
+
+    Two more refusals bind what the backup carries beside its rows. A
+    verdict taken out of the file leaves a chain that no longer accounts
+    for the set, refused as ``verdict_chain_broken``. A GROUNDED
+    observed-grounding axis arriving with nothing attesting it is refused
+    as ``grounding_unattested``, which is checked only on a backup
+    carrying the format stamp, since files written before the
+    attestations existed carry none. Both take the same override.
     """
     from mareforma.db import restore as _restore
     return _restore(

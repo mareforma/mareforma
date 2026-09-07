@@ -350,6 +350,98 @@ _UNACCOUNTED = frozenset({
 })
 
 
+def _refuse_a_grounding_axis_nothing_attests(
+    conn, toml_path, stamped: bool, trusted: bool,
+) -> None:
+    """Stop a restore that would put a GROUNDED axis back on a producer's word.
+
+    The write path refuses to take that axis on trust: a verdict the process's
+    own observer minted is kept, and anything else is marked declared and its
+    GROUNDED neutralised to OPAQUE. Restore never passed through it, so a
+    neutralised record could be exported, edited, re-signed with the producer's
+    own enrolled key and restored as GROUNDED, with verify exiting 0 and the
+    trust map printing the attacker's sentence as its residual. Every signature
+    checked out, because the producer was signing their own claim.
+
+    The attestation is what carries the write path's knowledge into the file, so
+    a GROUNDED axis with nothing attesting it is a GROUNDED axis this graph
+    never watched being earned.
+
+    Only for a stamped file. A backup written before the attestations existed
+    carries none, and every GROUNDED claim in it would read as laundered, which
+    would refuse the honest history of every project that predates them.
+
+    This raises the cost of the lazy forgery, the one that edits the axis and
+    nothing else. It does not beat the producer: the observer runs inside their
+    process and they hold the key, so they can mint an attestation as readily as
+    a claim. Parity with the write path is the whole of what it buys.
+    """
+    if not stamped or trusted:
+        return
+    from mareforma.db.core import grounding_attestation_state
+
+    laundered = []
+    for row in conn.execute(
+        "SELECT claim_id, observed_grounding FROM claims "
+        "WHERE observed_grounding IS NOT NULL ORDER BY rowid"
+    ).fetchall():
+        record = _parse_observed_grounding(row["observed_grounding"])
+        if not record or record.get("grounding") != "GROUNDED":
+            continue
+        if grounding_attestation_state(conn, row["claim_id"]) != "attested":
+            laundered.append(row["claim_id"])
+    if not laundered:
+        return
+    raise RestoreError(
+        f"{len(laundered)} claim(s) in {toml_path} carry a GROUNDED axis that "
+        "nothing in the file attests, starting with "
+        f"{laundered[0]}. The write path only records that axis when its own "
+        "observer minted the verdict, so an axis arriving without the "
+        "attestation beside it was put there afterwards, and restoring it would "
+        "make this graph say execution was watched when no record of watching "
+        "came with it. Nothing has been changed and the file is untouched. If "
+        "you edited it deliberately, pass trust_unaccounted_backup=True to "
+        "restore it as it stands.",
+        kind="grounding_unattested",
+    )
+
+
+def _refuse_a_broken_verdict_chain(
+    reasons: "tuple[str, ...]", conn, toml_path, trusted: bool,
+) -> None:
+    """Stop a recovery whose restored verdict set does not add up.
+
+    This is the half of drop-guard-delete-verdict that survives everything
+    else. The guard reconciler and the contestation replay both speak about
+    rows that are still there, so a verdict deleted out of a backup used to
+    rebuild a graph that never had it and report clean. The chain is what makes
+    the absence speak, and refusing on it is what stops the absence being
+    rebuilt.
+
+    A graph whose verdicts all predate the chain is not this. Those carry no
+    links, the chain covers a suffix that begins where it begins, and the check
+    reports nothing. Every backup written before the chain existed lands there.
+    """
+    if not reasons or trusted:
+        return
+    from mareforma.db.core import verdict_chain_coverage, verify_verdict_chain
+
+    problems = verify_verdict_chain(conn)
+    covered, total = verdict_chain_coverage(conn)
+    raise RestoreError(
+        f"the verdict chain in {toml_path} does not account for the verdicts "
+        f"it restored, holding {covered} links over {total} verdicts: "
+        + "; ".join(problems[:3])
+        + (f", and {len(problems) - 3} more" if len(problems) > 3 else "")
+        + ". A verdict taken out of a backup leaves a graph that never had it "
+        "and nothing later can tell, which is the reason the chain is written "
+        "at all. Nothing has been changed and the file is untouched. If you "
+        "edited it deliberately, pass trust_unaccounted_backup=True to restore "
+        "it as it stands.",
+        kind="verdict_chain_broken",
+    )
+
+
 def _refuse_a_file_that_cannot_account_for_itself(
     reasons: "tuple[str, ...]", toml_path, trusted: bool,
 ) -> None:
@@ -1285,7 +1377,10 @@ def restore(
 
             # The verdict-set chain, after the verdicts its links cover.
             _replay_verdict_chain(conn, data.get("verdict_chain") or {})
-            _disclose_a_rotated_copy_worth_trying(conn, toml_path)
+            _refuse_a_broken_verdict_chain(
+                _disclose_a_rotated_copy_worth_trying(conn, toml_path),
+                conn, toml_path, trust_unaccounted_backup,
+            )
             # Every row has verified by here, so anything left is the
             # file disagreeing with its own account rather than a row
             # disagreeing with its signature.
@@ -1295,6 +1390,12 @@ def restore(
             # The grounding attestations, after the claims they name.
             _replay_grounding_attestations(
                 conn, data.get("grounding_attestations") or {},
+            )
+            # After the attestations, so the axis is judged against what the
+            # file actually carried for it.
+            _refuse_a_grounding_axis_nothing_attests(
+                conn, toml_path, data.get("backup_format") is not None,
+                trust_unaccounted_backup,
             )
             # What the source graph had seen missing. Carried so a round trip
             # cannot be the thing that forgets it.

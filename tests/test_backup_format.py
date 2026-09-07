@@ -784,9 +784,16 @@ class TestARotatedCopyIsNamedWhenItCouldHelp:
         shutil.copy(home / "claims.toml", target / "claims.toml")
         shutil.copy(home / "claims.toml.prev", target / "claims.toml.prev")
 
+        # Refused first, because a chain that does not account for its
+        # verdicts is a graph rebuilt short of one. The message is what this
+        # test is about, so it asks again saying the edit was meant.
+        with pytest.raises(RestoreError) as refused:
+            restore(target)
+        assert refused.value.kind == "verdict_chain_broken"
+
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            restore(target)
+            restore(target, trust_unaccounted_backup=True)
         said = [
             str(w.message) for w in caught
             if "verdict chain restored" in str(w.message)
@@ -815,7 +822,7 @@ class TestARotatedCopyIsNamedWhenItCouldHelp:
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            restore(target)
+            restore(target, trust_unaccounted_backup=True)
         said = [
             str(w.message) for w in caught
             if "verdict chain restored" in str(w.message)
@@ -952,7 +959,7 @@ class TestTheDisclosureNeverCostsTheRecovery:
 
         with warnings.catch_warnings():
             warnings.simplefilter("error", UserWarning)
-            report = restore(target)
+            report = restore(target, trust_unaccounted_backup=True)
 
         assert report["claims_restored"] == 3
         assert (target / ".mareforma").is_dir(), (
@@ -987,7 +994,7 @@ class TestTheDisclosureNeverCostsTheRecovery:
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            restore(target)
+            restore(target, trust_unaccounted_backup=True)
         said = [
             str(w.message) for w in caught
             if "verdict chain restored" in str(w.message)
@@ -1184,3 +1191,73 @@ class TestWhatARefusalCosts:
         with pytest.raises(RestoreError) as caught:
             self._restore(edited, tmp_path / "r")
         assert caught.value.kind == "claim_unverified"
+
+
+class TestABackupCannotHideADeletedVerdict:
+    """The half of drop-guard-delete-verdict that survives everything else.
+
+    The guard reconciler and the contestation replay both speak about rows
+    that are still there, so a verdict deleted out of a backup used to rebuild
+    a graph that never had it and report clean. Nothing in the file disagreed,
+    because nothing in the file spoke about which rows were meant to be in it.
+    """
+
+    def _with_a_verdict_removed(self, tmp_path: Path) -> Path:
+        import sqlite3
+
+        home = tmp_path / "src"
+        home.mkdir()
+        _project_with_a_verdict(home)
+
+        # Drop the guards, take the verdict and its link out, back the graph up.
+        raw = sqlite3.connect(home / ".mareforma" / "graph.db")
+        for guard in ("contradiction_verdicts_no_delete", "verdict_chain_no_delete"):
+            raw.execute(f"DROP TRIGGER IF EXISTS {guard}")
+        raw.execute("DELETE FROM contradiction_verdicts WHERE verdict_id = 'v1'")
+        raw.commit()
+        raw.close()
+        with mareforma.open(home, key_path=home / "root.key") as graph:
+            graph.assert_claim("written after the deletion", generated_by="after")
+        return home / "claims.toml"
+
+    def test_the_restore_is_refused(self, tmp_path: Path) -> None:
+        source = self._with_a_verdict_removed(tmp_path)
+        target = tmp_path / "recovered"
+        target.mkdir()
+        shutil.copy(source, target / "claims.toml")
+
+        with pytest.raises(RestoreError) as caught:
+            restore(target)
+        assert caught.value.kind == "verdict_chain_broken"
+        assert not (target / ".mareforma").exists()
+
+    def test_a_graph_whose_verdicts_predate_the_chain_still_restores(
+        self, tmp_path: Path,
+    ) -> None:
+        """The compatibility this refusal must not cost.
+
+        Verdicts recorded before the chain existed carry no links. The chain
+        covers a suffix that begins where it begins, so a backup full of them
+        reports nothing and restores untouched. Without that, binding the chain
+        would refuse every project that recorded a verdict before it shipped.
+        """
+        import sqlite3
+
+        home = tmp_path / "legacy"
+        home.mkdir()
+        _project_with_a_verdict(home)
+
+        # A verdict with no link is what a pre-chain graph looks like.
+        raw = sqlite3.connect(home / ".mareforma" / "graph.db")
+        raw.execute("DROP TRIGGER IF EXISTS verdict_chain_no_delete")
+        raw.execute("DELETE FROM verdict_chain")
+        raw.commit()
+        raw.close()
+        with mareforma.open(home, key_path=home / "root.key") as graph:
+            graph.assert_claim("later", generated_by="after")
+
+        target = tmp_path / "recovered"
+        target.mkdir()
+        shutil.copy(home / "claims.toml", target / "claims.toml")
+        report = restore(target)
+        assert report["claims_restored"] == 3

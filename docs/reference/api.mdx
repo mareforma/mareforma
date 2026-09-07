@@ -122,6 +122,8 @@ keyless write.
 | `policy_unverifiable` | `enforce_rekor_policy=True` without a pinned `rekor_log_pubkey_pem` to verify inclusion proofs. |
 | `policy_violation` | A rebuilt row breaks the project's signed policy, such as a REPLICATED claim with no `artifact_hash` under strict promotion. |
 | `backup_unaccounted` | The file does not hold what its `[completeness]` table says it holds, so the rebuilt graph would be short rows with nothing recording they were there. Pass `trust_unaccounted_backup=True` to restore a file you edited deliberately. A backup written before the table reaches this check not at all. |
+| `verdict_chain_broken` | The restored verdict chain does not account for the verdicts it carries, so a verdict was taken out of the backup. Pass `trust_unaccounted_backup=True` to restore it as it stands. |
+| `grounding_unattested` | A claim carries a GROUNDED observed-grounding axis that nothing in the file attests, which is how an axis edited after the fact arrives. Only checked on a backup carrying the format stamp. Pass `trust_unaccounted_backup=True` to restore it as it stands. |
 | `format_ahead` | The backup was written in a later format than this release understands, so what it owes cannot be checked here. The override does not apply; restore it with the release that wrote it. |
 
 ---

@@ -39,6 +39,7 @@ import mareforma
 from mareforma import signing
 from mareforma.db.core import grounding_attestation_state
 from mareforma.db.restore import restore
+from mareforma.db.errors import RestoreError
 from mareforma.observe import observe
 from tests._helpers import rewrite_backup, _bootstrap_key, _enroll_key, _load_signer
 
@@ -198,13 +199,20 @@ class TestItSurvivesRecovery:
         assert _axis(tmp_path, key, claim_id) == "GROUNDED"
         assert _state(tmp_path, key, claim_id) == "attested"
 
-    def test_a_forged_axis_restores_unattested(self, tmp_path: Path) -> None:
-        """The regression for the laundering path, stated as the discriminator.
+    def test_a_forged_axis_is_refused(self, tmp_path: Path) -> None:
+        """The laundering path, closed.
 
-        The claim is asserted with no grounding at all, and comes back from
-        restore saying GROUNDED. That much is unchanged and is not what this
-        pins: the axis is inside the claim's signed statement and the producer
-        re-signed it. What is new is that the two are now telling apart at all.
+        The claim is asserted with no grounding at all. Its axis is edited to
+        GROUNDED in the backup and re-signed with the producer's own enrolled
+        key, so every signature checks out, because the producer is signing
+        their own claim. The release that wrote the attestations could only
+        tell the two apart on read; this one stops the restore.
+
+        What that buys is parity with the write path, which has always refused
+        to take the axis on the producer's word. It does not beat the producer:
+        the observer runs inside their process and they hold the key. The
+        override is here because it is the same file to an operator who edited
+        it on purpose.
         """
         key = _bootstrap_key(tmp_path, "root.key")
         _dataset(tmp_path)
@@ -214,8 +222,16 @@ class TestItSurvivesRecovery:
             )
         _forge_axis_in_backup(tmp_path, claim_id, key)
         shutil.rmtree(tmp_path / ".mareforma")
-        restore(tmp_path)
 
+        with pytest.raises(RestoreError) as caught:
+            restore(tmp_path)
+        assert caught.value.kind == "grounding_unattested"
+        assert not (tmp_path / ".mareforma").exists()
+
+        # The same file, restored by somebody who says they meant it. The axis
+        # still reads GROUNDED, and still has nothing attesting it, which is
+        # the discriminator the attestation was written for.
+        restore(tmp_path, trust_unaccounted_backup=True)
         assert _axis(tmp_path, key, claim_id) == "GROUNDED"
         assert _state(tmp_path, key, claim_id) == "unattested"
 
@@ -237,7 +253,7 @@ class TestItSurvivesRecovery:
             forged_id = g.assert_claim("a finding", classification="ANALYTICAL")
         _forge_axis_in_backup(forged_root, forged_id, forged_key)
         shutil.rmtree(forged_root / ".mareforma")
-        restore(forged_root)
+        restore(forged_root, trust_unaccounted_backup=True)
 
         assert _axis(honest_root, honest_key, honest_id) == "GROUNDED"
         assert _axis(forged_root, forged_key, forged_id) == "GROUNDED"
@@ -574,7 +590,7 @@ class TestItIsReported:
             claim_id = g.assert_claim("a finding", classification="ANALYTICAL")
         _forge_axis_in_backup(tmp_path, claim_id, key)
         shutil.rmtree(tmp_path / ".mareforma")
-        restore(tmp_path)
+        restore(tmp_path, trust_unaccounted_backup=True)
 
         with mareforma.open(tmp_path, key_path=key) as g:
             prop = next(
