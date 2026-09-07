@@ -327,10 +327,6 @@ def _disclose_a_rotated_copy_worth_trying(conn, toml_path) -> "tuple[str, ...]":
 # taken their recovery away for a rule they never had. That window is closed,
 # and a witness nobody acts on is a witness nobody needs.
 #
-# `format_ahead` is here for the reason the graph's own version gate refuses a
-# newer file: a reader that cannot say what a file owes cannot say it is intact
-# either. Its message points at the release that wrote it rather than at this
-# one's flag, because upgrading is the answer and overriding is not.
 # The accounting, not the bytes. A file cannot account for itself when its own
 # counts are missing, unreadable, or disagree with what it holds, or when it
 # carries something the counts never named. Those are all statements about the
@@ -464,6 +460,10 @@ def _refuse_a_file_that_cannot_account_for_itself(
     # newer format and swallows the missing rows is the same mistake wearing
     # an exception. Whichever refusal fires, it carries the whole list.
     also = f" It also reports: {', '.join(fatal)}." if fatal else ""
+    # Refused for the reason the graph's own version gate refuses a newer file:
+    # a reader that cannot say what a file owes cannot say it is intact either.
+    # Not a member of the set above, and the override does not reach it, because
+    # upgrading is the answer and overriding is not.
     if "format_ahead" in reasons:
         raise RestoreError(
             f"claims.toml at {toml_path} was written in a backup format later "
@@ -488,7 +488,7 @@ def _refuse_a_file_that_cannot_account_for_itself(
 
 
 def _disclose_a_file_that_disagrees_with_itself(
-    toml_path, data: dict,
+    toml_path, data: dict, will_refuse: bool = False,
 ) -> "tuple[str, ...]":
     """Say so when the backup does not match the ``[completeness]`` table it
     carries.
@@ -610,8 +610,10 @@ def _disclose_a_file_that_disagrees_with_itself(
                 )
             warnings.warn(
                 f"claims.toml at {toml_path} {detail}. Nothing here can account "
-                "for what the file should hold. The restored graph is what "
-                "survived. Take the backup again.",
+                "for what the file should hold. "
+                + ("Nothing has been restored." if will_refuse
+                   else "The restored graph is what survived.")
+                + " Take the backup again.",
                 UserWarning,
                 stacklevel=4,
             )
@@ -730,9 +732,10 @@ def _disclose_a_file_that_disagrees_with_itself(
         closing = (
             "The restored graph is what the file held."
             if reasons == ["format_ahead"]
-            else "The restored graph is what the file holds, not what it claims "
-                 "to hold. Take the backup again if this was not a deliberate "
-                 "edit."
+            else ("Nothing has been restored." if will_refuse
+                  else "The restored graph is what the file holds, not what it "
+                       "claims to hold.")
+                 + " Take the backup again if this was not a deliberate edit."
         )
         warnings.warn(
             f"claims.toml at {toml_path} {opening}: "
@@ -871,7 +874,15 @@ def restore(
     # signer alike, because editing any of them also breaks the digest. The
     # precise violation is the more useful sentence and it wins; this one is
     # for the file that is short and otherwise honest.
-    _unaccounted = _disclose_a_file_that_disagrees_with_itself(toml_path, data)
+    # Told whether the caller is about to be refused, so the sentence it ends
+    # on is true. The disclosure runs early and the refusal lands after every
+    # row has verified, so on the default path an operator read "the restored
+    # graph is what survived" and then an exception saying nothing had been
+    # restored. Measured, on both refusals. The first thing they read was the
+    # false one.
+    _unaccounted = _disclose_a_file_that_disagrees_with_itself(
+        toml_path, data, will_refuse=not trust_unaccounted_backup,
+    )
     # [project_policy] holds fields, not rows, so only the section shape is
     # checked; _required_field reports a missing or malformed field.
     _validate_section_shape(

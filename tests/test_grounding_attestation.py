@@ -690,3 +690,49 @@ class TestItDoesNotBreakTheOrdinaryCase:
         raw.commit()
         assert grounding_attestation_state(raw, claim_id) == "broken"
         raw.close()
+
+
+class TestAProjectOlderThanTheAttestations:
+    """The carve-out that keeps every pre-attestation project restorable.
+
+    A GROUNDED axis arriving with nothing attesting it is how an axis edited
+    after the fact looks, and this release refuses it. Backups written before
+    the attestations existed carry none, so without the stamp check every
+    GROUNDED claim in them would read as laundered and their operators would be
+    refused their own history.
+
+    The guard that draws that line had no test. Removing it turned nothing red
+    across the whole suite while a real pre-attestation backup went from
+    restoring to refused, which is the shape of a promise nothing holds.
+    """
+
+    def test_a_backup_older_than_the_attestations_still_restores(
+        self, tmp_path: Path,
+    ) -> None:
+        import shutil as _shutil
+
+        import tomli_w
+
+        key = _bootstrap_key(tmp_path, "root.key")
+        _dataset(tmp_path)
+        with mareforma.open(tmp_path, key_path=key) as g:
+            claim_id = g.assert_claim(
+                "the treatment lowers the outcome", classification="ANALYTICAL",
+            )
+        _forge_axis_in_backup(tmp_path, claim_id, key)
+
+        # What a backup written before any of this looks like: the axis is
+        # there, and the stamp, the attestations and the completeness table
+        # are not, because the release that wrote it had none of them.
+        toml_path = tmp_path / "claims.toml"
+        doc = tomllib.loads(toml_path.read_text())
+        doc.pop("backup_format", None)
+        doc.pop("grounding_attestations", None)
+        doc.pop("completeness", None)
+        toml_path.write_text(tomli_w.dumps(doc))
+
+        _shutil.rmtree(tmp_path / ".mareforma")
+        restore(tmp_path)
+
+        assert _axis(tmp_path, key, claim_id) == "GROUNDED"
+        assert _state(tmp_path, key, claim_id) == "unattested"

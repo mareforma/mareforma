@@ -686,6 +686,12 @@ mareforma restore [CLAIMS_TOML_PATH]
 |---|---|
 | `CLAIMS_TOML_PATH` | Optional. Path to the source TOML. Defaults to `./claims.toml`. |
 
+**Options**
+
+| Option | Description |
+|---|---|
+| `--trust-unaccounted-backup` | Restore a backup whose completeness table does not match what the file holds. For a file you edited on purpose: without it, such a file is refused. |
+
 **Examples**
 
 ```bash
@@ -694,6 +700,9 @@ mareforma restore
 
 # Explicit source (e.g. recovered from a backup):
 mareforma restore backups/state.toml
+
+# A file you repaired by hand, which no longer matches its own row counts:
+mareforma restore --trust-unaccounted-backup
 ```
 
 The output reports `validators_restored` and `claims_restored` counts. Failure exits `1` with a `RestoreError` message naming the failure mode: `graph_not_empty`, `toml_not_found`, `toml_unreadable`, `toml_malformed`, `enrollment_unverified`, `claim_unverified`, `trust_row_rejected`, `mode_inconsistent`, `orphan_signer`, `policy_violation`, `rekor_inclusion_invalid`, `backup_unaccounted`, `format_ahead`, `verdict_chain_broken`, or

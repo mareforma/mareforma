@@ -420,7 +420,7 @@ class TestAStampCannotBuySilence:
         bumped = self._truncated(tmp_path, _BACKUP_FORMAT + 1)
         assert set(_reasons_for(bumped)) == {"format_ahead", "completeness_absent"}
 
-    def test_the_operator_is_still_told_to_take_the_backup_again(
+    def test_the_missing_rows_are_named_beside_the_later_format(
         self, tmp_path: Path,
     ) -> None:
         """The half that made this worse than silence: the wording."""
@@ -428,8 +428,14 @@ class TestAStampCannotBuySilence:
         target = tmp_path / "recovered"
         target.mkdir()
         shutil.copy(bumped, target / "claims.toml")
-        with pytest.raises(RestoreError) as caught:
-            restore(target)
+        # The disclosure runs before the refusal, so both surfaces are read
+        # from the one call: the sentence the operator sees first, and the
+        # exception that stops them.
+        with warnings.catch_warnings(record=True) as spoken:
+            warnings.simplefilter("always")
+            with pytest.raises(RestoreError) as caught:
+                restore(target)
+
         # The later format is why it stops, and the missing rows are still
         # named. Reporting only the first was the shape that let one character
         # turn a truncated backup into a reassuring sentence, and a refusal
@@ -437,6 +443,12 @@ class TestAStampCannotBuySilence:
         said = str(caught.value)
         assert "later than this release understands" in said
         assert "completeness_absent" in said
+
+        # The warning must not promise a graph the refusal is about to deny.
+        warned = [str(w.message) for w in spoken if "claims.toml at" in str(w.message)]
+        assert warned
+        assert "Take the backup again" in warned[0]
+        assert "The restored graph is what survived" not in warned[0]
 
 
 class TestLineEndingsDoNotHideAnything:
@@ -590,7 +602,8 @@ class TestAFormatThisReleaseDoesNotKnow:
         # override does not apply: this release cannot say what that file owes.
         assert caught.value.kind == "format_ahead"
         assert "Restore it with the release that wrote it" in said
-        assert "removed after it was written" not in said
+        # Refused for being newer, and the missing table still named beside it.
+        assert "completeness_absent" in said
 
     @pytest.mark.parametrize("value", [0, "1", 1.0, True, []])
     def test_a_stamp_of_any_other_shape_still_owes_a_table(
@@ -1261,3 +1274,137 @@ class TestABackupCannotHideADeletedVerdict:
         shutil.copy(home / "claims.toml", target / "claims.toml")
         report = restore(target)
         assert report["claims_restored"] == 3
+
+
+class TestEveryReasonActuallyRefuses:
+    """One case per fatal reason, asserting the refusal rather than the wording.
+
+    Every test above that produces these reasons reads what the file SAYS, so
+    it takes the override, and the refusal went unasserted for five of the
+    seven. Each could be quietly demoted to a warning with the suite still
+    green. Two of them are the forgeries the checks were written for: a section
+    smuggled in below the digest boundary, and the decoy header that hid one
+    from the byte reader.
+    """
+
+    def _refused(self, source: Path, target: Path) -> str:
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copy(source, target / "claims.toml")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(RestoreError) as caught:
+                restore(target)
+        assert not (target / ".mareforma").exists()
+        return caught.value.kind
+
+    def _forged(self, tmp_path: Path, tail: str = "") -> Path:
+        raw = _healthy_project(tmp_path).read_text()
+        claim_id = sorted(tomllib.loads(raw)["claims"])[0]
+        out = tmp_path / f"forged{len(tail)}.toml"
+        out.write_text(
+            raw + f'\n[rekor_inclusions."{claim_id}"]\n'
+            'uuid = "an-entry-that-was-never-submitted"\n'
+            'raw_response_b64 = "eyJhIjp7ImJvZHkiOiJ4In19"\n'
+            "log_index = 99\nintegrated_time = 1\n"
+            'recorded_at = "2026-08-31T00:00:00+00:00"\n' + tail,
+            newline="",
+        )
+        return out
+
+    def test_a_section_smuggled_below_the_table_is_refused(
+        self, tmp_path: Path,
+    ) -> None:
+        """The forged transparency-log entry, refused rather than reported.
+
+        Left to a warning it restored into the graph and marked a real claim
+        logged, with the digest still verifying.
+        """
+        source = self._forged(tmp_path)
+        assert "content_below_table" in _reasons_for(source)
+        assert self._refused(source, tmp_path / "r1") == "backup_unaccounted"
+
+    def test_the_decoy_header_forgery_is_refused(self, tmp_path: Path) -> None:
+        """The bypass that cost 274 bytes and no key, refused."""
+        source = self._forged(tmp_path, 'note = """\r\n[completeness]\r\n# """\n')
+        assert "section_not_declared" in _reasons_for(source)
+        assert self._refused(source, tmp_path / "r2") == "backup_unaccounted"
+
+    def test_an_unreadable_tail_is_refused(self, tmp_path: Path) -> None:
+        source = _healthy_project(tmp_path)
+        moved = tmp_path / "moved.toml"
+        moved.write_text(
+            source.read_text()
+            + '\n[rekor_inclusions."x"]\n'
+            + 'note = """\n[completeness]\nstill inside the string\n"""\n'
+        )
+        assert "tail_unparseable" in _reasons_for(moved)
+        assert self._refused(moved, tmp_path / "r3") == "backup_unaccounted"
+
+    def test_a_table_stripped_of_its_row_counts_is_refused(
+        self, tmp_path: Path,
+    ) -> None:
+        source = _healthy_project(tmp_path)
+        head, _, table = source.read_text().partition("\n[completeness]\n")
+        bare = tmp_path / "bare.toml"
+        bare.write_text(
+            f"{head}\n[completeness]\n{table.split('[completeness.sections]')[0]}"
+        )
+        assert "row_counts_absent" in _reasons_for(bare)
+        assert self._refused(bare, tmp_path / "r4") == "backup_unaccounted"
+
+    def test_a_retyped_row_count_is_refused(self, tmp_path: Path) -> None:
+        """The careful edit, held to the same answer as the clumsy one."""
+        import hashlib
+
+        raw = _healthy_project(tmp_path).read_text()
+        first = raw.index("[claims.")
+        second = raw.index("[claims.", first + 1)
+        third = raw.index("[claims.", second + 1)
+        short = (raw[:second] + raw[third:]).replace("claims = 3", 'claims = "3"', 1)
+        body, sep, tail = short.partition("\n[completeness]\n")
+        digest = hashlib.sha256((body + "\n").encode("utf-8")).hexdigest()
+        out = tmp_path / "retyped.toml"
+        out.write_text(body + sep + re.sub(
+            r'digest = "[0-9a-f]+"', f'digest = "{digest}"', tail, count=1,
+        ))
+        assert "row_count_not_a_number" in _reasons_for(out)
+        assert self._refused(out, tmp_path / "r5") == "backup_unaccounted"
+
+    def test_a_declared_section_below_the_table_is_still_refused(
+        self, tmp_path: Path,
+    ) -> None:
+        """The counts sit below the digest boundary, so naming the smuggled
+        section in them is free and silences the declaration check.
+
+        What still answers is where the bytes are. Isolated deliberately: the
+        two checks cover each other, and a fixture that trips both cannot show
+        that either one works.
+        """
+        raw = _healthy_project(tmp_path).read_text()
+        claim_id = sorted(tomllib.loads(raw)["claims"])[0]
+        out = tmp_path / "declared.toml"
+        out.write_text(
+            (raw + f'\n[rekor_inclusions."{claim_id}"]\n'
+             'uuid = "an-entry-that-was-never-submitted"\n'
+             'raw_response_b64 = "eyJhIjp7ImJvZHkiOiJ4In19"\n'
+             "log_index = 99\nintegrated_time = 1\n"
+             'recorded_at = "2026-08-31T00:00:00+00:00"\n'
+             ).replace("claims = 3", "claims = 3\nrekor_inclusions = 1", 1),
+            newline="",
+        )
+        assert _reasons_for(out) == ("content_below_table",)
+        assert self._refused(out, tmp_path / "r6") == "backup_unaccounted"
+
+    def test_an_unreadable_tail_alone_is_refused(self, tmp_path: Path) -> None:
+        """Isolated the same way, and the digest is not what answers: it is
+        excluded from the fatal set on purpose."""
+        raw = _healthy_project(tmp_path).read_text()
+        out = tmp_path / "tail-only.toml"
+        out.write_text(
+            (raw + '\n[rekor_inclusions."x"]\n'
+             'note = """\n[completeness]\nstill inside the string\n"""\n'
+             ).replace("claims = 3", "claims = 3\nrekor_inclusions = 1", 1),
+            newline="",
+        )
+        assert set(_reasons_for(out)) == {"digest_mismatch", "tail_unparseable"}
+        assert self._refused(out, tmp_path / "r7") == "backup_unaccounted"

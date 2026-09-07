@@ -2290,7 +2290,19 @@ def claim_validate(claim_id, validated_by):
     type=click.Path(exists=False, dir_okay=False, path_type=Path),
     required=False,
 )
-def restore_cmd(claims_toml_path: Path | None) -> None:
+@click.option(
+    "--trust-unaccounted-backup",
+    is_flag=True,
+    default=False,
+    help=(
+        "Restore a backup whose completeness table does not match what the "
+        "file holds. For a file you edited on purpose: without it, such a "
+        "file is refused."
+    ),
+)
+def restore_cmd(
+    claims_toml_path: Path | None, trust_unaccounted_backup: bool,
+) -> None:
     """Rebuild graph.db from claims.toml (catastrophic-loss recovery).
 
     Reads the TOML state file written by every claim/validator mutation
@@ -2307,12 +2319,22 @@ def restore_cmd(claims_toml_path: Path | None) -> None:
     Examples:
         mareforma restore                    # uses ./claims.toml
         mareforma restore backups/state.toml # explicit source
+        mareforma restore --trust-unaccounted-backup  # a file you edited
+
+    A backup that does not hold what its completeness table says it holds is
+    refused. That is a file short of rows with nothing recording they were
+    there. If you edited it deliberately, the flag above restores it as it
+    stands. A backup written before the table carries none of this and
+    restores unchanged.
     """
     import mareforma
     from mareforma.db import RestoreError
 
     try:
-        result = mareforma.restore(_root(), claims_toml=claims_toml_path)
+        result = mareforma.restore(
+            _root(), claims_toml=claims_toml_path,
+            trust_unaccounted_backup=trust_unaccounted_backup,
+        )
     except RestoreError as exc:
         _err(str(exc))
         sys.exit(1)
