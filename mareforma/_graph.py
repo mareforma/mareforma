@@ -18,9 +18,8 @@ Trust vocabulary
   Read trust off the two derived axes: ``Status`` per content_id is the state
   of the answer, ``FrameStatus`` / ``question_status`` per frame_id is the
   state of the question, both computed on every read from the graph. The
-  stored ``support_level`` column (PRELIMINARY -> REPLICATED -> ESTABLISHED)
-  is the legacy promotion ladder; its public labels are deprecated for v0.4.0,
-  though ``query(min_support=...)`` still filters on them for this release.
+  promotion ladder that used to sit beside them is gone: nothing public reads
+  or filters on a support level any more.
 
 Flow
 ----
@@ -80,58 +79,6 @@ _LLM_NAMED_FIELDS = frozenset(_LLM_WRAP_FIELDS + _LLM_SANITIZE_FIELDS)
 # path that resolves an absent generated_by uses this one name so a write and
 # the checks that read it back cannot drift apart.
 DEFAULT_RUN_TOKEN = "agent"
-
-_MIN_SUPPORT_DEPRECATION = (
-    "query(min_support=...) is deprecated: the support ladder is retired and "
-    "the whole support_level column goes in v0.4.0, filter and all. Read the "
-    "trust map's independence axis, or proposition_status(), for how much "
-    "distinct backing a finding actually has."
-)
-
-
-def _caller_stacklevel() -> int:
-    """The stacklevel that attributes a warning to the first frame outside us.
-
-    A fixed number cannot be right here. ``query`` reaches its caller in four
-    frames, but ``query_for_llm`` delegates to ``query``, so the same warning
-    needs five to get past the library, and any future public read that
-    delegates would need its own count. A wrong count is not cosmetic: Python's
-    default filter ignores a DeprecationWarning unless it comes from
-    ``__main__``, so an attribution inside mareforma silences the notice for
-    every real caller, and it collapses every call site onto one dedup key so
-    only the first ever reports. Walking out of the package answers it for
-    every path at once. Falls back to 2 if the whole stack is ours, which only
-    happens when mareforma calls itself.
-    """
-    import sys
-    from pathlib import Path
-
-    package_dir = str(Path(__file__).resolve().parent)
-    frame = sys._getframe(1)
-    level = 1
-    while frame is not None:
-        if not str(Path(frame.f_code.co_filename).resolve()).startswith(package_dir):
-            return level
-        frame = frame.f_back
-        level += 1
-    return 2
-
-
-def _warn_min_support(value) -> None:
-    """Warn once per call when a read still filters on the retired ladder.
-
-    The retirement warned only on ``mareforma.REPLICATED``, the module
-    attribute, which is not how anyone uses the ladder: callers pass the level
-    as a plain string to ``min_support``. So the announcement reached the one
-    path nobody takes and stayed silent on the path everybody does, which would
-    have made the v0.4.0 removal arrive unannounced for every real caller.
-    """
-    if value is None:
-        return
-    from mareforma._deprecation import _emit
-
-    # +1 for _emit's own frame; see its docstring.
-    _emit(_MIN_SUPPORT_DEPRECATION, _caller_stacklevel() + 1)
 
 
 def _model_lineage_of(grounding):
@@ -689,7 +636,6 @@ class EpistemicGraph:
         self,
         text: str | None = None,
         *,
-        min_support: str | None = None,
         classification: str | None = None,
         limit: int = 20,
         include_unverified: bool = False,
@@ -711,8 +657,6 @@ class EpistemicGraph:
         ----------
         text:
             Optional substring filter on claim text (case-insensitive).
-        min_support:
-            Minimum support level: 'PRELIMINARY' | 'REPLICATED' | 'ESTABLISHED'.
         classification:
             Filter by classification: 'INFERRED' | 'ANALYTICAL' | 'DERIVED'.
         limit:
@@ -747,11 +691,8 @@ class EpistemicGraph:
 
             Composition examples::
 
-                # high-confidence ESTABLISHED claims with no refutation
-                graph.query(
-                    min_support="ESTABLISHED",
-                    refutation_filter="clean",
-                )
+                # claims with no signed contradiction against them
+                graph.query(refutation_filter="clean")
 
                 # every claim with a signed contradiction, including
                 # the contradicting + contradicted pairs
@@ -785,7 +726,7 @@ class EpistemicGraph:
         Raises
         ------
         ValueError
-            If ``min_support`` or ``classification`` is not a valid value.
+            If ``classification`` is not a valid value.
         ScanCeilingReached
             If the read exhausted its scan ceiling (``max(limit * 50, 5000)``
             ordered rows) before collecting ``limit`` survivors. Rows dropped
@@ -795,11 +736,9 @@ class EpistemicGraph:
             empty graph; narrow the query or lower ``limit``.
         """
         self._check_open()
-        _warn_min_support(min_support)
         return _db.query_claims(
             self._conn,
             text=text,
-            min_support=min_support,
             classification=classification,
             limit=limit,
             include_unverified=include_unverified,
@@ -916,7 +855,6 @@ class EpistemicGraph:
         self,
         query: str,
         *,
-        min_support: str | None = None,
         classification: str | None = None,
         limit: int = 20,
         include_unverified: bool = False,
@@ -946,23 +884,21 @@ class EpistemicGraph:
 
             Pure-wildcard queries (``"*"``) are refused: they would
             scan the entire table.
-        min_support, classification, limit, include_unverified:
+        classification, limit, include_unverified:
             See :meth:`query`.
 
         Raises
         ------
         ValueError
             If ``query`` is empty or pure wildcards, or fails FTS5
-            parsing. Also for invalid ``min_support`` / ``classification``.
+            parsing. Also for an invalid ``classification``.
         ScanCeilingReached
             Same scan ceiling as :meth:`query`, on the ranked fetch.
         """
         self._check_open()
-        _warn_min_support(min_support)
         return _db.search_claims(
             self._conn,
             query,
-            min_support=min_support,
             classification=classification,
             limit=limit,
             include_unverified=include_unverified,
@@ -2568,7 +2504,6 @@ class EpistemicGraph:
         self,
         text: str | None = None,
         *,
-        min_support: str | None = None,
         classification: str | None = None,
         limit: int = 20,
     ) -> list[dict]:
@@ -2603,7 +2538,6 @@ class EpistemicGraph:
 
         rows = self.query(
             text=text,
-            min_support=min_support,
             classification=classification,
             limit=limit,
         )
@@ -3597,25 +3531,19 @@ class EpistemicGraph:
         """
         self._check_open()
 
-        def query_graph(topic: str, min_support: str | None = None) -> str:
+        def query_graph(topic: str) -> str:
             """Query the epistemic graph for what is already established about a topic.
 
-            Call this BEFORE asserting any new finding. If REPLICATED or ESTABLISHED
-            findings exist, build on them using DERIVED classification with their
+            Call this BEFORE asserting any new finding. If findings already
+            exist, build on them using DERIVED classification with their
             claim_ids in supports=[]. Returns a JSON list of matching claims.
+            Each carries a support_level. That is a stored legacy label, not a
+            measure of how much backing a finding has, so do not gate on it.
 
             Parameters
             ----------
             topic:
                 Substring to search for in claim text (case-insensitive).
-            min_support:
-                Minimum trust level: PRELIMINARY, REPLICATED, or ESTABLISHED.
-                Defaults to no filter. It used to default to ``PRELIMINARY``,
-                which is the floor and so filtered nothing, but still counted
-                as the caller asking for the retired support ladder: every call
-                warned about a deprecation the caller had not opted into, and
-                the warning named a library default the agent author could not
-                change. Passing nothing now means asking for nothing.
 
             Returns
             -------
@@ -3627,9 +3555,9 @@ class EpistemicGraph:
                 consumed by an LLM, so it routes through the same
                 prompt-safety layer as :meth:`query_for_llm`. ``status``
                 is surfaced so the LLM can spot editorial taint
-                (``contested`` / ``retracted``) even on REPLICATED rows.
+                (``contested`` / ``retracted``) on any row.
             """
-            results = self.query_for_llm(topic, min_support=min_support)
+            results = self.query_for_llm(topic)
             return json.dumps([
                 {
                     "text": r["text"],

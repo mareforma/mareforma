@@ -1972,7 +1972,7 @@ def claim() -> None:
     Claims are falsifiable assertions with a classification (INFERRED |
     ANALYTICAL | DERIVED). Trust reads off the derived status a claim earns in
     the graph; the stored support level (PRELIMINARY -> REPLICATED ->
-    ESTABLISHED) is the legacy promotion ladder, deprecated for v0.4.0.
+    ESTABLISHED) is the legacy promotion ladder. No public read filters on it.
 
     \b
     Examples:

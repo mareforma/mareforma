@@ -1308,7 +1308,7 @@ class TestTheReadPathAsksEntitlementToo:
         raw.commit()
         raw.close()
         with mareforma.open(tmp_path, key_path=root_key) as g:
-            served = g.query(min_support="REPLICATED")
+            served = g.query(limit=99)
         assert claim_id not in [c["claim_id"] for c in served], (
             "a self-issued verdict carried the level it claims to back"
         )

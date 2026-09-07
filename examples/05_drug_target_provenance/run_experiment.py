@@ -109,7 +109,8 @@ def main() -> None:
         # Query-before-assert: check for prior REPLICATED findings
         # -------------------------------------------------------------------
 
-        prior = graph.query("drug target", min_support="REPLICATED")
+        prior = [c for c in graph.query("drug target")
+                 if c["support_level"] == "REPLICATED"]
         if prior:
             print(f"\nFound {len(prior)} prior REPLICATED finding(s) — MEDEA will build on them.")
         else:

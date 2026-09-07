@@ -148,9 +148,9 @@ class TestValidatorReputationProjection:
         rep_ids = self._seed_and_promote(tmp_path, 3, root_key, validator_key)
 
         with mareforma.open(tmp_path, key_path=root_key) as g:
-            results = g.query(min_support="ESTABLISHED", limit=50)
+            results = g.query(limit=50)
 
-        # The seed claim is also ESTABLISHED, filter to the promoted set.
+        # Every claim comes back, so narrow to the ones promoted above.
         promoted = [r for r in results if r["claim_id"] in rep_ids]
         assert len(promoted) == 3
         for r in promoted:
@@ -164,7 +164,7 @@ class TestValidatorReputationProjection:
         with mareforma.open(tmp_path, key_path=root_key) as g:
             g.assert_claim("preliminary")
         with mareforma.open(tmp_path, key_path=root_key) as g:
-            results = g.query(min_support="PRELIMINARY")
+            results = g.query()
         prelim_rows = [r for r in results if r["support_level"] == "PRELIMINARY"]
         assert prelim_rows
         for r in prelim_rows:

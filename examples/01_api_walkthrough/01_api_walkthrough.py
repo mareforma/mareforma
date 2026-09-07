@@ -16,7 +16,7 @@ Sections
 --------
   1. Open                  zero setup, context manager
   2. Assert                INFERRED, ANALYTICAL, DERIVED
-  3. Query                 text, min_support, classification, limit
+  3. Query                 text, classification, limit
   4. Idempotency           retry-safe writes
   5. REPLICATED            automatic when two independent agents converge
   6. ESTABLISHED           human validation, requires REPLICATED first
@@ -124,8 +124,8 @@ r = graph.query(classification="ANALYTICAL")
 show("classification=ANALYTICAL", f"{len(r)} claim")
 
 # Minimum support, nothing is REPLICATED yet
-r = graph.query(min_support="REPLICATED")
-show("min_support=REPLICATED", f"{len(r)} claims  ← expected 0")
+r = [c for c in graph.query(limit=99) if c["support_level"] == "REPLICATED"]
+show("REPLICATED rows", f"{len(r)} claims  ← expected 0")
 
 # Limit
 r = graph.query(limit=2)
@@ -214,7 +214,8 @@ c_rep_a = graph.get_claim(rep_a)
 c_rep_b = graph.get_claim(rep_b)
 show("lab_a support_level", c_rep_a["support_level"] if c_rep_a else "n/a")
 show("lab_b support_level", c_rep_b["support_level"] if c_rep_b else "n/a")
-show("REPLICATED count", len(graph.query(min_support="REPLICATED")))
+show("REPLICATED count", len([c for c in graph.query(limit=99)
+                              if c["support_level"] == "REPLICATED"]))
 
 
 # ---------------------------------------------------------------------------

@@ -52,7 +52,7 @@ from mareforma.observe import observe
 with mareforma.open() as graph:
 
     # 1. Query before asserting: check what is already established
-    prior = graph.query("finding about topic X", min_support="REPLICATED")
+    prior = graph.query("finding about topic X")
     prior_ids = [c["claim_id"] for c in prior]
 
     # 2. Wrap the data read so Mareforma sees whether the finding is grounded
@@ -195,7 +195,7 @@ never blocks.
 
 | Method | Purpose |
 |---|---|
-| `graph.query(text=None, *, min_support=None, classification=None, limit=20)` | Plain read: returns full claim dicts. |
+| `graph.query(text=None, *, classification=None, limit=20)` | Plain read: returns full claim dicts. |
 | `graph.query_for_llm(...)` | Same shape as `query()` with free-text fields sanitized and wrapped in `<untrusted_data>...</untrusted_data>`. Use whenever results will be spliced into an LLM prompt. |
 | `graph.get_claim(claim_id)` | Single claim dict or `None`. |
 | `graph.validate(claim_id, *, validated_by=None)` | Promote `REPLICATED` → `ESTABLISHED`. Identity-gated. |
@@ -275,9 +275,9 @@ for the full model.
 ## Support levels
 
 <Warning>
-  `REPLICATED` / `ESTABLISHED` are deprecated public labels this release, kept
-  working as a one-release alias; `PRELIMINARY` stays a stored `support_level`.
-  All three still fire and gate as described below, but the lead independence
+  `REPLICATED` / `ESTABLISHED` are removed public labels: reading
+  `mareforma.REPLICATED` raises `AttributeError`, and no public read filters on
+  a level. The levels below are still stored and still fire, but the lead independence
   signal is the effective-independence number on `mareforma map`: the count of
   pairwise-distinct (model, data, signer) checks behind a finding. Read the
   number, not the label.
@@ -297,8 +297,8 @@ self-promote to `ESTABLISHED`.
 The `support_level` ladder above is the legacy stored axis. For the state of a
 proposition, read the two axes `graph.proposition_status(prop)` derives on every
 call: `status` (the answer, per `content_id`) and `question_status` (the
-question, per `frame_id`: `consistent` or `divided`). The `frame_status` key it
-also returns is deprecated for v0.4.0 in favour of `question_status`.
+question, per `frame_id`: `consistent` or `divided`). It used to also return a
+`frame_status` key; that key is gone.
 
 ### ESTABLISHED-upstream rule
 
@@ -603,7 +603,7 @@ When a new finding is in tension with an existing claim, assert with
 with an explicit link: neither is overwritten.
 
 ```python
-prior = graph.query("Treatment X", min_support="ESTABLISHED")
+prior = graph.query("Treatment X")
 
 graph.assert_claim(
     "Treatment X shows no effect (n=1240, p=0.21)",
@@ -621,11 +621,10 @@ Science advances by documented contestation, not by one side disappearing.
 
 ```python
 graph.query("topic X")
-graph.query("topic X", min_support="REPLICATED")
-graph.query(min_support="ESTABLISHED")
+graph.query("topic X", classification="ANALYTICAL")
 
 # Filter genuine replication (ANALYTICAL + source)
-results = graph.query("topic X", min_support="REPLICATED")
+results = graph.query("topic X")
 trustworthy = [
     r for r in results
     if r["classification"] == "ANALYTICAL" and r.get("source_name")
@@ -643,7 +642,7 @@ trustworthy = [
 </Warning>
 
 ```python
-findings = graph.query_for_llm("topic X", min_support="REPLICATED")
+findings = graph.query_for_llm("topic X")
 joined = "\n".join(f["text"] for f in findings)
 prompt = f"""
 You are reviewing peer-replicated findings. Everything inside

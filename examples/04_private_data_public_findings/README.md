@@ -97,7 +97,7 @@ step_2 = graph.assert_claim(
 # Lab B reads Lab A's trace from the shared graph, the experimental logic,
 # not the data, then runs the same hypothesis on its own private dataset.
 lab_a_findings = json.loads(query_graph.invoke(
-    {"topic": "Target T", "min_support": "PRELIMINARY"}))
+    {"topic": "Target T"}))
 for f in lab_a_findings:
     trace = get_provenance_trace.invoke({"claim_id": f["claim_id"]})
     # trace['source_name'] names Lab A's data, which Lab B cannot access.
@@ -235,7 +235,7 @@ spurious_b = graph.assert_claim(
 ```
 
 `REPLICATED` alone is not trust. The graph lets you filter it out:
-`query('Target T', min_support='REPLICATED')`, then keep only
+`query('Target T')`, keep the REPLICATED rows, then keep only
 `classification='ANALYTICAL'` with a non-empty `source_name`.
 
 ## Using a real LLM

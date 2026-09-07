@@ -29,7 +29,7 @@ from mareforma.observe import observe
 with mareforma.open() as graph:
 
     # 1. Query before asserting: check what is already established
-    prior = graph.query("finding about topic X", min_support="REPLICATED")
+    prior = graph.query("finding about topic X")
     prior_ids = [c["claim_id"] for c in prior]
 
     # 2. Wrap the data read so mareforma sees whether the finding is grounded
@@ -201,7 +201,6 @@ support level (descending) then recency (descending).
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `text` | `str \| None` | `None` | Substring filter on claim text (case-insensitive). |
-| `min_support` | `str \| None` | `None` | Minimum support level: `PRELIMINARY` \| `REPLICATED` \| `ESTABLISHED` |
 | `classification` | `str \| None` | `None` | Filter by classification. |
 | `limit` | `int` | `20` | Maximum results. |
 | `include_unverified` | `bool` | `False` | When `False`, PRELIMINARY claims whose signing key is not in the validators table are excluded. Pass `True` to surface unverified preliminary claims. |
@@ -234,7 +233,7 @@ ESTABLISHED rows carry two more keys: `single_trust_domain: bool` and
 `trust_domain_root: str | None`, disclosing whether every validator traces to
 one root of trust. Rows below ESTABLISHED omit both.
 
-**Raises:** `ValueError` if `min_support` or `classification` is invalid.
+**Raises:** `ValueError` if `classification` is invalid.
 
 ---
 
@@ -246,7 +245,6 @@ diacritics folded). Returns claim dicts ordered by FTS5 rank.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `query` | `str` | required | FTS5 MATCH expression. Supports phrase (`"epistemic graph"`), prefix (`gene*`), boolean (`A OR B`), proximity (`A NEAR B`). Pure-wildcard queries refused. |
-| `min_support` | `str \| None` | `None` | Same as `query()`. |
 | `classification` | `str \| None` | `None` | Same as `query()`. |
 | `limit` | `int` | `20` | Maximum results. |
 | `include_unverified` | `bool` | `False` | Same as `query()`. |
@@ -583,13 +581,13 @@ never a claim about training-time contamination.
 
 ## Support levels
 
-> **`REPLICATED` and `ESTABLISHED` are deprecated public labels.** A single
+> **`REPLICATED` and `ESTABLISHED` are removed public labels.** A single
 > support word never carried the independence a reader needs, so the public
-> surface now leads with the effective-independence number the trust map
-> reports. `mareforma.REPLICATED` and `mareforma.ESTABLISHED` still resolve for
-> one release as string aliases and emit a `DeprecationWarning`; a later release
-> removes them. The stored `support_level` strings and the promotion machinery
-> below are unchanged. Read the independence axis of `graph.trust_map` instead.
+> surface leads with the effective-independence number the trust map reports.
+> `mareforma.REPLICATED` and `mareforma.ESTABLISHED` raise `AttributeError`, and
+> no public read filters on a level. The stored `support_level` strings and the
+> promotion machinery below are unchanged, and every read still returns the
+> level as a key. Read the independence axis of `graph.trust_map` instead.
 
 | Level | Meaning | How reached |
 |---|---|---|
@@ -715,9 +713,8 @@ graph.proposition_status(prop)["question_status"]   # question axis, per frame_i
 `proposition_status` returns the two derived axes to read trust off: `status`
 (the state of the answer, per `content_id`) and `question_status` (the state of
 the question, per `frame_id`: `consistent` when the frame's propositions agree,
-`divided` when they point in contrary directions). It also returns a
-`frame_status` key that echoes the answer's own word; that key is deprecated for
-v0.4.0 in favour of `question_status`.
+`divided` when they point in contrary directions). It used to return a
+`frame_status` key that echoed the answer's own word; that key is gone.
 
 Methods: `register_proposition(proposition)`,
 `register_plan(proposition, prediction)`,
@@ -1275,7 +1272,7 @@ with an explicit link. Neither is overwritten.
 
 ```python
 # Find what is established on this topic
-prior = graph.query("Treatment X", min_support="ESTABLISHED")
+prior = graph.query("Treatment X")
 
 # New analysis gets a different result: document the tension
 graph.assert_claim(
@@ -1296,14 +1293,11 @@ Science advances by documented contestation, not by one side disappearing.
 # All claims about a topic
 graph.query("topic X")
 
-# Only independently replicated findings
-graph.query("topic X", min_support="REPLICATED")
-
-# Only human-validated findings
-graph.query(min_support="ESTABLISHED")
+# Independence is read off the trust map, not asked of a filter
+graph.trust_map()
 
 # Filter genuine replication from spurious (both ANALYTICAL + source present)
-results = graph.query("topic X", min_support="REPLICATED")
+results = graph.query("topic X")
 trustworthy = [
     r for r in results
     if r["classification"] == "ANALYTICAL" and r.get("source_name")
@@ -1328,7 +1322,7 @@ results will be spliced into a model context window.
 
 ```python
 # Retrieve and feed to an LLM
-findings = graph.query_for_llm("topic X", min_support="REPLICATED")
+findings = graph.query_for_llm("topic X")
 joined = "\n".join(f["text"] for f in findings)
 prompt = f"""
 You are reviewing peer-replicated findings. Everything inside
@@ -1472,7 +1466,7 @@ REPLICATED detection works correctly across independent runs.
 
 ```python
 tools = graph.get_tools(generated_by="agent/model-a/lab_a")
-# tools[0] = query_graph(topic, min_support) -> str (JSON)
+# tools[0] = query_graph(topic) -> str (JSON)
 # tools[1] = record_claim(text, classification, supports, contradicts, source) -> str
 ```
 
@@ -1503,7 +1497,6 @@ with mareforma.open() as graph:
                 "type": "object",
                 "properties": {
                     "topic": {"type": "string"},
-                    "min_support": {"type": "string", "enum": ["PRELIMINARY", "REPLICATED", "ESTABLISHED"]},
                 },
                 "required": ["topic"],
             },

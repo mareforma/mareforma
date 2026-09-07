@@ -1048,9 +1048,8 @@ def test_quickstart_signing_key_step_is_not_labelled_optional(tmp_path):
         graph.assert_claim("Cell type A receives more inhibitory input",
                            classification="ANALYTICAL",
                            source_name="dataset_alpha")
-        assert graph.query("cell type A", min_support="PRELIMINARY") == []
-        assert graph.query("cell type A", min_support="PRELIMINARY",
-                           include_unverified=True)
+        assert graph.query("cell type A") == []
+        assert graph.query("cell type A", include_unverified=True)
         for call in (
             lambda: graph.assert_claim("upstream", classification="DERIVED",
                                        seed=True),
@@ -1139,32 +1138,31 @@ def test_replicated_promotion_docs_do_not_overclaim_the_model_gate(tmp_path):
         )
 
 
-def test_deprecated_label_note_matches_deprecated_labels(tmp_path=None):
-    """the "deprecated public labels" note must list only the real aliases.
+def test_the_retired_label_note_says_removed_and_not_deprecated(tmp_path=None):
+    """The note must say what the code does, which is raise.
 
-    Only ``REPLICATED`` and ``ESTABLISHED`` are retired public labels resolved as
-    one-release aliases (``mareforma._DEPRECATED_SUPPORT_LABELS``); ``PRELIMINARY``
-    was never a module attribute and is not deprecated. The note on both pages
-    must name exactly the aliases the code honors.
+    It used to list the labels the module resolved as one-release aliases, read
+    off ``mareforma._DEPRECATED_SUPPORT_LABELS``. There are no aliases now, so
+    a page still calling them deprecated tells a reader they can keep reading
+    ``mareforma.REPLICATED``, which raises.
     """
-    known = {"PRELIMINARY", "REPLICATED", "ESTABLISHED"}
-    expected = set(mareforma._DEPRECATED_SUPPORT_LABELS)
     for page in (DOCS / "concepts" / "trust.mdx",
                  DOCS / "for-agents" / "agents.mdx"):
         text = page.read_text(encoding="utf-8")
-        note = "are deprecated public labels"
-        assert note in text, (
-            f"{page.name} no longer carries the {note!r} note this guard reads: "
-            "a docs change removed it, so update or retire the guard rather than "
-            "letting it raise a bare lookup error"
+        assert "are deprecated public labels" not in text, (
+            f"{page.name} still calls the retired labels deprecated; reading "
+            "one raises AttributeError"
         )
-        idx = text.index(note)
-        window = text[idx - 160:idx]
-        listed = {label for label in known if f"`{label}`" in window}
-        assert listed == expected, (
-            f"{page.name} lists {listed} as deprecated public labels; the code "
-            f"deprecates only {expected}"
+        assert "are removed public labels" in text, (
+            f"{page.name} no longer carries the note this guard reads: a docs "
+            "change removed it, so update or retire the guard rather than "
+            "letting it pass silently"
         )
+        for label in ("REPLICATED", "ESTABLISHED"):
+            assert f"`{label}`" in text, (
+                f"{page.name} stopped naming {label}; a reader who has it in "
+                "their code needs the page to say where it went"
+            )
 
 
 def _section(text: str, heading: str) -> str:
@@ -2161,7 +2159,7 @@ def test_query_result_keys_match_the_projection(tmp_path):
     """
     root_key, _, _, _ = _build_established(tmp_path)
     with mareforma.open(tmp_path, key_path=root_key) as g:
-        rows = g.query(min_support="ESTABLISHED", limit=9)
+        rows = g.query(limit=9)
     assert rows, "no ESTABLISHED row to read the full projection from"
     returned = set(rows[0])
 

@@ -597,6 +597,12 @@ def test_test_heavy_extra_matches_the_loaders_it_exercises():
     """
     data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
     heavy = {_requirement_name(req) for req in data["project"]["optional-dependencies"]["test-heavy"]}
+    # A distribution name and the module it installs differ by separator:
+    # ``langchain-core`` imports as ``langchain_core``. Compared raw, a pin
+    # that is present reads as missing, and the fix that suggests itself is to
+    # drop the test rather than the pin. Every heavy dep was single-word until
+    # one was not.
+    heavy = {name.replace("-", "_") for name in heavy}
 
     # Direction 1: no importorskip'd loader is missing from the heavy extra.
     # A lib installed by its own dedicated CI leg is covered elsewhere.

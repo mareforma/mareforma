@@ -745,43 +745,13 @@ __all__ = [
 ]
 
 
-# Retired public support-level labels. REPLICATED and ESTABLISHED were the
-# public names for the top of the support ladder; the trust map now leads with
-# the effective-independence number, not a single support word, so these labels
-# are retired from the public surface. They keep working for one release as
-# string aliases and emit a DeprecationWarning when read via the public module;
-# v0.4.0 removes them.
-#
-# The labels go first, the ladder goes with them. v0.4.0 drops the stored
-# ``support_level`` column, the promotion machinery, and the
-# ``query(min_support=...)`` filter, which is why that filter warns too
-# (``_graph._warn_min_support``): the string path is the one real callers take,
-# and a removal that only announced itself through a module attribute would
-# reach nobody. Internal callers use the string literals directly, never this
-# module attribute, so the suite does not warn on itself here.
-_DEPRECATED_SUPPORT_LABELS = ("REPLICATED", "ESTABLISHED")
-
-
 def __getattr__(name: str) -> str:
-    """PEP 562 hook: resolve a retired public label with a deprecation warning.
+    """PEP 562 hook: every missing attribute is an error.
 
-    Only the two retired support-level labels are resolved here; every other
-    missing attribute stays an ``AttributeError`` so a typo on the public
-    surface is not silently swallowed.
+    The two retired support-level labels resolved here for one release, with a
+    deprecation notice, and they are gone. Nothing is resolved now, so a typo
+    on the public surface is not silently swallowed.
     """
-    if name in _DEPRECATED_SUPPORT_LABELS:
-        from mareforma._deprecation import _emit
-
-        _emit(
-            f"The public support-level label `mareforma.{name}` is deprecated; "
-            "the trust map now leads with the effective-independence number, "
-            "not a support word. v0.4.0 removes the whole support ladder, not "
-            "just this alias: the stored support_level column, the promotion "
-            "machinery, and the query(min_support=...) filter go with it. Read "
-            "the independence axis of the trust map instead.",
-            3,  # +1 for _emit's own frame
-        )
-        return name
     raise AttributeError(f"module 'mareforma' has no attribute {name!r}")
 
 

@@ -104,17 +104,27 @@ class TestSearchWildcardRejection:
 
 
 # ---------------------------------------------------------------------------
-# Filter composition (min_support, classification, include_unverified)
+# Filter composition (classification, include_unverified)
 # ---------------------------------------------------------------------------
 
 class TestSearchFilters:
-    def test_min_support_filter(self, tmp_path: Path) -> None:
+    def test_the_storage_layer_still_filters_on_the_stored_level(
+        self, tmp_path: Path,
+    ) -> None:
+        """``search`` no longer takes a level; the column underneath still does.
+
+        Checked at the storage layer for the same reason its sibling in
+        test_graph is: the parameter is gone from the public read and the
+        column goes with the schema step, so this is where the filter lives
+        until then.
+        """
+        from mareforma.db import open_db, search_claims
+
         key = _bootstrap_key(tmp_path)
         sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=key) as g:
             seed = g.assert_claim(
-                "dopamine reference work",
-                generated_by="seed", seed=True,
+                "dopamine reference work", generated_by="seed", seed=True,
             )
             g.assert_claim(
                 "dopamine modulates striatum",
@@ -124,12 +134,15 @@ class TestSearchFilters:
                 "dopamine modulates striatum",
                 supports=[seed], generated_by="B", signer=sb,
             )
-            # Now we have 1 ESTABLISHED + 2 REPLICATED with 'dopamine'.
-            replicated = g.search("dopamine", min_support="REPLICATED")
-            established = g.search("dopamine", min_support="ESTABLISHED")
-        # min_support=REPLICATED includes REPLICATED + ESTABLISHED.
+
+        conn = open_db(tmp_path)
+        try:
+            # One ESTABLISHED seed plus two REPLICATED peers.
+            replicated = search_claims(conn, "dopamine", min_support="REPLICATED")
+            established = search_claims(conn, "dopamine", min_support="ESTABLISHED")
+        finally:
+            conn.close()
         assert len(replicated) == 3
-        # min_support=ESTABLISHED is just the seed.
         assert len(established) == 1
 
     def test_classification_filter(self, tmp_path: Path) -> None:

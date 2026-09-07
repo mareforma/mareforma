@@ -318,7 +318,7 @@ class TestLLMToolSurfacesStatus:
             from mareforma.db import update_claim
             update_claim(g._conn, g._root, a, status="contested")
             query_graph, _ = g.get_tools(generated_by="agent/llm")
-            results = json.loads(query_graph("W", min_support="REPLICATED"))
+            results = json.loads(query_graph("W"))
             statuses = {r["claim_id"]: r["status"] for r in results}
             assert statuses[a] == "contested"
             assert statuses[b] == "open"

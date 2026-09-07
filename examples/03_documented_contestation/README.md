@@ -76,7 +76,7 @@ graph = mareforma.open(tmp, key_path=agent_key_path)
 ```python
 # Step 1: query what is already established on this topic.
 prior = json.loads(query_graph.invoke(
-    {"topic": "Treatment X", "min_support": "ESTABLISHED"}))
+    {"topic": "Treatment X"}))
 established_ids = [c["claim_id"] for c in prior]
 
 # Step 2: the new analysis returns no significant effect. The agent does not
@@ -91,7 +91,7 @@ challenge = assert_finding_c.invoke({
 ```
 
 ```
-  query_graph('Treatment X', min_support='ESTABLISHED') → 2 claims
+  query_graph('Treatment X') → 3 claims, 2 of them ESTABLISHED
     [ESTABLISHED ] Treatment X reduces outcome Y in population P (cohort_1, n=500, p…
     [ESTABLISHED ] Prior literature: Treatment X is studied in population P…
 
@@ -125,7 +125,7 @@ for c in sorted(all_claims, key=lambda x: level_order.get(x["support_level"], 3)
 The ESTABLISHED finding is not overwritten; the challenge is not discarded. Both
 sit in the graph with full provenance. A reviewer can then
 `query_graph('Treatment X')` to see both sides, filter to
-`min_support='ESTABLISHED'` for validated consensus only, or read
+keep the `ESTABLISHED` rows for validated consensus only, or read
 `get_claim(challenge)['contradicts_json']` to trace the stated tension.
 
 ## What NOT to do

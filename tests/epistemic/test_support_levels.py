@@ -332,12 +332,15 @@ class TestReplicatedSpurious:
                 signer=sb,
             )
 
-            all_replicated = graph.query(min_support="REPLICATED")
+            all_replicated = [
+                row for row in graph.query(limit=99)
+                if row["support_level"] in ("REPLICATED", "ESTABLISHED")
+            ]
 
-        # All four downstream peers REPLICATE plus the ESTABLISHED
-        # seeded upstream (min_support='REPLICATED' is inclusive of
-        # ESTABLISHED). Topology alone does not distinguish trustworthy
-        # from spurious.
+        # All four downstream peers REPLICATE plus the ESTABLISHED seeded
+        # upstream. Read off the rows rather than asked of a filter, which
+        # no public read takes any more. Topology alone does not distinguish
+        # trustworthy from spurious.
         assert len(all_replicated) == 5
 
         # Filter for trustworthy: ANALYTICAL + source present

@@ -641,7 +641,7 @@ class TestVerifyOnRead:
             c = g.get_claim(rep)
             assert c["verified"] is False
             # query excludes the forged high-trust row.
-            ids = {r["claim_id"] for r in g.query(min_support="ESTABLISHED", limit=99)}
+            ids = {r["claim_id"] for r in g.query(limit=99)}
             assert rep not in ids
 
     def test_read_exclusion_is_counted_and_logged(self, tmp_path: Path) -> None:
@@ -663,7 +663,7 @@ class TestVerifyOnRead:
 
         with mareforma.open(tmp_path, key_path=root_key) as g:
             assert g.read_verify_exclusions == 0
-            g.query(min_support="ESTABLISHED", limit=99)
+            g.query(limit=99)
             assert g.read_verify_exclusions == 1
             g.search("quasarflux", limit=99)
             assert g.read_verify_exclusions == 2
@@ -688,7 +688,7 @@ class TestVerifyOnRead:
             c = g.get_claim(rep)
             assert c["support_level"] == "REPLICATED"
             assert c["verified"] is True
-            ids = {r["claim_id"] for r in g.query(min_support="REPLICATED", limit=99)}
+            ids = {r["claim_id"] for r in g.query(limit=99)}
             assert rep in ids
 
     def test_tampered_enrolled_asserter_bundle_excluded(self, tmp_path: Path) -> None:
@@ -729,7 +729,7 @@ class TestVerifyOnRead:
         with mareforma.open(tmp_path, key_path=root_key) as g:
             c = g.get_claim(rep)
             assert c["verified"] is False
-            ids = {r["claim_id"] for r in g.query(min_support="REPLICATED", limit=99)}
+            ids = {r["claim_id"] for r in g.query(limit=99)}
             assert rep not in ids
 
     def test_search_excludes_a_high_trust_row_that_query_excludes(
@@ -751,7 +751,7 @@ class TestVerifyOnRead:
         finally:
             conn.close()
         with mareforma.open(tmp_path, key_path=root_key) as g:
-            q_ids = {r["claim_id"] for r in g.query(min_support="ESTABLISHED", limit=99)}
+            q_ids = {r["claim_id"] for r in g.query(limit=99)}
             s_ids = {r["claim_id"] for r in g.search("quasarflux", limit=99)}
         assert rep not in q_ids
         assert rep not in s_ids
@@ -787,7 +787,7 @@ class TestVerifyOnRead:
             c = g.get_claim(lone)
             assert c["support_level"] == "REPLICATED"
             assert c["verified"] is False
-            ids = {r["claim_id"] for r in g.query(min_support="REPLICATED", limit=99)}
+            ids = {r["claim_id"] for r in g.query(limit=99)}
             assert lone not in ids
 
     def test_unsigned_replication_verdict_does_not_back_a_promotion(
@@ -830,7 +830,7 @@ class TestVerifyOnRead:
             c = g.get_claim(lone)
             assert c["support_level"] == "REPLICATED"
             assert c["verified"] is False
-            ids = {r["claim_id"] for r in g.query(min_support="REPLICATED", limit=99)}
+            ids = {r["claim_id"] for r in g.query(limit=99)}
             assert lone not in ids
 
     def test_validator_signed_replication_verdict_backs_a_promotion(
@@ -839,6 +839,11 @@ class TestVerifyOnRead:
         """The verdict path still promotes: an enrolled issuer's signed verdict
         carries both members, and both are served verified. Neither claim has a
         distinct-signer peer, so the verdict is the only evidence behind them.
+
+        The promotion is read off each row rather than asked of a filter. This
+        used to narrow the read with min_support, which is gone; asserting only
+        that both ids come back from an unfiltered read is true whether or not
+        the verdict promoted anything.
         """
         root_key = _bootstrap_key(tmp_path, "root.key")
         issuer_key = _bootstrap_key(tmp_path, "issuer.key")
@@ -855,8 +860,13 @@ class TestVerifyOnRead:
         with mareforma.open(tmp_path, key_path=root_key) as g:
             assert g.get_claim(a)["verified"] is True
             assert g.get_claim(b)["verified"] is True
-            ids = {r["claim_id"] for r in g.query(min_support="REPLICATED", limit=99)}
-            assert {a, b} <= ids
+            assert g.get_claim(a)["support_level"] == "REPLICATED"
+            assert g.get_claim(b)["support_level"] == "REPLICATED"
+            served = {
+                r["claim_id"] for r in g.query(limit=99)
+                if r["support_level"] == "REPLICATED"
+            }
+            assert {a, b} <= served
 
     def test_verdict_membership_does_not_excuse_the_strict_policy(
         self, tmp_path: Path,
@@ -896,7 +906,7 @@ class TestVerifyOnRead:
             c = g.get_claim(a)
             assert c["support_level"] == "REPLICATED"
             assert c["verified"] is False
-            ids = {r["claim_id"] for r in g.query(min_support="REPLICATED", limit=99)}
+            ids = {r["claim_id"] for r in g.query(limit=99)}
             assert a not in ids
 
     def test_unsigned_peer_row_does_not_back_a_promotion(
@@ -943,7 +953,7 @@ class TestVerifyOnRead:
             c = g.get_claim(target)
             assert c["support_level"] == "REPLICATED"
             assert c["verified"] is False
-            ids = {r["claim_id"] for r in g.query(min_support="REPLICATED", limit=99)}
+            ids = {r["claim_id"] for r in g.query(limit=99)}
             assert target not in ids
 
     def test_signed_peers_on_a_shared_anchor_back_a_promotion(
@@ -959,7 +969,7 @@ class TestVerifyOnRead:
             b = g.assert_claim("B", supports=[anchor], generated_by="lab_b", signer=sb)
             assert g.get_claim(a)["verified"] is True
             assert g.get_claim(b)["verified"] is True
-            ids = {r["claim_id"] for r in g.query(min_support="REPLICATED", limit=99)}
+            ids = {r["claim_id"] for r in g.query(limit=99)}
             assert {a, b} <= ids
 
     def test_search_returns_a_genuine_established_row_with_disclosure(
@@ -1106,7 +1116,7 @@ class TestParticipantBundleBinding:
             assert c["support_level"] == "REPLICATED"  # forged level persists
             assert c["verified"] is False               # but flagged unverified
             ids = {row["claim_id"]
-                   for row in g.query(min_support="REPLICATED", limit=99)}
+                   for row in g.query(limit=99)}
             assert victim not in ids                     # excluded from query
             assert rep in ids                            # genuine row still served
 
@@ -1146,7 +1156,7 @@ class TestParticipantBundleBinding:
         with mareforma.open(tmp_path, key_path=root_key) as g:
             assert g.get_claim(victim)["verified"] is False
             ids = {row["claim_id"]
-                   for row in g.query(min_support="REPLICATED", limit=99)}
+                   for row in g.query(limit=99)}
             assert victim not in ids
             assert rep in ids
 
@@ -1184,7 +1194,7 @@ class TestParticipantBundleBinding:
         with mareforma.open(tmp_path, key_path=root_key) as g:
             assert g.get_claim(rep)["verified"] is False
             ids = {row["claim_id"]
-                   for row in g.query(min_support="REPLICATED", limit=99)}
+                   for row in g.query(limit=99)}
             assert rep not in ids
 
     def test_junk_bundle_unenrolled_keyid_excluded(self, tmp_path: Path) -> None:
@@ -1210,7 +1220,7 @@ class TestParticipantBundleBinding:
         with mareforma.open(tmp_path, key_path=root_key) as g:
             assert g.get_claim(victim)["verified"] is False
             ids = {row["claim_id"]
-                   for row in g.query(min_support="REPLICATED", limit=99)}
+                   for row in g.query(limit=99)}
             assert victim not in ids
 
 
@@ -1358,8 +1368,14 @@ class TestVerifyOnReadContentBinding:
         self, tmp_path: Path, root_key: Path, claim_id: str, level: str,
     ) -> None:
         with mareforma.open(tmp_path, key_path=root_key) as g:
-            assert g.get_claim(claim_id)["verified"] is False
-            ids = {r["claim_id"] for r in g.query(min_support=level, limit=99)}
+            row = g.get_claim(claim_id)
+            assert row["verified"] is False
+            # The tier is asserted rather than passed and ignored. The read
+            # used to be narrowed by it, and once that filter went the
+            # parameter named a tier nothing checked, which left the class
+            # claiming coverage at every tier while exercising none.
+            assert row["support_level"] == level
+            ids = {r["claim_id"] for r in g.query(limit=99)}
             assert claim_id not in ids
 
     def test_replicated_text_rewrite_excluded(self, tmp_path: Path) -> None:

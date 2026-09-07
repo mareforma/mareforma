@@ -200,12 +200,12 @@ claim_id = graph.assert_claim("...", idempotency_key="run_abc_claim_1")
 
 ---
 
-### `query(text=None, *, min_support=None, classification=None, limit=20, include_unverified=False, include_invalidated=False, refutation_filter=None)`
+### `query(text=None, *, classification=None, limit=20, include_unverified=False, include_invalidated=False, refutation_filter=None)`
 
 Query claims ordered by support level (descending) then recency (descending).
 
 ```python
-results = graph.query("cell type A", min_support="REPLICATED")
+results = graph.query("cell type A", classification="ANALYTICAL")
 for r in results:
     print(r["text"], r["support_level"], r["validator_reputation"])
 ```
@@ -215,7 +215,6 @@ for r in results:
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `text` | `str \| None` | `None` | Case-insensitive substring filter on claim text. |
-| `min_support` | `str \| None` | `None` | `PRELIMINARY` \| `REPLICATED` \| `ESTABLISHED` |
 | `classification` | `str \| None` | `None` | `INFERRED` \| `ANALYTICAL` \| `DERIVED` |
 | `limit` | `int` | `20` | Maximum number of results. |
 | `include_unverified` | `bool` | `False` | When `False`, PRELIMINARY claims whose signing key is not in the validators table are excluded. Pass `True` to surface unverified preliminary claims. |
@@ -249,22 +248,22 @@ ESTABLISHED rows carry two more keys: `single_trust_domain: bool` and
 one root of trust. It is a disclosure, not a Sybil guard. Rows below
 ESTABLISHED omit both.
 
-**Raises** `ValueError` if `min_support` or `classification` is invalid.
+**Raises** `ValueError` if `classification` is invalid.
 
 REPLICATED / ESTABLISHED rows are re-verified on read: a row whose signature fails to verify is excluded from the result. Never raises.
 
-`min_support` and the `support_level` result key are the legacy stored promotion ladder. They stay functional this release, but their `REPLICATED` / `ESTABLISHED` public labels are deprecated for v0.4.0. To read trust, use the derived axes `graph.proposition_status(prop)` returns: `status` (the answer, per `content_id`) and `question_status` (the question, per `frame_id`).
+The `support_level` result key is the legacy stored promotion ladder. No public read filters on it any more and the `REPLICATED` / `ESTABLISHED` module labels are removed. To read trust, use the derived axes `graph.proposition_status(prop)` returns: `status` (the answer, per `content_id`) and `question_status` (the question, per `frame_id`).
 
 ---
 
-### `search(query, *, min_support=None, classification=None, limit=20, include_unverified=False, include_invalidated=False)`
+### `search(query, *, classification=None, limit=20, include_unverified=False, include_invalidated=False)`
 
 Full-text search over claim text using SQLite FTS5 (`unicode61` tokenizer,
 diacritics folded). Returns claim dicts ordered by FTS5 rank (best
 match first). Same projection as `query()`.
 
 ```python
-hits = graph.search("dopaminergic", min_support="REPLICATED")
+hits = graph.search("dopaminergic", classification="ANALYTICAL")
 # Phrase, prefix, boolean, proximity all supported.
 hits = graph.search('"dopamine receptor"')
 hits = graph.search("gene*")
@@ -275,7 +274,7 @@ Pure-wildcard queries (`"*"`, `"**"`) are refused; they would scan
 the whole table.
 
 **Parameters**: `query` is required and must be a non-empty FTS5 MATCH
-expression; it is the positional `query()` takes as `text`. `min_support`,
+expression; it is the positional `query()` takes as `text`.
 `classification`, `limit`, `include_unverified` and `include_invalidated`
 behave as in `query()`. `refutation_filter` is query-only and `search()`
 raises `TypeError` on it.
@@ -412,14 +411,14 @@ top = sorted(reputation.items(), key=lambda kv: -kv[1])[:5]
 
 ---
 
-### `query_for_llm(text=None, *, min_support=None, classification=None, limit=20)`
+### `query_for_llm(text=None, *, classification=None, limit=20)`
 
 Same shape as `query()` with two changes: the `text` and `comparison_summary` fields are sanitized (zero-width / bidi / control characters stripped, length capped) AND wrapped in `<untrusted_data>...</untrusted_data>` delimiters; metadata labels (`source_name`, `generated_by`, `validated_by`) are sanitized but not wrapped.
 
 Use this when retrieved claims will be spliced into an LLM prompt: claim text is written by *earlier* agents and may contain stored prompt-injection payloads.
 
 ```python
-findings = graph.query_for_llm("topic X", min_support="REPLICATED")
+findings = graph.query_for_llm("topic X", classification="ANALYTICAL")
 joined = "\n".join(f["text"] for f in findings)
 prompt = f"""
 You are reviewing peer-replicated findings. Everything inside
@@ -859,7 +858,7 @@ lc_tools = [tool(fn) for fn in tools]
 
 **Returns** `list`: `[query_graph, record_claim]`
 
-- `query_graph(topic, min_support="PRELIMINARY") -> str`: routes through `query_for_llm`. Returns a JSON string of matching claims with free-text fields sanitized and wrapped in `<untrusted_data>...</untrusted_data>`.
+- `query_graph(topic) -> str`: routes through `query_for_llm`. Returns a JSON string of matching claims with free-text fields sanitized and wrapped in `<untrusted_data>...</untrusted_data>`.
 - `record_claim(text, classification="INFERRED", supports=None, contradicts=None, source="") -> str`: returns `claim_id`.
 
 See [Framework integrations](/for-agents/agents#framework-integrations) for per-framework wrapping.
@@ -1307,8 +1306,7 @@ The retrieval view for one proposition. Accepts a `content_id` or a
 
 **Returns** `dict` with `content_id`, `frame_id`, `direction`, `status`,
 `independent_support`, `independent_refute`, `question_status` (the state of the
-question, either consistent or divided), `frame_status` (its retired
-predecessor, removed in v0.4.0), `status_policy`, `lines_skipped`, the count of
+question, either consistent or divided), `status_policy`, `lines_skipped`, the count of
 this proposition's evidence lines that were left out of the counts, and
 `post_hoc`. A dropped refutation reads as consensus, so read `lines_skipped` next
 to the two counts.

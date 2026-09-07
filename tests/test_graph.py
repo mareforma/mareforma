@@ -11,7 +11,7 @@ Coverage
                     REPLICATED not triggered (same agent),
                     REPLICATED not triggered (no shared upstream)
   query()         : text=None returns all, substring match, no match,
-                    min_support filter, classification filter, limit
+                    classification filter, limit
   get_claim()     : found, not found
   validate()      : REPLICATED→ESTABLISHED, validated_by stored,
                     PRELIMINARY raises, nonexistent raises
@@ -221,29 +221,43 @@ def test_query_text_no_match_returns_empty(tmp_path):
     assert results == []
 
 
-def test_query_min_support_filters_correctly(tmp_path):
+def test_the_storage_layer_still_filters_on_the_stored_level(tmp_path):
+    """No public read takes a level, and the column underneath still answers.
+
+    This used to be a test of ``query(min_support=...)``. That parameter is
+    gone, and the stored column goes with the step that changes the schema, so
+    the filter is checked where it now lives rather than left uncovered for a
+    release with nothing exercising it.
+    """
+    from mareforma.db import open_db, query_claims
+
     key_path = _bootstrap_key(tmp_path)
     sa, sb = _two_signers(tmp_path)
     with mareforma.open(tmp_path, key_path=key_path) as graph:
         prior = graph.assert_claim("prior", generated_by="seed", seed=True)
-        # Create a REPLICATED pair
-        rep1 = graph.assert_claim("rep claim", supports=[prior], generated_by="A", signer=sa)
-        rep2 = graph.assert_claim("rep claim", supports=[prior], generated_by="B", signer=sb)
-        # One PRELIMINARY
+        rep1 = graph.assert_claim(
+            "rep claim", supports=[prior], generated_by="A", signer=sa,
+        )
+        rep2 = graph.assert_claim(
+            "rep claim", supports=[prior], generated_by="B", signer=sb,
+        )
         pre = graph.assert_claim("preliminary only", generated_by="C")
 
-        replicated_results = graph.query(min_support="REPLICATED")
-        preliminary_results = graph.query(min_support="PRELIMINARY")
+    conn = open_db(tmp_path)
+    try:
+        replicated = {
+            r["claim_id"] for r in query_claims(conn, min_support="REPLICATED")
+        }
+        everything = {
+            r["claim_id"] for r in query_claims(conn, min_support="PRELIMINARY")
+        }
+    finally:
+        conn.close()
 
-    replicated_ids = {r["claim_id"] for r in replicated_results}
-    assert rep1 in replicated_ids
-    assert rep2 in replicated_ids
-    assert pre not in replicated_ids
-
-    # PRELIMINARY returns everything
-    all_ids = {r["claim_id"] for r in preliminary_results}
-    assert pre in all_ids
-    assert rep1 in all_ids
+    assert {rep1, rep2} <= replicated
+    assert pre not in replicated
+    # PRELIMINARY is the floor, so it filters nothing.
+    assert {pre, rep1} <= everything
 
 
 def test_query_classification_filter(tmp_path):

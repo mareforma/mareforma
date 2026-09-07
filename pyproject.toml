@@ -80,6 +80,11 @@ test-heavy = [
     "aiohttp>=3.9",
     "requests>=2.31",
     "responses>=0.24",
+    # The agent tools are handed to a wrapper that builds a schema from the
+    # signature, and what that wrapper does with an argument the signature no
+    # longer has is a property worth holding. Pinned here so the test runs
+    # rather than skipping quietly on every leg.
+    "langchain-core>=0.3",
 ]
 
 [project.scripts]

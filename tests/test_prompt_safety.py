@@ -432,14 +432,23 @@ class TestQueryForLLM:
         open_graph.assert_claim(
             "peer B", supports=[upstream], generated_by="B", signer=sb,
         )
-        # Both peers converge → REPLICATED. min_support='REPLICATED' is
-        # inclusive of ESTABLISHED, so the seeded upstream is also
-        # returned. The filter still applies, three results, none at
-        # PRELIMINARY.
-        rows = open_graph.query_for_llm(min_support="REPLICATED")
-        assert len(rows) == 3
-        texts = " ".join(r["text"] for r in rows)
-        assert "peer A" in texts and "peer B" in texts and "upstream" in texts
+        open_graph.assert_claim(
+            "a computed one", classification="ANALYTICAL",
+            source_name="dataset", generated_by="C",
+        )
+        # The support filter is gone from every public read, so the filter this
+        # checks is the one that is left, and it has to exclude something. The
+        # earlier shape asked for a classification every row in the fixture
+        # already had, so dropping the pass-through entirely changed no result
+        # and the delegation went uncovered.
+        rows = open_graph.query_for_llm(classification="ANALYTICAL")
+        assert len(rows) == 1
+        assert "a computed one" in rows[0]["text"]
+
+        unfiltered = open_graph.query_for_llm()
+        assert len(unfiltered) == 4, (
+            "the filter has to leave rows out, or forwarding it proves nothing"
+        )
 
 
 # ---------------------------------------------------------------------------

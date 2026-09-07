@@ -269,9 +269,9 @@ the answer/question structure above. Read these, not a stored label:
   computation as the underlying `FrameStatus`, so the two cannot disagree about
   whether the frame is divided.
 
-`graph.proposition_status(prop)` returns both, alongside a `frame_status` key
-that echoes the answer's own word and is **deprecated for v0.4.0** in favour of
-`question_status`.
+`graph.proposition_status(prop)` returns both. It used to return a
+`frame_status` key alongside them that echoed the answer's own word; that key is
+gone, and `question_status` is what names the state of the question.
 
 The **legacy layer** is `support_level` (`PRELIMINARY` / `REPLICATED` /
 `ESTABLISHED`, see [Trust](/concepts/trust)): the stored promotion ladder on a

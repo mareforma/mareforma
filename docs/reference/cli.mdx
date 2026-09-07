@@ -756,7 +756,7 @@ and binding work does not grow with the evidence, and reports the missing map as
 | `query_claims` | Claims matching a text substring and classification |
 | `search_claims` | Full-text search, ranked by relevance |
 | `get_claim` | One claim by id. `found: false` rather than an error when the id is unknown |
-| `proposition_status` | `{found, status}` for a content id. `status` is the whole derived view: `status`, `question_status`, `independent_support`, `independent_refute`, `lines_skipped`, `post_hoc`, `frame_status`, `status_policy`. `null` when nothing resolves to that id |
+| `proposition_status` | `{found, status}` for a content id. `status` is the whole derived view: `status`, `question_status`, `independent_support`, `independent_refute`, `lines_skipped`, `post_hoc`, `status_policy`. `null` when nothing resolves to that id |
 | `trust_map` | A claim's trust map: who signed it, what backs it |
 | `verify_claim` | `verified`, `tampered`, or `unverifiable`, by the rule `mareforma verify` applies |
 

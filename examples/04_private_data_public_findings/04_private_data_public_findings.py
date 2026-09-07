@@ -208,7 +208,7 @@ sep("Lab B, reads trace, runs independent replication")
 
 # Step 1: Lab B reads Lab A's provenance trace from the shared graph.
 # It sees the experimental logic, not the data.
-lab_a_findings = json.loads(query_graph.invoke({"topic": "Target T", "min_support": "PRELIMINARY"}))
+lab_a_findings = json.loads(query_graph.invoke({"topic": "Target T"}))
 print(f"  query_graph('Target T') → {len(lab_a_findings)} claims from Lab A\n")
 
 for f in lab_a_findings:
@@ -375,7 +375,7 @@ print("  REPLICATED fired, but classification=INFERRED and source_name=''.")
 print("  Two distinct keys repeated the same LLM prior. No data behind either finding.")
 print()
 print("  The graph makes this detectable:")
-print("    graph.query('Target T', min_support='REPLICATED')")
+print("    graph.query('Target T'), then keep the REPLICATED rows")
 print("    → filter for classification='ANALYTICAL' and source_name != ''")
 print("    → spurious claims are excluded from the trustworthy result set.")
 

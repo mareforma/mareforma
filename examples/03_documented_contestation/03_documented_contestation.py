@@ -199,8 +199,10 @@ def _for_console(text: str) -> str:
 
 
 # Step 1: query the graph, what is already established on this topic?
-prior = json.loads(query_graph.invoke({"topic": "Treatment X", "min_support": "ESTABLISHED"}))
-print(f"  query_graph('Treatment X', min_support='ESTABLISHED') → {len(prior)} claims")
+prior = json.loads(query_graph.invoke({"topic": "Treatment X"}))
+established = [c for c in prior if c["support_level"] == "ESTABLISHED"]
+print(f"  query_graph('Treatment X') → {len(prior)} claims, "
+      f"{len(established)} of them ESTABLISHED")
 for c in prior:
     print(f"    [{c['support_level']:12}] {_for_console(c['text'])[:65]}…")
 
@@ -254,8 +256,8 @@ print("  The challenge is not discarded.")
 print("  Both are in the graph with full provenance.")
 print()
 print("  A human reviewer can now:")
-print("    query_graph('Treatment X')                           , see both sides")
-print("    query_graph('Treatment X', min_support='ESTABLISHED'), see only validated consensus")
+print("    query_graph('Treatment X'), see both sides")
+print("    query_graph('Treatment X') and keep the ESTABLISHED rows, for validated consensus")
 print("    graph.get_claim(challenge_id)['contradicts_json']    , trace the stated tension")
 
 

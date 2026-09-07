@@ -176,8 +176,7 @@ so the public surface leads with the derived axes above and the
 effective-independence number the trust map reports, not a rung name. The stored
 `support_level` strings and the promotion machinery are unchanged this release;
 only the two public labels `mareforma.REPLICATED` and `mareforma.ESTABLISHED` are
-retired. They resolve for one release as string aliases and emit a
-`DeprecationWarning`, and v0.4.0 removes them (the `seed=True` bootstrap is
+retired. They raise `AttributeError`, and no public read filters on a level (the `seed=True` bootstrap is
 deprecated on the same schedule and gains its replacement anchor there). Read
 `status`, `question_status`, and the trust map's independence axis instead of a
 rung name.
@@ -250,7 +249,7 @@ single content-addressed proposition, computed on every read. It is additive:
 seven new tables, schema stays at v1, and every finding still rides a signed
 claim. `graph.proposition_status(prop)` returns both derived axes under the keys
 `status` (the answer, per `content_id`, a `Status` enum value) and
-`question_status` (the question, per `frame_id`), alongside a `frame_status` key
+`question_status` (the question, per `frame_id`). A `frame_status` key
 deprecated for v0.4.0 in favour of `question_status`.
 
 ```

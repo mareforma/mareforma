@@ -1294,12 +1294,9 @@ def proposition_status(
         "independent_refute": refute,
         "lines_skipped": memo.get("skipped", {}).get(content_id, 0),
         "post_hoc": memo.get("post_hoc", {}).get(content_id, False),
-        # ``frame_status`` ("consistent" / "contested") is retired: it echoed the
-        # answer's own status word. ``question_status`` ("consistent" / "divided")
-        # names the state of the question instead. Both are derived from the one
-        # ``frame_status`` computed above, so they cannot disagree about whether
-        # the frame is contested. ``frame_status`` is removed in v0.4.0.
-        "frame_status": frame_status.value,
+        # ``question_status`` ("consistent" / "divided") names the state of the
+        # question. It replaced ``frame_status``, which echoed the answer's own
+        # status word and said nothing the answer had not already said.
         "question_status": question_status_of(frame_status).value,
         "status_policy": STATUS_POLICY,
     }

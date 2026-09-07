@@ -45,10 +45,11 @@ this release as deprecated one-release aliases.
 ## Support levels
 
 <Note>
-  `REPLICATED` / `ESTABLISHED` are deprecated public labels this release, kept
-  working as a one-release alias; `PRELIMINARY` stays a stored `support_level`.
-  All three still fire and gate as described below, but the effective-independence
-  number above is the signal to read.
+  `REPLICATED` / `ESTABLISHED` are removed public labels: reading
+  `mareforma.REPLICATED` raises `AttributeError`, and no public read filters on
+  a level. The levels below are still stored and still fire, but nothing public
+  asks for one, and the effective-independence number above is the signal to
+  read.
 </Note>
 
 <AccordionGroup>

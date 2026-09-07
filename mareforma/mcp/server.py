@@ -544,7 +544,7 @@ class ReadVerifyTools:
         ``status`` (the state of the answer), ``question_status`` (the state of
         the question, ``consistent`` or ``divided``), ``independent_support``,
         ``independent_refute``, ``lines_skipped``, ``post_hoc``,
-        ``frame_status`` and ``status_policy``. ``found`` is ``False`` and
+        and ``status_policy``. ``found`` is ``False`` and
         ``status`` is ``None`` when no proposition resolves to *content_id*.
         """
         try:

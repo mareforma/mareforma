@@ -96,7 +96,7 @@ c_derived = graph.assert_claim(
 ```python
 graph.query("cell type A")                # text substring (case-insensitive)
 graph.query(classification="ANALYTICAL")  # classification filter
-graph.query(min_support="REPLICATED")     # nothing is REPLICATED yet
+[c for c in graph.query() if c["support_level"] == "REPLICATED"]  # none yet
 graph.query(limit=2)                      # limit
 graph.get_claim(c_analytical)             # single record by id
 ```
@@ -104,7 +104,7 @@ graph.get_claim(c_analytical)             # single record by id
 ```
   text='cell type A'     3 claims
   classification=ANALYTICAL 1 claim
-  min_support=REPLICATED 0 claims  ← expected 0
+  REPLICATED rows        0 claims  ← expected 0
   limit=2                2 claims
   get_claim support_level PRELIMINARY
   get_claim classification ANALYTICAL

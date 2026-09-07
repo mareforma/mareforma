@@ -96,7 +96,7 @@ want the verdict cross-checked against the data the claim rests on. See
 ## Query what is already known
 
 ```python
-results = graph.query("cell type A", min_support="PRELIMINARY")
+results = graph.query("cell type A")
 for r in results:
     print(r["text"], r["support_level"])
 ```
@@ -106,8 +106,9 @@ finding on your topic, build on it; don't duplicate it. Trust itself reads off
 the derived axes, not the stored label: `graph.proposition_status(prop)`
 returns the answer's `status` and the question's `question_status`, both
 computed on every read. The `support_level` column (`PRELIMINARY` ->
-`REPLICATED` -> `ESTABLISHED`) and the `min_support=` filter are the legacy
-promotion ladder, still functional this release but deprecated for v0.4.0.
+`REPLICATED` -> `ESTABLISHED`) is the legacy promotion ladder. It is still
+stored, but no public read filters on it and the `REPLICATED` / `ESTABLISHED`
+module labels are gone.
 
 When the results will be spliced into an LLM prompt, use
 `graph.query_for_llm(...)` instead: it sanitizes free-text fields and
