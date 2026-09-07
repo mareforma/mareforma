@@ -116,6 +116,7 @@ class TestRestoreHappyPath:
             "claims_restored": pre_count,
             # Nothing unsigned in an honest signed backup.
             "unsigned_in_signed_mode": 0,
+            "verdict_chain_withheld": 0,
         }
 
         # Re-open the restored graph and confirm shape.
@@ -191,6 +192,7 @@ class TestRestoreHappyPath:
         assert result == {
             "validators_restored": 0, "claims_restored": 2,
             "unsigned_in_signed_mode": 0,
+            "verdict_chain_withheld": 0,
         }
 
 

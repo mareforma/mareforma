@@ -705,7 +705,7 @@ mareforma restore backups/state.toml
 mareforma restore --trust-unaccounted-backup
 ```
 
-The output reports `validators_restored` and `claims_restored` counts. Failure exits `1` with a `RestoreError` message naming the failure mode: `graph_not_empty`, `toml_not_found`, `toml_unreadable`, `toml_malformed`, `enrollment_unverified`, `claim_unverified`, `trust_row_rejected`, `mode_inconsistent`, `orphan_signer`, `policy_violation`, `rekor_inclusion_invalid`, `backup_unaccounted`, `format_ahead`, `verdict_chain_broken`, or
+The output reports `validators_restored` and `claims_restored` counts. Failure exits `1` with a `RestoreError` message naming the failure mode: `graph_not_empty`, `toml_not_found`, `toml_unreadable`, `toml_malformed`, `enrollment_unverified`, `claim_unverified`, `trust_row_rejected`, `mode_inconsistent`, `orphan_signer`, `policy_violation`, `rekor_inclusion_invalid`, `backup_unaccounted`, `format_ahead`, `verdict_chain_broken`, `verdict_chain_cut_short`, or
 `grounding_unattested`. Three further modes (`policy_unverified`, `policy_absent`, `policy_unverifiable`) exist but fire only under `enforce_rekor_policy`, which the CLI `restore` does not expose; see the `mareforma.restore()` API table for those.
 
 `claims.toml` includes a `[rekor_inclusions]` section. Older files written without it restore successfully with a `RekorSidecarSectionAbsentWarning`. Run `refresh_unsigned()` afterward to re-fetch inclusion proofs.

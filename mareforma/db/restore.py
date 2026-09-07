@@ -402,6 +402,51 @@ def _refuse_a_grounding_axis_nothing_attests(
     )
 
 
+def _refuse_a_chain_the_writer_cut_short(
+    toml_path, data: dict, trusted: bool,
+) -> int:
+    """Stop a recovery from a backup the writer could not write in full.
+
+    The writer stops at the first link that does not follow the one before it,
+    so a graph somebody wrecked backs up as the part of its chain that still
+    holds. Handing that back quietly is the hole: one row put into the chain
+    below the numbering, which needs no key and no write guard removed, makes
+    every later backup carry no chain at all, and a backup with verdicts and no
+    chain is indistinguishable from one written before the chain existed. That
+    file restored clean, and the verdict it was missing went unremarked.
+
+    So a file that says it is short is refused, and what the operator does next
+    is theirs to choose. Taking the override gives back a graph whose chain
+    holds rather than the wreckage, which is the half of this worth having.
+
+    A file whose count has been stripped is a file that says nothing, and this
+    cannot tell it from an honest one. Neither can anything else here: the
+    count sits under the digest, and the digest is not a signature.
+
+    Returns the number of links left out, for the caller's report.
+    """
+    withheld = data.get("verdict_chain_withheld")
+    if not isinstance(withheld, int) or isinstance(withheld, bool) or withheld < 1:
+        return 0
+    if trusted:
+        return withheld
+    because = data.get("verdict_chain_withheld_because")
+    said = f" The writer stopped because {because}." if isinstance(because, str) and because else ""
+    links = "link" if withheld == 1 else "links"
+    raise RestoreError(
+        f"{toml_path} was written from a graph whose verdict chain stopped "
+        f"forming a chain, so it carries the chain up to that point and leaves "
+        f"{withheld} {links} out.{said} A chain this short does not account "
+        "for the verdicts in the file, and a verdict taken out of one leaves a "
+        "graph that never had it. Nothing has been changed and the file is "
+        "untouched. The graph this was written from still holds every link and "
+        "still reports them on every read, so look there for what went wrong. "
+        "To rebuild from the part that holds, which is a working graph shorter "
+        "than the one backed up, pass trust_unaccounted_backup=True.",
+        kind="verdict_chain_cut_short",
+    )
+
+
 def _refuse_a_broken_verdict_chain(
     reasons: "tuple[str, ...]", conn, toml_path, trusted: bool,
 ) -> None:
@@ -1388,6 +1433,9 @@ def restore(
 
             # The verdict-set chain, after the verdicts its links cover.
             _replay_verdict_chain(conn, data.get("verdict_chain") or {})
+            chain_withheld = _refuse_a_chain_the_writer_cut_short(
+                toml_path, data, trust_unaccounted_backup,
+            )
             _refuse_a_broken_verdict_chain(
                 _disclose_a_rotated_copy_worth_trying(conn, toml_path),
                 conn, toml_path, trust_unaccounted_backup,
@@ -1642,6 +1690,7 @@ def restore(
             "validators_restored": len(ordered_validators),
             "claims_restored": len(ordered_claims),
             "unsigned_in_signed_mode": len(unsigned_in_signed_mode),
+            "verdict_chain_withheld": chain_withheld,
         }
     except BaseException:
         # Close first so the files are unlocked, then drop the residue.

@@ -507,7 +507,8 @@ def restore(
         mode_inconsistent, orphan_signer, rekor_inclusion_invalid,
         policy_unverified, policy_absent, policy_unverifiable,
         policy_violation, backup_unaccounted, format_ahead,
-        verdict_chain_broken, or grounding_unattested.
+        verdict_chain_broken, verdict_chain_cut_short, or
+        grounding_unattested.
 
     A backup whose completeness table does not match what the file holds is
     refused as ``backup_unaccounted``: it says what it should contain and

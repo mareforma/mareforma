@@ -460,6 +460,12 @@ One row per verdict recorded from the version that introduced this table
 onwards, each carrying the tip of the chain behind it and a signature over that
 tip made by the verdict's own issuer.
 
+A graph rebuilt by `restore` can hold fewer. The backup writer stops at the
+first link that does not follow the one before it, so a wrecked graph backs up
+as the part of its chain that still holds rather than as the wreckage, and the
+file records how many links it left out and why. `restore` refuses such a file
+unless you pass `trust_unaccounted_backup=True`, and reports the count.
+
 Every claim, validator and verdict in `claims.toml` carries its own signature,
 so nobody can change what a row says. Nothing in the file signs **which rows are
 in it**. Delete a verdict's entry and restore rebuilds a graph that never had

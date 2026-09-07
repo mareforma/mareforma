@@ -31,7 +31,7 @@ from mareforma.db.errors import RestoreError
 from mareforma.db.core import (
     _BACKUP_FORMAT, tables_below_completeness, verify_completeness_digest,
 )
-from tests._helpers import _bootstrap_key, _enroll_key
+from tests._helpers import _bootstrap_key, _enroll_key, rewrite_backup
 
 try:
     import tomllib          # 3.11+ stdlib
@@ -749,6 +749,34 @@ class TestTheReasonsAreTyped:
         assert _reasons_for(ahead) == ("format_ahead",)
 
 
+def _a_backup_with_a_planted_link(tmp_path: Path) -> Path:
+    """A claims.toml carrying a chain that does not check out.
+
+    Written into the file rather than into the graph. The writer stops at
+    the first link that does not verify, so a backup it produced can no
+    longer carry one; a file somebody edited still can, and that is the
+    case these refusals are for.
+    """
+    import tomli_w
+
+    home = tmp_path / "src"
+    home.mkdir()
+    _project_with_a_verdict(home)
+    with mareforma.open(home, key_path=home / "root.key") as graph:
+        graph.assert_claim("a later claim", generated_by="after")
+    assert (home / "claims.toml.prev").is_file()
+
+    doc = tomllib.loads((home / "claims.toml").read_text())
+    doc["verdict_chain"]["99"] = {
+        "prev_tip": "x", "tip": "junk", "verdict_kind": "contradiction",
+        "verdict_id": "nope", "verdict_digest": "nope",
+        "issuer_keyid": "nokey", "signature": "AA==",
+        "created_at": "2026-09-07T00:00:00+00:00",
+    }
+    rewrite_backup(home / "claims.toml", doc)
+    return home
+
+
 class TestARotatedCopyIsNamedWhenItCouldHelp:
     """The recovery the accepted risk rested on, made real.
 
@@ -766,32 +794,9 @@ class TestARotatedCopyIsNamedWhenItCouldHelp:
     recommending it.
     """
 
-    def _poisoned(self, tmp_path: Path) -> Path:
-        import sqlite3
-
-        home = tmp_path / "src"
-        home.mkdir()
-        _project_with_a_verdict(home)
-
-        raw = sqlite3.connect(home / ".mareforma" / "graph.db")
-        raw.execute(
-            "INSERT INTO verdict_chain(seq, prev_tip, tip, verdict_kind, "
-            "verdict_id, verdict_digest, issuer_keyid, signature, created_at) "
-            "VALUES (99, 'x', 'junk', 'contradiction', 'nope', 'nope', "
-            "'nokey', X'00', '2026-09-03T00:00:00+00:00')"
-        )
-        raw.commit()
-        raw.close()
-
-        # One honest mutation, which is all it takes for the backup to carry
-        # the planted row into the recovery artifact.
-        with mareforma.open(home, key_path=home / "root.key") as graph:
-            graph.assert_claim("written after the plant", generated_by="after")
-        assert (home / "claims.toml.prev").is_file()
-        return home
 
     def test_the_previous_copy_is_named(self, tmp_path: Path) -> None:
-        home = self._poisoned(tmp_path)
+        home = _a_backup_with_a_planted_link(tmp_path)
         target = tmp_path / "recovered"
         target.mkdir()
         shutil.copy(home / "claims.toml", target / "claims.toml")
@@ -828,7 +833,7 @@ class TestARotatedCopyIsNamedWhenItCouldHelp:
         nothing. Deleting that file is free, and it is the first thing worth
         deleting.
         """
-        home = self._poisoned(tmp_path)
+        home = _a_backup_with_a_planted_link(tmp_path)
         target = tmp_path / "recovered"
         target.mkdir()
         shutil.copy(home / "claims.toml", target / "claims.toml")
@@ -948,22 +953,7 @@ class TestTheDisclosureNeverCostsTheRecovery:
     def test_a_restore_survives_a_caller_that_raises_on_warnings(
         self, tmp_path: Path,
     ) -> None:
-        import sqlite3
-
-        home = tmp_path / "src"
-        home.mkdir()
-        _project_with_a_verdict(home)
-        raw = sqlite3.connect(home / ".mareforma" / "graph.db")
-        raw.execute(
-            "INSERT INTO verdict_chain(seq, prev_tip, tip, verdict_kind, "
-            "verdict_id, verdict_digest, issuer_keyid, signature, created_at) "
-            "VALUES (99, 'x', 'junk', 'contradiction', 'nope', 'nope', "
-            "'nokey', X'00', '2026-09-03T00:00:00+00:00')"
-        )
-        raw.commit()
-        raw.close()
-        with mareforma.open(home, key_path=home / "root.key") as graph:
-            graph.assert_claim("after the plant", generated_by="after")
+        home = _a_backup_with_a_planted_link(tmp_path)
 
         target = tmp_path / "recovered"
         target.mkdir()
@@ -983,22 +973,7 @@ class TestTheDisclosureNeverCostsTheRecovery:
         self, tmp_path: Path,
     ) -> None:
         """Quoting the first of five drops the more alarming ones."""
-        import sqlite3
-
-        home = tmp_path / "src"
-        home.mkdir()
-        _project_with_a_verdict(home)
-        raw = sqlite3.connect(home / ".mareforma" / "graph.db")
-        raw.execute(
-            "INSERT INTO verdict_chain(seq, prev_tip, tip, verdict_kind, "
-            "verdict_id, verdict_digest, issuer_keyid, signature, created_at) "
-            "VALUES (99, 'x', 'junk', 'contradiction', 'nope', 'nope', "
-            "'nokey', X'00', '2026-09-03T00:00:00+00:00')"
-        )
-        raw.commit()
-        raw.close()
-        with mareforma.open(home, key_path=home / "root.key") as graph:
-            graph.assert_claim("after the plant", generated_by="after")
+        home = _a_backup_with_a_planted_link(tmp_path)
 
         target = tmp_path / "recovered"
         target.mkdir()
@@ -1216,21 +1191,20 @@ class TestABackupCannotHideADeletedVerdict:
     """
 
     def _with_a_verdict_removed(self, tmp_path: Path) -> Path:
-        import sqlite3
+        """An honest backup with one verdict taken out of the file.
 
+        Out of the file rather than out of the graph, because the writer stops
+        at the first chain link that does not check out and would leave the
+        orphaned link behind rather than write it. Somebody editing the file
+        they were handed is the case this refusal answers.
+        """
         home = tmp_path / "src"
         home.mkdir()
         _project_with_a_verdict(home)
 
-        # Drop the guards, take the verdict and its link out, back the graph up.
-        raw = sqlite3.connect(home / ".mareforma" / "graph.db")
-        for guard in ("contradiction_verdicts_no_delete", "verdict_chain_no_delete"):
-            raw.execute(f"DROP TRIGGER IF EXISTS {guard}")
-        raw.execute("DELETE FROM contradiction_verdicts WHERE verdict_id = 'v1'")
-        raw.commit()
-        raw.close()
-        with mareforma.open(home, key_path=home / "root.key") as graph:
-            graph.assert_claim("written after the deletion", generated_by="after")
+        doc = tomllib.loads((home / "claims.toml").read_text())
+        assert doc["contradiction_verdicts"].pop("v1", None) is not None
+        rewrite_backup(home / "claims.toml", doc)
         return home / "claims.toml"
 
     def test_the_restore_is_refused(self, tmp_path: Path) -> None:

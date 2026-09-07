@@ -190,6 +190,10 @@ class RestoreError(MareformaError):
         than this release understands
       - ``'verdict_chain_broken'``     : a verdict was taken out of the
         backup and the chain no longer accounts for the set
+      - ``'verdict_chain_cut_short'``  : the backup says its own writer
+        could not write the chain in full, so it is short of links the
+        graph it came from still holds. Takes the same override, which
+        rebuilds from the part that holds.
       - ``'grounding_unattested'``     : a GROUNDED axis arrived with
         nothing in the file attesting it
       - ``'rekor_inclusion_invalid'``  : Rekor inclusion entry or proof invalid

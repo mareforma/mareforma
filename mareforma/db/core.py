@@ -9026,6 +9026,7 @@ def _backup_verdict_chain(conn: sqlite3.Connection, data: dict) -> None:
         "SELECT seq, prev_tip, tip, verdict_kind, verdict_id, verdict_digest, "
         "issuer_keyid, signature, created_at FROM verdict_chain ORDER BY seq"
     ).fetchall()
+    rows = _chain_prefix_that_forms_a_chain(conn, rows, data)
     if not rows:
         return
     data["verdict_chain"] = {
@@ -9041,6 +9042,89 @@ def _backup_verdict_chain(conn: sqlite3.Connection, data: dict) -> None:
         }
         for r in rows
     }
+
+
+def _chain_prefix_that_forms_a_chain(
+    conn: sqlite3.Connection, rows: list, data: dict,
+) -> list:
+    """The leading run of links that still forms a chain, and what stopped it.
+
+    A backup carrying links that do not link rebuilds a graph broken the same
+    way, so the one artifact meant to recover from tampering hands the
+    tampering back. Stopping at the first link that does not follow the one
+    before it gives an operator something they can open.
+
+    Structure only: the sequence numbering, the previous tip each link names,
+    and whether a link's stored tip is the one its own contents produce. Not
+    signatures, not enrolment, not the verdict a link covers. Those are the
+    read path's answer and the restore's, and asking them here cost a full
+    chain verification on every mutation, which is per-write work that grows
+    with the graph. What it leaves for the restore is the case where the file
+    is a chain and the chain is forged, and the restore refuses that.
+
+    The count and the reason go in the file, because leaving quietly is the
+    silence the chain exists to close. The links stay in the graph this was
+    read from, which still holds them and still reports them on every read.
+    """
+    if not rows:
+        return rows
+    kept: list = []
+    expected_prev = ""
+    stopped = ""
+    for link in rows:
+        try:
+            stopped = _why_a_link_does_not_follow(link, len(kept) + 1, expected_prev)
+        except Exception as exc:  # noqa: BLE001
+            # Every exception, not only sqlite3's, for the reason the read
+            # path's copy of this gives: on a graph somebody has taken apart
+            # these rows hold whatever they hold, and a column typed against
+            # the schema reaches the hashing with the wrong type. Narrower than
+            # this, the error escaped into the backup writer, and the backup
+            # writer runs inside every mutation, so a single planted row made
+            # the graph permanently unwritable. The row cannot be deleted
+            # either, the chain is append-only. Withholding is the recoverable
+            # answer; raising is not.
+            stopped = f"link {len(kept) + 1} could not be read: {type(exc).__name__}"
+        if stopped:
+            break
+        kept.append(link)
+        expected_prev = link["tip"]
+    dropped = len(rows) - len(kept)
+    if dropped:
+        data["verdict_chain_withheld"] = dropped
+        data["verdict_chain_withheld_because"] = stopped
+    return kept
+
+
+def _why_a_link_does_not_follow(
+    link: sqlite3.Row, expected_seq: int, expected_prev: str,
+) -> str:
+    """Empty when the link follows the one before it, else why it does not."""
+    if link["seq"] != expected_seq:
+        return (
+            f"link {expected_seq} is out of sequence, the row here is numbered "
+            f"{link['seq']}: links are numbered without gaps, so a jump is a "
+            "link that was removed or one that was put in"
+        )
+    if link["prev_tip"] != expected_prev:
+        return (
+            f"link {expected_seq} names a previous tip no earlier link "
+            "produced, so the chain is broken at this point"
+        )
+    record = {
+        "seq": link["seq"],
+        "prev_tip": link["prev_tip"],
+        "verdict_kind": link["verdict_kind"],
+        "verdict_id": link["verdict_id"],
+        "verdict_digest": link["verdict_digest"],
+        "issuer_keyid": link["issuer_keyid"],
+    }
+    if _verdict_chain_tip(record) != link["tip"]:
+        return (
+            f"link {expected_seq} stores a tip its own contents do not "
+            "produce, so the row was edited after it was written"
+        )
+    return ""
 
 
 def _backup_schema_census(conn: sqlite3.Connection, data: dict) -> None:
@@ -9131,14 +9215,27 @@ def _backup_completeness_tail(
     reader checks it by hashing the file it is holding, with no need to
     reproduce a serialization byte for byte before it can agree.
 
-    The counts describe the file rather than the graph, so a file truncated
-    after it was written disagrees with itself. The verdict pair is the one
-    graph-side number here, because the gap between covered and total is how a
-    reader sees which verdicts predate the chain instead of guessing.
+    Every count describes the file rather than the graph, so a file truncated
+    after it was written disagrees with itself. The verdict pair included: it
+    used to be read off the graph, which meant a backup the writer could not
+    write in full advertised a chain longer than the one it carried, and named
+    a tip no link in it produces. A table whose job is to say what the file
+    holds cannot describe something else. The gap between covered and total is
+    still how a reader sees which verdicts predate the chain, and now the gap
+    also opens when the writer withheld links, which is the same question a
+    reader is asking.
     """
     import tomli_w
 
-    covered, total = verdict_chain_coverage(conn)
+    links = data.get("verdict_chain")
+    links = links if isinstance(links, dict) else {}
+    covered = len(links)
+    total = sum(
+        len(data[name])
+        for name in ("contradiction_verdicts", "replication_verdicts")
+        if isinstance(data.get(name), dict)
+    )
+    last = max(links, key=lambda seq: int(seq)) if links else None
     table = {
         "completeness": {
             "sections": {
@@ -9146,7 +9243,7 @@ def _backup_completeness_tail(
                 for name, entries in sorted(data.items())
                 if isinstance(entries, dict)
             },
-            "verdict_chain_tip": verdict_chain_tip(conn),
+            "verdict_chain_tip": links[last]["tip"] if last is not None else "",
             "verdict_chain_covered": covered,
             "verdicts_total": total,
             "digest": hashlib.sha256(body.encode("utf-8")).hexdigest(),

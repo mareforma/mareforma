@@ -307,7 +307,8 @@ convergence-eligible only when it carries a verified, claim-bound
 inclusion proof. That closes the strip-route where an edited `claims.toml`
 makes an unwitnessed claim look ready. Off by default.
 
-Returns `{"validators_restored": N, "claims_restored": M}`.
+Returns `{"validators_restored": N, "claims_restored": M}`, plus
+`unsigned_in_signed_mode` and `verdict_chain_withheld` counts.
 
 **Raises:** `mareforma.db.RestoreError` with a `.kind` field: `graph_not_empty`,
 `toml_not_found`, `toml_unreadable`, `toml_malformed`,
@@ -316,6 +317,7 @@ Returns `{"validators_restored": N, "claims_restored": M}`.
 `orphan_signer`, `policy_absent`, `policy_unverifiable`,
 `policy_unverified`, `policy_violation`, `rekor_inclusion_invalid`,
 `backup_unaccounted`, `format_ahead`, `verdict_chain_broken`,
+`verdict_chain_cut_short`,
 `grounding_unattested`.
 
 A backup whose completeness table does not match what the file holds is

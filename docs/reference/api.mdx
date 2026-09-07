@@ -79,7 +79,7 @@ fail-all-or-nothing.
 ```python
 result = mareforma.restore("/path/to/project")
 # {'validators_restored': 3, 'claims_restored': 47,
-#  'unsigned_in_signed_mode': 0}
+#  'unsigned_in_signed_mode': 0, 'verdict_chain_withheld': 0}
 ```
 
 **Parameters**
@@ -91,8 +91,8 @@ result = mareforma.restore("/path/to/project")
 | `rekor_log_pubkey_pem` | `bytes \| None` | `None` | PEM-encoded Rekor log operator public key. When supplied, every `[rekor_inclusions]` entry's Merkle inclusion proof is cryptographically verified before replay, and each proof is bound to the claim it covers. Verification failure raises `RestoreError(kind='rekor_inclusion_invalid')`. When `None`, sidecar entries are replayed unverified. |
 | `enforce_rekor_policy` | `bool` | `False` | Assert this project requires transparency-log witnessing. Requires a valid root-signed `[project_policy]` and a pinned `rekor_log_pubkey_pem`; a signed claim is then marked convergence-eligible only when it carries a verified, claim-bound inclusion proof. Closes the strip-route where an edited claims.toml makes an unwitnessed claim look ready. Off by default (best-effort, matching the pinned-key opt-in posture). |
 
-**Returns** `dict` with `validators_restored`, `claims_restored`, and
-`unsigned_in_signed_mode`.
+**Returns** `dict` with `validators_restored`, `claims_restored`,
+`unsigned_in_signed_mode`, and `verdict_chain_withheld`.
 
 `unsigned_in_signed_mode` counts claims that came back carrying no signature in
 a project that enrols a validator. Restore accepts them and warns; the read path
@@ -123,6 +123,7 @@ keyless write.
 | `policy_violation` | A rebuilt row breaks the project's signed policy, such as a REPLICATED claim with no `artifact_hash` under strict promotion. |
 | `backup_unaccounted` | The file does not hold what its `[completeness]` table says it holds, so the rebuilt graph would be short rows with nothing recording they were there. Pass `trust_unaccounted_backup=True` to restore a file you edited deliberately. A backup written before the table reaches this check not at all. |
 | `verdict_chain_broken` | The restored verdict chain does not account for the verdicts it carries, so a verdict was taken out of the backup. Pass `trust_unaccounted_backup=True` to restore it as it stands. |
+| `verdict_chain_cut_short` | The backup says its own writer could not write the verdict chain in full, so the file is short of links the graph it came from still holds. Pass `trust_unaccounted_backup=True` to rebuild from the part that holds, which is a working graph shorter than the one backed up. |
 | `grounding_unattested` | A claim carries a GROUNDED observed-grounding axis that nothing in the file attests, which is how an axis edited after the fact arrives. Only checked on a backup carrying the format stamp. Pass `trust_unaccounted_backup=True` to restore it as it stands. |
 | `format_ahead` | The backup was written in a later format than this release understands, so what it owes cannot be checked here. The override does not apply; restore it with the release that wrote it. |
 
