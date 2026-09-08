@@ -30,7 +30,13 @@ read UNDECIDABLE, and measured-zero must be recorded as its own state.
 """
 from __future__ import annotations
 
-from mareforma.observe.oracle import OracleInfluence, perturbation_oracle
+import pytest
+
+from mareforma.observe.oracle import (
+    OracleInfluence,
+    QuantityClass,
+    perturbation_oracle,
+)
 
 # A deterministic sequence finding, run at repeats>1 so the noise floor is
 # measured (and comes out 0), the modal real case.
@@ -43,6 +49,11 @@ def _hollow(x):
     return 42.0
 
 
+def _boom(x):
+    """A target a run kills, which is expected input rather than a bug."""
+    raise RuntimeError("the target crashed")
+
+
 def _positional(x):
     """Honest: reads specific positions, so content and order both matter."""
     return float(x[0]) * 10.0 + float(x[-1])
@@ -51,6 +62,17 @@ def _positional(x):
 def _marginal(x):
     """A genuine mean: invariant under the marginal-preserving nulls."""
     return sum(x) / len(x)
+
+
+def _sample_size(x):
+    """A reported sample size: a function of length, not of content.
+
+    The case the bench was missing. Every null in the family preserves length,
+    so this is flat under all of them for a reason that has nothing to do with
+    the pipeline, and the bench only ever protected the mean, which the
+    marginal-preserving nulls already separate.
+    """
+    return float(len(x))
 
 
 def _by_null(result):
@@ -79,6 +101,130 @@ def test_marginal_finding_is_undecidable_never_hollow():
     # The load-bearing assertion: a genuine mean must NOT read as hollow.
     assert res.influence is not OracleInfluence.NOT_INFLUENCED
     assert res.influence is OracleInfluence.UNDECIDABLE
+
+
+def test_a_length_shaped_quantity_is_flat_under_the_whole_family():
+    """The false positive, shown before it is excluded.
+
+    Nothing about this is ambiguous in the data: the family cannot move a
+    length, so it comes out flat whatever the pipeline does. Undeclared, that
+    reads as the same verdict a silent fallback earns.
+    """
+    res = perturbation_oracle(_sample_size, _DATA, repeats=_REPEATS)
+    assert all(e == 0.0 for e in res.perturbation_effects)
+    assert res.influence is OracleInfluence.NOT_INFLUENCED
+
+
+def test_a_declared_length_invariant_quantity_is_never_hollow():
+    """The exclusion, and the assertion that fails without it.
+
+    Sample sizes, cell counts and degrees of freedom are among the most common
+    numbers in any write-up. Calling them hollow is a systematic false positive,
+    not an edge case, so the class routes to undecidable by construction.
+    """
+    res = perturbation_oracle(
+        _sample_size, _DATA, repeats=_REPEATS,
+        quantity_class=QuantityClass.LENGTH_INVARIANT,
+    )
+    assert res.influence is not OracleInfluence.NOT_INFLUENCED
+    assert res.influence is OracleInfluence.UNDECIDABLE
+    assert "preserves the input's length" in res.reason
+
+
+def test_declaring_a_class_cannot_launder_a_real_dependence():
+    """A finding the family moves is INFLUENCED whatever class it declared.
+
+    Weak on its own: the family moves this target, so control never reaches the
+    branch the exclusion lives in and this passes with the exclusion deleted.
+    Kept because it pins the other half of the grid, and paired with the test
+    below, which is the one that has teeth.
+    """
+    res = perturbation_oracle(
+        _positional, _DATA, repeats=_REPEATS,
+        quantity_class=QuantityClass.LENGTH_INVARIANT,
+    )
+    assert res.influence is OracleInfluence.INFLUENCED
+
+
+def test_the_exclusion_does_suppress_a_hollow_finding_when_declared():
+    """The cost of the exclusion, pinned rather than left in a docstring.
+
+    NOT_INFLUENCED is the only accusation this instrument makes, and a
+    declaration the instrument cannot check suppresses it. A pipeline that
+    ignores its input entirely, the canonical silent fallback, reads hollow
+    undeclared and undecidable declared, and undecidable leaves the report.
+
+    That is a real hole and naming it is the honest thing to do: the class is a
+    caller's word, on the one axis the product otherwise refuses to take on the
+    producer's word. This test is the record that it was chosen, not overlooked.
+    """
+    undeclared = perturbation_oracle(_hollow, _DATA, repeats=_REPEATS)
+    declared = perturbation_oracle(
+        _hollow, _DATA, repeats=_REPEATS,
+        quantity_class=QuantityClass.LENGTH_INVARIANT,
+    )
+    assert undeclared.influence is OracleInfluence.NOT_INFLUENCED
+    assert declared.influence is OracleInfluence.UNDECIDABLE
+    assert declared.declared_exclusion is True
+    assert undeclared.declared_exclusion is False
+
+
+@pytest.mark.parametrize("shape, kwargs", [
+    ("the target crashed", dict(run_fn=_boom, base_input=_DATA)),
+    ("no family fits the shape", dict(run_fn=len, base_input=object())),
+])
+def test_a_row_that_never_ran_still_records_what_was_declared(shape, kwargs):
+    """The class is known before anything runs, so a never-run row carries it.
+
+    It was dropped on every NOT_TESTED path, so the one field that exists to
+    record what the caller declared reported ``CONTENT_DEPENDENT`` for a caller
+    who declared otherwise. An audit weighing declarations across a corpus would
+    have counted every crashed and every unsupported row on the wrong side, and
+    the free-text reason it replaced said nothing about the class either.
+    """
+    res = perturbation_oracle(
+        quantity_class=QuantityClass.LENGTH_INVARIANT, **kwargs,
+    )
+    assert res.influence is OracleInfluence.NOT_TESTED, shape
+    assert res.quantity_class == QuantityClass.LENGTH_INVARIANT.value, shape
+
+
+def test_building_a_never_run_row_by_hand_refuses_an_unreadable_class():
+    """The field records a declaration, so it takes declarations only.
+
+    The oracle converts before it runs, so its own paths cannot reach here with
+    a bad value. This constructor is reachable on its own, and a row carrying a
+    class no reader can branch on is worse than one carrying the default: the
+    default is at least a value the enum defines.
+    """
+    from mareforma.observe.oracle import NotTestedReason, OracleResult
+
+    with pytest.raises(ValueError, match="not a quantity class"):
+        OracleResult.not_tested(
+            NotTestedReason.UNSUPPORTED_SHAPE,
+            quantity_class="LENGTH_INVARIENT",
+        )
+
+
+def test_an_unreadable_class_is_refused_before_the_target_runs():
+    """A typo used to read as the default and reinstate the false positive.
+
+    Refused up front, because the check used to sit past every re-run of the
+    target: an expensive pipeline paid for the whole measurement and then found
+    out.
+    """
+    runs = []
+
+    def counting(x):
+        runs.append(1)
+        return float(len(x))
+
+    with pytest.raises(ValueError, match="not a quantity class"):
+        perturbation_oracle(
+            counting, _DATA, repeats=_REPEATS,
+            quantity_class="LENGTH_INVARIENT",
+        )
+    assert runs == [], "the target ran before the class was checked"
 
 
 # -- the 3x3 cross-tab: finding class x null, the per-null effect profile ----

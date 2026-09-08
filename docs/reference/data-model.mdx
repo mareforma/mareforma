@@ -352,6 +352,164 @@ derived alongside it from the same computation. Both are what a reader should
 read trust off; the stored `support_level` ladder above is the deprecated legacy
 axis.
 
+## schema_census and schema_guards_seen tables
+
+Two tables that record the state of the schema's own write guards, because a
+dropped guard is the one tamper a read cannot infer afterwards. Every trigger in
+the schema is reconciled against `sqlite_master` on every open, and
+`_ADDITIVE_TABLES_SQL` recreates its own triggers on every open as well, so a
+guard that was gone is back before the open returns. Nothing in the file
+afterwards says it had gone, while the rows it let someone delete stay deleted.
+
+The census runs first, ahead of both repairs, and writes down what was absent.
+Ordering is the whole mechanism: run after either repair and it sees a healed
+schema and reports clean forever. A read surface consults the record rather than
+re-deriving from `sqlite_master`, and reads the union of every observation, not
+the latest: a guard that came back is not a guard that was never gone.
+
+`schema_guards_seen` is what separates "this graph never had that table" from
+"somebody took that table away". A guard is expected while its table is present,
+which keeps a graph written before a table existed off the tamper report, and a
+guard this graph has carried stays expected however its table is treated after.
+It is written at the end of an open, from the guards actually present, and it
+only grows.
+
+Both tables carry no-delete and append-only guards of their own. Once every
+guard heals on every open they are the only record that anything happened, and a
+store of tamper evidence the tamperer can empty is not a record of anything.
+
+Those guards refuse a DELETE and an UPDATE. They cannot refuse a DROP TABLE.
+Dropping `schema_census` alone is enough: its guards go with it, the next open
+rebuilds it empty, and every observation ever recorded is gone while the seen
+store and the guarded table sit untouched. No scheme confined to one file the
+attacker can write to will change that. What
+the census does buy is that any smaller version of the attack is on the record,
+including dropping the guarded table by itself, and that the census travels in
+the backup, so a graph emptied this way disagrees with a `claims.toml` that has
+to be found and edited as well.
+
+`schema_census`:
+
+| Field | Type | Description |
+|---|---|---|
+| `observed_at` | TEXT | UTC ISO 8601: when the open that found them ran |
+| `missing` | TEXT | JSON array of trigger names absent at that open |
+
+A row is written only when something is missing, and only when the set differs
+from the last one recorded, so a long-lived process does not bury the
+observation that matters. `observed_at` carries no primary key: appending rather
+than replacing is what lets the delete guard be absolute.
+
+`schema_guards_seen`:
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | TEXT (PK) | A trigger this graph has carried |
+| `first_seen` | TEXT | UTC ISO 8601: the open that first saw it |
+
+## grounding_attestations table
+
+What the observer computed, carried in `claims.toml` so recovery can be held to
+the standard the write path holds.
+
+`observed_grounding` is the one signal on a claim meant not to be the producer's
+own word. The write path enforces that: a verdict the process's observer minted
+is stored as the observer's snapshot, and anything else is marked DECLARED with
+its GROUNDED claim neutralised to OPAQUE. Restore never passed through that
+check. It writes the axis straight out of `claims.toml`, so a producer could
+export a claim, edit GROUNDED into it, re-sign with their own key, restore, and
+every read surface rendered the result exactly like an execution mareforma
+watched.
+
+Restore cannot re-run the check instead. The register it reads is in-process and
+keyed on a receipt digest, so it dies with the process that built it, and a
+fresh restore would strip the axis off every honest claim along with the forged
+one. So the observer's word travels in the file.
+
+| Field | Type | Description |
+|---|---|---|
+| `claim_id` | TEXT (PK) | The claim whose verdict this attests, FK to `claims` |
+| `statement_cid` | TEXT | The exact signed claim, so an attestation cannot move |
+| `receipt_digest` | TEXT | The observer's receipt for the verdict |
+| `grounding` | TEXT | The state attested |
+| `signer_keyid` | TEXT | The key that asserted the claim |
+| `signature` | BLOB | Over the attestation's own DSSE payload type |
+| `created_at` | TEXT | UTC ISO 8601 |
+
+A row exists only where the observer's own record was kept. A declared verdict
+gets none, and that absence is the signal.
+
+`grounding_attestation_state()` answers in one word. `attested` means a row is
+present, binds this claim's current statement, names the axis the claim stores,
+and verifies under the asserting key. `unattested` means no row, which is the
+ordinary state for a declared verdict and for any claim written before the table
+existed. `broken` means a row is present and fails one of those, which is a
+stronger signal than absence and is never folded into it.
+
+**What this buys is parity, not prevention.** The observer runs inside the
+producer's process and the producer holds the key, so a producer determined
+enough to re-sign a claim can build an attestation too. There is no
+cryptographic asymmetry between the producer at write time and the same producer
+later. What it ends is the ordinary act, editing the axis and nothing else, the
+same lazy path the schema census closes for a dropped trigger. The trust map's
+grounding residual says which state a claim is in rather than implying more.
+
+## verdict_chain table
+
+One row per verdict recorded from the version that introduced this table
+onwards, each carrying the tip of the chain behind it and a signature over that
+tip made by the verdict's own issuer.
+
+Every claim, validator and verdict in `claims.toml` carries its own signature,
+so nobody can change what a row says. Nothing in the file signs **which rows are
+in it**. Delete a verdict's entry and restore rebuilds a graph that never had
+it, reports clean, and nothing in the file disagrees. This table is what makes
+that absence speak.
+
+The issuer signs each link, not the project root. Nothing holds a private key
+when the backup is written, and the two verdict paths are the only mutations
+that require a signer, so that is where a real key is in hand. The issuer
+attests only what an issuer is entitled to attest: that the verdict set behind
+their verdict hashed to `prev_tip` when they issued it.
+
+| Field | Type | Description |
+|---|---|---|
+| `seq` | INTEGER (PK) | Position in the chain, from 1, no gaps |
+| `prev_tip` | TEXT | The previous link's `tip`, empty at the first link |
+| `tip` | TEXT (UNIQUE) | SHA-256 over this link's canonical payload |
+| `verdict_kind` | TEXT | CHECK enum `contradiction` / `replication` |
+| `verdict_id` | TEXT (UNIQUE) | The verdict this link covers |
+| `verdict_digest` | TEXT | SHA-256 of that verdict's signature |
+| `issuer_keyid` | TEXT | The key that signed both the verdict and this link |
+| `signature` | BLOB | Over the link's own DSSE payload type |
+| `created_at` | TEXT | UTC ISO 8601. Not signed, same as a verdict's |
+
+`verify_verdict_chain()` recomputes the chain and checks every signature. What a
+clean result rules out, stated as narrowly as it holds: no verdict has been
+taken out of the middle by anyone holding no enrolled key. Removing a verdict
+means removing its link, and the next link then has to be re-signed over the
+gap, its tip recomputed, and the verdict it covers made to verify under the key
+the link names. An outside attacker with file access and the project operator
+are held out by that.
+
+**An enrolled peer is not.** A verdict's signed payload carries no issuer, so a
+peer can claim a surviving verdict, re-sign it under its own key, and re-sign
+the link to match; every check then passes on a chain it just shortened. Closing
+that needs the issuer inside the verdict's signed bytes, which changes bytes an
+already-released reader rebuilds. Nor is the issuer of the verdicts held out,
+and it cannot be: a key can always restate its own view of its own verdicts.
+
+Two things it does not say. A removed suffix leaves a shorter chain that
+verifies, so length is reported by `verdict_chain_coverage()` rather than
+checked. And verdicts recorded before this table existed carry no link, which
+the same covered-versus-total pair is what makes visible.
+
+The link binds to the verdict's signature rather than its row, because the
+signature is the one field only the issuer could have produced. There is no
+foreign key on `verdict_id`: verdicts live in two tables, so the reference is
+not expressible, and a link left pointing at a verdict that is gone is the
+evidence rather than a violation to cascade away.
+
 ## Schema versioning
 
 The schema version is stored in SQLite's `user_version` pragma.
@@ -360,14 +518,20 @@ The schema version is stored in SQLite's `user_version` pragma.
 |---|---|
 | `0` | Fresh database: full schema applied on first `open_db()` |
 | `1` | the current schema |
-| Any other | `DatabaseError`: delete `graph.db` to start fresh; `claims.toml` is the backup |
+| Ahead of this build | `DatabaseError`: a newer release wrote it. Upgrade mareforma. Do not delete `graph.db` |
+| Behind, with no route | `MigrationError`: nothing is changed, and the graph opens on the release that wrote it |
 
-No in-place migrations in this release. Adding a column, index, or
-trigger means updating the schema in place; existing development
-databases get the schema-validation error and the operator deletes
-`graph.db` (`claims.toml` is the restore artifact). Versioned
-migrations become relevant only after a 1.0 release establishes a
-stable schema with real users on it.
+**Do not delete `graph.db`.** It holds the claim chain and every signature, and
+`claims.toml` cannot reconstruct them: the backup carries what each row says, and
+the chain is what says which rows were there. A graph this build will not open is
+almost always a graph a newer build wrote, and the answer is to upgrade rather
+than to start again.
+
+A migration runner exists and its registry is empty. Nothing in this release
+moves `user_version`, so no graph migrates. When a release does add a route, the
+schema change and the version bump commit in one transaction or neither does, so
+a crash leaves the graph at the version it started from with every claim,
+signature and chain link intact.
 
 ## Storage
 
@@ -385,4 +549,4 @@ but it survives `graph.db` deletion.
 | PRAGMA | Value | Why |
 |---|---|---|
 | `journal_mode` | `WAL` | Concurrent readers + one writer without blocking |
-| `foreign_keys` | `ON` | SQLite default is OFF. The `replication_verdicts`, `contradiction_verdicts`, and `rekor_inclusions` tables have FK references to `validators(keyid)` and `claims(claim_id)`; without this PRAGMA, those constraints would be advisory and a direct-SQL INSERT with a fabricated keyid would silently succeed |
+| `foreign_keys` | `ON` | SQLite default is OFF. Tables across the graph carry `REFERENCES` clauses, to `validators(keyid)`, to `claims(claim_id)`, and to each other down the evidence tree; without this PRAGMA those constraints are advisory and a direct-SQL INSERT naming a fabricated keyid or a row that does not exist succeeds in silence |

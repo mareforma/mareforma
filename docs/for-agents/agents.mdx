@@ -556,6 +556,44 @@ than that root, is refused. `mare:trustDomainRoot` names the root and
 That pair is a disclosure about the exporting graph, not a guard against
 one operator holding every key.
 
+**Transparency-log inclusion, and the key it needs.** A stored Rekor entry is
+re-verified on read when the project has pinned the log's public key at
+`<root>/.mareforma/rekor_log_pubkey.pem`, which
+`mareforma.open(rekor_log_pubkey_pem=...)` writes on first use. With a pinned key
+the witnessing axis reads `inclusion proof verified` only when the Merkle path,
+the log's signed checkpoint and the binding to the claim's own envelope all
+check out, and `TAMPERED` when they do not; `mareforma verify` fails on the
+second. With no pinned key it reads `inclusion record present, unchecked`, and
+that is neither evidence for the entry nor against it: the verdict is unaffected.
+No read fetches the key over the network, so nothing about what a read trusts
+changes without an explicit pin.
+
+**Replication verdicts in the predicate.** The predicate also carries
+`mare:replicationVerdicts`, one object per signed replication verdict with
+`verdict_id`, `cluster_id`, `member_claim_id`, `other_claim_id`, `method`,
+`confidence`, `issuer_keyid` and `signature` (base64). They travel because a
+signed verdict is one of the two things that earns a `REPLICATED` level, and
+without them a bundle could not tell an honest promotion from an inflated one.
+Verification holds each against the same bar the graph applies: the issuer must
+be a chain-verified validator in this bundle, the signature must verify over the
+verdict's DSSE PAE, and the issuer must not be one of the signers of a claim the
+verdict names. A signature says who signed; the third condition is whether they
+were entitled to, and one key that both asserts a claim and corroborates it is
+one key rather than two. A verdict that fails any of the three backs nothing.
+
+**What a REPLICATED display is checked against.** The same rule the graph
+enforces, on either of its two paths: a replication verdict that verifies and
+names the claim, or convergence, meaning a shared `ESTABLISHED` anchor carrying
+a peer under a distinct asserter key whose artifact hash does not collapse into
+this claim's. Both convergence terms have to hold on the same peer. Two claims
+that each recorded no artifact hash still corroborate: a missing hash records
+that no artifact was named, not that the same one was.
+
+One term the graph applies does not travel, and the bundle says so rather than
+implying otherwise: the observed-grounding gate. No node carries that column, so
+a bundle checks the graph's rule minus that term. It is a weaker check than the
+read path, not a different one.
+
 ---
 
 ## Contradiction pattern

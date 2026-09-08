@@ -1,0 +1,13 @@
+{
+  "graph_size": 300,
+  "iterations": 60,
+  "warmup": 5,
+  "mareforma_version": "0.3.14",
+  "shapes_ms": {
+    "refutation_status_contradicted_ms": 0.136085000121966,
+    "refutation_status_clean_ms": 0.015651501598767936,
+    "get_claim_ms": 0.01214649819303304,
+    "query_limit_20_ms": 1.3838945014867932,
+    "query_limit_200_ms": 4.3513255077414215
+  }
+}

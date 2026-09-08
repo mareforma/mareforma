@@ -798,6 +798,15 @@ END"""
 # that check at all.
 _POLICY_MARKER_TABLE = "mareforma_policy_open"
 
+# The marker a table rebuild has to run inside. Unlike the two above it guards
+# no trigger: nothing in SQL can refuse a DROP TABLE. It is a gate in Python,
+# and it exists because the rebuild is a laundering primitive. It drops every
+# guard on claims along with the table, including claims_signed_no_delete, and
+# it runs with foreign keys off. Reachable from the versioned upgrade path and
+# from nowhere else, so a caller who wants those guards gone for a moment
+# cannot borrow the one function that legitimately takes them off.
+_UPGRADE_MARKER_TABLE = "mareforma_upgrade_open"
+
 _PROJECT_POLICY_APPEND_ONLY_TRIGGER_NAME = "project_policy_append_only"
 
 _PROJECT_POLICY_APPEND_ONLY_TRIGGER_SQL = f"""\
@@ -844,9 +853,12 @@ BEGIN
 END"""
 
 
-# The triggers open_db reconciles against sqlite_master on every open, name
-# first so a definition that changed shape reaches an existing graph.
-_MANAGED_TRIGGERS = (
+# Triggers whose text lives in Python rather than in a DDL script, because
+# these are the ones a release rewrites and the reconciler needs the new text
+# by name. Every trigger in the schema is reconciled, not just these: see
+# _MANAGED_TRIGGERS below, which is the whole set. This tuple is only about
+# where a definition is written down.
+_AUTHORED_TRIGGERS = (
     (_SIGNED_FIELDS_TRIGGER_NAME, _SIGNED_FIELDS_TRIGGER_SQL),
     (_PROMOTION_TRIGGER_NAME, _PROMOTION_TRIGGER_SQL),
     (_FINDINGS_APPEND_ONLY_TRIGGER_NAME, _FINDINGS_APPEND_ONLY_TRIGGER_SQL),
@@ -1003,11 +1015,6 @@ CREATE INDEX IF NOT EXISTS idx_pred_content ON predictions(content_id);
 -- other immutable columns, and a managed definition reaches an existing graph
 -- whose trigger predates the plan_id addition, which an IF NOT EXISTS here would
 -- not.
-CREATE TRIGGER IF NOT EXISTS predictions_no_delete
-BEFORE DELETE ON predictions
-BEGIN
-    SELECT RAISE(ABORT, 'mareforma:append_only:prediction_delete_blocked');
-END;
 
 -- A retired plan. A plan written by a release with a wider alpha bound can
 -- carry a rule the gates cannot run, and the row above can be neither corrected
@@ -1032,16 +1039,6 @@ CREATE TABLE IF NOT EXISTS plan_retirements (
 -- A retirement is append-only like the plan it retires: an operator who could
 -- re-point or drop one could move a proposition's counts by rewriting which
 -- rule its evidence stands under, with nothing on the read saying so.
-CREATE TRIGGER IF NOT EXISTS plan_retirements_append_only
-BEFORE UPDATE ON plan_retirements
-BEGIN
-    SELECT RAISE(ABORT, 'mareforma:append_only:plan_retirement_locked');
-END;
-CREATE TRIGGER IF NOT EXISTS plan_retirements_no_delete
-BEFORE DELETE ON plan_retirements
-BEGIN
-    SELECT RAISE(ABORT, 'mareforma:append_only:plan_retirement_delete_blocked');
-END;
 
 -- A finding: one attestation (claim_id) plus its computed bearing_direction on
 -- a proposition under a plan. The direction is denormalised here for queryable
@@ -1134,7 +1131,364 @@ CREATE TABLE IF NOT EXISTS supports_revision (
     id       INTEGER PRIMARY KEY CHECK (id = 1),
     revision INTEGER NOT NULL DEFAULT 0
 );
+
+-- The other half of the contradiction lookup. idx_contradiction_member sits
+-- next to its table in _SCHEMA_SQL and covers member_claim_id alone, so the
+-- replay's "names this claim on either side" reads as
+--   WHERE member_claim_id = ? OR other_claim_id = ?
+-- and SQLite answers it with SCAN contradiction_verdicts: an OR it cannot
+-- satisfy from one index defeats the index it has. Every clean read pays a
+-- full scan of the verdict table for it, which is nothing at ten verdicts and
+-- linear in a graph that argues with itself. With both sides indexed the
+-- planner takes each arm on its own index and unions the results.
+--
+-- It lives here rather than beside its table because _SCHEMA_SQL runs once, on
+-- a fresh database, and an existing graph would never get it. Additive is what
+-- this script is for.
+CREATE INDEX IF NOT EXISTS idx_contradiction_other
+    ON contradiction_verdicts(other_claim_id);
+
+-- What the observer computed, carried in the file so recovery can be held to
+-- the standard the write path holds.
+--
+-- The grounding axis is the one signal on a claim that is not meant to be the
+-- producer's own word. _attest_grounding is where the write path enforces that:
+-- a verdict the process's observer minted is stored as the observer's snapshot,
+-- and anything else is marked DECLARED with its GROUNDED claim neutralised.
+-- Restore never passed through there. It writes observed_grounding straight out
+-- of claims.toml, so a neutralised record could be exported, edited, re-signed
+-- by the producer's own key and restored as GROUNDED.
+--
+-- Restore cannot re-run the check instead. The register the check reads is
+-- in-process and keyed on a receipt digest, so it dies with the process that
+-- built it, and a fresh restore would neutralise every honest verdict along
+-- with the forged one.
+--
+-- What this buys, stated as narrowly as it holds: parity, not prevention. The
+-- observer runs inside the producer's process and the producer holds the key,
+-- so a determined producer can build one of these too. There is no
+-- cryptographic asymmetry between the producer at write time and the same
+-- producer later. What it closes is the ordinary path, editing the axis and
+-- nothing else, the same lazy act the schema census closes for a dropped
+-- trigger. Every surface that reports it says which.
+--
+-- statement_cid is what makes an attestation non-transferable: it names the
+-- exact signed claim, so one cannot be moved onto another claim, and changing
+-- the axis changes the statement and strands it.
+--
+-- A row exists only where the observer's own record was kept. A declared
+-- verdict gets none, and that absence is the signal.
+CREATE TABLE IF NOT EXISTS grounding_attestations (
+    claim_id       TEXT NOT NULL PRIMARY KEY
+                   REFERENCES claims(claim_id),
+    statement_cid  TEXT NOT NULL,
+    receipt_digest TEXT NOT NULL,
+    grounding      TEXT NOT NULL,
+    signer_keyid   TEXT NOT NULL,
+    signature      BLOB NOT NULL,
+    created_at     TEXT NOT NULL
+);
+
+-- The verdict-set chain. One row per verdict recorded from this version on,
+-- each carrying the tip of the chain behind it and a signature over that tip
+-- made by the verdict's own issuer.
+--
+-- claims.toml signs what every row says and nothing in it signs which rows are
+-- there, so deleting a verdict's entry leaves a file that restores clean and
+-- disagrees with nothing. That is the half of the drop-guard-delete-verdict
+-- path which survives both the guard reconciler and the contestation replay,
+-- because those speak about rows that are still present.
+--
+-- The issuer signs, not the project root. Nothing holds a private key at
+-- backup time, and the two verdict paths are the only mutations that require a
+-- signer, so this is where a real key is in hand. The issuer attests what an
+-- issuer is entitled to attest: that the verdict set behind their verdict
+-- hashed to prev_tip when they issued it. A root signature would have to be an
+-- out-of-band ceremony, leaving every verdict between ceremonies uncovered,
+-- and a peer signing a project-level tip could attest a set it had just
+-- emptied.
+--
+-- Taking a verdict out of the middle means taking its link too, and the next
+-- link's prev_tip then matches nothing that survives, so repairing the chain
+-- needs that link's issuer key. Taking a suffix leaves a consistent shorter
+-- chain: nothing inside the file records that it was ever longer, which is the
+-- residual this cannot close and the completeness section reports around.
+--
+-- No foreign key on verdict_id. Verdicts live in two tables, so the reference
+-- is not expressible, and a link left pointing at a verdict that is gone is
+-- the evidence, not a violation to be cascaded away.
+CREATE TABLE IF NOT EXISTS verdict_chain (
+    seq            INTEGER NOT NULL PRIMARY KEY,
+    prev_tip       TEXT NOT NULL,
+    tip            TEXT NOT NULL UNIQUE,
+    verdict_kind   TEXT NOT NULL
+                   CHECK (verdict_kind IN ('contradiction', 'replication')),
+    verdict_id     TEXT NOT NULL UNIQUE,
+    verdict_digest TEXT NOT NULL,
+    issuer_keyid   TEXT NOT NULL,
+    signature      BLOB NOT NULL,
+    created_at     TEXT NOT NULL
+);
 """
+
+
+# The census store. Its DDL lives here with the rest of the schema, but unlike
+# the two scripts above it is run by _record_schema_census rather than by the
+# open sequence, because the census has to have its tables before it looks and
+# it looks before anything else runs.
+#
+# Guarded like every other table that carries evidence, and the reason is
+# sharper here than elsewhere. Once every guard is reconciled on every open,
+# almost no tamper stays visible in sqlite_master by the time anything reads:
+# these two tables are the only record that it happened. A store of tamper
+# evidence that the tamperer can empty is not a record of anything.
+#
+# observed_at carries no PRIMARY KEY on purpose. It had one, with INSERT OR
+# REPLACE behind it, and REPLACE resolves a conflict by deleting the row first,
+# which the guard below would refuse. Appending instead means the guards can be
+# absolute, and the "only when it differs from the last" rule already keeps the
+# table from growing.
+_SCHEMA_CENSUS_SQL = """
+CREATE TABLE IF NOT EXISTS schema_census (
+    observed_at TEXT NOT NULL,
+    missing     TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS schema_guards_seen (
+    name       TEXT NOT NULL PRIMARY KEY,
+    first_seen TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS schema_census_no_delete
+BEFORE DELETE ON schema_census
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:no_delete:schema_census_locked');
+END;
+CREATE TRIGGER IF NOT EXISTS schema_census_append_only
+BEFORE UPDATE ON schema_census
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:schema_census_locked');
+END;
+CREATE TRIGGER IF NOT EXISTS schema_guards_seen_no_delete
+BEFORE DELETE ON schema_guards_seen
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:no_delete:schema_guards_seen_locked');
+END;
+CREATE TRIGGER IF NOT EXISTS schema_guards_seen_append_only
+BEFORE UPDATE ON schema_guards_seen
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:schema_guards_seen_locked');
+END;
+"""
+
+
+def _extract_triggers(script: str) -> "tuple[tuple[str, str], ...]":
+    """Every ``CREATE TRIGGER`` in *script*, as SQLite will store it.
+
+    Two normalisations, both required for the text to compare equal against
+    ``sqlite_master.sql``. SQLite drops ``IF NOT EXISTS`` from what it stores,
+    so a wanted text that keeps it never matches and a reconciler keyed on
+    equality would drop and recreate the trigger on every single open. And the
+    trailing semicolon is not part of the stored statement.
+
+    Statement boundaries come from :func:`sqlite3.complete_statement`, not from
+    a regex: a trigger body contains ``CASE ... END;`` before its own ``END;``,
+    so the first semicolon-terminated span that looks complete is usually the
+    inner one, and matching it truncates the trigger mid-body.
+    """
+    import re
+    import sqlite3
+
+    start = re.compile(r"CREATE\s+TRIGGER\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)", re.I)
+    out: list[tuple[str, str]] = []
+    for m in start.finditer(script):
+        i = m.start()
+        for j in range(i, len(script)):
+            if script[j] != ";":
+                continue
+            stmt = script[i:j + 1]
+            if not sqlite3.complete_statement(stmt):
+                continue
+            stmt = re.sub(
+                r"CREATE\s+TRIGGER\s+IF\s+NOT\s+EXISTS\s+",
+                "CREATE TRIGGER ", stmt, count=1,
+            )
+            out.append((m.group(1), stmt.rstrip().rstrip(";")))
+            break
+    return tuple(out)
+
+
+def _extract_table(script: str, name: str) -> str:
+    """The ``CREATE TABLE`` statement for *name* in *script*.
+
+    Derived from the authored DDL for the reason the trigger set is: a rebuild
+    that carried a hand-copied copy of the claims definition would drift from
+    the one a fresh database gets, and the drift would show up as two graphs
+    that accept different rows while both call themselves current.
+    """
+    import re
+    import sqlite3
+
+    start = re.compile(
+        rf"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?{name}\s*\(", re.I
+    )
+    m = start.search(script)
+    if m is None:                                        # pragma: no cover
+        raise ValueError(f"no CREATE TABLE for {name!r} in the schema")
+    i = m.start()
+    for j in range(i, len(script)):
+        if script[j] != ";":
+            continue
+        stmt = script[i:j + 1]
+        if sqlite3.complete_statement(stmt):
+            return stmt.rstrip().rstrip(";")
+    raise ValueError(f"unterminated CREATE TABLE for {name!r}")  # pragma: no cover
+
+
+def claims_rebuild_sql(table_name: str) -> str:
+    """The claims definition, under *table_name*, for a table rebuild.
+
+    One source of truth with the schema a fresh database gets. A rebuild builds
+    its replacement under a temporary name and renames it, so the only thing
+    that changes is the name in the header.
+
+    A column-dropping rebuild does NOT come through here. It needs a definition
+    with the column gone, and filtering one out of this text means parsing it;
+    a parser that mishandles a CHECK clause writes a table that accepts what the
+    old one refused. Such a migration authors its own definition and passes it
+    in, and the column list it copies is checked against the result.
+    """
+    import re
+
+    ddl = _extract_table(_SCHEMA_SQL, "claims")
+    return re.sub(
+        r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?claims\s*\(",
+        f"CREATE TABLE {table_name} (", ddl, count=1, flags=re.I,
+    )
+
+
+# Every trigger a correct graph carries, derived from the DDL rather than
+# listed by hand: three of them embed SQL comments that SQLite stores verbatim,
+# so a hand-copied table would drift on the first reformat and the drift would
+# be invisible until a reconciler compared texts.
+#
+# This is the census's expected set. It deliberately spans BOTH homes, because
+# a trigger's home decides whether a dropped guard comes back: the managed ones
+# are reconciled against sqlite_master on every open, while the rest are
+# created once, on a fresh database, by a script that never runs again. Before
+# this constant the expected set existed only as that split, so nothing could
+# ask the single question "is every guard still here".
+
+# Guards whose text lives in DDL and whose creation belongs to the reconciler.
+# They sat in _ADDITIVE_TABLES_SQL, which executes on every open, so two paths
+# created them and only one owned the wanted text. Now that every trigger is
+# reconciled there is one owner, and this constant exists so the text still has
+# a DDL home: hand-copying it into a Python string is the drift _extract_triggers
+# was introduced to remove. Never executed. _ALL_EXPECTED_TRIGGERS reads it.
+_RECONCILED_ONLY_TRIGGERS_SQL = """
+CREATE TRIGGER IF NOT EXISTS predictions_no_delete
+BEFORE DELETE ON predictions
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:prediction_delete_blocked');
+END;
+CREATE TRIGGER IF NOT EXISTS plan_retirements_append_only
+BEFORE UPDATE ON plan_retirements
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:plan_retirement_locked');
+END;
+CREATE TRIGGER IF NOT EXISTS plan_retirements_no_delete
+BEFORE DELETE ON plan_retirements
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:plan_retirement_delete_blocked');
+END;
+CREATE TRIGGER IF NOT EXISTS grounding_attestations_append_only
+BEFORE UPDATE ON grounding_attestations
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:grounding_attestation_locked');
+END;
+CREATE TRIGGER IF NOT EXISTS grounding_attestations_no_delete
+BEFORE DELETE ON grounding_attestations
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:no_delete:grounding_attestation_locked');
+END;
+CREATE TRIGGER IF NOT EXISTS verdict_chain_append_only
+BEFORE UPDATE ON verdict_chain
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:verdict_chain_locked');
+END;
+CREATE TRIGGER IF NOT EXISTS verdict_chain_no_delete
+BEFORE DELETE ON verdict_chain
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:no_delete:verdict_chain_locked');
+END;
+"""
+
+_ALL_EXPECTED_TRIGGERS: "dict[str, str]" = {
+    **dict(_extract_triggers(_SCHEMA_SQL)),
+    **dict(_extract_triggers(_ADDITIVE_TABLES_SQL)),
+    **dict(_extract_triggers(_RECONCILED_ONLY_TRIGGERS_SQL)),
+    **dict(_extract_triggers(_SCHEMA_CENSUS_SQL)),
+    **{name: sql.rstrip().rstrip(";") for name, sql in _AUTHORED_TRIGGERS},
+}
+
+
+# Every trigger in the schema is reconciled against sqlite_master on every
+# open, not the seventeen whose text happens to be authored in Python.
+#
+# The split those seventeen used to represent was not a decision about which
+# guards matter. _SCHEMA_SQL runs once, on a fresh database, and never again,
+# so a trigger created only there could be dropped and would simply stay
+# dropped: contradiction_verdicts_no_delete, the append-only guards on
+# rekor_inclusions and replication_verdicts, the claims state-machine checks.
+# Seventeen guards whose removal was permanent, next to seventeen whose removal
+# lasted until the next open, and nothing about the tables told you which was
+# which.
+#
+# Deriving the reconciled set from the expected set makes the two the same
+# thing by construction, so a trigger cannot be added to the schema and left
+# out of the reconciler. That was the other half of the old failure: the list
+# was maintained by hand beside a growing schema.
+_MANAGED_TRIGGERS: "tuple[tuple[str, str], ...]" = tuple(
+    _ALL_EXPECTED_TRIGGERS.items()
+)
+
+
+
+def _trigger_base_table(sql: str) -> str:
+    """The table a ``CREATE TRIGGER`` statement fires on.
+
+    The first ``ON`` in the statement, which the grammar puts between the event
+    and the body: ``CREATE TRIGGER <name> <BEFORE|AFTER|INSTEAD OF> <event> ON
+    <table>``. Nothing earlier can match, because ``INSTEAD OF`` and ``UPDATE
+    OF`` both spell ``OF``, not ``ON``.
+    """
+    import re
+
+    m = re.search(r"\bON\s+(\w+)", sql, re.I)
+    if m is None:                                    # pragma: no cover
+        raise ValueError(f"trigger names no base table: {sql[:80]}")
+    return m.group(1)
+
+
+# The table each expected trigger hangs off, so the census can tell a guard
+# somebody removed from one that was never created.
+#
+# A trigger cannot outlive its table, and _ADDITIVE_TABLES_SQL builds nine
+# tables that carry sixteen of these guards. A graph.db written by an earlier
+# mareforma has none of those tables yet, which is the whole reason that script
+# re-runs on every open, and it passes the user_version gate because adding a
+# table is additive and never bumped the version. Censused against the flat
+# expected set, such a file reports sixteen absent guards on the open that is
+# about to create them, and the substrate axis brands every claim in it
+# TAMPERED for good.
+#
+# So a guard is only expected when its table is present. The gap that leaves is
+# worth saying plainly: dropping a whole table takes its guards out of the
+# expected set along with it. That is a far louder act than dropping a trigger,
+# because the rows go too, where the point of dropping a guard is to leave the
+# rows editable in silence.
+_EXPECTED_TRIGGER_TABLES: "dict[str, str]" = {
+    name: _trigger_base_table(sql)
+    for name, sql in _ALL_EXPECTED_TRIGGERS.items()
+}
 
 
 # Explicit column list, avoids SELECT * coupling to schema changes.

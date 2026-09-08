@@ -58,6 +58,9 @@ ALL_SECTIONS = [
     "replication_verdicts",
     "contradiction_verdicts",
     "rekor_inclusions",
+    "verdict_chain",
+    "grounding_attestations",
+    "schema_census",
     *SCALAR_FIELD_SECTIONS,
 ]
 TABLE_OF_TABLE_SECTIONS = [s for s in ALL_SECTIONS if s not in SCALAR_FIELD_SECTIONS]
@@ -199,6 +202,71 @@ def test_unparseable_evidence_json_refuses_restore(
     assert exc_info.value.kind == "toml_malformed"
     assert "c1" in str(exc_info.value)
     assert not (tmp_path / ".mareforma" / "graph.db").exists()
+
+
+@pytest.mark.parametrize("held", ["5", '"tampered"', "[1, 2]"])
+def test_a_completeness_table_over_a_malformed_section_still_types(
+    tmp_path: Path, held: str,
+) -> None:
+    """The completeness check must not reach a section before the shape check.
+
+    ``[completeness.sections]`` names a row count per section, and comparing it
+    against what the file holds means measuring that section. A section holding
+    a scalar has no length, so measuring it first raised a raw ``TypeError``
+    and left the documented ``RestoreError`` contract by the front door, on
+    exactly the hand-edited file this module is about.
+    """
+    _write_claims_toml(tmp_path, (
+        f"claims = {held}\n\n"
+        '[completeness]\ndigest = "deadbeef"\n\n'
+        "[completeness.sections]\nclaims = 3\n"
+    ))
+    with pytest.raises(_db.RestoreError) as exc_info:
+        mareforma.restore(tmp_path)
+    assert exc_info.value.kind == "toml_malformed"
+
+
+def test_a_completeness_table_naming_an_unknown_section_still_types(
+    tmp_path: Path,
+) -> None:
+    """The shape check covers the sections restore reads, and nothing else.
+
+    A hand-edited ``[completeness.sections]`` can name a key that is not one of
+    them, so its value reaches the count comparison unvalidated and can be any
+    TOML type at all.
+    """
+    _write_claims_toml(tmp_path, (
+        "not_a_section = 7\n\n"
+        '[completeness]\ndigest = "deadbeef"\n\n'
+        "[completeness.sections]\nnot_a_section = 3\n"
+    ))
+    # Nothing to restore and nothing to crash on: the unknown key is skipped
+    # rather than measured, and the recovery proceeds.
+    mareforma.restore(tmp_path)
+
+
+@pytest.mark.parametrize("label,value", [
+    ("array", "[1, 2]"),
+    ("inline_table", "{a = 1}"),
+    ("local_time", "07:32:00"),
+    ("oversized_int", "10000000000000000000000000000000"),
+])
+def test_an_unbindable_census_value_is_refused_with_a_kind(
+    tmp_path: Path, label: str, value: str,
+) -> None:
+    """The census section is replayed, so it needs the guard the others have.
+
+    TOML expresses arrays, inline tables, local times and integers wider than
+    64 bits. sqlite3 binds none of them, and an oversized integer raises
+    ``OverflowError``, which is not a ``sqlite3`` exception at all, so a
+    handler for ``sqlite3.Error`` lets it past the documented contract.
+    """
+    _write_claims_toml(
+        tmp_path, f'[schema_census.1]\nobserved_at = {value}\nmissing = "[]"\n',
+    )
+    with pytest.raises(_db.RestoreError) as exc_info:
+        mareforma.restore(tmp_path)
+    assert exc_info.value.kind == "toml_malformed"
 
 
 def test_unreadable_claims_toml_raises_restore_error(tmp_path: Path) -> None:

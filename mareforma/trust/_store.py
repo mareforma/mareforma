@@ -198,6 +198,64 @@ def get_plan_claim_id(conn: sqlite3.Connection, plan_id: str) -> Optional[str]:
     return row["claim_id"] if row is not None else None
 
 
+def plan_attestation_written_at(
+    conn: sqlite3.Connection, plan_id: str
+) -> Optional[str]:
+    """When the plan attestation for *plan_id* was written, or None.
+
+    ``register_plan`` commits the attestation claim before the structured rows,
+    so on a plan that was genuinely pre-registered this is at or before the
+    ``predictions`` row's ``registered_at``.
+
+    **What this term cannot do in this release, stated so nobody reads it as
+    more.** It asks for a signed claim that verifies and whose predicate names
+    this ``plan_id``. But no signed field ties a claim to a plan: the signed set
+    is claim_id, text, classification, generated_by, supports, contradicts,
+    source_name, artifact_hash and created_at, while ``predicate_payload`` and
+    ``idempotency_key`` are both unsigned by design, the first documented in the
+    schema as a query-side denormalisation. So somebody holding the file can
+    relabel a real signed claim as this plan's attestation, and nothing here can
+    tell. Closing that means putting the plan id inside the signed bytes, which
+    changes what an older reader rebuilds, and this release adds no such change.
+    What the checks above buy is that a fabricated row will not do: the claim
+    has to be one the project actually signed. An attestation written afterwards
+    is vouching for a row it did not create, which is the shape a one-shot plan
+    takes when somebody registers the same prediction later and then raises the
+    flag: every other term of the rule passes, because a one-shot registers and
+    executes in the same breath.
+    """
+    row = conn.execute(
+        "SELECT * FROM claims WHERE idempotency_key = ? LIMIT 1",
+        (f"plan:{plan_id}",),
+    ).fetchone()
+    if row is None:
+        return None
+    # The idempotency key alone is not the attestation. Nothing signs that
+    # column, and a claims.toml an attacker holds can carry any row under any
+    # key with any created_at, so taking the key at its word made this term as
+    # unsigned as the flag it was added to check. A real attestation is written
+    # by register_plan through assert_claim: it is signed, and it carries the
+    # plan predicate naming this plan_id. Both are asked for here.
+    if not row["signature_bundle"]:
+        return None
+    # Verified, not merely present. A bundle that does not check out is a row
+    # somebody wrote, and this term exists to tell a written row from an
+    # attested one.
+    from mareforma.db.core import verify_claim_signatures
+
+    ok, _ = verify_claim_signatures(conn, dict(row))
+    if not ok:
+        return None
+    try:
+        payload = json.loads(row["predicate_payload"] or "{}")
+    except (ValueError, TypeError):
+        return None
+    if (payload.get("trust") != "plan/v1"
+            or payload.get("plan_id") != plan_id):
+        return None
+    return row["created_at"]
+
+
 def register_plan(
     conn: sqlite3.Connection,
     content_id: str,
@@ -738,7 +796,10 @@ INDEPENDENCE_COUNTS_SQL = (
     " est.ci_lower, est.ci_upper, est.ci_level, est.n_total, "
     " pr.test_type, pr.direction_of_interest, pr.equivalence_lower, "
     " pr.equivalence_upper, pr.alpha, pr.inference_regime, "
-    " pr.preregistered AS preregistered "
+    " pr.preregistered AS preregistered, "
+    # The read path re-applies the pre-registration timing rule assert_finding
+    # enforces at write, so registered_at travels with the flag it qualifies.
+    " pr.registered_at AS plan_registered_at "
     "FROM findings f "
     "LEFT JOIN evidence_lines el ON el.finding_id = f.finding_id "
     "LEFT JOIN contrasts c ON c.line_id = el.line_id "

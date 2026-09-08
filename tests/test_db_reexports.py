@@ -69,3 +69,24 @@ def test_all_lists_match_actually_defined() -> None:
     assert missing == [], (
         f"__all__ lists names not bound in mareforma.db: {missing}"
     )
+
+
+def test_every_exception_is_in_all() -> None:
+    """Importable is not the same as public, and the tests above check only the
+    first. An exception a caller is expected to catch has to be in ``__all__``,
+    or ``from mareforma.db import *`` does not bring it and a reader scanning
+    the public surface does not find it. ``MigrationError`` shipped importable
+    and unlisted, which every other test here was happy with."""
+    from mareforma.db.errors import MareformaError
+
+    exceptions = {
+        name for name in dir(db_pkg)
+        if not name.startswith("_")
+        and isinstance(getattr(db_pkg, name), type)
+        and issubclass(getattr(db_pkg, name), MareformaError)
+    }
+    unlisted = sorted(exceptions - set(db_pkg.__all__))
+    assert unlisted == [], (
+        f"these exception types are importable from mareforma.db but absent "
+        f"from __all__, so they are not part of its public surface: {unlisted}"
+    )

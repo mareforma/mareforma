@@ -363,7 +363,16 @@ def is_enrolled(conn: sqlite3.Connection, keyid: str) -> bool:
     validators table its trust property.
 
     Results are cached per-connection so repeated calls during a session
-    don't re-walk.
+    don't re-walk. The WALK is what the cache covers, not the whole call: the
+    membership lookup here and the singleton-root count inside
+    :func:`_verify_chain` both run every time, and the count deliberately runs
+    ahead of the cache check so a second self-signed root planted after a
+    positive answer is not served the cached True.
+
+    That leaves a warm call at about 0.005 ms, measured, against the 0.10 ms an
+    Ed25519 verification costs on the contradiction replay that calls it. The
+    remaining queries are not worth caching and caching them would trade the
+    freshness above for about four percent of one read.
     """
     row = conn.execute(
         "SELECT 1 FROM validators WHERE keyid = ? LIMIT 1", (keyid,),

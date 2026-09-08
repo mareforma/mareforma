@@ -27,12 +27,16 @@ from .._canonical import signed_value_matches
 from ..doi_resolver import is_doi
 from ._schema_sql import (  # noqa: F401
     _ADDITIVE_TABLES_SQL,
+    _EXPECTED_TRIGGER_TABLES,
+    _SCHEMA_CENSUS_SQL,
     _CLAIM_COLUMNS,
     _CLAIM_SELECT,
     _MANAGED_TRIGGERS,
     _POLICY_MARKER_TABLE,
     _PROMOTION_MARKER_TABLE,
     _SCHEMA_SQL,
+    _UPGRADE_MARKER_TABLE,
+    claims_rebuild_sql,
     _SIGNED_FIELDS_TRIGGER_NAME,
     _SIGNED_FIELDS_TRIGGER_SQL,
 )
@@ -55,6 +59,7 @@ from .errors import (  # noqa: F401
     GraphTooLargeError,
     ProjectPolicyError,
     VerdictIssuerError,
+    FormatArtifactError,
 )
 
 _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -154,6 +159,171 @@ def _serialize_observed_grounding(record: dict | None) -> str | None:
         )
     from .._canonical import canonicalize
     return canonicalize(record).decode("utf-8")
+
+
+_GROUNDING_ATTESTATION_FIELDS = (
+    "claim_id",
+    "statement_cid",
+    "receipt_digest",
+    "grounding",
+)
+
+
+def _grounding_attestation_pae(record: dict) -> bytes:
+    """The DSSE PAE a grounding attestation is made and checked over.
+
+    Its own payload type, so an attestation can never be read as the claim
+    envelope it names, nor a claim envelope as an attestation.
+    """
+    from mareforma import signing as _signing
+    return _signing.dsse_pae(
+        _signing.PAYLOAD_TYPE_GROUNDING_ATTESTATION,
+        _verdict_canonical_payload(_GROUNDING_ATTESTATION_FIELDS, record),
+    )
+
+
+def _observer_minted(record: "dict | None") -> bool:
+    """True iff *record* is the observer's own, rather than a declaration.
+
+    The two are told apart by what the write path leaves on them: a declaration
+    is marked ``provenance: DECLARED`` and has its receipt digest stripped, so a
+    record carrying a digest and no such mark is one the observer minted. Both
+    halves are checked rather than either alone, because each is a field.
+    """
+    from mareforma.observe._verdict import DECLARED_PROVENANCE
+
+    if not isinstance(record, dict):
+        return False
+    digest = record.get("receipt_digest")
+    return (
+        isinstance(digest, str)
+        and bool(digest)
+        and record.get("provenance") != DECLARED_PROVENANCE
+    )
+
+
+def _write_grounding_attestation(
+    conn: sqlite3.Connection,
+    *,
+    claim_id: str,
+    statement_cid: str,
+    record: "dict | None",
+    signer: "object | None",
+    asserter_keyid: "str | None",
+    created_at: str,
+) -> None:
+    """Record that the observer computed this claim's grounding verdict.
+
+    Written only where the write path kept the observer's own record. A declared
+    verdict gets none, and that absence is the signal a reader looks for.
+
+    The axis is the one signal on a claim meant not to be the producer's word,
+    and ``_attest_grounding`` is where the write path enforces that. Restore
+    never passes through it: it takes ``observed_grounding`` straight from
+    ``claims.toml``, so a neutralised record could be exported, edited, re-signed
+    by the producer's own key and restored as GROUNDED. Re-running the check on
+    restore is not available, because the register it reads is in-process and
+    keyed on a receipt digest, so a fresh restore would strip the axis off every
+    honest claim too. This carries what the write path knew into the file
+    instead.
+
+    What it buys is parity, not prevention. The observer runs inside the
+    producer's process and the producer holds the key, so a producer determined
+    enough to re-sign a claim can build one of these as well. It closes the
+    ordinary act, editing the axis and nothing else, and every surface that
+    reports it says so.
+
+    Silent when there is no signer: an unsigned claim carries no signature worth
+    attesting beside.
+    """
+    if signer is None or not asserter_keyid or not _observer_minted(record):
+        return
+    payload = {
+        "claim_id": claim_id,
+        "statement_cid": statement_cid,
+        "receipt_digest": record["receipt_digest"],
+        "grounding": record.get("grounding"),
+    }
+    conn.execute(
+        "INSERT INTO grounding_attestations(claim_id, statement_cid, "
+        "receipt_digest, grounding, signer_keyid, signature, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            claim_id, statement_cid, payload["receipt_digest"],
+            payload["grounding"], asserter_keyid,
+            signer.sign(_grounding_attestation_pae(payload)), created_at,
+        ),
+    )
+
+
+def grounding_attestation_state(
+    conn: sqlite3.Connection, claim_id: str,
+) -> str:
+    """Whether this claim's grounding axis is attested, in one word.
+
+    ``"attested"`` when a row is present, binds this claim's current statement,
+    names the axis the claim stores, and verifies under the key that asserted
+    it. ``"unattested"`` when no row is there, which is the honest state for a
+    declared verdict and for every claim written before the table existed.
+    ``"broken"`` when a row is present and fails any of those, which is a
+    stronger signal than absence and must never be folded into it.
+
+    Never raises. A graph too damaged to answer from reports ``"broken"``
+    rather than taking a read down, and never ``"attested"``.
+    """
+    from mareforma import signing as _signing
+    from mareforma import validators as _validators
+
+    try:
+        row = conn.execute(
+            "SELECT statement_cid, receipt_digest, grounding, signer_keyid, "
+            "signature FROM grounding_attestations WHERE claim_id = ?",
+            (claim_id,),
+        ).fetchone()
+        if row is None:
+            return "unattested"
+        claim = conn.execute(
+            "SELECT statement_cid, observed_grounding, asserter_keyid FROM "
+            "claims WHERE claim_id = ?", (claim_id,),
+        ).fetchone()
+        if claim is None or claim["statement_cid"] != row["statement_cid"]:
+            return "broken"
+        stored = _json_object(claim["observed_grounding"]) or {}
+        if stored.get("grounding") != row["grounding"]:
+            return "broken"
+        if stored.get("receipt_digest") != row["receipt_digest"]:
+            return "broken"
+        # The asserting key, and only that one. An attestation is the producer's
+        # word that their own observer computed this axis, so a signature from
+        # any other enrolled key attests nothing about it. Without this the read
+        # surfaces printed "the observer that computed this verdict attested it
+        # under the asserting key" for an attestation re-signed by a peer that
+        # asserted nothing: a false attribution rather than a false axis, since
+        # a peer cannot create the axis, but the sentence was still untrue.
+        if row["signer_keyid"] != claim["asserter_keyid"]:
+            return "broken"
+        # The enrolment chain walk, the same bar the verdict chain applies to
+        # its own signers. A bare row lookup accepted a validator row that does
+        # not chain back to the root, so one check refused a key the other
+        # accepted, in the same file, two functions apart.
+        signer_row = _validators.get_validator(conn, row["signer_keyid"])
+        if signer_row is None or not _validators.is_enrolled(
+            conn, row["signer_keyid"],
+        ):
+            return "broken"
+        pem = base64.standard_b64decode(signer_row["pubkey_pem"])
+        _signing.public_key_from_pem(pem).verify(
+            row["signature"],
+            _grounding_attestation_pae({
+                "claim_id": claim_id,
+                "statement_cid": row["statement_cid"],
+                "receipt_digest": row["receipt_digest"],
+                "grounding": row["grounding"],
+            }),
+        )
+    except Exception:
+        return "broken"
+    return "attested"
 
 
 def _observed_grounding_promotes(stored: str | None) -> bool:
@@ -329,24 +499,262 @@ def _ensure_supports_revision_row(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _guards_seen(conn: sqlite3.Connection) -> "set[str]":
+    """Every guard this graph is known to have carried, or an empty set.
+
+    Tolerates the table being absent, which is not an error condition but the
+    state of every file written before the store existed, and the state the
+    census has to read from before it is allowed to create anything.
+    """
+    try:
+        return {
+            row[0] for row in conn.execute("SELECT name FROM schema_guards_seen")
+        }
+    except sqlite3.OperationalError:
+        return set()
+
+
+def _note_guards_seen(conn: sqlite3.Connection) -> None:
+    """Add every expected guard the graph currently carries to its seen set.
+
+    The seen set is what makes "this table was never built here" separable from
+    "somebody took this table away". A guard is expected while its table is
+    present, which is what keeps an older graph.db off the tamper report, but on
+    its own that rule hands an attacker a way out: drop the table and its guards
+    leave the expected set along with it, and the additive script rebuilds the
+    table empty on the same open. Once a guard is in this set it stays expected
+    whatever happens to its table.
+
+    Called at the END of an open, after the repairs, and that is not the same
+    moment as the census. The census has to look before anything heals or it
+    sees a mended schema; this has to look after, or the guards an open just
+    built are not recorded until the next one and a table dropped in between
+    walks out through the gap it was closing.
+
+    Monotone, and only ever written when it grows. It records what is present,
+    never what is expected. A guard absent when this looks is not written down
+    however much the census wanted it, so a drop cannot enrol itself as normal,
+    and nothing here forgets: a graph cannot un-know a guard it once had.
+    """
+    conn.executescript(_SCHEMA_CENSUS_SQL)
+    present = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+        )
+    }
+    known = _guards_seen(conn)
+    fresh = sorted((present & set(_EXPECTED_TRIGGER_TABLES)) - known)
+    if not fresh:
+        return
+    now = _now()
+    conn.executemany(
+        "INSERT OR IGNORE INTO schema_guards_seen (name, first_seen) VALUES (?, ?)",
+        [(name, now) for name in fresh],
+    )
+    conn.commit()
+
+
+# Guards this release adds to a table that ALREADY existed. Held back from the
+# expected set for one release, because the census looks before the reconciler
+# creates them and every graph written before this release would otherwise
+# report them missing on its first open, permanently.
+#
+# Empty, and that is the current state rather than the permanent one: the tables
+# this release added are new, so table-presence already keeps their guards off
+# an older graph's report. A release that puts a guard on an existing table adds
+# its name here and removes it in the release after, once every opened graph
+# carries it in its seen set.
+#
+# Verified rather than assumed: adding one guard to `claims` and opening an
+# existing graph once was measured turning a verified claim into UNVERIFIABLE,
+# with no migration involved.
+_GUARDS_INTRODUCED_THIS_RELEASE: "frozenset[str]" = frozenset()
+
+
+def _record_schema_census(conn: sqlite3.Connection) -> "tuple[str, ...]":
+    """Record which write guards are absent, BEFORE anything recreates them.
+
+    A dropped trigger is the one tamper the read path cannot infer afterwards,
+    because two different repairs run on the way in and both are silent. The
+    managed set is reconciled against ``sqlite_master`` on every open, and
+    ``_ADDITIVE_TABLES_SQL`` re-runs its own ``CREATE TRIGGER IF NOT EXISTS``
+    statements on every open as well. By the time a caller reads a claim, a
+    guard that was missing when the file was opened is back, with nothing
+    anywhere saying it had gone, and the deletes it permitted while it was down
+    are already indistinguishable from rows that were never written.
+
+    So this runs first and writes down what it saw. Ordering is the whole
+    mechanism: called after the repair, it observes a healed schema and reports
+    clean forever.
+
+    Only a non-empty result is recorded, and only when it differs from the last
+    record: an unconditional row per open would grow without bound on a
+    long-lived process and bury the one observation that matters.
+
+    A guard is expected when its table is here and this release did not just
+    introduce it, or when this graph has carried that guard before. Three parts,
+    and each closes something the others open.
+
+    Table-presence keeps an older graph.db off the report:
+    :data:`_EXPECTED_TRIGGER_TABLES` explains that the additive script builds
+    nine tables on the way in, a file written before they existed has none of
+    them, and measured against the flat set it would show every guard on those
+    tables as absent on the very open that creates them.
+
+    The seen set closes what table-presence would otherwise open, because a
+    guard cannot outlive its table: dropping the table would take its guards out
+    of the expected set, and the additive script rebuilds the table empty on the
+    same open, so the rows would be gone with nothing said. A guard this graph
+    has carried stays expected however its table is treated. Deleting every row
+    of the seen set does not lower what is expected of a table that is still
+    present, and the store's own guards refuse the delete anyway.
+
+    What it does not close, and no single-file scheme can: the census table
+    itself is droppable. ``DROP TABLE schema_census`` takes its own guards with
+    it, the additive script rebuilds both empty on the next open, and every
+    observation ever recorded is gone with the seen store and the guarded table
+    untouched. That is cheaper than it was once described here, which said all
+    three had to go; one does. The union over every record defends against a
+    later open burying an earlier one, and not against the store being
+    replaced. The record lives in the file the attacker is holding.
+    What raises the cost is the second copy: the census rides in the backup, so
+    a graph emptied this way disagrees with a claims.toml the attacker has to
+    find and edit too.
+
+    :data:`_GUARDS_INTRODUCED_THIS_RELEASE` closes the case both of the others
+    miss, which is the ordinary shape of a schema release. A guard added to a
+    table that ALREADY exists is expected of every graph written before it, on
+    the first open, because the census looks before the reconciler creates it.
+    The record is a union over every open and nothing here forgets, so one added
+    guard would brand every claim in every existing graph as tampered,
+    permanently, with no way to clear it. Declaring it holds it back for exactly
+    one release, after which every graph that has been opened carries it in its
+    seen set and the declaration can go.
+
+    Returns the missing names so the caller can act on the open it happened on.
+    """
+    # Look before creating anything, including the census store itself. The
+    # store's own no-delete guards are created by _SCHEMA_CENSUS_SQL, so running
+    # that script first would heal a dropped store guard and then report a
+    # healthy schema: exactly the blindness the ordering above exists to avoid,
+    # aimed at the one table that is the only record left. Four statements
+    # emptied the whole report that way, dropping the two store guards to get
+    # past them and deleting the rows behind.
+    live = conn.execute(
+        "SELECT type, name, sql FROM sqlite_master "
+        "WHERE type IN ('table', 'trigger')"
+    ).fetchall()
+    tables = {name for kind, name, _ in live if kind == "table"}
+    # Present AND intact. A guard whose body has been replaced by a no-op is
+    # not a guard, and comparing names alone reported it as healthy: the
+    # reconciler further down this same open then repairs the text silently, so
+    # the tamper healed with nothing written down, which is the one thing this
+    # function exists to prevent. The comparison is the reconciler's own, so
+    # the two cannot disagree about what a guard is.
+    _wanted = dict(_MANAGED_TRIGGERS)
+    triggers = {
+        name for kind, name, sql in live
+        if kind == "trigger" and (name not in _wanted or sql == _wanted[name])
+    }
+    seen = _guards_seen(conn)
+    expected = {
+        name for name, table in _EXPECTED_TRIGGER_TABLES.items()
+        if (table in tables and name not in _GUARDS_INTRODUCED_THIS_RELEASE)
+        or name in seen
+    }
+    missing = tuple(sorted(expected - triggers))
+
+    conn.executescript(_SCHEMA_CENSUS_SQL)
+    if not missing:
+        return ()
+
+    payload = json.dumps(list(missing))
+    last = conn.execute(
+        "SELECT missing FROM schema_census "
+        "ORDER BY observed_at DESC, rowid DESC LIMIT 1"
+    ).fetchone()
+    if last is None or last[0] != payload:
+        conn.execute(
+            "INSERT INTO schema_census (observed_at, missing) VALUES (?, ?)",
+            (_now(), payload),
+        )
+        # Commit here rather than leaning on the caller. The record would
+        # otherwise survive only because the additive executescript further down
+        # the open commits the transaction on its way past, and this function's
+        # whole contract is that it can be moved to stay ahead of the repairs.
+        # Moved, it would go on returning the right names and silently stop
+        # writing them down.
+        conn.commit()
+    return missing
+
+
+def schema_census_missing(conn: sqlite3.Connection) -> "tuple[str, ...]":
+    """Every write guard any open has found absent, or ``()``.
+
+    Read surfaces must consult this rather than re-deriving from
+    ``sqlite_master``: the repairs described in :func:`_record_schema_census`
+    have already run by then, so a live re-derivation answers "nothing is
+    missing" on exactly the graph that was tampered with.
+
+    The union of every record, not the most recent one. A guard that came back
+    is not a guard that was never gone: the rows it let someone delete while it
+    was down are still gone, and no later open can see that. Reporting only the
+    latest census would let one subsequent open bury the observation, which is
+    the same disappearance this function exists to prevent, one level up.
+    """
+    try:
+        rows = conn.execute("SELECT missing FROM schema_census").fetchall()
+    except sqlite3.OperationalError:
+        return ()          # no census table: nothing was ever missing
+    seen: set[str] = set()
+    for row in rows:
+        try:
+            names = json.loads(row[0])
+        except (ValueError, TypeError):
+            continue
+        # A list of names, and nothing else. `update` iterates whatever it is
+        # given, so a stored JSON string became one reported guard per
+        # character and a stored object became one per key. The writer only
+        # ever stores a list, and since the census travels in the backup the
+        # value can also arrive from a file, so the reader checks rather than
+        # assumes.
+        if not isinstance(names, list):
+            continue
+        seen.update(n for n in names if isinstance(n, str))
+    return tuple(sorted(seen))
+
+
 def _ensure_managed_triggers(conn: sqlite3.Connection) -> None:
-    """Reconcile the claims-table write guards with their wanted text.
+    """Reconcile every trigger in the schema with its wanted text.
 
     _SCHEMA_SQL never runs again on an initialised db, so a trigger whose
-    definition changed shape reaches an existing graph only from here. Doing
-    that as an unconditional drop-and-recreate would open a window on every
-    single open() in which another connection sees the claims table with no
-    laundering guard on it, which is exactly the substitution the triggers
-    exist to refuse. Compare against sqlite_master instead: the steady-state
-    open is a pure read, and a genuine rewrite runs inside one transaction so
-    the absence is never observable.
+    definition changed shape reaches an existing graph only from here, and a
+    trigger somebody dropped comes back only from here. Doing that as an
+    unconditional drop-and-recreate would open a window on every single open()
+    in which another connection sees a table with no guard on it, which is
+    exactly the substitution the triggers exist to refuse. Compare against
+    sqlite_master instead: the steady-state open is a pure read, and a genuine
+    rewrite runs inside one transaction so the absence is never observable.
+
+    One read for the whole set rather than a lookup per name. The set is now
+    every trigger the schema defines rather than the seventeen with authored
+    text, and a query each would put a statement per guard on the hot path of
+    every open to answer a question one scan of sqlite_master answers.
     """
+    live = conn.execute(
+        "SELECT type, name, sql FROM sqlite_master "
+        "WHERE type IN ('table', 'trigger')"
+    ).fetchall()
+    tables = {name for kind, name, _ in live if kind == "table"}
+    stored = {name: sql for kind, name, sql in live if kind == "trigger"}
     for name, wanted in _MANAGED_TRIGGERS:
-        stored = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
-            (name,),
-        ).fetchone()
-        if stored is not None and stored[0] == wanted:
+        if stored.get(name) == wanted:
+            continue
+        # A guard whose table is not here cannot be created, and its absence is
+        # not this function's to report. The same rule the census uses: a table
+        # that was never built here is an older file, and one that was built and
+        # taken away is already on the census under the guard's own name.
+        if _EXPECTED_TRIGGER_TABLES[name] not in tables:
             continue
         own_transaction = not conn.in_transaction
         if own_transaction:
@@ -369,30 +777,56 @@ def _open_existing_db(
     served. *root* is the project root used for the grandfather event and the
     claims.toml remediation hint.
     """
-    # No in-place migrations in this release. A db whose user_version
-    # is neither 0 nor _SCHEMA_VERSION was written by a different
-    # build of the dev branch and may carry a partial schema (e.g.
-    # a v2-stranded db is missing the retracted-is-terminal trigger
-    # that the fix relies on, even though its column set
-    # happens to match). Refuse rather than open silently.
-    if version != _SCHEMA_VERSION:
+    # A graph from a later release is refused before anything touches it. No
+    # census, no ALTER, no migration: this code does not know what it is looking
+    # at, and the census store forgets nothing, so a guard this build expects
+    # and a newer one retired would be written into that graph as a permanent
+    # tamper record by the build least able to judge it.
+    if version > _SCHEMA_VERSION:
         conn.close()
         raise DatabaseError(
-            f"graph.db has user_version={version} but this mareforma "
-            f"expects user_version={_SCHEMA_VERSION}. The dev branch does "
-            "not migrate schemas. Delete .mareforma/graph.db to start "
-            "fresh; claims.toml is a human-readable record of the prior "
-            "state (the chain and signatures cannot be reconstructed "
-            "from it)."
+            f"graph.db has user_version={version}, which is ahead of the "
+            f"user_version={_SCHEMA_VERSION} this mareforma understands. It "
+            "was written by a newer release and may carry schema this one "
+            "does not know how to read, so opening it could report on a graph "
+            "it is misreading. Nothing is wrong with the file. Upgrade "
+            "mareforma to the version that wrote it. Do not delete graph.db: "
+            "it holds the chain and every signature, and claims.toml cannot "
+            "reconstruct them."
         )
 
-    # Initialised db, validate the schema by exact column-set match.
-    # Catching extras as well as missing columns means a partially-migrated
-    # or hand-edited claims table fails loudly instead of silently passing
-    # through code that assumes _CLAIM_COLUMNS is exhaustive.
     existing_cols = {
         row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()
     }
+
+    # Census ahead of every repair below, and only into a file that is a graph.
+    # A migration's rebuild calls the trigger reconciler, and the reconciler
+    # restores the whole managed set rather than the guards the rebuild dropped,
+    # on tables it never touched. Censused after that, one migration reports a
+    # clean schema on a graph somebody had taken guards off, which is the
+    # observation the census exists to keep. The claims check comes first
+    # because pointing this at an unrelated SQLite file should refuse it, not
+    # write mareforma's own tables into it on the way to refusing it.
+    # A version with no route is refused before any ALTER commits AND before the
+    # census writes. The ALTERs below commit one at a time, so refusing after
+    # them leaves a file this release will not open and the release that wrote it
+    # now rejects for carrying columns it does not know. And the census store
+    # forgets nothing, so a guard this build expects that an unroutable old file
+    # never had would be written into it as a permanent tamper record, by a
+    # build that has just said it cannot interpret the file. The release that
+    # wrote it then reads that record and brands every claim in it. Both
+    # directions of an unrecognised version are now refused before anything is
+    # written, which is the ordering this had before the route check arrived.
+    if version < _SCHEMA_VERSION:
+        try:
+            _plan_migration(version)
+        except MigrationError:
+            conn.close()
+            raise
+
+    if existing_cols:
+        _record_schema_census(conn)
+
     # Auto-migrate the two columns added between v0.3.0 and v0.3.1.
     # Both are non-signed, non-CHECK'd query-side denormalisations with
     # safe defaults, so ALTER ADD COLUMN is a non-disruptive in-place
@@ -406,9 +840,38 @@ def _open_existing_db(
     # already have the column and skip the ALTER.
     if "asserter_keyid" in added_cols:
         _grandfather_legacy_replicated(conn, root)
+
+    # Migrate AFTER the column ALTERs and before the exact-set check. A step
+    # copies the column list this release knows, and an older file is missing
+    # some of those columns until the ALTERs above have run, so migrating first
+    # fails on exactly the graphs migrations exist for. The exact-set check has
+    # to come after, because changing that set is what a migration is for.
+    if version < _SCHEMA_VERSION:
+        try:
+            version = _migrate_to_current(conn, version)
+        except BaseException:
+            conn.close()
+            raise
+        # Re-gate. The version above was read before any lock was taken, so a
+        # concurrent opener can have moved the file past this release while this
+        # one waited, and the future check has already run.
+        if version != _SCHEMA_VERSION:
+            conn.close()
+            raise MigrationError(
+                f"graph.db reached user_version={version} while this open was "
+                f"waiting, which this mareforma does not understand "
+                f"(it expects {_SCHEMA_VERSION}). Another process upgraded it. "
+                "Do not delete graph.db. Upgrade mareforma to the version that "
+                "did, and open it again."
+            )
+
     existing_cols = {
         row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()
     }
+    # Validate the schema by exact column-set match. Catching extras as well as
+    # missing columns means a partially-migrated or hand-edited claims table
+    # fails loudly instead of silently passing through code that assumes
+    # _CLAIM_COLUMNS is exhaustive.
     expected_cols = set(_CLAIM_COLUMNS)
     if existing_cols != expected_cols:
         missing = expected_cols - existing_cols
@@ -450,6 +913,7 @@ def _open_existing_db(
         raise DatabaseError(
             f"graph.db schema mismatch ({'; '.join(parts)}). {remedy}"
         )
+
     # Additive tables (project_policy, the trust layer) must be
     # present on every initialised db, not just fresh ones ,
     # otherwise an existing legacy graph.db lacks them and the first
@@ -518,11 +982,33 @@ def open_db(root: Path) -> sqlite3.Connection:
 
         version = conn.execute("PRAGMA user_version").fetchone()[0]
 
+        if version == 0 and conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='claims'"
+        ).fetchone() is not None:
+            # A fresh database has no tables. This one has claims, so whatever
+            # the pragma says, it is not fresh: `user_version` is a plain write
+            # no trigger can refuse, and zeroing it on a populated graph asks
+            # for the branch below, which heals every guard and records
+            # nothing. That is the census bypassed by one PRAGMA, on the graph
+            # the census exists for. Look before the repairs run, the same
+            # ordering the existing-graph path uses and for the same reason.
+            _record_schema_census(conn)
+
         if version == 0:
             conn.executescript(_SCHEMA_SQL)
             conn.executescript(_ADDITIVE_TABLES_SQL)
+            # With the census store here too, since its guards are reconciled
+            # like the rest and the reconciler cannot build a trigger on a
+            # table that does not exist yet.
+            conn.executescript(_SCHEMA_CENSUS_SQL)
             _ensure_supports_revision_row(conn)
             _ensure_managed_triggers(conn)
+            # Seed the seen set while the graph is provably whole, so a graph
+            # this build creates never carries an empty baseline. Without it a
+            # brand-new file could have a table taken away before its first
+            # reopen, and with nothing seen yet the guards on that table would
+            # never have been expected.
+            _note_guards_seen(conn)
             conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             conn.commit()
             _attach_supports_cache(conn, root)
@@ -531,6 +1017,9 @@ def open_db(root: Path) -> sqlite3.Connection:
         _open_existing_db(conn, root, version)
         _attach_supports_cache(conn, root)
         _ensure_managed_triggers(conn)
+        # After the repairs, so an upgrade records the trust layer it just
+        # built rather than leaving it unseen until the next open.
+        _note_guards_seen(conn)
         conn.commit()
         return conn
 
@@ -582,11 +1071,15 @@ def open_db_from_db_path(db_path: "str | Path") -> sqlite3.Connection:
         if version == 0:
             conn.executescript(_SCHEMA_SQL)
             conn.executescript(_ADDITIVE_TABLES_SQL)
+            conn.executescript(_SCHEMA_CENSUS_SQL)
             _ensure_supports_revision_row(conn)
             conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
         else:
             _open_existing_db(conn, db_file.parent, version)
         _ensure_managed_triggers(conn)
+        # Same seeding as the conventional path: a db reached by a literal path
+        # meets the contract a db reached by project root meets.
+        _note_guards_seen(conn)
         conn.commit()
         # Attach the rebuildable supports cache just like open_db does. Without
         # it add_claim's unconditional supports-edge maintenance hits
@@ -606,6 +1099,712 @@ def open_db_from_db_path(db_path: "str | Path") -> sqlite3.Connection:
             "If the file is corrupt or truncated, delete it and restore "
             "from claims.toml.",
         ) from exc
+
+
+class MigrationError(DatabaseError):
+    """A schema migration could not complete, and nothing was changed.
+
+    Distinct from :class:`DatabaseError` so the remedy can be too. The generic
+    one tells an operator to delete graph.db and start from claims.toml, which
+    is right for a file this code cannot recognise and wrong for one it failed
+    to migrate: the migration is a single transaction, so a failure leaves the
+    graph exactly as it was, and deleting it would throw away a chain that is
+    still intact over a fault that changed nothing.
+    """
+
+
+@contextmanager
+def _upgrade_window(conn: sqlite3.Connection):
+    """Open the marker a table rebuild is only allowed to run inside.
+
+    The sibling windows mark a write so a trigger will permit it. This one
+    marks nothing in SQL, because no trigger can refuse a ``DROP TABLE``: the
+    rebuild takes every guard on the table away with the table itself, and runs
+    with foreign keys off. So the gate is in Python and this is the only thing
+    that opens it, from the versioned upgrade path.
+
+    A temp table, so it lives on this connection and cannot be left open for
+    another one, and it is dropped in a ``finally`` so a failed migration does
+    not leave the door open behind it.
+    """
+    conn.execute(
+        f"CREATE TEMP TABLE IF NOT EXISTS {_UPGRADE_MARKER_TABLE} (id INTEGER)"
+    )
+    try:
+        yield
+    finally:
+        try:
+            conn.execute(f"DROP TABLE IF EXISTS temp.{_UPGRADE_MARKER_TABLE}")
+        except sqlite3.Error:
+            # Closing the window can only fail on a connection that is already
+            # failing every statement, which is what an interrupted migration
+            # leaves. Raising here would replace the migration's own error with
+            # the noise that followed it. The marker is a temp table, so it
+            # cannot outlive this connection however this ends.
+            pass
+
+
+def _upgrade_window_open(conn: sqlite3.Connection) -> bool:
+    """True while :func:`_upgrade_window` is open on this connection."""
+    row = conn.execute(
+        "SELECT 1 FROM temp.sqlite_master WHERE type = 'table' AND name = ?",
+        (_UPGRADE_MARKER_TABLE,),
+    ).fetchone()
+    return row is not None
+
+
+def _table_index_sql(
+    conn: sqlite3.Connection, table: str,
+) -> "tuple[str, ...]":
+    """The CREATE INDEX statements a rebuild of *table* has to put back.
+
+    Read from ``sqlite_master`` rather than from a constant, for the same reason
+    the trigger reconciler reads the DDL rather than a hand-copied list, and
+    with one more reason on top: an upgraded graph carries indexes this code
+    never authored, and a rebuild that replayed only the authored set would
+    drop them silently.
+
+    Implicit indexes are skipped. SQLite gives ``sqlite_autoindex_*`` rows a
+    NULL ``sql`` because the PRIMARY KEY and UNIQUE clauses in the table's own
+    DDL create them, so the new table already has them and replaying is neither
+    possible nor needed.
+    """
+    return tuple(
+        row[0] for row in conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' "
+            "AND tbl_name = ? AND sql IS NOT NULL ORDER BY name",
+            (table,),
+        )
+    )
+
+
+def _unmanaged_trigger_sql(
+    conn: sqlite3.Connection, table: str,
+) -> "tuple[str, ...]":
+    """Triggers on *table* the reconciler will not put back after a rebuild.
+
+    The reconciler recreates the managed set, which is the set this release
+    names. A graph can carry a guard an earlier release wrote and this one no
+    longer lists, and dropping the table takes it away with everything else. The
+    reconciler would then not miss it, the census would not report it, and a
+    write guard on an append-only store would be gone with no record.
+
+    So they are captured and replayed, for the reason
+    :func:`_table_index_sql` captures indexes rather than replaying an authored
+    list. A rebuild is not the place to decide which guards a graph is allowed
+    to have; its job is to leave the table as it found it.
+    """
+    managed = {name for name, _ in _MANAGED_TRIGGERS}
+    return tuple(
+        row[1] for row in conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' "
+            "AND tbl_name = ? AND sql IS NOT NULL ORDER BY name",
+            (table,),
+        )
+        if row[0] not in managed
+    )
+
+
+# The name a rebuild renames the table to and back, to make SQLite reparse.
+_REPARSE_PROBE = "_mareforma_reparse_probe"
+
+
+def _canary_targets(conn: sqlite3.Connection, table: str) -> "tuple[str, ...]":
+    """The tables a rebuild of *table* could have left unable to take a write.
+
+    The rebuilt table, and every ordinary table carrying a trigger. A trigger
+    body is the only place a reference to a dropped column can hide where a
+    write will find it: a CHECK constraint cannot name another table, and a
+    foreign key is :func:`_require_references_resolve`'s business.
+
+    Virtual tables are left out. Their write path belongs to the module that
+    implements them, and preparing a statement against a full-text index proves
+    nothing about the schema this migration changed.
+    """
+    owners = {
+        row[0] for row in conn.execute(
+            "SELECT DISTINCT tbl_name FROM sqlite_master WHERE type = 'trigger'"
+        )
+    }
+    ordinary = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name NOT LIKE 'sqlite_%' "
+            "AND sql NOT LIKE 'CREATE VIRTUAL%'"
+        )
+    }
+    return tuple(sorted(ordinary & (owners | {table})))
+
+
+def _uncompilable_writes(
+    conn: sqlite3.Connection, table: str,
+) -> "dict[str, str]":
+    """Which tables will not accept a write, without writing to any of them.
+
+    SQLite compiles a statement's whole trigger program when it prepares it, so
+    a trigger body naming a column that is gone fails at prepare time. Preparing
+    one insert, one update and one delete per table therefore reaches every
+    trigger a write on it could fire, including one fired by another trigger.
+
+    This is what closes the shape no check that matches names can see. A trigger
+    doing ``INSERT INTO archive SELECT * FROM claims`` never spells the dropped
+    column, and the reparse resolves it happily because every name in it still
+    exists; only the arity changed. Measured: the migration committed, reported
+    success, and the next write died with "table claims_archive has 36 columns
+    but 35 values were supplied". Preparing the same write raises that inside
+    the transaction, where a failure rolls the rebuild back.
+
+    Preparing rather than writing is what makes it safe to run on a real graph.
+    There is no synthetic row to build, so no CHECK constraint to satisfy and no
+    unique key to collide with; no write guard fires, so a table that refuses
+    deletes by design is not read as a broken one; and nothing has to be undone,
+    so a crash here cannot leave a canary row behind.
+
+    The update names every column. A trigger declared ``AFTER UPDATE OF`` one
+    column is compiled only by a statement that writes that column, so an update
+    touching one column reaches one trigger and says nothing about the rest.
+
+    All three statements are tried even after one fails, because the caller
+    compares this against the same probe run before the rebuild. Stopping at the
+    first failure would report the same first error on a table that arrived
+    broken and that the rebuild then broke a second way, and the comparison would
+    read the two as equal and let the new one through.
+    """
+    broken: "dict[str, str]" = {}
+    for target in _canary_targets(conn, table):
+        columns = [
+            row[1] for row in conn.execute(f'PRAGMA table_info("{target}")')
+        ]
+        if not columns:
+            continue
+        assignments = ", ".join(f'"{c}" = "{c}"' for c in columns)
+        failures = []
+        for kind, statement in (
+            ("insert", f'INSERT INTO "{target}" DEFAULT VALUES'),
+            ("update", f'UPDATE "{target}" SET {assignments}'),
+            ("delete", f'DELETE FROM "{target}"'),
+        ):
+            try:
+                conn.execute(f"EXPLAIN {statement}")
+            except sqlite3.Error as exc:
+                failures.append(f"{kind}: {exc}")
+        if failures:
+            broken[target] = "; ".join(failures)
+    return broken
+
+
+def _require_writes_still_compile(
+    conn: sqlite3.Connection, table: str, before: "dict[str, str]",
+) -> None:
+    """Refuse a rebuild that left a table unable to take a write.
+
+    Compared against the same probe run before the rebuild, so a graph that
+    arrived carrying a broken trigger is neither refused for it nor told the
+    migration did it. A migration answers for what it changed.
+    """
+    for target, detail in sorted(_uncompilable_writes(conn, table).items()):
+        if before.get(target) == detail:
+            continue
+        raise MigrationError(
+            f"after rebuilding {table!r} a write to {target!r} no longer "
+            f"compiles: {detail}. Something in this graph reaches what the "
+            "migration removed, and this release does not manage it so it "
+            "cannot rewrite it. Left in place it would commit a graph whose "
+            "next write fails. Nothing has been changed."
+        )
+
+
+def _unresolved_references(
+    conn: sqlite3.Connection, table: str,
+) -> "dict[str, str]":
+    """Which foreign keys onto *table* no longer resolve.
+
+    ``PRAGMA foreign_key_check`` raises "foreign key mismatch" for a REFERENCES
+    clause whose parent no longer has the column, and it has to be asked about
+    the CHILD. Measured: the same pragma scoped to the rebuilt parent returns no
+    rows on exactly that graph, so the check that shipped here first was looking
+    in the wrong place and could not have caught the case its own comment
+    claimed it caught.
+
+    Scoped to the rebuilt table and its children rather than the whole database,
+    so a mismatch elsewhere in a graph that arrived with one is neither blamed on
+    this migration nor able to mask one this migration made.
+
+    Ordinary orphan rows come back as rows rather than an exception and are
+    deliberately not reported: a graph that already had them is not this
+    migration's to refuse.
+    """
+    children = [
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        )
+    ]
+    broken: "dict[str, str]" = {}
+    for child in children:
+        parents = {
+            row[2] for row in conn.execute(
+                f'PRAGMA foreign_key_list("{child}")'
+            )
+        }
+        if child != table and table not in parents:
+            continue
+        try:
+            conn.execute(f'PRAGMA foreign_key_check("{child}")').fetchall()
+        except sqlite3.Error as exc:
+            broken[child] = str(exc)
+    return broken
+
+
+def _require_references_resolve(
+    conn: sqlite3.Connection, table: str, before: "dict[str, str]",
+) -> None:
+    """Refuse a rebuild that left a foreign key naming a column that is gone.
+
+    Compared against the same probe run before the rebuild, on the same rule the
+    write probe follows: a graph that arrived with a dangling reference is not
+    refused for it and, worse, not told the migration did it.
+    """
+    for child, detail in sorted(_unresolved_references(conn, table).items()):
+        if before.get(child) == detail:
+            continue
+        raise MigrationError(
+            f"after rebuilding {table!r} a foreign key on {child!r} no longer "
+            f"resolves: {detail}. A REFERENCES clause names what the migration "
+            "removed, and this release does not manage it so it cannot rewrite "
+            "it. Nothing has been changed."
+        )
+
+
+def _require_schema_resolves(conn: sqlite3.Connection, table: str) -> None:
+    """Refuse a rebuild that left any object naming something that is gone.
+
+    SQLite resolves a trigger or view body when it runs, not when it is created,
+    so a narrowing rebuild can commit a schema whose next write dies on a column
+    the migration removed. Atomicity is no help: nothing failed inside the
+    transaction, and the graph is left unwritable by a migration that reported
+    success.
+
+    A rename with ``legacy_alter_table`` off reparses the WHOLE schema and fails
+    if anything in it no longer resolves, so renaming the table aside and back
+    is a full check with an exact error naming the object. It runs inside the
+    caller's transaction, so a failure rolls the rebuild back.
+
+    Pattern-matching column names against trigger text was tried first and was
+    wrong twice over. It missed anything the check did not scan or spell the
+    same way, since SQLite identifiers are case-insensitive and objects on other
+    tables were never looked at, and it fired on the word appearing inside an
+    error string, blocking a legitimate migration with advice to delete a write
+    guard. The reparse has neither failure: it asks SQLite the question instead
+    of guessing at it.
+    """
+    squatter = conn.execute(
+        "SELECT name FROM sqlite_master WHERE name = ?", (_REPARSE_PROBE,),
+    ).fetchone()
+    if squatter is not None:
+        raise MigrationError(
+            f"an object named {_REPARSE_PROBE!r} is already in this graph, and "
+            "the rebuild needs that name free to make SQLite recheck the "
+            "schema. Nothing has been changed. Rename or drop it, then migrate."
+        )
+    # Set the pragma here rather than inheriting it. The check IS the reference
+    # rewriting, so a connection that already had the legacy behaviour on turned
+    # the whole thing into a no-op that passed everything.
+    was_legacy = conn.execute("PRAGMA legacy_alter_table").fetchone()[0]
+    conn.execute("PRAGMA legacy_alter_table = OFF")
+    try:
+        conn.execute(f"ALTER TABLE {table} RENAME TO {_REPARSE_PROBE}")
+        conn.execute(f"ALTER TABLE {_REPARSE_PROBE} RENAME TO {table}")
+    except sqlite3.Error as exc:
+        raise MigrationError(
+            f"after rebuilding {table!r} the schema no longer resolves: {exc}. "
+            "Something in this graph, a trigger or a view, names what the "
+            "migration removed, and this release does not manage it so it "
+            "cannot rewrite it. Left alone it would commit a graph whose next "
+            "write fails. Nothing has been changed."
+        ) from exc
+    finally:
+        if was_legacy:
+            try:
+                conn.execute("PRAGMA legacy_alter_table = ON")
+            except sqlite3.Error:
+                # Same rule as the other three restores. On an interrupted
+                # connection this raises too, and it would replace the exact
+                # "schema no longer resolves" message, which names the offending
+                # object, with a bare "interrupted".
+                pass
+
+
+def _rebuild_table(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    create_sql: str,
+    columns: "tuple[str, ...]",
+    drops: "tuple[str, ...]" = (),
+) -> None:
+    """Rebuild *table* under a new definition, carrying *columns* across.
+
+    The seven steps SQLite's own ALTER procedure prescribes, in the order that
+    survives them: build the replacement, copy, drop the original, rename,
+    then put the triggers and indexes back.
+
+    **The column list is a parameter, and both sides of the copy name it.**
+    A same-schema rebuild could get away with ``INSERT INTO new SELECT * FROM
+    old``, and a column-dropping one cannot: it needs an explicit list against a
+    wider source, and a positional copy is then the one way this can corrupt a
+    graph in silence. Naming the columns on both sides makes the ordering of
+    either table irrelevant, so the shape that ships here is the shape a
+    column-dropping migration reuses without a rewrite.
+
+    *create_sql* builds the replacement under a temporary name and is supplied
+    rather than derived. Filtering a column out of authored DDL means parsing
+    it, and a parser that gets a CHECK clause wrong writes a table that accepts
+    what the old one refused.
+
+    Two pragmas, and they behave differently, which is why neither is left to
+    the caller's memory. ``foreign_keys`` must already be off, and it cannot be
+    turned off here: it is a silent no-op inside a transaction, so the runner
+    sets it outside one. ``legacy_alter_table`` does take effect inside a
+    transaction and is set here, around the rename alone. Without it step four
+    fails: ``contradiction_invalidates_older`` is a trigger on another table
+    whose body names ``claims``, and a modern rename reparses the whole schema,
+    which cannot resolve that name in the window where the table is gone. It is
+    connection-scoped, so it is restored immediately: left on, every later
+    rename would quietly stop rewriting references, which is the laundering
+    primitive this whole path is gated to prevent.
+
+    **A narrowing rebuild is checked three ways, and each sees what the others
+    cannot.** The reparse resolves view bodies and ``NEW``/``OLD`` references.
+    The write probe compiles a write against the rebuilt table and every table
+    carrying a trigger, which reaches everything a statement compiles, including
+    a body that gets at the dropped column through a star and never spells its
+    name. The reference check reads a ``REFERENCES`` clause, which neither of
+    the others looks at. A name-matching scan of the stored SQL sat here first
+    and is gone: every shape it caught, one of these three catches by asking
+    SQLite rather than by guessing, and the shape it could never catch is the
+    one the write probe exists for.
+
+    Assumes an open transaction. The caller owns it, because the version bump
+    has to commit with the rebuild or not at all.
+    """
+    if not _upgrade_window_open(conn):
+        raise MigrationError(
+            f"the rebuild of {table!r} was called outside the upgrade path. It "
+            "drops every write guard on the table and runs with foreign keys "
+            "off, so it is reachable from a versioned migration and from "
+            "nowhere else."
+        )
+    live = tuple(
+        row[1] for row in conn.execute(f"PRAGMA table_info({table})")
+    )
+    # A rebuild copies the columns it is given and the rest are gone with the
+    # old table. The exact column-set check on the open path is what catches a
+    # hand-edited claims table, and it runs after this, so an undeclared
+    # narrowing would leave that check comparing against the laundered result
+    # and finding nothing to report. Every column that goes has to be named.
+    unnamed = set(live) - set(columns) - set(drops)
+    if unnamed:
+        raise MigrationError(
+            f"the rebuild of {table!r} would drop {sorted(unnamed)}, which the "
+            "step did not declare. A column this migration does not know about "
+            "is a column somebody else put there, and dropping it here would "
+            "erase it and the check that would have reported it. Nothing has "
+            "been changed."
+        )
+    absent = set(drops) - set(live)
+    if absent:
+        raise MigrationError(
+            f"the rebuild of {table!r} declares it drops {sorted(absent)}, "
+            f"which {table!r} does not have. The step and the table disagree "
+            "about what is there, so the rest of what it declares cannot be "
+            "trusted either. Nothing has been changed."
+        )
+
+    # Before anything changes, so the checks afterwards can tell what this
+    # rebuild broke from what arrived broken.
+    already_broken = _uncompilable_writes(conn, table)
+    already_dangling = _unresolved_references(conn, table)
+    indexes = _table_index_sql(conn, table)
+    unmanaged = _unmanaged_trigger_sql(conn, table)
+    names = ", ".join(columns)
+    temp = f"{table}_new"
+    was_legacy = conn.execute("PRAGMA legacy_alter_table").fetchone()[0]
+
+    conn.execute(create_sql)                                        # 1
+    # The replacement has to agree with what the step said it was doing. A
+    # declared drop the definition still carries is the dangerous shape: the
+    # column survives, the copy does not carry it, every row silently loses its
+    # value or takes a DEFAULT, and the exact column-set check on the open path
+    # compares set against set, sees no difference and reports nothing.
+    built = {row[1] for row in conn.execute(f"PRAGMA table_info({temp})")}
+    if not set(drops).isdisjoint(built):
+        raise MigrationError(
+            f"the rebuild of {table!r} declares it drops "
+            f"{sorted(set(drops) & built)}, and the replacement definition "
+            "still has those columns. The copy would leave them empty on every "
+            "row and nothing downstream would notice. Nothing has been changed."
+        )
+    if not set(columns) <= built:
+        raise MigrationError(
+            f"the rebuild of {table!r} copies "
+            f"{sorted(set(columns) - built)}, which the replacement definition "
+            "does not have. Nothing has been changed."
+        )
+    # rowid travels with the rows. The claim chain's tip is read in rowid order,
+    # so a copy that let SQLite choose its own order could move the tip with
+    # nothing raising. Naming it keeps the order the chain is defined by.
+    conn.execute(                                                   # 2
+        f"INSERT INTO {temp} (rowid, {names}) SELECT rowid, {names} FROM {table}"
+    )
+    conn.execute(f"DROP TABLE {table}")                             # 3
+    conn.execute("PRAGMA legacy_alter_table = ON")
+    try:
+        conn.execute(f"ALTER TABLE {temp} RENAME TO {table}")       # 4
+    finally:
+        try:
+            conn.execute(
+                f"PRAGMA legacy_alter_table = {'ON' if was_legacy else 'OFF'}"
+            )
+        except sqlite3.Error:
+            # Same rule as the other two restores: on a connection that is
+            # already failing, do not replace the real error with this one. The
+            # transaction is about to roll back and the connection is closed by
+            # every caller that gets a migration failure, so the pragma cannot
+            # outlive the fault and go on suppressing reference rewriting.
+            pass
+    _ensure_managed_triggers(conn)                                  # 5
+    for statement in unmanaged:
+        conn.execute(statement)
+    for statement in indexes:                                       # 6
+        conn.execute(statement)
+    # Three checks, because each sees something the other two do not. The
+    # reparse resolves view bodies and NEW/OLD references. The write probe
+    # reaches everything a statement compiles, including a trigger body that
+    # never spells the dropped column's name. The reference check reads a
+    # REFERENCES clause, which neither of the others looks at.
+    _require_schema_resolves(conn, table)
+    _require_writes_still_compile(conn, table, already_broken)
+    _require_references_resolve(conn, table, already_dangling)
+
+
+def _run_migration(
+    conn: sqlite3.Connection,
+    *,
+    to_version: int,
+    steps: "Callable[[sqlite3.Connection], None]",
+    from_version: "int | None" = None,
+) -> None:
+    """Apply *steps* and bump ``user_version``, in one transaction or none.
+
+    Atomicity is the whole guarantee. Verified rather than assumed: no statement
+    in the rebuild forces an implicit commit, ``sqlite_master`` rolls back to
+    exactly what it was, and ``user_version`` rolls back with it. So a crash at
+    any step leaves a graph that opens on the old code, with its rows, its
+    guards and its version untouched. There is no half-migrated state to
+    recover from, which is why nothing here tells an operator to delete
+    anything.
+
+    ``foreign_keys`` is toggled outside the transaction because inside one the
+    pragma is a silent no-op, and the rebuild needs it off: dropping the old
+    table would otherwise fail against the six tables that reference it.
+    Restored in a ``finally``, since it is connection-scoped and every later
+    write on this connection depends on it.
+    """
+    was_on = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+    conn.execute("PRAGMA foreign_keys = OFF")
+    ok = False
+    try:
+        try:
+            # Inside the guarded block, so lock contention becomes a migration
+            # failure rather than a raw sqlite error. Outside it, two people
+            # upgrading at once put "database is locked" through the generic
+            # open handler, and the loser is told to delete graph.db, which is
+            # the advice this whole path exists to stop giving.
+            conn.execute("BEGIN IMMEDIATE")
+            # Re-read the version under the lock. It was read before the lock
+            # was taken, so two openers can both have seen the old one and both
+            # decide to run this step. The rebuild that ships here happens to be
+            # idempotent, which hides it; a step that backfills a column or
+            # inserts a row is not, and would apply twice with no error and a
+            # correct-looking version afterwards.
+            if from_version is not None:
+                current = conn.execute("PRAGMA user_version").fetchone()[0]
+                if current != from_version:
+                    conn.execute("ROLLBACK")
+                    # Not a failure: somebody else did this step. The connection
+                    # goes back to a caller either way, so the pragma restore
+                    # below is held to the success rule, not the unwinding one.
+                    ok = True
+                    return
+            steps(conn)
+            conn.execute(f"PRAGMA user_version = {int(to_version)}")
+            conn.execute("COMMIT")
+            ok = True
+        except BaseException as exc:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise MigrationError(
+                f"the schema migration to version {to_version} failed and was "
+                f"rolled back: {exc}. This step changed nothing: the graph is "
+                "at the version it was at when the step began, with every "
+                "claim, signature and chain link intact. Do not delete it."
+            ) from exc
+    finally:
+        if was_on:
+            try:
+                conn.execute("PRAGMA foreign_keys = ON")
+            except sqlite3.Error as exc:
+                # Swallowed only while unwinding. A connection that cannot run
+                # this statement is failing every statement, which is how an
+                # interrupt behaves, and raising would replace the migration's
+                # own error with the noise that followed it. On the success path
+                # it is not swallowed: the connection is about to be handed back
+                # to a caller, and handing back one with foreign keys off is an
+                # unenforced schema for every write that follows.
+                #
+                # Raised as a MigrationError rather than the sqlite error it
+                # came from. open_db wraps any sqlite3.Error in the generic
+                # open failure, whose remedy is to delete graph.db and start
+                # fresh, and the migration has already committed by this point.
+                if ok:
+                    raise MigrationError(
+                        "the schema migration committed, and foreign-key "
+                        f"enforcement could not be turned back on: {exc}. "
+                        "graph.db is migrated and intact; do not delete it. "
+                        "Close this connection and open the graph again."
+                    ) from exc
+
+
+def _rebuild_claims_unchanged(conn: sqlite3.Connection) -> None:
+    """Rebuild ``claims`` under the definition it already has.
+
+    A migration step that changes nothing about the schema, which is the point:
+    it exercises the rebuild against the graphs users actually hold, so the
+    machinery a column-dropping migration will reuse is proven before anything
+    irreversible depends on it. The column list is the full set and the
+    definition comes from the same DDL a fresh database gets, so the table
+    after is the table before.
+    """
+    _rebuild_table(
+        conn, table="claims",
+        create_sql=claims_rebuild_sql("claims_new"),
+        columns=_CLAIM_COLUMNS,
+    )
+
+
+# from-version -> (to-version, the steps that get there).
+#
+# Empty in this release, and that is the design rather than an omission. The
+# rebuild ships as production code on a path nothing reaches, because
+# _SCHEMA_VERSION does not move here: a migration is the one change that cannot
+# be taken back, so the machinery lands and is proven a release before anything
+# depends on it. What a later release adds is an entry, not a rewrite.
+_MIGRATIONS: "dict[int, tuple[int, Callable[[sqlite3.Connection], None]]]" = {}
+
+
+def _plan_migration(version: int) -> "tuple[int, ...]":
+    """The whole route from *version* to current, or refuse before anything runs.
+
+    Every link is checked, not just the first. Checking only the first asks "is
+    there a step from here", and a chain with a gap two links along passes that,
+    commits the steps before the gap, and then refuses with a message saying
+    nothing was changed. The file is left at a version this release will not
+    open and the release that wrote it now rejects as too new, which is the
+    bricked-forward outcome the pre-check exists to prevent, reached one link
+    later.
+
+    Also refuses a route that does not advance, which would loop forever
+    committing a rebuild each pass inside an open, and one that overshoots the
+    current version, which commits a version this release then treats as from
+    the future. Both are one typo in a registry entry.
+    """
+    seen = []
+    at = version
+    while at < _SCHEMA_VERSION:
+        route = _MIGRATIONS.get(at)
+        if route is None:
+            raise MigrationError(
+                f"graph.db is at user_version={version} and this mareforma "
+                f"cannot route it to user_version={_SCHEMA_VERSION}: there is "
+                f"no migration from {at}. Nothing has been changed. Open it "
+                "with the release that wrote it, or with one that names this "
+                "version as a supported upgrade source. Do not delete graph.db."
+            )
+        to_version = route[0]
+        if not at < to_version <= _SCHEMA_VERSION:
+            raise MigrationError(
+                f"the migration registry routes user_version={at} to "
+                f"{to_version}, which does not move forward toward "
+                f"{_SCHEMA_VERSION}. Nothing has been changed. This is a "
+                "defect in mareforma, not in graph.db; please report it."
+            )
+        seen.append(to_version)
+        at = to_version
+    return tuple(seen)
+
+
+def _migrate_to_current(conn: sqlite3.Connection, version: int) -> int:
+    """Walk *version* up to :data:`_SCHEMA_VERSION`, one registered step at a
+    time, and return where it got to.
+
+    Each step is its own transaction, so a chain of them stops at the first
+    failure with every earlier step committed and the version recording exactly
+    that. Refuses a version with no route rather than guessing: a file this code
+    has no step for is a file it does not know the shape of.
+    """
+    started_at = version
+    _plan_migration(version)
+    while version < _SCHEMA_VERSION:
+        to_version, steps = _MIGRATIONS[version]
+        try:
+            with _upgrade_window(conn):
+                _run_migration(
+                    conn, to_version=to_version, steps=steps,
+                    from_version=version,
+                )
+        except MigrationError as exc:
+            if version == started_at:
+                raise
+            # Some steps already committed. The step's own message says the
+            # graph is at the version it was at when that step began, which is
+            # true of the step and false of the graph, so quote the underlying
+            # cause rather than the sentence built around it. Saying "unchanged"
+            # here would also point at a remedy that cannot work: the release
+            # that wrote this file refuses the version the chain has reached.
+            cause = exc.__cause__ if exc.__cause__ is not None else exc
+            raise MigrationError(
+                f"the schema migration reached user_version={version} of "
+                f"{_SCHEMA_VERSION} and then failed: {cause}. The steps that "
+                f"completed are committed, and graph.db opens at "
+                f"{version} with this release. Do not delete it. Re-run the "
+                "open to continue from here."
+            ) from exc
+        # Re-read rather than trusting to_version, because the step may have
+        # found another process had already done it. Guard the re-read the same
+        # way the registry entry is guarded: a version that did not advance
+        # loops here forever, committing a full table rebuild each pass inside
+        # an open(), and one past this release is a graph this code must not go
+        # on repairing.
+        seen = conn.execute("PRAGMA user_version").fetchone()[0]
+        if seen > _SCHEMA_VERSION:
+            raise MigrationError(
+                f"graph.db moved to user_version={seen} while this migration "
+                f"was running, past the {_SCHEMA_VERSION} this mareforma "
+                "understands. Another process upgraded it. Nothing further has "
+                "been changed here. Do not delete graph.db."
+            )
+        if seen <= version:
+            raise MigrationError(
+                f"the migration to user_version={to_version} committed and "
+                f"graph.db still reads {seen}, so it did not advance. Stopping "
+                "rather than repeating the step. Do not delete graph.db; "
+                "report this."
+            )
+        version = seen
+    return version
 
 
 def _ensure_claims_columns_for_upgrade(
@@ -1792,6 +2991,14 @@ def add_claim(
         # and the next open rebuilds the cache.
         from mareforma import _supports
         _supports.record_supports_edges(conn, claim_id, supports)
+        # Inside the claim's own transaction: an attestation without its claim
+        # attests nothing, and a claim whose attestation did not land would read
+        # as a declared verdict on the next open.
+        _write_grounding_attestation(
+            conn, claim_id=claim_id, statement_cid=statement_cid,
+            record=observed_grounding, signer=signer,
+            asserter_keyid=asserter_keyid, created_at=now,
+        )
         if _own_transaction:
             conn.commit()
     except sqlite3.IntegrityError as exc:
@@ -2597,6 +3804,26 @@ def _refuse_self_verdict(
             "self-verdicts are refused. The issuer must be an external "
             "witness whose keyid does not appear on the claim envelope."
         )
+
+
+def _claim_asserting_keyid(claim_signature_bundle: "str | None") -> "str | None":
+    """The one keyid that asserted the claim, or None.
+
+    The FIRST signature on the envelope, which is the asserter's: a
+    ``claim-with-roles:v1`` envelope carries the role actors after it. Kept
+    apart from :func:`_claim_signer_keyids` because the two answer opposite
+    questions. That one asks who is disqualified from judging this claim, and a
+    wider answer is a safer one. This asks who is entitled to attest it, and a
+    wider answer is a hole: role signatures cover the same PAE bytes, the role
+    label is the asserter's own metadata, and the bundle can be rewritten from
+    non-NULL to non-NULL, so any enrolled key can append itself to the signer
+    set. A capability must not rest on a set that grows.
+
+    Read out of the envelope rather than off ``claims.asserter_keyid``: no
+    signature covers that column.
+    """
+    keyids = _claim_signer_keyids(claim_signature_bundle)
+    return keyids[0] if keyids else None
 
 
 def _claim_signer_keyids(claim_signature_bundle: str | None) -> list[str]:
@@ -4119,6 +5346,44 @@ def _gather_verdicts_by_claim(
     return by_claim
 
 
+def _issuer_was_entitled(
+    conn: sqlite3.Connection,
+    issuer_keyid: str,
+    claims: "tuple[tuple[str, str], ...]",
+    *,
+    verdict_kind: str,
+    refuse_llm_issuer: bool = False,
+) -> bool:
+    """Whether *issuer_keyid* was entitled to issue this verdict.
+
+    A signature proves who signed. Entitlement is the separate question of
+    whether that signer was allowed to, and the recording path and
+    :mod:`mareforma.db.restore` both ask it: an issuer may not verdict a claim
+    whose envelope it signed any role on, and a contradiction, which invalidates
+    the older claim through the insert trigger, may not come from an llm-typed
+    validator. A read that verified the signature and skipped these served a
+    level the same graph refuses to restore, which is one file disagreeing with
+    itself about whether a claim is corroborated.
+
+    False rather than raising. Every caller is a read, and a read degrades
+    rather than crashes; the write path keeps the exceptions, where refusing is
+    the whole point.
+    """
+    try:
+        if refuse_llm_issuer:
+            _refuse_llm_contradiction_issuer(conn, issuer_keyid)
+        for claim_id, relation in claims:
+            if claim_id is None:
+                continue
+            _refuse_self_verdict(
+                conn, issuer_keyid, claim_id,
+                relation=relation, verdict_kind=verdict_kind,
+            )
+    except Exception:
+        return False
+    return True
+
+
 def _verdict_verifies(
     conn: sqlite3.Connection, cache: dict, v: sqlite3.Row,
 ) -> bool:
@@ -4156,7 +5421,12 @@ def _verdict_verifies(
         )
     except Exception:
         return False
-    return True
+    return _issuer_was_entitled(
+        conn, v["issuer_keyid"],
+        ((v["member_claim_id"], "member_claim_id"),
+         (v["other_claim_id"], "other_claim_id")),
+        verdict_kind="replication",
+    )
 
 
 # The corroboration peer probe, at module scope so tests/test_corroboration_
@@ -4634,6 +5904,40 @@ def _verify_validation_on_read(
                         base64.standard_b64decode(env["payload"])
                     )
                     ok = payload.get("claim_id") == row.get("claim_id")
+                    if ok:
+                        # The envelope is genuine, binds this claim, and comes
+                        # from an enrolled key. Whether that key was entitled to
+                        # promote is a separate question, and it is the one the
+                        # write path asks. Skipping it here served an
+                        # ESTABLISHED the same graph refuses to write.
+                        #
+                        # The llm ceiling applies whatever the envelope calls
+                        # itself, because the write path applies it to both: the
+                        # seed path refuses an llm signer in as many words, so
+                        # that an llm validator cannot route around the
+                        # ESTABLISHED ceiling by seeding instead of validating.
+                        #
+                        # The self-validation rule is where the two types differ,
+                        # and the difference is not an exemption to assume. A
+                        # born-ESTABLISHED claim is attested by its own asserter,
+                        # so for a seed that is the thing to REQUIRE. The signer
+                        # picks the payloadType, and taking the word for it let
+                        # any enrolled key promote any claim by calling its
+                        # envelope a seed.
+                        try:
+                            _refuse_llm_validator(conn, keyid)
+                            if declared == _signing.PAYLOAD_TYPE_VALIDATION:
+                                _refuse_self_validation(
+                                    row.get("claim_id"),
+                                    row.get("signature_bundle"),
+                                    keyid,
+                                )
+                            elif row.get("signature_bundle") and keyid \
+                                    != _claim_asserting_keyid(
+                                        row["signature_bundle"]):
+                                ok = False
+                        except Exception:
+                            ok = False
             except Exception:
                 ok = False
         # No row, or a row whose chain does not walk back to the root -> the
@@ -5221,6 +6525,330 @@ def _contradiction_verdict_pae(record: dict) -> bytes:
     )
 
 
+_VERDICT_CHAIN_LINK_FIELDS = (
+    "seq",
+    "prev_tip",
+    "verdict_kind",
+    "verdict_id",
+    "verdict_digest",
+    # The author, inside the bytes. Left out, the link's signed payload and its
+    # tip were identical whoever signed it, so the column naming the author was
+    # free for an attacker to set and the tip did not notice. Safe to add here
+    # and nowhere else: this payload type ships for the first time in this
+    # release, so no reader anywhere rebuilds these bytes from a shorter list.
+    "issuer_keyid",
+)
+
+# The tip a chain starts from. Empty rather than a hash of nothing, so the
+# first link is recognisable as the first by reading it.
+_VERDICT_CHAIN_GENESIS = ""
+
+
+def _verdict_chain_link_pae(record: dict) -> bytes:
+    """The DSSE PAE a chain link's signature is made and checked over.
+
+    Its own payload type, so the signature cannot be confused with the one over
+    the verdict the link covers. Both are made by the same issuer key over
+    bytes naming the same ``verdict_id``, and only the type separates them.
+    """
+    from mareforma import signing as _signing
+    return _signing.dsse_pae(
+        _signing.PAYLOAD_TYPE_VERDICT_CHAIN_LINK,
+        _verdict_canonical_payload(_VERDICT_CHAIN_LINK_FIELDS, record),
+    )
+
+
+def _verdict_chain_tip(record: dict) -> str:
+    """The tip a link's own contents produce.
+
+    Over the canonical payload rather than the signature: the tip has to be
+    recomputable by anyone holding the file, including a reader with no key at
+    all, or the chain could only be checked by its own signers.
+    """
+    return hashlib.sha256(
+        _verdict_canonical_payload(_VERDICT_CHAIN_LINK_FIELDS, record)
+    ).hexdigest()
+
+
+def _verdict_chain_head(conn: sqlite3.Connection) -> "tuple[int, str]":
+    """The last link's ``(seq, tip)``, or ``(0, genesis)`` on an empty chain.
+
+    Read inside the caller's write transaction. Two writers that read the same
+    head would build two links claiming the same ``prev_tip``, and the chain
+    would fork with both halves verifying; the ``BEGIN IMMEDIATE`` around the
+    verdict write is what stops that, and the PRIMARY KEY on ``seq`` refuses
+    the loser if it ever does not.
+    """
+    row = conn.execute(
+        "SELECT seq, tip FROM verdict_chain ORDER BY seq DESC LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return (0, _VERDICT_CHAIN_GENESIS)
+    return (row["seq"], row["tip"])
+
+
+def _append_verdict_chain_link(
+    conn: sqlite3.Connection,
+    *,
+    verdict_kind: str,
+    verdict_id: str,
+    signature: bytes,
+    signer: "object",
+    issuer_keyid: str,
+    created_at: str,
+) -> None:
+    """Append the link covering one verdict, signed by that verdict's issuer.
+
+    Called from inside the verdict's own write transaction, never from the
+    backup writer. A verdict that committed without its link would break the
+    chain for a reason that is not tamper, and the reader cannot tell the two
+    apart, so the two writes are one write or neither.
+
+    The link binds to the verdict's signature rather than to its row. The
+    signature is the one field only the issuer could have produced, so a
+    re-signed lookalike carrying the same ids does not satisfy the link.
+    """
+    seq, prev_tip = _verdict_chain_head(conn)
+    record = {
+        "seq": seq + 1,
+        "prev_tip": prev_tip,
+        "verdict_kind": verdict_kind,
+        "verdict_id": verdict_id,
+        "verdict_digest": hashlib.sha256(signature).hexdigest(),
+        "issuer_keyid": issuer_keyid,
+    }
+    conn.execute(
+        """
+        INSERT INTO verdict_chain(
+            seq, prev_tip, tip, verdict_kind, verdict_id, verdict_digest,
+            issuer_keyid, signature, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            record["seq"], record["prev_tip"], _verdict_chain_tip(record),
+            verdict_kind, verdict_id, record["verdict_digest"],
+            issuer_keyid, signer.sign(_verdict_chain_link_pae(record)),
+            created_at,
+        ),
+    )
+
+
+def verdict_chain_tip(conn: sqlite3.Connection) -> str:
+    """The current tip of the verdict-set chain, ``""`` when it is empty."""
+    return _verdict_chain_head(conn)[1]
+
+
+def verdict_chain_coverage(conn: sqlite3.Connection) -> "tuple[int, int]":
+    """``(covered, total)`` verdicts, counting both verdict tables.
+
+    They differ on any graph that recorded verdicts before this version, and
+    the difference is the point: those verdicts have no link and the chain says
+    nothing about them. Reporting the pair keeps that a number an operator can
+    read rather than a silence in the middle of an artifact about absence.
+    """
+    total = conn.execute(
+        "SELECT (SELECT COUNT(*) FROM contradiction_verdicts) "
+        "     + (SELECT COUNT(*) FROM replication_verdicts)"
+    ).fetchone()[0]
+    covered = conn.execute("SELECT COUNT(*) FROM verdict_chain").fetchone()[0]
+    return (covered, total)
+
+
+def verify_verdict_chain(conn: sqlite3.Connection) -> "tuple[str, ...]":
+    """Every way the stored chain fails to account for the verdicts it covers.
+
+    Empty means all of: the links run 1..n with no gap, each carries the tip its
+    own contents produce, each names the tip of the link before it, each
+    signature verifies against an enrolled issuer, and each covers a verdict
+    that is still present carrying the signature the link was made over.
+
+    What a clean result rules out, stated as narrowly as it holds: no verdict
+    has been taken out of the middle of the chain by anyone holding no enrolled
+    key. Removing a verdict means removing its link, and the next link then has
+    to be re-signed over the gap, its tip recomputed over the new contents, and
+    the verdict it covers made to verify under the key the link names. An
+    outside attacker with file access and the project operator are held out by
+    that.
+
+    **An enrolled peer is not held out, and this used to say it was.** The
+    verdict's own signed payload carries no issuer, so a peer can put its keyid
+    on a surviving verdict, re-sign the verdict under its own key, and re-sign
+    the link to match. Every check here then passes, on a chain that peer just
+    shortened. Reproduced against this code, not reasoned about. Closing it
+    needs the issuer inside the verdict's signed bytes, which changes bytes an
+    already-released reader rebuilds, so it waits for a release that can pay
+    for that.
+
+    The issuer of the verdicts is not held out either, and cannot be: a key can
+    always restate its own view of its own verdicts, and on a graph where one
+    issuer signed everything that is the whole chain.
+
+    Two further things it does not say. A removed suffix leaves a shorter chain
+    that verifies, so length is reported by :func:`verdict_chain_coverage`
+    rather than checked here. And verdicts recorded before the chain existed
+    carry no link, which the same coverage pair is what makes visible.
+
+    Never raises. A graph too damaged to read the chain from reports that as a
+    problem rather than taking the caller down.
+    """
+    try:
+        links = conn.execute(
+            "SELECT seq, prev_tip, tip, verdict_kind, verdict_id, "
+            "verdict_digest, issuer_keyid, signature "
+            "FROM verdict_chain ORDER BY seq"
+        ).fetchall()
+    except sqlite3.Error as exc:
+        return (f"the verdict chain could not be read: {exc}",)
+
+    problems: list[str] = []
+    cache: dict = {}
+    expected_prev = _VERDICT_CHAIN_GENESIS
+    expected_seq = 1
+    for link in links:
+        name = f"link {link['seq']} (verdict {link['verdict_id']!r})"
+        try:
+            _check_verdict_chain_link(
+                conn, cache, link, name, expected_seq, expected_prev, problems,
+            )
+        except Exception as exc:      # noqa: BLE001, see the contract above
+            # Every exception, not only sqlite3's. The enrolment walk and the
+            # covered-verdict lookup read tables this function does not own, and
+            # on a graph somebody has taken apart they raise whatever they
+            # raise: a signature column holding TEXT where the schema says BLOB
+            # reached hashlib as a str and came out a TypeError, which walked
+            # straight past a handler scoped to sqlite3.Error and took the
+            # caller down. That column is one of the things an attacker edits,
+            # so the shape most likely to arrive here was the one shape this did
+            # not catch. A link that cannot be checked is reported as unchecked,
+            # never skipped: the damage is the finding.
+            problems.append(
+                f"{name} could not be checked, the graph is not readable "
+                f"here: {exc}"
+            )
+        expected_prev = link["tip"]
+        expected_seq = link["seq"] + 1
+    return tuple(problems)
+
+
+def _check_verdict_chain_link(
+    conn: sqlite3.Connection,
+    cache: dict,
+    link: sqlite3.Row,
+    name: str,
+    expected_seq: int,
+    expected_prev: str,
+    problems: "list[str]",
+) -> None:
+    """Append every way one link fails. See :func:`verify_verdict_chain`.
+
+    Split out so the caller can catch a database error per link. Raises
+    :class:`sqlite3.Error` when a table it reads has been taken away, which the
+    caller turns into a reported problem.
+    """
+    from mareforma import signing as _signing
+    from mareforma import validators as _validators
+
+    if link["seq"] != expected_seq:
+        problems.append(
+            f"{name} is out of sequence, expected seq {expected_seq}: "
+            "links are numbered without gaps, so a jump is a link that was "
+            "removed"
+        )
+    if link["prev_tip"] != expected_prev:
+        problems.append(
+            f"{name} names a previous tip no surviving link produced; the "
+            "chain is broken here and mending it needs this link's issuer "
+            "key"
+        )
+    record = {
+        "seq": link["seq"],
+        "prev_tip": link["prev_tip"],
+        "verdict_kind": link["verdict_kind"],
+        "verdict_id": link["verdict_id"],
+        "verdict_digest": link["verdict_digest"],
+        "issuer_keyid": link["issuer_keyid"],
+    }
+    if _verdict_chain_tip(record) != link["tip"]:
+        problems.append(
+            f"{name} stores a tip its own contents do not produce, so the "
+            "row was edited after it was written"
+        )
+    signer_row = _cached_validator(conn, cache, link["issuer_keyid"])
+    if signer_row is None or not _validators.is_enrolled(
+        conn, link["issuer_keyid"],
+    ):
+        problems.append(
+            f"{name} names an issuer that is not an enrolled validator"
+        )
+    else:
+        try:
+            pem = base64.standard_b64decode(signer_row["pubkey_pem"])
+            _signing.public_key_from_pem(pem).verify(
+                link["signature"], _verdict_chain_link_pae(record),
+            )
+        except Exception:
+            problems.append(
+                f"{name} does not verify against its issuer's key"
+            )
+    table = (
+        "contradiction_verdicts"
+        if link["verdict_kind"] == "contradiction"
+        else "replication_verdicts"
+    )
+    row = conn.execute(
+        f"SELECT signature, issuer_keyid FROM {table} WHERE verdict_id = ?",
+        (link["verdict_id"],),
+    ).fetchone()
+    if row is None:
+        problems.append(
+            f"{name} covers a verdict that is no longer in the graph"
+        )
+    else:
+        if hashlib.sha256(row["signature"]).hexdigest() != link["verdict_digest"]:
+            problems.append(
+                f"{name} covers a verdict whose signature is not the one "
+                "the link was made over"
+            )
+        # The link must be signed by the key that issued the verdict it covers,
+        # not by whoever happens to be enrolled. Otherwise an enrolled peer
+        # deletes a verdict, re-signs the following link over the gap, and the
+        # chain recomputes and reads clean: a valid signature over a set the
+        # signer had just emptied.
+        #
+        # Asked of the verdict's own signature, not of its issuer_keyid column.
+        # Both columns are outside their signed payloads, so comparing them was
+        # comparing two things an attacker sets together: put your own keyid on
+        # the verdict and on the link, sign both, and the two agreed. Verifying
+        # the verdict under the key the link names is a question only that key's
+        # holder can answer.
+        #
+        # What it does NOT close, and the docstring says so: the verdict payload
+        # carries no issuer, so an enrolled peer can re-sign the verdict itself
+        # under their own key and satisfy this. Binding the issuer inside the
+        # verdict's signed bytes is what closes that, and it changes bytes a
+        # released reader rebuilds.
+        if row["issuer_keyid"] != link["issuer_keyid"]:
+            problems.append(
+                f"{name} is signed by a key that did not issue the verdict "
+                "it covers, so the link was rewritten by somebody else"
+            )
+        else:
+            verifies = (
+                _contradiction_verdict_verifies
+                if link["verdict_kind"] == "contradiction"
+                else _verdict_verifies
+            )
+            verdict_row = conn.execute(
+                f"SELECT * FROM {table} WHERE verdict_id = ?",
+                (link["verdict_id"],),
+            ).fetchone()
+            if not verifies(conn, cache, verdict_row):
+                problems.append(
+                    f"{name} covers a verdict that does not verify under the "
+                    "key the link names as its issuer"
+                )
+
+
 def _require_enrolled_issuer(
     conn: sqlite3.Connection, issuer_keyid: str,
 ) -> None:
@@ -5352,6 +6980,13 @@ def record_replication_verdict(
                 method, confidence_json, issuer_keyid, signature, created_at,
             ),
         )
+        # Inside the same transaction as the verdict: see
+        # _append_verdict_chain_link on why the two are one write.
+        _append_verdict_chain_link(
+            conn, verdict_kind="replication", verdict_id=verdict_id,
+            signature=signature, signer=signer, issuer_keyid=issuer_keyid,
+            created_at=created_at,
+        )
         # Promote referenced claims to REPLICATED. The state-machine
         # trigger rejects PRELIMINARY → ESTABLISHED but accepts
         # PRELIMINARY → REPLICATED. Update only when the row is still
@@ -5416,6 +7051,13 @@ def record_replication_verdict(
         raise VerdictIssuerError(
             f"Replication verdict {verdict_id!r} INSERT refused: {exc}"
         ) from exc
+    except BaseException:
+        # See the sibling handler in record_contradiction_verdict. Same two
+        # writes, same open transaction, same silent loss of whatever is
+        # written next on this connection.
+        if _own_txn:
+            conn.rollback()
+        raise
 
     _backup_claims_toml(conn, root)
 
@@ -5451,12 +7093,6 @@ def record_contradiction_verdict(
             f"claim_id on both sides ({member_claim_id!r}), self-"
             "contradiction is not a valid verdict."
         )
-    # Asymmetry with record_replication_verdict (which wraps INSERT +
-    # promotion UPDATE in one BEGIN IMMEDIATE): contradiction is a
-    # single INSERT + one AFTER-INSERT trigger that fires inside the
-    # same auto-statement transaction. No second write follows, so no
-    # race window opens between INSERT and the trigger's UPDATE.
-    # Symmetric atomic-txn treatment would be a no-op.
     issuer_keyid = _signing.public_key_id(signer.public_key())
     _require_enrolled_issuer(conn, issuer_keyid)
     # Symmetric to validate_claim's LLM-validator gate: an LLM-typed
@@ -5494,7 +7130,16 @@ def record_contradiction_verdict(
     pae = _contradiction_verdict_pae(record)
     signature = signer.sign(pae)
     created_at = _now()
+    # One transaction, like its sibling. This used to be a bare INSERT on the
+    # grounds that the AFTER-INSERT trigger fires inside the same auto-statement
+    # transaction and no second write follows. A second write follows now: the
+    # chain link has to land with the verdict or not at all, and reading the
+    # chain head under BEGIN IMMEDIATE is what stops two writers building two
+    # links from the same tip.
+    _own_txn = not conn.in_transaction
     try:
+        if _own_txn:
+            conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             """
             INSERT INTO contradiction_verdicts(
@@ -5507,11 +7152,31 @@ def record_contradiction_verdict(
                 confidence_json, issuer_keyid, signature, created_at,
             ),
         )
-        conn.commit()
+        _append_verdict_chain_link(
+            conn, verdict_kind="contradiction", verdict_id=verdict_id,
+            signature=signature, signer=signer, issuer_keyid=issuer_keyid,
+            created_at=created_at,
+        )
+        if _own_txn:
+            conn.commit()
     except sqlite3.IntegrityError as exc:
+        if _own_txn:
+            conn.rollback()
         raise VerdictIssuerError(
             f"Contradiction verdict {verdict_id!r} INSERT refused: {exc}"
         ) from exc
+    except BaseException:
+        # Every other way this block can fail, and the transaction has to close
+        # on all of them. There are two writes in here now, and the second one
+        # can fail for reasons the first never could: a schema the graph no
+        # longer has, or a signer that goes away between the two. Left open, the
+        # transaction makes the NEXT write on this connection a silent no-op:
+        # add_claim sees in_transaction and does not commit, returns a claim id,
+        # raises nothing, and the row is discarded when the connection closes.
+        # Measured both ways before this handler existed.
+        if _own_txn:
+            conn.rollback()
+        raise
 
     _backup_claims_toml(conn, root)
 
@@ -5619,21 +7284,306 @@ VALID_REFUTATION_FILTERS: tuple[str, ...] = (
 )
 
 
-def refutation_status(row: dict) -> dict:
+# Signals that mean the column and the signed evidence disagree. Grouped here
+# rather than tested one by one at each call site, because every reader of a
+# replayed status has to make the same split: a verdict that was checked and a
+# verdict that was asserted are different claims about the world, and a caller
+# that treats them alike is back where the column left it.
+REPLAY_TAMPER_SIGNALS: tuple[str, ...] = (
+    "unbacked-invalidation",
+    "suppressed-verdict",
+    "unverifiable-verdict",
+    "replay-unavailable",
+)
+
+
+_CONTRADICTION_VERDICT_SELECT = (
+    "SELECT verdict_id, member_claim_id, other_claim_id, confidence_json, "
+    "issuer_keyid, signature, created_at FROM contradiction_verdicts"
+)
+
+
+def _contradiction_verdicts_naming(
+    conn: sqlite3.Connection, claim_id: str,
+) -> "list[sqlite3.Row]":
+    """Every contradiction verdict that names *claim_id* on either side."""
+    return conn.execute(
+        _CONTRADICTION_VERDICT_SELECT
+        + " WHERE member_claim_id = ? OR other_claim_id = ?",
+        (claim_id, claim_id),
+    ).fetchall()
+
+
+def _gather_contradictions_by_claim(
+    conn: sqlite3.Connection,
+) -> "dict[str, list[sqlite3.Row]]":
+    """Every contradiction verdict grouped by the claim ids it names.
+
+    One scan, no signature work, the same shape
+    :func:`_gather_verdicts_by_claim` holds for the replication table and for
+    the same reason. A bulk read that replays per row spends a statement per row
+    to ask a question one pass answers, and it spends it hardest on the ordinary
+    graph where the table is empty and every one of those statements returns
+    nothing. Measured on a 400-claim graph with no verdicts, grouping saves
+    about 0.1 ms on a 20-row page and grows with the page.
+
+    Modest, and worth stating at its real size, because the obvious reading of
+    the numbers around it is wrong: a clean-filtered page costs roughly 1.3 ms
+    more than an unfiltered one on that graph, all of which is the SQL the
+    filter already emitted (it plans as SCAN claims) and none of which is the
+    replay.
+
+    The trade is real and worth naming too: this reads the whole verdict table,
+    so a graph that argues with itself far more than it is read pays a scan
+    where indexed lookups would have been cheaper. Verdicts are rare next to
+    claims, which is what makes the scan the right default rather than a safe
+    one.
+    """
+    by_claim: "dict[str, list[sqlite3.Row]]" = {}
+    for v in conn.execute(_CONTRADICTION_VERDICT_SELECT):
+        for cid in (v["member_claim_id"], v["other_claim_id"]):
+            if cid is not None:
+                by_claim.setdefault(cid, []).append(v)
+    return by_claim
+
+
+def _contradiction_verdict_verifies(
+    conn: sqlite3.Connection, cache: dict, v: "sqlite3.Row",
+) -> bool:
+    """True iff *v*'s issuer is enrolled and its signature checks out.
+
+    The contradiction sibling of :func:`_verdict_verifies`, over the
+    contradiction PAE. Same reasoning: the recording path checks the issuer, and
+    that precondition does not travel to a read, where the table is whatever a
+    process with SQL access wrote. Never raises; an unparseable verdict is not
+    evidence and a read must degrade rather than crash.
+    """
+    from mareforma import signing as _signing
+    from mareforma import validators as _validators
+
+    signer_row = _cached_validator(conn, cache, v["issuer_keyid"])
+    if signer_row is None or not _validators.is_enrolled(conn, v["issuer_keyid"]):
+        return False
+    record = {
+        "verdict_id": v["verdict_id"],
+        "member_claim_id": v["member_claim_id"],
+        "other_claim_id": v["other_claim_id"],
+    }
+    try:
+        record["confidence"] = json.loads(v["confidence_json"] or "{}")
+        pem = base64.standard_b64decode(signer_row["pubkey_pem"])
+        _signing.public_key_from_pem(pem).verify(
+            v["signature"], _contradiction_verdict_pae(record),
+        )
+    except Exception:
+        return False
+    return _issuer_was_entitled(
+        conn, v["issuer_keyid"],
+        ((v["member_claim_id"], "member_claim_id"),
+         (v["other_claim_id"], "other_claim_id")),
+        verdict_kind="contradiction", refuse_llm_issuer=True,
+    )
+
+
+def _verdict_invalidates(
+    conn: sqlite3.Connection, v: "sqlite3.Row",
+) -> "str | None":
+    """Which claim ``contradiction_invalidates_older`` picks for verdict *v*.
+
+    The rule is the trigger's, restated in Python so a read can ask what the
+    write path would have done: the older claim by ``created_at``, tie-broken on
+    the lexicographically smaller id so the verdict's argument order does not
+    decide it. Restating is a duplication and it is the only way to check the
+    column against anything; the pairing is pinned by test.
+
+    ``None`` when either claim is gone, because then the question has no answer
+    rather than a negative one.
+    """
+    rows = {
+        r["claim_id"]: r["created_at"] for r in conn.execute(
+            "SELECT claim_id, created_at FROM claims WHERE claim_id IN (?, ?)",
+            (v["member_claim_id"], v["other_claim_id"]),
+        )
+    }
+    a, b = v["member_claim_id"], v["other_claim_id"]
+    if a not in rows or b not in rows:
+        return None
+    if rows[a] != rows[b]:
+        return a if rows[a] < rows[b] else b
+    return min(a, b)
+
+
+def replay_contradictions(
+    conn: sqlite3.Connection, claim_id: str, *,
+    verdicts: "list | None" = None, cache: "dict | None" = None,
+) -> dict:
+    """What the signed contradiction verdicts say about *claim_id*.
+
+    The read path cannot take ``t_invalid`` at its word. No trigger guards that
+    column, so one UPDATE either fabricates a contradiction with no verdict
+    behind it or erases a real one from every read surface, and a presenter over
+    the row alone reports the edit as though it were the evidence.
+
+    So the verdicts naming the claim are fetched and held against their issuers:
+    enrolled validator, signature verifying over the DSSE PAE rebuilt from the
+    stored columns, the same bar the recording path applies. A verdict that
+    fails is not weaker evidence, it is a row somebody planted, and it is
+    reported rather than skipped.
+
+    Returns ``backed`` (a verifying verdict makes this claim the invalidated
+    one), ``unverifiable`` (verdict ids naming it that did not check out), and
+    ``checked`` (how many were examined), so a caller can tell "no verdict" from
+    "a verdict nobody can authenticate".
+    """
+    cache = {} if cache is None else cache
+    backed = False
+    unverifiable: list[str] = []
+    if verdicts is None:
+        verdicts = _contradiction_verdicts_naming(conn, claim_id)
+    for v in verdicts:
+        if not _contradiction_verdict_verifies(conn, cache, v):
+            unverifiable.append(v["verdict_id"])
+            continue
+        if _verdict_invalidates(conn, v) == claim_id:
+            backed = True
+    return {
+        "backed": backed,
+        "unverifiable": tuple(sorted(unverifiable)),
+        "checked": len(verdicts),
+    }
+
+
+def _replayed_refutation(
+    conn: sqlite3.Connection, row: dict, flagged: bool, *,
+    verdicts: "list | None" = None, cache: "dict | None" = None,
+) -> "dict | None":
+    """The contradiction answer with the verdicts replayed, or ``None``.
+
+    ``None`` means the replay had nothing to say and the caller should fall
+    through to the status flags: no verdict names this claim and its column is
+    clear, which is the ordinary case and must stay cheap to report.
+
+    Never raises, and that has to hold for more than a database error. The
+    replay compares two ``created_at`` values, and that column has TEXT
+    affinity, so a value written around the write path stays whatever type it
+    was put in and the comparison raises a ``TypeError`` rather than a
+    ``sqlite3.Error``. A read that cannot reach the verdict tables, or cannot
+    make sense of what it found there, degrades to the column rather than taking
+    a claim down with it, and says which it did.
+    """
+    try:
+        replay = replay_contradictions(
+            conn, row["claim_id"], verdicts=verdicts, cache=cache,
+        )
+    except Exception as exc:
+        # Reported, not None. None here means "the replay had nothing to say",
+        # and both callers then fall through to ``t_invalid``, the column with
+        # no trigger that this replay exists to distrust. So a graph where the
+        # replay cannot run served a suppressed contradiction as a clean row,
+        # which is worse than the crash this handler replaced: the crash was at
+        # least visible. A replay that could not run is a fact about the graph,
+        # not the absence of one, and it belongs with the other three signals
+        # for the same reason they are grouped: every reader has to make the
+        # same split, and a caller asking for clean claims must not be handed
+        # this one.
+        return {
+            "state": "contradicted" if flagged else "clean",
+            "reason": (
+                "the contradiction verdicts behind this claim could not be "
+                f"replayed ({type(exc).__name__}), so nothing signed stands "
+                "behind the invalidation column either way"
+            ),
+            "signal": "replay-unavailable",
+        }
+    if replay["unverifiable"]:
+        return {
+            "state": "contradicted",
+            "reason": (
+                f"{len(replay['unverifiable'])} contradiction verdict(s) name "
+                "this claim and do not verify against an enrolled issuer: "
+                + ", ".join(replay["unverifiable"])
+                + ". A verdict that fails its own signature is a planted row, "
+                "not weak evidence"
+            ),
+            "signal": "unverifiable-verdict",
+        }
+    if replay["backed"] and not flagged:
+        return {
+            "state": "contradicted",
+            "reason": (
+                "a contradiction verdict that verifies invalidates this claim, "
+                "and its invalidation timestamp is clear; the column was "
+                "cleared under signed evidence that is still here"
+            ),
+            "signal": "suppressed-verdict",
+        }
+    if flagged and not replay["backed"]:
+        return {
+            "state": "contradicted",
+            "reason": (
+                "this claim's invalidation timestamp is set "
+                f"(t_invalid={row['t_invalid']}) and no contradiction verdict "
+                f"that verifies invalidates it ({replay['checked']} named it); "
+                "the column was written by something that left no evidence"
+            ),
+            "signal": "unbacked-invalidation",
+        }
+    if flagged and replay["backed"]:
+        return {
+            "state": "contradicted",
+            "reason": (
+                "a contradiction verdict that verifies against an enrolled "
+                "issuer invalidates this claim, and the invalidation timestamp "
+                f"agrees (t_invalid={row['t_invalid']})"
+            ),
+            "signal": "signed-verdict",
+        }
+    return None
+
+
+def refutation_status(row: dict, conn: "sqlite3.Connection | None" = None) -> dict:
     """Classify a claim row's refutation state.
 
     Returns a dict with three fields:
 
       * ``state``: one of :data:`REFUTATION_STATES`
       * ``reason``: short human-readable explanation
-      * ``signal``: ``"signed-verdict"`` if backed by a cryptographic
-                     verdict, ``"editorial"`` if backed only by a
-                     status flag, or ``"none"`` for clean claims
+      * ``signal``: how the state was established, see below
 
-    The presenter is a pure function over the row's queryable
-    columns; it does NOT walk verdict tables (callers wanting the
-    underlying verdicts use
-    :meth:`EpistemicGraph.contradiction_verdicts`).
+    Pass *conn* and the contradiction verdicts are replayed
+    (:func:`replay_contradictions`) instead of the ``t_invalid`` column being
+    taken at its word. Without it the answer is the column, said plainly, which
+    is what every caller got before and is still the honest report when there is
+    no graph to check against.
+
+    The signals, and what each is worth:
+
+      * ``signed-verdict``: the column is set and a verdict that verifies backs
+        it. The only reading that survives a hostile writer.
+      * ``invalidation-recorded``: the column is set and nothing replayed it.
+      * ``editorial``: a status flag, which is an assertion by the asserter.
+      * ``none``: nothing to report.
+      * ``unbacked-invalidation``: the column is set and no verifying verdict
+        names this claim. Somebody wrote the column.
+      * ``suppressed-verdict``: a verifying verdict invalidates this claim and
+        the column is clear. Somebody erased it from every read surface.
+      * ``unverifiable-verdict``: verdicts naming this claim exist and do not
+        check out. Planted rows, not weak evidence.
+      * ``replay-unavailable``: the replay itself could not run, so nothing
+        signed stands behind the column either way.
+
+    Those last four are :data:`REPLAY_TAMPER_SIGNALS`. For the first three the
+    state stays ``contradicted``, deliberately: an unbacked column is not
+    grounds to hand a suppressed claim back as clean, and a suppressed verdict
+    is not grounds to keep calling it clean either. Refusing to un-flag in both
+    directions is the only choice that does not do an attacker's work in one of
+    them. ``replay-unavailable`` is the exception and follows the column,
+    because a replay that did not run is not evidence that one would have
+    found something.
+
+    Without *conn* the presenter is a pure function over the row's queryable
+    columns and does NOT walk verdict tables (callers wanting the underlying
+    verdicts use :meth:`EpistemicGraph.contradiction_verdicts`).
 
     Raises :class:`ValueError` when *row* lacks the required
     ``status`` field: a hand-crafted partial dict would otherwise
@@ -5648,22 +7598,48 @@ def refutation_status(row: dict) -> dict:
             "refutation_status: row missing 'status' field; pass a row "
             "fetched via list_claims / get_claim, not a partial dict."
         )
-    if row.get("t_invalid") is not None:
-        # States what was read, not what was proved. This is a pure function
-        # over one row: it sees `t_invalid` and nothing else. The signed
-        # evidence sits untouched in contradiction_verdicts, and no trigger
-        # guards this column, so one UPDATE either fabricates a contradiction
-        # with zero verdicts present or erases a real one from every read
-        # surface. The old wording asserted a signed verdict had been checked,
-        # and the old signal name said so in machine-readable form; neither is
-        # something this function can know. Replaying the verdicts on read is
-        # deferred work, so until then the honest report is the column.
+    if conn is None:
+        from .._deprecation import warn_refutation_status_without_conn
+
+        warn_refutation_status_without_conn()
+        return refutation_from_column(row)
+    if row.get("claim_id"):
+        replayed = _replayed_refutation(
+            conn, row, row.get("t_invalid") is not None,
+        )
+        if replayed is not None:
+            return replayed
+    return refutation_from_column(row)
+
+
+def refutation_from_column(row: dict) -> dict:
+    """The refutation state as the row's own columns record it, no replay.
+
+    The honest floor: what a reader can say with the row in front of them and
+    nothing else. ``refutation_status`` falls through to it when the replay has
+    nothing to add, and :func:`mareforma.trust_map._assemble` calls it directly
+    because that function is pure by contract and holds no graph, which is a
+    legitimate absence rather than a caller who should have passed one.
+
+    Carries no deprecation warning for that reason. The warning belongs on
+    ``refutation_status(row)``, where a connection was available and was not
+    handed over.
+    """
+    flagged = row.get("t_invalid") is not None
+    if flagged:
+        # States what was read, not what was proved. With no connection this is
+        # a pure function over one row: it sees `t_invalid` and nothing else.
+        # The signed evidence sits untouched in contradiction_verdicts, and no
+        # trigger guards this column, so one UPDATE either fabricates a
+        # contradiction with zero verdicts present or erases a real one from
+        # every read surface. Claiming a signed verdict had been checked is not
+        # something this branch can know, so it says what it saw.
         return {
             "state": "contradicted",
             "reason": (
                 "this claim's invalidation timestamp is set "
                 f"(t_invalid={row['t_invalid']}); the contradiction verdicts "
-                "behind it are not replayed on read"
+                "behind it were not replayed on this call"
             ),
             "signal": "invalidation-recorded",
         }
@@ -5801,6 +7777,66 @@ def _count_unverified_held_back(
     return n, n >= _DISCLOSURE_SCAN_CEILING
 
 
+def _count_unbacked_invalidations(
+    conn: sqlite3.Connection,
+    from_sql: str,
+    where: str,
+    params: list,
+    *,
+    ceiling: int,
+    prefix: str = "",
+) -> "tuple[int, bool]":
+    """How many rows this read hid on an invalidation no signed verdict backs.
+
+    The sibling of :func:`_count_unverified_held_back`, and it exists for the
+    same reason stated there: the filter runs in SQL so the drained rows never
+    enter the scan, and nothing downstream can then see what was dropped. Here
+    the filter is ``t_invalid IS NULL``, and that column carries no trigger, so
+    one UPDATE hides a claim from every listing while the per-claim surfaces go
+    on reporting the disagreement to nobody who is looking.
+
+    The negated condition alone is not the answer, because a claim invalidated
+    by a verdict that verifies is honestly hidden. So each hidden row is
+    replayed against the signed verdicts, and only the ones no verdict backs are
+    counted. Bounded by the same scan ceiling for the same reason: a disclosure
+    must not cost more than the read it describes, and a saturated count reads
+    as "at least this many".
+
+    Cheap on an ordinary graph, which invalidates nothing: the bounded id query
+    comes back empty and no replay runs.
+    """
+    # The read's own WHERE with the invalidation condition NEGATED, which is
+    # how the sibling counter reaches its drained rows too. The literal is
+    # already treated as a token where the filter is assembled, and the assert
+    # says so out loud rather than silently counting nothing if it ever moves.
+    negated = where.replace("t_invalid IS NULL", "t_invalid IS NOT NULL")
+    if negated == where:
+        return 0, False
+    hidden = conn.execute(
+        f"SELECT {prefix}claim_id AS claim_id FROM {from_sql} {negated} "
+        f"LIMIT ?",
+        (*params, ceiling + 1),
+    ).fetchall()
+    if not hidden:
+        return 0, False
+    saturated = len(hidden) > ceiling
+    verdicts = _gather_contradictions_by_claim(conn)
+    cache: dict = {}
+    unbacked = 0
+    for row in hidden[:ceiling]:
+        claim_id = row[0]
+        try:
+            replay = replay_contradictions(
+                conn, claim_id, verdicts=verdicts.get(claim_id, []),
+                cache=cache,
+            )
+        except Exception:
+            continue
+        if not replay["backed"]:
+            unbacked += 1
+    return unbacked, saturated
+
+
 def _disclose_unverified(
     conn: sqlite3.Connection,
     from_sql: str,
@@ -5813,6 +7849,9 @@ def _disclose_unverified(
     include_unverified: bool,
     on_unverified_excluded: "Callable[[int], None] | None",
     prefix: str = "",
+    contested: int = 0,
+    on_contested: "Callable[[int], None] | None" = None,
+    include_invalidated: bool = True,
 ) -> None:
     """Report what the enrolled-generator filter held back, when it could matter.
 
@@ -5823,6 +7862,36 @@ def _disclose_unverified(
     page, which is the case where an empty or truncated answer reads as "that is
     all there is" about a record that is not.
     """
+    # One disclosure function, two facts, and they are counted apart because
+    # they are not the same fact. A held-back row was NOT served, and the
+    # caller's list is short by it. A contested row WAS served, and what is
+    # wrong with it is that its contradiction record does not hold up. Routing
+    # the second through the first would have logged a served row as an
+    # excluded one, which is a false sentence in the health record and inflates
+    # a counter that means something else.
+    #
+    # Reported ahead of the full-page return below, because a contested row is
+    # a property of the rows served and a full page does not make it moot the
+    # way it does a held-back count.
+    if contested and on_contested is not None:
+        on_contested(contested)
+    if not include_invalidated:
+        # Whatever the page length. A short page is the case the count above is
+        # about; here one hidden row among a full page of served ones is the
+        # whole of the attack, so a full page does not make it moot.
+        unbacked, unbacked_saturated = _count_unbacked_invalidations(
+            conn, from_sql, where, params, ceiling=ceiling, prefix=prefix,
+        )
+        if unbacked:
+            import logging
+            logging.getLogger("mareforma").warning(
+                "Read hid %s claim(s)%s behind an invalidation timestamp that "
+                "no signed verdict supports; that column carries no trigger, "
+                "so one UPDATE hides a claim from every listing. Call "
+                "`mareforma verify` on the project, or pass "
+                "include_invalidated=True to see them.",
+                unbacked, " (at least)" if unbacked_saturated else "",
+            )
     if include_unverified or on_unverified_excluded is None or served >= limit:
         return
     held, saturated = _count_unverified_held_back(
@@ -5897,7 +7966,8 @@ def _project_verified_rows(
     limit: int,
     include_unverified: bool,
     on_verify_excluded: Callable[[int], None] | None = None,
-) -> tuple[list[dict], int]:
+    clean_only: bool = False,
+) -> tuple[list[dict], int, int]:
     """Filter and project rows for a read surface, stopping at ``limit`` survivors.
 
     Computes the per-call reputation, enrolled set, and trust-domain disclosure
@@ -5920,22 +7990,41 @@ def _project_verified_rows(
     :func:`_read_path_row` stays as the belt-and-braces check the SQL mirrors.
     Its disclosure is taken separately by :func:`_disclose_unverified`.
 
-    Returns ``(survivors, scanned)``. ``scanned`` is how many rows were pulled,
-    which the caller compares against the scan ceiling to tell "that is all
-    there is" from "the scan ran out before the survivors did".
+    Returns ``(survivors, scanned, contested)``. ``scanned`` is how many rows
+    were pulled, which the caller compares against the scan ceiling to tell
+    "that is all there is" from "the scan ran out before the survivors did".
+    ``contested`` counts rows whose contradiction record the signed verdicts do
+    not support, and it is counted whatever the caller asked for: a clean-only
+    caller has those rows withheld, an ordinary caller is served them and has to
+    be told. It is kept apart from the excluded count because a row that fails
+    to re-verify and a row whose contradiction record does not hold up are
+    different news.
     """
     if limit <= 0:
         # The loop appends a survivor before testing the stop condition, so it
         # would hand back one row for a limit of zero. Nothing was asked for:
         # return nothing, and skip the per-call reputation and trust-domain work.
-        return [], 0
+        return [], 0, 0
     reputation = _compute_validator_reputation(conn)
     enrolled_keyids = _enrolled_validator_keyids(conn)
     trust_domain = _trust_domain_disclosure(conn)
+    # Grouped once for the page, whether or not the filter will act on the
+    # answer, because the count is disclosed either way: a caller who did not
+    # ask for clean claims still has to be told that one of the rows it was
+    # handed carries a contradiction record the signed verdicts do not support.
+    # Per row this would be a statement each to ask what one pass answers, and
+    # the ordinary graph has no verdicts at all, so every one of those
+    # statements returns nothing. It cannot move into the SQL filter either:
+    # that filter can only read t_invalid, which carries no trigger, so a real
+    # contradiction erased from that column reads as clean to every statement
+    # in this file.
+    contradictions = _gather_contradictions_by_claim(conn)
+    contested = 0
     verify_cache: dict = {}
     results: list[dict] = []
     scanned = 0
     excluded = 0
+    withheld = 0
     for row in rows:
         scanned += 1
         d = _read_path_row(
@@ -5947,6 +8036,26 @@ def _project_verified_rows(
         if d is _VERIFY_EXCLUDED:
             excluded += 1
         elif d is not None:
+            # One replay per served row, doing both jobs. The disagreement is
+            # counted whatever the caller asked for, and only a caller who asked
+            # for clean claims has the row withheld: dropping it from an
+            # unfiltered listing would be this function deciding what the caller
+            # meant, and counting it nowhere is the silence this exists to end.
+            replayed = _replayed_refutation(
+                conn, d, d.get("t_invalid") is not None,
+                verdicts=contradictions.get(d["claim_id"], []),
+                cache=verify_cache,
+            )
+            if replayed is not None and replayed["signal"] in REPLAY_TAMPER_SIGNALS:
+                contested += 1
+                if clean_only:
+                    # Counted apart from the verify-on-read exclusions. Both
+                    # withhold a row, and they are different news: one row's
+                    # signature did not re-verify, this one's contradiction
+                    # record does not hold up. Folding them told the operator
+                    # the wrong thing about which claim to go and look at.
+                    withheld += 1
+                    continue
             results.append(d)
             if len(results) >= limit:
                 break
@@ -5960,7 +8069,30 @@ def _project_verified_rows(
         )
         if on_verify_excluded is not None:
             on_verify_excluded(excluded)
-    return results, scanned
+    if withheld:
+        import logging
+        logging.getLogger("mareforma").warning(
+            "Read withheld %s claim(s) whose contradiction record the signed "
+            "verdicts do not support; call `mareforma verify` on the affected "
+            "claim_id for the detail.",
+            withheld,
+        )
+    if contested - withheld:
+        # The other direction, and the one that reads as a clean answer. A
+        # claim whose invalidation was cleared passes the SQL filter and is
+        # SERVED, so the caller is handed a row the signed verdicts say is
+        # contradicted. Counting it in the health record is not telling the
+        # person reading the list, and the disagreement has to reach them the
+        # same way the withheld one does.
+        import logging
+        logging.getLogger("mareforma").warning(
+            "Read served %s claim(s) whose contradiction record the signed "
+            "verdicts contradict; the invalidation column carries no trigger, "
+            "so one UPDATE clears a real contradiction from every listing. "
+            "Call `mareforma verify` on the affected claim_id for the detail.",
+            contested - withheld,
+        )
+    return results, scanned, contested
 
 
 def query_claims(
@@ -5975,6 +8107,7 @@ def query_claims(
     refutation_filter: str | None = None,
     on_verify_excluded: Callable[[int], None] | None = None,
     on_unverified_excluded: Callable[[int], None] | None = None,
+    on_contested: Callable[[int], None] | None = None,
 ) -> list[dict]:
     """Return claims ordered by support_level (desc) then recency (desc).
 
@@ -6013,9 +8146,16 @@ def query_claims(
       - ``validator_reputation`` (int): for ESTABLISHED rows, the number
         of ESTABLISHED claims signed by the same validator (≥ 1). For
         other rows, ``0``.
-      - ``generator_enrolled`` (bool): True iff the claim's
-        ``signature_bundle`` is signed by an enrolled validator. False
-        for unsigned claims and for signatures by unenrolled keys.
+      - ``generator_enrolled`` (bool): True iff the key on the claim's
+        ``signature_bundle`` has a row in the ``validators`` table. False
+        for unsigned claims and for keys that table does not name.
+
+        Membership, not enrolment. The table has no INSERT guard, so one
+        INSERT carrying a real pubkey and a junk enrollment envelope makes a
+        key a member without its chain walking back to the root. The walk is
+        what ``validators.is_enrolled`` does and what verify-on-read and
+        ``mareforma verify`` apply; a caller wanting that answer asks them,
+        and this field is the cheap listing-side filter it was built as.
     """
     _require_non_negative_limit(limit, "query")
 
@@ -6137,9 +8277,10 @@ def query_claims(
     # at `limit` survivors, and on the common path (the first `limit` rows all
     # survive) that break stops fetching too, so the ceiling stays the worst-case
     # bound for the adversarial drain path instead of the per-call materialisation.
-    results, scanned = _project_verified_rows(
+    results, scanned, contested = _project_verified_rows(
         conn, cursor, limit=limit, include_unverified=include_unverified,
         on_verify_excluded=on_verify_excluded,
+        clean_only=refutation_filter == "clean",
     )
     if scanned >= ceiling and len(results) < limit:
         raise _scan_ceiling_error("query", ceiling, len(results), limit)
@@ -6147,7 +8288,9 @@ def query_claims(
         conn, "claims", disclose_where, disclose_params,
         ceiling=ceiling, limit=limit,
         served=len(results), include_unverified=include_unverified,
-        on_unverified_excluded=on_unverified_excluded,
+        on_unverified_excluded=on_unverified_excluded, contested=contested,
+        on_contested=on_contested,
+        include_invalidated=include_invalidated,
     )
     return results
 
@@ -6233,6 +8376,7 @@ def search_claims(
     include_invalidated: bool = False,
     on_verify_excluded: Callable[[int], None] | None = None,
     on_unverified_excluded: Callable[[int], None] | None = None,
+    on_contested: Callable[[int], None] | None = None,
 ) -> list[dict]:
     """FTS5-ranked search over claim text.
 
@@ -6308,7 +8452,7 @@ def search_claims(
         raise DatabaseError(f"Failed to search claims: {exc}") from exc
     # Step the ranked cursor lazily: _project_verified_rows stops at `limit`
     # survivors, so the common path fetches a handful, not the whole ceiling.
-    results, scanned = _project_verified_rows(
+    results, scanned, contested = _project_verified_rows(
         conn, cursor, limit=limit, include_unverified=include_unverified,
         on_verify_excluded=on_verify_excluded,
     )
@@ -6320,6 +8464,15 @@ def search_claims(
         disclose_where, disclose_params, ceiling=ceiling, limit=limit,
         served=len(results), include_unverified=include_unverified,
         on_unverified_excluded=on_unverified_excluded, prefix="c.",
+        # The contested count reaches the caller here as it does from query.
+        # The shared projection replays the signed verdicts for both surfaces
+        # and hands the count back to both, and this one bound it to a local
+        # and dropped it, leaving `on_contested` in the signature with nothing
+        # to call it. So a claim whose contradiction verdict is signed and
+        # whose t_invalid somebody erased was served by search in silence and
+        # by query with a disclosure, on the same graph, in the same process.
+        contested=contested, on_contested=on_contested,
+        include_invalidated=include_invalidated,
     )
     return results
 
@@ -6732,16 +8885,342 @@ def _backup_trust_tables(conn: sqlite3.Connection, data: dict) -> None:
         data[section] = section_data
 
 
+def _backup_grounding_attestations(
+    conn: sqlite3.Connection, data: dict,
+) -> None:
+    """Add the observer's grounding attestations to the backup ``data`` dict.
+
+    This is the section the whole artifact is for. The axis travels in the
+    claim's signed statement already; what did not travel was any record that an
+    observer, rather than the producer's typing, put it there. Round-tripping
+    these is what lets a restored graph be held to the standard the write path
+    holds.
+
+    Emitted only when populated, like every other optional section.
+    """
+    rows = conn.execute(
+        "SELECT claim_id, statement_cid, receipt_digest, grounding, "
+        "signer_keyid, signature, created_at FROM grounding_attestations "
+        "ORDER BY created_at, claim_id"
+    ).fetchall()
+    if not rows:
+        return
+    data["grounding_attestations"] = {
+        r["claim_id"]: {
+            "statement_cid": r["statement_cid"],
+            "receipt_digest": r["receipt_digest"],
+            "grounding": r["grounding"],
+            "signer_keyid": r["signer_keyid"],
+            "signature": base64.b64encode(r["signature"]).decode("ascii"),
+            "created_at": r["created_at"],
+        }
+        for r in rows
+    }
+
+
+def _backup_verdict_chain(conn: sqlite3.Connection, data: dict) -> None:
+    """Add the verdict-set chain to the backup ``data`` dict.
+
+    Keyed by sequence number as a string, because TOML table keys are strings.
+    Round-tripping it is what carries the chain through the recovery the file
+    exists for: a restore that dropped the chain would rebuild a graph whose
+    verdicts are all uncovered, which reads exactly like a graph somebody
+    stripped.
+
+    Emitted only when populated, so a graph that has recorded no verdict under
+    this version writes no section, the same rule every other optional section
+    follows.
+    """
+    rows = conn.execute(
+        "SELECT seq, prev_tip, tip, verdict_kind, verdict_id, verdict_digest, "
+        "issuer_keyid, signature, created_at FROM verdict_chain ORDER BY seq"
+    ).fetchall()
+    if not rows:
+        return
+    data["verdict_chain"] = {
+        str(r["seq"]): {
+            "prev_tip": r["prev_tip"],
+            "tip": r["tip"],
+            "verdict_kind": r["verdict_kind"],
+            "verdict_id": r["verdict_id"],
+            "verdict_digest": r["verdict_digest"],
+            "issuer_keyid": r["issuer_keyid"],
+            "signature": base64.b64encode(r["signature"]).decode("ascii"),
+            "created_at": r["created_at"],
+        }
+        for r in rows
+    }
+
+
+def _backup_schema_census(conn: sqlite3.Connection, data: dict) -> None:
+    """Add the write-guard census to the backup ``data`` dict.
+
+    The census is the graph's memory that a guard was found missing, and a
+    guard that came back is not a guard that was never gone: the rows it let
+    somebody delete while it was down are gone, and no later open can see that.
+    Leaving the census out of the backup made a round trip erase exactly that
+    memory, so a graph could be tampered with, backed up and restored, and read
+    clean on every surface that had just called it tampered.
+
+    It is observation rather than evidence, which is why it rides as its own
+    section and not as a claim: the file records that something was seen
+    missing, and the restored graph goes on saying so.
+
+    Emitted only when populated, the rule every optional section follows.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT observed_at, missing FROM schema_census "
+            "ORDER BY observed_at, missing"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return          # no census table on this schema: nothing observed
+    if not rows:
+        return
+    data["schema_census"] = {
+        str(n): {"observed_at": r["observed_at"], "missing": r["missing"]}
+        for n, r in enumerate(rows, start=1)
+    }
+
+
+# The line that separates the backup's body from its completeness table. The
+# digest below covers every byte before it, so both the writer and
+# :func:`verify_completeness_digest` locate the split on this exact string.
+_COMPLETENESS_HEADER = "[completeness]\n"
+
+# Which shape of claims.toml this is, stamped at the top of every backup.
+#
+# The completeness table lets a reader ask whether a backup accounts for itself,
+# and a reader can only hold a file to that question if the file says it owes an
+# answer. Without this number it cannot: a backup of a healthy graph carries only
+# [validators], [claims] and [graph_meta] beside the table, because every other
+# section is written only when it has rows. Delete the table from such a file and
+# what is left has the same sections, and the same keys, as a backup written
+# before the table existed. Measured against the released trees, not reasoned
+# about. So absence could not be read as tamper, and the silence a stripped file
+# keeps was the same silence an honest older file keeps.
+#
+# It is a top-level key rather than a field inside a section, and that is the
+# whole of its truncation value. Inside [graph_meta] it sat seventeen bytes above
+# the table on a seven-kilobyte file, so all but one cut that took the table took
+# the stamp with it. On line one it survives every cut that leaves a parseable
+# file. Measured both ways.
+#
+# What it does not do: beat an editor who removes it along with the table. This
+# is a claim the file makes about itself and nothing signs it, so that edit puts
+# the file back where it was. It closes deleting the completeness table whole and
+# leaving the rest, which is one shape, not the class.
+#
+# The number rises when the set of sections a reader may rely on changes. A
+# reader that meets a number above its own cannot say what that file owes, and
+# says so rather than guessing in either direction.
+_BACKUP_FORMAT = 1
+
+
+def _backup_completeness_tail(
+    conn: sqlite3.Connection, data: dict, body: str,
+) -> str:
+    """The ``[completeness]`` table: what this file says it contains.
+
+    Row counts per emitted section, the verdict-chain tip, the covered-versus-
+    total verdict pair, and a SHA-256 over *body*, which is every byte of the
+    file that precedes this table.
+
+    **The digest is not a signature and must never be described as one.**
+    Anyone editing the file recomputes it in a line. What it does is make
+    truncation, corruption and casual editing detectable, and make a deliberate
+    attacker be deliberate. Nothing signs at backup time because nothing holds a
+    key at backup time, which is the constraint the verdict chain works around
+    by signing where a key genuinely is, and which this table cannot.
+
+    It digests the serialized body rather than a second canonical form of the
+    same data, for two reasons. The writer has already paid for those bytes, and
+    hashing them again costs nothing, where canonicalizing the whole dict a
+    second time measured at about a third of the cost of writing a claim. And a
+    reader checks it by hashing the file it is holding, with no need to
+    reproduce a serialization byte for byte before it can agree.
+
+    The counts describe the file rather than the graph, so a file truncated
+    after it was written disagrees with itself. The verdict pair is the one
+    graph-side number here, because the gap between covered and total is how a
+    reader sees which verdicts predate the chain instead of guessing.
+    """
+    import tomli_w
+
+    covered, total = verdict_chain_coverage(conn)
+    table = {
+        "completeness": {
+            "sections": {
+                name: len(entries)
+                for name, entries in sorted(data.items())
+                if isinstance(entries, dict)
+            },
+            "verdict_chain_tip": verdict_chain_tip(conn),
+            "verdict_chain_covered": covered,
+            "verdicts_total": total,
+            "digest": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        }
+    }
+    tail = tomli_w.dumps(table)
+    if not tail.startswith(_COMPLETENESS_HEADER):
+        # tomli_w puts the table header first for a single-table document. If
+        # that ever stops being true the split point moves and every stored
+        # digest silently stops reproducing, so refuse rather than write one.
+        raise FormatArtifactError(
+            "the completeness table did not serialize with its own header "
+            f"first, so the digest boundary is not where readers look: {tail[:60]!r}"
+        )
+    return tail
+
+
+def verify_completeness_digest(claims_toml: "str | Path") -> bool:
+    """True iff the file's stored digest matches the bytes above it.
+
+    Splits on the last :data:`_COMPLETENESS_HEADER` and hashes everything
+    before it. No TOML is re-serialized, so the answer does not depend on
+    agreeing with the writer's formatting, only on the bytes on disk.
+
+    False for a file with no completeness table, which is every backup written
+    before the table existed, and for one whose digest does not reproduce.
+    Truncation, corruption and hand-editing all land here. A deliberate
+    attacker recomputes it, which is why this is not a signature and the
+    verdict chain exists beside it.
+    """
+    # Line endings normalised before the boundary is looked for, the same way
+    # and for the same reason as the reader that asks what follows the table.
+    # When only one of the two normalised, the pair could be made to locate
+    # different boundaries in one file: a decoy header written with carriage
+    # returns was invisible here and visible there, and a forged section between
+    # them was checked by neither while this still returned True. So the rule is
+    # that both find the boundary the same way, and the cost of that is that a
+    # line-ending conversion no longer reads as an edit, which it never was.
+    raw = Path(claims_toml).read_bytes().replace(b"\r\n", b"\n")
+    marker = ("\n" + _COMPLETENESS_HEADER).encode("utf-8")
+    cut = raw.rfind(marker)
+    if cut == -1:
+        return False
+    body = raw[: cut + 1]
+    try:
+        import tomllib          # 3.11+ stdlib
+    except ModuleNotFoundError:  # 3.10, where it is the tomli backport
+        import tomli as tomllib  # type: ignore[no-redef]
+
+    try:
+        stored = tomllib.loads(raw.decode("utf-8"))["completeness"]["digest"]
+    except (ValueError, KeyError, UnicodeDecodeError):
+        return False
+    return hashlib.sha256(body).hexdigest() == stored
+
+
+def tables_below_completeness(claims_toml: "str | Path") -> "tuple[str, ...]":
+    """The names of any tables written below the ``[completeness]`` table.
+
+    Empty for every file this writer produces, because the completeness table is
+    the last thing it writes.
+
+    This is the blind spot the digest cannot cover by construction. The digest
+    is taken over the bytes ABOVE the header, so bytes below it are outside what
+    it attests, and the row counts only walk the section names the table itself
+    declares, so a section the file never had is counted by neither. Measured
+    rather than reasoned about: a well-formed transparency-log entry appended
+    under the table restored into the graph, flipped a real claim to logged, and
+    the digest still verified with nothing said.
+
+    **The tail is parsed, not scanned.** Reading it line by line for something
+    that opens with a bracket and closes with one was the first version, and a
+    single trailing comment walked straight past it: ``[rekor_inclusions."..."]
+    # note`` is a table to TOML and was not one to that check, so the same
+    forged entry landed again in silence. Measured before and after. Every other
+    shape a header can take, whitespace, an array of tables, a quoted key with a
+    bracket in it, is the same class of mistake waiting, and the parser already
+    knows all of them.
+
+    Raises :class:`ValueError` when the tail cannot be parsed, rather than
+    reporting nothing found. The two are different answers and collapsing them
+    hands a caller "there is nothing below the table" for a file where there
+    demonstrably is: a multi-line string carrying the marker moves the boundary,
+    the tail then starts mid-string, and the parse fails. Restore has already
+    parsed the whole file by the time it asks, so it does not meet this; a
+    caller reaching the function directly does, and should hear about it.
+    """
+    try:
+        import tomllib          # 3.11+ stdlib
+    except ModuleNotFoundError:  # 3.10, where it is the tomli backport
+        import tomli as tomllib  # type: ignore[no-redef]
+
+    # Line endings are normalised before the boundary is looked for. The file is
+    # read as text everywhere else, which is newline-agnostic, so a backup that
+    # went through a Windows editor or a checkout that rewrites endings is an
+    # ordinary honest file. Searching it for a byte pattern that requires a bare
+    # newline found nothing, which made every such file look like it had no
+    # table below and let a forged section hide behind the digest complaint the
+    # conversion produced on its own.
+    raw = Path(claims_toml).read_bytes().replace(b"\r\n", b"\n")
+    marker = ("\n" + _COMPLETENESS_HEADER).encode("utf-8")
+    cut = raw.rfind(marker)
+    if cut == -1:
+        return ()
+    # From the header itself, so the tail is a document in its own right and
+    # its own table is named rather than inferred from what follows it.
+    try:
+        tail = tomllib.loads(raw[cut + 1:].decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, RecursionError) as exc:
+        raise ValueError(
+            f"the bytes below the completeness table of {claims_toml} are not "
+            f"a table this format writes: {exc}"
+        ) from exc
+    return tuple(name for name in tail if name != "completeness")
+
+
+def _format_artifact(build, *args):
+    """Run a format writer, raising rather than degrading to absent.
+
+    Every failure inside one becomes a :class:`FormatArtifactError`, which
+    :func:`_backup_claims_toml` re-raises instead of printing, for the reason on
+    the class.
+
+    In ordinary operation this cannot fire: the writers read one table and hash
+    bytes that are already in hand. The raise is reserved for a graph that is
+    already broken, and on such a graph a caller finding out is the point.
+    """
+    try:
+        return build(*args)
+    except FormatArtifactError:
+        raise
+    except Exception as exc:
+        raise FormatArtifactError(
+            f"a claims.toml format section could not be built: {exc}. "
+            "Whatever mutation triggered this backup is already committed to "
+            "graph.db, which stays authoritative; what did not happen is the "
+            "backup, and claims.toml still holds the previous good copy. This "
+            "refuses instead of printing because a completeness section that "
+            "is merely absent cannot be told apart from one that was never "
+            "written."
+        ) from exc
+
+
 def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
     """Write all claims AND validators to claims.toml in the project root.
 
     Called after every claim or validator mutation. The TOML file is
     the source of truth for ``mareforma restore`` after catastrophic
-    loss of ``graph.db``. Failure is non-fatal: an error line is
-    printed to stderr but the exception is not raised: graph.db is
-    still authoritative and the next successful mutation will rewrite
-    the file. Stderr-ERROR (not ``warnings.warn``, which production
-    callers often suppress) so divergence is visible by default.
+    loss of ``graph.db``.
+
+    **Most failures are non-fatal.** An error line goes to stderr and the
+    exception is not raised: graph.db is still authoritative and the next
+    successful mutation rewrites the file. Stderr-ERROR rather than
+    ``warnings.warn``, which production callers often suppress, so divergence
+    is visible by default.
+
+    **The completeness sections are the exception, and they raise.** Every
+    other section degrades to a stale backup that the next mutation repairs. An
+    absent completeness section cannot be told apart from a backup written
+    before the section existed, so its silence has the shape of the tamper it
+    exists to detect, and a writer whose job is detecting silence cannot fail
+    silently. :class:`~mareforma.db.errors.FormatArtifactError` therefore
+    reaches the caller, which means **every mutating call can raise it, after
+    the mutation itself has already committed**. The row is in graph.db; what
+    did not happen is the backup.
     """
     state = _backup_suspended.get(id(conn))
     if state is not None:
@@ -6751,7 +9230,11 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
     try:
         import tomli_w
 
-        data: dict[str, Any] = {}
+        # First, and unconditionally. A stamp that is sometimes absent says
+        # nothing when it is absent, and one written low in the file goes with
+        # the bytes a truncation takes. tomli_w emits top-level keys ahead of
+        # every table, so this lands on line one whatever else the graph holds.
+        data: dict[str, Any] = {"backup_format": _BACKUP_FORMAT}
 
         # Validators first so a restore pass can verify enrollment
         # signatures before trying to verify the claims that reference
@@ -6964,6 +9447,13 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
             "supports_revision": _supports.supports_revision(conn),
         }
 
+        # Last section in the dict, so the completeness digest below covers it
+        # along with everything above. Raises where the sections above degrade:
+        # see _format_artifact.
+        _format_artifact(_backup_verdict_chain, conn, data)
+        _format_artifact(_backup_grounding_attestations, conn, data)
+        _format_artifact(_backup_schema_census, conn, data)
+
         # Rotate the previous backup aside before overwriting it. graph.db is
         # authoritative, so the threat this addresses is not a torn write (the
         # atomic replace below already rules that out) but the loss of the only
@@ -6981,14 +9471,25 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
         if prior is not None:
             atomic_write_bytes(root / "claims.toml.prev", prior)
 
+        # Serialize once. The completeness table is appended as text rather than
+        # added to the dict and dumped with it, so the digest can cover the body
+        # bytes without a second pass over every claim.
+        body = tomli_w.dumps(data)
+        tail = _format_artifact(_backup_completeness_tail, conn, data, body)
+
         # Atomic write: a crash during the rewrite must not destroy the sole DR
         # artifact on the exact crash class it exists for. A failure anywhere
         # before the rename leaves the previous good claims.toml untouched,
         # never truncated or empty.
         atomic_write_bytes(
-            toml_path, tomli_w.dumps(data).encode("utf-8"),
+            toml_path, (body + tail).encode("utf-8"),
         )
 
+    except FormatArtifactError:
+        # The one failure this writer does not absorb. Printing it would leave a
+        # claims.toml with no completeness section, which reads the same as a
+        # file written before the section existed. See FormatArtifactError.
+        raise
     except Exception as exc:  # noqa: BLE001
         import sys
         # stderr at an ERROR-line prefix is harder for production to

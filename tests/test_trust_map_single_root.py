@@ -58,14 +58,20 @@ class TestFindingSingleRootResidual:
         ind = tmap.get("independence")
         assert "no trust root is enrolled" in ind.residual
 
-    def test_multi_root_finding_has_no_single_root_caveat(self) -> None:
-        """With two or more enrolled roots the single-root caveat is absent."""
+    def test_multi_root_finding_reports_tamper_not_a_caveat(self) -> None:
+        """Two roots is not "the caveat does not apply", it is a broken substrate.
+
+        The single-root caveat exists because one operator owns every key. Two
+        self-signed roots does not lift that; it means the chain walk now
+        refuses every key in the table, so the count the caveat qualified is
+        not computable at all.
+        """
         tmap = _assemble(
             _claim(), n_roots=2, has_inclusion=False,
             effective_independence={"number": 2, "soft": False},
         )
         ind = tmap.get("independence")
-        assert ind.value == "2"
+        assert ind.value == "TAMPERED"
         assert "single trust root" not in ind.residual
 
     def test_integration_single_operator_two_models(self, tmp_path: Path) -> None:

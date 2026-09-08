@@ -69,7 +69,9 @@ def classify_claim_verdict(
         verify_claim_signatures,
     )
     from mareforma.observe._binding import check_grounding_binding
-    from mareforma.trust_map import build_trust_map, parse_grounding_record
+    from mareforma.trust_map import (
+        _has_rekor_inclusion, build_trust_map, parse_grounding_record,
+    )
 
     # Two lists, because the exit-code contract splits on exactly this:
     # *problems* is a definite NO (TAMPERED), something was checked and failed;
@@ -151,9 +153,107 @@ def classify_claim_verdict(
         if result.disjoint:
             problems.append(f"grounding binding violation: {result.reason}")
 
+    # The contradiction verdicts, replayed. This is a definite NO about THIS
+    # claim, not a fact about the graph around it: either its invalidation
+    # timestamp asserts a contradiction no verdict backs, or a verdict that
+    # verifies invalidates it and the timestamp was cleared, or a verdict naming
+    # it does not check out. Each was checked and each failed, which is what
+    # separates `problems` from `unchecked` here. Without this the map said
+    # TAMPERED and the verdict still exited 0, which is the exit code a CI gate
+    # reads and the only one most callers ever see.
+    from mareforma.db import REPLAY_TAMPER_SIGNALS, refutation_status
+
+    contestation = refutation_status(claim, conn)
+    if contestation["signal"] in REPLAY_TAMPER_SIGNALS:
+        problems.append(
+            f"contradiction record does not hold up ({contestation['signal']}): "
+            + contestation["reason"]
+        )
+
+    # A stored transparency-log entry that does not verify against the log key
+    # this project pinned. Checked and failed, about this claim, so it belongs
+    # with the problems: the entry claims a log witnessed the claim and the log
+    # did not. An entry nobody could check because no key is pinned is a
+    # different thing and reaches neither list, which is why the map's three
+    # states are kept apart rather than reduced to witnessed / not.
+    from mareforma.trust_map import _INCLUSION_FAILED, _recheck_inclusion
+
+    if _has_rekor_inclusion(conn, target):
+        state, detail = _recheck_inclusion(conn, target, claim)
+        if state == _INCLUSION_FAILED:
+            problems.append(
+                f"transparency-log inclusion record does not verify: {detail}"
+            )
+
+    # An observer attestation that is stored and does not check out. It belongs
+    # with the problems for the same reason: checked, failed, and about this
+    # claim. The attestation is what separates a grounding axis an observer
+    # computed from one a restore rewrote, so a broken one is not the absence of
+    # an attestation and must not exit the way absence does.
+    from mareforma.db.core import grounding_attestation_state
+
+    if grounding_attestation_state(conn, target) == "broken":
+        problems.append(
+            "observer attestation is present and does not check out against "
+            "this claim"
+        )
+
+    # The substrate this claim sits on, and it lands in `unchecked` rather than
+    # `problems` on purpose. A dropped write guard or a planted second root is a
+    # fact about the whole file, not about this claim, and it does not show the
+    # claim is bad: its own signature may be perfect. What it shows is that
+    # evidence around it could have been removed with nothing left to say so,
+    # which is missing material, the thing UNVERIFIABLE means here.
+    #
+    # Computed rather than read off the map, because the map is optional and the
+    # verdict may not differ by whether the caller asked for one.
+    from mareforma.db.core import schema_census_missing, verify_verdict_chain
+    from mareforma.validators import enrollment_roots
+
+    census_missing = schema_census_missing(conn)
+    if census_missing:
+        unchecked.append(
+            "a write guard was found missing when this graph was opened ("
+            + ", ".join(census_missing)
+            + "), so rows it would have refused cannot be ruled out and no "
+            "per-claim answer from this file is worth more than that"
+        )
+    # Same class as the census, same answer. A chain that does not check out
+    # means a verdict may have been taken out of the set, so the evidence
+    # against any claim in this file may be short by one and no per-claim
+    # answer can be worth more than that. It reached the trust map's residual
+    # first and stopped there, which put it in the printed report and not in
+    # the verdict: a graph somebody had just removed a verdict from rendered
+    # TAMPERED on the map and exited 0, and the exit code is what a gate reads.
+    chain_problems = verify_verdict_chain(conn)
+    if chain_problems:
+        unchecked.append(
+            "the verdict chain does not check out ("
+            + "; ".join(chain_problems[:3])
+            + (f"; and {len(chain_problems) - 3} more"
+               if len(chain_problems) > 3 else "")
+            + "), so a verdict may have been removed from the set and the "
+            "evidence against this claim cannot be shown to be complete"
+        )
+    n_roots = len(enrollment_roots(conn))
+    if n_roots >= 2:
+        unchecked.append(
+            f"{n_roots} self-signed trust roots are enrolled and no code path "
+            "creates a second one; the chain walk refuses every keyid in the "
+            "table while that holds, so enrolment could not be checked at all"
+        )
+
     # build_trust_map re-fetches the row and runs its own audit-grade signature
     # re-verification, so the standalone map is honest.
-    tmap = build_trust_map(conn, target) if with_trust_map else None
+    #
+    # The chain result is handed over rather than recomputed. The map would
+    # otherwise run the same check this function just ran, which on a graph
+    # with two hundred verdicts doubled the cost of a verify from forty
+    # milliseconds to ninety, for an answer that cannot have changed in
+    # between.
+    tmap = build_trust_map(
+        conn, target, chain_problems=chain_problems,
+    ) if with_trust_map else None
 
     # A definite NO outranks missing material: a claim that is both tampered and
     # signed by an unenrolled key is tampered.

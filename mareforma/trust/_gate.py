@@ -38,8 +38,17 @@ from ._store import (
     _gateable_prediction,
     compute_plan_id,
     estimate_from_row,
+    get_plan_claim_id,
+    plan_attestation_written_at,
+    run_first_execution,
     estimates_digest_from_rows,
 )
+
+# The run identity a claim with no generated_by resolves to. Mirrors
+# _graph.DEFAULT_RUN_TOKEN, spelled here rather than imported because _graph
+# imports this package; the pre-registration guard has to resolve the token the
+# same way the write path does or it asks about a different run.
+_DEFAULT_RUN_TOKEN = "agent"
 
 # Skip reasons. A line the verifier cannot count is tagged with one of these.
 # ``BEARING_RECOMPUTE``, ``PLAN_REBIND`` and ``PLAN_RULE_REBIND`` are the
@@ -159,7 +168,9 @@ class _GateLine:
     signed material by :func:`_derive_units`. ``post_hoc`` is True when the plan
     this line is gated under was not pre-registered (a one-shot plan or the
     replacement a retirement resolved it to), so a count that rests on it can be
-    disclosed as post-hoc rather than passing for a pre-registered gate.
+    disclosed as post-hoc rather than passing for a pre-registered gate. Not
+    pre-registered is decided by :func:`_preregistration_holds` rather than read
+    off the ``preregistered`` column, which nothing signs.
     """
 
     direction: BearingDirection
@@ -817,6 +828,59 @@ def _resolve_signer_and_model(
     return cache.resolve("claims", claim_id, digest, compute)  # type: ignore[return-value]
 
 
+def _preregistration_holds(
+    conn: sqlite3.Connection, row, cache: "GateCache",
+) -> bool:
+    """Whether this line's plan is pre-registered in the sense the write meant.
+
+    Three terms, and the flag is only the first, because the flag is the one
+    thing here that nothing signs.
+
+    The second is the signed one and it is what makes the answer worth having.
+    :meth:`EpistemicGraph.register_plan` writes a plan attestation, an ordinary
+    signed claim under the idempotency key ``plan:{plan_id}``, and the one-shot
+    plan ``assert_finding`` synthesises has none. So a writer who flips the
+    column has to produce a signed claim under the project's key to go with it,
+    and a ``predictions`` row planted straight through SQL brings no attestation
+    at all. Without this term the flag is the only thing separating a one-shot
+    from a pre-registration, and the guard on the column is the only thing
+    separating a reader from whoever wants to edit it.
+
+    The third is the timing rule :meth:`EpistemicGraph.assert_finding` applies
+    at write: a plan registered once its run was already emitting findings is a
+    rule chosen with the outcomes in view, whatever the column says. Restating
+    the write rule is a duplication and the alternative is a read that reports
+    a refusal as though it had been honored.
+
+    Memoized through the shared cache on the run token, because a proposition's
+    lines usually share one and the lookup is a MIN over the run's findings. A
+    run that has executed nothing yields None, which the cache does not store by
+    design; recomputing it is one indexed aggregate and the answer is the same.
+    """
+    if not row["preregistered"]:
+        return False
+    registered_at = row["plan_registered_at"]
+    if not registered_at:
+        # A flag with no registration time behind it says when nothing.
+        return False
+    plan_id = row["plan_id"]
+    # The attestation has to be the one that created this row, not one written
+    # for the same prediction afterwards. register_plan commits the claim before
+    # the structured rows, so a genuine pre-registration attests at or before its
+    # own registered_at. Without this the one-shot case is open: it registers and
+    # executes in the same breath, so the timing term below passes on its own,
+    # and a later register_plan supplies the attestation the flag needs.
+    attested_at = plan_attestation_written_at(conn, plan_id) if plan_id else None
+    if not plan_id or attested_at is None or attested_at > registered_at:
+        return False
+    run_token = row["generated_by"] or _DEFAULT_RUN_TOKEN
+    first_exec = cache.resolve(
+        "run_first_execution", run_token, "",
+        lambda: run_first_execution(conn, run_token),
+    )
+    return first_exec is None or registered_at <= first_exec
+
+
 def _derive_units(
     conn: sqlite3.Connection, content_id: str, cache: GateCache,
 ) -> tuple[list[_GateLine], list[_SkippedLine]]:
@@ -1130,7 +1194,17 @@ def _derive_units(
             # The count rests on a post-hoc plan when the line's own plan was not
             # pre-registered (a one-shot plan) or a retirement resolved it to a
             # replacement, whose alpha was chosen with the estimates in view.
-            post_hoc = superseded or not r["preregistered"]
+            #
+            # "Pre-registered" is not taken off the column. preregistered is
+            # deliberately excluded from the content-addressed plan_id and no
+            # signature covers it, so the flag alone is an assertion, and the
+            # rule that makes it mean something lives at write time: a plan
+            # registered after its run had already produced findings is not a
+            # pre-registration. assert_finding refuses that; nothing re-derived
+            # it on read, which is where a stored flag was read back as though
+            # the refusal had been applied to it. Every term is in the database,
+            # so the read can ask the same question the write asked.
+            post_hoc = superseded or not _preregistration_holds(conn, r, cache)
             units.append(
                 _GateLine(direction, run_token, r["data_id"], model_key, post_hoc)
             )

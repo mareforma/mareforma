@@ -46,6 +46,7 @@ import functools
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -105,21 +106,39 @@ _PYTEST_BUILTIN_MARKERS = frozenset(
 _DOC_MARKER = re.compile(r"@pytest\.mark\.(\w+)|pytest\s+-m\s+'?(\w+)")
 
 
-def _build_sdist_names():
-    """Build the sdist in-process (no network, no build frontend) and
-    return the archive member paths relative to the sdist root."""
+def _build_sdist(out) -> str:
+    """Build the sdist into *out* and return the archive name.
+
+    setuptools stages the archive in a ``<name>-<version>/`` tree under the
+    working directory, which has to be the repo root. Recent setuptools removes
+    that tree once the archive is written; this covers a version that does not,
+    and only when this build is what created it. An untracked copy of the
+    package inside the checkout is not cosmetic: a dirty tree aborts a rebase,
+    and one ``git add -A`` commits the package into itself.
+    """
     # The dev extra declares setuptools, so every CI leg and every documented
     # dev install runs this guard. Skip rather than hard-fail for the one case
     # left, a bare environment installed without the dev extra.
     build_meta = pytest.importorskip("setuptools.build_meta")
 
     cwd = os.getcwd()
+    before = {p.name for p in REPO_ROOT.iterdir()}
+    os.chdir(REPO_ROOT)
+    try:
+        name = build_meta.build_sdist(str(out))
+    finally:
+        os.chdir(cwd)
+    staged = REPO_ROOT / name.removesuffix(".tar.gz")
+    if staged.name not in before and staged.is_dir():
+        shutil.rmtree(staged, ignore_errors=True)
+    return name
+
+
+def _build_sdist_names():
+    """Build the sdist in-process (no network, no build frontend) and
+    return the archive member paths relative to the sdist root."""
     with tempfile.TemporaryDirectory() as out:
-        os.chdir(REPO_ROOT)
-        try:
-            name = build_meta.build_sdist(out)
-        finally:
-            os.chdir(cwd)
+        name = _build_sdist(out)
         with tarfile.open(os.path.join(out, name)) as tf:
             members = tf.getnames()
     # strip the leading "<pkg>-<version>/" component
@@ -160,14 +179,7 @@ def test_sdist_suite_runs_green_from_the_archive(tmp_path):
     release that is fine. Such tests skip downstream, and this catches the next
     one that does not. Marked ``sdist`` because it costs about 45 seconds.
     """
-    build_meta = pytest.importorskip("setuptools.build_meta")
-
-    cwd = os.getcwd()
-    os.chdir(REPO_ROOT)
-    try:
-        name = build_meta.build_sdist(str(tmp_path))
-    finally:
-        os.chdir(cwd)
+    name = _build_sdist(tmp_path)
     with tarfile.open(tmp_path / name) as tf:
         tf.extractall(tmp_path, filter="data")
 
@@ -905,4 +917,80 @@ def test_built_artifacts_carry_model_lineage_authentication():
         "authentication, so a forged unsigned model_lineage column inflates "
         f"independence to CONVERGENT: {stale}. Rebuild dist/ from current "
         "source before publishing."
+    )
+
+
+def test_no_shipped_module_uses_syntax_newer_than_the_floor():
+    """Every shipped module has to parse on the oldest Python we claim.
+
+    ``requires-python`` says 3.10, and a backslash inside an f-string
+    expression is a syntax error until 3.12. That is not a runtime failure on
+    an edge path: the module does not import at all, so the package is broken
+    for anyone on the floor and green for everyone developing above it. Checked
+    from the source rather than by running an old interpreter, because the
+    check has to hold on whichever Python the suite happens to run under, and
+    ``ast.parse(feature_version=(3, 10))`` does not reject it.
+    """
+    import ast
+
+    floor = tomllib.loads(
+        (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]["requires-python"]
+    assert floor == ">=3.10", (
+        f"the floor moved to {floor}; this guard names 3.10 in its reasoning"
+    )
+
+    offenders = []
+    for path in sorted((REPO_ROOT / "mareforma").rglob("*.py")):
+        src = path.read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FormattedValue):
+                segment = ast.get_source_segment(src, node.value) or ""
+                if "\\" in segment:
+                    offenders.append(
+                        f"{path.relative_to(REPO_ROOT)}:{node.lineno}"
+                    )
+    assert not offenders, (
+        "a backslash inside an f-string expression does not parse before "
+        f"Python 3.12: {offenders}"
+    )
+
+
+def test_nothing_imports_tomllib_without_the_backport():
+    """``tomllib`` is stdlib from 3.11, and the floor is 3.10.
+
+    Below that it is the ``tomli`` backport under another name, which is why it
+    is a conditional dependency. A bare ``import tomllib`` therefore fails on
+    the oldest Python we claim, and it fails at import time, so the module does
+    not load at all. The shipped tests are graft-ed into the sdist for distro
+    packagers to run, so they are held to the same rule as the package.
+    """
+    import ast
+
+    offenders = []
+    for root in ("mareforma", "tests"):
+        for path in sorted((REPO_ROOT / root).rglob("*.py")):
+            src = path.read_text(encoding="utf-8")
+            tree = ast.parse(src)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Import):
+                    continue
+                if not any(a.name == "tomllib" for a in node.names):
+                    continue
+                # Guarded when it sits inside a try that falls back to tomli.
+                guarded = any(
+                    isinstance(parent, ast.Try)
+                    and "tomli" in (ast.get_source_segment(src, parent) or "")
+                    for parent in ast.walk(tree)
+                    if isinstance(parent, ast.Try)
+                    and node in list(ast.walk(parent))
+                )
+                if not guarded:
+                    offenders.append(
+                        f"{path.relative_to(REPO_ROOT)}:{node.lineno}"
+                    )
+    assert not offenders, (
+        "import tomllib without a tomli fallback breaks Python 3.10: "
+        f"{offenders}"
     )

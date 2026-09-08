@@ -87,6 +87,12 @@ def _info(msg: str) -> None:
 
 
 _TIER_FG = {"COMPUTED": "green", "PROXIED": "yellow", "DEFERRED": "white"}
+# A tamper value overrides the tier colour. The tier says where an answer came
+# from, so a tamper report computed from evidence printed its badge in the same
+# green as a healthy computed axis: the word said TAMPERED and the colour said
+# fine. Whether an answer is alarming is a different question from where it
+# came from.
+_TAMPER_FG = "red"
 
 
 def _trust_map_plaintext(tmap) -> str:
@@ -134,12 +140,17 @@ def _echo_trust_map(tmap, *, redact_home: bool = False) -> None:
     click.echo(f"  map version: {tmap.version}")
     click.echo("")
     for p in tmap.properties:
-        color = _TIER_FG.get(p.tier.value, "white")
+        from mareforma.trust_map import is_tamper_value
+
+        tampered = is_tamper_value(p.value)
+        color = _TAMPER_FG if tampered else _TIER_FG.get(p.tier.value, "white")
         click.echo(
             "  " + click.style(f"{p.name:24}", bold=True) + " "
             + click.style(f"[{p.tier.value:8}]", fg=color) + " "
         )
-        out(f"      {display_value(p.value)}")
+        rendered = display_value(p.value)
+        out("      " + (click.style(rendered, fg=_TAMPER_FG, bold=True)
+                        if tampered else rendered))
         out(f"      {p.residual}")
         click.echo("")
 

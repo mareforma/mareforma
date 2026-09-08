@@ -106,6 +106,72 @@ class OracleInfluence(str, Enum):
     NOT_TESTED = "NOT_TESTED"
 
 
+class QuantityClass(str, Enum):
+    """What kind of quantity a finding reports, where that decides the verdict.
+
+    The null families destroy content and hold shape: every null in the sequence
+    family and the mapping family returns a container of the same length. That is
+    what makes them valid nulls, and it also means a quantity determined by the
+    length alone is flat under all of them by construction.
+
+    So a reported sample size, a cell count, a degrees-of-freedom figure or any
+    other function of ``len`` comes out of a content-destroying family unmoved,
+    and a family that cannot move a quantity has not shown that quantity is
+    hollow. Reading it as NOT_INFLUENCED turns the most common integers in any
+    write-up into an accusation. These are among the most common numbers there
+    are, which is why this is a systematic false positive rather than an edge.
+
+    Declare the class when it is known. ``CONTENT_DEPENDENT`` is the default and
+    the only one the family can decide.
+    """
+
+    #: The value is a function of the data's content. The nulls destroy content,
+    #: so a flat result is evidence and the verdict stands.
+    CONTENT_DEPENDENT = "CONTENT_DEPENDENT"
+    #: The value is a function of how many observations there are, not of what
+    #: they say: sample sizes, cell counts, degrees of freedom.
+    LENGTH_INVARIANT = "LENGTH_INVARIANT"
+    #: The value is fixed by the design or the configuration and no data moves
+    #: it: a declared alpha, a seed, a configured epoch count.
+    DESIGN_FIXED = "DESIGN_FIXED"
+
+
+# Classes the content-destroying families cannot decide, and why. A quantity in
+# one of these is a provable invariant of every valid null in the family, so the
+# measurement is undecidable BY CONSTRUCTION rather than ambiguous in the data.
+# Named here so the exclusion is a table a reader can check rather than a rule
+# living in one branch of one function.
+_UNDECIDABLE_BY_CONSTRUCTION: "dict[QuantityClass, str]" = {
+    QuantityClass.LENGTH_INVARIANT: (
+        "every null in the family preserves the input's length, so a quantity "
+        "determined by length alone is flat under all of them whatever the "
+        "pipeline does with the data"
+    ),
+    QuantityClass.DESIGN_FIXED: (
+        "the value is fixed by the design rather than read from the data, so no "
+        "null that perturbs the data can move it"
+    ),
+}
+
+
+def _quantity_class(declared) -> "QuantityClass":
+    """*declared* as a :class:`QuantityClass`, or refuse.
+
+    Refuses rather than falling back. An unrecognised value used to read as the
+    default, so one wrong character reinstated exactly the false positive the
+    class exists to remove and published a hollow verdict against an honest
+    sample size. It also raised only at the end, after every re-run of the
+    target had already been paid for.
+    """
+    try:
+        return QuantityClass(declared)
+    except (ValueError, KeyError, TypeError):
+        raise ValueError(
+            f"{declared!r} is not a quantity class. Expected one of "
+            f"{[c.value for c in QuantityClass]}."
+        ) from None
+
+
 class NotTestedReason(str, Enum):
     """Why the oracle did not produce an influence verdict for a finding.
 
@@ -338,6 +404,14 @@ class OracleResult:
     # ``multiplicity`` alone reads as "this was corrected for", and on the modal
     # deterministic target it was not.
     multiplicity_applied: bool = False
+    # The quantity class the caller declared, and whether that declaration is
+    # what turned a hollow verdict into an undecidable one. Recorded because the
+    # only trace used to be a substring of the free-text reason, so nothing
+    # downstream could tell "undecidable because the caller declared a class"
+    # from "undecidable because the measurement was ambiguous". An audit that
+    # cannot count the declarations cannot weigh them.
+    quantity_class: str = "CONTENT_DEPENDENT"
+    declared_exclusion: bool = False
     noise_is_thin: bool = False
     # Whether the noise floor was measured at all. False means a single base run,
     # so the floor is 0 by construction and run-to-run jitter is not ruled out:
@@ -383,6 +457,7 @@ class OracleResult:
         perturbation_effects: tuple[float, ...] = (),
         dropped_nulls: "tuple[str, ...]" = (),
         caller_chose_nulls: bool = False,
+        quantity_class: "QuantityClass | str" = QuantityClass.CONTENT_DEPENDENT,
     ) -> "OracleResult":
         """Build a NOT_TESTED result: the oracle produced no influence verdict.
 
@@ -396,6 +471,13 @@ class OracleResult:
         family resolves, and a row that says the caller did not choose the nulls
         when the caller did is a false statement on the field added to keep a
         caller's own null from reading as the derived family's.
+
+        ``quantity_class`` is the caller's declaration and is carried for the
+        same reason. It is known before anything runs, so a row that omits it
+        reports ``CONTENT_DEPENDENT`` for a caller who declared otherwise, on the
+        one field that exists to record what the caller declared. An audit
+        counting declarations across a corpus would have counted every crashed
+        and unsupported row on the wrong side.
         """
         sentence = f"the oracle did not run: {reason.value}"
         if detail:
@@ -412,6 +494,7 @@ class OracleResult:
             traceback=traceback,
             dropped_nulls=dropped_nulls,
             caller_chose_nulls=caller_chose_nulls,
+            quantity_class=_quantity_class(quantity_class).value,
         )
 
     @property
@@ -587,6 +670,7 @@ def perturbation_oracle(
     thin_sigma_guard: bool = False,
     determinism_rtol: float = 1e-6,
     determinism_atol: float = 0.0,
+    quantity_class: "QuantityClass | str" = "CONTENT_DEPENDENT",
     on_progress: "Callable[[int, int], None] | None" = None,
 ) -> OracleResult:
     """Measure whether the cited data causally influences the finding.
@@ -745,6 +829,10 @@ def perturbation_oracle(
         raise ValueError("repeats must be >= 1")
     if multiplicity < 1:
         raise ValueError("multiplicity must be >= 1")
+    # Before anything runs. Refusing at the end meant paying for every re-run of
+    # the target and then raising, and a value that merely looked wrong read as
+    # the default and reinstated the false positive silently.
+    quantity_class = _quantity_class(quantity_class)
     # Resolve the metric to a declared reducer so the result records which one ran.
     # A bare callable is wrapped as an unnamed reducer; None uses scalar_reducer.
     if metric is None:
@@ -769,12 +857,14 @@ def perturbation_oracle(
             traceback=_traceback.format_exc(),
             reducer=reducer,
             caller_chose_nulls=perturb is not None,
+            quantity_class=quantity_class,
         )
     if resolved is None:
         return OracleResult.not_tested(
             NotTestedReason.UNSUPPORTED_SHAPE,
             detail="no scramble family fits the finding's input shape",
             reducer=reducer,
+            quantity_class=quantity_class,
         )
     perturbed_inputs, null_names, dropped_nulls, caller_chose = resolved
 
@@ -848,6 +938,7 @@ def perturbation_oracle(
             reducer=reducer,
             dropped_nulls=tuple(dropped_nulls),
             caller_chose_nulls=caller_chose,
+            quantity_class=quantity_class,
         )
 
     try:
@@ -883,6 +974,7 @@ def perturbation_oracle(
                 reducer=reducer,
                 dropped_nulls=tuple(dropped_nulls),
                 caller_chose_nulls=caller_chose,
+                quantity_class=quantity_class,
             )
     effect_size = max(perturbation_effects)
 
@@ -985,6 +1077,7 @@ def perturbation_oracle(
             )
         return NullOutcome.FLAT
 
+    declared_exclusion = False
     null_outcomes = tuple(_classify(e) for e in perturbation_effects)
     moved = [o is NullOutcome.MOVED for o in null_outcomes]
     ambiguous = [o is NullOutcome.AMBIGUOUS for o in null_outcomes]
@@ -998,11 +1091,26 @@ def perturbation_oracle(
             f"every null (largest move {effect_size:.4g}): the data influences it"
         )
     elif not any(moved):
-        influence = OracleInfluence.NOT_INFLUENCED
-        reason = (
-            f"the finding stayed within {decision_threshold:.4g} under every null "
-            f"(largest move {effect_size:.4g}): it does not depend on the data"
-        )
+        # A flat result is only evidence when the family could have moved it.
+        # For a quantity the family provably cannot move, flat is what the
+        # construction guarantees, and calling it hollow would turn sample sizes
+        # and cell counts into accusations. See _UNDECIDABLE_BY_CONSTRUCTION.
+        excluded = _UNDECIDABLE_BY_CONSTRUCTION.get(quantity_class)
+        if excluded is not None:
+            declared_exclusion = True
+            influence = OracleInfluence.UNDECIDABLE
+            reason = (
+                f"the finding stayed within {decision_threshold:.4g} under every "
+                f"null, and it is declared {quantity_class.value}: "
+                f"{excluded}. "
+                "Undecidable by construction, not hollow"
+            )
+        else:
+            influence = OracleInfluence.NOT_INFLUENCED
+            reason = (
+                f"the finding stayed within {decision_threshold:.4g} under every null "
+                f"(largest move {effect_size:.4g}): it does not depend on the data"
+            )
     else:
         influence = OracleInfluence.UNDECIDABLE
         held = [n for n, mv in zip(null_names, moved) if not mv]
@@ -1052,6 +1160,8 @@ def perturbation_oracle(
 
     return OracleResult(
         influence=influence,
+        quantity_class=quantity_class.value,
+        declared_exclusion=declared_exclusion,
         effect_size=effect_size,
         noise_floor=noise_std,
         decision_threshold=decision_threshold,

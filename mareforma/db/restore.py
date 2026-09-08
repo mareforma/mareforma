@@ -37,6 +37,8 @@ from .core import (
     _refuse_llm_contradiction_issuer,
     _refuse_llm_validator,
     _refuse_self_validation,
+    _claim_asserting_keyid,
+    _claim_signer_keyids,
     _refuse_self_verdict,
     _extract_validation_signer_keyid,
     _extract_signature_bundle_keyid,
@@ -245,6 +247,337 @@ def _discard_created_paths(
         pass
 
 
+def _disclose_a_rotated_copy_worth_trying(conn, toml_path) -> "tuple[str, ...]":
+    """Name the previous backup when the chain this one restored is damaged.
+
+    The verdict-chain tables take rows and refuse to give them up, on purpose,
+    and a row with a signature that does not verify makes every claim in the
+    graph read tampered. That was accepted as a denial of service rather than a
+    way to make a false claim read true, on the grounds that recovery through
+    the backup exists.
+
+    Measured, it does not survive contact: the next backup after such a row is
+    planted copies it into ``claims.toml``, so restoring from that file replays
+    it. The one clean copy is the generation the writer rotates aside, and
+    nothing has ever read it.
+
+    So this reads it, and only to say it is there. Choosing it is the operator's
+    call, because it is older by exactly one mutation and this cannot know
+    whether that mutation mattered. Saying nothing is what leaves them with two
+    files, one of them fine, and no reason to look at the second.
+    """
+    import warnings
+
+    from mareforma.db.core import verdict_chain_coverage, verify_verdict_chain
+
+    problems = verify_verdict_chain(conn)
+    if not problems:
+        return ()
+    # Beside the file being restored, whatever it is called, rather than a fixed
+    # name in whatever directory that file happens to sit in. Restoring a backup
+    # kept under another name looked past its own rotated copy, and a symlinked
+    # claims.toml looked in the link's directory instead of the real one.
+    source = Path(toml_path).resolve()
+    previous = source.with_name(source.name + ".prev")
+    have_previous = previous.is_file()
+
+    covered, _total = verdict_chain_coverage(conn)
+    said = "; ".join(problems[:3])
+    if len(problems) > 3:
+        said += f", and {len(problems) - 3} more"
+    # The damage is reported whether or not there is a copy to point at. Gating
+    # the whole sentence on that file meant restoring a damaged backup into an
+    # empty project, which is the documented recovery and by construction has no
+    # rotated copy, returned a plain success and said nothing. Deleting that
+    # file is free, and it is the first thing worth deleting.
+    message = (
+        f"the verdict chain restored from {toml_path} does not check out: "
+        f"{said}. This restore has already run and its graph holds {covered} "
+        "chain links."
+    )
+    reason = "chain_damaged"
+    if have_previous:
+        reason = "chain_damaged_previous_copy_exists"
+        message += (
+            f" A file is on disk at {previous}, which is the copy this format "
+            "rotates aside before each write. Whether its chain predates the "
+            "damage is not something this can tell you, only that it is there "
+            "and was written earlier. To compare, restore that copy into an "
+            "empty project."
+        )
+    try:
+        warnings.warn(message, UserWarning, stacklevel=4)
+    except UserWarning:
+        # A caller running warnings as errors would otherwise have this abort
+        # the restore, roll it back and delete the recovered graph, on exactly
+        # the file it exists to help with. Measured: with the rotated copy
+        # present the restore died and .mareforma was removed, and without it
+        # the same backup restored fine. A disclosure that destroys what it is
+        # disclosing about has inverted its own purpose, so the message goes to
+        # stderr instead, where it is harder to swallow than a warning and
+        # cannot unwind anything.
+        import sys
+        print(f"WARNING: {message}", file=sys.stderr)
+    return (reason,)
+
+
+def _disclose_a_file_that_disagrees_with_itself(
+    toml_path, data: dict,
+) -> "tuple[str, ...]":
+    """Say so when the backup does not match the ``[completeness]`` table it
+    carries.
+
+    The table records a row count per section and a SHA-256 over every byte
+    before it. That digest is not a signature and nobody should call it one:
+    anyone editing the file recomputes it in a line. What it makes detectable is
+    an edit made without care, and nothing was asking: a file whose body was
+    changed with the table left in place kept a section count saying three,
+    restored two, and reported success.
+
+    The table is the LAST thing in the file, so a loss that takes it also takes
+    the count that would have reported the loss. What answers for it then is the
+    format stamp on line one, which survives every cut that leaves a parseable
+    file. That is why it is a top-level key: inside a section it sat seventeen
+    bytes above the table, and all but one cut that reached the table reached it
+    too.
+
+    Two more things the table cannot speak for on its own, both measured, both
+    checked here instead. Its digest covers the bytes ABOVE it, so a section
+    appended below is outside the digest and outside the row counts, which walk
+    only the names the table declares; a well-formed transparency-log entry put
+    there restored into the graph and marked a real claim logged, in silence.
+    And the counts sit in a sub-table below the digest boundary, so they can be
+    lifted out alone while the digest still reproduces.
+
+    What no check inside one file reaches: an editor who removes the stamp along
+    with the table. The file describes itself and nothing signs the description,
+    so that edit puts it back where it was. A backup that has to answer for its
+    own truncation needs a copy the editor does not hold.
+
+    Disclosed rather than refused. This is the recovery path, its threat model
+    is a hand-edited file, and an operator who repaired a corrupt row by hand
+    has to be able to recover from it. What they must not get is silence, and a
+    graph short a few rows looks exactly like a complete one afterwards.
+
+    A file carrying neither the table nor the stamp predates both and passes
+    without a word, which is every backup written before them.
+
+    Returns a stable reason per thing found, empty when there is nothing to
+    say: ``completeness_absent``, ``format_ahead``, ``digest_mismatch``,
+    ``content_below_table``, ``tail_unparseable``, ``row_counts_absent``,
+    ``row_count_not_a_number``, ``section_not_declared``,
+    ``section_count_mismatch``.
+    Tokens rather than the sentences, because these are what a caller that
+    refuses would have to select on, and not all of them should be fatal: a
+    hand-repaired file has to stay recoverable, and ``format_ahead`` is a
+    reader admitting a limit rather than a file admitting an edit. Matching on
+    prose is how that distinction gets lost. The same shape ``RestoreError``
+    already carries in its ``kind``.
+    """
+    import warnings
+
+    from mareforma.db.core import (
+        _BACKUP_FORMAT, tables_below_completeness, verify_completeness_digest,
+    )
+
+    declared = data.get("completeness")
+    complaints = []
+    reasons = []
+    stamp = data.get("backup_format")
+    # Asked of every file, not only one missing its table. A later format still
+    # writes a completeness table, so the realistic file from ahead of this
+    # reader comes down the ordinary path, and a stamp read only on the other
+    # branch would never see it. Measured: a file stamped ten, with a table and
+    # a digest that reproduced, restored without a word.
+    ahead = (
+        isinstance(stamp, int) and not isinstance(stamp, bool)
+        and stamp > _BACKUP_FORMAT
+    )
+    if ahead:
+        reasons.append("format_ahead")
+        complaints.append(
+            f"it says it is backup format {stamp}, later than the format "
+            f"{_BACKUP_FORMAT} this release knows, so what it owes cannot be "
+            "checked here and what was checked is only what this release "
+            "understands"
+        )
+    if not isinstance(declared, dict):
+        # No table. Either the file predates it, or something took it. Two
+        # things say it was there: the stamp, and the sections written just
+        # ahead of it, one of which surviving means the file was cut between
+        # them.
+        #
+        # The stamp is what makes this reach the common case. Those sections
+        # carry rows only on a graph that recorded a verdict, attested a
+        # grounding, or lost a guard, so a healthy project's backup has none of
+        # them and, without the stamp, reads exactly like a file written before
+        # any of this existed. Measured against the released trees: same
+        # sections, same keys, nothing to tell them apart.
+        #
+        # A file carrying neither predates the format and passes without a
+        # word, which is every backup written before it.
+        if stamp is not None or any(data.get(name) for name in
+                                    ("verdict_chain", "grounding_attestations",
+                                     "schema_census")):
+            # The missing table is reported whatever the file says its format
+            # is. Putting it in an else arm let one character buy silence: bump
+            # the stamp on a truncated backup and the reason went from "the
+            # table was removed, take the backup again" to "this is from a later
+            # release, read it there", which is an affirmative misdirection
+            # about a file that had just lost a signed verdict. Measured. Every
+            # format after this one still writes the table, as the note above
+            # says, so its absence is a fact about the file rather than a thing
+            # the file's own claim about itself can excuse.
+            reasons.append("completeness_absent")
+            detail = (
+                "says it was written in a format that always carries a "
+                "completeness table, and carries none, so the table was "
+                "removed after it was written or the file was cut short"
+            )
+            if ahead:
+                # Said as well, not instead. A reader admitting it does not know
+                # the format is a true thing to add and never a reason to stop
+                # reporting what it does know.
+                detail += (
+                    f", and says it is backup format {stamp}, later than the "
+                    f"format {_BACKUP_FORMAT} this release knows"
+                )
+            warnings.warn(
+                f"claims.toml at {toml_path} {detail}. Nothing here can account "
+                "for what the file should hold. The restored graph is what "
+                "survived. Take the backup again.",
+                UserWarning,
+                stacklevel=4,
+            )
+            return tuple(reasons)
+        return tuple(reasons)
+    if not verify_completeness_digest(toml_path):
+        reasons.append("digest_mismatch")
+        complaints.append(
+            "it does not match the digest it carries, so it was truncated or "
+            "edited after it was written"
+        )
+    # What the digest cannot reach, because it is taken over the bytes above the
+    # table. A section appended below it is outside the digest and outside the
+    # counts, which only walk the names the table declares.
+    #
+    # Asked of the parsed document first, and only then of the bytes. The row
+    # counts name every table the writer emitted, so a table the document holds
+    # and the counts do not declare was added afterwards, wherever it sits in
+    # the file. That question has no byte offset in it, which is the point: two
+    # readers that locate the same boundary by searching bytes can be made to
+    # disagree, and a decoy header encoded so that only one of them sees it
+    # returned this file to silence with the digest still verifying. Measured,
+    # on 274 appended bytes and no key. Position is the wrong thing to ask.
+    #
+    # This does not stand on its own, and should not be read as if it did. The
+    # counts live below the digest boundary, so adding a name to them is free:
+    # twenty-one bytes defeats this check by itself. What it covers is the case
+    # the byte reader cannot see, and the byte reader covers the case this one
+    # cannot. Measured together: declaring the section leaves the check below
+    # the table firing, and hiding from that one moves a boundary both readers
+    # now find, which breaks the digest. Silence needs the digest rewritten,
+    # which is the deliberate attacker this file never claimed to stop.
+    declared_sections = declared.get("sections")
+    if isinstance(declared_sections, dict):
+        undeclared = sorted(
+            name for name, value in data.items()
+            if isinstance(value, dict)
+            and name != "completeness"
+            and name not in declared_sections
+        )
+        if undeclared:
+            reasons.append("section_not_declared")
+            complaints.append(
+                "it holds "
+                + ", ".join(f"[{name}]" for name in undeclared)
+                + ", which the row counts do not declare, so it was added "
+                "after the file was written"
+            )
+    try:
+        trailing = tables_below_completeness(toml_path)
+    except ValueError:
+        # The tail did not parse, which is its own answer and not the same as
+        # nothing being there. Restore parsed the whole file to get here, so
+        # reaching this means the boundary moved: something below the table put
+        # the marker somewhere the writer never would.
+        trailing = ()
+        reasons.append("tail_unparseable")
+        complaints.append(
+            "the bytes below the completeness table are not the table this "
+            "format writes, so what sits there cannot be read"
+        )
+    if trailing:
+        reasons.append("content_below_table")
+        complaints.append(
+            "it carries "
+            + ", ".join(f"[{name}]" for name in sorted(set(trailing)))
+            + " below the completeness table, where nothing the table says "
+            "reaches them"
+        )
+    sections = declared.get("sections")
+    if isinstance(sections, dict):
+        for name, count in sorted(sections.items()):
+            if not isinstance(count, int) or isinstance(count, bool):
+                # A count that is not a number is not a count, and skipping it
+                # made the careful edit quieter than the clumsy one: lifting the
+                # whole table of counts out is reported, and retyping one of
+                # them from 3 to "3" was not, while a claim went missing either
+                # way. Measured. Every file this format writes has integer
+                # counts, so anything else was put there afterwards.
+                reasons.append("row_count_not_a_number")
+                complaints.append(
+                    f"[{name}] declares a row count of {count!r}, which is not "
+                    "a number, so what it should hold cannot be checked"
+                )
+                continue
+            held = data.get(name)
+            if held is None:
+                held_n = 0          # declared and absent: the truncation case
+            elif isinstance(held, dict):
+                held_n = len(held)
+            else:
+                continue            # not a section shape; not this check's call
+            if held_n != count:
+                reasons.append("section_count_mismatch")
+                complaints.append(f"[{name}] says {count} and holds {held_n}")
+    elif stamp is not None:
+        # The counts live in a sub-table written below the digest boundary, so
+        # they can be taken out on their own and the digest still reproduces.
+        # Every file this format writes has them, so their absence in a stamped
+        # file is the same act as removing the table, one level down.
+        reasons.append("row_counts_absent")
+        complaints.append(
+            "the completeness table carries no row counts, which every file in "
+            "this format has, so they were removed after it was written"
+        )
+    if complaints:
+        # "Disagrees with itself" is true of a file whose contents and counts
+        # part company, and false of one that is merely newer than this reader.
+        # Both can be true at once, so the opening names whichever applies and
+        # the reasons are listed the same way either way.
+        opening = (
+            "is from a format this release does not fully know"
+            if reasons == ["format_ahead"]
+            else "disagrees with itself"
+        )
+        closing = (
+            "The restored graph is what the file held."
+            if reasons == ["format_ahead"]
+            else "The restored graph is what the file holds, not what it claims "
+                 "to hold. Take the backup again if this was not a deliberate "
+                 "edit."
+        )
+        warnings.warn(
+            f"claims.toml at {toml_path} {opening}: "
+            + "; ".join(complaints)
+            + f". {closing}",
+            UserWarning,
+            stacklevel=4,
+        )
+    return tuple(reasons)
+
+
 def restore(
     project_root: Path | str,
     *,
@@ -358,9 +691,18 @@ def restore(
     # AttributeError past the documented RestoreError contract.
     for _section_name in (
         "validators", "claims", "replication_verdicts", "contradiction_verdicts",
-        "rekor_inclusions",
+        "rekor_inclusions", "verdict_chain", "grounding_attestations",
+        "schema_census",
     ):
         _validate_section_shape(data.get(_section_name), _section_name)
+    # After the shape check, because that is what makes a named section safe to
+    # measure: before it, a section holding a scalar turned the length below
+    # into a TypeError and left the documented RestoreError contract.
+    # The complaints are returned rather than only warned, so a test can
+    # ask directly. Putting them in the report dict is a wider public shape
+    # than this release should take: two tests compare that dict for exact
+    # equality, which is the contract saying it is closed.
+    _disclose_a_file_that_disagrees_with_itself(toml_path, data)
     # [project_policy] holds fields, not rows, so only the section shape is
     # checked; _required_field reports a missing or malformed field.
     _validate_section_shape(
@@ -863,6 +1205,17 @@ def restore(
                 _verify_and_insert_contradiction_verdict(
                     conn, verdict_id, v, validators_section,
                 )
+
+            # The verdict-set chain, after the verdicts its links cover.
+            _replay_verdict_chain(conn, data.get("verdict_chain") or {})
+            _disclose_a_rotated_copy_worth_trying(conn, toml_path)
+            # The grounding attestations, after the claims they name.
+            _replay_grounding_attestations(
+                conn, data.get("grounding_attestations") or {},
+            )
+            # What the source graph had seen missing. Carried so a round trip
+            # cannot be the thing that forgets it.
+            _replay_schema_census(conn, data.get("schema_census") or {})
 
             # Rekor inclusion sidecar. Replay entries so post-restore
             # graphs carry the same Rekor proof data as the original.
@@ -1639,6 +1992,166 @@ def _verify_and_insert_contradiction_verdict(
         ) from exc
 
 
+def _replay_schema_census(conn: sqlite3.Connection, section: dict) -> None:
+    """Carry the write-guard census across the restore.
+
+    The census is what a graph remembers about guards found missing, and it is
+    the one record a later open cannot reconstruct: the repairs have already
+    run by then, so a live re-derivation answers "nothing is missing" on exactly
+    the graph that was tampered with. A restore that dropped it turned tamper,
+    back up, restore into a clean graph.
+
+    Replayed rather than judged, the posture the chain and the attestations
+    take. The costs are not symmetric and the entry an attacker adds is the
+    dearer one: a planted name makes the trust map read TAMPERED, ``mareforma
+    status`` red and ``mareforma verify`` exit non-zero, on a guard that was
+    never missing, and the census store refuses DELETE so the operator cannot
+    clear it. What is bought is the other direction, which is the one this
+    exists for: an entry cannot be dropped by a round trip, only by editing the
+    file. A restore that carries a census the source graph earned therefore
+    hands back a graph that reports tamper, and that is the point rather than a
+    surprise, but it is worth knowing before the recovery is run.
+    """
+    if not section:
+        return
+    rows = []
+    for key, entry in section.items():
+        try:
+            rows.append((entry["observed_at"], entry["missing"]))
+        except (KeyError, TypeError) as exc:
+            raise RestoreError(
+                f"[schema_census] entry {key!r} is malformed: {exc}",
+                kind="toml_malformed",
+            ) from exc
+    try:
+        conn.executemany(
+            "INSERT INTO schema_census(observed_at, missing) VALUES (?, ?)",
+            rows,
+        )
+    except Exception as exc:
+        # Not sqlite3.Error alone. TOML expresses values sqlite3 will not bind,
+        # and an integer wider than 64 bits raises OverflowError, which is not
+        # a sqlite3 exception at all. The trust-table replay learned this the
+        # same way; both refusals have to reach the operator as a RestoreError.
+        raise RestoreError(
+            f"[schema_census] could not be replayed: {exc}",
+            kind="toml_malformed",
+        ) from exc
+
+
+def _replay_grounding_attestations(
+    conn: sqlite3.Connection, section: dict,
+) -> None:
+    """Round-trip the observer's grounding attestations out of the backup.
+
+    Replayed faithfully and not judged here, the same posture the verdict chain
+    takes: an attestation that does not check out is inserted as it was carried
+    and reported on read by
+    :func:`mareforma.db.core.grounding_attestation_state`. Dropping it on the
+    way in would turn a broken attestation into an absent one, and absence is a
+    weaker signal than breakage.
+
+    This release does not refuse a restored GROUNDED axis that arrives with no
+    attestation. It records what came, and the read surfaces say which claims
+    have one. The refusal is a later release, where a breaking change already
+    pays for it.
+    """
+    if not section:
+        return
+    rows = []
+    for claim_id, att in section.items():
+        try:
+            rows.append((
+                claim_id, att["statement_cid"], att["receipt_digest"],
+                att["grounding"], att["signer_keyid"],
+                base64.b64decode(att["signature"]), att["created_at"],
+            ))
+        except (KeyError, ValueError, TypeError) as exc:
+            raise RestoreError(
+                f"[grounding_attestations] entry {claim_id!r} is malformed: {exc}",
+                kind="claim_unverified",
+            ) from exc
+    try:
+        conn.executemany(
+            "INSERT INTO grounding_attestations(claim_id, statement_cid, "
+            "receipt_digest, grounding, signer_keyid, signature, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+    except sqlite3.IntegrityError as exc:
+        # An attestation naming a claim the file does not carry trips the
+        # foreign key. Every other replay path here turns that into a
+        # RestoreError with a kind; leaving it raw means the CLI, which catches
+        # RestoreError, prints a traceback and offers the operator no remedy.
+        raise RestoreError(
+            f"[grounding_attestations] does not fit the claims in this file: "
+            f"{exc}",
+            kind="claim_unverified",
+        ) from exc
+
+
+def _replay_verdict_chain(conn: sqlite3.Connection, chain_section: dict) -> None:
+    """Round-trip the verdict-set chain out of ``[verdict_chain]``.
+
+    Replayed faithfully and not checked here. A link that does not verify is
+    inserted exactly as the file carried it, for the same reason a contradiction
+    verdict that does not verify is a tamper state rather than an absent
+    verdict: dropping it on the way in would turn evidence of tampering into
+    silence, which is the direction this whole artifact exists to close.
+    :func:`mareforma.db.core.verify_verdict_chain` is what reads the result, and
+    it says so on every read rather than once at restore.
+
+    Absent section means a graph that recorded no verdict under a version that
+    had the chain. Nothing to replay and nothing to say about it.
+    """
+    if not chain_section:
+        return
+    rows = []
+    for seq, link in chain_section.items():
+        try:
+            rows.append((
+                int(seq),
+                link["prev_tip"], link["tip"], link["verdict_kind"],
+                link["verdict_id"], link["verdict_digest"],
+                link["issuer_keyid"],
+                base64.b64decode(link["signature"]),
+                link["created_at"],
+            ))
+        except (KeyError, ValueError, TypeError) as exc:
+            raise RestoreError(
+                f"[verdict_chain] entry {seq!r} is malformed: {exc}",
+                kind="claim_unverified",
+            ) from exc
+    try:
+        # Sorted before the insert, and inside the guard: two keys that
+        # normalise to one seq make the tuple comparison fall through to the
+        # next element, and a hand edit that also retyped that element compares
+        # a string with an integer. That is a TypeError, not an IntegrityError,
+        # and it left the documented RestoreError contract by the front door.
+        ordered = sorted(rows)
+    except TypeError as exc:
+        raise RestoreError(
+            f"[verdict_chain] could not be put in sequence order, so the file "
+            f"was hand-edited into a shape the chain cannot hold: {exc}",
+            kind="toml_malformed",
+        ) from exc
+    try:
+        conn.executemany(
+            "INSERT INTO verdict_chain(seq, prev_tip, tip, verdict_kind, "
+            "verdict_id, verdict_digest, issuer_keyid, signature, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ordered,
+        )
+    except sqlite3.IntegrityError as exc:
+        # Two keys that normalise to one seq, or two links carrying one tip.
+        # Same rule as the sibling above: a hand-edited section is a tamper
+        # shape, and a tamper shape gets a refusal an operator can read.
+        raise RestoreError(
+            f"[verdict_chain] does not form a chain: {exc}",
+            kind="claim_unverified",
+        ) from exc
+
+
 def _verify_and_insert_project_policy(
     conn: sqlite3.Connection,
     policy_section: dict | None,
@@ -2202,11 +2715,26 @@ def _verify_claim_signatures_on_restore(
         # that fails them here could not have been promoted there. Seed
         # envelopes are exempt: a born-ESTABLISHED claim is attested by its
         # own asserter by design and never climbs the ladder.
-        if declared_type == _signing.PAYLOAD_TYPE_VALIDATION:
-            try:
-                _refuse_llm_validator(conn, val_keyid)
+        try:
+            # The llm ceiling applies whatever the envelope calls itself: the
+            # live seed path refuses an llm signer for the same reason
+            # validate_claim does, so keying the gate on the payloadType let a
+            # signer pick which rule it was under.
+            _refuse_llm_validator(conn, val_keyid)
+            if declared_type == _signing.PAYLOAD_TYPE_VALIDATION:
                 _refuse_self_validation(claim_id, sig_bundle_json, val_keyid)
-            except (LLMValidatorPromotionError, SelfValidationError) as exc:
+            elif sig_bundle_json and val_keyid != _claim_asserting_keyid(
+                sig_bundle_json
+            ):
+                # A seed is exempt from the self-validation rule because a
+                # born-ESTABLISHED claim is attested by its own asserter. That
+                # is the premise, so require it rather than assume it.
+                raise SelfValidationError(
+                    f"seed envelope on claim '{claim_id}' is signed by "
+                    f"{val_keyid[:12]}…, which signed no role on the claim; a "
+                    "seed is the asserter's own attestation"
+                )
+        except (LLMValidatorPromotionError, SelfValidationError) as exc:
                 raise RestoreError(
                     f"Claim {claim_id} validation envelope fails a promotion "
                     f"gate the live path enforces: {exc}",

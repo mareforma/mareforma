@@ -231,6 +231,7 @@ class EpistemicGraph:
         require_rekor: bool = False,
         trust_insecure_rekor: bool = False,
         rekor_log_pubkey_pem: bytes | None = None,
+        rekor_key_provenance: str | None = None,
         strict_promotion: bool = False,
         validator_type: str = "human",
     ) -> None:
@@ -268,6 +269,11 @@ class EpistemicGraph:
         # When supplied, every signed-claim submit and every restore
         # cross-verifies the log's signed Merkle root.
         self._rekor_log_pubkey_pem = rekor_log_pubkey_pem
+        # Which of the three ways the key arrived. None when no key did, or
+        # when a caller built the graph directly rather than through
+        # mareforma.open(), in which case the read falls back to reading the
+        # pin off disk and says so as a pin.
+        self._rekor_key_provenance = rekor_key_provenance
         self._closed = False
         # Convergence detection swallows SQLite errors so a misconfigured
         # trigger or contention pattern cannot crash a write. A WARNING is
@@ -280,6 +286,7 @@ class EpistemicGraph:
         # tampered graph reads as a graph with fewer claims.
         self._read_verify_exclusions = 0
         self._read_unverified_exclusions = 0
+        self._read_contested_rows = 0
         # Whether any disclosure count stopped at its scan ceiling, so a reader
         # knows the total is a floor rather than an exact number.
         self._read_unverified_saturated = False
@@ -800,6 +807,7 @@ class EpistemicGraph:
             refutation_filter=refutation_filter,
             on_verify_excluded=self._record_verify_exclusions,
             on_unverified_excluded=self._record_unverified_exclusions,
+            on_contested=self._record_contested_rows,
         )
 
     @_synchronized
@@ -838,6 +846,17 @@ class EpistemicGraph:
         That produces a signed envelope plus a contradiction verdict
         that restore can re-verify.
 
+        One consequence worth stating plainly, because the live path
+        looks stricter than it is. ``retracted`` is terminal here: both
+        this method and the ``retracted_is_terminal`` trigger refuse to
+        move a claim back out of it. ``claims.toml`` carries the column
+        as written and :func:`mareforma.db.restore.restore` replays it,
+        because there is no signature over it to check it against. So a
+        backup round trip performs the edit the live path refuses, and
+        the terminal rule is a rule about this process rather than a
+        property of the record. A retraction that has to survive an
+        untrusted file is the supersede pattern above.
+
         Concurrency
         -----------
         Two processes calling ``update_claim`` on the same claim are
@@ -873,9 +892,14 @@ class EpistemicGraph:
         ``state`` is one of :data:`mareforma.db.REFUTATION_STATES`
         (``"clean"`` | ``"contradicted"`` | ``"contested"`` |
         ``"retracted"``), ``reason`` is a short human-readable
-        explanation, and ``signal`` is ``"signed-verdict"`` /
-        ``"editorial"`` / ``"none"`` indicating the strength of the
-        underlying evidence.
+        explanation, and ``signal`` says how the state was
+        established. This method holds the graph open, so it replays
+        the contradiction verdicts rather than reporting the
+        ``t_invalid`` column: no trigger guards that column, and one
+        UPDATE can either fabricate a contradiction or erase a real
+        one from every read surface. The signals in
+        :data:`mareforma.db.REPLAY_TAMPER_SIGNALS` are the cases where
+        the column and the signed evidence disagree.
 
         Raises :class:`ClaimNotFoundError` if no such claim exists.
         """
@@ -885,7 +909,7 @@ class EpistemicGraph:
             raise _db.ClaimNotFoundError(
                 f"Claim '{claim_id}' not found."
             )
-        return _db.refutation_status(row)
+        return _db.refutation_status(row, self._conn)
 
     @_synchronized
     def search(
@@ -945,6 +969,7 @@ class EpistemicGraph:
             include_invalidated=include_invalidated,
             on_verify_excluded=self._record_verify_exclusions,
             on_unverified_excluded=self._record_unverified_exclusions,
+            on_contested=self._record_contested_rows,
         )
 
     def _record_verify_exclusions(self, n: int) -> None:
@@ -968,6 +993,26 @@ class EpistemicGraph:
         _health.append_health_event(
             self._root, "read_verify_excluded", outcome="fail",
             n=n, total=self._read_verify_exclusions,
+        )
+
+    def _record_contested_rows(self, n: int) -> None:
+        """Record that a read SERVED *n* rows whose contradiction record fails.
+
+        Counted apart from the unverified exclusions, which is the whole point.
+        Those rows were withheld and the caller's list is short by them; these
+        were handed over, and what is wrong with them is that ``t_invalid`` and
+        the signed verdicts disagree. Filing one under the other would log a
+        served row as an excluded one and inflate a count that answers a
+        different question.
+        """
+        self._read_contested_rows += n
+        if not self._health_append_due(
+                "read_contested_served", self._read_contested_rows):
+            return
+        from mareforma import health as _health
+        _health.append_health_event(
+            self._root, "read_contested_served", outcome="degraded",
+            n=n, total=self._read_contested_rows,
         )
 
     def _record_unverified_exclusions(self, n: int, saturated: bool = False) -> None:
@@ -1203,6 +1248,7 @@ class EpistemicGraph:
         return build_trust_map(
             self._conn, claim_id, reexec_record=reexec_record,
             disclose=self._skips,
+            key_provenance=self._rekor_key_provenance,
         )
 
     # ------------------------------------------------------------------
@@ -3857,9 +3903,17 @@ class EpistemicGraph:
             # Flush any backup a still-open deferral window left pending, so a
             # graph closed mid-batch still leaves claims.toml current. Drain
             # every nesting level at once, before the connection closes.
-            _db._drain_backup_window(self._conn, self._root)
-            self._conn.close()
-            self._closed = True
+            #
+            # In a finally, because the drain can raise: a format artifact that
+            # cannot be written refuses rather than going quiet, and a graph
+            # that failed to close would leak the connection and go on reading
+            # as open. The close happens either way and the failure still
+            # reaches the caller.
+            try:
+                _db._drain_backup_window(self._conn, self._root)
+            finally:
+                self._conn.close()
+                self._closed = True
 
     def _check_open(self) -> None:
         """Guard against use after close. Public methods call this first."""

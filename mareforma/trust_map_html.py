@@ -10,10 +10,17 @@ from __future__ import annotations
 
 from html import escape
 
-from .trust_map import TrustMap, Tier, display_value
+from .trust_map import TrustMap, Tier, display_value, is_tamper_value
 
 # Tier → a stable accent the badge uses. Kept as plain hex so the page needs no
 # external stylesheet and renders the same everywhere.
+# A tamper value overrides the tier accent. The tier says where an answer came
+# from and the accent renders that, so a tamper report computed from evidence
+# was painted in the same green as a healthy computed axis: the word said
+# TAMPERED and the colour said fine. Whether an answer is alarming is a
+# different question from where it came from, and the page has to answer both.
+_TAMPER_ACCENT = "#b3261e"
+
 _TIER_ACCENT = {
     Tier.COMPUTED.value: "#1a7f5a",
     Tier.PROXIED.value: "#b8860b",
@@ -47,14 +54,24 @@ def render_html(trust_map: TrustMap) -> str:
     """Render *trust_map* as one self-contained HTML document (deterministic)."""
     rows = []
     for p in trust_map.properties:
-        accent = _TIER_ACCENT.get(p.tier.value, "#6b6b6b")
+        tampered = is_tamper_value(p.value)
+        accent = (_TAMPER_ACCENT if tampered
+                  else _TIER_ACCENT.get(p.tier.value, "#6b6b6b"))
         value = display_value(p.value)
+        # Built here rather than inside the f-string below: a backslash
+        # in an f-string expression is a syntax error before 3.12, and
+        # this package supports 3.10.
+        tamper_style = (
+            f' style="color:{_TAMPER_ACCENT};font-weight:600"'
+            if tampered else ""
+        )
         rows.append(
             "      <tr>\n"
             f"        <td class=\"prop\">{escape(p.name)}</td>\n"
             f"        <td><span class=\"badge\" style=\"background:{accent}\">"
             f"{escape(p.tier.value)}</span></td>\n"
-            f"        <td class=\"value\">{escape(value)}</td>\n"
+            f"        <td class=\"value\"{tamper_style}>"
+            f"{escape(value)}</td>\n"
             f"        <td class=\"residual\">{escape(p.residual)}</td>\n"
             "      </tr>"
         )
