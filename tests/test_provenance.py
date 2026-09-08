@@ -331,7 +331,6 @@ class TestMultiSigDSSE:
             "claim_id": "11111111-2222-4333-8444-555555555555",
             "text": "multi-sig claim text",
             "classification": "DERIVED",
-            "support_level": "PRELIMINARY",
             "status": "open",
             "source_name": None,
             "generated_by": "compound-agent",
@@ -442,7 +441,6 @@ class TestSingleSigBackwardsCompatible:
             "claim_id": "22222222-3333-4444-8555-666666666666",
             "text": "legacy single-sig",
             "classification": "INFERRED",
-            "support_level": "PRELIMINARY",
             "status": "open",
             "source_name": None,
             "generated_by": "agent",
@@ -494,7 +492,6 @@ class TestSelfValidationDefenseInDepth:
             "claim_id": "33333333-4444-4555-8666-777777777777",
             "text": "two-role claim",
             "classification": "DERIVED",
-            "support_level": "PRELIMINARY",
             "status": "open",
             "source_name": None,
             "generated_by": "agent",
@@ -722,48 +719,6 @@ class TestProvOExport:
         assert f"mareforma:claim:{a}" in claim_ids
         assert f"mareforma:claim:{b}" in claim_ids
         assert f"mareforma:claim:{c}" in claim_ids
-
-    def test_ancestor_walk_builds_one_corroboration_index(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
-        """The evidence behind a promoted row is graph-wide, so the index that
-        carries it is built once per read. The ancestor walk reads one claim
-        per hop; without a shared verify cache it rebuilds the index per hop
-        and the export costs a full graph pass for every ancestor."""
-        from mareforma.db import core as _core
-        from mareforma.exporters.prov_o import build_prov_o
-        from tests._helpers import _bootstrap_key, _two_signers
-
-        root_key = _bootstrap_key(tmp_path, "root.key")
-        sa, sb = _two_signers(tmp_path)
-        with mareforma.open(tmp_path, key_path=root_key) as graph:
-            anchor = graph.assert_claim("anchor", generated_by="seed", seed=True)
-            peers = [
-                graph.assert_claim(
-                    f"peer {i}", supports=[anchor], generated_by=f"lab{i % 2}",
-                    signer=sa if i % 2 == 0 else sb,
-                )
-                for i in range(8)
-            ]
-            focal = graph.assert_claim(
-                "focal", supports=peers, generated_by="lab0", signer=sa,
-            )
-            assert graph.get_claim(peers[0])["support_level"] == "REPLICATED"
-
-        builds = 0
-        real = _core._CorroborationIndex
-
-        def counting(conn, cache):
-            nonlocal builds
-            builds += 1
-            return real(conn, cache)
-
-        monkeypatch.setattr(_core, "_CorroborationIndex", counting)
-        build_prov_o(tmp_path, claim_id=focal)
-        assert builds == 1, (
-            f"the export built {builds} corroboration indexes over "
-            f"{len(peers)} ancestors; the walk is not sharing one cache"
-        )
 
     def test_missing_graph_db_raises(self, tmp_path: Path) -> None:
         from mareforma.exporters.prov_o import build_prov_o

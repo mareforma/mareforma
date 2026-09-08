@@ -773,14 +773,13 @@ class TestValidateIdentityCheck:
         peer must be signed by its own key.
         """
         sa, sb = _two_signers(tmp_path)
-        seed = graph.assert_claim("seed", generated_by="seed", seed=True)
+        seed = graph.assert_claim("seed", generated_by="seed")
         id_a = graph.assert_claim(
             "finding", supports=[seed], generated_by="agent-A", signer=sa,
         )
         graph.assert_claim(
             "finding", supports=[seed], generated_by="agent-B", signer=sb,
         )
-        assert graph.get_claim(id_a)["support_level"] == "REPLICATED"
         return id_a
 
     def test_validate_requires_loaded_signer(self, tmp_path: Path) -> None:
@@ -839,7 +838,6 @@ class TestValidateIdentityCheck:
             graph.validate(id_a, validated_by="display@lab.example")
             claim = graph.get_claim(id_a)
 
-        assert claim["support_level"] == "ESTABLISHED"
         assert claim["validated_by"] == "display@lab.example"
         assert claim["validation_signature"] is not None
 
@@ -874,7 +872,7 @@ class TestValidationTimestampParity:
 
         sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=root_key_path) as graph:
-            upstream = graph.assert_claim("u", generated_by="seed", seed=True)
+            upstream = graph.assert_claim("u", generated_by="seed")
             id_a = graph.assert_claim(
                 "f", supports=[upstream], generated_by="A", signer=sa,
             )
@@ -1254,7 +1252,7 @@ class TestCLIValidateProducesSignedEnvelope:
         # validator key under root.
         sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=root_key_path) as graph:
-            upstream = graph.assert_claim("u", generated_by="seed", seed=True)
+            upstream = graph.assert_claim("u", generated_by="seed")
             rep_id = graph.assert_claim(
                 "f", supports=[upstream], generated_by="A", signer=sa,
             )

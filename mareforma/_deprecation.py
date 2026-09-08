@@ -41,26 +41,6 @@ def warn_retired_status(old: str, new: str, *, stacklevel: int = 4) -> None:
     )
 
 
-def warn_deprecated_seed(*, stacklevel: int = 6) -> None:
-    """Warn that ``assert_claim(seed=True)`` is deprecated and removed in v0.4.0.
-
-    The seed path stays functional this release: it still writes a signed
-    ESTABLISHED claim and it is the only anchor that bootstraps a fresh trust
-    chain. The replacement anchor is designed for v0.4.0.
-
-    The default is 6, the depth from the one call site (``db.core.add_claim``,
-    reached through the graph's ``assert_claim``) out to the user's own line. It
-    used to be 3, which named no call site that exists: a default no caller can
-    use is a default that points a warning at mareforma's own frames.
-    """
-    _emit(
-        "assert_claim(seed=True) is deprecated and will be removed in v0.4.0. "
-        "It stays the seed-anchor bootstrap for this release and still writes a "
-        "signed ESTABLISHED claim; a replacement anchor arrives in v0.4.0.",
-        stacklevel,
-    )
-
-
 def warn_refutation_status_without_conn(*, stacklevel: int = 4) -> None:
     """Warn that the row-only ``refutation_status`` cannot replay the verdicts.
 

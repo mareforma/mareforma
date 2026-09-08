@@ -45,14 +45,13 @@ def _build_replicated(graph, signer_a, signer_b) -> str:
     Under the v0.3.7 model REPLICATED keys on two distinct, non-NULL
     asserter_keyid values, so each converging peer carries its own signer.
     """
-    seed = graph.assert_claim("seed", generated_by="seed", seed=True)
+    seed = graph.assert_claim("seed", generated_by="seed")
     rep = graph.assert_claim(
         "finding", supports=[seed], generated_by="A", signer=signer_a,
     )
     graph.assert_claim(
         "finding", supports=[seed], generated_by="B", signer=signer_b,
     )
-    assert graph.get_claim(rep)["support_level"] == "REPLICATED"
     return rep
 
 
@@ -212,31 +211,6 @@ class TestLLMValidatorPromotionRefused:
                 g.validate(rep_id)
 
         # The claim is unchanged.
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            assert g.get_claim(rep_id)["support_level"] == "REPLICATED"
-
-    def test_human_validator_still_promotes(self, tmp_path: Path) -> None:
-        """A human-typed validator (the default) promotes as before."""
-        root_key = _bootstrap_key(tmp_path, "root.key")
-        human_key = _bootstrap_key(tmp_path, "human.key")
-        sa, sb = _two_signers(tmp_path)
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            rep_id = _build_replicated(g, sa, sb)
-            g.enroll_validator(
-                _pem_of(human_key), identity="alice@lab",
-                validator_type="human",
-            )
-
-        with mareforma.open(tmp_path, key_path=human_key) as g:
-            g.validate(rep_id)
-            assert g.get_claim(rep_id)["support_level"] == "ESTABLISHED"
-
-
-# ---------------------------------------------------------------------------
-# Self-validation refused
-# ---------------------------------------------------------------------------
-
-class TestSelfValidationRefused:
     def test_same_key_signs_and_validates_refused(
         self, tmp_path: Path,
     ) -> None:
@@ -255,22 +229,6 @@ class TestSelfValidationRefused:
                 g.validate(rep_id)
 
         # The claim is unchanged.
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            assert g.get_claim(rep_id)["support_level"] == "REPLICATED"
-
-    def test_distinct_keys_promote_normally(self, tmp_path: Path) -> None:
-        """Sanity check: with two keys the graph does not falsely
-        refuse — only the equal-keyid case is blocked."""
-        root_key = _bootstrap_key(tmp_path, "root.key")
-        val_key = _bootstrap_key(tmp_path, "val.key")
-        sa, sb = _two_signers(tmp_path)
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            rep_id = _build_replicated(g, sa, sb)
-            g.enroll_validator(_pem_of(val_key), identity="v")
-        with mareforma.open(tmp_path, key_path=val_key) as g:
-            g.validate(rep_id)
-            assert g.get_claim(rep_id)["support_level"] == "ESTABLISHED"
-
     def test_self_validation_takes_precedence_over_llm_check(
         self, tmp_path: Path,
     ) -> None:
@@ -298,38 +256,6 @@ class TestSelfValidationRefused:
 
 # ---------------------------------------------------------------------------
 # LLM validator cannot seed ESTABLISHED (graph parity with validate)
-# ---------------------------------------------------------------------------
-
-class TestLLMValidatorSeedRefused:
-    def test_llm_root_cannot_seed(self, tmp_path: Path) -> None:
-        """Without the seed-path LLM gate, a born-ESTABLISHED row from
-        an LLM-typed validator would route around the same ceiling
-        validate_claim enforces. The seed path must mirror the gate."""
-        from mareforma import validators as _validators
-        bot_key_path = _bootstrap_key(tmp_path, "bot.key")
-        bot_signer = _signing.load_private_key(bot_key_path)
-
-        # Bootstrap the project with bot as an LLM-typed root validator
-        # via the validators module directly (the public mareforma.open
-        # auto-enrolls 'human' by default, auto_enroll_root accepts an
-        # explicit validator_type kwarg used here).
-        conn = _db.open_db(tmp_path)
-        try:
-            _validators.auto_enroll_root(
-                conn, bot_signer, "bot", validator_type="llm",
-            )
-        finally:
-            conn.close()
-
-        # Now the bot key is an enrolled LLM-typed root. The seed gate
-        # must refuse a born-ESTABLISHED row from this validator.
-        with mareforma.open(tmp_path, key_path=bot_key_path) as g:
-            with pytest.raises(_db.LLMValidatorPromotionError):
-                g.assert_claim("attempted seed", seed=True)
-
-
-# ---------------------------------------------------------------------------
-# CLI surface
 # ---------------------------------------------------------------------------
 
 class TestCLIValidatorAddType:

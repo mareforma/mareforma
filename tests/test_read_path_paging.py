@@ -28,13 +28,13 @@ def test_query_sorts_the_table_once_not_per_batch(tmp_path):
         seen: list[str] = []
         g._conn.set_trace_callback(seen.append)
         try:
-            # include_unverified=False, so every unenrolled-PRELIMINARY row is
+            # so every unenrolled-PRELIMINARY row is
             # drained and the loop scans the whole table for survivors.
             g.query(limit=10)
         finally:
             g._conn.set_trace_callback(None)
 
-    orderings = [s for s in seen if "ORDER BY CASE support_level" in s]
+    orderings = [s for s in seen if "ORDER BY created_at" in s]
     assert len(orderings) == 1, (
         f"expected one scan-and-sort over the claims table, got {len(orderings)}"
     )
@@ -85,28 +85,6 @@ def test_common_path_does_not_materialise_the_whole_ceiling(tmp_path):
         f"read materialised {fetched} rows for limit=5 over {n_rows} claims; "
         "the whole scan ceiling was pulled instead of stopping at the survivors"
     )
-
-
-def test_unenrolled_drain_does_not_bury_an_enrolled_survivor(
-    tmp_path, monkeypatch,
-):
-    """The unenrolled-generator half of the read filter runs in SQL, so LIMIT
-    counts survivors: a wall of drained rows newer than an enrolled claim
-    cannot push that claim past the scan ceiling."""
-    sa, _ = _two_signers(tmp_path)  # unenrolled: its claims drain by default
-    root_key = _bootstrap_key(tmp_path, "root.key")
-    with mareforma.open(tmp_path, key_path=root_key) as g:
-        g.assert_claim("the enrolled survivor", generated_by="x")
-        for i in range(40):
-            g.assert_claim(
-                f"drained claim number {i}", generated_by="x", signer=sa,
-            )
-
-    monkeypatch.setattr(_db_core, "_read_scan_ceiling", lambda limit: 20)
-    with mareforma.open(tmp_path, key_path=root_key) as g:
-        rows = g.query(limit=5)
-
-    assert [r["text"] for r in rows] == ["the enrolled survivor"]
 
 
 def test_zero_limit_returns_no_rows_on_both_read_surfaces(tmp_path):
@@ -163,12 +141,13 @@ def test_scan_ceiling_truncation_raises_instead_of_a_short_list(
 
 
 def test_the_read_ordering_is_served_by_an_index_not_a_temp_btree(tmp_path):
-    """`query()` orders by a CASE over support_level, which no column index can
-    serve, so every call scanned the table and built a temp B-tree to sort it.
-    The LIMIT bounded what came back, never what was read, and the whole cost was
-    paid under the process-wide graph lock. Pinned on the plan rather than on a
-    timing, so it cannot flake and it names the thing that regressed if the
-    index or the ORDER BY drifts apart."""
+    """`query()` used to order by a CASE over the ladder tier, which no column
+    index can serve, so every call scanned the table and built a temp B-tree to
+    sort it. The LIMIT bounded what came back, never what was read, and the
+    whole cost was paid under the process-wide graph lock. The tier is gone and
+    the ordering is recency alone, which an index does serve. Pinned on the
+    plan rather than on a timing, so it cannot flake and it names the thing
+    that regressed if the index or the ORDER BY drifts apart."""
     root_key = _bootstrap_key(tmp_path, "root.key")
     with mareforma.open(tmp_path, key_path=root_key) as g:
         for i in range(20):

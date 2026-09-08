@@ -189,7 +189,6 @@ class TestCrossExporterConformance:
                 "upstream finding",
                 classification="DERIVED",
                 generated_by="lab-A",
-                seed=True,
             )
             b = graph.assert_claim(
                 "downstream conclusion",

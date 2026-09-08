@@ -6,7 +6,7 @@ number, not a single support word. CORROBORATED was the top Status verdict
 word; it is renamed to the convergence marker CONVERGENT, because distinct-model
 is necessary but not sufficient for independence, so the word over-claimed. Both
 old names keep resolving for one release and warn on read; a future release
-removes them. Neither is a schema rename: the stored ``support_level`` strings
+removes them. Neither is a schema rename: the stored strings
 and the promotion machinery are unchanged, and Status is recomputed on read, so
 no stored status string exists to migrate.
 """

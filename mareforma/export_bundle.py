@@ -155,10 +155,9 @@ def build_statement(root: Path) -> dict[str, Any]:
             bundle_json = sig_by_claim.get(cid)
             if bundle_json:
                 node["signatureBundle"] = json.loads(bundle_json)
-            # An ESTABLISHED claim's promotion is attested by a validator's
-            # signed validation (or seed) envelope; carry it so verify_bundle
-            # can confirm the displayed support level, not just trust the
-            # exporter for it.
+            # A validator's signed validation (or seed) envelope, carried so
+            # verify_bundle can confirm the attestation binds to this claim
+            # rather than trusting the exporter for it.
             val_json = val_by_claim.get(cid)
             if val_json:
                 node["validationSignature"] = json.loads(val_json)
@@ -399,19 +398,6 @@ def _verify_exported_validators(
     return verified, verified_types, root
 
 
-def _string_supports(supports: Any) -> list[str]:
-    """The string entries of a node's ``supports``, ignoring anything else.
-
-    A hand-crafted bundle could carry a non-list or nested/unhashable supports
-    value; this keeps the distinct-signer pre-pass and REPLICATED check within
-    the module's ``BundleVerificationError`` contract instead of leaking a
-    TypeError. A malformed supports value simply contributes no upstream.
-    """
-    if not isinstance(supports, list):
-        return []
-    return [s for s in supports if isinstance(s, str)]
-
-
 def _verified_replication_verdicts(
     predicate: dict, verified_validators: dict, asserters: dict,
 ) -> "dict[str, set]":
@@ -467,64 +453,6 @@ def _verified_replication_verdicts(
     return by_claim
 
 
-def _distinct_artifact(own_hash: "str | None", peer_hash: "str | None") -> bool:
-    """The graph's artifact-hash term, restated: two NULLs are not one artifact.
-
-    ``_QUALIFYING_PEER_SQL`` disqualifies a peer only when both hashes are
-    present and equal, because a missing hash records that no artifact was
-    named, not that the same one was. Reading it as "the hashes must differ"
-    rejects every honest convergence between two claims that recorded no
-    artifact, which is the ordinary case for a text finding.
-    """
-    return own_hash is None or peer_hash is None or peer_hash != own_hash
-
-
-def _verify_replicated_level(
-    node: dict, claim_id: str, support_peers: dict,
-    established_anchors: set, verified_verdicts: dict,
-) -> None:
-    """Refuse a displayed REPLICATED the bundle's own material does not back.
-
-    The two paths are the graph's, not this file's. ``_CorroborationIndex``
-    holds that a stored REPLICATED is legitimate on either an enrolled
-    validator's signed replication verdict naming the claim, or convergence: a
-    shared ESTABLISHED anchor with a peer under a distinct asserter key and a
-    different artifact hash. This applied neither. It asked only whether two
-    distinct asserters shared any upstream, which is weaker than convergence in
-    three ways and blind to the verdict path in full.
-
-    Being blind to the verdict path was the worse half, because it was a false
-    rejection rather than a permissive one: a claim the graph promoted on a
-    signed verdict, exported and then handed to this verifier, raised. mareforma
-    produced bundles it refused to verify.
-
-    One condition of convergence is NOT re-applied here and the bundle cannot
-    apply it: the observed-grounding gate, whose column no node carries. So this
-    is the graph's rule minus that term, which makes it a weaker check than the
-    read path rather than a different one, and the difference is stated rather
-    than papered over.
-    """
-    if verified_verdicts.get(claim_id):
-        return
-    own = _node_asserter(node)
-    own_hash = node.get("artifactHash")
-    for sup in _string_supports(node.get("supports")):
-        if sup not in established_anchors:
-            continue
-        # Both terms on the SAME peer. Asking whether some peer has a distinct
-        # key and some peer has a distinct artifact would pass on two peers that
-        # each satisfy one, which is not a corroboration by anybody.
-        for peer_key, peer_hash in support_peers.get(sup, ()):
-            if peer_key != own and _distinct_artifact(own_hash, peer_hash):
-                return
-    raise BundleVerificationError(
-        f"claim:{claim_id} is shown REPLICATED but this bundle carries "
-        "neither a replication verdict that verifies against an enrolled "
-        "issuer nor a shared ESTABLISHED anchor with a distinct-signer peer "
-        "on a different artifact hash"
-    )
-
-
 def _node_signers(node: dict) -> "set[str]":
     """Every keyid that signed a node's own envelope.
 
@@ -546,21 +474,13 @@ def _node_signers(node: dict) -> "set[str]":
     }
 
 
-def _node_asserter(node: dict) -> "str | None":
-    """The keyid on a node's own asserter bundle, or None."""
-    try:
-        return node["signatureBundle"]["signatures"][0]["keyid"]
-    except (KeyError, IndexError, TypeError):
-        return None
-
-
-def _verify_established_level(
+def _verify_validation_attestation(
     node: dict, claim_id: str, verified_validators: dict,
     validator_types: dict, _signing,
 ) -> None:
-    """Confirm a node displayed as ESTABLISHED carries a validator-signed
-    promotion for THIS claim, so the exporter cannot inflate a claim's support
-    level. Mirrors the validation-envelope checks the restore path applies."""
+    """Confirm a node's validation envelope names THIS claim and a validator
+    who could have signed it, so the exporter cannot present a human's sign-off
+    it did not earn. Mirrors the checks the restore path applies."""
     vs = node.get("validationSignature")
     if not vs:
         raise BundleVerificationError(
@@ -754,19 +674,6 @@ def verify_bundle(
     # upstream, and which upstreams are ESTABLISHED. The rule the graph enforces
     # needs the pair, so an index of signers alone was dropped with the weaker
     # check it fed.
-    support_peers: dict[str, set] = {}
-    established_anchors: set = set()
-    for n in nodes:
-        if not n.get("@id", "").startswith("mare:claim/"):
-            continue
-        if n.get("supportLevel") == "ESTABLISHED":
-            established_anchors.add(n["@id"][len("mare:claim/"):])
-        n_asserter = _node_asserter(n)
-        if n_asserter is None or n_asserter not in verified_validators:
-            continue
-        for sup in _string_supports(n.get("supports")):
-            support_peers.setdefault(sup, set()).add(
-                (n_asserter, n.get("artifactHash")))
     # Accumulated per claim rather than assigned, because two nodes can carry
     # the same @id and a comprehension would let the later one replace what the
     # earlier one said about who signed that claim, which is a way to hide a
@@ -862,20 +769,16 @@ def verify_bundle(
                 "presented content — text or evidence differs from what "
                 "was signed"
             )
-        # Support level: verify the DISPLAYED level is backed by signed
-        # material, so the exporter cannot inflate it. ESTABLISHED needs a
-        # validator-signed validation envelope for this claim; REPLICATED needs
-        # distinct-signer corroboration on a shared upstream. Editorial status
-        # (retracted/contested) and comparison summaries are NOT attested here,         # they carry no signature in the data model (see the module docstring).
-        level = node.get("supportLevel", "PRELIMINARY")
-        if level == "ESTABLISHED":
-            _verify_established_level(
+        # A validation attestation is verified whenever the node carries one.
+        # It used to be verified only on a node the exporter displayed as
+        # ESTABLISHED, which stopped meaning anything the moment the level left
+        # the export: the gate read a key that is never present, every node
+        # took the PRELIMINARY branch, and a bundle carried a human's sign-off
+        # that nothing checked. The envelope is the thing being attested to, so
+        # its presence is what asks the question.
+        if node.get("validationSignature"):
+            _verify_validation_attestation(
                 node, claim_id, verified_validators, validator_types, _signing,
-            )
-        elif level == "REPLICATED":
-            _verify_replicated_level(
-                node, claim_id, support_peers, established_anchors,
-                verified_verdicts,
             )
         # Re-derive the canonical Statement v1 hash from the @graph
         # node. evidence is part of the signed predicate, so the

@@ -57,126 +57,24 @@ def _seeded_upstream(graph) -> str:
         "seeded prior literature",
         classification="DERIVED",
         generated_by="agent/seed",
-        seed=True,
     )
 
 
 # ---------------------------------------------------------------------------
-# REPLICATED detection filters by status
-# ---------------------------------------------------------------------------
-
-
-class TestReplicatedFiltersStatus:
-    def test_retracted_peer_does_not_trigger_replicated(
-        self, tmp_path: Path,
-    ) -> None:
-        """Distinct signers on a shared ESTABLISHED anchor, so the status
-        filter on the candidate peer is the only thing holding the pair
-        at PRELIMINARY."""
-        from tests._helpers import _two_signers
-        sa, sb = _two_signers(tmp_path)
-        with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
-            seed = _seeded_upstream(g)
-            tainted = g.assert_claim(
-                "X is true",
-                supports=[seed],
-                generated_by="agent/adversary",
-                status="retracted",
-                signer=sa,
-            )
-            honest = g.assert_claim(
-                "X is true",
-                supports=[seed],
-                generated_by="agent/honest",
-                signer=sb,
-            )
-            assert g.get_claim(tainted)["support_level"] == "PRELIMINARY"
-            assert g.get_claim(honest)["support_level"] == "PRELIMINARY"
-
-    def test_contested_peer_does_not_trigger_replicated(
-        self, tmp_path: Path,
-    ) -> None:
-        from tests._helpers import _two_signers
-        sa, sb = _two_signers(tmp_path)
-        with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
-            seed = _seeded_upstream(g)
-            tainted = g.assert_claim(
-                "X is true",
-                supports=[seed],
-                generated_by="agent/a",
-                status="contested",
-                signer=sa,
-            )
-            honest = g.assert_claim(
-                "X is true",
-                supports=[seed],
-                generated_by="agent/b",
-                signer=sb,
-            )
-            assert g.get_claim(tainted)["support_level"] == "PRELIMINARY"
-            assert g.get_claim(honest)["support_level"] == "PRELIMINARY"
-
-    def test_two_open_peers_with_third_retracted_still_replicate(
-        self, tmp_path: Path,
-    ) -> None:
-        """The retracted row is skipped but honest peers still find each other."""
-        from tests._helpers import _two_signers
-        sa, sb = _two_signers(tmp_path)
-        with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
-            seed = _seeded_upstream(g)
-            g.assert_claim(
-                "Y", supports=[seed], generated_by="agent/x", status="retracted",
-            )
-            a = g.assert_claim("Y", supports=[seed], generated_by="agent/a", signer=sa)
-            b = g.assert_claim("Y", supports=[seed], generated_by="agent/b", signer=sb)
-            assert g.get_claim(a)["support_level"] == "REPLICATED"
-            assert g.get_claim(b)["support_level"] == "REPLICATED"
-
-    def test_tainted_new_claim_does_not_replicate_off_existing_honest_peer(
-        self, tmp_path: Path,
-    ) -> None:
-        """Reverse-order attack: honest peer is inserted FIRST (and sits at
-        PRELIMINARY since it has no partner yet), then an adversary INSERTs a
-        retracted claim citing the same upstream. Without the new-claim
-        status guard, the adversary's INSERT would find the honest peer in
-        the SELECT and the UPDATE (which appends new_claim_id to peer_ids
-        unconditionally) would co-promote BOTH rows to REPLICATED. The two
-        rows carry distinct signers, so the new-claim status guard is the
-        only thing holding them down."""
-        from tests._helpers import _two_signers
-        sa, sb = _two_signers(tmp_path)
-        with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
-            seed = _seeded_upstream(g)
-            honest = g.assert_claim(
-                "Z", supports=[seed], generated_by="agent/honest", signer=sa,
-            )
-            tainted = g.assert_claim(
-                "Z",
-                supports=[seed],
-                generated_by="agent/adversary",
-                status="retracted",
-                signer=sb,
-            )
-            assert g.get_claim(honest)["support_level"] == "PRELIMINARY"
-            assert g.get_claim(tainted)["support_level"] == "PRELIMINARY"
-
-
-# ---------------------------------------------------------------------------
-# validate() refuses non-open claims
+# Validation refuses a claim the graph has withdrawn
 # ---------------------------------------------------------------------------
 
 
 class TestValidateRefusesNonOpen:
     def test_validate_refused_on_contested(self, tmp_path: Path) -> None:
-        """Build a REPLICATED row by normal means, then flip status, then
-        confirm validate() refuses the promotion."""
+        """Build a claim by normal means, flip its status, then confirm
+        validate() refuses to record a sign-off over it."""
         from tests._helpers import _two_signers
         sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
             seed = _seeded_upstream(g)
             a = g.assert_claim("Z", supports=[seed], generated_by="agent/a", signer=sa)
             b = g.assert_claim("Z", supports=[seed], generated_by="agent/b", signer=sb)
-            assert g.get_claim(a)["support_level"] == "REPLICATED"
             # Flip a to contested via the editorial update path.
             from mareforma.db import update_claim
             update_claim(g._conn, g._root, a, status="contested")
@@ -188,40 +86,10 @@ class TestValidateRefusesNonOpen:
                 g.validate(a, validated_by="reviewer")
             # b is still open and still validatable.
             g.validate(b, validated_by="reviewer")
-            assert g.get_claim(b)["support_level"] == "ESTABLISHED"
 
 
 # ---------------------------------------------------------------------------
 # seed=True refuses non-open status
-# ---------------------------------------------------------------------------
-
-
-class TestSeedRefusesNonOpen:
-    def test_seed_with_retracted_status_refused(self, tmp_path: Path) -> None:
-        with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
-            with pytest.raises(ValueError, match="seed.*status='retracted'"):
-                g.assert_claim(
-                    "anchor",
-                    classification="DERIVED",
-                    generated_by="agent/seed",
-                    seed=True,
-                    status="retracted",
-                )
-
-    def test_seed_with_contested_status_refused(self, tmp_path: Path) -> None:
-        with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
-            with pytest.raises(ValueError, match="seed.*status='contested'"):
-                g.assert_claim(
-                    "anchor",
-                    classification="DERIVED",
-                    generated_by="agent/seed",
-                    seed=True,
-                    status="contested",
-                )
-
-
-# ---------------------------------------------------------------------------
-# Retracted status is terminal at the storage layer
 # ---------------------------------------------------------------------------
 
 
@@ -291,10 +159,7 @@ class TestRetractedIsTerminal:
             # Honest peer can still REPLICATE with another honest peer,             # the adversary's retracted claim is invisible to convergence.
             honest_a = g.assert_claim("Z", supports=[seed], generated_by="agent/h1", signer=sa)
             honest_b = g.assert_claim("Z", supports=[seed], generated_by="agent/h2", signer=sb)
-            assert g.get_claim(adv)["support_level"] == "PRELIMINARY"
             assert g.get_claim(adv)["status"] == "retracted"
-            assert g.get_claim(honest_a)["support_level"] == "REPLICATED"
-            assert g.get_claim(honest_b)["support_level"] == "REPLICATED"
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +177,6 @@ class TestLLMToolSurfacesStatus:
             seed = _seeded_upstream(g)
             a = g.assert_claim("W", supports=[seed], generated_by="agent/a", signer=sa)
             b = g.assert_claim("W", supports=[seed], generated_by="agent/b", signer=sb)
-            assert g.get_claim(a)["support_level"] == "REPLICATED"
             # Flip a to contested editorially, it remains REPLICATED but
             # the LLM must see the taint.
             from mareforma.db import update_claim

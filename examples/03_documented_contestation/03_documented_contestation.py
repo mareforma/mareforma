@@ -128,7 +128,6 @@ upstream_ref = graph.assert_claim(
     "Prior literature: Treatment X is studied in population P",
     classification="DERIVED",
     generated_by="agent_seed/literature",
-    seed=True,
 )
 
 # Two converging claims on the same ESTABLISHED upstream, signed by DISTINCT
@@ -156,7 +155,7 @@ consensus_b = graph.assert_claim(
 )
 
 c_a = graph.get_claim(consensus_a)
-show("consensus_a support_level", c_a["support_level"] if c_a else "n/a")
+show("consensus_a validated", bool(c_a and c_a.get("validation_signature")))
 
 # Close and re-open under the reviewer key so the validator's signing identity
 # differs from the agent that signed consensus_a. mareforma refuses
@@ -182,7 +181,7 @@ _, assert_finding_c = [tool(fn) for fn in graph.get_tools(
     generated_by="agent_lab_c/model-c"
 )]
 established = graph.get_claim(consensus_a)
-show("after validate()", established["support_level"] if established else "n/a")
+show("after validate()", (established or {}).get("validated_by") or "n/a")
 
 
 # ---------------------------------------------------------------------------
@@ -200,11 +199,12 @@ def _for_console(text: str) -> str:
 
 # Step 1: query the graph, what is already established on this topic?
 prior = json.loads(query_graph.invoke({"topic": "Treatment X"}))
-established = [c for c in prior if c["support_level"] == "ESTABLISHED"]
+established = [c for c in prior if c.get("validation_signature")]
 print(f"  query_graph('Treatment X') → {len(prior)} claims, "
-      f"{len(established)} of them ESTABLISHED")
+      f"{len(established)} of them validated")
 for c in prior:
-    print(f"    [{c['support_level']:12}] {_for_console(c['text'])[:65]}…")
+    mark = "validated" if c.get("validation_signature") else "unvalidated"
+    print(f"    [{mark:12}] {_for_console(c['text'])[:65]}…")
 
 established_ids = [c["claim_id"] for c in prior]
 
@@ -226,7 +226,7 @@ challenge = assert_finding_c.invoke({
 
 c_challenge = graph.get_claim(challenge)
 show("challenge claim_id", challenge[:8] + "…")
-show("challenge support_level", c_challenge["support_level"] if c_challenge else "n/a")
+show("challenge validated", bool(c_challenge and c_challenge.get("validation_signature")))
 show("challenge classification", c_challenge["classification"] if c_challenge else "n/a")
 
 contradicts_list = json.loads(c_challenge["contradicts_json"] if c_challenge else "[]")
@@ -242,12 +242,12 @@ sep("Graph state, consensus and challenge coexist")
 all_claims = graph.query()
 print(f"  Total claims in graph: {len(all_claims)}\n")
 
-level_order = {"ESTABLISHED": 0, "REPLICATED": 1, "PRELIMINARY": 2}
-for c in sorted(all_claims, key=lambda x: level_order.get(x["support_level"], 3)):
-    contradicts_flag = " ← contradicts ESTABLISHED" if json.loads(
+for c in sorted(all_claims, key=lambda x: x["created_at"]):
+    contradicts_flag = " ← contradicts a prior claim" if json.loads(
         c.get("contradicts_json", "[]") or "[]"
     ) else ""
-    label = f"[{c['support_level']:12}] [{c['classification']:10}]"
+    mark = "validated" if c.get("validation_signature") else "unvalidated"
+    label = f"[{mark:12}] [{c['classification']:10}]"
     print(f"  {label}  {c['text'][:50]}…{contradicts_flag}")
 
 print()

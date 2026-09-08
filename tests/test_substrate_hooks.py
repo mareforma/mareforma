@@ -544,7 +544,6 @@ class TestReplicationVerdictIntegration:
                 "claim A",
                 classification="DERIVED",
                 generated_by="agent-a",
-                seed=True,
             )
             b = graph.assert_claim(
                 "claim B",
@@ -874,7 +873,6 @@ class TestRestoreTypeSafety:
                 bad_claim_id: {
                     "text": "test",
                     "classification": "INFERRED",
-                    "support_level": "PRELIMINARY",
                     "generated_by": "agent",
                     "status": "open",
                     "supports": [],

@@ -106,15 +106,14 @@ def _classify(result: dict) -> str:
 def main() -> None:
     with mareforma.open(HERE) as graph:
         # -------------------------------------------------------------------
-        # Query-before-assert: check for prior REPLICATED findings
+        # Query-before-assert: check for prior findings
         # -------------------------------------------------------------------
 
-        prior = [c for c in graph.query("drug target")
-                 if c["support_level"] == "REPLICATED"]
+        prior = [c for c in graph.query("drug target")]
         if prior:
-            print(f"\nFound {len(prior)} prior REPLICATED finding(s) — MEDEA will build on them.")
+            print(f"\nFound {len(prior)} prior finding(s). MEDEA will build on them.")
         else:
-            print("\nNo prior REPLICATED findings — running both forks fresh.")
+            print("\nNo prior findings, running both forks fresh.")
 
         # -------------------------------------------------------------------
         # Fork 1: Rheumatoid Arthritis, CD4+ T cells
@@ -162,8 +161,8 @@ def main() -> None:
         print("\n" + "=" * 60)
         print("EPISTEMIC STATUS")
         print("=" * 60)
-        print(f"  RA fork:   {ra_classification:10}  →  {ra_claim['support_level']}")
-        print(f"  SLE fork:  {sle_classification:10}  →  {sle_claim['support_level']}")
+        print(f"  RA fork:   {ra_classification:10}  →  {ra_claim['claim_id'][:8]}")
+        print(f"  SLE fork:  {sle_classification:10}  →  {sle_claim['claim_id'][:8]}")
 
         if ra_result["generated_code"] is None or sle_result["generated_code"] is None:
             print("\n  ⚠  One or both forks returned null generated_code.")

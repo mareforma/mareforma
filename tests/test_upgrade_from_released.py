@@ -22,13 +22,19 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
 import mareforma
 from mareforma.db import core as _core
 from mareforma.db._schema_sql import _ALL_EXPECTED_TRIGGERS
-from mareforma.db.core import verify_claim_signatures
+from mareforma.db.core import (
+    _MIGRATIONS,
+    _SCHEMA_VERSION,
+    MigrationError,
+    verify_claim_signatures,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -135,8 +141,12 @@ def _state(root: Path) -> dict:
             "claims": conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0],
             # The columns actually present, so this still answers on a table a
             # narrowing test has just taken one out of.
+            # Keyed by column name, not positional. A narrowing upgrade
+            # removes a column, so two positional tuples differ by construction
+            # and say nothing about whether the columns that survived were
+            # carried faithfully, which is the only question worth asking.
             "rows": [
-                tuple(r) for r in conn.execute(
+                dict(r) for r in conn.execute(
                     "SELECT {} FROM claims ORDER BY rowid".format(
                         ", ".join(
                             c[1] for c in conn.execute(
@@ -182,6 +192,22 @@ def _state(root: Path) -> dict:
         conn.close()
 
 
+
+def _rows_agree_on_surviving_columns(before: list, after: list) -> None:
+    """Every column present on both sides holds the value it held.
+
+    The columns a migration drops are not compared, because they are gone on
+    purpose. Everything else has to come through untouched, which is the whole
+    claim a rebuild makes.
+    """
+    assert len(before) == len(after), "the upgrade changed the row count"
+    for old_row, new_row in zip(before, after):
+        shared = set(old_row) & set(new_row)
+        assert shared, "the two sides share no columns at all"
+        for column in sorted(shared):
+            assert old_row[column] == new_row[column], column
+
+
 def _definition_without(column: str) -> str:
     """The claims definition with *column* and the constraints naming it gone.
 
@@ -215,6 +241,34 @@ def _definition_without(column: str) -> str:
                 keep[i] = keep[i].rstrip().rstrip(",")
                 break
     return "\n".join(keep)
+
+
+
+def _rebuild_claims_to_the_current_shape(conn) -> None:
+    """Rebuild ``claims`` under the definition this release has.
+
+    Stands in for the package's no-op rebuild, which is gone: it existed to
+    prove the machinery on real graphs before a narrowing step relied on it,
+    and that release never published. Reads the live column list, carries what
+    the current definition can hold, declares the rest as dropped, and retires
+    the objects that read them, which is what any narrowing step must do.
+    """
+    live = {r[1] for r in conn.execute("PRAGMA table_info(claims)")}
+    keep = tuple(c for c in _core._CLAIM_COLUMNS if c in live)
+    going = set(live) - set(keep)
+    if going:
+        for kind, name, sql in conn.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE tbl_name = 'claims' AND type IN ('index', 'trigger')"
+        ).fetchall():
+            if sql and any(col in sql for col in going):
+                conn.execute(f"DROP {kind.upper()} IF EXISTS {name}")
+    _core._rebuild_table(
+        conn, table="claims",
+        create_sql=_core.claims_rebuild_sql("claims_new"),
+        columns=keep,
+        drops=tuple(sorted(going)),
+    )
 
 
 class TestNarrowingTheTable:
@@ -278,8 +332,9 @@ class TestNarrowingTheTable:
             kept = ", ".join(
                 c[1] for c in conn.execute("PRAGMA table_info(claims)")
             )
+            conn.row_factory = sqlite3.Row
             after = [
-                tuple(r) for r in conn.execute(
+                dict(r) for r in conn.execute(
                     f"SELECT {kept} FROM claims ORDER BY rowid"
                 )
             ]
@@ -292,13 +347,9 @@ class TestNarrowingTheTable:
 
         assert "comparison_summary" not in columns
         assert columns == set(_core._CLAIM_COLUMNS) - {"comparison_summary"}
-        # The dropped column taken out of the expected side too, so this
-        # compares the thirty-five that had to survive rather than failing on
-        # the one that was meant to go.
-        gone = _core._CLAIM_COLUMNS.index("comparison_summary")
-        assert after == [
-            row[:gone] + row[gone + 1:] for row in before["rows"]
-        ]
+        # Compared on the columns that had to survive, not on the one that was
+        # meant to go.
+        _rows_agree_on_surviving_columns(before["rows"], after)
         assert stale == []
 
     def test_a_column_the_schema_still_depends_on_is_refused(
@@ -324,8 +375,8 @@ class TestNarrowingTheTable:
         before = _state(project)
 
         with pytest.raises(_core.MigrationError) as caught:
-            self._narrow(project, "support_level")
-        assert "support_level" in str(caught.value)
+            self._narrow(project, "generated_by")
+        assert "generated_by" in str(caught.value)
 
         assert _state(project) == before
         with mareforma.open(project, key_path=project / "root.key") as graph:
@@ -409,9 +460,7 @@ class TestTheUpgradeAUserPerforms:
         after = _state(project)
 
         assert after["claims"] == before["claims"] == 6
-        assert after["rows"] == before["rows"], (
-            "a column changed value across the upgrade"
-        )
+        _rows_agree_on_surviving_columns(before["rows"], after["rows"])
         # A table the additive script creates on the way in is expected to
         # appear. A row disappearing from one that was already there is not,
         # and the rebuild runs with foreign keys off, so nothing else counts.
@@ -598,7 +647,7 @@ class TestWhatAFailedUpgradeTellsTheOperator:
                 with _core._upgrade_window(conn):
                     _core._run_migration(
                         conn, to_version=_core._SCHEMA_VERSION + 1,
-                        steps=_core._rebuild_claims_unchanged,
+                        steps=_rebuild_claims_to_the_current_shape,
                     )
         finally:
             conn.close()
@@ -620,12 +669,24 @@ class TestWhatAFailedUpgradeTellsTheOperator:
         conn = sqlite3.connect(_db(project))
         conn.execute("ALTER TABLE claims ADD COLUMN vendor_note TEXT")
         conn.commit()
+
+        def _declares_nothing(c) -> None:
+            """A step that names its columns and no drops, which is the shape
+            every step has until one deliberately narrows. The adaptive helper
+            above declares whatever it finds, so it would swallow the column
+            this test plants and prove nothing."""
+            _core._rebuild_table(
+                c, table="claims",
+                create_sql=_core.claims_rebuild_sql("claims_new"),
+                columns=_core._CLAIM_COLUMNS,
+            )
+
         try:
             with pytest.raises(_core.MigrationError) as caught:
                 with _core._upgrade_window(conn):
                     _core._run_migration(
                         conn, to_version=_core._SCHEMA_VERSION + 1,
-                        steps=_core._rebuild_claims_unchanged,
+                        steps=_declares_nothing,
                     )
         finally:
             conn.close()
@@ -650,7 +711,7 @@ class TestWhatAFailedUpgradeTellsTheOperator:
                 with _core._upgrade_window(loser):
                     _core._run_migration(
                         loser, to_version=_core._SCHEMA_VERSION + 1,
-                        steps=_core._rebuild_claims_unchanged,
+                        steps=_rebuild_claims_to_the_current_shape,
                     )
         finally:
             loser.close()
@@ -702,6 +763,103 @@ class TestTheVersionStampIsEarned:
         assert after["definition"].startswith('CREATE TABLE "claims"'), (
             "the version moved without the step running"
         )
+
+
+class TestAChainOfSteps:
+    """A route longer than one step, which no release has ever shipped.
+
+    The runner was written for a chain and refuses a route with a gap before it
+    commits anything, but every real route so far has been one hop. The
+    interesting failure lives in the chain: the steps are separate
+    transactions, so a stop partway leaves a graph at neither end of the route,
+    and the release that wrote the file refuses the version it has reached.
+
+    The second step is synthetic, because this release has only one. That is
+    the point of testing it here rather than waiting: the day a real second
+    step is registered is a bad day to discover the runner cannot resume.
+    """
+
+    @pytest.mark.skipif(
+        not _available(_SOURCES[0][1]), reason="pinned commit not in this clone",
+    )
+    def test_the_oldest_graph_reaches_the_current_version(
+        self, tmp_path: Path,
+    ) -> None:
+        """One open, the whole route, and the claims come through unchanged."""
+        version, commit = _SOURCES[0]
+        root = tmp_path / "project"
+        _graph_written_by(version, commit, tmp_path / "work", root)
+
+        with sqlite3.connect(_db(root)) as conn:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        before = _state(root)
+
+        with mareforma.open(root, key_path=root / "root.key"):
+            pass
+
+        after = _state(root)
+        assert after["user_version"] == _SCHEMA_VERSION
+        assert after["claims"] == before["claims"]
+        # The signed child tables, not every table: the guard census records
+        # what it saw on the way through, so it is supposed to differ across an
+        # open, and comparing it would only assert that the open ran.
+        signed = ("verdict_chain", "grounding_attestations", "validators",
+                  "contradiction_verdicts", "replication_verdicts")
+        for table in signed:
+            if table in before["children"]:
+                assert after["children"].get(table) == before["children"][table], table
+        _rows_agree_on_surviving_columns(before["rows"], after["rows"])
+
+    @pytest.mark.skipif(
+        not _available(_SOURCES[0][1]), reason="pinned commit not in this clone",
+    )
+    def test_a_stop_partway_says_where_it_stopped_and_resumes(
+        self, tmp_path: Path,
+    ) -> None:
+        """The failure a chain has that a single step does not.
+
+        Each hop commits on its own, so a second hop that fails leaves the file
+        at the first hop's version: neither where it started nor where it was
+        going. Telling the operator nothing changed would point them at a
+        remedy that cannot work, because the release that wrote the file
+        refuses the version the chain has reached. It has to name that version
+        and say the open can simply be run again.
+        """
+        version, commit = _SOURCES[0]
+        root = tmp_path / "project"
+        _graph_written_by(version, commit, tmp_path / "work", root)
+
+        reached = _SCHEMA_VERSION
+        route = dict(_MIGRATIONS)
+        route[reached] = (reached + 1, _blow_up_in_the_second_hop)
+
+        with mock.patch.dict(_MIGRATIONS, route, clear=True), \
+                mock.patch.object(_core, "_SCHEMA_VERSION", reached + 1):
+            with pytest.raises(MigrationError) as caught:
+                with mareforma.open(root, key_path=root / "root.key"):
+                    pass
+        message = str(caught.value)
+        assert f"reached user_version={reached}" in message
+        assert "committed" in message and "Do not delete" in message
+        assert "unchanged" not in message, (
+            "the graph is not unchanged: the first hop committed"
+        )
+
+        with sqlite3.connect(_db(root)) as conn:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == reached
+
+        # Re-running the open is the documented remedy, so it has to work.
+        with mareforma.open(root, key_path=root / "root.key"):
+            pass
+        with sqlite3.connect(_db(root)) as conn:
+            assert conn.execute(
+                "PRAGMA user_version"
+            ).fetchone()[0] == _SCHEMA_VERSION
+
+
+def _blow_up_in_the_second_hop(conn: sqlite3.Connection) -> None:
+    """A second hop that fails after the first one has committed."""
+    raise sqlite3.OperationalError("the second hop refused on purpose")
 
 
 class TestContentionIsNotCalledCorruption:

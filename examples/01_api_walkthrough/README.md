@@ -14,7 +14,7 @@ No external dependencies. Uses a temporary directory, safe to run anywhere.
 Trust reads off the derived axes `graph.proposition_status(prop)` returns:
 `status` per `content_id` (the answer) and `question_status` per `frame_id` (the
 question). Sections 5 and 6 exercise the stored `support_level` ladder, the
-legacy per-claim axis whose `REPLICATED` / `ESTABLISHED` public labels are
+legacy per-claim axis whose labels were
 deprecated for v0.4.0. It is still functional this release, which is why the
 walkthrough still shows it.
 
@@ -96,7 +96,7 @@ c_derived = graph.assert_claim(
 ```python
 graph.query("cell type A")                # text substring (case-insensitive)
 graph.query(classification="ANALYTICAL")  # classification filter
-[c for c in graph.query() if c["support_level"] == "REPLICATED"]  # none yet
+graph.query()  # every claim, each carrying generator_enrolled
 graph.query(limit=2)                      # limit
 graph.get_claim(c_analytical)             # single record by id
 ```
@@ -134,7 +134,7 @@ id_b = graph.assert_claim(
   same id?               True
 ```
 
-## 5. REPLICATED: automatic convergence
+## 5. Convergence
 
 ```python
 # REPLICATED fires when >=2 claims share the same upstream in supports[], are
@@ -150,8 +150,7 @@ lab_b_priv = _signing.load_private_key(lab_b_key_path)
 upstream = graph.assert_claim(
     "Property X is elevated in compartment Y",
     classification="DERIVED",
-    generated_by="agent_seed/model-a",
-    seed=True,                    # directly ESTABLISHED, anchors the chain
+    generated_by="agent_seed/model-a",                    # directly ESTABLISHED, anchors the chain
 )
 
 rep_a = graph.assert_claim(
@@ -174,7 +173,7 @@ rep_b = graph.assert_claim(
   REPLICATED count       3
 ```
 
-## 6. ESTABLISHED: human validation only
+## 6. Validation (human only)
 
 ```python
 # validate() requires support_level == REPLICATED. No agent can self-promote.

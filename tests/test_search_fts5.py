@@ -108,43 +108,6 @@ class TestSearchWildcardRejection:
 # ---------------------------------------------------------------------------
 
 class TestSearchFilters:
-    def test_the_storage_layer_still_filters_on_the_stored_level(
-        self, tmp_path: Path,
-    ) -> None:
-        """``search`` no longer takes a level; the column underneath still does.
-
-        Checked at the storage layer for the same reason its sibling in
-        test_graph is: the parameter is gone from the public read and the
-        column goes with the schema step, so this is where the filter lives
-        until then.
-        """
-        from mareforma.db import open_db, search_claims
-
-        key = _bootstrap_key(tmp_path)
-        sa, sb = _two_signers(tmp_path)
-        with mareforma.open(tmp_path, key_path=key) as g:
-            seed = g.assert_claim(
-                "dopamine reference work", generated_by="seed", seed=True,
-            )
-            g.assert_claim(
-                "dopamine modulates striatum",
-                supports=[seed], generated_by="A", signer=sa,
-            )
-            g.assert_claim(
-                "dopamine modulates striatum",
-                supports=[seed], generated_by="B", signer=sb,
-            )
-
-        conn = open_db(tmp_path)
-        try:
-            # One ESTABLISHED seed plus two REPLICATED peers.
-            replicated = search_claims(conn, "dopamine", min_support="REPLICATED")
-            established = search_claims(conn, "dopamine", min_support="ESTABLISHED")
-        finally:
-            conn.close()
-        assert len(replicated) == 3
-        assert len(established) == 1
-
     def test_classification_filter(self, tmp_path: Path) -> None:
         key = _bootstrap_key(tmp_path)
         with mareforma.open(tmp_path, key_path=key) as g:
@@ -160,20 +123,12 @@ class TestSearchFilters:
         assert len(results) == 1
         assert results[0]["classification"] == "ANALYTICAL"
 
-    def test_default_excludes_unverified_preliminary(
-        self, tmp_path: Path,
-    ) -> None:
-        with mareforma.open(tmp_path) as g:  # unsigned
-            g.assert_claim("alpha unverified")
-            results = g.search("alpha")
-        assert results == []
-
     def test_include_unverified_true_surfaces_unsigned(
         self, tmp_path: Path,
     ) -> None:
         with mareforma.open(tmp_path) as g:
             g.assert_claim("alpha unverified")
-            results = g.search("alpha", include_unverified=True)
+            results = g.search("alpha")
         assert len(results) == 1
 
 
@@ -200,10 +155,10 @@ class TestFTSIndexSync:
         from mareforma import db as _db
         with mareforma.open(tmp_path) as g:
             cid = g.assert_claim("original text")
-            assert len(g.search("original", include_unverified=True)) == 1
+            assert len(g.search("original")) == 1
             _db.update_claim(g._conn, g._root, cid, text="revised body")
-            assert g.search("original", include_unverified=True) == []
-            assert len(g.search("revised", include_unverified=True)) == 1
+            assert g.search("original") == []
+            assert len(g.search("revised")) == 1
 
 
 # ---------------------------------------------------------------------------

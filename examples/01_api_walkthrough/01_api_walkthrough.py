@@ -8,9 +8,9 @@ No external dependencies. Uses a temporary directory, safe to run anywhere.
 
 Trust reads off the derived axes graph.proposition_status(prop) returns: status
 per content_id (the answer) and question_status per frame_id (the question).
-Steps 5 and 6 exercise the stored support_level ladder, the legacy per-claim axis
-whose REPLICATED / ESTABLISHED public labels are deprecated for v0.4.0 and still
-functional this release.
+Steps 5 and 6 cover what two independent agents converging is worth, and what a
+human signing off on a finding records. Neither writes a level: the promotion
+ladder that used to sit under both is gone.
 
 Sections
 --------
@@ -18,8 +18,8 @@ Sections
   2. Assert                INFERRED, ANALYTICAL, DERIVED
   3. Query                 text, classification, limit
   4. Idempotency           retry-safe writes
-  5. REPLICATED            automatic when two independent agents converge
-  6. ESTABLISHED           human validation, requires REPLICATED first
+  5. Convergence            two independent agents on the same finding
+  6. Validation (human only)  a signed sign-off, no automated path
   7. Operational surfaces  health(), classify_supports()
   8. Anti-patterns         what breaks the epistemic model silently
 """
@@ -124,7 +124,7 @@ r = graph.query(classification="ANALYTICAL")
 show("classification=ANALYTICAL", f"{len(r)} claim")
 
 # Minimum support, nothing is REPLICATED yet
-r = [c for c in graph.query(limit=99) if c["support_level"] == "REPLICATED"]
+r = graph.query(limit=99)
 show("REPLICATED rows", f"{len(r)} claims  ← expected 0")
 
 # Limit
@@ -134,7 +134,7 @@ show("limit=2", f"{len(r)} claims")
 # get_claim, single record by id
 claim = graph.get_claim(c_analytical)
 if claim:
-    show("get_claim support_level", claim["support_level"])
+    show("get_claim validated_by", claim.get("validated_by") or "not validated")
     show("get_claim classification", claim["classification"])
 
 
@@ -171,7 +171,7 @@ show("same id?", id_a == id_b)
 # ---------------------------------------------------------------------------
 # 5. REPLICATED, automatic convergence
 # ---------------------------------------------------------------------------
-sep("5. REPLICATED (automatic)")
+sep("5. Convergence")
 
 # REPLICATED fires when >=2 claims share the same upstream in supports[],
 # are signed by DISTINCT keys, and the shared upstream is itself
@@ -188,8 +188,7 @@ lab_b_priv = _signing.load_private_key(lab_b_key_path)
 upstream = graph.assert_claim(
     "Property X is elevated in compartment Y",
     classification="DERIVED",
-    generated_by="agent_seed/model-a",
-    seed=True,                    # directly ESTABLISHED, anchors the chain
+    generated_by="agent_seed/model-a",                    # directly ESTABLISHED, anchors the chain
 )
 
 rep_a = graph.assert_claim(
@@ -212,24 +211,24 @@ rep_b = graph.assert_claim(
 
 c_rep_a = graph.get_claim(rep_a)
 c_rep_b = graph.get_claim(rep_b)
-show("lab_a support_level", c_rep_a["support_level"] if c_rep_a else "n/a")
-show("lab_b support_level", c_rep_b["support_level"] if c_rep_b else "n/a")
-show("REPLICATED count", len([c for c in graph.query(limit=99)
-                              if c["support_level"] == "REPLICATED"]))
+show("lab_a validated", bool(c_rep_a and c_rep_a.get("validation_signature")))
+show("lab_b validated", bool(c_rep_b and c_rep_b.get("validation_signature")))
+show("REPLICATED count", len(graph.query(limit=99)))
 
 
 # ---------------------------------------------------------------------------
-# 6. ESTABLISHED, human validation only
+# 6. Validation, human only
 # ---------------------------------------------------------------------------
-sep("6. ESTABLISHED (human only)")
+sep("6. Validation (human only)")
 
-# validate() requires support_level == REPLICATED.
-# No automated path. No agent can self-promote to ESTABLISHED.
+# validate() records a signed attestation and changes nothing you can filter
+# on. There is no automated path to it, and no agent can sign off on its own
+# work: a validator whose key appears on the claim envelope is refused.
 
 try:
-    graph.validate(c_inferred)          # PRELIMINARY, raises
-except ValueError as exc:
-    show("validate(PRELIMINARY)", f"ValueError: {exc}")
+    graph.validate(c_inferred)          # signed by this key, so refused
+except Exception as exc:
+    show("validate(own claim)", f"{type(exc).__name__}: {str(exc)[:60]}…")
 
 # Close and re-open under the reviewer key so the validator differs from the
 # signer of rep_a. mareforma refuses self-validation: a validator cannot
@@ -248,7 +247,6 @@ with mareforma.open(tmp, key_path=reviewer_key_path) as reviewer_graph:
 graph = mareforma.open(tmp, key_path=agent_key_path)
 established = graph.get_claim(rep_a)
 if established:
-    show("support_level", established["support_level"])
     show("validated_by", established["validated_by"])
     show("validated_at", established["validated_at"][:10])
 
@@ -269,7 +267,6 @@ show("unsigned_claims", h["unsigned_claims"])
 show("unresolved_claims", h["unresolved_claims"])
 show("dangling_supports", h["dangling_supports"])
 show("convergence_errors", h["convergence_errors"])
-show("convergence_retry_pending", h["convergence_retry_pending"])
 
 # graph.classify_supports(), see how the graph routes each entry
 # in a supports[] / contradicts[] list. Three buckets: claim (strict

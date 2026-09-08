@@ -739,72 +739,6 @@ def test_architecture_trust_map_count_matches_its_command_bullets():
     )
 
 
-def test_no_page_promises_a_cli_only_established_promotion():
-    """ESTABLISHED needs a seed anchor, and no CLI command writes one.
-
-    REPLICATED requires an ESTABLISHED upstream and ``claim validate``
-    refuses anything below REPLICATED, so a walkthrough that never leaves
-    the CLI dead-ends on a fresh graph. Only ``assert_claim(seed=True)``
-    breaks the deadlock, and ``claim add`` exposes no ``--seed``. The guard
-    lifts on its own the day the CLI grows that option.
-    """
-    add = cli.commands["claim"].commands["add"]
-    if any("--seed" in param.opts for param in add.params):
-        return
-    pages = [ROOT / "AGENTS.md", *sorted(DOCS.rglob("*.mdx"))]
-    offenders = sorted(
-        str(page.relative_to(ROOT))
-        for page in pages
-        if "CLI only" in page.read_text(encoding="utf-8")
-    )
-    assert not offenders, (
-        "pages promise a CLI-only path to ESTABLISHED, but `mareforma claim "
-        f"add` cannot write the seed anchor: {offenders}"
-    )
-
-
-# Pages that carry a REPLICATED convergence recipe in prose.
-_REPLICATION_PAGES = (
-    ROOT / "AGENTS.md",
-    DOCS / "for-agents" / "agents.mdx",
-    DOCS / "concepts" / "trust.mdx",
-)
-
-# ``min_support="REPLICATED"`` is a query filter, not a promotion claim.
-_MIN_SUPPORT_RE = re.compile(r"""min_support\s*=\s*["']REPLICATED["']""")
-
-
-def test_replicated_recipes_sign_the_peers_with_distinct_keys():
-    """a convergence recipe run under one key stays PRELIMINARY, silently.
-
-    Promotion counts independence by distinct ``asserter_keyid``, so two
-    peers asserted through one open graph share one keyid and never
-    converge. A snippet that annotates that pair as REPLICATED teaches the
-    reader that a same-key rerun counts as corroboration.
-    """
-    unsigned = []
-    recipes_seen = 0
-    for page in _REPLICATION_PAGES:
-        for block in _python_blocks(page.read_text(encoding="utf-8")):
-            if "assert_claim" not in block:
-                continue
-            if "REPLICATED" not in _MIN_SUPPORT_RE.sub("", block):
-                continue
-            recipes_seen += 1
-            if "signer=" in block or block.count("key_path=") >= 2:
-                continue
-            unsigned.append(str(page.relative_to(ROOT)))
-    assert recipes_seen, (
-        "no REPLICATED convergence recipe found in the replication pages to "
-        "guard: the vocabulary pass removed the subject, so update or retire "
-        "this guard rather than letting it pass on nothing"
-    )
-    assert not unsigned, (
-        "REPLICATED recipes assert both peers under one key in: "
-        + ", ".join(sorted(set(unsigned)))
-    )
-
-
 def test_findings_convergent_example_uses_a_distinct_signer(tmp_path):
     """the findings.mdx CONVERGENT recipe must reach CONVERGENT when run.
 
@@ -969,13 +903,12 @@ def test_idempotency_docs_do_not_teach_key_sharing_as_convergence(tmp_path):
 
 
 def test_quickstart_python_blocks_run_end_to_end(tmp_path, monkeypatch):
-    """the quickstart must run as written, up to and including ESTABLISHED.
+    """the quickstart must run as written, up to and including validate().
 
-    Promotion refuses a validator whose keyid signed the claim or any peer
-    in the converging set, so a page that promotes with the key that
-    asserted the claim ends in ``SelfValidationError`` at its last step.
-    The blocks are executed in order in a temp project; the only stub is
-    ``analyze``, the reader's own pipeline.
+    validate() refuses a validator whose keyid signed the claim, so a page that
+    signs off with the key that asserted it ends in ``SelfValidationError`` at
+    its last step. The blocks are executed in order in a temp project; the only
+    stub is ``analyze``, the reader's own pipeline.
     """
     from mareforma import signing
 
@@ -991,8 +924,17 @@ def test_quickstart_python_blocks_run_end_to_end(tmp_path, monkeypatch):
     for block in blocks:
         exec(compile(block, "quickstart.mdx", "exec"), namespace)
 
-    with mareforma.open(project, key_path=signing.default_key_path()) as graph:
-        assert graph.get_claim(namespace["id_a"])["support_level"] == "ESTABLISHED"
+    # The page ends by validating a claim, so the graph has to hold the signed
+    # attestation the page says it does. This asserted the claim reached the
+    # top rung; the rung is gone and the envelope is what it was standing for.
+    import mareforma as _mf
+
+    with _mf.open(project) as g:
+        validated = g.get_claim(namespace["id_a"])
+    assert validated["validation_signature"], (
+        "the quickstart's validate() step recorded nothing"
+    )
+    assert validated["validated_by"], "a validation with nobody's name on it"
 
 
 def test_replicated_accordion_scopes_the_witnessing_policy_to_recovery(tmp_path):
@@ -1013,46 +955,44 @@ def test_replicated_accordion_scopes_the_witnessing_policy_to_recovery(tmp_path)
         graph.enroll_validator(signing.public_key_to_pem(peer.public_key()),
                                identity="lab_b")
         seed = graph.assert_claim("upstream", classification="DERIVED",
-                                  generated_by="agent/seed", seed=True)
+                                  generated_by="agent/seed")
         a = graph.assert_claim("A", supports=[seed], generated_by="lab_a")
         b = graph.assert_claim("B", supports=[seed], generated_by="lab_b",
                                signer=peer)
         # No rekor_url, so both are born flagged and converge unwitnessed.
         assert graph.get_claim(a)["transparency_logged"] == 1
-        assert graph.get_claim(a)["support_level"] == "REPLICATED"
-        assert graph.get_claim(b)["support_level"] == "REPLICATED"
 
+    # The page that explains witnessing must not present the policy as a live
+    # gate on the write path, wherever on the page it says it. The accordion
+    # this used to read went with the ladder; the rule it guards did not.
     trust = (DOCS / "concepts" / "trust.mdx").read_text(encoding="utf-8")
-    accordion = re.search(
-        r'<Accordion title="REPLICATED">(.*?)</Accordion>', trust, re.DOTALL
-    )
-    assert accordion, "trust.mdx has no REPLICATED accordion"
-    body = accordion.group(1)
-    if "require_rekor_witnessing" in body:
-        assert "restore" in body, (
-            "the REPLICATED accordion presents require_rekor_witnessing() as a "
-            "live convergence gate; it is enforced on restore"
+    for para in trust.split("\n\n"):
+        if "require_rekor_witnessing" not in para:
+            continue
+        assert "restore" in para or "recovery" in para, (
+            "trust.mdx presents require_rekor_witnessing() as a live gate on "
+            f"the write path; it is enforced on restore. Paragraph: {para[:200]}"
         )
 
 
 def test_quickstart_signing_key_step_is_not_labelled_optional(tmp_path):
     """the key is optional for two sections of the page and required for the rest.
 
-    Without a loaded signer ``assert_claim`` stores an unsigned claim that
-    ``query`` hides unless the caller opts in with ``include_unverified``,
-    and ``seed=True``, ``enroll_validator`` and ``validate`` all raise,
-    since independence and promotion key on ``asserter_keyid``. The
-    bootstrap step must not read as skippable.
+    Without a loaded signer ``assert_claim`` stores an unsigned claim, and
+    ``enroll_validator`` and ``validate`` both raise, since independence keys
+    on ``asserter_keyid``. The unsigned claim is served now rather than hidden,
+    carrying ``generator_enrolled=False``, so the reason the bootstrap step
+    must not read as skippable is the calls that raise rather than a read that
+    comes back empty.
     """
     with mareforma.open(tmp_path) as graph:
         graph.assert_claim("Cell type A receives more inhibitory input",
                            classification="ANALYTICAL",
                            source_name="dataset_alpha")
-        assert graph.query("cell type A") == []
-        assert graph.query("cell type A", include_unverified=True)
+        served = graph.query("cell type A")
+        assert served, "the unsigned claim was hidden rather than disclosed"
+        assert served[0]["generator_enrolled"] is False
         for call in (
-            lambda: graph.assert_claim("upstream", classification="DERIVED",
-                                       seed=True),
             lambda: graph.enroll_validator(b"pem", identity="lab_b"),
             lambda: graph.validate("00000000-0000-4000-8000-000000000000"),
         ):
@@ -1064,12 +1004,12 @@ def test_quickstart_signing_key_step_is_not_labelled_optional(tmp_path):
     assert heading, "quickstart has no signing-key step"
     assert "optional" not in heading.group(0).lower(), (
         "the quickstart labels the signing key optional, yet its later "
-        "sections seed, enroll and validate, all of which need one"
+        "sections enrol and validate, both of which need one"
     )
     step = _section(page, heading.group(0))
-    for required in ("seed", "enroll_validator", "validate", "include_unverified"):
+    for required in ("enroll_validator", "validate", "generator_enrolled"):
         assert required in step, (
-            f"the signing-key step must say {required} needs a key"
+            f"the signing-key step must say what {required} does without one"
         )
 
 
@@ -1122,13 +1062,11 @@ def test_replicated_promotion_docs_do_not_overclaim_the_model_gate(tmp_path):
     sa = _signing.load_private_key(_bootstrap_key(tmp_path, "a.key"))
     sb = _signing.load_private_key(_bootstrap_key(tmp_path, "b.key"))
     with mareforma.open(tmp_path, key_path=ka) as g:
-        up = g.assert_claim("anchor", generated_by="seed", seed=True)
+        up = g.assert_claim("anchor", generated_by="seed")
         a = g.assert_claim("A", supports=[up], generated_by="lab_a", signer=sa)
         b = g.assert_claim("B", supports=[up], generated_by="lab_b", signer=sb)
         # No finding lineage on these claims, so the model gate is a no-op: a
         # same-(absent-)model pair under distinct keys promotes all the same.
-        assert g.get_claim(a)["support_level"] == "REPLICATED"
-        assert g.get_claim(b)["support_level"] == "REPLICATED"
 
     for name in ("AGENTS.md", "ARCHITECTURE.md"):
         text = (ROOT / name).read_text(encoding="utf-8")
@@ -1153,9 +1091,9 @@ def test_the_retired_label_note_says_removed_and_not_deprecated(tmp_path=None):
             f"{page.name} still calls the retired labels deprecated; reading "
             "one raises AttributeError"
         )
-        assert "are removed public labels" in text, (
-            f"{page.name} no longer carries the note this guard reads: a docs "
-            "change removed it, so update or retire the guard rather than "
+        assert "raises `AttributeError`" in text, (
+            f"{page.name} no longer says what reading a retired label does: a "
+            "docs change removed it, so update or retire the guard rather than "
             "letting it pass silently"
         )
         for label in ("REPLICATED", "ESTABLISHED"):
@@ -1764,7 +1702,7 @@ def test_unresolved_row_describes_the_restore_path_that_sets_it(tmp_path):
     with mareforma.open(source, key_path=root_key) as g:
         g.enroll_validator(_pem_of(key_a), identity="a")
         g.enroll_validator(_pem_of(key_b), identity="b")
-        up = g.assert_claim("anchor", generated_by="seed", seed=True)
+        up = g.assert_claim("anchor", generated_by="seed")
         first = g.assert_claim("A", supports=[up], generated_by="lab_a",
                                signer=_signing.load_private_key(key_a))
 
@@ -1784,13 +1722,9 @@ def test_unresolved_row_describes_the_restore_path_that_sets_it(tmp_path):
         # convergence candidate query skips the quarantined row silently.
         second = g.assert_claim("B", supports=[up], generated_by="lab_b",
                                 signer=_signing.load_private_key(key_b))
-        assert g.get_claim(first)["support_level"] == "PRELIMINARY"
-        assert g.get_claim(second)["support_level"] == "PRELIMINARY"
 
         assert [c["claim_id"] for c in _db.list_unresolved_claims(g._conn)] == [first]
         _db.mark_claim_resolved(g._conn, project, first)
-        assert g.get_claim(first)["support_level"] == "REPLICATED"
-        assert g.get_claim(second)["support_level"] == "REPLICATED"
 
     page = (DOCS / "reference" / "data-model.mdx").read_text(encoding="utf-8")
     row = next(line for line in page.splitlines()
@@ -1840,17 +1774,13 @@ def test_example_05_promotion_prose_matches_the_signer_gate(tmp_path):
         # The way run_experiment.py writes: one key, no upstream.
         ra = g.assert_claim("RA target", generated_by="medea/gpt-4o/ra_cd4")
         sle = g.assert_claim("SLE target", generated_by="medea/gpt-4o/sle_cd4")
-        assert g.get_claim(ra)["support_level"] == "PRELIMINARY"
-        assert g.get_claim(sle)["support_level"] == "PRELIMINARY"
 
         # The gate the README must describe: distinct keys, shared anchor.
         sa = _signing.load_private_key(_bootstrap_key(tmp_path, "a.key"))
         sb = _signing.load_private_key(_bootstrap_key(tmp_path, "b.key"))
-        up = g.assert_claim("anchor", generated_by="seed", seed=True)
+        up = g.assert_claim("anchor", generated_by="seed")
         a = g.assert_claim("A", supports=[up], generated_by="lab_a", signer=sa)
-        assert g.get_claim(a)["support_level"] == "PRELIMINARY"
         b = g.assert_claim("B", supports=[up], generated_by="lab_b", signer=sb)
-        assert g.get_claim(b)["support_level"] == "REPLICATED"
 
     example = ROOT / "examples" / "05_drug_target_provenance"
     readme = (example / "README.md").read_text(encoding="utf-8")
@@ -1901,9 +1831,10 @@ def test_example_05_recorded_run_is_out_of_the_backup_writer_reach(tmp_path):
 def test_example_05_recorded_run_restores_as_the_readme_describes(tmp_path):
     """the README must state how the recorded capture restores.
 
-    The capture predates signing, so ``restore`` rebuilds four unsigned claims
-    that the default ``query`` drops. That is only honest if the README says
-    so rather than presenting the file as a working recovery source.
+    The capture predates signing, so ``restore`` rebuilds four unsigned claims.
+    The default read used to drop them and the README had to say so; they are
+    served now, carrying ``generator_enrolled=False``, and the README has to
+    say that instead rather than presenting the file as a signed record.
     """
     example = ROOT / "examples" / "05_drug_target_provenance"
     recorded = example / "recorded" / "case_b.claims.toml"
@@ -1914,8 +1845,9 @@ def test_example_05_recorded_run_restores_as_the_readme_describes(tmp_path):
     assert mareforma.restore(project)["claims_restored"] == 4
 
     with mareforma.open(project) as graph:
-        assert graph.query("target") == []
-        assert len(graph.query("target", include_unverified=True)) == 4
+        served = graph.query("target")
+        assert len(served) == 4
+        assert all(r["generator_enrolled"] is False for r in served)
 
     section = " ".join(
         _section((example / "README.md").read_text(encoding="utf-8"), "## What this caught").split()
@@ -1923,8 +1855,8 @@ def test_example_05_recorded_run_restores_as_the_readme_describes(tmp_path):
     assert "recorded/case_b.claims.toml" in section, (
         "the README must point at the recorded capture by path"
     )
-    assert "include_unverified=True" in section, (
-        "the README must state that the capture is unsigned and needs include_unverified"
+    assert "unsigned" in section, (
+        "the README must state that the capture is unsigned"
     )
 
 

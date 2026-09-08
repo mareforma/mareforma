@@ -27,12 +27,10 @@ signed bundles" for the shape.
 
 Deprecation
 -----------
-``supportLevel`` (the ``mare:supportLevel`` term in the ``@context``)
-carries the retired support ladder (PRELIMINARY / REPLICATED /
-ESTABLISHED). The ladder is deprecated; read the computed status axis
-instead. The term still emits this release so existing consumers are not
-broken. What happens to ``mare:supportLevel`` at v0.4.0, when the stored
-column is removed, is an open format question, not decided here.
+``mare:supportLevel`` is gone. It carried the support ladder, and the stored
+column it read is gone with it. A consumer keyed on the term now finds it
+absent, which is a break they can see, rather than a value frozen at some
+level or fabricated from nothing, which is a break they would keep trusting.
 """
 
 from __future__ import annotations
@@ -61,7 +59,6 @@ _CONTEXT = {
     "dateCreated":     "schema:dateCreated",
     "claimText":       "mare:claimText",
     "classification":  "mare:classification",
-    "supportLevel":    "mare:supportLevel",
     "claimStatus":     "mare:claimStatus",
     "sourceName":      "mare:sourceName",
     "generatedBy":     "mare:generatedBy",
@@ -225,7 +222,6 @@ class JSONLDExporter:
             # exported as a fabricated level or classification the record never
             # carried, matching the sibling fields below.
             "classification": claim["classification"],
-            "supportLevel": claim["support_level"],
             "claimStatus": claim["status"],
             "generatedBy": claim.get("generated_by", "agent"),
             "dateCreated": claim["created_at"],

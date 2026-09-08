@@ -13,7 +13,7 @@ description: "The Mareforma command-line interface: identity setup, claim manage
 | `mareforma claim list` | List claims |
 | `mareforma claim show` | Show one claim |
 | `mareforma claim update` | Update a claim |
-| `mareforma claim validate` | Promote REPLICATED → ESTABLISHED |
+| `mareforma claim validate` | Record a signed human validation |
 | `mareforma status` | Epistemic health dashboard |
 | `mareforma activity` | Rolling operational rates (`stats` is a deprecated alias) |
 | `mareforma export` | Write `ontology.jsonld` (or signed bundle) |
@@ -102,7 +102,7 @@ mareforma key show --keyid
 
 ## validator
 
-Manage the per-project validators table: who may promote claims to `ESTABLISHED`.
+Manage the per-project validators table: who may sign off on a claim.
 
 ```bash
 mareforma validator [SUBCOMMAND]
@@ -233,7 +233,7 @@ clears it. `claim show` carries the same marker.
 ```bash
 mareforma claim list
 mareforma claim list --status open
-mareforma claim list --json | jq '.[].support_level'
+mareforma claim list --json | jq '.[].classification'
 ```
 
 ---
@@ -277,7 +277,7 @@ Signed claims (those with a non-NULL `signature_bundle`) refuse mutation of `tex
 
 ### claim validate
 
-Promote a `REPLICATED` claim to `ESTABLISHED`. Identity-gated.
+Record a signed human validation on a claim. Identity-gated, and terminal.
 
 ```bash
 mareforma claim validate CLAIM_ID [OPTIONS]
@@ -314,19 +314,12 @@ mareforma status [OPTIONS]
 |---|---|
 | 🔴 RED | No claims recorded |
 | 🟡 YELLOW | Claims exist but all are PRELIMINARY, or every promoted claim has been retracted or invalidated by a signed contradiction verdict, or a promoted claim does not re-verify on read |
-| 🟢 GREEN | At least one REPLICATED or ESTABLISHED claim still standing, meaning not retracted and not invalidated by a signed contradiction verdict, and every promoted claim re-verifies |
+| 🟢 GREEN | At least one validated claim still standing, meaning not retracted and not invalidated by a signed contradiction verdict, and every promoted claim re-verifies |
 
-The light cannot read green while a promoted claim fails re-verification: the
-stored REPLICATED or ESTABLISHED level is not backed by signed material (a forged
-level or a tampered envelope). The report names how many, so `mareforma verify
-<claim_id>` can find which, to retract or repair.
-
-The report also carries `convergence_retry_pending`, the count of promotions a
-convergence check failed to run and left flagged for retry. The common cause is a
-project one writer has upgraded: a promotion under the older release trips the
-newer promotion guard and gets flagged, and a writer on the newer release clears
-it with `graph.refresh_convergence()`. It is informational and does not gate the
-light.
+The light cannot read green while a claim carrying signed material fails
+re-verification: an envelope stapled onto another row, a signed field rewritten
+underneath, or a swapped signature. The report names how many, so `mareforma
+verify <claim_id>` can find which, to retract or repair.
 
 **Options**
 

@@ -115,7 +115,6 @@ def test_q3_prints_the_chain_the_graph_holds(tmp_path: Path, capsys) -> None:
             "Prior literature on Target T in condition C",
             classification="DERIVED",
             generated_by="agent_seed/literature",
-            seed=True,
         )
         step_1 = graph.assert_claim(
             "Candidate target T shows elevated activity in condition C",

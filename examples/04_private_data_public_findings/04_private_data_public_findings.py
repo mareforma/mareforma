@@ -143,8 +143,7 @@ def get_provenance_trace(claim_id: str) -> dict:
         "claim_id": claim["claim_id"],
         "text": claim["text"],
         "classification": claim["classification"],
-        "support_level": claim["support_level"],
-        "source_name": claim.get("source_name"),
+                "source_name": claim.get("source_name"),
         "generated_by": claim.get("generated_by"),
         "supports": json.loads(claim.get("supports_json", "[]") or "[]"),
         "contradicts": json.loads(claim.get("contradicts_json", "[]") or "[]"),
@@ -165,7 +164,6 @@ upstream_ref = graph.assert_claim(
     "Prior literature on Target T in condition C",
     classification="DERIVED",
     generated_by="agent_seed/literature",
-    seed=True,
 )
 
 # Lab A runs a multi-step analysis on its private dataset.
@@ -283,13 +281,13 @@ else:
 sep("Q2, Genuinely reproducible?")
 
 for c in graph.query("Target T"):
-    show(c["text"][:45] + "…", c["support_level"])
+    show(c["text"][:45] + "…", c["classification"])
 
 print()
 c_rep1 = graph.get_claim(rep_1)
 c_rep2 = graph.get_claim(rep_2)
-support_1 = c_rep1["support_level"] if c_rep1 else "n/a"
-support_2 = c_rep2["support_level"] if c_rep2 else "n/a"
+support_1 = bool(c_rep1 and c_rep1.get("validation_signature"))
+support_2 = bool(c_rep2 and c_rep2.get("validation_signature"))
 
 if support_1 == "REPLICATED" or support_2 == "REPLICATED":
     print("  ✓ REPLICATED: distinct signing keys, shared upstream, independent data paths.")
@@ -366,8 +364,8 @@ spurious_b = graph.assert_claim(
 
 c_sp_a = graph.get_claim(spurious_a)
 c_sp_b = graph.get_claim(spurious_b)
-show("spurious_a support_level", c_sp_a["support_level"] if c_sp_a else "n/a")
-show("spurious_b support_level", c_sp_b["support_level"] if c_sp_b else "n/a")
+show("spurious_a validated", bool(c_sp_a and c_sp_a.get("validation_signature")))
+show("spurious_b validated", bool(c_sp_b and c_sp_b.get("validation_signature")))
 show("spurious_a classification", c_sp_a["classification"] if c_sp_a else "n/a")
 
 print()

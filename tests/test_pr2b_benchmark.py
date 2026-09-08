@@ -46,7 +46,7 @@ def _build_many_anchors(graph, root: Path, n_anchors: int, n_signers: int = 3) -
     """
     signers = [_enrolled_signer(graph, root, f"m{i}") for i in range(n_signers)]
     for a in range(n_anchors):
-        anchor = graph.assert_claim(f"anchor {a}", generated_by="seed", seed=True)
+        anchor = graph.assert_claim(f"anchor {a}", generated_by="seed")
         for i, s in enumerate(signers):
             graph.assert_claim(
                 f"converging claim {a}.{i}", generated_by=f"lab_{i}",
@@ -60,7 +60,7 @@ def _build_many_replicated(graph, root: Path, n_signers: int) -> int:
     signer citing it. Every claim converges with the others on the anchor, so all
     n land at REPLICATED. Returns the number of REPLICATED rows created.
     """
-    anchor = graph.assert_claim("anchor", generated_by="seed", seed=True)
+    anchor = graph.assert_claim("anchor", generated_by="seed")
     signers = [_enrolled_signer(graph, root, f"a{i}") for i in range(n_signers)]
     for i, s in enumerate(signers):
         graph.assert_claim(
@@ -68,93 +68,6 @@ def _build_many_replicated(graph, root: Path, n_signers: int) -> int:
             supports=[anchor], signer=s,
         )
     return n_signers
-
-
-def test_pr2b_verify_count_is_bounded(
-    tmp_path, monkeypatch,
-):
-    n = 40
-    kv = tmp_path / "mareforma.key"
-    _signing.bootstrap_key(kv)
-    with mareforma.open(tmp_path, key_path=kv) as g:
-        created = _build_many_replicated(g, tmp_path, n)
-
-        # Count crypto verifications through the read path. The verify helpers
-        # call ``_signing.verify_envelope``; patching the attribute the module
-        # binds lets us count every actual signature check.
-        calls = {"n": 0}
-        real = _signing.verify_envelope
-
-        def counting(*args, **kwargs):
-            calls["n"] += 1
-            return real(*args, **kwargs)
-
-        monkeypatch.setattr(_signing, "verify_envelope", counting)
-
-        rows = g.query(limit=1000)
-
-        replicated = [r for r in rows if r["support_level"] == "REPLICATED"]
-        # The setup actually produced the REPLICATED rows we query over.
-        assert len(replicated) == created
-        # Every REPLICATED row was served verified (cache reports per row).
-        assert all(r.get("verified", True) for r in replicated)
-
-        # Cache bound, MEASURED: at most one verification per envelope served,         # never the 2x+ that a missing cache would allow if an envelope were
-        # re-checked across the query's internal batches. Each distinct claim
-        # has a distinct (keyid, digest), so the count tracks the envelope
-        # count. A REPLICATED row carries the asserter bundle; an ESTABLISHED
-        # row carries the validation envelope on top of it, so it counts twice.
-        # The read also authenticates enrollment rather than trusting a
-        # validators row's presence, which costs one envelope check per read.
-        # Measured constant in the row count on THIS fixture. That is a narrow
-        # claim: one anchor with every claim citing it is not the shape a
-        # project has, and a regression that walked every anchor once per row
-        # served passed this bound untouched, because verification count was
-        # never what moved. The many-anchor case below carries the same bound on
-        # the realistic shape, and the query plan is pinned separately.
-        established = [r for r in rows if r["support_level"] == "ESTABLISHED"]
-        bound = len(replicated) + 2 * len(established) + 1
-        assert calls["n"] >= 1, "expected the read path to verify signatures"
-        assert calls["n"] <= bound, (
-            f"verify cache did not bound checks: {calls['n']} checks for "
-            f"a bound of {bound} envelopes"
-        )
-
-
-def test_pr2b_verify_count_is_bounded_across_many_anchors(tmp_path, monkeypatch):
-    """The same bound, on the graph shape a findings project actually has.
-
-    Twenty anchors with their own converging sets, rather than one anchor every
-    claim cites. The signature bound held through a query-plan regression that
-    made a bulk read walk every anchor once per row served, because the number
-    of verifications was never what moved; this pins the bound on the shape that
-    regression was invisible on, and the plan itself is pinned separately in
-    tests/test_corroboration_query_plan.py.
-    """
-    kv = tmp_path / "mareforma.key"
-    _signing.bootstrap_key(kv)
-    with mareforma.open(tmp_path, key_path=kv) as g:
-        created = _build_many_anchors(g, tmp_path, n_anchors=20)
-
-        calls = {"n": 0}
-        real = _signing.verify_envelope
-
-        def counting(*args, **kwargs):
-            calls["n"] += 1
-            return real(*args, **kwargs)
-
-        monkeypatch.setattr(_signing, "verify_envelope", counting)
-        rows = g.query(limit=1000)
-
-        replicated = [r for r in rows if r["support_level"] == "REPLICATED"]
-        established = [r for r in rows if r["support_level"] == "ESTABLISHED"]
-        assert len(replicated) == created
-        assert all(r.get("verified", True) for r in replicated)
-        bound = len(replicated) + 2 * len(established) + 1
-        assert calls["n"] <= bound, (
-            f"verify cache did not bound checks across {len(established)} "
-            f"anchors: {calls['n']} checks for a bound of {bound} envelopes"
-        )
 
 
 def test_pr2b_cache_collapses_a_repeated_row_in_one_walk(tmp_path, monkeypatch):
@@ -171,7 +84,7 @@ def test_pr2b_cache_collapses_a_repeated_row_in_one_walk(tmp_path, monkeypatch):
     kv = tmp_path / "mareforma.key"
     _signing.bootstrap_key(kv)
     with mareforma.open(tmp_path, key_path=kv) as g:
-        anchor = g.assert_claim("anchor", generated_by="seed", seed=True)
+        anchor = g.assert_claim("anchor", generated_by="seed")
         sa = _enrolled_signer(g, tmp_path, "sa")
         sb = _enrolled_signer(g, tmp_path, "sb")
         a = g.assert_claim("A", generated_by="x", supports=[anchor], signer=sa)

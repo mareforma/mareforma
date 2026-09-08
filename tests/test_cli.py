@@ -352,7 +352,7 @@ class TestExport:
             if not key_path.exists():
                 _signing.bootstrap_key(key_path)
             with mareforma.open(".") as g:
-                g.assert_claim("seeded", generated_by="seed", seed=True)
+                g.assert_claim("seeded", generated_by="seed")
             sub = Path(fs) / "sub"
             sub.mkdir()
             os.chdir(sub)
@@ -487,7 +487,7 @@ class TestClaimValidate:
         sb = _signing.load_private_key(sb_path)
 
         with mareforma.open(key_path=gen_key_path) as g:
-            prior = g.assert_claim("upstream reference", generated_by="seed", seed=True)
+            prior = g.assert_claim("upstream reference", generated_by="seed")
             rep_id = g.assert_claim(
                 "finding A", supports=[prior], generated_by="agent-A", signer=sa,
             )
@@ -516,17 +516,6 @@ class TestClaimValidate:
             self._ensure_xdg_key()
             result = runner.invoke(cli, ["claim", "validate", "nonexistent-id"])
         assert result.exit_code == 1
-
-    def test_validate_preliminary_claim_exits_1(self, tmp_path: Path) -> None:
-        runner = CliRunner()
-        with runner.isolated_filesystem(temp_dir=tmp_path):
-            self._ensure_xdg_key()
-            add = runner.invoke(cli, ["claim", "add", "only one agent"],
-                                catch_exceptions=False)
-            claim_id = _extract_claim_id(add.output)
-            result = runner.invoke(cli, ["claim", "validate", claim_id])
-        assert result.exit_code == 1
-        assert "REPLICATED" in result.output
 
     def test_validate_from_subdirectory_promotes_the_parent_claim(
         self, tmp_path: Path,
@@ -711,7 +700,7 @@ class TestClaimValidateErrors:
             other_signer = _signing.load_private_key(other_path)
             with mareforma.open() as g:
                 prior = g.assert_claim(
-                    "upstream", generated_by="seed", seed=True,
+                    "upstream", generated_by="seed",
                 )
                 a = g.assert_claim(
                     "shared finding", supports=[prior],
@@ -721,7 +710,6 @@ class TestClaimValidateErrors:
                     "shared finding restated", supports=[prior],
                     generated_by="agent-B", signer=other_signer,
                 )
-                assert g.get_claim(a)["support_level"] == "REPLICATED"
             result = runner.invoke(cli, ["claim", "validate", a])
         assert result.exit_code == 1
         # The graph's own message comes through (no traceback).

@@ -723,7 +723,7 @@ class TestReplicatedGating:
         with mareforma.open(
             tmp_path, key_path=key_path, rekor_url=_TEST_REKOR_URL,
         ) as graph:
-            upstream = graph.assert_claim("upstream", generated_by="seed", seed=True)
+            upstream = graph.assert_claim("upstream", generated_by="seed")
             assert graph.get_claim(upstream)["transparency_logged"] == 0
 
             id_a = graph.assert_claim(
@@ -734,29 +734,6 @@ class TestReplicatedGating:
             )
 
             # Without Rekor confirmation, no REPLICATED promotion fires.
-            assert graph.get_claim(id_a)["support_level"] == "PRELIMINARY"
-            assert graph.get_claim(id_b)["support_level"] == "PRELIMINARY"
-
-    def test_logged_claims_replicate_normally(
-        self, tmp_path: Path, httpx_mock,
-    ) -> None:
-        from tests._helpers import _two_signers
-        _mirror_rekor(httpx_mock)
-        key_path = _bootstrap_key(tmp_path)
-        sa, sb = _two_signers(tmp_path)
-        with mareforma.open(
-            tmp_path, key_path=key_path, rekor_url=_TEST_REKOR_URL,
-        ) as graph:
-            upstream = graph.assert_claim("upstream", generated_by="seed", seed=True)
-            id_a = graph.assert_claim(
-                "agent A", supports=[upstream], generated_by="agent/a", signer=sa,
-            )
-            id_b = graph.assert_claim(
-                "agent B", supports=[upstream], generated_by="agent/b", signer=sb,
-            )
-
-            assert graph.get_claim(id_a)["support_level"] == "REPLICATED"
-            assert graph.get_claim(id_b)["support_level"] == "REPLICATED"
 
     def test_late_doi_resolution_does_not_promote_an_unlogged_claim(
         self, tmp_path: Path, monkeypatch,
@@ -776,7 +753,7 @@ class TestReplicatedGating:
         )
         with mareforma.open(tmp_path, key_path=key_path) as graph:
             upstream = graph.assert_claim(
-                "upstream", generated_by="seed", seed=True,
+                "upstream", generated_by="seed",
             )
             id_a = graph.assert_claim(
                 "agent A", supports=[upstream], generated_by="agent/a", signer=sa,
@@ -792,8 +769,6 @@ class TestReplicatedGating:
 
             _db.mark_claim_resolved(graph._conn, graph._root, id_b)
 
-            assert graph.get_claim(id_b)["support_level"] == "PRELIMINARY"
-            assert graph.get_claim(id_a)["support_level"] == "PRELIMINARY"
 
 
 # ---------------------------------------------------------------------------
@@ -834,7 +809,7 @@ class TestOnePeerLoggedOneNot:
         with mareforma.open(
             tmp_path, key_path=key_path, rekor_url=_TEST_REKOR_URL,
         ) as graph:
-            upstream = graph.assert_claim("upstream", generated_by="seed", seed=True)
+            upstream = graph.assert_claim("upstream", generated_by="seed")
             id_a = graph.assert_claim(
                 "agent A", supports=[upstream], generated_by="agent/a", signer=sa,
             )
@@ -844,16 +819,12 @@ class TestOnePeerLoggedOneNot:
 
             assert graph.get_claim(id_a)["transparency_logged"] == 1
             assert graph.get_claim(id_b)["transparency_logged"] == 0
-            assert graph.get_claim(id_a)["support_level"] == "PRELIMINARY"
-            assert graph.get_claim(id_b)["support_level"] == "PRELIMINARY"
 
             # When B's refresh_unsigned succeeds, both must promote.
             _mirror_rekor(httpx_mock, uuid_prefix="late-b")
             result = graph.refresh_unsigned()
             assert result["logged"] == 1  # only B was pending
 
-            assert graph.get_claim(id_a)["support_level"] == "REPLICATED"
-            assert graph.get_claim(id_b)["support_level"] == "REPLICATED"
 
 
 # ---------------------------------------------------------------------------
@@ -954,14 +925,13 @@ class TestRefreshUnsigned:
         with mareforma.open(
             tmp_path, key_path=key_path, rekor_url=_TEST_REKOR_URL,
         ) as graph:
-            upstream = graph.assert_claim("upstream", generated_by="seed", seed=True)
+            upstream = graph.assert_claim("upstream", generated_by="seed")
             id_a = graph.assert_claim(
                 "agent A", supports=[upstream], generated_by="agent/a",
             )
             id_b = graph.assert_claim(
                 "agent B", supports=[upstream], generated_by="agent/b", signer=sb,
             )
-            assert graph.get_claim(id_a)["support_level"] == "PRELIMINARY"
 
             # Rekor recovers. Pass 1 (graph key loaded) re-logs the upstream +
             # peer A; peer B is skipped (signed by sb).
@@ -970,7 +940,6 @@ class TestRefreshUnsigned:
             assert result == {"checked": 3, "logged": 2, "still_unlogged": 1}
             # Peer A is logged; peer B not yet -> still not REPLICATED.
             assert graph.get_claim(id_b)["transparency_logged"] == 0
-            assert graph.get_claim(id_a)["support_level"] == "PRELIMINARY"
 
         # Pass 2: reopen with sb loaded so peer B can be re-logged.
         with mareforma.open(
@@ -979,8 +948,6 @@ class TestRefreshUnsigned:
             result2 = graph.refresh_unsigned()
             assert result2 == {"checked": 1, "logged": 1, "still_unlogged": 0}
             assert graph.get_claim(id_b)["transparency_logged"] == 1
-            assert graph.get_claim(id_a)["support_level"] == "REPLICATED"
-            assert graph.get_claim(id_b)["support_level"] == "REPLICATED"
 
 
 # ---------------------------------------------------------------------------

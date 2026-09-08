@@ -84,25 +84,6 @@ def _count_claims_toml_writes(monkeypatch, out):
     return counter
 
 
-def test_refresh_convergence_writes_the_backup_once_not_per_row(
-    tmp_path, monkeypatch,
-):
-    """A refresh pass over many flagged rows writes claims.toml once, not once
-    per row."""
-    root_key = _bootstrap_key(tmp_path, "root.key")
-    out = tmp_path / "claims.toml"
-    with mareforma.open(tmp_path, key_path=root_key) as g:
-        for i in range(4):
-            g.assert_claim(f"claim number {i}", generated_by="x")
-        g._conn.execute("UPDATE claims SET convergence_retry_needed = 1")
-        g._conn.commit()
-
-        writes = _count_claims_toml_writes(monkeypatch, out)
-        g.refresh_convergence()
-
-    assert writes["n"] == 1
-
-
 def test_refresh_unsigned_writes_the_backup_once_not_per_claim(
     tmp_path, monkeypatch, httpx_mock,
 ):

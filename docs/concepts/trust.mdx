@@ -15,8 +15,7 @@ label: **`Status`** per `content_id` is the state of the answer (`UNTESTED` ->
 `PRELIMINARY` -> `CONVERGENT`, plus `REFUTED` and `CONTESTED`), and
 **`question_status`** per `frame_id` is the state of the question
 (`consistent` / `divided`). Both come from `graph.proposition_status(prop)`.
-The `support_level` ladder below is the legacy stored promotion axis; its
-`REPLICATED` and `ESTABLISHED` public labels are deprecated for v0.4.0. See
+See
 [Findings](/concepts/findings#the-two-derived-axes-and-the-legacy-ladder) for
 the answer/question structure the axes sit on.
 
@@ -39,149 +38,29 @@ assembled from checks that all answered false. The discarded number moves to
 the residual for forensics rather than being offered as the value, because a
 number computed on a broken substrate is worse than no number.
 
-Read the number, not the label: `REPLICATED` and `ESTABLISHED` resolve
-this release as deprecated one-release aliases.
+## The ladder that used to be here
 
-## Support levels
+A stored `support_level` sat on every claim: `PRELIMINARY` on assertion, lifted
+to `REPLICATED` when two distinct signing keys converged on a shared
+`ESTABLISHED` upstream, and lifted again to `ESTABLISHED` by a human calling
+`validate()`. It is gone, column and all.
 
 <Note>
-  `REPLICATED` / `ESTABLISHED` are removed public labels: reading
-  `mareforma.REPLICATED` raises `AttributeError`, and no public read filters on
-  a level. The levels below are still stored and still fire, but nothing public
-  asks for one, and the effective-independence number above is the signal to
-  read.
+  Reading `mareforma.REPLICATED` raises `AttributeError`, no read filters on a
+  level, and no claim carries one.
 </Note>
 
-<AccordionGroup>
-  <Accordion title="PRELIMINARY">
-    One agent claimed it. Could be correct. No independent confirmation yet.
+It was removed for two reasons. A single word never carried what a reader needs:
+`REPLICATED` said two keys agreed, which is a convergence marker and not proof
+of independence, and readers took it for one anyway. And the word was unsigned,
+so any process with write access could raise it, which meant every read had to
+re-derive whether the level was backed by signed material before serving the
+row. Several hundred lines of the read path existed to police a value nothing
+signed.
 
-    Set automatically at INSERT. Every new claim starts here.
-  </Accordion>
-  <Accordion title="REPLICATED">
-    ≥2 claims signed by **distinct keys** cite the same upstream in
-    `supports[]`, AND at least one of those upstreams is itself
-    `ESTABLISHED`. Set automatically at INSERT. No extra step required.
-
-    The independence unit is the signing key (the `asserter_keyid` denormalized
-    from each signature bundle), not `generated_by`. An unsigned claim (no
-    `asserter_keyid`) or two claims signed by the same key cannot reach
-    REPLICATED.
-
-    REPLICATED is a convergence marker, not proof of independence. Distinct
-    keys prove the asserters are cryptographically separate, not that their data
-    or reasoning is independent, and signing keys are operator-mintable, so one
-    operator can produce any number of "distinct" signers. Treat REPLICATED as a
-    weak prior; read independence from its own axis (see
-    [The independence axis](#the-independence-axis) below), which is honest about
-    what it cannot verify.
-
-    The ESTABLISHED-upstream rule enforces that replication-of-noise is not
-    replication. A fresh project bootstraps the chain via a *seed claim* (see
-    below).
-
-    Promotion is also gated on the claim's `transparency_logged` flag. That
-    flag holds a claim back only when the graph was opened with a `rekor_url`
-    and submission has not yet succeeded; `graph.refresh_unsigned()` retries
-    it. With no `rekor_url` the flag is set at insert, so a signed claim
-    converges on its signature alone and the flag imposes no gate.
-
-    `graph.require_rekor_witnessing()` is a root-signed declaration, not a
-    live gate. It is enforced on recovery by
-    `restore(..., enforce_rekor_policy=True)`, which refuses to mark a signed
-    claim convergence-eligible without a verified, claim-bound inclusion
-    proof.
-  </Accordion>
-  <Accordion title="ESTABLISHED">
-    A human (an enrolled validator) reviewed the provenance chain and
-    validated it. Only reachable via `graph.validate()`. No agent can
-    self-promote.
-
-    This is the gate for consequential actions.
-  </Accordion>
-</AccordionGroup>
-
-## How REPLICATED fires
-
-```
-ESTABLISHED upstream ──► ANALYTICAL claim (lab_a, signed by key A)  ──┐
-                                                                      ├──► REPLICATED
-ESTABLISHED upstream ──► ANALYTICAL claim (lab_b, signed by key B)  ──┘
-```
-
-Three conditions must all be true:
-1. Both claims reference the **same upstream** in `supports[]`
-2. Each claim is **signed by a distinct key** (`asserter_keyid`)
-3. At least one shared upstream is itself **ESTABLISHED**
-
-One key asserting the same claim a thousand times is still PRELIMINARY.
-Cryptographic separation of asserters is what matters, not count. An unsigned
-claim carries no `asserter_keyid` and cannot reach REPLICATED.
-
-### Bootstrapping a fresh project (seed claim)
-
-On a brand new graph, no claim is yet ESTABLISHED, so the third condition
-above can never be satisfied. An enrolled validator (typically the project's
-root, auto-enrolled on first open) bootstraps the chain by asserting a
-*seed claim*: a claim inserted directly at `ESTABLISHED` with a signed seed
-envelope.
-
-```python
-import mareforma
-from mareforma.signing import load_private_key
-
-with mareforma.open() as graph:
-    # Bootstrap the chain. Only an enrolled validator can produce a seed.
-    seed_id = graph.assert_claim(
-        "Prior literature establishes X under condition C",
-        classification="DERIVED",
-        generated_by="agent/seed",
-        seed=True,
-    )
-
-    # Downstream peers now have an ESTABLISHED upstream to converge on.
-    # Each peer signs under its own key: two peers asserted through the
-    # graph's single key share one asserter_keyid and stay PRELIMINARY.
-    id_a = graph.assert_claim(
-        "Finding A consistent with X",
-        supports=[seed_id],
-        generated_by="agent/model-a",
-        signer=load_private_key("lab_a.key"),
-    )
-    id_b = graph.assert_claim(
-        "Finding B consistent with X",
-        supports=[seed_id],
-        generated_by="agent/model-b",
-        signer=load_private_key("lab_b.key"),
-    )
-
-    graph.get_claim(id_a)["support_level"]  # → "REPLICATED"
-    graph.get_claim(id_b)["support_level"]  # → "REPLICATED"
-```
-
-### Data equality: a collapse check, not a match requirement
-
-`artifact_hash` (a SHA-256 hex digest of the output bytes: figure, CSV, model)
-is a secondary collapse check, never a match requirement. Two peers with equal
-data (equal `artifact_hash`, or equal content-addressed `data_id`) collapse to
-one line: a byte-identical rerun is not corroboration. Distinct data counts as
-independent. Absent data (NULL) never blocks promotion; distinct signers alone
-promote.
-
-The hash is part of the signed payload, so an attacker who edits the
-column without the private key breaks verification.
-
-For operators who want data-distinctness as a hard gate rather than a collapse
-check, open with `strict_promotion=True`: a pair then promotes only when BOTH
-sides carry non-NULL data. It is off by default and only ever adds the
-requirement. It never loosens the default signer-axis rule.
-
-The gate is project state, not a session option. Asking for it has the root
-validator sign a one-way policy record, so every later opener promotes under
-it, restore rebuilds it, and a second session cannot promote around it by
-opening without the flag. Only the root key can declare it: a keyless or
-non-root caller gets a `ProjectPolicyError` rather than a gate that binds
-nothing but its own writes.
+Nothing replaces it with another word. What a finding is worth is computed on
+every read, from signed material, and reported as a number with a stated
+residual.
 
 ## The independence axis
 
@@ -278,12 +157,12 @@ every other property without being confused for truth or independence.
 ## Verify
 
 `mareforma verify <target>` is the audit receipt at the moment of the check. It
-re-verifies signatures, the grounding-to-citation binding, and the support
-level, then prints the trust map. A signature says who signed; the level is held
-to who was entitled to back it, which is the same rule the write path applies.
-An issuer does not corroborate a claim it signed, and neither an `llm` validator
-nor a claim's own asserter carries it to ESTABLISHED, whatever the stored column
-says. A directory target is an export dir and a
+re-verifies signatures, the grounding-to-citation binding, and any validation
+attestation, then prints the trust map. A signature says who signed; the
+attestation is held to who was entitled to make it, which is the same rule the
+write path applies. An issuer does not corroborate a claim it signed, and
+neither an `llm` validator nor a claim's own asserter can sign off on it. A
+directory target is an export dir and a
 target that is not a path is a claim id resolved against the local project. A
 file is told apart by its DSSE `payloadType`, never by its name: a per-finding
 audit receipt and a signed audit-run record each reach their own verifier, and
@@ -308,18 +187,20 @@ verdict at all, so a gate fails the build on it rather than reading it as one.
 
 ## Verify on read
 
-High-trust rows (REPLICATED and ESTABLISHED) are re-verified on read. A
-`query_*` call excludes a row whose signature does not verify; `get_claim`
-returns it flagged `verified=False`. Read never raises.
+Every row carrying signed material is re-verified on read: its asserter bundle
+always, and its validation envelope where it has one. A `query_*` call excludes
+a row whose signature does not verify; `get_claim` returns it flagged
+`verified=False`. Read never raises. A row with no envelope carries nothing to
+check and is exempt, which is what keeps a graph written before signing
+readable.
 
-ESTABLISHED rows in query results and bundle export also disclose
-`single_trust_domain`: whether every validator traces to one root of trust.
-This is a disclosure of trust-domain concentration, not a Sybil guard.
+Rows also disclose `single_trust_domain`: whether every validator traces to one
+root of trust. This is a disclosure of trust-domain concentration, not a Sybil
+guard.
 
-## How ESTABLISHED is reached
+## Recording that a human signed off
 
 ```python
-# Only after REPLICATED: raises ValueError if still PRELIMINARY
 graph.validate(claim_id, validated_by="reviewer@example.org")
 ```
 
@@ -336,17 +217,23 @@ The validation event itself is signed: a DSSE-style envelope binding
 label; the authoritative identity is the keyid embedded in the signed
 envelope.
 
-`validate()` raises `ValueError` if the claim is not yet `REPLICATED`,
-if no signer is loaded, or if the loaded signer is not enrolled. It raises
-`SelfValidationError` if the loaded key signed the claim itself, or signed
-any peer in the set that converged it: promotion needs a witness who
-asserted none of the lines being promoted.
+It changes nothing you can filter on, and it is terminal: the row holds one
+envelope, so a second validation is refused rather than written over the first.
+Recording a second reviewer's view means recording it as its own claim, not over
+the top of theirs.
+
+`validate()` raises `ValueError` if no signer is loaded, if the loaded signer is
+not enrolled, if the claim has been retracted or contradicted, or if somebody
+has already validated it. It raises `SelfValidationError` if the loaded key
+signed the claim itself: a sign-off needs a witness who did not assert the
+thing being signed off on.
 
 ## What trust is not
 
-ESTABLISHED does not mean the claim is true. The graph records what agents
-assert and what the provenance structure supports. A REPLICATED finding can
-still be wrong if both agents were reasoning from the same false prior.
+A validation does not mean the claim is true. The graph records what agents
+assert, what the provenance structure supports, and who put their name to it.
+Two agreeing findings can both be wrong if both agents were reasoning from the
+same false prior, which is exactly what the independence axis is for.
 
 Trust in Mareforma is a structural property: a measure of how the finding
 was reached, not of whether it is correct.

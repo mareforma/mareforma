@@ -18,11 +18,10 @@ work:
 * Embedding the evidence vector as ``additionalProperty``
   PropertyValue rows for quality-of-evidence downstream filters.
 
-Deprecation: the ``support_level`` PropertyValue carries the retired
-support ladder (PRELIMINARY / REPLICATED / ESTABLISHED). The ladder is
-deprecated; read the computed status axis instead. It still emits this
-release where present. What the crate carries once the stored column is
-removed at v0.4.0 is an open format question, not decided here.
+Removed: the ``support_level`` PropertyValue carried the retired
+support ladder (PRELIMINARY / REPLICATED / ESTABLISHED), and it is gone with
+the stored column it read. A consumer keyed on it finds it absent, which is a
+break they can see rather than a value that means nothing.
 """
 
 from __future__ import annotations
@@ -91,12 +90,6 @@ def _claim_to_create_action(claim: dict) -> dict[str, Any]:
             "@type": "PropertyValue",
             "name": "classification",
             "value": claim["classification"],
-        })
-    if claim.get("support_level"):
-        extra.append({
-            "@type": "PropertyValue",
-            "name": "support_level",
-            "value": claim["support_level"],
         })
     if claim.get("status"):
         extra.append({

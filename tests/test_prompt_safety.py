@@ -340,6 +340,26 @@ class TestQueryForLLM:
         hostile = "agent\u200ba\u202eX"
         cid = open_graph.assert_claim("finding", generated_by=hostile,
                                       source_name=hostile)
+        # A real validation first: a row cannot say a human validated it
+        # without the envelope proving one did, a junk envelope is dropped on
+        # read, and a key cannot ratify what it signed, so the label has to sit
+        # on a row a second enrolled validator genuinely signed off on.
+        import mareforma
+        from mareforma import signing as _sig
+
+        root = open_graph._root
+        reviewer_key = root / "reviewer.key"
+        _sig.bootstrap_key(reviewer_key)
+        open_graph.enroll_validator(
+            _sig.public_key_to_pem(
+                _sig.load_private_key(reviewer_key).public_key(),
+            ),
+            identity="reviewer@example.org",
+        )
+        open_graph.close()
+        with mareforma.open(root, key_path=reviewer_key) as reviewer:
+            reviewer.validate(cid, validated_by="reviewer@example.org")
+        open_graph = mareforma.open(root)
         open_graph._conn.execute(
             "UPDATE claims SET validated_by = ? WHERE claim_id = ?",
             (hostile, cid),
@@ -357,8 +377,7 @@ class TestQueryForLLM:
         cid = open_graph.assert_claim("finding")
         rows = open_graph.query_for_llm()
         assert rows[0]["claim_id"] == cid
-        # Timestamps and support_level pass through unchanged.
-        assert rows[0]["support_level"] == "PRELIMINARY"
+        # Timestamps pass through unchanged.
         assert "T" in rows[0]["created_at"]  # ISO 8601
 
     def test_query_returns_unwrapped_text(self, open_graph) -> None:
@@ -425,7 +444,7 @@ class TestQueryForLLM:
     def test_filters_apply_same_as_query(self, open_graph, tmp_path) -> None:
         from tests._helpers import _two_signers
         sa, sb = _two_signers(tmp_path)
-        upstream = open_graph.assert_claim("upstream", generated_by="seed", seed=True)
+        upstream = open_graph.assert_claim("upstream", generated_by="seed")
         open_graph.assert_claim(
             "peer A", supports=[upstream], generated_by="A", signer=sa,
         )

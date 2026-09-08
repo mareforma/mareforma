@@ -23,15 +23,14 @@ mareforma bootstrap
 
 Generates an Ed25519 keypair at `~/.config/mareforma/key` (mode `0600`).
 With a key, every claim is signed and the first project you open
-auto-enrolls you as its root validator (the identity allowed to promote
-claims to `ESTABLISHED`).
+auto-enrolls you as its root validator (the identity allowed to record a
+validation).
 
-Do this before you start. Without a key, `assert_claim` still writes, but
-the claim is unsigned, so `query` hides it unless you pass
-`include_unverified=True`, and everything from "Bootstrap an ESTABLISHED
-upstream" onward raises: a seed claim, `enroll_validator` and `validate`
-each need a loaded signer. Independence and promotion key on the signing
-identity (`asserter_keyid`), which an unsigned claim does not have.
+Do this before you start. Without a key, `assert_claim` still writes, but the
+claim is unsigned: it is served carrying `generator_enrolled=False`, and
+`enroll_validator` and `validate` both raise, since each needs a loaded signer.
+Independence keys on the signing identity (`asserter_keyid`), which an unsigned
+claim does not have.
 
 ## Open a graph
 
@@ -98,39 +97,33 @@ want the verdict cross-checked against the data the claim rests on. See
 ```python
 results = graph.query("cell type A")
 for r in results:
-    print(r["text"], r["support_level"])
+    print(r["text"], r["classification"])
 ```
 
 Always query before asserting. If the graph already carries a well-supported
 finding on your topic, build on it; don't duplicate it. Trust itself reads off
 the derived axes, not the stored label: `graph.proposition_status(prop)`
 returns the answer's `status` and the question's `question_status`, both
-computed on every read. The `support_level` column (`PRELIMINARY` ->
-`REPLICATED` -> `ESTABLISHED`) is the legacy promotion ladder. It is still
-stored, but no public read filters on it and the `REPLICATED` / `ESTABLISHED`
-module labels are gone.
+computed on every read. The `support_level` ladder that used to sit on each
+claim is gone, column and all.
 
 When the results will be spliced into an LLM prompt, use
 `graph.query_for_llm(...)` instead: it sanitizes free-text fields and
 wraps them in `<untrusted_data>...</untrusted_data>` delimiters so
 stored prompt-injection in earlier claim text cannot escape.
 
-## Bootstrap an ESTABLISHED upstream
+## Record a prior the rest of the work builds on
 
-REPLICATED requires at least one `ESTABLISHED` claim in the converging
-peers' `supports[]`, which stops replication of noise. On a fresh project,
-no claim is yet ESTABLISHED, so
-the first thing the root validator does is assert a *seed claim*: a claim
-that goes directly to `ESTABLISHED` via a signed seed envelope.
+Nothing has to be bootstrapped before a claim counts. A finding used to need an
+already-established upstream before two agreeing lines meant anything, so a
+project began by minting one; there is no ladder to climb now, and a prior is
+just a claim like any other.
 
 ```python
-# Bootstrap. Only an enrolled validator (the bootstrap key auto-enrolls
-# as root the first time the project is opened) can produce a seed.
-seed_id = graph.assert_claim(
+prior_id = graph.assert_claim(
     "Prior literature establishes that target T is elevated in condition C",
     classification="DERIVED",
-    generated_by="agent/seed",
-    seed=True,
+    generated_by="agent/prior",
 )
 ```
 
@@ -156,7 +149,7 @@ id_a = graph.assert_claim(
     "Target T elevated in condition C (n=620)",
     classification="ANALYTICAL",
     generated_by="agent/model-a/lab_a",
-    supports=[seed_id],
+    supports=[prior_id],
     source_name="dataset_alpha",
 )
 
@@ -165,26 +158,25 @@ id_b = graph.assert_claim(
     "Target T elevated in condition C (n=580)",
     classification="ANALYTICAL",
     generated_by="agent/model-b/lab_b",
-    supports=[seed_id],
+    supports=[prior_id],
     source_name="dataset_beta",
     signer=signer_b,
 )
 
-# REPLICATED fires automatically
-graph.get_claim(id_a)["support_level"]  # → "REPLICATED"
-graph.get_claim(id_b)["support_level"]  # → "REPLICATED"
+# Two lines under distinct keys. Read what that is worth off the trust map's
+# independence axis rather than off a stored word.
+graph.trust_map(id_a)
 ```
 
-Two claims under distinct signing keys, sharing an ESTABLISHED upstream →
-`REPLICATED` is set automatically at INSERT time. Independence is the
-signing key (`asserter_keyid`); `generated_by` is a display label only. No
-extra step required.
+Two claims under distinct signing keys, sharing an upstream, are two lines.
+Independence is the signing key (`asserter_keyid`); `generated_by` is a display
+label only. Nothing is written onto either claim: what the pair is worth is
+computed on read and reported on the trust map's independence axis.
 
-## Promote to ESTABLISHED
+## Record a human signing off
 
-Promotion needs a witness. No key can promote a claim it signed, and no key
-can promote a claim whose converging peer it signed, so neither your root
-key nor `lab_b` can do this step. Enroll a third key that asserted nothing
+A sign-off needs a witness. No key can validate a claim it signed, so your root
+key cannot do this step. Enroll a second key that asserted nothing
 and validate from it.
 
 ```python
@@ -200,10 +192,11 @@ graph.enroll_validator(
 with mareforma.open(key_path="reviewer.key") as review_graph:
     review_graph.validate(id_a, validated_by="reviewer@example.org")
 
-graph.get_claim(id_a)["support_level"]  # → "ESTABLISHED"
+graph.get_claim(id_a)["validated_by"]  # → "reviewer@example.org"
 ```
 
-Only `REPLICATED` claims can be promoted. `validate()` is identity-gated:
+`validate()` records a signed human attestation and changes nothing you can
+filter on. It is identity-gated:
 the loaded signing key must be enrolled in the project's `validators`
 table, and it must not appear on the claim envelope or on any peer in the
 converging set. A key that promotes its own line raises

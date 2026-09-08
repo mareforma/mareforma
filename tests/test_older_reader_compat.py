@@ -199,13 +199,21 @@ def test_0312_is_refused_a_graph_this_code_wrote(tmp_path: Path) -> None:
     assert "Delete .mareforma/graph.db" in out
 
 
-def test_0312_restores_a_backup_this_code_wrote(tmp_path: Path) -> None:
-    """Restore reads named sections and never rejects an unknown one.
+def test_0312_cannot_restore_a_backup_this_code_wrote(tmp_path: Path) -> None:
+    """The backup stops being readable by the release before it, and says so.
 
-    So ``[verdict_chain]`` and ``[completeness]`` are inert to 0.3.12: it
-    rebuilds the graph without them and reports clean. That is exactly the
-    property which makes the manifest data rather than a guarantee, and the
-    reason the refusal that binds it is a later release rather than this one.
+    0.3.12 reads named sections and ignores unknown ones, so the sections this
+    release added were inert to it and it restored them away happily. What it
+    does not tolerate is a section that has lost a field it requires: the
+    support level is not in the file any more, and its restore asks for it by
+    name.
+
+    That is a one-way door on the artifact, matching the one already on the
+    database, and it is recorded here rather than avoided. The alternative was
+    to keep writing a level that means nothing so an older reader would accept
+    the file, which is the same fabricated value this release refused to keep
+    emitting from the exporters. A reader that stops is better than a reader
+    that carries on with a word nobody stands behind.
     """
     project = tmp_path / "project"
     project.mkdir()
@@ -217,9 +225,16 @@ def test_0312_restores_a_backup_this_code_wrote(tmp_path: Path) -> None:
         _extract_v0312(tmp_path / "work"),
         """
         from mareforma.db.restore import restore
-        report = restore(root)
-        print("restored", report["claims_restored"])
+        try:
+            restore(root)
+            print("RESTORED")
+        except Exception as exc:
+            print("REFUSED", type(exc).__name__, exc)
         """,
         str(project),
     )
-    assert "restored 4" in out
+    assert "RESTORED" not in out
+    assert "support_level" in out, (
+        "0.3.12 refused for some reason other than the missing level, so this "
+        "no longer documents what it says it documents"
+    )

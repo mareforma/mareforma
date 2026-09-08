@@ -11,11 +11,9 @@ They measure different things.
 
 Trust itself reads off the derived axes (`status` per `content_id`,
 `question_status` per `frame_id`; see [Trust](/concepts/trust) and
-[Findings](/concepts/findings)). The `support_level` ladder those examples used
-to name (`PRELIMINARY` / `REPLICATED` / `ESTABLISHED`) is the legacy stored axis,
-and it is being removed whole. The public labels and the `query(min_support=...)`
-filter are gone; the stored column and the promotion machinery go with the
-schema step. Origin is orthogonal to all of it.
+[Findings](/concepts/findings)). The stored `support_level` ladder those
+examples used to name is gone, column and all. Origin was always orthogonal to
+it.
 
 The API field is `classification`. This page explains what its values mean.
 
@@ -39,7 +37,7 @@ The API field is `classification`. This page explains what its values mean.
     is an epistemic lie that the graph will permanently record.
   </Accordion>
   <Accordion title="DERIVED">
-    Explicitly built on ESTABLISHED or REPLICATED claims already in the graph.
+    Explicitly built on other claims already in the graph.
 
     The `supports[]` field must point to those claims. A DERIVED claim with
     empty `supports[]` is unverifiable: the graph cannot validate the chain.
@@ -93,7 +91,7 @@ looks right.
 
 ```python
 # Two independent agents established a finding
-prior_id = "3f8a1b2c-..."  # REPLICATED claim
+prior_id = "3f8a1b2c-..."  # a prior claim
 
 # A synthesiser builds explicitly on top
 synthesis_id = graph.assert_claim(

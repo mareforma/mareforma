@@ -140,7 +140,7 @@ capture, taken before claims were signed, so it carries no signature bundles and
 its `generated_by` reads `medea/gpt-4o` rather than the per-fork label the script
 writes today. `mareforma.restore()` reads it and rebuilds the four claims, but
 they come back unsigned, which the default `query()` drops. Pass
-`include_unverified=True` to read them.
+`unsigned, so every restored row carries generator_enrolled=False` to read them.
 
 ## Promoting a finding
 

@@ -33,7 +33,6 @@ with mareforma.open() as graph:
 | `trust_insecure_rekor` | `bool` | `False` | Skip SSRF validation on `rekor_url` (only for private Rekor instances on internal networks). |
 | `rekor_log_pubkey_pem` | `bytes \| None` | `None` | PEM-encoded Rekor log operator public key. Opts the session into RFC 6962 Merkle inclusion-proof verification: every signed-claim submit and every `refresh_unsigned()` re-fetches the entry and cryptographically verifies the audit path against the log's signed checkpoint. Verification failure refuses to mark `transparency_logged=1`. Supports Ed25519 + ECDSA secp256r1; other curves raise `RekorInclusionError(reason="unsupported_key")`. Mutually exclusive with `rekor_log_pubkey_path`. The supplied PEM persists to `.mareforma/rekor_log_pubkey.pem` as a TOFU pin. |
 | `rekor_log_pubkey_path` | `str \| Path \| None` | `None` | Filesystem path to a PEM file holding the Rekor log operator public key. Read once at open() time; equivalent to passing the bytes via `rekor_log_pubkey_pem`. Mutually exclusive with `rekor_log_pubkey_pem`. |
-| `strict_promotion` | `bool` | `False` | Gate REPLICATED on non-NULL data (`artifact_hash`) present on both sides of a converging pair. Off by default: the signer axis alone promotes and absent data never blocks. Opt-in and additive, it only ever adds the requirement. Passing `True` root-signs a one-way project policy, so every later opener including the CLI promotes under the gate; a keyless or non-root caller raises `ProjectPolicyError`. |
 | `validator_type` | `str` | `"human"` | `"human"` or `"llm"`, the self-declared type recorded if this key auto-enrolls as the project's root validator. Ignored once a root exists. An LLM-typed validator can sign a validation envelope but cannot promote a claim past REPLICATED. |
 
 **Returns** `EpistemicGraph`
@@ -59,9 +58,8 @@ Return the epistemic schema: valid values, defaults, and state transitions.
 s = mareforma.schema()
 s["schema_version"]    # 2
 s["classifications"]   # ['INFERRED', 'ANALYTICAL', 'DERIVED']
-s["support_levels"]    # ['PRELIMINARY', 'REPLICATED', 'ESTABLISHED']
 s["statuses"]          # ['open', 'contested', 'retracted']
-s["defaults"]          # {'classification': 'INFERRED', 'support_level': 'PRELIMINARY', ...}
+s["defaults"]          # {'classification': 'INFERRED', 'status': 'open', ...}
 s["transitions"]       # list of state transition dicts
 ```
 
@@ -120,7 +118,7 @@ keyless write.
 | `policy_unverified` | A `[project_policy]` is present but its root signature or field binding failed. |
 | `policy_absent` | `enforce_rekor_policy=True` but no root-signed policy requiring witnessing is present. |
 | `policy_unverifiable` | `enforce_rekor_policy=True` without a pinned `rekor_log_pubkey_pem` to verify inclusion proofs. |
-| `policy_violation` | A rebuilt row breaks the project's signed policy, such as a REPLICATED claim with no `artifact_hash` under strict promotion. |
+| `policy_violation` | A rebuilt row breaks the project's signed policy, such as an unwitnessed claim under a witnessing declaration. |
 | `backup_unaccounted` | The file does not hold what its `[completeness]` table says it holds, so the rebuilt graph would be short rows with nothing recording they were there. Pass `trust_unaccounted_backup=True` to restore a file you edited deliberately. A backup written before the table reaches this check not at all. |
 | `verdict_chain_broken` | The restored verdict chain does not account for the verdicts it carries, so a verdict was taken out of the backup. Pass `trust_unaccounted_backup=True` to restore it as it stands. |
 | `verdict_chain_cut_short` | The backup says its own writer could not write the verdict chain in full, so the file is short of links the graph it came from still holds. Pass `trust_unaccounted_backup=True` to rebuild from the part that holds, which is a working graph shorter than the one backed up. |
@@ -133,7 +131,7 @@ keyless write.
 
 Returned by `mareforma.open()`. Do not instantiate directly.
 
-### `assert_claim(text, *, classification, generated_by, supports, contradicts, source_name, idempotency_key, status, artifact_hash, evidence, seed, signer, predicate_payload, original_signature_bundle, grounding_sensor, observed_grounding, finding_record)`
+### `assert_claim(text, *, classification, generated_by, supports, contradicts, source_name, idempotency_key, status, artifact_hash, evidence, signer, predicate_payload, original_signature_bundle, grounding_sensor, observed_grounding, finding_record)`
 
 Assert a claim into the graph.
 
@@ -155,7 +153,7 @@ claim_id = graph.assert_claim(
 |---|---|---|---|
 | `text` | `str` | required | Falsifiable assertion. Cannot be empty or whitespace. Capped at 100,000 characters. |
 | `classification` | `str` | `"INFERRED"` | `INFERRED` \| `ANALYTICAL` \| `DERIVED` |
-| `generated_by` | `str \| None` | `"agent"` | Display label. REPLICATED independence keys on the signing key, not this field. |
+| `generated_by` | `str \| None` | `"agent"` | Display label. Independence keys on the signing key, not this field. |
 | `supports` | `list[str] \| None` | `None` | Upstream claim_ids or DOIs this claim rests on. Cycles are rejected (`CycleDetectedError`). |
 | `contradicts` | `list[str] \| None` | `None` | Claim_ids this finding is in explicit tension with. |
 | `source_name` | `str \| None` | `None` | Data source. Stored as-is; required for ANALYTICAL to be meaningful. |
@@ -163,7 +161,6 @@ claim_id = graph.assert_claim(
 | `status` | `str` | `"open"` | `open` \| `contested` \| `retracted` |
 | `artifact_hash` | `str \| None` | `None` | SHA-256 hex digest of the output bytes backing the claim. Secondary collapse check: equal data collapses two peers to one line (a byte-identical rerun is not corroboration), distinct data counts as independent, absent data (NULL) never blocks. |
 | `evidence` | `dict \| None` | `None` | Optional opaque evidence-vector dict for the claim, denormalised into the `ev_*` columns and stored as `evidence_json`. Carried inside the signed predicate; mareforma does not interpret it. |
-| `seed` | `bool` | `False` | Insert directly at `ESTABLISHED` with a signed seed envelope. Only an enrolled validator can produce a seed. Used to bootstrap the ESTABLISHED-upstream chain on a fresh project. |
 | `signer` | `object \| None` | `None` | Per-call override for the key the claim is signed with; `None` inherits the signer from `mareforma.open(key_path=...)`. The keyid it writes to `asserter_keyid` is the axis REPLICATED counts, so a host holding several keys asserts each lab's finding under its own. Signing does not enroll: only enrolled keys can `validate()`. |
 | `predicate_payload` | `dict \| None` | `None` | Structured predicate body for typed adapters. Stored in the queryable `predicate_payload` column only, NOT bound into the signed envelope or chain hash. |
 | `original_signature_bundle` | `str \| None` | `None` | Source-side DSSE envelope preserved by federation-import flows. Validated only for JSON well-formedness at write time, never re-verified. |
@@ -181,7 +178,7 @@ claim_id = graph.assert_claim(
 - `ChainIntegrityError`: if the `prev_hash` append-only chain check fails
 - `DatabaseError`: on SQLite write failure
 
-**Side effect**: if ≥2 claims now share the same upstream in `supports[]` signed by distinct keys, all are promoted to `REPLICATED`. The promotion fires only when at least one upstream is itself `ESTABLISHED` (the ESTABLISHED-upstream rule, strict by default, so replication-of-noise is not replication). When both peers supply `artifact_hash`, equal data collapses the pair to one line and does not promote on data alone; distinct data counts as independent; absent data never blocks.
+**No side effect on other rows**: asserting a claim writes that claim. Claims sharing an upstream under distinct signing keys are separate lines the independence axis counts on read.
 
 #### Idempotency
 
@@ -196,18 +193,18 @@ claim_id = graph.assert_claim("...", idempotency_key="run_abc_claim_1")
 
 **Strict contract**: a replay that supplies the same key with any divergent semantic field (`text`, `classification`, `generated_by`, `supports`, `contradicts`, `source_name`, `artifact_hash`, `evidence`, `observed_grounding`, `original_signature_bundle`) raises `IdempotencyConflictError` listing every mismatch, rather than silently dropping the new content. Use a different key or reconcile the conflict.
 
-**Not a convergence mechanism**: two agents reaching the same conclusion converge through the epistemic ladder, not by sharing a key. Both cite the same `ESTABLISHED` upstream in `supports[]` and sign with distinct keys, and `REPLICATED` fires. Collapsing two authors into one row would erase the second contribution, so mareforma refuses it.
+**Not a convergence mechanism**: two agents reaching the same conclusion stay two lines by each signing under its own key while citing the same upstream. Collapsing them into one row would erase the second contribution.
 
 ---
 
-### `query(text=None, *, classification=None, limit=20, include_unverified=False, include_invalidated=False, refutation_filter=None)`
+### `query(text=None, *, classification=None, limit=20, include_invalidated=False, refutation_filter=None)`
 
 Query claims ordered by support level (descending) then recency (descending).
 
 ```python
 results = graph.query("cell type A", classification="ANALYTICAL")
 for r in results:
-    print(r["text"], r["support_level"], r["validator_reputation"])
+    print(r["text"], r["classification"], r["validator_reputation"])
 ```
 
 **Parameters**
@@ -217,46 +214,41 @@ for r in results:
 | `text` | `str \| None` | `None` | Case-insensitive substring filter on claim text. |
 | `classification` | `str \| None` | `None` | `INFERRED` \| `ANALYTICAL` \| `DERIVED` |
 | `limit` | `int` | `20` | Maximum number of results. |
-| `include_unverified` | `bool` | `False` | When `False`, PRELIMINARY claims whose signing key is not in the validators table are excluded. Pass `True` to surface unverified preliminary claims. |
 | `include_invalidated` | `bool` | `False` | When `False`, claims marked invalid by a signed `contradiction_verdicts` row (`t_invalid IS NOT NULL`) are excluded. Pass `True` for audit / history queries. |
 | `refutation_filter` | `str \| None` | `None` | Optional refutation-state filter: `clean` (`t_invalid IS NULL` and `status='open'`) / `contradicted` / `contested` / `retracted` / `any`. Composes with the other filters via AND. |
 
 **Returns** `list[dict]`: each dict contains:
-`claim_id`, `text`, `classification`, `support_level`, `idempotency_key`,
+`claim_id`, `text`, `classification`, `idempotency_key`,
 `validated_by`, `validated_at`, `status`, `source_name`, `generated_by`,
 `supports_json`, `contradicts_json`, `comparison_summary`, `branch_id`,
 `unresolved`, `signature_bundle`, `transparency_logged`,
 `validation_signature`, `validator_keyid`, `asserter_keyid`, `artifact_hash`,
 `prev_hash`, `ev_risk_of_bias`, `ev_inconsistency`, `ev_indirectness`,
 `ev_imprecision`, `ev_pub_bias`, `evidence_json`, `statement_cid`,
-`t_invalid`, `convergence_retry_needed`, `predicate_payload`,
+`t_invalid`, `predicate_payload`,
 `original_signature_bundle`, `observed_grounding`, `created_at`,
 `updated_at`. `asserter_keyid` is the signing key the independence axis
 counts. `observed_grounding` is the stored grounding verdict (the queryable
 denormalisation of the signed predicate's grounding record).
-`convergence_retry_needed` is set on a claim whose promotion check failed and
-is waiting for `refresh_convergence()`. Plus two reputation projections
-computed at query time:
+Plus two reputation projections computed at query time:
 
-- `validator_reputation: int`: for ESTABLISHED rows, the count of
-  ESTABLISHED claims signed by the same validator. `0` otherwise.
+- `validator_reputation: int`: for a row carrying a validation envelope, the
+  count of claims the same validator signed off on. `0` otherwise.
 - `generator_enrolled: bool`: `True` iff the claim's signing keyid
   is in the validators table.
 
-ESTABLISHED rows carry two more keys: `single_trust_domain: bool` and
+Rows carry two more keys: `single_trust_domain: bool` and
 `trust_domain_root: str | None`, disclosing whether all validators trace to
-one root of trust. It is a disclosure, not a Sybil guard. Rows below
-ESTABLISHED omit both.
+one root of trust. It is a disclosure, not a Sybil guard.
 
 **Raises** `ValueError` if `classification` is invalid.
 
-REPLICATED / ESTABLISHED rows are re-verified on read: a row whose signature fails to verify is excluded from the result. Never raises.
+Rows carrying signed material are re-verified on read: a row whose signature fails to verify is excluded from the result. Never raises.
 
-The `support_level` result key is the legacy stored promotion ladder. No public read filters on it any more and the `REPLICATED` / `ESTABLISHED` module labels are removed. To read trust, use the derived axes `graph.proposition_status(prop)` returns: `status` (the answer, per `content_id`) and `question_status` (the question, per `frame_id`).
 
 ---
 
-### `search(query, *, classification=None, limit=20, include_unverified=False, include_invalidated=False)`
+### `search(query, *, classification=None, limit=20, include_invalidated=False)`
 
 Full-text search over claim text using SQLite FTS5 (`unicode61` tokenizer,
 diacritics folded). Returns claim dicts ordered by FTS5 rank (best
@@ -275,7 +267,7 @@ the whole table.
 
 **Parameters**: `query` is required and must be a non-empty FTS5 MATCH
 expression; it is the positional `query()` takes as `text`.
-`classification`, `limit`, `include_unverified` and `include_invalidated`
+`classification`, `limit` and `include_invalidated`
 behave as in `query()`. `refutation_filter` is query-only and `search()`
 raises `TypeError` on it.
 
@@ -316,10 +308,8 @@ graph.record_replication_verdict(
 | `method` | `str` | required | One of `hash-match` / `semantic-cluster` / `shared-resolved-upstream` / `cross-method` / `signed-elo-bracket-replay`. |
 | `confidence` | `dict \| None` | `None` | Confidence values keyed by guard (e.g. `cosine`, `nli_forward`). Never fused into a single score. |
 
-**Side effect**: promotes the referenced claims from `PRELIMINARY` to
-`REPLICATED` (only when still `PRELIMINARY AND status='open' AND
-t_invalid IS NULL`). INSERT + promotion run in one `BEGIN IMMEDIATE`
-transaction so a concurrent contradiction cannot land between the writes.
+**No side effect on the claims it names**: the verdict is a signed record of
+one party corroborating another, and it lifts nothing.
 
 **Raises** `VerdictIssuerError`: no signer loaded, signer's keyid not
 enrolled (or chain broken), method not in the allowed enum, referenced
@@ -400,7 +390,7 @@ was this invalidated" requires audit mode.
 ### `get_validator_reputation()`
 
 Returns `{validator_keyid: count}` for every enrolled validator. Count
-is the number of ESTABLISHED claims whose validation envelope was
+is the number of claims whose validation envelope was
 signed by that keyid. Validators with zero promotions appear with
 `count=0`. Derived state, recomputed on every call.
 
@@ -442,12 +432,12 @@ Return a single claim dict by ID.
 ```python
 claim = graph.get_claim(claim_id)
 if claim:
-    print(claim["support_level"])
+    print(claim["classification"])
 ```
 
 **Parameters** `claim_id: str`
 
-**Returns** `dict | None`: `None` if not found. Same field shape as `query()`. A REPLICATED / ESTABLISHED row is re-verified on read; if its signature fails to verify the dict is returned with `verified=False` rather than excluded. Never raises.
+**Returns** `dict | None`: `None` if not found. Same field shape as `query()`. A row carrying signed material is re-verified on read; if its signature fails to verify the dict is returned with `verified=False` rather than excluded. Never raises.
 
 ---
 
@@ -574,7 +564,7 @@ Every signed envelope is returned verbatim from the row, so a consumer re-verifi
 
 ### `validate(claim_id, *, validated_by=None, evidence_seen=None)`
 
-Promote a `REPLICATED` claim to `ESTABLISHED`. Identity-gated.
+Record a signed human validation on a claim. Identity-gated, and terminal.
 
 ```python
 graph.validate(
@@ -602,7 +592,7 @@ When `validation_signature` is supplied directly to `db.validate_claim` (advance
 
 **Raises**
 - `ClaimNotFoundError`: if the claim does not exist
-- `ValueError`: if `support_level` is not `REPLICATED`, no signer is loaded, or the loaded signer is not an enrolled validator
+- `ValueError`: if no signer is loaded, if the claim is not open, if it already carries a validation, or if the loaded signer is not an enrolled validator
 - `EvidenceCitationError`: if any `evidence_seen` entry is not a strict-v4 UUID, does not point to an existing claim, post-dates `validated_at`, or disagrees with the validation envelope's signed `evidence_seen` field
 - `LLMValidatorPromotionError`: if the loaded signer is enrolled with `validator_type='llm'`. LLM-typed validators sign validation envelopes but cannot promote past REPLICATED; a human-typed validator has to make the call
 - `SelfValidationError`: if the loaded signer's keyid is the one on the claim's `signature_bundle`. Promotion needs an external witness, so on a single-key project this is the expected outcome
@@ -625,11 +615,10 @@ h = graph.health()
 #   "unresolved_claims": int,
 #   "dangling_supports": int,
 #   "convergence_errors": int,
-#   "convergence_retry_pending": int,
 # }
 ```
 
-A "healthy" graph has zeros across the five drift counters (`unsigned_claims`, `unresolved_claims`, `dangling_supports`, `convergence_errors`, `convergence_retry_pending`). Non-zero values don't by themselves indicate a defect; they indicate something the operator should look at.
+A "healthy" graph has zeros across the four drift counters (`unsigned_claims`, `unresolved_claims`, `dangling_supports`, `convergence_errors`). Non-zero values don't by themselves indicate a defect; they indicate something the operator should look at.
 
 **Returns** `dict[str, int]` with the seven keys above.
 
@@ -643,7 +632,6 @@ Read-only count of SQLite errors swallowed during convergence detection since th
 graph.convergence_errors  # 0
 ```
 
-Convergence detection (PRELIMINARY to REPLICATED) runs after a successful INSERT and swallows SQLite errors so a misconfigured trigger can never crash a write. Each one logs a WARNING; this counter mirrors that log so the failure is observable without parsing logs. Non-zero means at least one assertion landed but its promotion check did not run cleanly. `refresh_convergence()` retries them.
 
 **Returns** `int`, reset to zero on every open.
 
@@ -657,7 +645,7 @@ Read-only count of rows `query()` and `search()` dropped because their signature
 graph.read_verify_exclusions  # 0
 ```
 
-A REPLICATED or ESTABLISHED row that fails re-verification is excluded from every enumerating read and no flag brings it back, so the result reads exactly like a graph that never held those claims. This counter is what tells the two apart; the same event is appended to `.mareforma/health.jsonl` as `read_verify_excluded`, rate-limited to the 1st, 2nd, 4th, 8th occurrence and so on, and again whenever the running total has at least doubled since the last line, so a sudden spike is not lost between powers of two. The exclusion is a state every later read finds again, and a long-lived reader would otherwise write one line per poll. The counter itself is exact.
+A row carrying signed material that fails re-verification is excluded from every enumerating read and no flag brings it back, so the result reads exactly like a graph that never held those claims. This counter is what tells the two apart; the same event is appended to `.mareforma/health.jsonl` as `read_verify_excluded`, rate-limited to the 1st, 2nd, 4th, 8th occurrence and so on, and again whenever the running total has at least doubled since the last line, so a sudden spike is not lost between powers of two. The exclusion is a state every later read finds again, and a long-lived reader would otherwise write one line per poll. The counter itself is exact.
 
 Zero means nothing was excluded from the reads this session made, not that the graph is untampered. Non-zero means a claim on disk failed re-verification: name it with `get_claim()` or `mareforma verify`.
 
@@ -673,7 +661,7 @@ Read-only count of rows `query()` and `search()` held back behind the default ve
 graph.read_unverified_exclusions  # 0
 ```
 
-A PRELIMINARY claim whose generator key is not in the validators table is dropped from an enumerating read unless you pass `include_unverified=True`. Unlike the verify exclusions above, a flag does bring these back: they are not tampered rows, they are rows the default read does not vouch for. Without the count, a project whose claims were written under an unenrolled key answers a query with an empty list, and a caller reads "there is nothing here" for a record that is not empty.
+A claim whose generator key is not in the validators table is served, carrying `generator_enrolled=False`. It used to be dropped from an enumerating read, and converging lifted it back into view; nothing converges now, so that rule would have answered every query on a project that enrols no validator with an empty list, and a caller would read "there is nothing here" for a record that is not empty.
 
 The count is taken only when a read comes back short, since a full page already says `has_more`. It is bounded by its own fixed 5,000-row scan ceiling rather than the read's (which scales with `limit`), so the disclosed number does not move with the page size you asked for, and a count that stopped at the ceiling is reported as a floor. The MCP `query_claims` and `search_claims` tools report the per-call number as `unverified_excluded`, and add `unverified_excluded_is_at_least: true` when the count stopped at its ceiling. The same event is appended to `.mareforma/health.jsonl` as `read_unverified_excluded` with outcome `degraded`, under the same rate limit as `read_verify_excluded`.
 
@@ -702,21 +690,6 @@ Served rows are appended to `.mareforma/health.jsonl` as
 `read_verify_excluded`. They are counted apart from the exclusion counters
 above on purpose: those rows are missing from your list, these were handed to
 you. Name the affected claims with `mareforma verify`.
-
----
-
-### `refresh_convergence()`
-
-Retry convergence detection (PRELIMINARY → REPLICATED) for every claim flagged `convergence_retry_needed=1`. Without this method, a swallowed SQLite error during detection would leave the claim stuck at PRELIMINARY forever.
-
-```python
-result = graph.refresh_convergence()
-# {"checked": N, "retried_ok": M, "promoted": P, "still_pending": K}
-```
-
-The detection path runs after every successful claim INSERT. When a SQLite trigger or contention pattern causes that check to raise, mareforma swallows the error so writes never crash, logs a WARNING, and flags the claim for retry.
-
-**Returns** `dict` with keys `checked`, `retried_ok`, `promoted`, `still_pending`. `retried_ok` counts the claims whose detection ran cleanly this pass; `promoted` is the subset whose support level actually moved. A claim with no converging peer recovers cleanly and promotes nothing, so `retried_ok` without `promoted` is the normal outcome.
 
 ---
 
@@ -751,7 +724,7 @@ dangling = graph.find_dangling_supports()
 # [{"claim_id": "...", "dangling_ref": "..."}, ...]
 ```
 
-REPLICATED detection already refuses to promote on a dangling reference; this helper is for auditing integrity, not for blocking writes.
+The independence count already refuses to count a dangling reference; this helper is for auditing integrity, not for blocking writes.
 
 **Returns** `list[dict]` of `{"claim_id", "dangling_ref"}` dicts sorted deterministically. Empty list when the graph is clean.
 
@@ -774,7 +747,7 @@ result = graph.classify_supports([
 # ]
 ```
 
-Mareforma uses this same classification for cycle detection, REPLICATED anchoring, dangling-reference audit, and JSON-LD export. Exposed publicly so callers can introspect what it sees for any candidate list before insertion.
+Mareforma uses this same classification for cycle detection, dangling-reference audit, and JSON-LD export. Exposed publicly so callers can introspect what it sees for any candidate list before insertion.
 
 **Returns** `list[dict]` of `{"value", "type"}` dicts in input order.
 
@@ -926,7 +899,7 @@ catching looks like `from mareforma import RekorInclusionError`.
 | `ClaimNotFoundError` | `mareforma.db` | `validate()`, `get_claim()` callers | The claim does not exist |
 | `SignedClaimImmutableError` | `mareforma.db` | `update_claim()` | Tried to mutate a signed-payload field on a signed row |
 | `IdempotencyConflictError` | `mareforma.db` | `assert_claim()` | Idempotency-key replay with any conflicting semantic field (text, classification, generated_by, supports, contradicts, source_name, artifact_hash, evidence, observed_grounding, original_signature_bundle) |
-| `IllegalStateTransitionError` | `mareforma.db` | DB triggers | Transition violates the state-machine (e.g. PRELIMINARY → ESTABLISHED) |
+| `IllegalStateTransitionError` | `mareforma.db` | DB triggers | A write violates a storage-layer state rule, such as reopening a retracted claim |
 | `ChainIntegrityError` | `mareforma.db` | DB write | `prev_hash` append-only chain check failed |
 | `CycleDetectedError` | `mareforma.db` | `assert_claim()`, `update_claim()` | `supports[]` would form a cycle |
 | `GraphTooLargeError` | `mareforma.db` | `assert_claim()`, `update_claim()` | `supports[]` reaches more distinct upstream claims than the acyclicity walk will visit, so the walk stopped without deciding |
@@ -934,7 +907,7 @@ catching looks like `from mareforma import RekorInclusionError`.
 | `LLMValidatorPromotionError` | `mareforma.db` | `validate()` | The loaded signer is enrolled `validator_type='llm'`; a human-typed validator must promote |
 | `SelfValidationError` | `mareforma.db` | `validate()` | The loaded signer also signed the claim. Promotion needs an external witness |
 | `VerdictIssuerError` | `mareforma.db` | `record_replication_verdict()`, `record_contradiction_verdict()` | No signer loaded, signer not enrolled (chain walk fails), invalid method enum, referenced claim missing, or self-contradiction (`member == other`) |
-| `ProjectPolicyError` | `mareforma.db` | `open(strict_promotion=True)`, `require_rekor_witnessing()` | The project-policy declaration was refused: no signer loaded, the signer is not the project's single root validator, or a concurrent writer declared a rule the envelope in hand does not carry. Subclasses `ValueError` |
+| `ProjectPolicyError` | `mareforma.db` | `require_rekor_witnessing()` | The project-policy declaration was refused: no signer loaded, the signer is not the project's single root validator, or a concurrent writer declared a rule the envelope in hand does not carry. Subclasses `ValueError` |
 | `EvidenceCitationError` | `mareforma.db` | `validate()` with `evidence_seen=...` | A cited entry isn't a strict-v4 UUID, points to a non-existent claim, post-dates `validated_at`, or disagrees with the envelope's `evidence_seen` field |
 | `InvalidValidationEnvelopeError` | `mareforma.db` | `validate()`, `db.validate_claim()` | Validation envelope is structurally / cryptographically invalid: malformed JSON, wrong `payloadType`, signer not enrolled, signature does not verify against the claimed signer, or payload binds a different `claim_id` / `validator_keyid` / timestamp than the row being promoted |
 | `UnverifiedClaimError` | `mareforma.db` | `JSONLDExporter.export()`, `build_prov_o()`, `build_crate()` | The export would publish a REPLICATED or ESTABLISHED claim whose signature no longer re-verifies. Names the claim ids; run `mareforma verify <claim_id>` for the detail |
@@ -1089,7 +1062,7 @@ The trust layer turns a free-text claim into a structured finding: a
 content-addressed proposition, a pre-registered prediction, a computed bearing,
 and a derived status. See [Findings](/concepts/findings) for the narrative. It
 is additive: every finding still rides a signed claim, so it appears in
-`query()` with a `support_level` like any other claim.
+`query()` with a `classification` like any other claim.
 
 ```python
 from mareforma.trust import (

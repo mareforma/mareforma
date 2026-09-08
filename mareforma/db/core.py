@@ -33,7 +33,6 @@ from ._schema_sql import (  # noqa: F401
     _CLAIM_SELECT,
     _MANAGED_TRIGGERS,
     _POLICY_MARKER_TABLE,
-    _PROMOTION_MARKER_TABLE,
     _SCHEMA_SQL,
     _UPGRADE_MARKER_TABLE,
     claims_rebuild_sql,
@@ -84,30 +83,6 @@ VALID_STATUSES = ("open", "contested", "retracted")
 
 VALID_CLASSIFICATIONS = ("INFERRED", "ANALYTICAL", "DERIVED")
 
-VALID_SUPPORT_LEVELS = ("PRELIMINARY", "REPLICATED", "ESTABLISHED")
-
-# Maps min_support value to the set of levels that satisfy it.
-_SUPPORT_LEVEL_TIERS: dict[str, tuple[str, ...]] = {
-    "PRELIMINARY": ("PRELIMINARY", "REPLICATED", "ESTABLISHED"),
-    "REPLICATED":  ("REPLICATED", "ESTABLISHED"),
-    "ESTABLISHED": ("ESTABLISHED",),
-}
-
-
-def _unknown_min_support_message(value: str | None) -> str:
-    """The rejection message for an unrecognised ``min_support`` value.
-
-    Lists the accepted levels, which still filter this release, and names the
-    retirement rather than teaching the ladder as the axis to read: a confused
-    reader meets the deprecation at the moment they are most likely to copy the
-    old vocabulary.
-    """
-    return (
-        f"Unknown min_support {value!r}. Use one of: "
-        f"{', '.join(VALID_SUPPORT_LEVELS)} (these still filter this release). "
-        "The support ladder is deprecated and removed in v0.4.0; read the "
-        "computed status instead as the trust axis."
-    )
 
 
 
@@ -345,46 +320,6 @@ def _observed_grounding_promotes(stored: str | None) -> bool:
         return False
 
 
-def _claim_promotes(
-    *,
-    asserter_keyid: str | None,
-    transparency_logged: int | None,
-    observed_grounding: str | None,
-    artifact_hash: str | None,
-    strict_promotion: bool,
-) -> bool:
-    """Whether a claim's durable columns permit PRELIMINARY -> REPLICATED.
-
-    Both writes that reach that transition (convergence on insert, a signed
-    replication verdict) call this, so a gate cannot be added to one path and
-    forgotten on the other. So does the read side, where
-    :class:`_CorroborationIndex` re-derives the rung a stored row sits on: a
-    term added here reaches the live read and restore with it.
-
-    An unsigned / legacy row (NULL ``asserter_keyid``) is not a valid distinct
-    signer. A row whose transparency-log inclusion is still pending is not
-    settled. An execution observed as NOT grounded (UNGROUNDED or OPAQUE) never
-    counts toward promotion, while a claim with no computed verdict is
-    unaffected. Under the project's strict-promotion policy a claim without an
-    ``artifact_hash`` carries no data to distinguish from a peer, so it cannot
-    promote at all.
-
-    The concurrency-sensitive columns (``status``, ``support_level``,
-    ``t_invalid``) are not read here: they belong on the callers' WHERE
-    clauses, where the row lock decides.
-    """
-    return (
-        asserter_keyid is not None
-        and transparency_logged == 1
-        and _observed_grounding_promotes(observed_grounding)
-        and not (strict_promotion and artifact_hash is None)
-    )
-
-
-# ---------------------------------------------------------------------------
-# Exceptions
-# ---------------------------------------------------------------------------
-
 # ---------------------------------------------------------------------------
 # Connection management
 # ---------------------------------------------------------------------------
@@ -404,42 +339,8 @@ class _GraphConnection(sqlite3.Connection):
     """
 
 
-_PROMOTION_DEPTH_ATTR = "_mareforma_promotion_depth"
-
-
 @contextmanager
-def _promotion_window(conn: sqlite3.Connection):
-    """Open the promotion marker for the statements inside the block.
 
-    Every write that lifts a claim's ``support_level`` runs inside one. The
-    marker ``claims_signed_promotion_backed`` reads is a temp table, which lives
-    on the connection and dies with it, so no other connection can promote on
-    the strength of this window and none is left behind by a process that dies
-    inside one. There is nothing to register first: the window creates the table
-    and drops it again.
-
-    Nesting is not expected (the promotion paths do not call each other) but is
-    safe: only the outermost window creates and drops, so an inner one cannot
-    close the marker under the outer block.
-    """
-    depth = getattr(conn, _PROMOTION_DEPTH_ATTR, 0)
-    setattr(conn, _PROMOTION_DEPTH_ATTR, depth + 1)
-    try:
-        if depth == 0:
-            conn.execute(
-                f"CREATE TEMP TABLE IF NOT EXISTS {_PROMOTION_MARKER_TABLE} "
-                "(id INTEGER)"
-            )
-        yield
-    finally:
-        setattr(conn, _PROMOTION_DEPTH_ATTR, depth)
-        if depth == 0:
-            # IF EXISTS: a ROLLBACK inside the block takes the temp table with
-            # it, and the close still has to be idempotent.
-            conn.execute(f"DROP TABLE IF EXISTS temp.{_PROMOTION_MARKER_TABLE}")
-
-
-@contextmanager
 def _policy_window(conn: sqlite3.Connection):
     """Open the project-policy marker for the statements inside the block.
 
@@ -833,14 +734,7 @@ def _open_existing_db(
     # additive migration that preserves every existing row's signed
     # bytes. Concurrent first-opens hit a "duplicate column name" race
     # we treat as benign.
-    added_cols = _ensure_claims_columns_for_upgrade(conn, existing_cols)
-    # The open that first adds asserter_keyid grandfathers every existing
-    # REPLICATED row (all promoted under the retired generated_by rule)
-    # with a one-time durable health event. Runs once: subsequent opens
-    # already have the column and skip the ALTER.
-    if "asserter_keyid" in added_cols:
-        _grandfather_legacy_replicated(conn, root)
-
+    _ensure_claims_columns_for_upgrade(conn, existing_cols)
     # Migrate AFTER the column ALTERs and before the exact-set check. A step
     # copies the column list this release knows, and an older file is missing
     # some of those columns until the ALTERs above have run, so migrating first
@@ -1762,37 +1656,76 @@ def _run_migration(
                     ) from exc
 
 
-def _rebuild_claims_unchanged(conn: sqlite3.Connection) -> None:
-    """Rebuild ``claims`` under the definition it already has.
+def _drop_support_level(conn: sqlite3.Connection) -> None:
+    """Rebuild ``claims`` without the support ladder's column.
 
-    A migration step that changes nothing about the schema, which is the point:
-    it exercises the rebuild against the graphs users actually hold, so the
-    machinery a column-dropping migration will reuse is proven before anything
-    irreversible depends on it. The column list is the full set and the
-    definition comes from the same DDL a fresh database gets, so the table
-    after is the table before.
+    The narrowing step the rebuild was built for. It authors nothing: the
+    column is gone from the definition a fresh database gets and from the
+    column list, so the same two inputs the unchanged rebuild used now describe
+    a narrower table, and the copy carries every remaining column across by
+    name. Filtering a column out of authored DDL would mean parsing it, and a
+    parser that mishandles a CHECK writes a table accepting what the old one
+    refused.
+
+    The triggers and the index that named the column go with the old table
+    rather than being dropped one by one: the rebuild recreates the current
+    schema's guards against the new table, and the current schema no longer has
+    them. What a graph loses is the stored word. What it keeps is every claim,
+    every signature, and the signed validation envelopes, which outlive the
+    ladder because a human attestation was never the same thing as a level.
     """
+    # The guards the ladder had are retired here, by name, before the rebuild
+    # reaches them. A rebuild replays a trigger or index this release does not
+    # manage exactly as it found it, and refuses when one names a column the
+    # step is dropping, because a trigger it cannot rewrite is one it must not
+    # silently discard. That refusal is right for a trigger somebody else
+    # wrote and wrong for the ones this project shipped and is now removing:
+    # left to the general rule, no graph written by an older release could
+    # upgrade at all, for carrying exactly what that release was supposed to
+    # give it. Naming them keeps the refusal intact for everything else.
+    for guard in (
+        "claims_insert_state_check",
+        "claims_update_state_check",
+        "claims_signed_promotion_backed",
+    ):
+        conn.execute(f"DROP TRIGGER IF EXISTS {guard}")
+    for index in ("idx_claims_support_level", "idx_claims_convergence_retry"):
+        conn.execute(f"DROP INDEX IF EXISTS {index}")
+    # The read-order index sorted on the ladder tier before recency. It is
+    # recreated from the current schema, on recency alone.
+    conn.execute("DROP INDEX IF EXISTS idx_claims_read_order")
+
+    # Named, but only the ones this file actually has. Both columns arrived in
+    # different releases, so a graph old enough to predate one of them carries
+    # the other alone, and the runner refuses a step that claims to drop a
+    # column the table does not hold as readily as one that drops a column it
+    # did not name. Anything else unexpected still trips the undeclared check.
+    live = {row[1] for row in conn.execute("PRAGMA table_info(claims)")}
     _rebuild_table(
         conn, table="claims",
         create_sql=claims_rebuild_sql("claims_new"),
         columns=_CLAIM_COLUMNS,
+        drops=tuple(
+            name for name in ("support_level", "convergence_retry_needed")
+            if name in live
+        ),
     )
 
 
 # from-version -> (to-version, the steps that get there).
 #
-# The entry the previous release built the machinery for, and it is an entry
-# rather than a rewrite, which was the thing that release set out to buy.
+# One step, because one is all any graph needs. The previous release built the
+# runner and registered a rebuild that changed nothing, so the machinery would
+# be proven on real graphs before a step that narrows the table depended on it.
+# That release was never published, so no graph ever reached the version it
+# would have written, and that version describes a table no file on disk has.
+# Keeping it would mean carrying a frozen copy of the old definition forever to
+# describe a shape nobody holds.
 #
-# The step rebuilds claims under the definition it already has. That is the
-# point rather than a placeholder: it carries every graph anyone holds through
-# the whole path, the copy, the drop, the rename, the triggers, the indexes and
-# the version bump, before a step that also changes the column list depends on
-# any of it. A narrowing step does not reuse this function, which hardcodes the
-# full column list and the unchanged definition; it calls _rebuild_table itself
-# with a shorter list and a definition it authors.
+# The runner still walks a chain and still refuses a route with a gap before it
+# commits anything. A second step, when one is needed, registers here.
 _MIGRATIONS: "dict[int, tuple[int, Callable[[sqlite3.Connection], None]]]" = {
-    1: (2, _rebuild_claims_unchanged),
+    1: (2, _drop_support_level),
 }
 
 
@@ -1983,37 +1916,6 @@ def _ensure_claims_columns_for_upgrade(
         pass
 
     return added
-
-
-def _grandfather_legacy_replicated(
-    conn: sqlite3.Connection, root: Path,
-) -> int:
-    """Grandfather REPLICATED rows that predate the asserter_keyid rule.
-
-    Runs exactly once, in the same open that first adds ``asserter_keyid``
-    (its column is brand-new, so every existing REPLICATED row was promoted
-    under the old ``generated_by`` rule and now carries a NULL keyid). Those
-    rows keep their level: the new rule never re-promotes a NULL-keyid row,
-    so nothing downgrades them, and the read-path verify gate exempts them
-    because they carry no participant signature to check. We record a durable
-    ``legacy_promotion`` health event so the grandfathered set stays
-    distinguishable from rows promoted under the new rule. Returns the count.
-
-    A REPLICATED row with a NULL ``asserter_keyid`` is, by construction, a
-    legacy promotion: the current promotion query refuses to promote a
-    NULL-keyid row, so no post-build row can land in this state.
-    """
-    from mareforma.health import append_health_event
-    n = conn.execute(
-        "SELECT COUNT(*) AS n FROM claims "
-        "WHERE support_level = 'REPLICATED' AND asserter_keyid IS NULL"
-    ).fetchone()["n"]
-    if n:
-        append_health_event(
-            root, "legacy_promotion", outcome="ok",
-            replicated_grandfathered=int(n),
-        )
-    return int(n)
 
 
 def _ensure_evidence_lines_columns(conn: sqlite3.Connection) -> None:
@@ -2702,7 +2604,6 @@ def add_claim(
     unresolved: bool = False,
     artifact_hash: str | None = None,
     evidence: "object | None" = None,
-    seed: bool = False,
     signer: "object | None" = None,
     rekor_url: str | None = None,
     require_rekor: bool = False,
@@ -2713,7 +2614,6 @@ def add_claim(
     original_signature_bundle: str | None = None,
     observed_grounding: dict | None = None,
     finding_record: dict | None = None,
-    strict_promotion: bool = False,
 ) -> str:
     """Insert a new claim and return its claim_id.
 
@@ -2721,7 +2621,7 @@ def add_claim(
     already exists. After insert, checks for REPLICATED: if ≥2 claims share
     the same ESTABLISHED upstream claim_id in supports[] and carry distinct,
     non-NULL asserter_keyid values, all are promoted to
-    support_level='REPLICATED'.
+    a converging peer.
 
     Parameters
     ----------
@@ -2855,72 +2755,6 @@ def add_claim(
     # half-built state on rejection.
     _check_no_cycle(conn, claim_id, supports or [])
 
-    # Seed-claim bootstrap. A seed claim is asserted by an
-    # enrolled validator and inserted directly with
-    # support_level='ESTABLISHED' + a signed seed envelope. This is
-    # the only path that can place a claim at ESTABLISHED without
-    # going through REPLICATED + validate(); it exists to bootstrap
-    # the chain of trust on a fresh graph (otherwise the
-    # ESTABLISHED-upstream rule blocks the first REPLICATED forever).
-    seed_envelope_json: str | None = None
-    if seed:
-        # Deprecated this release, removed in v0.4.0. Fires once per seed call
-        # and never on the honest (seed=False) path, since it is gated on the
-        # ``if seed:`` branch. stacklevel aims past add_claim and the graph
-        # wrapper at the caller's assert_claim(seed=True); the message is
-        # self-identifying if a direct db-layer caller shifts the frame.
-        from mareforma._deprecation import warn_deprecated_seed
-
-        warn_deprecated_seed(stacklevel=6)
-        # Seed envelopes sign claim_id + validator_keyid + seeded_at ,
-        # NOT status. A non-open seed could be flipped back to 'open'
-        # via update_claim later (status is mutable on signed rows) and
-        # the resurrection would carry no envelope evidence. Refuse the
-        # mismatched-status seed up-front to preserve seed-as-anchor.
-        if status != "open":
-            raise ValueError(
-                f"seed=True refused with status='{status}'. Seed claims "
-                "bootstrap the trust chain and must be born open."
-            )
-        if signer is None:
-            raise ValueError(
-                "seed=True requires a signing key (open the graph with "
-                "key_path=... or run `mareforma bootstrap` once)."
-            )
-        from mareforma import signing as _signing
-        from mareforma import validators as _validators
-        signer_keyid = _signing.public_key_id(signer.public_key())
-        if not _validators.is_enrolled(conn, signer_keyid):
-            raise ValueError(
-                f"seed=True refused: key {signer_keyid[:12]}… is not an "
-                "enrolled validator on this project. Only enrolled "
-                "validators can bootstrap the trust chain."
-            )
-        # Seed produces a born-ESTABLISHED row. Without the same
-        # validator_type gate validate_claim applies, an LLM-typed
-        # validator could route around the ESTABLISHED ceiling via
-        # the seed path. Apply the gate here so all paths to
-        # ESTABLISHED enforce the same human-witnessed rule.
-        signer_row = _validators.get_validator(conn, signer_keyid)
-        if signer_row is not None and signer_row["validator_type"] == "llm":
-            raise LLMValidatorPromotionError(
-                f"seed=True refused: validator {signer_keyid[:12]}… is "
-                "enrolled with validator_type='llm'. Seed claims bootstrap "
-                "the ESTABLISHED tier; only human-typed validators can "
-                "produce them."
-            )
-        seed_envelope = _signing.sign_seed_claim(
-            {
-                "claim_id": claim_id,
-                "validator_keyid": signer_keyid,
-                "seeded_at": now,
-            },
-            signer,
-        )
-        seed_envelope_json = json.dumps(
-            seed_envelope, sort_keys=True, separators=(",", ":"),
-        )
-
     # Sign the claim if a signer was supplied. The signature is bound to the
     # in-toto Statement v1 wrapping claim fields + the evidence vector, so
     # any later tamper (text edit, support reattribution, evidence override)
@@ -3014,18 +2848,14 @@ def add_claim(
     # that case the caller's transaction supplies the serialization;
     # our SELECT runs inside their snapshot and the chain stays linear.
     _own_transaction = not conn.in_transaction
-    # Seed claims insert with support_level='ESTABLISHED' and carry
-    # the seed envelope in validation_signature. The INSERT trigger
-    # accepts ESTABLISHED rows when validation_signature is non-NULL.
-    initial_level = "ESTABLISHED" if seed else "PRELIMINARY"
-    initial_validation_signature = seed_envelope_json
-    initial_validated_at = now if seed else None
-    # Seed claims carry their signer's keyid in validator_keyid so the
-    # reputation aggregation counts the bootstrap event. Non-seed rows
-    # acquire validator_keyid later at validate_claim time.
-    initial_validator_keyid = (
-        signer_keyid if seed and signer is not None else None
-    )
+    # A claim is born with no validation. The one path that used to write one
+    # at insert time was the seed anchor, and it is gone: it existed to place a
+    # claim above the first rung so the rung below it was reachable, and there
+    # are no rungs. A validation arrives later, through validate_claim, or not
+    # at all.
+    initial_validation_signature = None
+    initial_validated_at = None
+    initial_validator_keyid = None
     # Denormalize the asserter keyid from the signed envelope so the
     # REPLICATED promotion query and the trust-layer independence count read
     # an indexed column rather than walking the bundle JSON. The
@@ -3038,7 +2868,7 @@ def add_claim(
         conn.execute(
             """
             INSERT INTO claims
-                (claim_id, text, classification, support_level, idempotency_key,
+                (claim_id, text, classification, idempotency_key,
                  status, source_name, generated_by,
                  supports_json, contradicts_json, unresolved,
                  signature_bundle, transparency_logged,
@@ -3051,11 +2881,11 @@ def add_claim(
                  predicate_payload, original_signature_bundle,
                  observed_grounding,
                  created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                claim_id, text, classification, initial_level, idempotency_key,
+                claim_id, text, classification, idempotency_key,
                 status, source_name, generated_by,
                 supports_json, contradicts_json, 1 if unresolved else 0,
                 signature_bundle, transparency_logged,
@@ -3158,16 +2988,6 @@ def add_claim(
             own_transaction=_own_transaction,
         )
 
-    # Check whether this claim triggers REPLICATED status on shared upstreams.
-    # Unresolved DOIs OR pending transparency-log inclusion block eligibility.
-    if not unresolved and transparency_logged == 1:
-        _maybe_update_replicated(
-            conn, claim_id, supports or [], generated_by, artifact_hash,
-            on_error=on_convergence_error,
-            own_transaction=_own_transaction,
-            strict_promotion=strict_promotion,
-        )
-
     # Snapshot committed state only. When this call joined a caller's open
     # transaction the rows are not committed yet, so backing up here would put a
     # claim in the DR artifact that a caller rollback then erases from the DB.
@@ -3204,425 +3024,6 @@ def _claim_model_lineage(
         return json.loads(row["model_lineage"])
     except (ValueError, TypeError):
         return None
-
-
-def _maybe_update_replicated_unlocked(
-    conn: sqlite3.Connection,
-    new_claim_id: str,
-    supports: list[str],
-    generated_by: str,
-    artifact_hash: str | None = None,
-    *,
-    strict_promotion: bool = False,
-) -> None:
-    """REPLICATED-detection SQL without a commit: caller controls the txn.
-
-    Used by ``mark_claim_resolved`` so the unresolved-flag clear and the
-    REPLICATED promotion land in the same SQLite transaction.
-
-    ``strict_promotion`` (opt-in, off by default) requires **non-NULL data on
-    both sides** of the converging pair: the new claim and every candidate peer
-    must carry an ``artifact_hash``. The default rule promotes on the
-    distinct-signer axis alone (absent data never blocks); an operator who wants
-    data-distinctness as a hard gate turns this on. It never loosens the default
-   , it only adds the data-presence requirement. The caller's flag is ORed with
-    the project's root-signed policy, so the rule is the project's and not the
-    writing handle's.
-
-    Independence axis: distinct asserter_keyid
-    ------------------------------------------
-    Two converging claims count as independent lines only when they carry
-    **distinct, non-NULL** ``asserter_keyid`` values (the WHO of the claim,
-    denormalized from the signature_bundle). A NULL asserter_keyid is "not a
-    valid distinct signer": the new claim is not promoted at all, and two
-    legacy NULL-keyid rows never read as two distinct signers. ``generated_by``
-    is a display label and plays no part in the gate.
-
-    Data is a secondary collapse, never a gate
-    ------------------------------------------
-    Distinct asserter_keyid alone promotes. Where output data exists on BOTH
-    sides and is **equal**, the two lines collapse to one (a byte-identical
-    rerun is the same output, not corroboration) and do not promote on their
-    own. Absent data (NULL ``artifact_hash`` on either side) never blocks: the
-    pair promotes on the keyid axis. So a double-NULL pair with distinct
-    signers promotes on the signer axis, never "on hash alone."
-
-    ESTABLISHED-upstream requirement
-    --------------------------------
-    The candidate peer's ``supports[]`` must include at least one
-    claim with ``support_level = 'ESTABLISHED'``. Matches Cochrane /
-    GRADE evidence-chain methodology: REPLICATED-of-noise is not
-    replication. Bootstrap a fresh graph with the ``seed=True``
-    parameter on :func:`add_claim` to create an ESTABLISHED root.
-    """
-    if not supports:
-        return
-
-    # The project's declared policy is the floor. It is root-signed and
-    # one-way, so a handle opened without the flag (the CLI, a second
-    # process, a later session) is held to it: the promotion rule belongs to
-    # the project, not to whoever performs the insert.
-    strict_promotion = strict_promotion or strict_promotion_required(conn)
-
-    # A tainted new claim (status != 'open') must not enter the trust
-    # ladder. The candidate-peer SQL filter below blocks an existing
-    # tainted row from acting as a partner, but the new row itself
-    # would otherwise still ride an honest peer's INSERT into REPLICATED
-    # (peer_ids appends new_claim_id unconditionally at the UPDATE
-    # below). Short-circuit before the SELECT so neither the new row
-    # nor any open peer is promoted.
-    new_status_row = conn.execute(
-        "SELECT status, support_level, asserter_keyid, observed_grounding, "
-        "t_invalid, transparency_logged FROM claims WHERE claim_id = ?",
-        (new_claim_id,),
-    ).fetchone()
-    if new_status_row is None or new_status_row["status"] != "open":
-        return
-    # An already-ESTABLISHED new claim (a seed) is not a convergence candidate:
-    # the candidate-peer SELECT below already excludes ESTABLISHED rows as peers
-    # (support_level != 'ESTABLISHED'), so the new claim must be held to the same
-    # bar. Without this a seed citing a shared anchor rode its own promotion into
-    # peer_ids, and the promotion UPDATE then attempted an illegal
-    # ESTABLISHED -> REPLICATED transition that aborted the whole statement,
-    # stranding the honest peer and setting a retry flag no retry could clear.
-    if new_status_row["support_level"] == "ESTABLISHED":
-        return
-    # A claim a signed contradiction verdict marked invalid (t_invalid set) must
-    # not climb the trust ladder through convergence, nor ride an honest peer's
-    # promotion. record_replication_verdict already refuses to promote such a
-    # claim; the convergence path agrees. Gated here for the new claim, in the
-    # candidate-peer SELECT below, and again in the promotion UPDATE (the UPDATE
-    # guard closes the TOCTOU window if a peer is invalidated after the SELECT).
-    if new_status_row["t_invalid"] is not None:
-        return
-    # Durable per-claim gates, the same set the verdict path applies (see
-    # _claim_promotes). The new claim cannot start a convergence, nor ride a
-    # peer's promotion, without clearing them. add_claim also checks the
-    # transparency log on its own side (it skips this call), but
-    # mark_claim_resolved and refresh_convergence reach promotion without it.
-    # (Legacy REPLICATED rows keep their level via the one-time grandfather;
-    # they are never re-promoted here.)
-    new_asserter_keyid = new_status_row["asserter_keyid"]
-    if not _claim_promotes(
-        asserter_keyid=new_asserter_keyid,
-        transparency_logged=new_status_row["transparency_logged"],
-        observed_grounding=new_status_row["observed_grounding"],
-        artifact_hash=artifact_hash,
-        strict_promotion=strict_promotion,
-    ):
-        return
-
-    # Shared-anchor rule: the converged-on-same-upstream contract requires
-    # that there exists a SINGLE upstream X such that
-    #   X ∈ new_claim.supports  ∧  X ∈ peer.supports  ∧  X is ESTABLISHED+open.
-    # Pre-filter the new claim's supports[] to those that are ESTABLISHED
-    # and open; then the shared-element match below (`j.value IN
-    # ({placeholders})`) automatically guarantees the shared element is
-    # itself the anchor. A prior implementation gated on three separate
-    # conditions (peer-shares-something + new-has-some-established +
-    # peer-has-some-established) which let two unrelated established
-    # anchors plus a shared preliminary throwaway promote, strictly
-    # weaker than the spec.
-    #
-    # The status='open' filter on the anchor closes a hand-edited
-    # claims.toml planting a born-retracted ESTABLISHED seed (the seed
-    # envelope binds claim_id + validator_keyid + seeded_at, NOT status)
-    # then having downstream peers ride it into REPLICATED.
-    sup_placeholders = ",".join("?" * len(supports))
-    established_anchors = [
-        r["claim_id"] for r in conn.execute(
-            f"SELECT claim_id FROM claims "
-            f"WHERE claim_id IN ({sup_placeholders}) "
-            f"AND support_level = 'ESTABLISHED' "
-            f"AND status = 'open'",
-            supports,
-        ).fetchall()
-    ]
-    if not established_anchors:
-        return
-
-    # Candidate peers: the claims that cite one of the established anchors.
-    # Found through the indexed reverse-edge cache (idx_supports_reverse) rather
-    # than json_each over every claim, so the per-insert cost is O(deg(anchor))
-    # instead of O(N), the same reverse store walk_upstream / walk_downstream
-    # already use. The cache is a rebuildable convenience, so it only narrows the
-    # candidate set; each candidate's authoritative supports_json is re-checked
-    # below before it can promote, so a stale or drifted edge cannot slip a claim
-    # that does not actually cite the anchor into a promotion.
-    anchor_placeholders = ",".join("?" * len(established_anchors))
-    candidate_ids = [
-        r["claim_id"] for r in conn.execute(
-            f"SELECT DISTINCT claim_id FROM supports_cache.claim_supports "
-            f"WHERE supports_claim_id IN ({anchor_placeholders}) "
-            f"AND claim_id != ?",
-            (*established_anchors, new_claim_id),
-        ).fetchall()
-    ]
-    if not candidate_ids:
-        return
-
-    # status='open' filter on the peer: a contested or retracted peer
-    # is editorially tainted and must not participate in REPLICATED
-    # convergence. Without this, an adversary could plant a born-retracted
-    # claim and ride an honest peer's INSERT into REPLICATED (and from
-    # there, via validate(), into ESTABLISHED, usable as a fake upstream
-    # for further chains).
-    # Under strict promotion, a candidate peer must ALSO carry data, an
-    # artifact_hash on both sides is the data-distinctness the operator opted
-    # into. Off by default, this clause is empty and behaviour is unchanged.
-    strict_peer_clause = (
-        "\n          AND c.artifact_hash IS NOT NULL" if strict_promotion else ""
-    )
-    # The candidate list is as wide as the anchor's in-degree, so it is bound as
-    # a single JSON array rather than one variable per id: a well-cited anchor
-    # would otherwise cross SQLite's per-statement variable cap, and the failure
-    # is swallowed into a retry flag whose retry rebuilds the same statement.
-    rows = conn.execute(
-        f"""
-        SELECT c.claim_id, c.asserter_keyid, c.supports_json
-        FROM claims c
-        WHERE c.claim_id IN (SELECT value FROM json_each(?))
-          AND c.asserter_keyid IS NOT NULL
-          AND c.asserter_keyid != ?
-          AND c.support_level != 'ESTABLISHED'
-          AND c.status = 'open'
-          AND c.t_invalid IS NULL
-          AND c.unresolved = 0
-          AND c.transparency_logged = 1
-          AND (
-              c.observed_grounding IS NULL
-              OR (
-                  CASE
-                      WHEN json_valid(c.observed_grounding)
-                      THEN json_extract(c.observed_grounding, '$.grounding')
-                      ELSE NULL
-                  END
-              ) = 'GROUNDED'
-          )
-          AND NOT (
-              c.artifact_hash IS NOT NULL
-              AND ? IS NOT NULL
-              AND c.artifact_hash = ?
-          ){strict_peer_clause}
-        """,
-        (json.dumps(candidate_ids), new_asserter_keyid,
-         artifact_hash, artifact_hash),
-    ).fetchall()
-
-    # Authoritative anchor re-check against claims.supports_json, the cache
-    # narrows, the claims row decides. A candidate stays only when its own
-    # supports_json genuinely cites one of the established anchors, so a stale or
-    # drifted cache edge cannot carry a non-citing claim into the promotion.
-    anchor_set = set(established_anchors)
-    confirmed = []
-    for r in rows:
-        try:
-            refs = json.loads(r["supports_json"] or "[]")
-        except (ValueError, TypeError):
-            continue
-        if isinstance(refs, list) and any(
-            isinstance(ref, str) and ref in anchor_set for ref in refs
-        ):
-            confirmed.append(r)
-    rows = confirmed
-
-    if not rows:
-        return
-
-    # Model/method independence gate. A converging peer counts only when its
-    # model lineage is distinct from the new claim's: two same-model checks
-    # (COMPUTED, same family root) are one line of evidence, not two, even under
-    # distinct signers; a pair with soft (PROXY/UNVERIFIABLE) lineage on either
-    # side is UNVERIFIABLE for independence, never a silent pass; absent lineage
-    # (no observed model call) imposes no model constraint. It uses the same key
-    # as the read-side count (``model_distinct_pair`` / ``independence_model_key``).
-    # NOTE: the load-bearing model-independence signal is that read-side
-    # effective-independence number (``trust_map`` / ``effective_independence``),
-    # NOT this gate. REPLICATED is a deprecated public label, and on the primary
-    # path a plain claims-graph claim carries no finding lineage (findings are
-    # read after this runs), so both sides read absent and this filter is a
-    # consistent no-op here rather than the enforcement point.
-    from mareforma.observe._lineage import model_distinct_pair
-
-    new_lineage = _claim_model_lineage(conn, new_claim_id)
-    rows = [
-        r for r in rows
-        if model_distinct_pair(
-            new_lineage, _claim_model_lineage(conn, r["claim_id"])
-        )
-    ]
-    if not rows:
-        return
-
-    peer_ids = [r["claim_id"] for r in rows] + [new_claim_id]
-    # status='open' folded into the UPDATE's WHERE closes the TOCTOU
-    # window between the SELECT above and this UPDATE: another writer
-    # could flip a peer (or the new row) to contested/retracted between
-    # the two statements. The row-level lock SQLite acquires during
-    # UPDATE is the actual gate; the pre-SELECT is a cheap fast-path.
-    # One JSON-array variable for the peers, same reason as the SELECT above.
-    # The support_level guard keeps the write to the rows that actually change
-    # level, matching record_replication_verdict. Peers already at REPLICATED
-    # stay in the candidate set (they still corroborate) but must not have their
-    # updated_at re-dated to this insert: that field is a claim's end time on
-    # every export surface.
-    with _promotion_window(conn):
-        conn.execute(
-            "UPDATE claims SET support_level = 'REPLICATED', updated_at = ? "
-            "WHERE claim_id IN (SELECT value FROM json_each(?)) "
-            "AND support_level = 'PRELIMINARY' "
-            "AND status = 'open' AND t_invalid IS NULL",
-            (_now(), json.dumps(peer_ids)),
-        )
-
-
-def _maybe_update_replicated(
-    conn: sqlite3.Connection,
-    new_claim_id: str,
-    supports: list[str],
-    generated_by: str,
-    artifact_hash: str | None = None,
-    on_error: "Callable[[Exception], None] | None" = None,
-    *,
-    own_transaction: bool = True,
-    strict_promotion: bool = False,
-) -> bool:
-    """Promote claims to REPLICATED when convergence is detected.
-
-    Convergence: ≥2 claims share the same ESTABLISHED upstream claim_id in
-    their supports[] and carry distinct, non-NULL ``asserter_keyid`` values
-    (equal output artifacts collapse to one line). Uses json_each() for
-    correct JSON array element extraction (no fragile LIKE).
-
-    Called immediately after a successful INSERT in add_claim().
-    Failures are swallowed: convergence detection must not crash writes.
-
-    ``own_transaction`` mirrors ``add_claim``'s flag: when ``False`` the caller
-    already holds an open transaction (e.g. ``submit_finding``'s BEGIN
-    IMMEDIATE), so this helper makes its convergence + retry-flag writes but
-    does NOT commit: the caller's outer commit flushes them, keeping the
-    claim INSERT and the finding write atomic. Committing here would strand a
-    signed claim if a later step in the caller's transaction rolls back.
-
-    Returns ``True`` if detection ran cleanly, ``False`` if a SQLite
-    error was swallowed. When ``on_error`` is supplied, the exception is
-    handed to that callback before the WARNING is logged; caller can
-    increment a counter or surface the failure however it sees fit.
-    """
-    try:
-        _maybe_update_replicated_unlocked(
-            conn, new_claim_id, supports, generated_by, artifact_hash,
-            strict_promotion=strict_promotion,
-        )
-        if own_transaction:
-            conn.commit()
-        return True
-    except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
-        # Convergence detection is best-effort, never crash a write.
-        # A trigger-raised IntegrityError here would mean a state transition
-        # we asked for is illegal (e.g. ESTABLISHED peer being downgraded);
-        # the underlying invariant remains intact. Surface a WARNING so
-        # silently-swallowed failures are debuggable, without it, a
-        # mis-configured trigger or contention pattern would let claims sit
-        # at PRELIMINARY with no record of why. EpistemicGraph wires
-        # ``on_error`` to a counter so callers can detect drift without
-        # parsing log records, and we flip the per-claim retry flag so
-        # :meth:`EpistemicGraph.refresh_convergence` can re-run detection
-        # on demand. The two surfaces are complementary: the counter
-        # reports the live error rate, the flag preserves the work
-        # remaining across restarts.
-        if on_error is not None:
-            try:
-                on_error(exc)
-            except Exception:  # pragma: no cover - defensive
-                pass
-        try:
-            conn.execute(
-                "UPDATE claims SET convergence_retry_needed = 1 "
-                "WHERE claim_id = ?",
-                (new_claim_id,),
-            )
-            if own_transaction:
-                conn.commit()
-        except (sqlite3.OperationalError, sqlite3.IntegrityError):
-            # If even the retry-flag UPDATE fails mareforma is in a
-            # worse state than this helper can paper over. Log it, but
-            # do not propagate, when we own the transaction the originating
-            # write already committed; when we don't, the caller's rollback
-            # cleans up. The WARNING below makes the failure visible.
-            pass
-        import logging
-        logging.getLogger("mareforma").warning(
-            "Convergence detection swallowed %s for claim %s: %s "
-            "(retry flag set; call graph.refresh_convergence() to retry)",
-            type(exc).__name__, new_claim_id, exc,
-        )
-        return False
-
-
-def _maybe_update_replicated_best_effort(
-    conn: sqlite3.Connection,
-    root: Path,
-    claim_id: str,
-    supports: list[str],
-    generated_by: str,
-    artifact_hash: str | None,
-    *,
-    strict_promotion: bool = False,
-) -> None:
-    """Re-check REPLICATED after a caller-owned flag flip without losing work.
-
-    The flag-flip sites (mark_claim_logged, mark_claim_resolved, update_claim)
-    re-run convergence inside their own transaction. A bare
-    ``except OperationalError: pass`` here left the claim PRELIMINARY with no
-    retry flag on a transient lock, invisible to refresh_convergence and health.
-    Route them through the same wrapper add_claim uses (``own_transaction=False``,
-    so it sets ``convergence_retry_needed`` on transient failure without
-    committing the caller's transaction), and record a health event when the
-    re-check is stranded so the strand is not silent.
-    """
-    ok = _maybe_update_replicated(
-        conn, claim_id, supports, generated_by, artifact_hash,
-        own_transaction=False, strict_promotion=strict_promotion,
-    )
-    if not ok:
-        from mareforma.health import append_health_event
-        append_health_event(
-            root, "convergence_retry", outcome="degraded", claim_id=claim_id,
-        )
-
-
-def list_convergence_retry_claims(
-    conn: sqlite3.Connection,
-) -> list[dict]:
-    """Return every claim with ``convergence_retry_needed = 1``.
-
-    Caller-side iteration target for the retry path. Rows are returned
-    in ``created_at`` order so a retry pass that promotes peer claims
-    sees the earlier upstream first.
-    """
-    rows = conn.execute(
-        f"SELECT {_CLAIM_SELECT} FROM claims "
-        "WHERE convergence_retry_needed = 1 "
-        "ORDER BY created_at, claim_id"
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-
-def clear_convergence_retry_flag(
-    conn: sqlite3.Connection, root: Path, claim_id: str,
-) -> None:
-    """Clear ``convergence_retry_needed`` on a single claim after retry.
-
-    Mirrors :func:`mark_claim_resolved`: flag-flip + TOML mirror update.
-    """
-    conn.execute(
-        "UPDATE claims SET convergence_retry_needed = 0 "
-        "WHERE claim_id = ?",
-        (claim_id,),
-    )
-    conn.commit()
-    _backup_claims_toml(conn, root)
 
 
 def find_dangling_supports(conn: sqlite3.Connection) -> list[dict]:
@@ -4060,7 +3461,7 @@ def _refuse_self_validation_across_set(
         r["claim_id"] for r in conn.execute(
             f"SELECT claim_id FROM claims "
             f"WHERE claim_id IN ({sup_placeholders}) "
-            f"AND support_level = 'ESTABLISHED' AND status = 'open'",
+            f"AND status = 'open'",
             supports,
         ).fetchall()
     ]
@@ -4245,12 +3646,11 @@ def validate_claim(
     ClaimNotFoundError
         If no claim with claim_id exists.
     ValueError
-        If ``validation_signature`` is ``None`` (promotion requires a
-        signed envelope; there is no unsigned path), or if the claim's
-        support_level is not 'REPLICATED', or its status is not 'open'
-        (contested/retracted claims are editorially tainted and must not
-        be promoted; revisit the editorial flag via update_claim before
-        validating).
+        If ``validation_signature`` is ``None`` (recording a validation
+        requires a signed envelope; there is no unsigned path), or if the
+        claim's status is not 'open' (contested/retracted claims are
+        editorially tainted and must not be signed off on; revisit the
+        editorial flag via update_claim before validating).
     InvalidValidationEnvelopeError
         If the validation envelope is malformed, wrong-typed, signed
         by a non-enrolled key, fails cryptographic verification, or
@@ -4275,26 +3675,24 @@ def validate_claim(
         # that names the real requirement.
         raise ValueError(
             f"validate_claim for claim '{claim_id}' requires a signed "
-            "validation envelope; promotion to ESTABLISHED has no unsigned "
+            "validation envelope; recording a validation has no unsigned "
             "path. Build the envelope with mareforma.signing.sign_validation "
             "or call graph.validate() from an enrolled session."
         )
     row = conn.execute(
-        "SELECT support_level, status, signature_bundle, t_invalid "
+        "SELECT status, signature_bundle, t_invalid "
         "FROM claims WHERE claim_id = ?",
         (claim_id,),
     ).fetchone()
     if row is None:
         raise ClaimNotFoundError(f"Claim '{claim_id}' not found.")
-    if row["support_level"] != "REPLICATED":
-        raise ValueError(
-            f"Claim '{claim_id}' has support_level='{row['support_level']}'. "
-            "Only REPLICATED claims can be promoted to ESTABLISHED."
-        )
+    # There is no level to require a claim to have reached first. What is left
+    # is the part that was never about levels: a person cannot sign off on a
+    # claim the graph has already withdrawn or contradicted.
     if row["status"] != "open":
         raise ValueError(
             f"Claim '{claim_id}' has status='{row['status']}'. "
-            "Only claims with status='open' can be promoted to ESTABLISHED. "
+            "Only claims with status='open' can be validated. "
             "Reset the status via update_claim if the editorial flag no "
             "longer applies."
         )
@@ -4514,43 +3912,60 @@ def validate_claim(
     try:
         if _own_txn:
             conn.execute("BEGIN IMMEDIATE")
-        # COALESCE on validator_keyid guards a repeat signed re-validate.
-        # The state-check trigger permits ESTABLISHED → ESTABLISHED, so a
-        # second promotion can land on an already-validated row. Each
-        # signed call carries its own authenticated validator_keyid
-        # (unsigned calls are rejected up front), so the new signer's
-        # keyid is written; COALESCE is the belt that keeps a stray NULL
-        # from clearing the column and tanking a validator's reputation
-        # count.
-        with _promotion_window(conn):
-            cur = conn.execute(
-                """
-                UPDATE claims
-                SET support_level = 'ESTABLISHED',
-                    validated_by = ?,
-                    validated_at = ?,
-                    validation_signature = ?,
-                    validator_keyid = COALESCE(?, validator_keyid),
-                    updated_at   = ?
-                WHERE claim_id = ?
-                  AND support_level = 'REPLICATED'
-                  AND status = 'open'
-                  AND t_invalid IS NULL
-                """,
-                (validated_by, now, validation_signature, validator_keyid,
-                 now, claim_id),
-            )
+        # ``validation_signature IS NULL`` is what makes a validation
+        # terminal, and it has to be said here now. It used to be said by the
+        # level: the row went to the top rung and the UPDATE was gated on the
+        # rung below it, so a second call matched nothing and raised. The level
+        # went and took the rule with it, and the column holds one envelope, so
+        # without this a second validator's sign-off overwrites the first and
+        # the first is gone from the graph with nothing recording that it was
+        # ever there. The read path cannot notice, because the envelope that
+        # survives verifies.
+        #
+        # On the UPDATE rather than only in the gate above, so a concurrent
+        # validation landing in the check-to-write window loses the race
+        # instead of quietly replacing the winner.
+        cur = conn.execute(
+            """
+            UPDATE claims
+            SET validated_by = ?,
+                validated_at = ?,
+                validation_signature = ?,
+                validator_keyid = COALESCE(?, validator_keyid),
+                updated_at   = ?
+            WHERE claim_id = ?
+              AND status = 'open'
+              AND t_invalid IS NULL
+              AND validation_signature IS NULL
+            """,
+            (validated_by, now, validation_signature, validator_keyid,
+             now, claim_id),
+        )
         if cur.rowcount == 0:
-            # The guarded UPDATE matched nothing: a concurrent signed
-            # contradiction set t_invalid (or a retraction flipped status)
-            # after the early gate passed. Refuse rather than commit a silent
-            # no-op, mirroring the early t_invalid refusal above.
+            # The guarded UPDATE matched nothing. Say which of the three
+            # reasons it was, because they call for different things: a claim
+            # somebody already signed off on is not the same problem as one a
+            # verdict invalidated while this call was working.
+            already = conn.execute(
+                "SELECT validation_signature IS NOT NULL AS validated, status, "
+                "t_invalid FROM claims WHERE claim_id = ?",
+                (claim_id,),
+            ).fetchone()
             if _own_txn:
                 conn.rollback()
+            if already is not None and already["validated"]:
+                raise ValueError(
+                    f"Claim '{claim_id}' already carries a validation. The row "
+                    "holds one signed envelope, so recording a second would "
+                    "erase the first and the graph would keep no record that "
+                    "it was ever there. A validation is the statement of the "
+                    "person who made it; to add another reviewer's, record it "
+                    "as its own claim rather than over the top of theirs."
+                )
             raise ValueError(
                 f"Claim '{claim_id}' was invalidated by a signed contradiction "
-                "verdict during validation (the check-to-write window closed). "
-                "Refuse to promote an invalidated claim to ESTABLISHED."
+                "verdict during validation (the check-to-write window closed), "
+                "or its status changed. Refuse to record a validation over it."
             )
         if _own_txn:
             conn.commit()
@@ -4920,8 +4335,6 @@ def mark_claim_logged(
     root: Path,
     claim_id: str,
     new_signature_bundle: str,
-    *,
-    strict_promotion: bool = False,
 ) -> None:
     """Mark a claim as transparency-log included and update its bundle.
 
@@ -5067,15 +4480,6 @@ def mark_claim_logged(
                 "WHERE claim_id = ?",
                 (new_signature_bundle, now, claim_id),
             )
-            # Convergence detection is best-effort by design: a transient
-            # lock error during the REPLICATED check must not roll back the
-            # flag flip the operator just committed, but it must not vanish
-            # either (retry flag + health event).
-            if not unresolved:
-                _maybe_update_replicated_best_effort(
-                    conn, root, claim_id, supports, generated_by, artifact_hash,
-                    strict_promotion=strict_promotion,
-                )
     except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
         raise DatabaseError(f"Failed to mark claim logged: {exc}") from exc
 
@@ -5086,8 +4490,6 @@ def mark_claim_resolved(
     conn: sqlite3.Connection,
     root: Path,
     claim_id: str,
-    *,
-    strict_promotion: bool = False,
 ) -> None:
     """Clear the unresolved flag on a claim and re-check REPLICATED eligibility.
 
@@ -5126,10 +4528,6 @@ def mark_claim_resolved(
             # lock or convergence-query failure must not roll back the
             # flag-clear (the actual user intent), but it must stay retryable
             # (retry flag + health event) rather than strand the claim.
-            _maybe_update_replicated_best_effort(
-                conn, root, claim_id, supports, generated_by, artifact_hash,
-                strict_promotion=strict_promotion,
-            )
     except (sqlite3.OperationalError, sqlite3.IntegrityError) as exc:
         raise DatabaseError(f"Failed to mark claim resolved: {exc}") from exc
 
@@ -5146,7 +4544,6 @@ def update_claim(
     supports: list[str] | None = None,
     contradicts: list[str] | None = None,
     comparison_summary: str | None = None,
-    strict_promotion: bool = False,
 ) -> None:
     """Update fields on an existing claim.
 
@@ -5256,14 +4653,6 @@ def update_claim(
         new_unresolved = 0
 
     # If the claim just became resolved (or supports changed while resolved),
-    # we MUST re-evaluate REPLICATED. Otherwise a claim cured via update_claim
-    # stays at PRELIMINARY even when a peer is already waiting for convergence.
-    needs_replicated_check = (
-        supports_changed
-        and new_unresolved == 0
-        and existing.get("support_level") != "ESTABLISHED"
-    ) or (old_unresolved == 1 and new_unresolved == 0)
-
     try:
         # Wrap the UPDATE and (optional) convergence check in one txn so the
         # unresolved-flag transition and the REPLICATED promotion are atomic.
@@ -5289,15 +4678,6 @@ def update_claim(
                 from mareforma import _supports
                 _supports.replace_supports_edges(
                     conn, claim_id, json.loads(new_supports_json))
-            if needs_replicated_check:
-                # Best-effort convergence: never crash an update, but keep a
-                # stranded re-check retryable (retry flag + health event).
-                new_supports = json.loads(new_supports_json)
-                _maybe_update_replicated_best_effort(
-                    conn, root, claim_id, new_supports,
-                    existing["generated_by"], existing.get("artifact_hash"),
-                    strict_promotion=strict_promotion,
-                )
     except sqlite3.IntegrityError as exc:
         translated = _state_error_from_integrity(exc)
         if translated is not None:
@@ -5347,516 +4727,6 @@ def delete_claim(conn: sqlite3.Connection, root: Path, claim_id: str) -> None:
     _backup_claims_toml(conn, root)
 
 
-# -- the signed evidence behind a stored support_level -----------------------
-
-
-def _is_seed_attestation(validation_signature: str | None) -> bool:
-    """True when a row's envelope is a born-ESTABLISHED seed attestation.
-
-    A seed claim is asserted at ESTABLISHED and never passes through
-    REPLICATED, so the corroboration that step requires does not apply to it.
-    An unparseable value is not read as a seed: the caller has already verified
-    this column, and the gate's safe answer is to keep checking.
-    """
-    from mareforma import signing as _signing
-
-    try:
-        payload_type = json.loads(validation_signature or "")["payloadType"]
-    except (json.JSONDecodeError, KeyError, TypeError):
-        return False
-    return payload_type == _signing.PAYLOAD_TYPE_SEED
-
-
-def _legacy_unsigned_row(conn: sqlite3.Connection, row, cache: dict) -> bool:
-    """True when a row carrying no signature is legacy, not de-signed.
-
-    Two read-path exemptions hang off a NULL ``asserter_keyid``: the
-    corroboration index does not ask an unsigned row for the evidence behind its
-    rung, and the participant check has no envelope to hold it to. Both were
-    keyed on the claims row alone, and every column they read is one a writer
-    with SQL access is already assigning: ``UPDATE claims SET asserter_keyid =
-    NULL, signature_bundle = NULL`` turns any claim into a legacy one, and a
-    bare INSERT (or an unsigned ``support_level = "REPLICATED"`` block appended
-    to claims.toml before a restore) mints one from nothing. The exemption then
-    hands a fabricated row the level it wrote for itself.
-
-    So the grandfather asks two questions instead. ``statement_cid`` is written
-    at signing time and no honest path clears it, so it separates "unsigned from
-    birth" from "signed once and stripped". And the PROJECT is asked whether it
-    signs at all, through the validators table, which is a different table that
-    no UPDATE against ``claims`` reaches: a project that enrols a validator does
-    not serve a promoted claim carrying no signature. This is the rule
-    ``trust._gate._signer_identity`` already applies to the same claims, so the
-    read path and the gate speak for one graph.
-
-    *cache* is the caller's verify cache, so the validators probe runs once per
-    read. A caller whose SELECT omitted ``statement_cid`` (restore reads a
-    narrow column list) has it looked up, so both paths apply the same rule
-    rather than a laxer one on the recovery side.
-    """
-    ck = ("PS",)
-    if ck not in cache:
-        from mareforma.trust._gate import _project_signs
-        cache[ck] = _project_signs(conn)
-    if cache[ck]:
-        return False
-    try:
-        cid = row["statement_cid"]
-    except (KeyError, IndexError):
-        found = conn.execute(
-            "SELECT statement_cid FROM claims WHERE claim_id = ?",
-            (row["claim_id"],),
-        ).fetchone()
-        cid = found["statement_cid"] if found is not None else None
-    return cid is None
-
-
-def _gather_verdicts_by_claim(
-    conn: sqlite3.Connection,
-) -> dict[str, list[sqlite3.Row]]:
-    """Every replication verdict grouped by the claim ids it names.
-
-    One scan, no signature work: it groups the rows so a reader can verify only
-    the verdicts naming the claim in front of it. A single-row read verifies the
-    handful of verdicts that name its own claim rather than every verdict in the
-    graph, the order-N crypto that made a single ``get_claim`` verify one
-    signature per claim in the corroboration set. Grouping is cheap and is shared
-    across a bulk read; the verification is deferred to :func:`_verdict_verifies`
-    and memoized per claim on the index.
-    """
-    by_claim: dict[str, list[sqlite3.Row]] = {}
-    rows = conn.execute(
-        "SELECT verdict_id, cluster_id, member_claim_id, other_claim_id, "
-        "method, confidence_json, issuer_keyid, signature "
-        "FROM replication_verdicts"
-    ).fetchall()
-    for v in rows:
-        for cid in (v["member_claim_id"], v["other_claim_id"]):
-            if cid is not None:
-                by_claim.setdefault(cid, []).append(v)
-    return by_claim
-
-
-def _issuer_was_entitled(
-    conn: sqlite3.Connection,
-    issuer_keyid: str,
-    claims: "tuple[tuple[str, str], ...]",
-    *,
-    verdict_kind: str,
-    refuse_llm_issuer: bool = False,
-) -> bool:
-    """Whether *issuer_keyid* was entitled to issue this verdict.
-
-    A signature proves who signed. Entitlement is the separate question of
-    whether that signer was allowed to, and the recording path and
-    :mod:`mareforma.db.restore` both ask it: an issuer may not verdict a claim
-    whose envelope it signed any role on, and a contradiction, which invalidates
-    the older claim through the insert trigger, may not come from an llm-typed
-    validator. A read that verified the signature and skipped these served a
-    level the same graph refuses to restore, which is one file disagreeing with
-    itself about whether a claim is corroborated.
-
-    False rather than raising. Every caller is a read, and a read degrades
-    rather than crashes; the write path keeps the exceptions, where refusing is
-    the whole point.
-    """
-    try:
-        if refuse_llm_issuer:
-            _refuse_llm_contradiction_issuer(conn, issuer_keyid)
-        for claim_id, relation in claims:
-            if claim_id is None:
-                continue
-            _refuse_self_verdict(
-                conn, issuer_keyid, claim_id,
-                relation=relation, verdict_kind=verdict_kind,
-            )
-    except Exception:
-        return False
-    return True
-
-
-def _verdict_verifies(
-    conn: sqlite3.Connection, cache: dict, v: sqlite3.Row,
-) -> bool:
-    """True iff verdict *v*'s issuer is enrolled and its signature checks out.
-
-    Restore verifies each verdict before inserting it, and that precondition
-    does not travel to the live read path, where ``replication_verdicts`` is
-    whatever a process with SQL access wrote. Each verdict is therefore held
-    against its issuer here: the keyid must be an enrolled validator whose chain
-    verifies, the bar the recording path applies, and the signature must verify
-    over the DSSE PAE rebuilt from the stored columns. A verdict that fails
-    names nobody.
-
-    Never raises: a forged or unparseable verdict is not evidence, and a read
-    must degrade rather than crash. *cache* is the caller's verify cache, so one
-    issuer's pubkey is read once however many verdicts it signed.
-    """
-    from mareforma import signing as _signing
-    from mareforma import validators as _validators
-    signer_row = _cached_validator(conn, cache, v["issuer_keyid"])
-    if signer_row is None or not _validators.is_enrolled(conn, v["issuer_keyid"]):
-        return False
-    record = {
-        "verdict_id": v["verdict_id"],
-        "cluster_id": v["cluster_id"],
-        "member_claim_id": v["member_claim_id"],
-        "other_claim_id": v["other_claim_id"],
-        "method": v["method"],
-    }
-    try:
-        record["confidence"] = json.loads(v["confidence_json"] or "{}")
-        pem = base64.standard_b64decode(signer_row["pubkey_pem"])
-        _signing.public_key_from_pem(pem).verify(
-            v["signature"], _replication_verdict_pae(record),
-        )
-    except Exception:
-        return False
-    return _issuer_was_entitled(
-        conn, v["issuer_keyid"],
-        ((v["member_claim_id"], "member_claim_id"),
-         (v["other_claim_id"], "other_claim_id")),
-        verdict_kind="replication",
-    )
-
-
-# The corroboration peer probe, at module scope so tests/test_corroboration_
-# query_plan.py can EXPLAIN the shipped string instead of a copy that drifts.
-# ``a.claim_id`` takes the anchor as a parameter rather than through ``j.value``:
-# the WHERE fixes ``j.value`` to that same value, so the rows are identical, but
-# as a join condition SQLite cannot tell that ``a`` is one known row and drives
-# the whole query off ``idx_claims_support_level``, walking every ESTABLISHED
-# claim once per row served.
-_QUALIFYING_PEER_SQL = (
-    "SELECT c.* FROM claims c, json_each(c.supports_json) j "
-    "JOIN claims a ON a.claim_id = ? "
-    "AND a.support_level = 'ESTABLISHED' "
-    "WHERE j.value = ? "
-    "AND c.asserter_keyid IS NOT NULL "
-    "AND c.signature_bundle IS NOT NULL "
-    "AND c.asserter_keyid != ? "
-    "AND (? IS NULL OR c.artifact_hash IS NULL OR c.artifact_hash != ?) "
-    "AND (c.observed_grounding IS NULL OR ("
-    "  CASE WHEN json_valid(c.observed_grounding) "
-    "  THEN json_extract(c.observed_grounding, '$.grounding') "
-    "  ELSE NULL END) = 'GROUNDED')"
-)
-
-# The strict-promotion policy adds one disqualifier: a peer must carry data.
-_QUALIFYING_PEER_STRICT_SUFFIX = " AND c.artifact_hash IS NOT NULL"
-
-
-def _qualifying_peer_exists(
-    conn: sqlite3.Connection,
-    cache: dict,
-    anchor_id: str,
-    own_keyid: str,
-    own_hash: str | None,
-    strict_row: bool,
-) -> bool:
-    """True iff a signed, distinct peer on *anchor_id* backs the served row's rung.
-
-    Path (b): the served row shares the ESTABLISHED *anchor_id* with a peer
-    carrying a distinct, non-NULL asserter_keyid, a different artifact hash, and
-    a grounding verdict that permits promotion, whose own bundle verifies. The
-    disqualifiers, the peer's keyid must differ from the served row's, its hash
-    must not be byte-identical (the same result twice is not corroboration), and
-    under a strict-promotion policy it must carry data, are pushed INTO the query
-    so a signature is verified only for a peer that already qualifies, and the
-    scan stops at the first peer whose bundle verifies. The old shape verified
-    every peer in the graph up front and applied these filters in Python after,
-    which turned one single-row read into order-N signature work.
-
-    ``asserter_keyid`` is an unsigned column, so a peer clears the same bar the
-    served row clears, :func:`_verify_participant_bundle_on_read`: its bundle
-    names the same keyid, binds its own signed fields, and verifies under an
-    enrolled signer's pubkey when there is one. Never raises: a peer that does
-    not verify is skipped, not fatal. *cache* is the caller's verify cache, so a
-    peer that is also a served row is verified once.
-
-    A peer whose signer has no validators row is counted, because that helper
-    answers True without checking a signature there. Corroboration is a different
-    question from service, and this is the weaker of the two: it means a writer
-    who signs with a key the project never registered can back a rung. Tightening
-    it is a behaviour change, not a repair, because it also strips the rung from
-    an honest claim whose only peer is an unregistered signer, and the write path
-    promotes on convergence without asking. Named in ARCHITECTURE.md under what
-    the model does not catch, and left for a release that can change the write
-    path with it.
-    """
-    # Non-row-specific filters (anchor is ESTABLISHED, peer is signed, peer's
-    # grounding promotes) and the row-specific disqualifiers (distinct keyid,
-    # distinct hash, strict-mode data) are both in SQL, so verification is the
-    # last filter. own_hash NULL keeps every peer on the hash clause (the served
-    # row carried no artifact to collide with), matching the Python original.
-    #
-    # The anchor is pinned by its own primary key rather than reached through
-    # ``j.value``. The two are the same row, because the WHERE below fixes
-    # ``j.value`` to this same parameter, but written as a join condition SQLite
-    # cannot see that ``a`` is one known row: it drives the query off
-    # ``idx_claims_support_level`` and walks every ESTABLISHED claim in the graph,
-    # once per row served. Pinning it collapses that to a primary-key seek. This
-    # probe answers a single-row question, so its plan has to stay a seek; the
-    # plan itself is asserted in tests/test_corroboration_query_plan.py.
-    sql = _QUALIFYING_PEER_SQL
-    params: list[Any] = [anchor_id, anchor_id, own_keyid, own_hash, own_hash]
-    if strict_row:
-        sql += _QUALIFYING_PEER_STRICT_SUFFIX
-    for e in conn.execute(sql, params):
-        if _verify_participant_bundle_on_read(conn, dict(e), cache):
-            return True
-    return False
-
-
-class _CorroborationIndex:
-    """The graph-wide evidence a level above PRELIMINARY has to stand on.
-
-    ``support_level`` is not a signed field, so a verifying signature says
-    nothing about the rung a row sits on: one UPDATE lifts a lone claim, and
-    both the live read path and restore would otherwise serve the result. The
-    signed material is enough to re-derive the invariant, and both callers ask
-    for it here so the rule cannot drift into two versions.
-
-    A stored REPLICATED (and the REPLICATED rung an ESTABLISHED row climbed
-    through) is legitimate on either of the two paths that produce it:
-
-    (a) An enrolled validator's signed replication verdict names the claim AND
-        the claim passes the terms that verdict path promotes on. Membership
-        alone proves only that a verdict named the claim: the live path records
-        the verdict for every member of a cluster and promotes the qualifying
-        ones, so a claim that is named and not promoted is normal.
-        :func:`_claim_promotes` is the difference between the two, the same
-        predicate the write applies, so a gate added there reaches this path.
-        Neither "enrolled" nor "signed" is assumed of the table: the index
-        gathers its own evidence through :func:`_verdict_verifies`, which
-        verifies every verdict it counts.
-    (b) Automatic convergence: the claim shares an ESTABLISHED anchor in its
-        signed ``supports`` with a peer carrying a distinct, non-NULL
-        asserter_keyid, a different artifact hash, and a grounding verdict that
-        permits promotion (on both sides). The peer's keyid is not taken off
-        its column either: :func:`_qualifying_peer_exists` holds every peer it
-        examines against its own signature bundle first.
-
-    Path (b) checks durable, signed facts only. It deliberately does NOT
-    re-apply the live promotion's point-in-time filters (peer/anchor still
-    ``open``, peer ``t_invalid`` NULL, transparency): those conditions can
-    change AFTER a genuine promotion, the peer can be contradicted or the anchor
-    retracted later, and re-applying them would false-reject an honest
-    REPLICATED that was invalidated or whose anchor was withdrawn after it
-    earned the level. The artifact-hash collapse and the observed-grounding gate
-    are different in kind and ARE re-applied: both columns are bound into the
-    signed statement and no code path rewrites either, so a claim that satisfied
-    them at promotion time still satisfies them now. Forgery is still blocked: a
-    lone flipped claim cannot conjure a second real signature on a shared
-    ESTABLISHED anchor, because every peer counted here carried one, and
-    ESTABLISHED itself is gated by a signed validation envelope both callers
-    verify.
-
-    Legacy rows (NULL asserter_keyid) predate the asserter_keyid rule and are
-    grandfathered, but only where the grandfather is the honest reading:
-    :func:`_legacy_unsigned_row` asks the claim for a ``statement_cid`` and the
-    project whether it signs at all, so a de-signed row and one INSERTed into a
-    signing project do not inherit it. Born-ESTABLISHED seed claims never
-    climbed the ladder and are exempt too, at the ESTABLISHED tier alone: the
-    seed envelope is verified on read only there.
-
-    Both probes gather and verify only the evidence a served row needs, not the
-    whole graph. The verdict half groups the table once (one scan, no crypto)
-    and verifies only the verdicts naming the row's own claim, memoized per
-    claim. The peer half runs one narrowed, anchor-keyed query per (anchor, own
-    keyid, own hash, strict) it is asked about, with the disqualifiers pushed
-    into SQL and the signature verified last, memoized on that key. A single-row
-    read therefore verifies a handful of signatures instead of one per claim in
-    the corroboration set; a bulk read reuses the memos and stays amortised.
-    """
-
-    def __init__(self, conn: sqlite3.Connection, cache: dict) -> None:
-        # The cutoff is when strict promotion was declared, not when the policy
-        # row was last signed: adding a second, unrelated rule later moves
-        # created_at forward, and keying on that would grandfather every claim
-        # written under the strict rule before the second declaration. The
-        # helper answers None when the flag is undeclared, which is the same
-        # "no cutoff" the level path needs.
-        #
-        # The policy is read through its root-signed envelope, never off the
-        # flat columns: those are a cache, and one UPDATE clearing
-        # strict_promotion_required (or dating the declaration into the future)
-        # would otherwise retire the rule for every row this index checks.
-        self._conn = conn
-        self._cache = cache
-        self._strict_since = project_policy_declared_at(
-            _verified_project_policy(conn)
-        )[1]
-        # Verdicts grouped by claim, gathered lazily on the first verdict check
-        # and verified per claim on demand. Peer qualification is memoized per
-        # (anchor, own_keyid, own_hash, strict_row): the disqualifiers are the
-        # only row-varying inputs, so the memo reuses a result across every row
-        # that shares them.
-        self._verdicts_by_claim: dict[str, list[sqlite3.Row]] | None = None
-        self._verdict_backs: dict[str, bool] = {}
-        self._peer_backs: dict[tuple[str, str, str | None, bool], bool] = {}
-
-    def _verdict_names_claim(self, claim_id: str) -> bool:
-        """True iff a verified replication verdict names *claim_id*.
-
-        The grouped table is gathered once (no crypto) and the verdicts naming
-        this claim are verified on first ask, memoized so a bulk read verifies
-        each claim's verdicts at most once.
-        """
-        cached = self._verdict_backs.get(claim_id)
-        if cached is not None:
-            return cached
-        if self._verdicts_by_claim is None:
-            self._verdicts_by_claim = _gather_verdicts_by_claim(self._conn)
-        result = any(
-            _verdict_verifies(self._conn, self._cache, v)
-            for v in self._verdicts_by_claim.get(claim_id, ())
-        )
-        self._verdict_backs[claim_id] = result
-        return result
-
-    def _anchor_has_qualifying_peer(
-        self,
-        anchor_id: str,
-        own_keyid: str,
-        own_hash: str | None,
-        strict_row: bool,
-    ) -> bool:
-        """Memoized path-(b) check for one anchor and one served row's terms."""
-        key = (anchor_id, own_keyid, own_hash, strict_row)
-        cached = self._peer_backs.get(key)
-        if cached is not None:
-            return cached
-        result = _qualifying_peer_exists(
-            self._conn, self._cache, anchor_id, own_keyid, own_hash, strict_row,
-        )
-        self._peer_backs[key] = result
-        return result
-
-    def failure(self, row) -> str | None:
-        """Name why *row*'s stored support_level is unbacked, or None if it is.
-
-        ``'strict_promotion_without_data'`` is the project-policy breach (a
-        post-declaration claim promoted without an ``artifact_hash``);
-        ``'uncorroborated'`` is the missing evidence itself. An exempt row and a
-        backed row both answer None.
-        """
-        if row["support_level"] not in ("REPLICATED", "ESTABLISHED"):
-            return None
-        if row["asserter_keyid"] is None and _legacy_unsigned_row(
-            self._conn, row, self._cache,
-        ):
-            return None
-        if (
-            row["support_level"] == "ESTABLISHED"
-            and _is_seed_attestation(row["validation_signature"])
-        ):
-            # The exemption is the born-ESTABLISHED case and only that. Nothing
-            # verifies this column below ESTABLISHED: _verify_validation_on_read
-            # runs on the ESTABLISHED tier alone, and validation_signature is
-            # not on the laundering trigger's watch list, so on a REPLICATED row
-            # the bytes are unauthenticated. One UPDATE writing
-            # {"payloadType": "...seed+json"} onto a lone claim would otherwise
-            # buy it the whole corroboration exemption. No honest REPLICATED row
-            # carries a seed envelope: a seed is asserted at ESTABLISHED and
-            # never climbs the ladder.
-            return None
-        # Under a strict-promotion policy the pair needed data on both sides, so
-        # a post-declaration row without it could not have been promoted here
-        # and a peer without it cannot be the one that promoted it.
-        own_hash = row["artifact_hash"]
-        strict_row = (
-            self._strict_since is not None
-            and row["created_at"] > self._strict_since
-        )
-        if self._verdict_names_claim(row["claim_id"]) and _claim_promotes(
-            asserter_keyid=row["asserter_keyid"],
-            transparency_logged=row["transparency_logged"],
-            observed_grounding=row["observed_grounding"],
-            artifact_hash=own_hash,
-            strict_promotion=strict_row,
-        ):
-            return None
-        if strict_row and own_hash is None:
-            return "strict_promotion_without_data"
-        try:
-            supports = json.loads(row["supports_json"]) or []
-        except (ValueError, TypeError):
-            supports = []
-        # A peer that produced byte-identical output is the same result twice,
-        # not corroboration, so an equal non-NULL artifact_hash disqualifies it
-        # (pushed into the anchor query). The scan stops at the first anchor with
-        # a qualifying, verifying peer.
-        own_keyid = row["asserter_keyid"]
-        corroborated = _observed_grounding_promotes(
-            row["observed_grounding"]
-        ) and any(
-            self._anchor_has_qualifying_peer(
-                anchor, own_keyid, own_hash, strict_row,
-            )
-            for anchor in supports
-        )
-        return None if corroborated else "uncorroborated"
-
-
-def _corroboration_backs_level(
-    conn: sqlite3.Connection, row: dict, cache: dict,
-) -> bool:
-    """True iff the signed evidence backs *row*'s stored support_level.
-
-    The index is built on the first gated row and reused for the rest of the
-    caller's read, the same batching the signature re-verification does with
-    the cache it is handed.
-    """
-    index = cache.get(_CORROBORATION_CACHE_KEY)
-    if index is None:
-        index = cache[_CORROBORATION_CACHE_KEY] = _CorroborationIndex(conn, cache)
-    return index.failure(row) is None
-
-
-# -- verify-on-read for high-trust rows --------------------------------------
-#
-# Persisted ``support_level`` is not signed: a process with DB write access can
-# flip a row to REPLICATED/ESTABLISHED or tamper its envelope. The read path
-# therefore re-verifies the row's signatures before serving a high-trust row.
-# query_* EXCLUDES a row that fails; get_claim RETURNS it flagged
-# verified=False. Neither ever raises, a verification miss must degrade the
-# read, not crash it.
-#
-# Pubkey sourcing (the two tiers):
-#   * ESTABLISHED (validator side): the validation envelope's keyid MUST be an
-#     enrolled validator (revocation is out of scope, so a legitimately-signed
-#     row's key persists through key rotation). A keyid absent from the
-#     validators table, or a signature that does not verify, is a forgery and
-#     the row is excluded. An ESTABLISHED row also carries the asserter bundle,
-#     so the participant check below runs on it too.
-#   * REPLICATED (participant side): the asserter need not be an enrolled
-#     validator. When the asserter keyid IS enrolled, the bundle signature is
-#     verified against that pubkey and a forged signature excludes the row.
-#     When it is NOT enrolled there is no pubkey to check against (the lean
-#     model carries no participant registry), so the row is verify-exempt:
-#     detection where a key is available, never a false exclusion. Legacy
-#     rows (NULL asserter_keyid, no bundle) are always exempt.
-#
-# Both tiers hold the bundle's signed predicate against the row's signed
-# fields, not against its claim_id alone. A signature that verifies over a
-# predicate nobody compares to the served content is decorative.
-#
-# A genuine signature over the right content still says nothing about the rung
-# the row sits on, because the level is not part of what was signed. Both tiers
-# therefore also hold the stored level against the signed evidence that earns
-# it (:class:`_CorroborationIndex`); a row that cannot show it is not served as
-# verified, exactly as a signature mismatch is not.
-#
-# The cache is a caller-owned dict keyed on (tier, keyid, digest): one
-# verification per distinct signature within a bulk query, one validators
-# lookup per distinct keyid, plus the one corroboration index the gated rows
-# share. It is passed in and scoped to a single query on purpose, a bulk read
-# must not persist verification results past the rows it was called for.
-
-_CORROBORATION_CACHE_KEY = "corroboration_index"
-
-
 def _cached_validator(conn: sqlite3.Connection, cache: dict, keyid: str):
     """The validators row for *keyid*, read once per caller's read.
 
@@ -5876,55 +4746,57 @@ def _cached_validator(conn: sqlite3.Connection, cache: dict, keyid: str):
 def _row_verified_on_read(
     conn: sqlite3.Connection, row: dict, cache: dict,
 ) -> bool:
-    """True iff *row* may be served at its persisted support_level.
+    """True iff *row*'s signed material still backs what the row says.
 
-    PRELIMINARY and below are not gated here (they have their own
-    enrolled-generator filter in query_claims) and pass through True.
+    This used to be gated on the stored level: only promoted rows were checked,
+    because the level was the unsigned word an attacker could raise, and the
+    corroboration behind it was what had to be re-proved on every read. There
+    is no level now, so that whole question is gone, and with it the reason to
+    check some rows and not others.
+
+    What is left applies to every row, which is a wider net than the one it
+    replaces. A row carrying a validation envelope has it verified, whether the
+    envelope was written by ``validate`` or is a seed attestation on a graph
+    old enough to have one. Every row has its asserter bundle re-verified
+    against its own signed fields; a row with no envelope carries nothing to
+    check and passes, the same exemption it always had.
     """
-    level = row.get("support_level")
-    if level not in ("REPLICATED", "ESTABLISHED"):
-        return True
-    if level == "ESTABLISHED" and not _verify_validation_on_read(conn, row, cache):
-        # An ESTABLISHED row carries both envelopes. The validation signature
-        # attests the promotion; the asserter bundle attests the content. Check
-        # both, or a validated row's text could be rewritten under a validation
-        # envelope that binds nothing but the claim id.
+    if row.get("validation_signature") and not _verify_validation_on_read(
+        conn, row, cache,
+    ):
         return False
-    return (
-        _verify_participant_bundle_on_read(conn, row, cache)
-        and _corroboration_backs_level(conn, row, cache)
-    )
+    return _verify_participant_bundle_on_read(conn, row, cache)
 
 
-def count_unverified_promoted(conn: sqlite3.Connection) -> int:
-    """Count REPLICATED / ESTABLISHED rows that do not re-verify on read.
+def count_unverified_rows(conn: sqlite3.Connection) -> int:
+    """Count rows carrying signed material that does not re-verify on read.
 
-    ``support_level`` is not a signed field, so a direct writer can flip a lone
-    PRELIMINARY claim to REPLICATED, or tamper a promoted row's envelope, and the
-    stored level still reads high. The health surface counts levels as recorded
-    (one grouped aggregate), which cannot tell a genuine promotion from a forged
-    one; this pairs that census with the count of promoted rows whose signed
-    material does not back the level they claim, so ``mareforma status`` cannot
-    read green over a tampered graph.
+    This counted promoted rows, because a stored level was the thing a direct
+    writer could raise without touching a signature, and the health surface had
+    to be unable to read green over a graph where one had been. The level is
+    gone; the tampering it stood for is not. A signature can still be swapped,
+    an envelope stapled onto another row, a signed field rewritten underneath.
 
-    It runs :func:`_row_verified_on_read` (the same gate ``get_claim`` /
-    ``query`` apply) over the promoted rows ONLY, not the whole graph: the traffic
-    light turns green solely on a standing REPLICATED / ESTABLISHED row, so the
-    promoted set is the only one whose verification can change the light, and it
-    is a small fraction of a graph dominated by PRELIMINARY rows. One shared
-    verify cache, so a bulk of promotions pays one verification per distinct
-    signature.
+    So the set is the rows where verification can fail at all: those carrying an
+    asserter bundle or a validation envelope. Rows with neither are exempt for
+    the reason they always were, they have nothing to check, and counting them
+    would turn every legacy graph amber for no finding.
+
+    Every row pays its own signature check. The cache is keyed by claim id as
+    well as by bundle, deliberately, so two rows carrying one envelope cannot
+    share a verdict: that pair is the copied-bundle attack, and letting the
+    first row's answer stand for the second is what the key exists to stop. The
+    cost is therefore linear in the rows carrying signed material, with no scan
+    ceiling, which is the price of the surface reading honestly.
     """
     rows = conn.execute(
         f"SELECT {_CLAIM_SELECT} FROM claims "
-        "WHERE support_level IN ('REPLICATED', 'ESTABLISHED')"
+        "WHERE signature_bundle IS NOT NULL OR validation_signature IS NOT NULL"
     ).fetchall()
     cache: dict = {}
-    unverified = 0
-    for row in rows:
-        if not _row_verified_on_read(conn, dict(row), cache):
-            unverified += 1
-    return unverified
+    return sum(
+        1 for row in rows if not _row_verified_on_read(conn, dict(row), cache)
+    )
 
 
 def _trust_domain_disclosure(conn: sqlite3.Connection) -> tuple[bool, str | None]:
@@ -6088,6 +4960,48 @@ def _signed_field_mismatch(pred: dict, row: dict) -> str | None:
     ):
         return "observed_grounding"
     return None
+
+
+def _legacy_unsigned_row(conn: sqlite3.Connection, row, cache: dict) -> bool:
+    """True when a row carrying no signature is legacy, not de-signed.
+
+    The participant check has no envelope to hold an unsigned row to, so it
+    exempts one. That exemption was keyed on the claims row alone, and every
+    column it reads is one a writer with SQL access is already assigning:
+    ``UPDATE claims SET asserter_keyid = NULL, signature_bundle = NULL`` turns
+    any claim into a legacy one, and a bare INSERT mints one from nothing. The
+    exemption then serves a fabricated row as though it predated signing.
+
+    So the grandfather asks two questions instead. ``statement_cid`` is written
+    at signing time and no honest path clears it, so it separates "unsigned from
+    birth" from "signed once and stripped". And the PROJECT is asked whether it
+    signs at all, through the validators table, which is a different table that
+    no UPDATE against ``claims`` reaches: a project that enrols a validator does
+    not serve a claim carrying no signature. This is the rule
+    ``trust._gate._signer_identity`` already applies to the same claims, so the
+    read path and the gate speak for one graph.
+
+    *cache* is the caller's verify cache, so the validators probe runs once per
+    read. A caller whose SELECT omitted ``statement_cid`` (restore reads a
+    narrow column list) has it looked up, so both paths apply the same rule
+    rather than a laxer one on the recovery side.
+    """
+    ck = ("PS",)
+    if ck not in cache:
+        from mareforma.trust._gate import _project_signs
+        cache[ck] = _project_signs(conn)
+    if cache[ck]:
+        return False
+    try:
+        cid = row["statement_cid"]
+    except (KeyError, IndexError):
+        found = conn.execute(
+            "SELECT statement_cid FROM claims WHERE claim_id = ?",
+            (row["claim_id"],),
+        ).fetchone()
+        cid = found["statement_cid"] if found is not None else None
+    return cid is None
+
 
 
 def _verify_participant_bundle_on_read(
@@ -6354,10 +5268,16 @@ def get_claim(
 ) -> dict | None:
     """Return a claim dict or None if not found.
 
-    High-trust rows (REPLICATED / ESTABLISHED) carry a ``verified`` boolean:
-    the read path re-verifies the row's signatures and flags the result rather
-    than excluding the row, so an auditor can still see a tampered row and know
-    it failed. PRELIMINARY rows are always ``verified=True`` here.
+    Every row carries a ``verified`` boolean: the read path re-verifies its
+    signatures and flags the result rather than excluding the row, so an auditor
+    can still see a tampered row and know it failed. A row with no envelope
+    carries nothing to check and reads ``verified=True``.
+
+    It also carries ``generator_enrolled``, for the reason the enumerating reads
+    do. A claim whose signer the project never enrolled used to be held back
+    from the default read; it is served now, so every surface that serves it has
+    to say what it is rather than leave the caller to assume somebody vouched
+    for it.
 
     *verify_cache* lets a caller reading several claims share one cache, the
     way :func:`list_claims` shares one across its rows: the peer evidence
@@ -6377,10 +5297,17 @@ def get_claim(
     d["verified"] = _row_verified_on_read(
         conn, d, {} if verify_cache is None else verify_cache,
     )
-    if d.get("support_level") == "ESTABLISHED":
-        std, root_kid = _trust_domain_disclosure(conn)
-        d["single_trust_domain"] = std
-        d["trust_domain_root"] = root_kid
+    # A graph-global property of the validator topology. It used to ride only
+    # on promoted rows, because those were the ones a consumer would act on;
+    # every row is that row now.
+    std, root_kid = _trust_domain_disclosure(conn)
+    d["single_trust_domain"] = std
+    d["trust_domain_root"] = root_kid
+    gen_keyid = _extract_signature_bundle_keyid(d.get("signature_bundle"))
+    d["generator_enrolled"] = (
+        gen_keyid is not None
+        and gen_keyid in _enrolled_validator_keyids(conn)
+    )
     return d
 
 
@@ -6440,9 +5367,16 @@ def list_claims(
 
     verify_cache: dict = {}
     claims = []
+    # Read once for the whole listing rather than per row: the set does not
+    # change under a single read, and this is the export feed.
+    enrolled = _enrolled_validator_keyids(conn)
     for row in rows:
         d = dict(row)
         d["verified"] = _row_verified_on_read(conn, d, verify_cache)
+        gen_keyid = _extract_signature_bundle_keyid(d.get("signature_bundle"))
+        d["generator_enrolled"] = (
+            gen_keyid is not None and gen_keyid in enrolled
+        )
         claims.append(d)
     return claims
 
@@ -6452,8 +5386,8 @@ def refuse_unverified_claims(claims: "Iterable[dict]") -> None:
 
     The gate every export shares. A claim dict comes from :func:`list_claims` or
     :func:`get_claim`, both of which flag rather than drop, so a publishing
-    surface has to refuse the document itself or the forged support level leaves
-    the machine with nothing marking it.
+    surface has to refuse the document itself, or a row whose signed material
+    does not check out leaves the machine with nothing marking it.
 
     A row carrying no ``verified`` key is refused too. It never went through
     verify-on-read, so testing the flag alone would read it as clean: a caller
@@ -6821,6 +5755,90 @@ def verify_verdict_chain(conn: sqlite3.Connection) -> "tuple[str, ...]":
     return tuple(problems)
 
 
+def _verdict_verifies(
+    conn: sqlite3.Connection, cache: dict, v: sqlite3.Row,
+) -> bool:
+    """True iff verdict *v*'s issuer is enrolled and its signature checks out.
+
+    Restore verifies each verdict before inserting it, and that precondition
+    does not travel to the live read path, where ``replication_verdicts`` is
+    whatever a process with SQL access wrote. Each verdict is therefore held
+    against its issuer here: the keyid must be an enrolled validator whose chain
+    verifies, the bar the recording path applies, and the signature must verify
+    over the DSSE PAE rebuilt from the stored columns. A verdict that fails
+    names nobody.
+
+    Never raises: a forged or unparseable verdict is not evidence, and a read
+    must degrade rather than crash. *cache* is the caller's verify cache, so one
+    issuer's pubkey is read once however many verdicts it signed.
+    """
+    from mareforma import signing as _signing
+    from mareforma import validators as _validators
+    signer_row = _cached_validator(conn, cache, v["issuer_keyid"])
+    if signer_row is None or not _validators.is_enrolled(conn, v["issuer_keyid"]):
+        return False
+    record = {
+        "verdict_id": v["verdict_id"],
+        "cluster_id": v["cluster_id"],
+        "member_claim_id": v["member_claim_id"],
+        "other_claim_id": v["other_claim_id"],
+        "method": v["method"],
+    }
+    try:
+        record["confidence"] = json.loads(v["confidence_json"] or "{}")
+        pem = base64.standard_b64decode(signer_row["pubkey_pem"])
+        _signing.public_key_from_pem(pem).verify(
+            v["signature"], _replication_verdict_pae(record),
+        )
+    except Exception:
+        return False
+    return _issuer_was_entitled(
+        conn, v["issuer_keyid"],
+        ((v["member_claim_id"], "member_claim_id"),
+         (v["other_claim_id"], "other_claim_id")),
+        verdict_kind="replication",
+    )
+
+
+def _issuer_was_entitled(
+    conn: sqlite3.Connection,
+    issuer_keyid: str,
+    claims: "tuple[tuple[str, str], ...]",
+    *,
+    verdict_kind: str,
+    refuse_llm_issuer: bool = False,
+) -> bool:
+    """Whether *issuer_keyid* was entitled to issue this verdict.
+
+    A signature proves who signed. Entitlement is the separate question of
+    whether that signer was allowed to, and the recording path and
+    :mod:`mareforma.db.restore` both ask it: an issuer may not verdict a claim
+    whose envelope it signed any role on, and a contradiction, which invalidates
+    the older claim through the insert trigger, may not come from an llm-typed
+    validator. A read that verified the signature and skipped these served a
+    level the same graph refuses to restore, which is one file disagreeing with
+    itself about whether a claim is corroborated.
+
+    False rather than raising. Every caller is a read, and a read degrades
+    rather than crashes; the write path keeps the exceptions, where refusing is
+    the whole point.
+    """
+    try:
+        if refuse_llm_issuer:
+            _refuse_llm_contradiction_issuer(conn, issuer_keyid)
+        for claim_id, relation in claims:
+            if claim_id is None:
+                continue
+            _refuse_self_verdict(
+                conn, issuer_keyid, claim_id,
+                relation=relation, verdict_kind=verdict_kind,
+            )
+    except Exception:
+        return False
+    return True
+
+
+
 def _check_verdict_chain_link(
     conn: sqlite3.Connection,
     cache: dict,
@@ -7002,7 +6020,7 @@ def record_replication_verdict(
     The OSS core doesn't fire replication predicates itself:
     third-party verdict-issuers call this method after running their
     predicate logic. Mareforma just accepts the signed verdict and
-    triggers the support_level promotion.
+    records the verdict.
     """
     from mareforma import signing as _signing
 
@@ -7078,59 +6096,6 @@ def record_replication_verdict(
             signature=signature, signer=signer, issuer_keyid=issuer_keyid,
             created_at=created_at,
         )
-        # Promote referenced claims to REPLICATED. The state-machine
-        # trigger rejects PRELIMINARY → ESTABLISHED but accepts
-        # PRELIMINARY → REPLICATED. Update only when the row is still
-        # PRELIMINARY (do not downgrade an ESTABLISHED claim) AND not
-        # invalidated (a signed contradiction verdict is terminal , 
-        # a later replication verdict must not silently re-promote).
-        #
-        # The verdict path enforces the SAME computed gates the convergence
-        # path applies to this identical PRELIMINARY → REPLICATED transition,
-        # through the shared `_claim_promotes` helper: a claim execution
-        # observed as NOT grounded (UNGROUNDED / OPAQUE), an unsigned / legacy
-        # row (NULL asserter_keyid, not a valid distinct signer), one whose
-        # transparency log is not settled, or one without data under the
-        # project's strict-promotion policy must not ride a verdict into the
-        # trust ladder. Without them an enrolled issuer could launder such a
-        # claim to REPLICATED, and from there validate() lifts it to
-        # ESTABLISHED. The policy is read here rather than off the handle for
-        # the reason the convergence path reads it: it is root-signed and
-        # one-way, so the rule is the project's, not the issuer's. These gates
-        # are read inside the same BEGIN IMMEDIATE transaction, so a mixed
-        # batch still promotes the qualifying members and the verdict is
-        # recorded either way. The concurrency-sensitive gates (t_invalid,
-        # status) stay on the UPDATE's WHERE to close the TOCTOU window if a
-        # member is invalidated after the read.
-        strict_promotion = strict_promotion_required(conn)
-        gate_rows = conn.execute(
-            f"SELECT claim_id, observed_grounding, asserter_keyid, "
-            f"transparency_logged, artifact_hash FROM claims "
-            f"WHERE claim_id IN ({placeholders})",
-            members,
-        ).fetchall()
-        promotable = [
-            r["claim_id"] for r in gate_rows
-            if _claim_promotes(
-                asserter_keyid=r["asserter_keyid"],
-                transparency_logged=r["transparency_logged"],
-                observed_grounding=r["observed_grounding"],
-                artifact_hash=r["artifact_hash"],
-                strict_promotion=strict_promotion,
-            )
-        ]
-        if promotable:
-            promote_placeholders = ",".join("?" * len(promotable))
-            with _promotion_window(conn):
-                conn.execute(
-                    f"UPDATE claims SET support_level = 'REPLICATED', "
-                    f"updated_at = ? "
-                    f"WHERE claim_id IN ({promote_placeholders}) "
-                    f"AND support_level = 'PRELIMINARY' "
-                    f"AND status = 'open' "
-                    f"AND t_invalid IS NULL",
-                    (created_at, *promotable),
-                )
         if _own_txn:
             conn.commit()
     except sqlite3.IntegrityError as exc:
@@ -7411,7 +6376,7 @@ def _gather_contradictions_by_claim(
     """Every contradiction verdict grouped by the claim ids it names.
 
     One scan, no signature work, the same shape
-    :func:`_gather_verdicts_by_claim` holds for the replication table and for
+    The same shape holds for the replication table and for
     the same reason. A bulk read that replays per row spends a statement per row
     to ask a question one pass answers, and it spends it hardest on the ordinary
     graph where the table is empty and every one of those statements returns
@@ -7788,9 +6753,9 @@ def _enrolled_generator_condition(prefix: str = "") -> str:
     """
     bundle = f"{prefix}signature_bundle"
     return (
-        f"({prefix}support_level != 'PRELIMINARY' OR (json_valid({bundle}) AND "
+        f"(json_valid({bundle}) AND "
         f"json_extract({bundle}, '$.signatures[0].keyid') "
-        f"IN (SELECT keyid FROM validators)))"
+        f"IN (SELECT keyid FROM validators))"
     )
 
 
@@ -7843,11 +6808,10 @@ def _count_unverified_held_back(
     # is bounded by the same ceiling the read uses, and the number is "at least
     # this many", which is how the caller already reads it.
     #
-    # The inner select aliases the two columns back to their bare names so the
-    # one enrolled-generator rule can be reused verbatim rather than restated.
+    # The inner select aliases the column back to its bare name so the one
+    # enrolled-generator rule can be reused verbatim rather than restated.
     inner = (
-        f"SELECT {prefix}signature_bundle AS signature_bundle, "
-        f"{prefix}support_level AS support_level "
+        f"SELECT {prefix}signature_bundle AS signature_bundle "
         f"FROM {from_sql} {where} LIMIT ?"
     )
     sql = (
@@ -7937,7 +6901,6 @@ def _disclose_unverified(
     ceiling: int,
     limit: int,
     served: int,
-    include_unverified: bool,
     on_unverified_excluded: "Callable[[int], None] | None",
     prefix: str = "",
     contested: int = 0,
@@ -7983,15 +6946,6 @@ def _disclose_unverified(
                 "include_invalidated=True to see them.",
                 unbacked, " (at least)" if unbacked_saturated else "",
             )
-    if include_unverified or on_unverified_excluded is None or served >= limit:
-        return
-    held, saturated = _count_unverified_held_back(
-        conn, from_sql, where, params, ceiling=ceiling, prefix=prefix,
-    )
-    if held:
-        on_unverified_excluded(held, saturated)
-
-
 def _scan_ceiling_error(surface: str, ceiling: int, found: int, limit: int):
     """The ScanCeilingReached a read surface raises when its scan ran out."""
     return ScanCeilingReached(
@@ -8014,7 +6968,6 @@ def _read_path_row(
     *,
     reputation: dict,
     enrolled_keyids: set,
-    include_unverified: bool,
     trust_domain: tuple,
     verify_cache: dict,
 ) -> dict | None | object:
@@ -8023,12 +6976,15 @@ def _read_path_row(
     Shared by :func:`query_claims` and :func:`search_claims` so the read-path
     verification cannot drift between the two surfaces. Attaches
     ``generator_enrolled`` and ``validator_reputation``; drops an
-    unenrolled-generator PRELIMINARY row unless ``include_unverified`` (returns
-    ``None``); drops a REPLICATED / ESTABLISHED row whose signature does not
-    re-verify (returns :data:`_VERIFY_EXCLUDED`, independent of
-    ``include_unverified``, which only relaxes the PRELIMINARY generator filter,
-    never the high-trust signature check); and attaches the trust-domain
-    disclosure to an ESTABLISHED row.
+    drops a row whose signature does not re-verify (returns
+    :data:`_VERIFY_EXCLUDED`); and attaches the trust-domain disclosure.
+
+    It no longer drops a row for being signed by a key the project never
+    enrolled. That filter only ever applied below the top of the support
+    ladder, and converging lifted a row out of it; with nothing to converge
+    into, it would have hidden every claim in a project that enrols no
+    validator. ``generator_enrolled`` still rides on every row, so a caller
+    that wants the old set can ask for it and see why.
     """
     d = dict(row)
     gen_keyid = _extract_signature_bundle_keyid(d.get("signature_bundle"))
@@ -8039,14 +6995,17 @@ def _read_path_row(
     d["validator_reputation"] = (
         reputation.get(validator_kid, 0) if validator_kid else 0
     )
-    if not include_unverified and (
-        d["support_level"] == "PRELIMINARY" and not d["generator_enrolled"]
-    ):
-        return None
+    # A claim whose signer the project never enrolled used to be held back from
+    # the default read, and converging lifted it into view. Nothing lifts
+    # anything now, so applying that rule to every row made a project which
+    # never enrols a validator read as empty, which looks like data loss and is
+    # not what the rest of this release says: trust is derived and disclosed,
+    # not gated by a word. The row is served, carrying ``generator_enrolled``
+    # and ``verified`` so a caller reads what backs it instead of being handed
+    # a shorter list and no reason.
     if not _row_verified_on_read(conn, d, verify_cache):
         return _VERIFY_EXCLUDED
-    if d["support_level"] == "ESTABLISHED":
-        d["single_trust_domain"], d["trust_domain_root"] = trust_domain
+    d["single_trust_domain"], d["trust_domain_root"] = trust_domain
     return d
 
 
@@ -8055,7 +7014,6 @@ def _project_verified_rows(
     rows: "Iterable",
     *,
     limit: int,
-    include_unverified: bool,
     on_verify_excluded: Callable[[int], None] | None = None,
     clean_only: bool = False,
 ) -> tuple[list[dict], int, int]:
@@ -8121,7 +7079,7 @@ def _project_verified_rows(
         d = _read_path_row(
             conn, row,
             reputation=reputation, enrolled_keyids=enrolled_keyids,
-            include_unverified=include_unverified, trust_domain=trust_domain,
+            trust_domain=trust_domain,
             verify_cache=verify_cache,
         )
         if d is _VERIFY_EXCLUDED:
@@ -8191,16 +7149,14 @@ def query_claims(
     *,
     limit: int = 10,
     text: str | None = None,
-    min_support: str | None = None,
     classification: str | None = None,
-    include_unverified: bool = False,
     include_invalidated: bool = False,
     refutation_filter: str | None = None,
     on_verify_excluded: Callable[[int], None] | None = None,
     on_unverified_excluded: Callable[[int], None] | None = None,
     on_contested: Callable[[int], None] | None = None,
 ) -> list[dict]:
-    """Return claims ordered by support_level (desc) then recency (desc).
+    """Return claims ordered by recency (desc).
 
     Parameters
     ----------
@@ -8209,17 +7165,8 @@ def query_claims(
         claims; a negative limit raises ``ValueError``.
     text:
         Optional substring filter: case-insensitive LIKE match on claim text.
-    min_support:
-        Minimum support level: 'PRELIMINARY' | 'REPLICATED' | 'ESTABLISHED'.
     classification:
         Filter by classification: 'INFERRED' | 'ANALYTICAL' | 'DERIVED'.
-    include_unverified:
-        When False (default), PRELIMINARY claims whose ``signature_bundle``
-        is unsigned or signed by a keyid not present in the ``validators``
-        table are excluded by default. REPLICATED and
-        ESTABLISHED rows already require an enrolled validator chain and
-        are never filtered by this flag. Pass ``True`` to surface
-        unverified preliminary claims (e.g. inspection of pending work).
     include_invalidated:
         When False (default), claims with non-NULL ``t_invalid`` are
         excluded: a contradiction_verdicts row from an enrolled
@@ -8269,14 +7216,6 @@ def query_claims(
 
     if not include_invalidated:
         conditions.append("t_invalid IS NULL")
-
-    if min_support is not None:
-        if min_support not in VALID_SUPPORT_LEVELS:
-            raise ValueError(_unknown_min_support_message(min_support))
-        tiers = _SUPPORT_LEVEL_TIERS[min_support]
-        tier_placeholders = ",".join("?" * len(tiers))
-        conditions.append(f"support_level IN ({tier_placeholders})")
-        params.extend(tiers)
 
     if classification is not None:
         if classification not in VALID_CLASSIFICATIONS:
@@ -8343,9 +7282,6 @@ def query_claims(
     # rows that are both enrolled and not, and the answer is always none.
     disclose_where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     disclose_params = list(params)
-    if not include_unverified:
-        conditions.append(_enrolled_generator_condition())
-
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
     # The signature re-verification runs in Python after the fetch, so a flat
@@ -8355,9 +7291,7 @@ def query_claims(
     # then filter for survivors.
     base_sql = (
         f"SELECT {_CLAIM_SELECT} FROM claims {where} "
-        f"ORDER BY CASE support_level "
-        f"WHEN 'ESTABLISHED' THEN 3 WHEN 'REPLICATED' THEN 2 ELSE 1 END DESC, "
-        f"created_at DESC LIMIT ?"
+        f"ORDER BY created_at DESC LIMIT ?"
     )
     ceiling = _read_scan_ceiling(limit)
     try:
@@ -8369,8 +7303,7 @@ def query_claims(
     # survive) that break stops fetching too, so the ceiling stays the worst-case
     # bound for the adversarial drain path instead of the per-call materialisation.
     results, scanned, contested = _project_verified_rows(
-        conn, cursor, limit=limit, include_unverified=include_unverified,
-        on_verify_excluded=on_verify_excluded,
+        conn, cursor, limit=limit, on_verify_excluded=on_verify_excluded,
         clean_only=refutation_filter == "clean",
     )
     if scanned >= ceiling and len(results) < limit:
@@ -8378,8 +7311,7 @@ def query_claims(
     _disclose_unverified(
         conn, "claims", disclose_where, disclose_params,
         ceiling=ceiling, limit=limit,
-        served=len(results), include_unverified=include_unverified,
-        on_unverified_excluded=on_unverified_excluded, contested=contested,
+        served=len(results), on_unverified_excluded=on_unverified_excluded, contested=contested,
         on_contested=on_contested,
         include_invalidated=include_invalidated,
     )
@@ -8406,7 +7338,7 @@ def _enrolled_validator_keyids(conn: sqlite3.Connection) -> set[str]:
     authoritative check for individual validations; this set is a
     cheap pre-filter used by :func:`query_claims` to decide whether a
     PRELIMINARY claim's generator is "enrolled enough" to surface
-    without ``include_unverified=True``.
+    unless the caller asks for them.
     """
     rows = conn.execute("SELECT keyid FROM validators").fetchall()
     return {r["keyid"] for r in rows}
@@ -8415,16 +7347,21 @@ def _enrolled_validator_keyids(conn: sqlite3.Connection) -> set[str]:
 def _compute_validator_reputation(
     conn: sqlite3.Connection,
 ) -> dict[str, int]:
-    """Return ``{validator_keyid: count}`` for ESTABLISHED claims.
+    """Return ``{validator_keyid: count}`` for claims a validator signed off on.
 
-    Count is the number of ESTABLISHED rows whose ``validator_keyid``
-    equals the key. Validators with zero ESTABLISHED rows are omitted
-    from the dict (caller defaults to 0). Derived state, recomputed
-    on every call, never cached.
+    Count is the number of rows carrying a validation envelope whose
+    ``validator_keyid`` equals the key. Validators with none are omitted from
+    the dict (caller defaults to 0). Derived state, recomputed on every call,
+    never cached.
+
+    This counted ESTABLISHED rows, which was the same set by a different name:
+    a row reached that level only by being validated. The level is gone and the
+    envelope is not, so the question is asked of the envelope directly, which is
+    the signed thing rather than the word derived from it.
     """
     rows = conn.execute(
         "SELECT validator_keyid, COUNT(*) AS n FROM claims "
-        "WHERE support_level = 'ESTABLISHED' "
+        "WHERE validation_signature IS NOT NULL "
         "  AND validator_keyid IS NOT NULL "
         "GROUP BY validator_keyid"
     ).fetchall()
@@ -8461,9 +7398,7 @@ def search_claims(
     query: str,
     *,
     limit: int = 20,
-    min_support: str | None = None,
     classification: str | None = None,
-    include_unverified: bool = False,
     include_invalidated: bool = False,
     on_verify_excluded: Callable[[int], None] | None = None,
     on_unverified_excluded: Callable[[int], None] | None = None,
@@ -8474,7 +7409,7 @@ def search_claims(
     Returns claim dicts ordered by FTS5 rank (best match first). Each
     dict carries the same projection as :func:`query_claims`:
     ``validator_reputation`` and ``generator_enrolled`` are attached
-    per row, and ``include_unverified`` / ``include_invalidated`` /
+    per row, and ``include_invalidated`` /
     ``on_verify_excluded`` behave identically.
 
     The ``query`` string is passed through to SQLite's FTS5 MATCH
@@ -8488,8 +7423,6 @@ def search_claims(
     _require_non_negative_limit(limit, "search")
     fts_query = _validate_fts5_query(query)
 
-    if min_support is not None and min_support not in VALID_SUPPORT_LEVELS:
-        raise ValueError(_unknown_min_support_message(min_support))
     if classification is not None and classification not in VALID_CLASSIFICATIONS:
         raise ValueError(
             f"Unknown classification '{classification}'. "
@@ -8502,20 +7435,12 @@ def search_claims(
     if not include_invalidated:
         conditions.append("c.t_invalid IS NULL")
 
-    if min_support is not None:
-        tiers = _SUPPORT_LEVEL_TIERS[min_support]
-        placeholders = ",".join("?" * len(tiers))
-        conditions.append(f"c.support_level IN ({placeholders})")
-        params.extend(tiers)
     if classification is not None:
         conditions.append("c.classification = ?")
         params.append(classification)
     # As in query_claims: the disclosure must ask without the filter it reports on.
     disclose_where = "WHERE " + " AND ".join(conditions)
     disclose_params = list(params)
-    if not include_unverified:
-        conditions.append(_enrolled_generator_condition("c."))
-
     where = " AND ".join(conditions)
     select_cols = ", ".join(f"c.{col}" for col in _CLAIM_COLUMNS)
     # Rank once and materialise up to the scan ceiling in a single statement,
@@ -8544,8 +7469,7 @@ def search_claims(
     # Step the ranked cursor lazily: _project_verified_rows stops at `limit`
     # survivors, so the common path fetches a handful, not the whole ceiling.
     results, scanned, contested = _project_verified_rows(
-        conn, cursor, limit=limit, include_unverified=include_unverified,
-        on_verify_excluded=on_verify_excluded,
+        conn, cursor, limit=limit, on_verify_excluded=on_verify_excluded,
     )
     if scanned >= ceiling and len(results) < limit:
         raise _scan_ceiling_error("search", ceiling, len(results), limit)
@@ -8553,8 +7477,7 @@ def search_claims(
         conn,
         "claims_fts f JOIN claims c ON c.claim_id = f.claim_id",
         disclose_where, disclose_params, ceiling=ceiling, limit=limit,
-        served=len(results), include_unverified=include_unverified,
-        on_unverified_excluded=on_unverified_excluded, prefix="c.",
+        served=len(results), on_unverified_excluded=on_unverified_excluded, prefix="c.",
         # The contested count reaches the caller here as it does from query.
         # The shared projection replays the signed verdicts for both surfaces
         # and hands the count back to both, and this one bound it to a local
@@ -8798,19 +7721,6 @@ def project_policy_unverified(conn: sqlite3.Connection) -> bool:
     if policy is None:
         return False
     return not _policy_envelope_binds(conn, policy)
-
-
-def strict_promotion_required(conn: sqlite3.Connection) -> bool:
-    """True when the project's stored policy gates promotion on data.
-
-    Read on the promotion path so the rule belongs to the project rather than
-    to whichever handle happens to be writing: the declaration is root-signed
-    and one-way, so a caller that opened without ``strict_promotion`` is held
-    to it too. It is read through the signed envelope for the same reason: a
-    rule that binds every writer must not be readable off a column every writer
-    can edit.
-    """
-    return project_policy_flags(_verified_project_policy(conn))[1]
 
 
 def set_project_policy(
@@ -9460,7 +8370,6 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
             entry: dict[str, Any] = {
                 "text": c["text"],
                 "classification": c.get("classification") or "INFERRED",
-                "support_level": c.get("support_level") or "PRELIMINARY",
                 "generated_by": c.get("generated_by", "agent"),
                 "status": c["status"],
                 "supports": supports,
@@ -9482,11 +8391,6 @@ def _backup_claims_toml(conn: sqlite3.Connection, root: Path) -> None:
                 # write contract on a restored graph: the replay of a step
                 # misses the key lookup and inserts a signed near-duplicate.
                 entry["idempotency_key"] = c["idempotency_key"]
-            if c.get("convergence_retry_needed"):
-                # Audit flag: preserved across restore so the operator's
-                # TODO list of "claims whose convergence detection still
-                # needs a retry" doesn't reset to empty on a rebuild.
-                entry["convergence_retry_needed"] = True
             if c.get("signature_bundle"):
                 entry["signature_bundle"] = c["signature_bundle"]
             if c.get("validation_signature"):

@@ -34,7 +34,6 @@ def _write_unsigned_claim(tmp_path: Path, evidence_json: object) -> None:
 [claims.c1]
 text = "alpha"
 classification = "INFERRED"
-support_level = "PRELIMINARY"
 generated_by = "agent"
 status = "open"
 supports = []

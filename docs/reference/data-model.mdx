@@ -13,13 +13,12 @@ All persistent state lives in a single SQLite file at `<project_root>/.mareforma
 | `claim_id` | TEXT | UUID at insert | No | Primary key |
 | `text` | TEXT | required | No | The falsifiable assertion. Hard cap 100,000 chars. Sanitized on write (zero-width / bidi / control chars stripped) |
 | `classification` | TEXT | `INFERRED` | No | Epistemic origin: `INFERRED` / `ANALYTICAL` / `DERIVED` |
-| `support_level` | TEXT | `PRELIMINARY` | No | The stored promotion ladder: `PRELIMINARY` / `REPLICATED` / `ESTABLISHED`. Transitions enforced by BEFORE triggers. REPLICATED fires when ≥2 claims signed by distinct keys (`asserter_keyid`) cite a shared ESTABLISHED upstream. This is the legacy per-claim axis; its `REPLICATED` / `ESTABLISHED` public labels are deprecated for v0.4.0. Read trust off the derived `Status` and `question_status` axes (see below) |
 | `idempotency_key` | TEXT | `NULL` | Yes | UNIQUE: same key → same `claim_id`, no INSERT. Round-trips through `claims.toml` so a replay after a restore still returns the original claim |
 | `validated_by` | TEXT | `NULL` | Yes | Cosmetic display label set by `graph.validate()` (authoritative identity lives in `validation_signature`) |
 | `validated_at` | TEXT | `NULL` | Yes | UTC ISO 8601 timestamp of validation |
 | `status` | TEXT | `open` | No | Editorial: `open` / `contested` / `retracted` |
 | `source_name` | TEXT | `NULL` | Yes | Data source name; required for `ANALYTICAL` to be meaningful |
-| `generated_by` | TEXT | `agent` | No | Agent identifier; display label only. The REPLICATED independence axis is the signing key, see `asserter_keyid` |
+| `generated_by` | TEXT | `agent` | No | Agent identifier; display label only. Independence keys on `asserter_keyid`, never on this. |
 | `asserter_keyid` | TEXT | `NULL` | Yes | Denormalized signer keyid from the `signature_bundle`. The REPLICATED independence axis: two claims signed by distinct keyids count as independent; an unsigned claim (NULL) cannot reach REPLICATED |
 | `supports_json` | TEXT | `[]` | No | JSON array of upstream claim_ids or DOIs |
 | `contradicts_json` | TEXT | `[]` | No | JSON array of claim_ids this finding contests |
@@ -40,14 +39,13 @@ All persistent state lives in a single SQLite file at `<project_root>/.mareforma
 | `evidence_json` | TEXT | `{}` | No | Optional evidence-vector dict serialized as canonical JSON, carried inside the signed Statement and denormalised into the `ev_*` columns for queryable filters. mareforma stores it opaquely and does not interpret it; defaults to all-zeros so a claim without one produces byte-identical canonical bytes |
 | `statement_cid` | TEXT | `NULL` | Yes | Content identifier of the signed in-toto Statement: `sha256(canonicalize(statement))` hex. Restore re-derives this from the row's fields + `evidence_json` and refuses any mismatch with the stored value |
 | `t_invalid` | INTEGER | `NULL` | Yes | Invalidation timestamp set by the `contradiction_invalidates_older` trigger when a signed `contradiction_verdicts` row references this claim. Default `query()` / `search()` excludes invalidated rows; pass `include_invalidated=True` for audit-mode listings |
-| `convergence_retry_needed` | INTEGER | `0` | No | `1` when `_maybe_update_replicated` swallowed a SQLite error during the post-INSERT promotion check. `EpistemicGraph.refresh_convergence()` walks flagged rows to retry detection and clear the flag. Round-trips through `claims.toml` so the operator's audit list survives restore |
 | `predicate_payload` | TEXT | `''` | No | Typed predicate body denormalized for `predicate_type` filtering without parsing the claim text JSON. Query-side only: NOT bound into the signed envelope or chain hash, and NOT compared during idempotency reconciliation |
 | `original_signature_bundle` | TEXT | `NULL` | Yes | On a federation-imported claim, the original signature envelope from the source graph. The active `signature_bundle` carries the receiver's re-signed envelope; verifiers that want the source-side proof read this. NULL on claims that were not federation-imported |
 | `observed_grounding` | TEXT | `NULL` | Yes | The computed grounding axis (distinct from the declared `classification`), stored as a JSON verdict record: `version`, `grounding` (`GROUNDED` / `UNGROUNDED` / `OPAQUE`), `reason`, `cited_sources`, `grounded_sources`, and `receipt_digest`. Written from the same record bound into the signed predicate, so this is a queryable denormalization the split measurement and the promotion gate read while the signed envelope stays authoritative. NULL on every claim asserted without the observer (including rows predating this column); a NULL here means the signed predicate omits the field too, so the signed bytes stay byte-identical to a pre-observer claim |
 | `created_at` | TEXT | UTC now | No | ISO 8601 UTC timestamp |
 | `updated_at` | TEXT | UTC now | No | ISO 8601 UTC; updated on every mutation |
 
-**Row-level CHECK**: every row whose `support_level = 'ESTABLISHED'` must have a non-NULL `validation_signature`. The CHECK is the row-level belt to the trigger's transition-level suspenders.
+**Row-level CHECK**: a row cannot say a human validated it without the envelope proving one did. Setting `validated_by` or `validated_at` requires a non-NULL `validation_signature`. The CHECK is the row-level belt to the trigger's transition-level suspenders.
 
 ## Indexes
 
@@ -56,12 +54,10 @@ All persistent state lives in a single SQLite file at `<project_root>/.mareforma
 | `idx_claims_status` | `status` | Non-unique | Filters by `open`, `contested`, `retracted` |
 | `idx_claims_source` | `source_name` | Non-unique | Filters by data source |
 | `idx_claims_generated_by` | `generated_by` | Non-unique | Filters by agent |
-| `idx_claims_support_level` | `support_level` | Non-unique | Filters by trust tier |
 | `idx_claims_unresolved` | `unresolved` | Non-unique | Finds the claims a restore brought back quarantined |
 | `idx_claims_transparency_logged` | `transparency_logged` | Non-unique | Accelerates `refresh_unsigned()` |
 | `idx_claims_artifact_hash` | `artifact_hash` | Unique (partial) | `WHERE artifact_hash IS NOT NULL`: only rows that supply a data hash |
 | `idx_claims_asserter_keyid` | `asserter_keyid` | Non-unique (partial) | `WHERE asserter_keyid IS NOT NULL`: the REPLICATED independence axis |
-| `idx_claims_convergence_retry` | `claim_id` | Non-unique (partial) | `WHERE convergence_retry_needed = 1`: keeps `refresh_convergence()` O(retry-pending) rather than O(N) |
 | `idx_claims_idempotency_key` | `idempotency_key` | Unique (partial) | `WHERE idempotency_key IS NOT NULL` |
 | `idx_claims_prev_hash` | `prev_hash` | Unique (partial) | `WHERE prev_hash IS NOT NULL`: catches branched chains from concurrent writers or manual SQL tamper |
 | `idx_claims_validator_keyid` | `validator_keyid` | Non-unique (partial) | `WHERE validator_keyid IS NOT NULL`: reputation aggregation |
@@ -74,24 +70,9 @@ All persistent state lives in a single SQLite file at `<project_root>/.mareforma
 
 Two `BEFORE` triggers enforce the support-level state machine at the storage layer. Defense in depth: a tampered Python interpreter cannot relax these rules.
 
-**`claims_insert_state_check`**: rejects:
-- `support_level` outside `{PRELIMINARY, ESTABLISHED}` (REPLICATED can only be reached via UPDATE): `mareforma:state:insert_invalid_level`
-- `support_level = 'ESTABLISHED'` without a `validation_signature` (only the seed-claim path satisfies this, since seeds carry a signed seed envelope): `mareforma:state:insert_established_without_validation`
-- `support_level = 'PRELIMINARY'` with `validated_by` or `validated_at` set: `mareforma:state:insert_preliminary_with_validation`
-
-**`claims_update_state_check`**: rejects:
-- `PRELIMINARY → ESTABLISHED` (must pass through REPLICATED first): `mareforma:state:illegal_transition:from_preliminary`
-- `REPLICATED → PRELIMINARY`: `mareforma:state:illegal_transition:from_replicated`
-- Any transition out of `ESTABLISHED`: `mareforma:state:illegal_transition:from_established`
-- `→ ESTABLISHED` without a `validation_signature`: `mareforma:state:established_without_validation`
-
-Every code is a static suffix, not a from/to pair: `RAISE()` cannot concatenate a column value below SQLite 3.46. Python translates any `mareforma:state:` code to `IllegalStateTransitionError`, carrying the suffix.
-
 **`claims_update_status_terminal`**: `retracted` is terminal. Any UPDATE that transitions a row out of `retracted` raises `mareforma:state:retracted_is_terminal`. To resurrect a withdrawn finding, assert a new claim citing the old via `contradicts=[<old_claim_id>]`.
 
 **`claims_signed_fields_no_laundering`**: append-only over the signed predicate. It lives in `_SIGNED_FIELDS_TRIGGER_SQL` rather than `_SCHEMA_SQL`, so every `open_db()` drops and re-creates it and an existing database gains the current watch list. Refuses any direct-SQL UPDATE that changes a signed-predicate value (`text`, `classification`, `generated_by`, `supports_json`, `contradicts_json`, `source_name`, `artifact_hash`, `ev_*`, `evidence_json`, `statement_cid`, `prev_hash`, `created_at`), the `asserter_keyid` denormalisation, the `observed_grounding` verdict, or the `predicate_payload` the audit path re-checks a GROUNDED verdict against, on a row whose `signature_bundle IS NOT NULL`. Value-comparison fires only when something actually changed, so multi-column UPDATEs that re-emit unchanged values (e.g. status-only edits via `update_claim`) pass through. It also refuses to set `signature_bundle` back to NULL on a signed row, because that one write would clear the guard on this trigger and on `claims_signed_no_delete`; the Rekor attachment's non-NULL rewrite stays legal. Raises `mareforma:append_only:signed_field_locked`.
-
-**`claims_signed_promotion_backed`**: `support_level` is derived state, promoted after the signature that binds the claim's content, so it cannot join the watch list above. What it is held to is the writer: on a row whose `signature_bundle IS NOT NULL`, the two transitions the state machine permits (`PRELIMINARY → REPLICATED`, `REPLICATED → ESTABLISHED`) are legal only inside a promotion window, which only the library's promotion paths open. Anything else raises `mareforma:append_only:promotion_unmarked`. The marker is a temp table, so it is per connection: a co-resident process that opened `graph.db` with plain sqlite3 has no temp schema of its own to hold it and is refused. Trigger text is durable schema and every connection that opens the file has to be able to compile it, so the marker cannot be a name only one release puts on its connections. It is a speed bump, not the guarantee: the guarantee is on the read path, where a level above PRELIMINARY has to be backed by the signed evidence that earns it (a signature-verified replication verdict, or distinct-signer convergence on a shared ESTABLISHED anchor). A row that cannot show that evidence is served `verified=False` and dropped from every read, exactly like a signature mismatch.
 
 **`claims_signed_no_delete`**: the delete-side twin of `claims_signed_fields_no_laundering`. BEFORE DELETE on a row whose `signature_bundle IS NOT NULL`, raises `mareforma:append_only:signed_claim_no_delete`. A signed claim cannot be wiped from the local graph while its Rekor entry and chain hash persist. Unsigned claims (legacy / no-key mode) carry no cryptographic commitment and stay deletable.
 
@@ -103,7 +84,6 @@ Every code is a static suffix, not a from/to pair: `RAISE()` cannot concatenate 
 
 ```python
 VALID_CLASSIFICATIONS = ("INFERRED", "ANALYTICAL", "DERIVED")
-VALID_SUPPORT_LEVELS  = ("PRELIMINARY", "REPLICATED", "ESTABLISHED")
 VALID_STATUSES        = ("open", "contested", "retracted")
 ```
 
@@ -112,7 +92,6 @@ Available at runtime via `mareforma.schema()`:
 ```python
 s = mareforma.schema()
 s["classifications"]  # ['INFERRED', 'ANALYTICAL', 'DERIVED']
-s["support_levels"]   # ['PRELIMINARY', 'REPLICATED', 'ESTABLISHED']
 s["statuses"]         # ['open', 'contested', 'retracted']
 s["schema_version"]   # 2
 ```
@@ -133,7 +112,7 @@ Signed replication verdicts produced by enrolled validators. The OSS core accept
 | `signature` | BLOB | Ed25519 signature over the DSSE PAE of the canonical payload (`payloadType=application/vnd.mareforma.replication-verdict+json`) |
 | `created_at` | TEXT | UTC ISO 8601 |
 
-**Side effect**: recording a replication verdict promotes the referenced claims from `PRELIMINARY` to `REPLICATED` (only if still `PRELIMINARY AND status='open' AND t_invalid IS NULL`). INSERT + promotion run in a single `BEGIN IMMEDIATE` transaction so a concurrent contradiction cannot land between the two writes.
+**No side effect on the claims it names**: the verdict is a signed record of one party corroborating another, and it lifts nothing.
 
 ## contradiction_verdicts table
 
@@ -166,7 +145,7 @@ Append-only at the SQL layer: both UPDATE and DELETE are refused by triggers, mi
 
 ## validators table
 
-The per-project set of enrolled public keys. Only `human`-typed rows can promote claims to `ESTABLISHED`.
+The per-project set of enrolled public keys. Only `human`-typed rows can sign off on a claims to `ESTABLISHED`.
 
 | Field | Type | Description |
 |---|---|---|
@@ -190,12 +169,12 @@ A root-signed, single-row (`id = 1`) declaration of project-wide trust policy. I
 |---|---|---|
 | `id` | INTEGER (PK) | CHECK `id = 1`: the row is a singleton |
 | `rekor_required` | INTEGER | `1` when findings must be Rekor-witnessed before they converge |
-| `strict_promotion_required` | INTEGER | `1` when a converging pair must carry `artifact_hash` on both sides |
+| `strict_promotion_required` | INTEGER | Retained so a policy an earlier release signed keeps verifying. Nothing reads it as a rule any more. |
 | `signer_keyid` | TEXT | Keyid of the root that signed the policy envelope |
 | `envelope` | TEXT | Root-signed DSSE-style envelope; the authoritative copy of the policy |
 | `created_at` | TEXT | UTC ISO 8601: when the row was last signed |
 | `rekor_declared_at` | TEXT | UTC ISO 8601: when `rekor_required` was first declared, NULL until then |
-| `strict_promotion_declared_at` | TEXT | UTC ISO 8601: when `strict_promotion_required` was first declared, NULL until then |
+| `strict_promotion_declared_at` | TEXT | UTC ISO 8601, retained for the same reason as the flag beside it. |
 
 ## supports_revision table
 
@@ -349,8 +328,7 @@ counted by pairwise-distinct model, dataset, and signer (`status_policy@v4`), so
 improving the rule later is a new policy over the same data, not a migration.
 `question_status` (per `frame_id`, the question: `consistent` / `divided`) is
 derived alongside it from the same computation. Both are what a reader should
-read trust off; the stored `support_level` ladder above is the deprecated legacy
-axis.
+read trust off. The stored ladder that used to sit beside them is gone.
 
 ## schema_census and schema_guards_seen tables
 

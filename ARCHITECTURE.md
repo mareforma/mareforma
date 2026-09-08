@@ -111,75 +111,38 @@ value: `UNTESTED` → `PRELIMINARY` → `CONVERGENT`, plus `REFUTED` and
 the read-side trust map leads with the effective-independence number rather than
 a single word. These are the vocabulary a reader should reach for.
 
-The **stored `support_level` ladder** below is the legacy promotion mechanism a
-claim carries. It is still live and still gates as described, but its `REPLICATED`
-and `ESTABLISHED` public labels are deprecated for v0.4.0 (see the note after the
-rules). Read it as the deprecated stored axis, not as the trust vocabulary.
+There was a **stored `support_level` ladder** beside them, a per-claim word a
+graph carried: `PRELIMINARY`, lifted to `REPLICATED` when two distinct signing
+keys converged on a shared `ESTABLISHED` upstream, and lifted again to
+`ESTABLISHED` by a human calling `validate()`. It is gone, column and all.
 
-```
-PRELIMINARY ──(≥2 distinct signers share ESTABLISHED upstream)──▶ REPLICATED ──(graph.validate())──▶ ESTABLISHED
-```
+It was removed because a single word never carried what a reader needs, and
+because the word itself was unsigned: any process with write access to the file
+could raise it, so every read had to re-derive whether the level was backed by
+signed material before serving the row. That re-derivation was several hundred
+lines of the read path, and it existed only to police a value nothing signed.
 
-Three rules govern the stored ladder:
+What replaces it is not another word. Trust is read off the derived axes above,
+computed on every read from signed material, and off the effective-independence
+number the trust map reports.
 
-1. **PRELIMINARY → REPLICATED is automatic, structural, and gated.**
-   The new claim and a candidate peer must share at least one
-   `ESTABLISHED` upstream in `supports[]` and carry **distinct, non-NULL
-   `asserter_keyid`** values (the signer keyid denormalized from each
-   claim's signature_bundle). Promotion keys on the signer axis. The
-   load-bearing model-independence signal is the read-side
-   effective-independence number the trust map reports, not this promotion.
-   The promotion path does run a `model_distinct_pair` filter, but it stays
-   inert on the primary path: a claim's finding model lineage is written
-   after promotion runs, so both sides read absent and the filter passes
-   everything through (see "Execution-observed grounding" and the trust
-   layer below for where the model axis is enforced, on read). An unsigned
-   (NULL keyid) claim is not a
-   distinct signer and is never promoted, so two legacy NULL-keyid rows do
-   not read as two signers. `generated_by` is a display label only and
-   plays no part in the gate. `artifact_hash` is a secondary equal-data
-   collapse: two converging claims that carry the same non-NULL hash are a
-   byte-identical rerun, so they collapse to one line and do not promote on
-   their own; a distinct hash, or an absent hash on either side, does not
-   block the convergence. Status and transparency-log gates apply too; see
-   `_maybe_update_replicated_unlocked` in db/core.py. Distinct keys are a
-   cryptographic distinctness signal, NOT a proof of apparatus
-   independence. REPLICATED is a convergence signal, not a truth claim.
-   Opening with `strict_promotion=True` (opt-in, off by default) turns the
-   equal-data collapse into a hard gate: a pair then promotes only when
-   BOTH sides carry non-NULL data. The root validator signs that gate into
-   the project policy, one-way, so it binds every later opener and not just
-   the handle that asked for it. Independence itself is reported on its
-   own axis by the read-side trust map (`graph.trust_map`), which surfaces
-   the effective-independence number and marks it `UNVERIFIABLE` when the
-   supporting lineage is too soft to certify a distinct model or when every
-   validator traces to a single trust root.
-2. **REPLICATED → ESTABLISHED is human-only.** `graph.validate()`
-   requires an enrolled validator key whose `validator_type` is
-   `'human'`. LLM-typed validators may sign validations but cannot
-   promote past REPLICATED. A validator keyid that equals ANY
-   `asserter_keyid` in the converging set is refused: a participant cannot
-   witness its own convergence into ESTABLISHED.
-3. **No back-transitions.** The state-machine triggers refuse any
-   ESTABLISHED → REPLICATED or REPLICATED → PRELIMINARY UPDATE. Status
-   changes (open / contested / retracted) live on a separate axis
-   that is mutable but `retracted` is terminal.
+Two things the ladder carried survive it, because neither was ever really about
+levels:
 
-The `seed=True` bootstrap is the only way to insert at ESTABLISHED
-directly. It exists to break the chicken-and-egg of "REPLICATED needs
-an ESTABLISHED upstream that doesn't exist on a fresh graph yet", and
-it is gated to enrolled human-typed validators only.
-
-**`REPLICATED` and `ESTABLISHED` are deprecated public labels, removed at
-v0.4.0.** A single support word never carried the independence a reader needs,
-so the public surface leads with the derived axes above and the
-effective-independence number the trust map reports, not a rung name. The stored
-`support_level` strings and the promotion machinery are unchanged this release;
-only the two public labels `mareforma.REPLICATED` and `mareforma.ESTABLISHED` are
-retired. They raise `AttributeError`, and no public read filters on a level (the `seed=True` bootstrap is
-deprecated on the same schedule and gains its replacement anchor there). Read
-`status`, `question_status`, and the trust map's independence axis instead of a
-rung name.
+1. **A human's sign-off.** `graph.validate()` still requires an enrolled
+   validator whose `validator_type` is `'human'`, and still refuses a validator
+   whose keyid appears on the claim's own envelope: a participant cannot witness
+   its own work. It records a signed attestation binding the claim id, the
+   validator keyid, the time and the evidence the reviewer named, and it changes
+   nothing that can be filtered on. It is terminal: a claim carries one envelope,
+   so a second validation is refused rather than written over the first.
+2. **Distinct signing keys as an independence signal.** `asserter_keyid` is the
+   per-claim signing key, and it is what the trust map's independence axis
+   counts. `generated_by` is a display label and plays no part. Distinct keys are
+   a cryptographic distinctness signal, NOT a proof of apparatus independence,
+   which is why the map marks the number `UNVERIFIABLE` when the supporting
+   lineage is too soft to certify a distinct model, or when every validator
+   traces back to a single trust root.
 
 ## Trust map
 
@@ -435,8 +398,8 @@ in-toto Statement v1 and signs it over the DSSE PAE encoding
 tooling. `verify_bundle` checks the bundle signature AND, for each
 claim, its own asserter signature bound to the presented content, the
 enrolled validator chain to a single root (which must be the bundle
-signer), and the displayed support level (ESTABLISHED against a
-validator-signed validation envelope, REPLICATED against distinct-signer
+signer), and any validation attestation the bundle carries (against the
+validator's key, and against the claim the envelope names, so a sign-off
 corroboration). Editorial status (`retracted` / `contested`) carries no
 signature and stays exporter-attested, and so does completeness: a
 verified bundle attests the claims it carries, not that they are all the
@@ -501,7 +464,7 @@ Tables:
 - `claims`: every assertion. Includes denormalized `ev_*` columns for
   query, the full `evidence_json` for round-trip, the
   `signature_bundle` DSSE envelope, a `prev_hash` chain link, and the
-  `convergence_retry_needed` flag set by `_maybe_update_replicated`
+  operational flags
   when a swallowed error needs operator follow-up.
 - `validators`: per-project enrolled-validator chain, rooted at a
   self-signed row. Singleton-root invariant: more than one self-signed
@@ -587,45 +550,20 @@ defends against. Designed for the reader who wants to verify
 mareforma's invariants without scrolling through thousands of lines of
 `db/core.py`.
 
-### State-machine transitions
+### What a claim's storage still refuses
 
-These are the transitions of the stored `support_level` ladder, the legacy
-per-claim promotion axis (its `REPLICATED` / `ESTABLISHED` public labels are
-deprecated for v0.4.0). The machine itself is unchanged and still enforced by the
-triggers below.
+The stored ladder had a state machine, and its transitions were enforced by
+triggers so a tampered Python interpreter could not bypass them. There are no
+levels and so no transitions; the guards that stay are the ones that were never
+about them.
 
-```
-                seed=True               graph.validate()
-                   │                          │
-                   ▼                          ▼
-              ┌─────────────┐            ┌─────────────┐
-              │ ESTABLISHED │ ◄───────── │ REPLICATED  │
-              └─────────────┘            └─────────────┘
-                                              ▲
-                                              │ ≥2 claims, distinct
-                                              │ asserter_keyid, sharing
-                                              │ ESTABLISHED upstream
-                                              │
-                                         ┌─────────────┐
-                                         │ PRELIMINARY │
-                                         └─────────────┘
-                                              ▲
-                                              │ assert_claim()
-                                              │ (default)
-```
-
-Each arrow is enforced by a SQL trigger that refuses illegal
-transitions at the storage layer. A tampered Python interpreter
-cannot bypass them.
-
-| Transition | Trigger | Refuses |
+| Rule | Trigger or constraint | Refuses |
 |---|---|---|
-| INSERT at any level | `claims_insert_state_check` | ESTABLISHED without `validation_signature`; PRELIMINARY with `validated_by` set; non-PRELIMINARY non-ESTABLISHED birth states |
-| PRELIMINARY → REPLICATED → ESTABLISHED (one-way) | `claims_update_state_check` | downgrades; bypass of REPLICATED via PRELIMINARY → ESTABLISHED |
-| status = 'retracted' is terminal | `claims_update_status_terminal` | the resurrection attack where a born-retracted ESTABLISHED seed is later flipped to 'open' |
+| a validation nobody signed | `CHECK` on `claims` | a row setting `validated_by` or `validated_at` with `validation_signature` NULL, which is a row asserting a human sign-off with nothing proving one |
+| a second validation over the first | the `validation_signature IS NULL` clause on `validate_claim`'s UPDATE | replacing one validator's signed attestation with another's, which would erase the first with nothing recording it had been there |
+| status = 'retracted' is terminal | `claims_update_status_terminal` | the resurrection attack, where a born-retracted claim is later flipped back to 'open' |
 | signed claims are append-only over the predicate | `claims_signed_fields_no_laundering` | direct-SQL UPDATE of `text` / `classification` / `generated_by` / `supports_json` / `contradicts_json` / `source_name` / `artifact_hash` / `ev_*` / `evidence_json` / `observed_grounding` / `statement_cid` / `prev_hash` / `created_at` / `asserter_keyid` / `predicate_payload` on a row with `signature_bundle IS NOT NULL`, and any UPDATE that sets `signature_bundle` back to NULL on such a row |
-| a signed claim is promoted only by a promotion path | `claims_signed_promotion_backed` | direct-SQL UPDATE of `support_level` on a row with `signature_bundle IS NOT NULL` outside a promotion window; the level itself is re-derived from signed evidence on every read, so a row promoted after the trigger is dropped is served `verified=False` |
-| signed claims cannot be deleted | `claims_signed_no_delete` | the wipe-and-rewrite attack where a Rekor-logged ESTABLISHED claim is deleted from `graph.db` and `claims.toml` is regenerated as if it never existed |
+| signed claims cannot be deleted | `claims_signed_no_delete` | the wipe-and-rewrite attack where a Rekor-logged claim is deleted from `graph.db` and `claims.toml` is regenerated as if it never existed |
 
 ### Append-only sidecars
 
@@ -664,11 +602,10 @@ on a signed row is refused at the SQL layer.
 | `statement_cid` | derived from signed bytes | no |
 | `prev_hash` | derived (chain link) | no |
 | `status` | not signed | ✓ (one-way: open → contested → retracted) |
-| `support_level` | not signed | ✓ (one-way ladder) |
 | `validated_by` / `validated_at` / `validation_signature` / `validator_keyid` | not signed (validation is its own envelope) | written by `validate_claim` only |
 | `asserter_keyid` | not signed (denormalized from the signature_bundle's asserter signature) | written at insert only; the envelope stays authoritative |
 | `signature_bundle` | self-referential | only rewritten by `mark_claim_logged` to attach a Rekor block; payload + signatures bytes must be byte-identical to the existing value, only the optional `rekor` top-level key may differ |
-| `unresolved` / `transparency_logged` / `convergence_retry_needed` / `t_invalid` | not signed (operational flags) | ✓ (gated mutations, `t_invalid` by trigger only) |
+| `unresolved` / `transparency_logged` / `t_invalid` | not signed (operational flags) | ✓ (gated mutations, `t_invalid` by trigger only) |
 
 ### What `restore()` proves vs what the live DB proves
 
@@ -693,17 +630,14 @@ this is the consolidated view.
 | Direct-SQL `UPDATE` of a signed claim's text / supports / evidence | `claims_signed_fields_no_laundering` trigger |
 | Direct-SQL `DELETE` of a signed claim | `claims_signed_no_delete` trigger |
 | Direct-SQL resurrection of a retracted claim by flipping status | `claims_update_status_terminal` trigger. It fires on UPDATE, so it covers the SQL edit and not the backup path; see the table below |
-| Born-retracted ESTABLISHED seed riding an honest peer into REPLICATED | `_maybe_update_replicated_unlocked` filters peers AND new claim on `status='open'`; ESTABLISHED-upstream + open required |
-| Same-signer self-replication | distinct, non-NULL `asserter_keyid` required in REPLICATED detection; a single signer's two claims share one keyid and do not converge |
 | Self-validation (validator signs the claim they are validating) | `_refuse_self_validation` |
 | Self-validation across the converging set (a participant validating its own convergence) | `_refuse_self_validation_across_set` refuses a validator keyid equal to any `asserter_keyid` in the converging set |
-| LLM-typed validator promoting past REPLICATED | `_refuse_llm_validator` (also applies to contradictions: `_refuse_llm_contradiction_issuer`) |
+| LLM-typed validator signing off on a finding | `_refuse_llm_validator` (also applies to contradictions: `_refuse_llm_contradiction_issuer`) |
 | Validator who didn't review the cited evidence | `_verify_evidence_seen`, each cited claim_id must exist in the graph with `created_at <= validated_at` |
 | Forged validation envelope (different signer, same claim_id) | `db.validate_claim` `verify_envelope`s against the claimed signer's pubkey from the validators table before any gate fires |
 | Replay of a validation envelope onto a different claim | envelope payload-field equality check refuses `claim_id` mismatch |
-| Direct-SQL forgery of a high-trust row served from the read path | verify-on-read: `get_claim` / `query` / `query_provenance` re-verify the asserter bundle (REPLICATED and ESTABLISHED) plus the validation envelope (ESTABLISHED), and hold the bundle's signed predicate against every signed field on the row, so a rewritten field cannot hide under an envelope that still verifies; a forged, tampered or removed signature is excluded from `query` and flagged `verified=false` from `get_claim`, never raising. Legacy unsigned rows (no bundle, no `asserter_keyid`) are verify-exempt |
-| Direct-SQL promotion of a row whose signature still verifies | `support_level` is not signed, so the read path re-derives it: a stored REPLICATED (and the rung an ESTABLISHED climbed through) must show a signature-verified replication verdict naming the claim, or distinct-signer convergence on a shared ESTABLISHED anchor. The same rule refuses the row on restore. A row that cannot show it is excluded and flagged exactly like a signature mismatch |
-| A promoted row read as healthy while its level is forged or its envelope tampered | `mareforma status` re-verifies the promoted rows (`count_unverified_promoted`, the same per-row gate `get_claim` applies) rather than counting stored levels, so the traffic light cannot read green while any REPLICATED / ESTABLISHED row fails re-verification. It also names `convergence_retry_pending`, promotions a swallowed convergence check left flagged, so that stuck state is visible instead of silent |
+| Direct-SQL forgery of a row served from the read path | verify-on-read: `get_claim` / `query` / `query_provenance` re-verify the asserter bundle on every row, and the validation envelope on every row that carries one, and hold the bundle's signed predicate against every signed field, so a rewritten field cannot hide under an envelope that still verifies. A forged, tampered or removed signature is excluded from `query` and flagged `verified=false` from `get_claim`, never raising. Legacy unsigned rows (no bundle, no `asserter_keyid`) are verify-exempt |
+| A tampered row read as healthy | `mareforma status` re-verifies every row carrying signed material (`count_unverified_rows`, the same per-row gate `get_claim` applies), so the traffic light cannot read green while any of them fails |
 | Direct-SQL rewrite of a gate input the count reads (a finding's `plan_id`, a `predictions` rule column, a re-pointed `plan_retirements.superseded_by`, an in-place estimate value, a re-pointed `findings.content_id` or proposition text, a fabricated `asserter_keyid`) | the `_gate.py` boundary re-derives each on read: `findings.plan_id` against the plan the finding's own claim recorded, the rule columns against the `compute_plan_id` that keys them, the estimate line set against the signed `finding_record` digest, the proposition against the finding's signed claim text, and the signer against the claim's verifying envelope. A rewrite that would reflip a bearing or re-point a finding drops the line and discloses it rather than moving the count in silence; restore refuses the recovery. The append-only triggers on `findings`, `evidence_lines`, `propositions`, `contrasts`, and `effect_estimates` refuse the naive UPDATE or DELETE ahead of the read check |
 | Tampered TOML in restore (any signed field, any verdict field, any evidence value) | restore re-derives canonical bytes and refuses on mismatch |
 | SQL-injected parallel root validator | singleton-root invariant: any second self-signed root breaks `is_enrolled` for every key |
@@ -715,11 +649,10 @@ this is the consolidated view.
 
 | Threat mareforma does NOT catch (deliberate scope) | Why |
 |---|---|
-| Colluding agents producing fake `REPLICATED` via two signing keys | distinct `asserter_keyid` is a cryptographic distinctness signal, not a proof of apparatus independence: one party can hold two keys. REPLICATED is a convergence signal, not a truth claim; the real trust anchor is human-validated ESTABLISHED. `single_trust_domain` discloses when all validators share one root, but does not prevent Sybils |
+| Colluding agents presenting two signing keys as two independent lines | distinct `asserter_keyid` is a cryptographic distinctness signal, not a proof of apparatus independence: one party can hold two keys. The trust map reports it as a number on its own axis rather than a word on the claim, and marks it `UNVERIFIABLE` when the lineage is too soft to certify. `single_trust_domain` discloses when all validators share one root, but does not prevent Sybils |
 | A gate input flipped consistently across every table that carries it, with the guarding triggers dropped first | `plan_id` and `preregistered` are not in `SIGNED_FIELDS`, so the read path re-derives `plan_id` against the value the finding's claim recorded (itself guarded only by `claims_signed_fields_no_laundering`) and cannot re-derive `preregistered` at all. A writer with SQL access who drops the append-only triggers and rewrites both `findings.plan_id` and the claim's recorded copy, or flips `preregistered` on a plan, defeats the read check: this binding rests on the triggers plus the claim signature, not on the gate input being a signed field. A single-column edit is still caught |
 | Erasure of a refutation by deleting the `findings` row it hangs from, with the append-only triggers dropped first | The count enumerates from `findings`, so removing that row removes the anchor there is anything to re-derive against. Every other tamper on this path drops the line and discloses it; this one leaves no line to drop. A contested proposition then reads CONVERGENT with `independent_refute` at 0, `lines_skipped` at 0, and nothing on the health channel, and the state survives a backup and restore. Deleting a supporting row is the same mechanism pointing the safe way, and is the case the suite pins. Closing this needs an anchor outside the database, which is why the design defers it rather than papering over it |
 | Resurrection of a retracted claim through an edited backup replayed by restore | `status` is editorial and carries no signature, so nothing re-derives it, and `claims_update_status_terminal` fires before an UPDATE, which restore's INSERT never performs. A writer who can edit `claims.toml` flips `retracted` back to `open` with no key and no SQL access, and restore accepts it without a warning. What the claim says is unaffected: its text, provenance and support level still have to verify. Treat a retraction as an editorial signal, and the signed content as the record |
-| A rung backed by a peer whose signer the project never registered | The read path re-derives a REPLICATED rung by looking for a distinct signed peer on the same ESTABLISHED anchor, and it accepts a peer whose signer has no validators row, because serving a stranger's claim is what the lean model is for and no signature is checked in that case. So a writer who signs with a key the project never enrolled can back a rung. Requiring enrolment here is a behaviour change rather than a repair: it also strips the rung from an honest claim whose only peer is an unregistered signer, and the write path promotes on convergence without asking, so the two would disagree. Held for a release that can move both together |
 | Misclassified `INFERRED` / `ANALYTICAL` / `DERIVED` | declared by the agent, not verified |
 | Colluding log operator publishing two checkpoints to different audiences | needs gossip / witness protocols, out of scope for the single-checkpoint trust model |
 | Compromised log signing key | mareforma trusts whichever pubkey the caller pinned via TOFU; rotation requires deleting the pin |
@@ -975,7 +908,7 @@ conventions, applied consistently:
 - **Every defensive measure names the threat it blocks.** Each SQL
   trigger comment names the attack chain its `RAISE(ABORT, ...)`
   refuses, e.g. `claims_signed_no_delete` documents that without
-  the trigger "an adversary could wipe a Rekor-logged ESTABLISHED
+  the trigger "an adversary could wipe a Rekor-logged
   claim and rewrite claims.toml as if it never existed." The
   contradiction-invalidates trigger carries a `DESIGN RULE: DO NOT
   PROPAGATE DOWNSTREAM` comment with rationale, so a future

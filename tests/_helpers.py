@@ -217,7 +217,6 @@ def _claim(**overrides) -> dict:
         "claim_id": "11111111-2222-3333-4444-555555555555",
         "text": "a finding",
         "classification": "ANALYTICAL",
-        "support_level": "PRELIMINARY",
         "status": "open",
         "supports_json": "[]",
         "contradicts_json": "[]",

@@ -44,9 +44,9 @@ def _trust_columns(tmp_path: Path) -> dict:
     conn = open_db(tmp_path)
     try:
         rows = conn.execute(
-            "SELECT claim_id, support_level, transparency_logged, t_invalid, "
-            "asserter_keyid, validator_keyid, validated_by, validated_at, "
-            "convergence_retry_needed FROM claims"
+            "SELECT claim_id, transparency_logged, t_invalid, "
+            "asserter_keyid, validator_keyid, validated_by, validated_at "
+            "FROM claims"
         ).fetchall()
     finally:
         conn.close()
@@ -66,12 +66,11 @@ def test_signed_non_rekor_claim_keeps_transparency_and_still_converges(
     val_signer = _signing.load_private_key(val_key)
 
     with mareforma.open(tmp_path, key_path=root_key) as g:
-        seed = g.assert_claim("anchor", generated_by="seed", seed=True)
+        seed = g.assert_claim("anchor", generated_by="seed")
         g.enroll_validator(_pem_of(val_key), identity="v")
         c1 = g.assert_claim(
             "converged", supports=[seed], generated_by="A", signer=root_signer,
         )
-        assert g.get_claim(c1)["support_level"] == "PRELIMINARY"
 
     _wipe_graph_db(tmp_path)
     mareforma.restore(tmp_path, trust_unaccounted_backup=True)
@@ -85,8 +84,6 @@ def test_signed_non_rekor_claim_keeps_transparency_and_still_converges(
         c2 = g.assert_claim(
             "converged", supports=[seed], generated_by="B", signer=val_signer,
         )
-        assert g.get_claim(c1)["support_level"] == "REPLICATED"
-        assert g.get_claim(c2)["support_level"] == "REPLICATED"
 
 
 def test_restore_refuses_a_forged_rekor_uuid_in_the_bundle(
@@ -125,238 +122,6 @@ def test_restore_refuses_a_forged_rekor_uuid_in_the_bundle(
 
     # No [rekor_inclusions] entry backs the forged uuid: not witnessed.
     assert _trust_columns(tmp_path)[cid]["transparency_logged"] == 0
-
-
-def test_restore_refuses_a_forged_replicated_support_level(
-    tmp_path: Path,
-) -> None:
-    """``support_level`` is not a signed field. A tampered claims.toml can flip
-    a lone PRELIMINARY claim to REPLICATED, forging distinct-signer
-    corroboration that never happened, the claim signature still verifies.
-    Restore must re-derive REPLICATED from the signed supports graph + verified
-    asserter identities and refuse a level no corroboration backs."""
-    root_key = _bootstrap_key(tmp_path, "root.key")
-    with mareforma.open(tmp_path, key_path=root_key) as g:
-        cid = g.assert_claim("lonely claim, no converging peer", generated_by="x")
-        assert g.get_claim(cid)["support_level"] == "PRELIMINARY"
-
-    from mareforma.db import open_db, _backup_claims_toml
-    conn = open_db(tmp_path)
-    _backup_claims_toml(conn, tmp_path)
-    conn.close()
-
-    toml_path = tmp_path / "claims.toml"
-    data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
-    # Forge the level only; the signature bundle is left untouched and valid.
-    data["claims"][cid]["support_level"] = "REPLICATED"
-    toml_path.write_text(tomli_w.dumps(data), encoding="utf-8")
-
-    _wipe_graph_db(tmp_path)
-    with pytest.raises(RestoreError):
-        mareforma.restore(tmp_path, trust_unaccounted_backup=True)
-
-
-def test_restore_preserves_a_corroborated_replicated(tmp_path: Path) -> None:
-    """A genuinely converged REPLICATED pair, distinct signers on a shared
-    ESTABLISHED anchor, survives backup + restore. The corroboration is
-    re-derivable from the signed supports graph, so the level is kept and the
-    forgery check does not false-reject an honest promotion."""
-    root_key = _bootstrap_key(tmp_path, "root.key")
-    val_key = _bootstrap_key(tmp_path, "val.key")
-    root_signer = _signing.load_private_key(root_key)
-    val_signer = _signing.load_private_key(val_key)
-    with mareforma.open(tmp_path, key_path=root_key) as g:
-        seed = g.assert_claim("anchor", generated_by="seed", seed=True)
-        g.enroll_validator(_pem_of(val_key), identity="v")
-        c1 = g.assert_claim(
-            "converged", supports=[seed], generated_by="A", signer=root_signer,
-        )
-        c2 = g.assert_claim(
-            "converged", supports=[seed], generated_by="B", signer=val_signer,
-        )
-        assert g.get_claim(c1)["support_level"] == "REPLICATED"
-        assert g.get_claim(c2)["support_level"] == "REPLICATED"
-
-    _wipe_graph_db(tmp_path)
-    mareforma.restore(tmp_path, trust_unaccounted_backup=True)
-    cols = _trust_columns(tmp_path)
-    assert cols[c1]["support_level"] == "REPLICATED"
-    assert cols[c2]["support_level"] == "REPLICATED"
-
-
-def _forge_replicated_and_restore(tmp_path: Path, claim_id: str) -> None:
-    """Flip one claim to REPLICATED in claims.toml, then restore from it.
-
-    The signature bundle is left untouched and valid; only the unsigned
-    ``support_level`` moves, which is exactly the tamper restore must catch.
-    """
-    from mareforma.db import _backup_claims_toml, open_db
-    conn = open_db(tmp_path)
-    _backup_claims_toml(conn, tmp_path)
-    conn.close()
-
-    toml_path = tmp_path / "claims.toml"
-    data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
-    data["claims"][claim_id]["support_level"] = "REPLICATED"
-    toml_path.write_text(tomli_w.dumps(data), encoding="utf-8")
-
-    _wipe_graph_db(tmp_path)
-    mareforma.restore(tmp_path, trust_unaccounted_backup=True)
-
-
-def test_restore_refuses_a_replicated_backed_by_an_identical_artifact(
-    tmp_path: Path,
-) -> None:
-    """Byte-identical output under two keys is the same result twice, not
-    corroboration. The live rule collapses such a pair and leaves both
-    PRELIMINARY; restore must not admit a level the live rule cannot produce.
-    ``artifact_hash`` is bound into the signed statement and never rewritten,
-    so re-applying the collapse cannot false-reject an honest promotion."""
-    root_key = _bootstrap_key(tmp_path, "root.key")
-    val_key = _bootstrap_key(tmp_path, "val.key")
-    root_signer = _signing.load_private_key(root_key)
-    val_signer = _signing.load_private_key(val_key)
-    same_hash = "a" * 64
-    with mareforma.open(tmp_path, key_path=root_key) as g:
-        seed = g.assert_claim("anchor", generated_by="seed", seed=True)
-        g.enroll_validator(_pem_of(val_key), identity="v")
-        c1 = g.assert_claim(
-            "rerun", supports=[seed], generated_by="A", signer=root_signer,
-            artifact_hash=same_hash,
-        )
-        c2 = g.assert_claim(
-            "rerun", supports=[seed], generated_by="B", signer=val_signer,
-            artifact_hash=same_hash,
-        )
-        assert g.get_claim(c1)["support_level"] == "PRELIMINARY"
-        assert g.get_claim(c2)["support_level"] == "PRELIMINARY"
-
-    with pytest.raises(RestoreError):
-        _forge_replicated_and_restore(tmp_path, c1)
-
-
-def test_restore_refuses_a_replicated_backed_by_an_ungrounded_peer(
-    tmp_path: Path,
-) -> None:
-    """A peer whose signed verdict says the finding is not grounded never
-    counts toward promotion on the live path, and must not count on restore
-    either. ``observed_grounding`` is signature-bound and never rewritten, so
-    the gate is as durable as the supports graph itself."""
-    from mareforma.observe import GroundingVerdict, ObservedGrounding
-
-    ungrounded = GroundingVerdict(
-        ObservedGrounding.UNGROUNDED, "no cited read", cited_sources=("/d.csv",),
-    ).to_signed_dict()
-    root_key = _bootstrap_key(tmp_path, "root.key")
-    val_key = _bootstrap_key(tmp_path, "val.key")
-    root_signer = _signing.load_private_key(root_key)
-    val_signer = _signing.load_private_key(val_key)
-    with mareforma.open(tmp_path, key_path=root_key) as g:
-        seed = g.assert_claim("anchor", generated_by="seed", seed=True)
-        g.enroll_validator(_pem_of(val_key), identity="v")
-        c1 = g.assert_claim(
-            "converged", supports=[seed], generated_by="A", signer=root_signer,
-        )
-        c2 = g.assert_claim(
-            "converged", supports=[seed], generated_by="B", signer=val_signer,
-            observed_grounding=ungrounded,
-        )
-        assert g.get_claim(c1)["support_level"] == "PRELIMINARY"
-        assert g.get_claim(c2)["support_level"] == "PRELIMINARY"
-
-    with pytest.raises(RestoreError):
-        _forge_replicated_and_restore(tmp_path, c1)
-
-
-def test_restore_refuses_an_ungrounded_replicated_named_in_a_verdict(
-    tmp_path: Path,
-) -> None:
-    """A verdict names every member of the cluster, including the members the
-    live path refuses to promote. Membership is therefore not proof of
-    promotion, and restore must hold a verdict-backed level to the same own-row
-    terms the live path reads: signer identity, settled transparency, and a
-    grounding verdict that permits promotion."""
-    from mareforma.observe import GroundingVerdict, ObservedGrounding
-
-    ungrounded = GroundingVerdict(
-        ObservedGrounding.UNGROUNDED, "no cited read", cited_sources=("/d.csv",),
-    ).to_signed_dict()
-    root_key = _bootstrap_key(tmp_path, "root.key")
-    issuer_key = _bootstrap_key(tmp_path, "issuer.key")
-    with mareforma.open(tmp_path, key_path=root_key) as g:
-        g.enroll_validator(_pem_of(issuer_key), identity="issuer")
-        a = g.assert_claim(
-            "alpha", generated_by="A", observed_grounding=ungrounded,
-        )
-        b = g.assert_claim("beta", generated_by="B")
-    with mareforma.open(tmp_path, key_path=issuer_key) as g:
-        g.record_replication_verdict(
-            verdict_id="rv_ung", cluster_id="cl_ung",
-            member_claim_id=a, other_claim_id=b,
-            method="semantic-cluster", confidence={},
-        )
-    with mareforma.open(tmp_path, key_path=root_key) as g:
-        # The live path recorded the verdict for both and promoted only 'b'.
-        assert g.get_claim(a)["support_level"] == "PRELIMINARY"
-        assert g.get_claim(b)["support_level"] == "REPLICATED"
-
-    with pytest.raises(RestoreError) as exc:
-        _forge_replicated_and_restore(tmp_path, a)
-    assert exc.value.kind == "claim_unverified"
-
-
-def test_restore_keeps_a_replicated_the_verdict_path_promoted(
-    tmp_path: Path,
-) -> None:
-    """The honest half of the same cluster survives: 'b' carries no grounding
-    verdict, a signer identity and a settled transparency log, so the level a
-    real verdict conferred is kept."""
-    root_key = _bootstrap_key(tmp_path, "root.key")
-    issuer_key = _bootstrap_key(tmp_path, "issuer.key")
-    with mareforma.open(tmp_path, key_path=root_key) as g:
-        g.enroll_validator(_pem_of(issuer_key), identity="issuer")
-        a = g.assert_claim("alpha", generated_by="A")
-        b = g.assert_claim("beta", generated_by="B")
-    with mareforma.open(tmp_path, key_path=issuer_key) as g:
-        g.record_replication_verdict(
-            verdict_id="rv_ok", cluster_id="cl_ok",
-            member_claim_id=a, other_claim_id=b,
-            method="semantic-cluster", confidence={},
-        )
-
-    _wipe_graph_db(tmp_path)
-    mareforma.restore(tmp_path, trust_unaccounted_backup=True)
-    cols = _trust_columns(tmp_path)
-    assert cols[a]["support_level"] == "REPLICATED"
-    assert cols[b]["support_level"] == "REPLICATED"
-
-
-def test_restore_refuses_an_ungrounded_replicated(tmp_path: Path) -> None:
-    """The gate applies to the promoted row too: a claim whose own signed
-    verdict is UNGROUNDED cannot have converged, whatever its peers say."""
-    from mareforma.observe import GroundingVerdict, ObservedGrounding
-
-    ungrounded = GroundingVerdict(
-        ObservedGrounding.UNGROUNDED, "no cited read", cited_sources=("/d.csv",),
-    ).to_signed_dict()
-    root_key = _bootstrap_key(tmp_path, "root.key")
-    val_key = _bootstrap_key(tmp_path, "val.key")
-    root_signer = _signing.load_private_key(root_key)
-    val_signer = _signing.load_private_key(val_key)
-    with mareforma.open(tmp_path, key_path=root_key) as g:
-        seed = g.assert_claim("anchor", generated_by="seed", seed=True)
-        g.enroll_validator(_pem_of(val_key), identity="v")
-        c1 = g.assert_claim(
-            "converged", supports=[seed], generated_by="A", signer=root_signer,
-            observed_grounding=ungrounded,
-        )
-        g.assert_claim(
-            "converged", supports=[seed], generated_by="B", signer=val_signer,
-        )
-        assert g.get_claim(c1)["support_level"] == "PRELIMINARY"
-
-    with pytest.raises(RestoreError):
-        _forge_replicated_and_restore(tmp_path, c1)
 
 
 def _forge_established_and_restore(
@@ -399,25 +164,6 @@ def _forge_established_and_restore(
     mareforma.restore(tmp_path, trust_unaccounted_backup=True)
 
 
-def test_restore_refuses_an_established_the_ladder_never_produced(
-    tmp_path: Path,
-) -> None:
-    """ESTABLISHED sits above REPLICATED, so a claim stamped ESTABLISHED must
-    still show the corroboration REPLICATED needs. The live path refuses to
-    promote a lone PRELIMINARY claim; restore must refuse the same row, even
-    though a second enrolled validator really did sign the envelope."""
-    root_key = _bootstrap_key(tmp_path, "root.key")
-    val_key = _bootstrap_key(tmp_path, "val.key")
-    val_signer = _signing.load_private_key(val_key)
-    with mareforma.open(tmp_path, key_path=root_key) as g:
-        g.enroll_validator(_pem_of(val_key), identity="v")
-        cid = g.assert_claim("lonely, no converging peer", generated_by="x")
-        assert g.get_claim(cid)["support_level"] == "PRELIMINARY"
-
-    with pytest.raises(RestoreError):
-        _forge_established_and_restore(tmp_path, cid, val_signer)
-
-
 def test_restore_refuses_a_self_validated_established(tmp_path: Path) -> None:
     """Promotion needs a witnessing validator whose keyid is not on the claim
     envelope. The live path raises SelfValidationError; restore must refuse the
@@ -427,7 +173,7 @@ def test_restore_refuses_a_self_validated_established(tmp_path: Path) -> None:
     root_signer = _signing.load_private_key(root_key)
     val_signer = _signing.load_private_key(val_key)
     with mareforma.open(tmp_path, key_path=root_key) as g:
-        seed = g.assert_claim("anchor", generated_by="seed", seed=True)
+        seed = g.assert_claim("anchor", generated_by="seed")
         g.enroll_validator(_pem_of(val_key), identity="v")
         c1 = g.assert_claim(
             "converged", supports=[seed], generated_by="A", signer=root_signer,
@@ -435,7 +181,6 @@ def test_restore_refuses_a_self_validated_established(tmp_path: Path) -> None:
         g.assert_claim(
             "converged", supports=[seed], generated_by="B", signer=val_signer,
         )
-        assert g.get_claim(c1)["support_level"] == "REPLICATED"
         with pytest.raises(SelfValidationError):
             g.validate(c1)
 
@@ -456,7 +201,7 @@ def test_restore_refuses_an_established_validated_by_an_llm(
     val_signer = _signing.load_private_key(val_key)
     llm_signer = _signing.load_private_key(llm_key)
     with mareforma.open(tmp_path, key_path=root_key) as g:
-        seed = g.assert_claim("anchor", generated_by="seed", seed=True)
+        seed = g.assert_claim("anchor", generated_by="seed")
         g.enroll_validator(_pem_of(val_key), identity="v")
         g.enroll_validator(
             _pem_of(llm_key), identity="bot", validator_type="llm",
@@ -467,7 +212,6 @@ def test_restore_refuses_an_established_validated_by_an_llm(
         g.assert_claim(
             "converged", supports=[seed], generated_by="B", signer=val_signer,
         )
-        assert g.get_claim(c1)["support_level"] == "REPLICATED"
 
     with mareforma.open(tmp_path, key_path=llm_key) as g:
         with pytest.raises(LLMValidatorPromotionError):
@@ -512,27 +256,6 @@ def test_project_policy_round_trips_through_restore(tmp_path: Path) -> None:
     finally:
         conn.close()
     assert policy is not None and policy["rekor_required"] == 1
-
-
-def test_strict_promotion_policy_round_trips_through_restore(
-    tmp_path: Path,
-) -> None:
-    """The strict-promotion rule is part of the signed declaration, so a
-    recovered graph keeps gating promotion on data instead of quietly
-    reverting to the looser signer-axis rule."""
-    root_key = _bootstrap_key(tmp_path, "root.key")
-    with mareforma.open(tmp_path, key_path=root_key, strict_promotion=True) as g:
-        g.assert_claim("anchored", generated_by="x")
-
-    _wipe_graph_db(tmp_path)
-    mareforma.restore(tmp_path, trust_unaccounted_backup=True)
-
-    from mareforma.db import open_db, strict_promotion_required
-    conn = open_db(tmp_path)
-    try:
-        assert strict_promotion_required(conn) is True
-    finally:
-        conn.close()
 
 
 def test_restore_accepts_a_policy_envelope_signed_before_the_strict_field(
@@ -590,8 +313,12 @@ def test_restore_dates_an_undated_policy_envelope_by_its_created_at(
     timestamp it does carry, so a project that upgrades is held to exactly the
     window it was already held to."""
     root_key = _bootstrap_key(tmp_path, "root.key")
-    with mareforma.open(tmp_path, key_path=root_key, strict_promotion=True) as g:
+    with mareforma.open(tmp_path, key_path=root_key) as g:
         g.assert_claim("anchored", generated_by="x")
+        # A declaration has to exist before it can be re-signed. Witnessing is
+        # the one a caller can still make; the strict-promotion flag that made
+        # the other went with the promotion it gated.
+        g.require_rekor_witnessing()
 
     # Re-sign the declaration the way the pre-v3 code did: the payload carries
     # the flags and one created_at, and nothing dating either flag.
@@ -643,8 +370,9 @@ def test_restore_refuses_a_declaration_time_the_envelope_does_not_carry(
     fields of an envelope that does not carry it moves the grandfathering
     cutoff, so restore aborts rather than honouring the edit."""
     root_key = _bootstrap_key(tmp_path, "root.key")
-    with mareforma.open(tmp_path, key_path=root_key, strict_promotion=True) as g:
+    with mareforma.open(tmp_path, key_path=root_key) as g:
         g.assert_claim("anchored", generated_by="x")
+        g.require_rekor_witnessing()
 
     toml_path = tmp_path / "claims.toml"
     data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
@@ -662,99 +390,21 @@ def test_restore_refuses_a_stripped_strict_promotion_flag(tmp_path: Path) -> Non
     envelope, so the cache no longer matches the declaration and restore
     aborts. The gate cannot be edited off the project."""
     root_key = _bootstrap_key(tmp_path, "root.key")
-    with mareforma.open(tmp_path, key_path=root_key, strict_promotion=True) as g:
+    with mareforma.open(tmp_path, key_path=root_key) as g:
         g.assert_claim("anchored", generated_by="x")
+        g.require_rekor_witnessing()
 
     toml_path = tmp_path / "claims.toml"
     data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
-    data["project_policy"]["strict_promotion_required"] = False
+    # The flat field and the signed envelope have to disagree; which flag it is
+    # does not matter, only that one of them was edited off the declaration.
+    data["project_policy"]["rekor_required"] = False
     toml_path.write_text(tomli_w.dumps(data), encoding="utf-8")
 
     _wipe_graph_db(tmp_path)
     with pytest.raises(RestoreError) as exc:
         mareforma.restore(tmp_path, trust_unaccounted_backup=True)
     assert "not match the signed envelope" in str(exc.value)
-
-
-def test_restore_refuses_a_replicated_row_the_strict_policy_forbids(
-    tmp_path: Path,
-) -> None:
-    """support_level is not signed, so a tampered backup can name REPLICATED
-    for a dataless claim. Under a strict policy this project could never have
-    promoted it, and restore says so instead of laundering the level."""
-    root_key = _bootstrap_key(tmp_path, "root.key")
-    val_key = _bootstrap_key(tmp_path, "val.key")
-    root_signer = _signing.load_private_key(root_key)
-    val_signer = _signing.load_private_key(val_key)
-    with mareforma.open(tmp_path, key_path=root_key, strict_promotion=True) as g:
-        seed = g.assert_claim("anchor", generated_by="seed", seed=True)
-        g.enroll_validator(_pem_of(val_key), identity="v")
-        c1 = g.assert_claim(
-            "converged", supports=[seed], generated_by="A", signer=root_signer,
-        )
-        g.assert_claim(
-            "converged", supports=[seed], generated_by="B", signer=val_signer,
-        )
-        assert g.get_claim(c1)["support_level"] == "PRELIMINARY"
-
-    with pytest.raises(RestoreError) as exc:
-        _forge_replicated_and_restore(tmp_path, c1)
-    assert exc.value.kind == "policy_violation"
-
-
-def test_a_verdict_does_not_excuse_the_strict_policy(tmp_path: Path) -> None:
-    """A verdict names every member of its cluster, so under a strict policy
-    every dataless member ends up named and left PRELIMINARY. Membership must
-    not buy the level the policy forbids: the verdict path is held to the same
-    four terms the live promotion applies, artifact_hash included."""
-    root_key = _bootstrap_key(tmp_path, "root.key")
-    issuer_key = _bootstrap_key(tmp_path, "issuer.key")
-    with mareforma.open(tmp_path, key_path=root_key, strict_promotion=True) as g:
-        g.enroll_validator(_pem_of(issuer_key), identity="issuer")
-        a = g.assert_claim("alpha", generated_by="A")
-        b = g.assert_claim("beta", generated_by="B")
-    with mareforma.open(tmp_path, key_path=issuer_key) as g:
-        g.record_replication_verdict(
-            verdict_id="rv_strict", cluster_id="cl_strict",
-            member_claim_id=a, other_claim_id=b,
-            method="semantic-cluster", confidence={},
-        )
-    with mareforma.open(tmp_path, key_path=root_key) as g:
-        # The verdict named both and the strict policy promoted neither.
-        assert g.get_claim(a)["support_level"] == "PRELIMINARY"
-        assert g.get_claim(b)["support_level"] == "PRELIMINARY"
-
-    with pytest.raises(RestoreError) as exc:
-        _forge_replicated_and_restore(tmp_path, a)
-    assert exc.value.kind == "policy_violation"
-
-
-def test_a_later_policy_rule_does_not_widen_strict_grandfathering(
-    tmp_path: Path,
-) -> None:
-    """Adding an unrelated rule must not relax the strict-promotion gate over
-    the claims already written. The cutoff is when strict promotion was first
-    declared, not when the policy row was last signed, so a witnessing
-    declaration after the fact leaves the forged level refused."""
-    root_key = _bootstrap_key(tmp_path, "root.key")
-    val_key = _bootstrap_key(tmp_path, "val.key")
-    root_signer = _signing.load_private_key(root_key)
-    val_signer = _signing.load_private_key(val_key)
-    with mareforma.open(tmp_path, key_path=root_key, strict_promotion=True) as g:
-        seed = g.assert_claim("anchor", generated_by="seed", seed=True)
-        g.enroll_validator(_pem_of(val_key), identity="v")
-        c1 = g.assert_claim(
-            "converged", supports=[seed], generated_by="A", signer=root_signer,
-        )
-        g.assert_claim(
-            "converged", supports=[seed], generated_by="B", signer=val_signer,
-        )
-        assert g.get_claim(c1)["support_level"] == "PRELIMINARY"
-        g.require_rekor_witnessing()
-
-    with pytest.raises(RestoreError) as exc:
-        _forge_replicated_and_restore(tmp_path, c1)
-    assert exc.value.kind == "policy_violation"
 
 
 def test_enforced_policy_fails_closed_on_an_unwitnessed_signed_claim(
@@ -1005,7 +655,7 @@ def test_restore_preserves_the_full_trust_layer(tmp_path: Path) -> None:
     val_signer = _signing.load_private_key(val_key)
 
     with mareforma.open(tmp_path, key_path=root_key) as g:
-        seed = g.assert_claim("anchor", generated_by="seed", seed=True)
+        seed = g.assert_claim("anchor", generated_by="seed")
         g.enroll_validator(_pem_of(val_key), identity="v")
         g.enroll_validator(_pem_of(val2_key), identity="v2")
         rep = g.assert_claim(
@@ -1014,7 +664,6 @@ def test_restore_preserves_the_full_trust_layer(tmp_path: Path) -> None:
         g.assert_claim(
             "converged", supports=[seed], generated_by="B", signer=val_signer,
         )
-        assert g.get_claim(rep)["support_level"] == "REPLICATED"
         # Two standalone claims to be contradicted by a third-party witness.
         older = g.assert_claim("older statement", generated_by="A",
                                signer=root_signer)
@@ -1025,7 +674,6 @@ def test_restore_preserves_the_full_trust_layer(tmp_path: Path) -> None:
     # witness (self-verdicts are refused) and the promoting validator.
     with mareforma.open(tmp_path, key_path=val2_key) as g:
         g.validate(rep)
-        assert g.get_claim(rep)["support_level"] == "ESTABLISHED"
         g.record_contradiction_verdict(
             verdict_id="v-contra-1",
             member_claim_id=newer,

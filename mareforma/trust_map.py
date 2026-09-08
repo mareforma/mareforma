@@ -586,22 +586,25 @@ _MULTI_ROOT_IS_TAMPER = _multi_root_is_tamper()
 
 def _standing_property(claim: dict) -> TrustProperty:
     """Place standing / ratification: the computed gate, human-in-the-loop by design."""
-    level = claim.get("support_level") or "PRELIMINARY"
+    # Read off the signed envelope rather than a stored word. The word was the
+    # ladder's, and a word a direct writer could set was never the evidence:
+    # the envelope is, and it is what survived the ladder.
     verified = claim.get("verified")
-    if level == "ESTABLISHED":
+    if claim.get("validation_signature"):
+        value = "VALIDATED" if verified else "VALIDATION_UNVERIFIED"
         detail = (
-            "ratified to ESTABLISHED by a signed human-validator envelope"
+            "a human validator signed off on this claim, and the envelope "
+            "verifies on read"
             if verified
-            else "marked ESTABLISHED but the validation envelope did not verify on read"
+            else "carries a validation envelope that did not verify on read"
         )
-    elif level == "REPLICATED":
-        detail = "REPLICATED by distinct-signer convergence; ratification to ESTABLISHED is human-in-the-loop by design"
     else:
-        detail = "PRELIMINARY; no ratification gate cleared"
+        value = "UNRATIFIED"
+        detail = "nobody has signed off on this claim; no ratification gate cleared"
     return TrustProperty(
         name="standing",
         tier=Tier.COMPUTED,
-        value=level,
+        value=value,
         residual=detail,
     )
 

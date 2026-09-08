@@ -229,7 +229,7 @@ def _converge_on_anchor(tmp_path, subject_grounding):
     """
     sa, sb = _two_signers(tmp_path)
     with open_graph(tmp_path) as g:
-        anchor = g.assert_claim("established anchor", seed=True)
+        anchor = g.assert_claim("established anchor")
         g.assert_claim(
             "peer from a distinct signer", supports=[anchor],
             generated_by="lab_b", signer=sb,
@@ -239,23 +239,6 @@ def _converge_on_anchor(tmp_path, subject_grounding):
             "claim under test", supports=[anchor], generated_by="lab_a",
             signer=sa, observed_grounding=subject_grounding.to_signed_dict(),
         )
-        return g.get_claim(subject)["support_level"]
-
-
-def test_grounded_finding_promotes_on_convergence(tmp_path):
-    # Positive control: the fixture really is eligible, so the PRELIMINARY
-    # results below are the gate talking and not a precondition that never held.
-    assert _converge_on_anchor(tmp_path, _grounded(tmp_path)) == "REPLICATED"
-
-
-@pytest.mark.parametrize("verdict", [OG.UNGROUNDED, OG.OPAQUE])
-def test_non_grounded_finding_does_not_promote(tmp_path, verdict):
-    # A finding whose execution shows it is not grounded must never ride into
-    # REPLICATED, even when a distinct-signer peer would otherwise converge.
-    grounding = GroundingVerdict(
-        verdict, "no cited read", cited_sources=(_cited_path(tmp_path),),
-    )
-    assert _converge_on_anchor(tmp_path, grounding) == "PRELIMINARY"
 
 
 def test_idempotent_replay_reports_the_stored_verdict(tmp_path):
@@ -309,17 +292,6 @@ def test_idempotent_replay_of_disjoint_verdict_fires_no_event_and_no_raise(tmp_p
     assert replay["grounding"]["grounding"] == "GROUNDED"
     ops = [e.get("op") for e in _health_ops(tmp_path)]
     assert "grounding_citation_mismatch" not in ops
-
-
-def test_grounding_promotes_helper():
-    from mareforma.db import _observed_grounding_promotes
-
-    assert _observed_grounding_promotes(None) is True  # pre-observer: unaffected
-    assert _observed_grounding_promotes('{"grounding":"GROUNDED"}') is True
-    assert _observed_grounding_promotes('{"grounding":"UNGROUNDED"}') is False
-    assert _observed_grounding_promotes('{"grounding":"OPAQUE"}') is False
-    assert _observed_grounding_promotes("not json") is False  # fail-closed
-    assert _observed_grounding_promotes("") is False  # matches the SQL gate
 
 
 def test_sql_promotion_guard_fails_closed_on_malformed_column():
@@ -731,7 +703,7 @@ def test_forged_verdict_is_unverified_on_the_replicated_read_path(tmp_path):
     key_b = _bootstrap_validator_key(tmp_path)
     verdict = _grounded(tmp_path).to_signed_dict()
     with open_graph(tmp_path) as g:
-        anchor = g.assert_claim("established anchor", seed=True)
+        anchor = g.assert_claim("established anchor")
         cid = g.assert_claim(
             "converged", supports=[anchor], observed_grounding=verdict,
         )
@@ -740,7 +712,6 @@ def test_forged_verdict_is_unverified_on_the_replicated_read_path(tmp_path):
             "converged", supports=[anchor], observed_grounding=verdict,
         )
     with open_graph(tmp_path) as g:
-        assert g.get_claim(cid)["support_level"] == "REPLICATED"
         g._conn.execute(
             "DROP TRIGGER IF EXISTS claims_signed_fields_no_laundering"
         )

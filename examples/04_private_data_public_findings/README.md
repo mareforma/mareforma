@@ -67,7 +67,7 @@ def get_provenance_trace(claim_id: str) -> dict:
 # source NAMES travel.
 upstream_ref = graph.assert_claim(
     "Prior literature on Target T in condition C",
-    classification="DERIVED", generated_by="agent_seed/literature", seed=True)
+    classification="DERIVED", generated_by="agent_seed/literature")
 
 step_1 = graph.assert_claim(
     "Candidate target T shows elevated activity in condition C"

@@ -42,7 +42,8 @@ from mareforma.db import (
     get_claim,
     open_db,
     query_claims,
-    strict_promotion_required,
+    _verified_project_policy,
+    project_policy_flags,
     verify_claim_signatures,
 )
 
@@ -87,7 +88,7 @@ def _plant_validator(root: Path, key_path: Path, parent_keyid: str) -> str:
 def _replicated_pair(graph, *, artifact_hashes=(None, None)) -> tuple[str, str]:
     """A seed anchor plus two distinct-signer claims citing it."""
     sa, sb = _two_signers(graph._root)
-    seed = graph.assert_claim("anchor", generated_by="seed", seed=True)
+    seed = graph.assert_claim("anchor", generated_by="seed")
     a = graph.assert_claim(
         "child-a", generated_by="lab_a", supports=[seed], signer=sa,
         artifact_hash=artifact_hashes[0],
@@ -157,53 +158,6 @@ class TestSignedValuesCompareByForm:
 
 
 class TestPresenceIsNotEnrolment:
-    def test_planted_validator_cannot_hold_an_established_row(
-        self, tmp_path: Path,
-    ) -> None:
-        """A seed claim's validation envelope re-signed by a planted key must
-        stop the row reading verified on the ESTABLISHED tier."""
-        root_key = _bootstrap_key(tmp_path, "root.key")
-        plant_key = _bootstrap_key(tmp_path, "plant.key")
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            seed = g.assert_claim("anchor", generated_by="seed", seed=True)
-            assert g.get_claim(seed)["support_level"] == "ESTABLISHED"
-            assert g.get_claim(seed)["verified"] is True
-        root_keyid = _signing.public_key_id(
-            _signing.load_private_key(root_key).public_key()
-        )
-        plant_keyid = _plant_validator(tmp_path, plant_key, root_keyid)
-
-        conn = open_db(tmp_path)
-        try:
-            # Present, and not enrolled: the two answers the fix separates.
-            assert _validators.get_validator(conn, plant_keyid) is not None
-            assert _validators.is_enrolled(conn, plant_keyid) is False
-        finally:
-            conn.close()
-
-        forged = _signing.sign_seed_claim(
-            {
-                "claim_id": seed,
-                "validator_keyid": plant_keyid,
-                "seeded_at": "2026-01-01T00:00:00+00:00",
-            },
-            _signing.load_private_key(plant_key),
-        )
-        conn = _adversary(tmp_path)
-        conn.execute(
-            "UPDATE claims SET validation_signature = ? WHERE claim_id = ?",
-            (json.dumps(forged, sort_keys=True, separators=(",", ":")), seed),
-        )
-        conn.commit()
-        conn.close()
-
-        conn = open_db(tmp_path)
-        try:
-            assert get_claim(conn, seed)["verified"] is False
-            assert _db.count_unverified_promoted(conn) == 1
-        finally:
-            conn.close()
-
     def test_planted_validator_cannot_attest_a_role(
         self, tmp_path: Path,
     ) -> None:
@@ -248,7 +202,6 @@ class TestPresenceIsNotEnrolment:
         plant_key = _bootstrap_key(tmp_path, "plant.key")
         with mareforma.open(tmp_path, key_path=root_key) as g:
             _a, cid_b = _replicated_pair(g)
-            assert g.get_claim(cid_b)["support_level"] == "REPLICATED"
         root_keyid = _signing.public_key_id(
             _signing.load_private_key(root_key).public_key()
         )
@@ -277,99 +230,14 @@ class TestPresenceIsNotEnrolment:
                     validated_at=now,
                     evidence_seen=[],
                 )
-            assert g.get_claim(cid_b)["support_level"] == "REPLICATED"
 
 
 # ---------------------------------------------------------------------------
-# (c) The seed exemption applies at ESTABLISHED and nowhere else
-# ---------------------------------------------------------------------------
-
-
-class TestSeedExemptionIsTiered:
-    def test_a_seed_envelope_on_a_replicated_row_exempts_nothing(
-        self, tmp_path: Path,
-    ) -> None:
-        """Nothing verifies ``validation_signature`` below ESTABLISHED, so a
-        lone claim flipped to REPLICATED with a seed-typed string in that column
-        must not inherit the born-ESTABLISHED exemption."""
-        key = _bootstrap_key(tmp_path, "root.key")
-        with mareforma.open(tmp_path, key_path=key) as g:
-            lone = g.assert_claim("a lone finding", generated_by="lab_a")
-            assert g.get_claim(lone)["support_level"] == "PRELIMINARY"
-
-        conn = _adversary(tmp_path)
-        # The promotion marker is a speed bump by design; the guarantee is the
-        # read-path re-derivation, so drop it and prove the row is still caught.
-        conn.execute("DROP TRIGGER IF EXISTS claims_signed_promotion_backed")
-        conn.execute(
-            "UPDATE claims SET support_level = 'REPLICATED', "
-            "validation_signature = ? WHERE claim_id = ?",
-            (json.dumps({"payloadType": _signing.PAYLOAD_TYPE_SEED}), lone),
-        )
-        conn.commit()
-        conn.close()
-
-        conn = open_db(tmp_path)
-        try:
-            assert get_claim(conn, lone)["verified"] is False
-            assert [c["claim_id"] for c in query_claims(conn)] == []
-        finally:
-            conn.close()
-
-    def test_a_real_seed_claim_is_still_exempt(self, tmp_path: Path) -> None:
-        """The exemption still does its job where it belongs: a born-ESTABLISHED
-        seed never climbed the ladder and has no corroboration to show."""
-        key = _bootstrap_key(tmp_path, "root.key")
-        with mareforma.open(tmp_path, key_path=key) as g:
-            seed = g.assert_claim("anchor", generated_by="seed", seed=True)
-        conn = open_db(tmp_path)
-        try:
-            row = get_claim(conn, seed)
-            assert row["support_level"] == "ESTABLISHED"
-            assert row["verified"] is True
-            assert _db.count_unverified_promoted(conn) == 0
-        finally:
-            conn.close()
-
-
-# ---------------------------------------------------------------------------
-# (d) The NULL-keyid grandfather asks the project, not only the row
+# The legacy grandfather, and what it still needs
 # ---------------------------------------------------------------------------
 
 
 class TestLegacyGrandfatherNeedsAnUnsignedProject:
-    def test_an_unsigned_promoted_row_is_not_served_by_a_signing_project(
-        self, tmp_path: Path,
-    ) -> None:
-        """A project that enrols a validator does not serve a promoted claim
-        carrying no signature at all. Otherwise an unsigned block appended to
-        claims.toml (or one UPDATE here) mints a verified REPLICATED row."""
-        key = _bootstrap_key(tmp_path, "root.key")
-        with mareforma.open(tmp_path, key_path=key) as g:
-            g.assert_claim("a signed finding", generated_by="lab_a")
-        with mareforma.open(tmp_path, key_path=key, load_key=False) as g:
-            unsigned = g.assert_claim("no signature at all", generated_by="x")
-
-        conn = _adversary(tmp_path)
-        # No trigger to drop: the promotion guard fires on signed rows only,
-        # which is the whole point, this row carries nothing to guard.
-        conn.execute(
-            "UPDATE claims SET support_level = 'REPLICATED' WHERE claim_id = ?",
-            (unsigned,),
-        )
-        conn.commit()
-        conn.close()
-
-        conn = open_db(tmp_path)
-        try:
-            row = get_claim(conn, unsigned)
-            assert row["signature_bundle"] is None
-            assert row["asserter_keyid"] is None
-            assert row["verified"] is False
-            assert unsigned not in [c["claim_id"] for c in query_claims(conn)]
-        finally:
-            conn.close()
-
     def test_a_project_that_never_signs_keeps_its_grandfather(
         self, tmp_path: Path,
     ) -> None:
@@ -379,10 +247,6 @@ class TestLegacyGrandfatherNeedsAnUnsignedProject:
             cid = g.assert_claim("keyless finding", generated_by="lab_a")
 
         conn = _adversary(tmp_path)
-        conn.execute(
-            "UPDATE claims SET support_level = 'REPLICATED' WHERE claim_id = ?",
-            (cid,),
-        )
         conn.commit()
         conn.close()
 
@@ -398,68 +262,36 @@ class TestLegacyGrandfatherNeedsAnUnsignedProject:
 # ---------------------------------------------------------------------------
 
 
-def _strict_graph(tmp_path: Path) -> tuple[Path, str]:
-    """A strict-promotion project holding one hand-promoted, dataless pair.
+def _declared_graph(tmp_path: Path) -> Path:
+    """A project holding a root-signed policy declaration.
 
-    Returns (root key path, the claim id to read). Both claims are created AFTER
-    the declaration and carry no ``artifact_hash``, so the strict rule is the
-    only thing standing between the row and a clean corroborated read: laundered
-    away, the peer on the shared anchor backs the level.
+    Witnessing is the declaration a caller can still make; the strict-promotion
+    one went with the promotion it gated. Which flag it is does not matter to
+    what these tests check, only that a flat field can be edited away from the
+    envelope that signs it.
     """
     root_key = _bootstrap_key(tmp_path, "root.key")
-    with mareforma.open(tmp_path, key_path=root_key, strict_promotion=True) as g:
-        a, b = _replicated_pair(g)
-        assert g.get_claim(b)["support_level"] == "PRELIMINARY"
-    conn = _adversary(tmp_path)
-    conn.execute("DROP TRIGGER IF EXISTS claims_signed_promotion_backed")
-    conn.execute(
-        "UPDATE claims SET support_level = 'REPLICATED' "
-        "WHERE claim_id IN (?, ?)",
-        (a, b),
-    )
-    conn.commit()
-    conn.close()
-    return root_key, b
+    with mareforma.open(tmp_path, key_path=root_key) as g:
+        g.assert_claim("anchored", generated_by="x")
+        g.require_rekor_witnessing()
+    return root_key
 
 
 class TestProjectPolicyIsReadThroughItsSignature:
-    def test_a_laundered_flag_does_not_retire_the_rule_on_read(
-        self, tmp_path: Path,
-    ) -> None:
-        _root_key, cid = _strict_graph(tmp_path)
-        conn = open_db(tmp_path)
-        try:
-            assert get_claim(conn, cid)["verified"] is False
-        finally:
-            conn.close()
-
-        conn = _adversary(tmp_path)
-        conn.execute("DROP TRIGGER IF EXISTS project_policy_append_only")
-        conn.execute("UPDATE project_policy SET strict_promotion_required = 0")
-        conn.commit()
-        conn.close()
-
-        conn = open_db(tmp_path)
-        try:
-            # The envelope still says the rule is declared, so the flat column
-            # cannot retire it and the dataless row stays unverified.
-            assert get_claim(conn, cid)["verified"] is False
-        finally:
-            conn.close()
-
     def test_a_laundered_flag_does_not_retire_the_rule_on_write(
         self, tmp_path: Path,
     ) -> None:
-        _strict_graph(tmp_path)
+        _declared_graph(tmp_path)
         conn = _adversary(tmp_path)
         conn.execute("DROP TRIGGER IF EXISTS project_policy_append_only")
-        conn.execute("UPDATE project_policy SET strict_promotion_required = 0")
+        conn.execute("UPDATE project_policy SET rekor_required = 0")
         conn.commit()
         conn.close()
 
         conn = open_db(tmp_path)
         try:
-            assert strict_promotion_required(conn) is True
+            rekor, _strict = project_policy_flags(_verified_project_policy(conn))
+            assert rekor is True
         finally:
             conn.close()
 
@@ -467,8 +299,14 @@ class TestProjectPolicyIsReadThroughItsSignature:
         self, tmp_path: Path,
     ) -> None:
         """The envelope has to come from the project's own root, or a writer
-        who holds any key at all declares the project's rules."""
-        _root_key, cid = _strict_graph(tmp_path)
+        who holds any key at all declares the project's rules.
+
+        The declaration is read through its signature, so a row swapped for one
+        a stranger signed does not bind. The flags fall back to the strictest
+        reading rather than the swapped one: a policy nobody in the project
+        made is not a policy that can relax anything.
+        """
+        _declared_graph(tmp_path)
         stranger = _bootstrap_key(tmp_path, "stranger.key")
         stranger_priv = _signing.load_private_key(stranger)
         env = _signing.sign_project_policy(
@@ -485,10 +323,10 @@ class TestProjectPolicyIsReadThroughItsSignature:
         conn = _adversary(tmp_path)
         conn.execute("DROP TRIGGER IF EXISTS project_policy_append_only")
         conn.execute(
-            "UPDATE project_policy SET strict_promotion_required = 0, "
+            "UPDATE project_policy SET rekor_required = 0, "
             "signer_keyid = ?, envelope = ?, "
             "created_at = '2026-01-01T00:00:00+00:00', "
-            "strict_promotion_declared_at = NULL",
+            "rekor_declared_at = NULL",
             (
                 _signing.public_key_id(stranger_priv.public_key()),
                 json.dumps(env, sort_keys=True, separators=(",", ":")),
@@ -499,8 +337,10 @@ class TestProjectPolicyIsReadThroughItsSignature:
 
         conn = open_db(tmp_path)
         try:
-            assert strict_promotion_required(conn) is True
-            assert get_claim(conn, cid)["verified"] is False
+            rekor, _strict = project_policy_flags(_verified_project_policy(conn))
+            assert rekor is True, (
+                "a stranger's signature relaxed the project's own declaration"
+            )
         finally:
             conn.close()
 
@@ -510,9 +350,8 @@ class TestProjectPolicyIsReadThroughItsSignature:
         """The row records a one-way rule, so it cannot be dropped: without the
         guard, DELETE launders the whole declaration and the backup written
         afterwards carries no policy for restore to enforce."""
-        root_key = _bootstrap_key(tmp_path, "root.key")
-        with mareforma.open(tmp_path, key_path=root_key, strict_promotion=True):
-            pass
+        # A row has to exist before a guard on it can be shown to hold.
+        _declared_graph(tmp_path)
         conn = _adversary(tmp_path)
         try:
             with pytest.raises(
@@ -523,13 +362,14 @@ class TestProjectPolicyIsReadThroughItsSignature:
                 sqlite3.IntegrityError, match="project_policy_locked",
             ):
                 conn.execute(
-                    "UPDATE project_policy SET strict_promotion_required = 0"
+                    "UPDATE project_policy SET rekor_required = 0"
                 )
         finally:
             conn.close()
         conn = open_db(tmp_path)
         try:
-            assert strict_promotion_required(conn) is True
+            rekor, _strict = project_policy_flags(_verified_project_policy(conn))
+            assert rekor is True
         finally:
             conn.close()
 
@@ -537,18 +377,18 @@ class TestProjectPolicyIsReadThroughItsSignature:
         """The guards must not lock out the one writer that may replace the
         row: extending the policy signs the union and rewrites the singleton."""
         root_key = _bootstrap_key(tmp_path, "root.key")
-        with mareforma.open(tmp_path, key_path=root_key, strict_promotion=True):
+        with mareforma.open(tmp_path, key_path=root_key):
             pass
         with mareforma.open(tmp_path, key_path=root_key) as g:
             g.require_rekor_witnessing()
         conn = open_db(tmp_path)
         try:
             policy = _db.get_project_policy(conn)
-            assert (policy["rekor_required"], policy["strict_promotion_required"]) \
-                == (1, 1)
+            assert policy["rekor_required"] == 1
             # Still bound to its envelope after the rewrite, so the rules are
             # enforceable rather than merely stored.
-            assert strict_promotion_required(conn) is True
+            rekor, _strict = project_policy_flags(_verified_project_policy(conn))
+            assert rekor is True
         finally:
             conn.close()
 
@@ -558,7 +398,7 @@ class TestProjectPolicyIsReadThroughItsSignature:
         """The triggers are managed, so a graph written before they existed
         gains them on the next open rather than staying unguarded."""
         root_key = _bootstrap_key(tmp_path, "root.key")
-        with mareforma.open(tmp_path, key_path=root_key, strict_promotion=True):
+        with mareforma.open(tmp_path, key_path=root_key):
             pass
         conn = _adversary(tmp_path)
         conn.execute("DROP TRIGGER IF EXISTS project_policy_append_only")

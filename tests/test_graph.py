@@ -126,7 +126,7 @@ def test_assert_claim_idempotency_key_no_duplicate(tmp_path):
         id2 = graph.assert_claim("finding A", idempotency_key="run1_claim0")
         # Unsigned mode, no validators table; opt out of the default
         # enrolled-identity filter so the rows surface.
-        all_claims = graph.query(include_unverified=True)
+        all_claims = graph.query()
     assert id1 == id2
     assert len(all_claims) == 1
 
@@ -135,7 +135,7 @@ def test_assert_claim_different_keys_creates_two(tmp_path):
     with mareforma.open(tmp_path) as graph:
         graph.assert_claim("finding A", idempotency_key="run1_claim0")
         graph.assert_claim("finding B", idempotency_key="run1_claim1")
-        all_claims = graph.query(include_unverified=True)
+        all_claims = graph.query()
     assert len(all_claims) == 2
 
 
@@ -143,65 +143,11 @@ def test_assert_claim_different_keys_creates_two(tmp_path):
 # assert_claim(), REPLICATED trigger
 # ---------------------------------------------------------------------------
 
-def test_assert_claim_replicated_triggers_on_independent_agents(tmp_path):
-    key_path = _bootstrap_key(tmp_path)
-    sa, sb = _two_signers(tmp_path)
-    with mareforma.open(tmp_path, key_path=key_path) as graph:
-        prior = graph.assert_claim("prior finding", generated_by="agent_seed", seed=True)
-        # Two independent agents both support the same prior
-        id1 = graph.assert_claim(
-            "agent A finding", supports=[prior], generated_by="agent_A", signer=sa
-        )
-        id2 = graph.assert_claim(
-            "agent B finding", supports=[prior], generated_by="agent_B", signer=sb
-        )
-        c1 = graph.get_claim(id1)
-        c2 = graph.get_claim(id2)
-    assert c1["support_level"] == "REPLICATED"
-    assert c2["support_level"] == "REPLICATED"
-
-
-def test_assert_claim_replicated_not_triggered_same_agent(tmp_path):
-    key_path = _bootstrap_key(tmp_path)
-    with mareforma.open(tmp_path, key_path=key_path) as graph:
-        prior = graph.assert_claim("prior finding", generated_by="agent_seed", seed=True)
-        id1 = graph.assert_claim(
-            "first claim", supports=[prior], generated_by="agent_A"
-        )
-        id2 = graph.assert_claim(
-            "second claim", supports=[prior], generated_by="agent_A"
-        )
-        c1 = graph.get_claim(id1)
-        c2 = graph.get_claim(id2)
-    assert c1["support_level"] == "PRELIMINARY"
-    assert c2["support_level"] == "PRELIMINARY"
-
-
-def test_assert_claim_replicated_not_triggered_no_shared_upstream(tmp_path):
-    with mareforma.open(tmp_path) as graph:
-        prior_a = graph.assert_claim("prior A", generated_by="seed")
-        prior_b = graph.assert_claim("prior B", generated_by="seed")
-        id1 = graph.assert_claim(
-            "claim 1", supports=[prior_a], generated_by="agent_A"
-        )
-        id2 = graph.assert_claim(
-            "claim 2", supports=[prior_b], generated_by="agent_B"
-        )
-        c1 = graph.get_claim(id1)
-        c2 = graph.get_claim(id2)
-    assert c1["support_level"] == "PRELIMINARY"
-    assert c2["support_level"] == "PRELIMINARY"
-
-
-# ---------------------------------------------------------------------------
-# query()
-# ---------------------------------------------------------------------------
-
 def test_query_text_none_returns_all(tmp_path):
     with mareforma.open(tmp_path) as graph:
         graph.assert_claim("alpha finding")
         graph.assert_claim("beta finding")
-        results = graph.query(include_unverified=True)
+        results = graph.query()
     assert len(results) == 2
 
 
@@ -209,7 +155,7 @@ def test_query_text_substring_match(tmp_path):
     with mareforma.open(tmp_path) as graph:
         graph.assert_claim("inhibitory neurons are special")
         graph.assert_claim("excitatory neurons are different")
-        results = graph.query("inhibitory", include_unverified=True)
+        results = graph.query("inhibitory")
     assert len(results) == 1
     assert "inhibitory" in results[0]["text"]
 
@@ -217,47 +163,8 @@ def test_query_text_substring_match(tmp_path):
 def test_query_text_no_match_returns_empty(tmp_path):
     with mareforma.open(tmp_path) as graph:
         graph.assert_claim("some finding about neurons")
-        results = graph.query("zzz_no_match", include_unverified=True)
+        results = graph.query("zzz_no_match")
     assert results == []
-
-
-def test_the_storage_layer_still_filters_on_the_stored_level(tmp_path):
-    """No public read takes a level, and the column underneath still answers.
-
-    This used to be a test of ``query(min_support=...)``. That parameter is
-    gone, and the stored column goes with the step that changes the schema, so
-    the filter is checked where it now lives rather than left uncovered for a
-    release with nothing exercising it.
-    """
-    from mareforma.db import open_db, query_claims
-
-    key_path = _bootstrap_key(tmp_path)
-    sa, sb = _two_signers(tmp_path)
-    with mareforma.open(tmp_path, key_path=key_path) as graph:
-        prior = graph.assert_claim("prior", generated_by="seed", seed=True)
-        rep1 = graph.assert_claim(
-            "rep claim", supports=[prior], generated_by="A", signer=sa,
-        )
-        rep2 = graph.assert_claim(
-            "rep claim", supports=[prior], generated_by="B", signer=sb,
-        )
-        pre = graph.assert_claim("preliminary only", generated_by="C")
-
-    conn = open_db(tmp_path)
-    try:
-        replicated = {
-            r["claim_id"] for r in query_claims(conn, min_support="REPLICATED")
-        }
-        everything = {
-            r["claim_id"] for r in query_claims(conn, min_support="PRELIMINARY")
-        }
-    finally:
-        conn.close()
-
-    assert {rep1, rep2} <= replicated
-    assert pre not in replicated
-    # PRELIMINARY is the floor, so it filters nothing.
-    assert {pre, rep1} <= everything
 
 
 def test_query_classification_filter(tmp_path):
@@ -265,7 +172,7 @@ def test_query_classification_filter(tmp_path):
         graph.assert_claim("inferred claim", classification="INFERRED")
         graph.assert_claim("analytical claim", classification="ANALYTICAL")
         results = graph.query(
-            classification="ANALYTICAL", include_unverified=True,
+            classification="ANALYTICAL",
         )
     assert len(results) == 1
     assert results[0]["classification"] == "ANALYTICAL"
@@ -275,7 +182,7 @@ def test_query_limit_respected(tmp_path):
     with mareforma.open(tmp_path) as graph:
         for i in range(5):
             graph.assert_claim(f"finding {i}")
-        results = graph.query(limit=3, include_unverified=True)
+        results = graph.query(limit=3)
     assert len(results) == 3
 
 
@@ -303,27 +210,12 @@ def test_get_claim_nonexistent_returns_none(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_validate_replicated_to_established(tmp_path):
-    root_key = _bootstrap_key(tmp_path, "root.key")
-    validator_key = _bootstrap_key(tmp_path, "validator.key")
-    sa, sb = _two_signers(tmp_path)
-    with mareforma.open(tmp_path, key_path=root_key) as graph:
-        prior = graph.assert_claim("prior", generated_by="seed", seed=True)
-        id1 = graph.assert_claim("finding", supports=[prior], generated_by="A", signer=sa)
-        graph.assert_claim("finding", supports=[prior], generated_by="B", signer=sb)
-        graph.enroll_validator(_pem_of(validator_key), identity="v")
-    with mareforma.open(tmp_path, key_path=validator_key) as graph:
-        graph.validate(id1)
-        claim = graph.get_claim(id1)
-    assert claim["support_level"] == "ESTABLISHED"
-
-
 def test_validate_stores_validated_by(tmp_path):
     root_key = _bootstrap_key(tmp_path, "root.key")
     validator_key = _bootstrap_key(tmp_path, "validator.key")
     sa, sb = _two_signers(tmp_path)
     with mareforma.open(tmp_path, key_path=root_key) as graph:
-        prior = graph.assert_claim("prior", generated_by="seed", seed=True)
+        prior = graph.assert_claim("prior", generated_by="seed")
         id1 = graph.assert_claim("finding", supports=[prior], generated_by="A", signer=sa)
         graph.assert_claim("finding", supports=[prior], generated_by="B", signer=sb)
         graph.enroll_validator(_pem_of(validator_key), identity="v")
@@ -332,14 +224,6 @@ def test_validate_stores_validated_by(tmp_path):
         claim = graph.get_claim(id1)
     assert claim["validated_by"] == "jane@lab.org"
     assert claim["validated_at"] is not None
-
-
-def test_validate_preliminary_raises(tmp_path):
-    key_path = _bootstrap_key(tmp_path)
-    with mareforma.open(tmp_path, key_path=key_path) as graph:
-        claim_id = graph.assert_claim("single agent claim")
-        with pytest.raises(ValueError, match="REPLICATED"):
-            graph.validate(claim_id)
 
 
 def test_validate_nonexistent_claim_raises(tmp_path):
@@ -358,7 +242,7 @@ def test_validate_without_signer_raises(tmp_path):
     """
     key_path = _bootstrap_key(tmp_path)
     with mareforma.open(tmp_path, key_path=key_path) as graph:
-        prior = graph.assert_claim("prior", generated_by="seed", seed=True)
+        prior = graph.assert_claim("prior", generated_by="seed")
         id1 = graph.assert_claim("finding", supports=[prior], generated_by="A")
         graph.assert_claim("finding", supports=[prior], generated_by="B")
 
@@ -376,56 +260,20 @@ def test_schema_returns_required_keys():
     s = mareforma.schema()
     assert "schema_version" in s
     assert "classifications" in s
-    assert "support_levels" in s
     assert "statuses" in s
     assert "defaults" in s
-    assert "transitions" in s
 
 
 def test_schema_values_match_db_constants():
-    from mareforma.db import VALID_CLASSIFICATIONS, VALID_SUPPORT_LEVELS, VALID_STATUSES
+    from mareforma.db import VALID_CLASSIFICATIONS, VALID_STATUSES
     s = mareforma.schema()
     assert set(s["classifications"]) == set(VALID_CLASSIFICATIONS)
-    assert set(s["support_levels"]) == set(VALID_SUPPORT_LEVELS)
     assert set(s["statuses"]) == set(VALID_STATUSES)
-
-
-def test_schema_transitions_cover_all_support_level_paths():
-    s = mareforma.schema()
-    froms = {t["from"] for t in s["transitions"]}
-    tos   = {t["to"]   for t in s["transitions"]}
-    assert "PRELIMINARY" in froms
-    assert "REPLICATED"  in froms
-    assert "REPLICATED"  in tos
-    assert "ESTABLISHED" in tos
 
 
 def test_schema_is_stable_across_calls():
     assert mareforma.schema() == mareforma.schema()
 
-
-def test_schema_replicated_rule_is_the_distinct_signer_model():
-    """schema() is a machine contract agents follow. It must describe the
-    distinct-signer convergence rule, not the retired single-key generated_by
-    rule, an agent following the old text signs both claims with one key and
-    never promotes."""
-    s = mareforma.schema()
-    rep = next(
-        t for t in s["transitions"]
-        if t["from"] == "PRELIMINARY" and t["to"] == "REPLICATED"
-    )
-    cond = rep["condition"].lower()
-    assert "generated_by" not in cond
-    assert any(
-        term in cond for term in ("signer", "signing key", "asserter", "validator key")
-    )
-    est = next(t for t in s["transitions"] if t["to"] == "ESTABLISHED")
-    assert "validate" in est["condition"].lower()
-
-
-# ---------------------------------------------------------------------------
-# get_tools()
-# ---------------------------------------------------------------------------
 
 def test_get_tools_returns_two_callables(tmp_path):
     """The agent-tool callables must be live when the graph is open AND
@@ -465,7 +313,7 @@ def test_get_tools_query_returns_valid_json(tmp_path):
     import json
     # Bootstrap a key so the root auto-enrolls and the claim's signing
     # keyid is in the validators table, the default LLM-tool query
-    # filter (include_unverified=False) excludes unverified PRELIMINARY.
+    # filter () excludes unverified PRELIMINARY.
     key_path = _bootstrap_key(tmp_path)
     with mareforma.open(tmp_path, key_path=key_path) as graph:
         graph.assert_claim("Target T is elevated", classification="ANALYTICAL")
@@ -479,7 +327,6 @@ def test_get_tools_query_returns_valid_json(tmp_path):
     assert "Target T is elevated" in data[0]["text"]
     assert data[0]["text"].startswith("<untrusted_data>\n")
     assert data[0]["text"].endswith("\n</untrusted_data>")
-    assert "support_level" in data[0]
     assert "claim_id" in data[0]
 
 
@@ -513,30 +360,6 @@ def test_get_tools_assert_creates_claim(tmp_path):
     assert claim is not None
     assert claim["text"] == "Finding X"
     assert claim["generated_by"] == "agent/a"
-
-
-def test_get_tools_generated_by_baked_into_closure_triggers_replicated(tmp_path):
-    # The get_tools closures sign with the graph handle's loaded key, so
-    # giving each converging peer a distinct asserter_keyid means opening
-    # two graph handles on the same root with distinct keys.
-    root_key = _bootstrap_key(tmp_path, "root.key")
-    key_a = _bootstrap_key(tmp_path, "agent_a.key")
-    key_b = _bootstrap_key(tmp_path, "agent_b.key")
-    with mareforma.open(tmp_path, key_path=root_key) as graph:
-        prior = graph.assert_claim(
-            "upstream evidence", generated_by="seed", seed=True,
-        )
-    with mareforma.open(tmp_path, key_path=key_a) as graph_a:
-        _, assert_finding_a = graph_a.get_tools(generated_by="agent/a")
-        id_a = assert_finding_a("finding A", supports=[prior])
-    with mareforma.open(tmp_path, key_path=key_b) as graph_b:
-        _, assert_finding_b = graph_b.get_tools(generated_by="agent/b")
-        id_b = assert_finding_b("finding B", supports=[prior])
-    with mareforma.open(tmp_path, key_path=root_key) as graph:
-        claim_a = graph.get_claim(id_a)
-        claim_b = graph.get_claim(id_b)
-    assert claim_a["support_level"] == "REPLICATED"
-    assert claim_b["support_level"] == "REPLICATED"
 
 
 def test_get_tools_supports_none_is_valid(tmp_path):
@@ -837,231 +660,6 @@ class TestFindDanglingSupports:
 # ---------------------------------------------------------------------------
 
 
-class TestConvergenceErrorCounter:
-    """`EpistemicGraph.convergence_errors` mirrors swallowed SQLite errors
-    from `_maybe_update_replicated` so silent failures are observable.
-    """
-
-    def test_counter_starts_at_zero(self, tmp_path):
-        with mareforma.open(tmp_path) as graph:
-            assert graph.convergence_errors == 0
-
-    def test_counter_stays_zero_on_clean_assertions(self, tmp_path):
-        """Happy-path writes do not increment the counter."""
-        key_path = _bootstrap_key(tmp_path)
-        with mareforma.open(tmp_path, key_path=key_path) as graph:
-            upstream = graph.assert_claim(
-                "anchor", generated_by="seed", seed=True,
-            )
-            graph.assert_claim(
-                "child A", generated_by="lab_a", supports=[upstream],
-            )
-            graph.assert_claim(
-                "child B", generated_by="lab_b", supports=[upstream],
-            )
-            assert graph.convergence_errors == 0
-
-    def test_counter_increments_when_detection_swallows_error(
-        self, tmp_path, monkeypatch,
-    ):
-        """Force `_maybe_update_replicated_unlocked` to raise; counter ticks."""
-        from mareforma.db import core as _db_core
-
-        key_path = _bootstrap_key(tmp_path)
-        with mareforma.open(tmp_path, key_path=key_path) as graph:
-            upstream = graph.assert_claim(
-                "anchor", generated_by="seed", seed=True,
-            )
-
-            # Patch after the seed lands so the seed itself runs cleanly.
-            def _boom(*_args, **_kwargs):
-                raise sqlite3.OperationalError("forced for test")
-
-            monkeypatch.setattr(_db_core, "_maybe_update_replicated_unlocked", _boom)
-
-            # This child has a non-empty supports[] and no DOIs, so
-            # convergence detection runs and hits the monkeypatched boom.
-            graph.assert_claim(
-                "child", generated_by="lab_a", supports=[upstream],
-            )
-            assert graph.convergence_errors >= 1
-
-    def test_counter_is_read_only(self, tmp_path):
-        """`convergence_errors` is exposed as a property, direct writes
-        raise AttributeError so callers cannot manufacture a clean signal."""
-        key_path = _bootstrap_key(tmp_path)
-        with mareforma.open(tmp_path, key_path=key_path) as graph:
-            with pytest.raises(AttributeError):
-                graph.convergence_errors = 99  # type: ignore[misc]
-
-
-# ---------------------------------------------------------------------------
-# Convergence retry queue
-# ---------------------------------------------------------------------------
-
-
-class TestConvergenceRetryQueue:
-    """`convergence_retry_needed` flag + `refresh_convergence()` together
-    make swallowed convergence-detection errors recoverable instead of
-    silently stuck at PRELIMINARY forever.
-    """
-
-    def test_flag_starts_zero_for_clean_inserts(self, tmp_path):
-        key_path = _bootstrap_key(tmp_path)
-        with mareforma.open(tmp_path, key_path=key_path) as graph:
-            upstream = graph.assert_claim(
-                "anchor", generated_by="seed", seed=True,
-            )
-            graph.assert_claim(
-                "child", generated_by="lab_a", supports=[upstream],
-            )
-            assert graph.health()["convergence_retry_pending"] == 0
-
-    def test_swallowed_error_sets_retry_flag(self, tmp_path, monkeypatch):
-        """A SQLite failure in detection sets convergence_retry_needed=1."""
-        from mareforma.db import core as _db_core
-
-        key_path = _bootstrap_key(tmp_path)
-        with mareforma.open(tmp_path, key_path=key_path) as graph:
-            upstream = graph.assert_claim(
-                "anchor", generated_by="seed", seed=True,
-            )
-
-            def _boom(*_args, **_kwargs):
-                raise sqlite3.OperationalError("forced for test")
-
-            monkeypatch.setattr(_db_core, "_maybe_update_replicated_unlocked", _boom)
-
-            graph.assert_claim(
-                "child", generated_by="lab_a", supports=[upstream],
-            )
-
-            h = graph.health()
-            assert h["convergence_errors"] >= 1
-            assert h["convergence_retry_pending"] == 1
-
-    def test_refresh_clears_flag_when_retry_succeeds(
-        self, tmp_path, monkeypatch,
-    ):
-        """A flagged claim whose retry runs cleanly has the flag cleared."""
-        from mareforma.db import core as _db_core
-
-        key_path = _bootstrap_key(tmp_path)
-        with mareforma.open(tmp_path, key_path=key_path) as graph:
-            upstream = graph.assert_claim(
-                "anchor", generated_by="seed", seed=True,
-            )
-
-            # Phase one: monkeypatch detection to fail so the flag lands.
-            original = _db_core._maybe_update_replicated_unlocked
-
-            def _boom(*_args, **_kwargs):
-                raise sqlite3.OperationalError("forced for test")
-
-            monkeypatch.setattr(_db_core, "_maybe_update_replicated_unlocked", _boom)
-
-            child = graph.assert_claim(
-                "child", generated_by="lab_a", supports=[upstream],
-            )
-            assert graph.health()["convergence_retry_pending"] == 1
-
-            # Phase two: restore the real detection, retry, flag clears.
-            monkeypatch.setattr(_db_core, "_maybe_update_replicated_unlocked", original)
-            result = graph.refresh_convergence()
-            assert result["checked"] == 1
-            # Detection ran cleanly, but a lone claim has no converging peer, so
-            # nothing was promoted. ``promoted`` counts claims that actually
-            # moved off PRELIMINARY, not clean passes.
-            assert result["promoted"] == 0
-            assert result["retried_ok"] == 1
-            assert result["still_pending"] == 0
-            assert graph.get_claim(child)["support_level"] == "PRELIMINARY"
-            assert graph.health()["convergence_retry_pending"] == 0
-
-    def test_refresh_counts_only_claims_that_were_promoted(
-        self, tmp_path, monkeypatch,
-    ):
-        """``promoted`` counts the claims the retry moved to REPLICATED."""
-        from mareforma.db import core as _db_core
-
-        key_path = _bootstrap_key(tmp_path)
-        sa, sb = _two_signers(tmp_path)
-        with mareforma.open(tmp_path, key_path=key_path) as graph:
-            upstream = graph.assert_claim(
-                "anchor", generated_by="seed", seed=True,
-            )
-
-            original = _db_core._maybe_update_replicated_unlocked
-
-            def _boom(*_args, **_kwargs):
-                raise sqlite3.OperationalError("forced for test")
-
-            monkeypatch.setattr(_db_core, "_maybe_update_replicated_unlocked", _boom)
-
-            # Two distinct signers on the same upstream: the converging pair
-            # detection would have promoted had it not been made to fail.
-            cid_a = graph.assert_claim(
-                "child-a", generated_by="lab_a", supports=[upstream], signer=sa,
-            )
-            cid_b = graph.assert_claim(
-                "child-b", generated_by="lab_b", supports=[upstream], signer=sb,
-            )
-            assert graph.get_claim(cid_b)["support_level"] == "PRELIMINARY"
-
-            monkeypatch.setattr(_db_core, "_maybe_update_replicated_unlocked", original)
-            result = graph.refresh_convergence()
-            assert result["checked"] == 2
-            assert result["retried_ok"] == 2
-            assert result["promoted"] == 2
-            assert result["still_pending"] == 0
-            assert graph.get_claim(cid_a)["support_level"] == "REPLICATED"
-            assert graph.get_claim(cid_b)["support_level"] == "REPLICATED"
-
-    def test_refresh_keeps_flag_when_retry_fails(self, tmp_path, monkeypatch):
-        """A flagged claim whose retry errors again stays flagged."""
-        from mareforma.db import core as _db_core
-
-        key_path = _bootstrap_key(tmp_path)
-        with mareforma.open(tmp_path, key_path=key_path) as graph:
-            upstream = graph.assert_claim(
-                "anchor", generated_by="seed", seed=True,
-            )
-
-            def _boom(*_args, **_kwargs):
-                raise sqlite3.OperationalError("forced for test")
-
-            monkeypatch.setattr(_db_core, "_maybe_update_replicated_unlocked", _boom)
-
-            graph.assert_claim(
-                "child", generated_by="lab_a", supports=[upstream],
-            )
-            assert graph.health()["convergence_retry_pending"] == 1
-
-            # Still broken. Retry walks but fails again; flag stays.
-            errors_before = graph.convergence_errors
-            result = graph.refresh_convergence()
-            assert result["checked"] == 1
-            assert result["promoted"] == 0
-            assert result["still_pending"] == 1
-            assert graph.convergence_errors > errors_before
-            assert graph.health()["convergence_retry_pending"] == 1
-
-    def test_refresh_on_clean_graph_is_no_op(self, tmp_path):
-        with mareforma.open(tmp_path) as graph:
-            result = graph.refresh_convergence()
-            assert result == {
-                "checked": 0,
-                "retried_ok": 0,
-                "promoted": 0,
-                "still_pending": 0,
-            }
-
-
-# ---------------------------------------------------------------------------
-# Rekor + UPDATE atomicity
-# ---------------------------------------------------------------------------
-
-
 class TestRekorSagaAtomicity:
     """The Rekor saga writes to ``rekor_inclusions`` BEFORE updating the
     claims row, so a row-UPDATE failure leaves a durable record that
@@ -1356,7 +954,7 @@ class TestEvidenceSeenBinding:
         """Build a REPLICATED claim under signers distinct from `root_key`."""
         sa, sb = _two_signers(graph._root)
         seed = graph.assert_claim(
-            "anchor", generated_by="seed", seed=True,
+            "anchor", generated_by="seed",
         )
         graph.assert_claim(
             "child-a", generated_by="lab_a", supports=[seed], signer=sa,
@@ -1364,7 +962,6 @@ class TestEvidenceSeenBinding:
         cid_b = graph.assert_claim(
             "child-b", generated_by="lab_b", supports=[seed], signer=sb,
         )
-        assert graph.get_claim(cid_b)["support_level"] == "REPLICATED"
         return seed, cid_b
 
     def test_validate_without_evidence_signs_empty_list(self, tmp_path):
@@ -1512,14 +1109,22 @@ class TestEvidenceSeenBinding:
 
         with mareforma.open(tmp_path, key_path=other_key) as g:
             g.validate(cid_b, evidence_seen=[seed])
+            before = g.get_claim(cid_b)["validation_signature"]
+        assert before, "the validation was not recorded in the first place"
 
         # Wipe graph.db and restore from claims.toml. evidence_seen
         # citation check runs against the rebuilt graph.
         (tmp_path / ".mareforma" / "graph.db").unlink()
         _m.restore(tmp_path)
 
-        with mareforma.open(tmp_path, key_path=other_key) as g:
-            assert g.get_claim(cid_b)["support_level"] == "ESTABLISHED"
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            after = g.get_claim(cid_b)
+        assert after["validation_signature"] == before, (
+            "the signed validation did not survive the round trip"
+        )
+        assert after["verified"] is True, (
+            "the restored row's signed material no longer checks out"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1535,7 +1140,7 @@ class TestValidationEnvelopeKwargAgreement:
 
     def _setup_replicated(self, graph):
         sa, sb = _two_signers(graph._root)
-        seed = graph.assert_claim("anchor", generated_by="seed", seed=True)
+        seed = graph.assert_claim("anchor", generated_by="seed")
         graph.assert_claim("a", generated_by="lab_a", supports=[seed], signer=sa)
         cid_b = graph.assert_claim("b", generated_by="lab_b", supports=[seed], signer=sb)
         return seed, cid_b
@@ -1583,7 +1188,6 @@ class TestValidationEnvelopeKwargAgreement:
                 )
 
             # Confirm the claim was NOT promoted.
-            assert g.get_claim(cid_b)["support_level"] == "REPLICATED"
 
     def test_envelope_kwarg_match_succeeds(self, tmp_path):
         """The standard happy path through graph.validate() (which threads
@@ -1599,8 +1203,10 @@ class TestValidationEnvelopeKwargAgreement:
 
         with mareforma.open(tmp_path, key_path=other_key) as g:
             g.validate(cid_b, evidence_seen=[seed])
-            assert g.get_claim(cid_b)["support_level"] == "ESTABLISHED"
-
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            row = g.get_claim(cid_b)
+        assert row["validation_signature"], "the validation was not recorded"
+        assert row["validated_at"], "a validation with no time on it"
 
 class TestValidateClaimRequiresSignedEnvelope:
     """Promotion to ESTABLISHED is gated on a signed validation envelope.
@@ -1611,7 +1217,7 @@ class TestValidateClaimRequiresSignedEnvelope:
 
     def _setup_replicated(self, graph):
         sa, sb = _two_signers(graph._root)
-        seed = graph.assert_claim("anchor", generated_by="seed", seed=True)
+        seed = graph.assert_claim("anchor", generated_by="seed")
         graph.assert_claim("a", generated_by="lab_a", supports=[seed], signer=sa)
         cid_b = graph.assert_claim("b", generated_by="lab_b", supports=[seed], signer=sb)
         return seed, cid_b
@@ -1634,24 +1240,6 @@ class TestValidateClaimRequiresSignedEnvelope:
                 )
             assert not isinstance(excinfo.value, IllegalStateTransitionError)
             # The claim was not promoted.
-            assert g.get_claim(cid_b)["support_level"] == "REPLICATED"
-
-    def test_signed_call_still_promotes(self, tmp_path):
-        root_key = _bootstrap_key(tmp_path, "root.key")
-        other_key = _bootstrap_key(tmp_path, "validator.key")
-
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            _, cid_b = self._setup_replicated(g)
-            g.enroll_validator(_pem_of(other_key), identity="reviewer")
-
-        with mareforma.open(tmp_path, key_path=other_key) as g:
-            g.validate(cid_b)
-            assert g.get_claim(cid_b)["support_level"] == "ESTABLISHED"
-
-
-# ---------------------------------------------------------------------------
-# Validation envelope cryptographic verification
-# ---------------------------------------------------------------------------
 
 class TestValidationEnvelopeCryptographicVerification:
     """``db.validate_claim`` is a public-by-convention graph function.
@@ -1668,7 +1256,7 @@ class TestValidationEnvelopeCryptographicVerification:
 
     def _setup_replicated(self, graph):
         sa, sb = _two_signers(graph._root)
-        seed = graph.assert_claim("anchor", generated_by="seed", seed=True)
+        seed = graph.assert_claim("anchor", generated_by="seed")
         graph.assert_claim("a", generated_by="lab_a", supports=[seed], signer=sa)
         cid_b = graph.assert_claim("b", generated_by="lab_b", supports=[seed], signer=sb)
         return seed, cid_b
@@ -1722,7 +1310,6 @@ class TestValidationEnvelopeCryptographicVerification:
                     validated_at=now,
                     evidence_seen=[],
                 )
-            assert g.get_claim(cid_b)["support_level"] == "REPLICATED"
 
     def test_non_enrolled_signer_is_refused(self, tmp_path):
         """A validation envelope signed by a key that is NOT in the
@@ -1764,7 +1351,6 @@ class TestValidationEnvelopeCryptographicVerification:
                     validated_at=now,
                     evidence_seen=[],
                 )
-            assert g.get_claim(cid_b)["support_level"] == "REPLICATED"
 
     def test_envelope_binding_different_claim_id_is_refused(self, tmp_path):
         """A validation envelope whose signed payload names a DIFFERENT
@@ -1811,7 +1397,6 @@ class TestValidationEnvelopeCryptographicVerification:
                     validated_at=now,
                     evidence_seen=[],
                 )
-            assert g.get_claim(cid_b)["support_level"] == "REPLICATED"
 
     def test_wrong_payload_type_envelope_is_refused(self, tmp_path):
         """Passing a CLAIM envelope (in-toto Statement v1) where a
@@ -1836,7 +1421,6 @@ class TestValidationEnvelopeCryptographicVerification:
                     validated_at=now,
                     evidence_seen=[],
                 )
-            assert g.get_claim(cid_b)["support_level"] == "REPLICATED"
 
     def test_signed_non_object_payload_is_refused(self, tmp_path):
         """verify_envelope only checks the DSSE signature, not the
@@ -1956,7 +1540,6 @@ class TestHealth:
         "unsigned_claims",
         "dangling_supports",
         "convergence_errors",
-        "convergence_retry_pending",
     }
 
     def test_empty_graph_reports_zeros(self, tmp_path):
@@ -1969,7 +1552,6 @@ class TestHealth:
             assert h["unsigned_claims"] == 0
             assert h["dangling_supports"] == 0
             assert h["convergence_errors"] == 0
-            assert h["convergence_retry_pending"] == 0
 
     def test_claim_count_grows_with_inserts(self, tmp_path):
         with mareforma.open(tmp_path) as graph:
@@ -2098,6 +1680,6 @@ class TestQueryDocstringRefutationExample:
             with pytest.raises(TypeError):
                 g.search("gene", refutation_filter="clean")
             rows = g.query(
-                "gene", refutation_filter="clean", include_unverified=True,
+                "gene", refutation_filter="clean",
             )
             assert isinstance(rows, list)

@@ -79,7 +79,7 @@ class TestQueryLikeWildcardEscape:
     ) -> None:
         with mareforma.open(tmp_path) as graph:
             self._seed(graph)
-            results = graph.query("%", include_unverified=True)
+            results = graph.query("%")
             assert results == [], (
                 "query('%') should match nothing (no literal % in any "
                 f"row's text), got {len(results)} hits"
@@ -90,7 +90,7 @@ class TestQueryLikeWildcardEscape:
     ) -> None:
         with mareforma.open(tmp_path) as graph:
             self._seed(graph)
-            results = graph.query("_", include_unverified=True)
+            results = graph.query("_")
             assert results == []
 
     def test_empty_string_still_matches_all(self, tmp_path: Path) -> None:
@@ -99,7 +99,7 @@ class TestQueryLikeWildcardEscape:
         # as wildcards, not the empty case.
         with mareforma.open(tmp_path) as graph:
             self._seed(graph)
-            results = graph.query("", include_unverified=True)
+            results = graph.query("")
             assert len(results) == 3
 
     def test_literal_percent_in_text_matched(self, tmp_path: Path) -> None:
@@ -112,7 +112,7 @@ class TestQueryLikeWildcardEscape:
                 "no percentage reported here",
                 classification="ANALYTICAL", generated_by="X",
             )
-            results = graph.query("47%", include_unverified=True)
+            results = graph.query("47%")
             assert len(results) == 1
             assert "47%" in results[0]["text"]
 
@@ -126,5 +126,5 @@ class TestQueryLikeWildcardEscape:
                 "no special chars here",
                 classification="ANALYTICAL", generated_by="X",
             )
-            results = graph.query("checkpoint_step", include_unverified=True)
+            results = graph.query("checkpoint_step")
             assert len(results) == 1

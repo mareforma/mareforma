@@ -30,8 +30,6 @@ from .errors import (
 )
 from .core import (
     open_db,
-    _CorroborationIndex,
-    _promotion_window,
     _compute_prev_hash,
     _is_claim_id,
     _refuse_llm_contradiction_issuer,
@@ -1127,7 +1125,11 @@ def restore(
                 c_created_at = _required_field(c, "created_at", ctx_c)
                 c_updated_at = _required_field(c, "updated_at", ctx_c)
                 c_status = _required_field(c, "status", ctx_c)
-                target_level = _required_field(c, "support_level", ctx_c)
+                # ``support_level`` is not read. A file written before the
+                # ladder was removed still carries one, and restoring such a
+                # file is the whole point of keeping the reader tolerant: the
+                # word is ignored rather than required, so an older backup
+                # restores and a newer one that never had the key restores too.
                 _verify_claim_signatures_on_restore(
                     conn, claim_id, c, validators_section, signed_mode,
                     _signing, unsigned_in_signed_mode,
@@ -1193,37 +1195,29 @@ def restore(
                     _extract_validation_signer_keyid(val_sig)
                     if val_sig else None
                 )
-                # The INSERT trigger only accepts PRELIMINARY or
-                # ESTABLISHED as initial values, REPLICATED is reached
-                # via the convergence detection path inside add_claim,
-                # never as a born state. Restore inserts REPLICATED rows
-                # as PRELIMINARY first, then UPDATEs into REPLICATED.
-                # The UPDATE trigger accepts PRELIMINARY → REPLICATED.
-                insert_level = (
-                    "PRELIMINARY" if target_level == "REPLICATED"
-                    else target_level
-                )
-                # ESTABLISHED rows born here carry validation_signature
-                # (the CHECK constraint and the INSERT trigger both
-                # require it). PRELIMINARY-during-promotion rows must
-                # NOT carry validated_by / validated_at, the INSERT
-                # trigger refuses that combination. We hold those
-                # back to the UPDATE phase below for REPLICATED.
-                insert_validated_by = (
-                    c.get("validated_by") if insert_level == "ESTABLISHED"
-                    else None
-                )
-                insert_validated_at = (
-                    c.get("validated_at") if insert_level == "ESTABLISHED"
-                    else None
-                )
-                insert_validation_signature = (
-                    val_sig if insert_level == "ESTABLISHED" else None
-                )
-                insert_validator_keyid = (
-                    validator_keyid if insert_level == "ESTABLISHED"
-                    else None
-                )
+                # The validation fields go in together or not at all, and a
+                # file that carries one without the other is refused rather
+                # than tidied. Dropping the name quietly would restore a claim
+                # somebody was told had been validated as one nobody had
+                # signed off on, and every other disagreement in this file is
+                # reported rather than edited away.
+                if not val_sig and (
+                    c.get("validated_by") or c.get("validated_at")
+                ):
+                    raise RestoreError(
+                        f"claim {claim_id} says a human validated it "
+                        f"({c.get('validated_by') or c.get('validated_at')!r}) "
+                        "and carries no validation envelope to prove one did. "
+                        "A validation nobody signed is not a validation, so "
+                        "this cannot be rebuilt as written. Nothing has been "
+                        "changed. Remove the field or restore the envelope "
+                        "beside it.",
+                        kind="claim_unverified",
+                    )
+                insert_validated_by = c.get("validated_by") if val_sig else None
+                insert_validated_at = c.get("validated_at") if val_sig else None
+                insert_validation_signature = val_sig
+                insert_validator_keyid = validator_keyid if val_sig else None
                 # Denormalize ev_* from the canonical evidence_dict so
                 # the row's CHECK constraints + the evidence_json blob
                 # stay aligned. statement_cid is rebuilt from the same
@@ -1301,7 +1295,7 @@ def restore(
                     conn.execute(
                         """
                         INSERT INTO claims
-                            (claim_id, text, classification, support_level,
+                            (claim_id, text, classification,
                              idempotency_key, validated_by, validated_at,
                              status, source_name, generated_by,
                              supports_json, contradicts_json,
@@ -1313,17 +1307,15 @@ def restore(
                              ev_risk_of_bias, ev_inconsistency,
                              ev_indirectness, ev_imprecision, ev_pub_bias,
                              evidence_json, statement_cid,
-                             convergence_retry_needed,
                              predicate_payload, original_signature_bundle,
                              observed_grounding,
                              created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                ?, ?, ?, ?, ?, ?, ?, ?)
+                                ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             claim_id, c_text, c_classification,
-                            insert_level,
                             c.get("idempotency_key"),
                             insert_validated_by, insert_validated_at,
                             c_status, c.get("source_name"),
@@ -1362,7 +1354,6 @@ def restore(
                             ),
                             evidence_json_str,
                             statement_cid_str,
-                            1 if c.get("convergence_retry_needed") else 0,
                             _restore_predicate_payload(c, claim_id),
                             _restore_original_signature_bundle(c, claim_id),
                             _serialize_observed_grounding(observed_grounding),
@@ -1370,9 +1361,9 @@ def restore(
                         ),
                     )
                 except sqlite3.IntegrityError as exc:
-                    # Trigger refusals (illegal initial support_level,
+                    # Trigger refusals,
                     # ESTABLISHED without validation_signature) and CHECK
-                    # violations (bad classification / support_level /
+                    # violations (bad classification /
                     # status enum, duplicate prev_hash) all surface here.
                     # Translate to RestoreError so callers honour the
                     # documented contract.
@@ -1380,25 +1371,6 @@ def restore(
                         f"Claim {claim_id} could not be restored: {exc}",
                         kind="claim_unverified",
                     ) from exc
-                if target_level == "REPLICATED":
-                    # PRELIMINARY → REPLICATED, the UPDATE trigger
-                    # accepts the transition. No validation_signature
-                    # required on REPLICATED rows. Wrap the UPDATE so
-                    # any trigger refusal surfaces as RestoreError.
-                    try:
-                        with _promotion_window(conn):
-                            conn.execute(
-                                "UPDATE claims SET support_level = 'REPLICATED' "
-                                "WHERE claim_id = ?",
-                                (claim_id,),
-                            )
-                    except sqlite3.IntegrityError as exc:
-                        raise RestoreError(
-                            f"Claim {claim_id} promote-to-REPLICATED "
-                            f"refused: {exc}",
-                            kind="claim_unverified",
-                        ) from exc
-
             # Verdict-table replay. Each verdict envelope carries its
             # own signature binding; we verify before INSERT. The
             # contradiction trigger fires on the contradiction INSERT
@@ -1629,12 +1601,6 @@ def restore(
             # drop, running the one verifier the live read path uses so both
             # paths agree on the same graph.
             _verify_gate_inputs_reconstruct(conn)
-
-            # Refuse a REPLICATED level no distinct-signer corroboration backs.
-            # support_level is not signed, so this runs after the full graph +
-            # verdicts are in place and re-derives the promotion invariant from
-            # signed material (supports edges + verified asserter identities).
-            _verify_replicated_corroboration(conn)
 
             conn.execute("COMMIT")
         except Exception:
@@ -1941,57 +1907,6 @@ def _verify_gate_inputs_reconstruct(conn: sqlite3.Connection) -> None:
             verify_gate_inputs_or_refuse(conn, r["content_id"], cache=cache)
         except GateInputRefused as exc:
             raise RestoreError(str(exc), kind="claim_unverified") from exc
-
-
-def _verify_replicated_corroboration(conn: sqlite3.Connection) -> None:
-    """Refuse a restored promotion no signed evidence backs.
-
-    ``support_level`` is not a signed field, so a tampered claims.toml can flip
-    a lone PRELIMINARY claim to REPLICATED while its signature still verifies.
-    :class:`_CorroborationIndex` re-derives the rung from signed material, the
-    same rule the live read path applies before it serves a row; here an
-    unbacked row fails the whole restore rather than degrading one read.
-
-    A project whose root-signed policy requires strict promotion is held to it
-    here too: a claim created after that declaration must carry data, and so
-    must the peer backing it. Claims created before the declaration keep their
-    level, the policy is not retroactive, and both timestamps are signed so the
-    grandfathering window cannot be widened, neither by editing the backup nor
-    by declaring a second, unrelated rule later.
-    """
-    rows = conn.execute(
-        "SELECT claim_id, support_level, asserter_keyid, supports_json, "
-        "artifact_hash, observed_grounding, transparency_logged, "
-        "created_at, validation_signature FROM claims "
-        "WHERE support_level IN ('REPLICATED', 'ESTABLISHED')"
-    ).fetchall()
-    if not rows:
-        return
-    index = _CorroborationIndex(conn, {})
-    for r in rows:
-        failure = index.failure(r)
-        if failure is None:
-            continue
-        if failure == "strict_promotion_without_data":
-            raise RestoreError(
-                f"Claim {r['claim_id']} is stored as {r['support_level']} with "
-                "no artifact_hash, which this project's root-signed "
-                "strict-promotion policy forbids for a claim created after "
-                "the declaration.",
-                kind="policy_violation",
-            )
-        raise RestoreError(
-            f"Claim {r['claim_id']} is stored as {r['support_level']} but no "
-            "distinct-signer corroboration on a shared ESTABLISHED anchor "
-            "backs the REPLICATED rung it stands on: a peer "
-            "must carry a different artifact hash, and neither side may "
-            "carry a non-promoting grounding verdict. A replication verdict "
-            "naming the claim does not settle it either: a verdict names "
-            "every member of its cluster and promotes only the qualifying "
-            "ones. The support level is not a signed field; this one is "
-            "unverifiable and the backup may be tampered.",
-            kind="claim_unverified",
-        )
 
 
 def _gate_replayed_verdict_issuer(

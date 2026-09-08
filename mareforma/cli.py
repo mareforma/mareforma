@@ -498,41 +498,12 @@ def status_cmd(as_json: bool) -> None:
         f"{report.claims_contradicted} contradicted"
     )
 
-    # Read the computed flag rather than re-deriving the same predicate here.
-    # It was computed and no surface read it, which is how the two copies of one
-    # rule start to disagree about when the disclosure applies.
-    if report.support_level_retired:
-        click.echo("  Support level breakdown:")
-        for level in ("ESTABLISHED", "REPLICATED", "PRELIMINARY"):
-            count = report.support_level_breakdown.get(level, 0)
-            if count:
-                bar = "█" * min(count, 20)
-                click.echo(f"    {level:14} {bar}  {count}")
-        click.echo(
-            "  " + click.style(
-                "The support ladder (PRELIMINARY / REPLICATED / ESTABLISHED) is "
-                "a retired axis, removed in v0.4.0. A project stores one even if "
-                "no level was ever named. Read the computed status instead.",
-                fg="yellow",
-            )
-        )
-
     if report.failed_verification:
         click.echo(
             "  " + click.style(
                 f"Unverified promotions: {report.failed_verification} "
                 "(support level not backed by signed material)",
                 fg="red", bold=True,
-            )
-        )
-
-    if report.convergence_retry_pending:
-        click.echo(
-            "  " + click.style(
-                f"Convergence retry pending: {report.convergence_retry_pending} "
-                "(a promotion check was swallowed; run "
-                "graph.refresh_convergence() to re-run it)",
-                fg="yellow",
             )
         )
 
@@ -2104,11 +2075,11 @@ def claim_list(status, source_name, limit, as_json):
     click.echo(click.style(heading, bold=True, fg="cyan"))
     click.echo("")
     for c in claims:
-        # A high-trust row whose signature no longer re-verifies still prints,
-        # so an auditor can see it, but never as if its level were sound.
+        # A row whose signature no longer re-verifies still prints, so an
+        # auditor can see it, but never without saying so.
         mark = "" if c.get("verified", True) else " UNVERIFIED"
         click.echo(
-            f"  [{c['status']:10}] [{c.get('support_level', 'PRELIMINARY'):12}] "
+            f"  [{c['status']:10}] "
             f"[{c.get('classification', 'INFERRED'):10}] {c['text'][:60]}{mark}"
         )
         click.echo(f"             id: {c['claim_id']}")
@@ -2147,15 +2118,12 @@ def claim_show(claim_id, as_json):
     click.echo(f"  id             : {c['claim_id']}")
     click.echo(f"  text           : {c['text']}")
     click.echo(f"  classification : {c.get('classification', 'INFERRED')}")
-    # The support level never prints alone on a row whose signature no longer
-    # re-verifies. `claim list` already marks that row UNVERIFIED, and `claim
-    # show` is the command an auditor runs on the claim they suspect, so it is
-    # the last place that should print REPLICATED with nothing beside it.
-    level = c.get("support_level", "PRELIMINARY")
     if not c.get("verified", True):
-        level += "  UNVERIFIED (the signature no longer re-verifies, so this "
-        level += "level is not backed; run `mareforma verify` on it)"
-    click.echo(f"  support_level  : {level}")
+        click.echo("  " + click.style(
+            "UNVERIFIED: the signed material does not check out on read; run "
+            "`mareforma verify` on this claim",
+            fg="yellow",
+        ))
     click.echo(f"  generated_by   : {c.get('generated_by', 'agent')}")
     click.echo(f"  status         : {c['status']}")
     if c.get("source_name"):
@@ -2261,7 +2229,7 @@ def claim_validate(claim_id, validated_by):
         _err(str(exc))
         sys.exit(1)
     except ValueError as exc:
-        # Mareforma ValueErrors carry actionable text (wrong support_level,
+        # Mareforma ValueErrors carry actionable text (wrong classification,
         # signer not enrolled, no signer loaded). Pass through verbatim.
         _err(str(exc))
         sys.exit(1)

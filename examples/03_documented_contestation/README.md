@@ -45,7 +45,7 @@ _, assert_finding_c = [tool(fn) for fn in graph.get_tools(
 # An ESTABLISHED upstream both lab agents converge on (seed=True).
 upstream_ref = graph.assert_claim(
     "Prior literature: Treatment X is studied in population P",
-    classification="DERIVED", generated_by="agent_seed/literature", seed=True,
+    classification="DERIVED", generated_by="agent_seed/literature",
 )
 # Same upstream, distinct signing keys → REPLICATED fires.
 consensus_a = graph.assert_claim(

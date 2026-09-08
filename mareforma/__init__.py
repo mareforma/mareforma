@@ -45,7 +45,6 @@ def open(  # noqa: A001
     trust_insecure_rekor: bool = False,
     rekor_log_pubkey_pem: "bytes | None" = None,
     rekor_log_pubkey_path: "str | Path | None" = None,
-    strict_promotion: bool = False,
     validator_type: str = "human",
 ) -> "EpistemicGraph":
     """Open the epistemic graph at *path* and return an EpistemicGraph.
@@ -109,22 +108,6 @@ def open(  # noqa: A001
         PEM file. The two are mutually exclusive. If neither is
         supplied AND ``<root>/.mareforma/rekor_log_pubkey.pem`` exists
         from a prior open(), it is loaded automatically.
-    strict_promotion:
-        When True, REPLICATED promotion also requires non-NULL
-        ``artifact_hash`` on BOTH sides of a converging pair, an operator
-        who wants data-distinctness as a hard gate, not just distinct
-        signers. Off by default (the default rule promotes on the
-        distinct-signer axis alone; absent data never blocks). Opt-in and
-        additive: it never loosens the default, only adds the data-presence
-        requirement.
-
-        Passing True DECLARES the rule on the project: the root validator
-        signs a one-way ``project_policy`` row, and every later opener,
-        including the CLI, promotes under it whether or not it passes the
-        flag. That makes it a property of the project rather than of the
-        handle. Only the root key can declare it, so a keyless or non-root
-        caller raises :class:`mareforma.ProjectPolicyError` instead of
-        receiving a gate that binds nothing but its own writes.
     validator_type:
         ``'human'`` or ``'llm'``, the self-declared type recorded if this key
         auto-enrolls as the project's root validator. Ignored once a root
@@ -368,7 +351,6 @@ def open(  # noqa: A001
             trust_insecure_rekor=trust_insecure_rekor,
             rekor_log_pubkey_pem=rekor_log_pubkey_pem,
             rekor_key_provenance=rekor_key_provenance,
-            strict_promotion=strict_promotion,
             validator_type=validator_type,
         )
     except BaseException:
@@ -377,7 +359,7 @@ def open(  # noqa: A001
 
 
 def schema() -> dict:
-    """Return the mareforma epistemic schema: valid values and state transitions.
+    """Return the mareforma epistemic schema: the valid values a claim can hold.
 
     Intended for agents that need to reason about the system before calling it.
     The returned dict is stable across patch releases; fields are only added,
@@ -388,60 +370,30 @@ def schema() -> dict:
     dict with keys:
         schema_version  : int, schema version stored in graph.db
         classifications : list[str], valid classification values
-        support_levels  : list[str], valid support_level values, ordered low→high
         statuses        : list[str], valid claim status values
         defaults        : dict, default value for each field at assert_claim() time
-        transitions     : list[dict], valid support_level state transitions
 
     Example
     -------
     >>> s = mareforma.schema()
     >>> s["classifications"]
     ['INFERRED', 'ANALYTICAL', 'DERIVED']
-    >>> s["transitions"]
-    [{'from': 'PRELIMINARY', 'to': 'REPLICATED', ...}, ...]
     """
     from mareforma.db import (
         _SCHEMA_VERSION,
         VALID_CLASSIFICATIONS,
-        VALID_SUPPORT_LEVELS,
         VALID_STATUSES,
     )
 
     return {
         "schema_version": _SCHEMA_VERSION,
         "classifications": list(VALID_CLASSIFICATIONS),
-        "support_levels": list(VALID_SUPPORT_LEVELS),
         "statuses": list(VALID_STATUSES),
         "defaults": {
             "classification": "INFERRED",
-            "support_level": "PRELIMINARY",
             "status": "open",
             "generated_by": "agent",  # EpistemicGraph default
         },
-        "transitions": [
-            {
-                "from": "PRELIMINARY",
-                "to": "REPLICATED",
-                "trigger": "automatic",
-                "condition": (
-                    "≥2 claims signed by different validator keys (distinct "
-                    "asserter keyids, the per-claim signing key, not the agent "
-                    "label) support the same ESTABLISHED upstream claim_id in "
-                    "supports[]; each claim must be transparency-logged, "
-                    "grounded, and free of a signed contradiction verdict"
-                ),
-            },
-            {
-                "from": "REPLICATED",
-                "to": "ESTABLISHED",
-                "trigger": "validator",
-                "condition": (
-                    "graph.validate(claim_id) by an enrolled validator whose "
-                    "key signed neither converging claim, no automated path"
-                ),
-            },
-        ],
     }
 
 

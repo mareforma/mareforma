@@ -9,8 +9,6 @@ CREATE TABLE IF NOT EXISTS claims (
     text            TEXT NOT NULL,
     classification  TEXT NOT NULL DEFAULT 'INFERRED'
                         CHECK (classification IN ('INFERRED', 'ANALYTICAL', 'DERIVED')),
-    support_level   TEXT NOT NULL DEFAULT 'PRELIMINARY'
-                        CHECK (support_level IN ('PRELIMINARY', 'REPLICATED', 'ESTABLISHED')),
     idempotency_key TEXT,
     validated_by    TEXT,
     validated_at    TEXT,
@@ -29,7 +27,7 @@ CREATE TABLE IF NOT EXISTS claims (
                         CHECK (transparency_logged IN (0, 1)),
     validation_signature TEXT,
     -- Denormalized from validation_signature's payload for indexable
-    -- reputation queries. NULL for non-ESTABLISHED rows. The envelope
+    -- reputation queries. NULL on rows nobody validated. The envelope
     -- remains authoritative; if this column ever drifts from the
     -- envelope it is the envelope that wins.
     validator_keyid TEXT,
@@ -77,18 +75,6 @@ CREATE TABLE IF NOT EXISTS claims (
     -- IS a legitimate mutation, gated by the trigger that only fires
     -- on a signed verdict INSERT from an enrolled validator.
     t_invalid       INTEGER,
-    -- Convergence-detection retry flag. Set to 1 by
-    -- _maybe_update_replicated when a SQLite trigger or contention
-    -- pattern causes the post-INSERT promotion check to fail. The
-    -- mareforma swallows the error so writes never crash, but a
-    -- swallowed error leaves the claim stuck at PRELIMINARY forever
-    -- unless someone retries. EpistemicGraph.refresh_convergence()
-    -- walks every flagged row, re-runs detection, and clears the flag
-    -- on success. Like ``unresolved``, this column is OUTSIDE the
-    -- claims_signed_fields_no_laundering watch list, flipping it is
-    -- a legitimate operational mutation, not predicate tampering.
-    convergence_retry_needed INTEGER NOT NULL DEFAULT 0
-                            CHECK (convergence_retry_needed IN (0, 1)),
     -- Predicate-type-specific structured payload. Adapters that ship
     -- a distinct predicateType (tool-call/v1, ingested-trace/v1,
     -- gemini/*/v1, wet-lab-assay/*, review/v1, elo-match/v1, ...)
@@ -132,12 +118,16 @@ CREATE TABLE IF NOT EXISTS claims (
     observed_grounding TEXT,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
-    -- ESTABLISHED rows must carry a signed validation envelope. The
-    -- trigger below also enforces this on UPDATE; the CHECK is the
-    -- row-level belt to the trigger's transition-level suspenders.
-    -- ``validated_by`` is a display label (the cryptographic identity
-    -- lives in ``validation_signature``) and may be NULL.
-    CHECK (support_level != 'ESTABLISHED' OR validation_signature IS NOT NULL)
+
+    -- A row cannot say a human validated it without the envelope that proves
+    -- one did. ``validated_by`` and ``validated_at`` are display fields
+    -- denormalised out of the signed payload; ``validation_signature`` is the
+    -- payload. The ladder's CHECK used to cover this from the other side, by
+    -- requiring the envelope on any ESTABLISHED row, and it went with the
+    -- level. The claim it was really making has nothing to do with levels and
+    -- survives them: a validation nobody signed is not a validation.
+    CHECK (validation_signature IS NOT NULL
+           OR (validated_by IS NULL AND validated_at IS NULL))
 );
 
 CREATE INDEX IF NOT EXISTS idx_claims_status
@@ -146,20 +136,14 @@ CREATE INDEX IF NOT EXISTS idx_claims_source
     ON claims(source_name);
 CREATE INDEX IF NOT EXISTS idx_claims_generated_by
     ON claims(generated_by);
-CREATE INDEX IF NOT EXISTS idx_claims_support_level
-    ON claims(support_level);
 CREATE INDEX IF NOT EXISTS idx_claims_unresolved
     ON claims(unresolved);
 CREATE INDEX IF NOT EXISTS idx_claims_transparency_logged
     ON claims(transparency_logged);
 CREATE INDEX IF NOT EXISTS idx_claims_artifact_hash
     ON claims(artifact_hash) WHERE artifact_hash IS NOT NULL;
--- Partial index on flagged retries only, refresh_convergence iterates
--- this set; the index keeps the walk O(retry-pending) rather than O(N).
-CREATE INDEX IF NOT EXISTS idx_claims_convergence_retry
-    ON claims(claim_id) WHERE convergence_retry_needed = 1;
--- Reputation reads aggregate ESTABLISHED claims per validator. Partial
--- on NOT NULL keeps index storage proportional to ESTABLISHED-only rows.
+-- Reputation reads aggregate validated claims per validator. Partial on NOT
+-- NULL keeps index storage proportional to the rows that carry a validator.
 CREATE INDEX IF NOT EXISTS idx_claims_validator_keyid
     ON claims(validator_keyid) WHERE validator_keyid IS NOT NULL;
 -- Independence counting and REPLICATED distinctness filter on a non-NULL
@@ -187,40 +171,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_claims_prev_hash
 -- `_state_error_from_integrity` keys off the suffix shape; downstream
 -- callers that need to know "what NEW value was rejected" can inspect
 -- the row's pre-image directly.
-CREATE TRIGGER IF NOT EXISTS claims_insert_state_check
-BEFORE INSERT ON claims
-BEGIN
-    SELECT CASE
-        WHEN NEW.support_level NOT IN ('PRELIMINARY', 'ESTABLISHED') THEN
-            RAISE(ABORT, 'mareforma:state:insert_invalid_level')
-        WHEN NEW.support_level = 'ESTABLISHED' AND
-             NEW.validation_signature IS NULL THEN
-            RAISE(ABORT, 'mareforma:state:insert_established_without_validation')
-        WHEN NEW.support_level = 'PRELIMINARY' AND
-             (NEW.validated_by IS NOT NULL OR NEW.validated_at IS NOT NULL) THEN
-            RAISE(ABORT, 'mareforma:state:insert_preliminary_with_validation')
-    END;
-END;
-
-CREATE TRIGGER IF NOT EXISTS claims_update_state_check
-BEFORE UPDATE OF support_level ON claims
-BEGIN
-    SELECT CASE
-        WHEN OLD.support_level = 'PRELIMINARY' AND
-             NEW.support_level NOT IN ('PRELIMINARY', 'REPLICATED') THEN
-            RAISE(ABORT, 'mareforma:state:illegal_transition:from_preliminary')
-        WHEN OLD.support_level = 'REPLICATED' AND
-             NEW.support_level NOT IN ('REPLICATED', 'ESTABLISHED') THEN
-            RAISE(ABORT, 'mareforma:state:illegal_transition:from_replicated')
-        WHEN OLD.support_level = 'ESTABLISHED' AND
-             NEW.support_level != 'ESTABLISHED' THEN
-            RAISE(ABORT, 'mareforma:state:illegal_transition:from_established')
-        WHEN NEW.support_level = 'ESTABLISHED' AND
-             NEW.validation_signature IS NULL THEN
-            RAISE(ABORT, 'mareforma:state:established_without_validation')
-    END;
-END;
-
 -- Retracted is terminal. Without this, an adversary could assert a
 -- born-retracted claim, flip it back to 'open' via update_claim (a pure
 -- status mutation never triggers a REPLICATED re-check), and then ride
@@ -565,56 +515,6 @@ BEGIN
 END"""
 
 
-# support_level is the trust ladder, and it is the one column the honest paths
-# rewrite after signing, so it cannot join the list above: the level is derived
-# state, promoted later than the signature that binds the claim's content. What
-# it can be held to is the writer. The two transitions the state machine permits
-# (PRELIMINARY -> REPLICATED, REPLICATED -> ESTABLISHED) are legal only inside a
-# promotion window, and only ``core._promotion_window`` opens one. A statement
-# from anywhere else is refused, on a signed row, for the same reason the
-# laundering trigger refuses one: the row carries a commitment the writer did
-# not make. The marker is a temp table, so it is per connection: a co-resident
-# process opening graph.db with plain sqlite3 has no temp schema of its own to
-# find it in and is refused.
-#
-# The marker has to be state, not a connection-scoped SQL function. Trigger text
-# is durable schema and SQLite resolves the names in it when it compiles the
-# UPDATE, so a function only this release registers makes support_level
-# unwritable by every other connection that opens the file, an older mareforma
-# included, instead of refusing the two guarded transitions. A temp table cannot
-# be named directly from a trigger (cross-schema references are refused at CREATE
-# time), so the WHEN clause probes for it through pragma_table_info, a
-# table-valued pragma any connection can compile since SQLite 3.16, well under
-# the 3.30 floor open_db enforces.
-#
-# The marker is a speed bump, not the guarantee: a writer with SQL access can
-# create the same temp table, or drop this trigger outright. The guarantee is on
-# the read path, where a level above PRELIMINARY has to be backed by the signed
-# evidence that earns it (``core._CorroborationIndex``). This trigger keeps a
-# stray write from reaching that check at all.
-#
-# Reconciled onto existing graphs by the same sqlite_master comparison as the
-# laundering trigger, so keep the text a single CREATE statement.
-_PROMOTION_MARKER_TABLE = "mareforma_promotion_open"
-
-_PROMOTION_TRIGGER_NAME = "claims_signed_promotion_backed"
-
-_PROMOTION_TRIGGER_SQL = f"""\
-CREATE TRIGGER {_PROMOTION_TRIGGER_NAME}
-BEFORE UPDATE OF support_level ON claims
-WHEN OLD.signature_bundle IS NOT NULL
-  AND (
-        (OLD.support_level = 'PRELIMINARY' AND NEW.support_level = 'REPLICATED')
-     OR (OLD.support_level = 'REPLICATED' AND NEW.support_level = 'ESTABLISHED')
-  )
-  AND NOT EXISTS (
-        SELECT 1 FROM pragma_table_info('{_PROMOTION_MARKER_TABLE}', 'temp')
-  )
-BEGIN
-    SELECT RAISE(ABORT, 'mareforma:append_only:promotion_unmarked');
-END"""
-
-
 # findings and evidence_lines are the two gate-input tables the read path reads
 # to derive a proposition's status, and neither carried a write guard: an UPDATE
 # could re-point a finding's plan or rewrite a line's data_id, and a DELETE could
@@ -860,7 +760,6 @@ END"""
 # where a definition is written down.
 _AUTHORED_TRIGGERS = (
     (_SIGNED_FIELDS_TRIGGER_NAME, _SIGNED_FIELDS_TRIGGER_SQL),
-    (_PROMOTION_TRIGGER_NAME, _PROMOTION_TRIGGER_SQL),
     (_FINDINGS_APPEND_ONLY_TRIGGER_NAME, _FINDINGS_APPEND_ONLY_TRIGGER_SQL),
     (_FINDINGS_NO_DELETE_TRIGGER_NAME, _FINDINGS_NO_DELETE_TRIGGER_SQL),
     (
@@ -923,8 +822,6 @@ _ADDITIVE_TABLES_SQL = """
 -- schema-if-not-exists-hides-constraint-change trap: statements that run only
 -- for a fresh database never reach a graph written by an earlier release).
 CREATE INDEX IF NOT EXISTS idx_claims_read_order ON claims(
-    CASE support_level WHEN 'ESTABLISHED' THEN 3
-         WHEN 'REPLICATED' THEN 2 ELSE 1 END DESC,
     created_at DESC
 );
 
@@ -1494,7 +1391,7 @@ _EXPECTED_TRIGGER_TABLES: "dict[str, str]" = {
 # Explicit column list, avoids SELECT * coupling to schema changes.
 # Source of truth for the column-presence check in open_db().
 _CLAIM_COLUMNS = (
-    "claim_id", "text", "classification", "support_level",
+    "claim_id", "text", "classification",
     "idempotency_key", "validated_by", "validated_at",
     "status", "source_name", "generated_by",
     "supports_json", "contradicts_json",
@@ -1514,7 +1411,6 @@ _CLAIM_COLUMNS = (
     # Statement v1 content identifier + verdict-derived invalidation.
     "statement_cid", "t_invalid",
     # Convergence-detection retry queue.
-    "convergence_retry_needed",
     # Adapter-specific structured predicate payload (queryable
     # denormalisation of the signed envelope's predicate body).
     "predicate_payload",
