@@ -67,21 +67,60 @@ def test_the_example_runs_end_to_end(name: str, tmp_path: Path) -> None:
     )
 
 
-def test_every_self_contained_example_is_listed() -> None:
+# Examples this file does not run, each with the reason and where it is held
+# instead. Every entry has to be one or the other: an example nothing accounts
+# for is a page that rots quietly.
+_ACCOUNTED_ELSEWHERE = {
+    "05_drug_target_provenance": "needs an API key; exits early without one",
+    "06_ci_verify": "a CI recipe, no script; the exit codes it relies on are "
+                    "pinned by test_exit_code_corpus and test_cli_trust",
+    "07_silent_failure_catch": "the demo gate; run under the observer by "
+                               "test_examples_silent_failure, which needs pandas",
+}
+
+
+def test_every_example_is_accounted_for() -> None:
     """A new example is covered the day it lands, not the day someone recalls.
 
-    The list above is the thing that rots: an example added later runs nowhere
-    until a person remembers this file. So the directory is the authority and
-    the list has to account for every entry in it, either by running it or by
-    naming it as needing something a test cannot supply.
+    The lists above are the thing that rots. An earlier version of this guard
+    only looked for a script named after its directory, so the two examples
+    that are not named that way, including the demo gate the README leads with,
+    were skipped in silence and the guard still passed. It reads the directory
+    now and every entry has to be either run here or named above.
+
+    Reading the directory is also what makes it the one test here that cannot
+    run from the sdist. The archive ships the suite and not the examples, so
+    there is no tree to read and nothing to account for; the siblings skip per
+    example on the same absence. Without this the guard raises
+    ``FileNotFoundError`` in the sdist job, which is the only leg that runs the
+    suite from the archive.
     """
-    needs_more_than_a_temp_dir = {"05_drug_target_provenance"}
-    present = {
-        d.name for d in EXAMPLES.iterdir()
-        if d.is_dir() and _script(d.name).is_file()
-    }
-    unaccounted = sorted(present - set(_SELF_CONTAINED) - needs_more_than_a_temp_dir)
-    assert not unaccounted, (
-        f"examples nothing runs: {unaccounted}. Add each to the list above, or "
-        "to the set of ones needing more than a temporary directory."
+    if not EXAMPLES.is_dir():
+        pytest.skip("the examples tree is not in this checkout")
+    present = {d.name for d in EXAMPLES.iterdir() if d.is_dir()}
+    unaccounted = sorted(
+        present - set(_SELF_CONTAINED) - set(_ACCOUNTED_ELSEWHERE)
     )
+    assert not unaccounted, (
+        f"examples nothing accounts for: {unaccounted}. Add each to the list "
+        "this file runs, or to _ACCOUNTED_ELSEWHERE with where it is held."
+    )
+
+
+def test_the_examples_named_as_held_elsewhere_really_are() -> None:
+    """A reason written in a comment is not a test.
+
+    Each entry names where its example is covered. If that file goes, the
+    example is unaccounted for again and this says so rather than the entry
+    quietly becoming a promise nobody keeps.
+    """
+    holders = {
+        "06_ci_verify": ("test_exit_code_corpus.py", "test_cli_trust.py"),
+        "07_silent_failure_catch": ("test_examples_silent_failure.py",),
+    }
+    here = Path(__file__).resolve().parent
+    for example, files in holders.items():
+        for name in files:
+            assert (here / name).is_file(), (
+                f"{example} is recorded as held by {name}, which is gone"
+            )

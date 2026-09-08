@@ -9,8 +9,8 @@ migration.
 Independence is a distinct-signer heuristic, not proof: two supporting lines
 count as independent support iff they come from different signers (the claim's
 ``asserter_keyid``) AND different datasets (``data_id``). This is the same WHO
-axis the REPLICATED promotion query keys on, so promotion and trust counting
-agree by construction. One signer contributes at most one independent support
+axis the independence count keys on, so both read the graph the same way.
+One signer contributes at most one independent support
 (so a single signer cannot self-certify) and at most one independent refute;
 re-running the identical dataset under a new signer adds nothing. Legacy lines
 whose claim predates the keyid column fall back to the retired ``generated_by``

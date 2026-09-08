@@ -680,8 +680,9 @@ def _witnessing_property(
             tier=Tier.COMPUTED,
             value="not witnessed",
             residual=(
-                "signed but no transparency-log inclusion; the log was not enabled, "
-                "so the top of the support ladder is unreachable (it requires witnessing)"
+                "signed but no transparency-log inclusion; the log was not "
+                "enabled, so nothing outside this machine saw the claim when it "
+                "was made"
             ),
         )
     return TrustProperty(
@@ -721,9 +722,9 @@ def build_trust_map(
 
     n_roots = len(_validators.enrollment_roots(conn))
     has_inclusion = _has_rekor_inclusion(conn, claim_id)
-    # Attributability must reflect an ACTUAL signature check, not the promotion
-    # gate: get_claim's ``verified`` passes PRELIMINARY rows through True without
-    # re-verifying, so trusting it would make the map assert "signature
+    # Attributability must reflect an ACTUAL signature check of its own. It is
+    # asked here rather than read off get_claim so the map cannot inherit a
+    # verdict computed for another purpose and assert "signature
     # re-verified on read" for a signed PRELIMINARY claim it never checked (and
     # miss a tamper). Run the audit-grade, tier-independent re-verification here,
     # the same one ``mareforma verify`` uses, so the standalone map is honest.

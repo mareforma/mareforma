@@ -107,15 +107,6 @@ class ObservedGrounding(str, Enum):
     UNGROUNDED = "UNGROUNDED"
     OPAQUE = "OPAQUE"
 
-    def promotes(self) -> bool:
-        """Only GROUNDED may ever count toward support-level promotion.
-
-        UNGROUNDED and OPAQUE are both non-promoting: a finding whose data did
-        not observably flow, or whose flow could not be observed, must not lift
-        a proposition up the support ladder. Grounding is a necessary floor,
-        never sufficient, promotion still needs the independent-signer counts.
-        """
-        return self is ObservedGrounding.GROUNDED
 
 
 def as_int(value: object) -> int:
@@ -135,8 +126,8 @@ def _read_grounding(value: object, reason: str) -> tuple["ObservedGrounding", st
     """Coerce a receipt's grounding field, degrading an unknown state to OPAQUE.
 
     A future axis state, a typo, or an explicit null reads as OPAQUE (the
-    conservative, non-promoting bucket) with the unreadable value named in the
-    reason, so the blind spot is stated rather than either abandoned or promoted.
+    conservative bucket) with the unreadable value named in the reason, so the
+    blind spot is stated rather than either abandoned or read as grounded.
     """
     try:
         return ObservedGrounding(value), reason
@@ -311,7 +302,7 @@ class GroundingVerdict:
         fields degrade to their defaults rather than raise, so a hand-authored or
         older receipt still summarizes: an unreadable grounding state reads as
         OPAQUE (named in the reason) and unreadable coverage counts read as 0,
-        never GROUNDED, so a malformed record cannot promote itself.
+        never GROUNDED, so a malformed record cannot vouch for itself.
         """
         cov = receipt.get("coverage") or {}
         grounding, reason = _read_grounding(
@@ -531,12 +522,12 @@ def declared_record(record: dict) -> dict:
 
     Two things happen, and they are separate on purpose. ``provenance`` records
     the fact for any reader that wants it. Neutralising GROUNDED to OPAQUE is
-    what makes the fact unmissable: every read surface, the promotion gate, the
-    trust map, the CLI, the restore path, keys on the grounding STATE, so a
-    marker alone would still leave a hand-built verdict rendering as an execution
-    mareforma watched. OPAQUE is the honest state for it, the observer could not
-    see, and the reason says why. UNGROUNDED and OPAQUE are left standing: they
-    promote nothing, so a declaration cannot buy anything with them.
+    what makes the fact unmissable: every read surface, the trust map, the CLI,
+    the restore path, keys on the grounding STATE, so a marker alone would still
+    leave a hand-built verdict rendering as an execution mareforma watched.
+    OPAQUE is the honest state for it, the observer could not see, and the reason
+    says why. UNGROUNDED and OPAQUE are left standing: neither reads as evidence,
+    so a declaration cannot buy anything with them.
 
     The GROUNDED-specific evidence goes with the state, for the same reason the
     disjoint downgrade drops it: an OPAQUE record still committing to a GROUNDED
