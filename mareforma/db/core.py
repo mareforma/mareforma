@@ -460,16 +460,17 @@ def _note_guards_seen(conn: sqlite3.Connection) -> None:
 # creates them and every graph written before this release would otherwise
 # report them missing on its first open, permanently.
 #
-# Empty, and that is the current state rather than the permanent one: the tables
-# this release added are new, so table-presence already keeps their guards off
-# an older graph's report. A release that puts a guard on an existing table adds
-# its name here and removes it in the release after, once every opened graph
-# carries it in its seen set.
+# This release puts one guard on `claims`, a table every existing graph already
+# has, so table-presence does not keep it off their reports. Declared here and
+# removed in the release after, once every opened graph carries it in its seen
+# set.
 #
 # Verified rather than assumed: adding one guard to `claims` and opening an
 # existing graph once was measured turning a verified claim into UNVERIFIABLE,
 # with no migration involved.
-_GUARDS_INTRODUCED_THIS_RELEASE: "frozenset[str]" = frozenset()
+_GUARDS_INTRODUCED_THIS_RELEASE: "frozenset[str]" = frozenset({
+    "claims_validation_is_terminal",
+})
 
 
 def _record_schema_census(conn: sqlite3.Connection) -> "tuple[str, ...]":
@@ -4895,6 +4896,16 @@ def _verify_validation_on_read(
                         base64.standard_b64decode(env["payload"])
                     )
                     ok = payload.get("claim_id") == row.get("claim_id")
+                    # And that it names the validator the row names.
+                    # ``validator_keyid`` is an unsigned denormalisation of the
+                    # signed payload, and the reputation count groups by that
+                    # column while its docstring says it asks the envelope. A
+                    # row disagreeing with its own envelope about who signed off
+                    # is refused rather than read either way round.
+                    if ok and row.get("validator_keyid") is not None:
+                        ok = payload.get("validator_keyid") == row.get(
+                            "validator_keyid"
+                        )
                     if ok:
                         # The envelope is genuine, binds this claim, and comes
                         # from an enrolled key. Whether that key was entitled to
@@ -7259,21 +7270,37 @@ def _compute_validator_reputation(
 ) -> dict[str, int]:
     """Return ``{validator_keyid: count}`` for claims a validator signed off on.
 
-    Count is the number of rows carrying a validation envelope whose
-    ``validator_keyid`` equals the key. Validators with none are omitted from
-    the dict (caller defaults to 0). Derived state, recomputed on every call,
-    never cached.
+    Count is the number of rows carrying a validation envelope signed by the
+    key. Validators with none are omitted from the dict (caller defaults to 0).
+    Derived state, recomputed on every call, never cached.
 
-    Asked of the envelope, which is the signed thing, rather than of any
-    column derived from it.
+    Grouped by the signer named INSIDE the envelope, not by the
+    ``validator_keyid`` column beside it. That column is an unsigned
+    denormalisation, and grouping on it credited a validator for a row it never
+    signed: a row carrying somebody else's envelope under its own name is
+    refused by the read path, and the count is a separate SQL statement that
+    never consulted the read path. Reading the signed thing is the only way the
+    two agree.
+
+    ``json_valid`` guards the extract, so a malformed envelope contributes to
+    nobody rather than failing the statement for everybody.
+
+    One statement over a column, so it counts envelopes that are PRESENT, not
+    envelopes that bind: a row carrying a copy of a genuine envelope is counted
+    for the key that signed it, though every read surface refuses to serve that
+    row. The same shape as ``generator_enrolled``, and the same rule applies,
+    a caller who needs the stronger answer asks the read path or
+    ``mareforma verify``.
     """
     rows = conn.execute(
-        "SELECT validator_keyid, COUNT(*) AS n FROM claims "
+        "SELECT json_extract(validation_signature, '$.signatures[0].keyid') "
+        "         AS signer, COUNT(*) AS n "
+        "FROM claims "
         "WHERE validation_signature IS NOT NULL "
-        "  AND validator_keyid IS NOT NULL "
-        "GROUP BY validator_keyid"
+        "  AND json_valid(validation_signature) "
+        "GROUP BY signer"
     ).fetchall()
-    return {r["validator_keyid"]: int(r["n"]) for r in rows}
+    return {r["signer"]: int(r["n"]) for r in rows if r["signer"] is not None}
 
 
 def _validate_fts5_query(query: str) -> str:

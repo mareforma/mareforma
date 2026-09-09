@@ -33,7 +33,7 @@ with mareforma.open() as graph:
 | `trust_insecure_rekor` | `bool` | `False` | Skip SSRF validation on `rekor_url` (only for private Rekor instances on internal networks). |
 | `rekor_log_pubkey_pem` | `bytes \| None` | `None` | PEM-encoded Rekor log operator public key. Opts the session into RFC 6962 Merkle inclusion-proof verification: every signed-claim submit and every `refresh_unsigned()` re-fetches the entry and cryptographically verifies the audit path against the log's signed checkpoint. Verification failure refuses to mark `transparency_logged=1`. Supports Ed25519 + ECDSA secp256r1; other curves raise `RekorInclusionError(reason="unsupported_key")`. Mutually exclusive with `rekor_log_pubkey_path`. The supplied PEM persists to `.mareforma/rekor_log_pubkey.pem` as a TOFU pin. |
 | `rekor_log_pubkey_path` | `str \| Path \| None` | `None` | Filesystem path to a PEM file holding the Rekor log operator public key. Read once at open() time; equivalent to passing the bytes via `rekor_log_pubkey_pem`. Mutually exclusive with `rekor_log_pubkey_pem`. |
-| `validator_type` | `str` | `"human"` | `"human"` or `"llm"`, the self-declared type recorded if this key auto-enrolls as the project's root validator. Ignored once a root exists. An LLM-typed validator can sign a validation envelope but cannot promote a claim past REPLICATED. |
+| `validator_type` | `str` | `"human"` | `"human"` or `"llm"`, the self-declared type recorded if this key auto-enrolls as the project's root validator. Ignored once a root exists. An LLM-typed validator can sign a validation envelope, and recording one on a claim is refused. |
 
 **Returns** `EpistemicGraph`
 
@@ -161,7 +161,7 @@ claim_id = graph.assert_claim(
 | `status` | `str` | `"open"` | `open` \| `contested` \| `retracted` |
 | `artifact_hash` | `str \| None` | `None` | SHA-256 hex digest of the output bytes backing the claim. Secondary collapse check: equal data collapses two peers to one line (a byte-identical rerun is not corroboration), distinct data counts as independent, absent data (NULL) never blocks. |
 | `evidence` | `dict \| None` | `None` | Optional opaque evidence-vector dict for the claim, denormalised into the `ev_*` columns and stored as `evidence_json`. Carried inside the signed predicate; mareforma does not interpret it. |
-| `signer` | `object \| None` | `None` | Per-call override for the key the claim is signed with; `None` inherits the signer from `mareforma.open(key_path=...)`. The keyid it writes to `asserter_keyid` is the axis REPLICATED counts, so a host holding several keys asserts each lab's finding under its own. Signing does not enroll: only enrolled keys can `validate()`. |
+| `signer` | `object \| None` | `None` | Per-call override for the key the claim is signed with; `None` inherits the signer from `mareforma.open(key_path=...)`. The keyid it writes to `asserter_keyid` is the axis independence counts, so a host holding several keys asserts each lab's finding under its own. Signing does not enroll: only enrolled keys can `validate()`. |
 | `predicate_payload` | `dict \| None` | `None` | Structured predicate body for typed adapters. Stored in the queryable `predicate_payload` column only, NOT bound into the signed envelope or chain hash. |
 | `original_signature_bundle` | `str \| None` | `None` | Source-side DSSE envelope preserved by federation-import flows. Validated only for JSON well-formedness at write time, never re-verified. |
 | `grounding_sensor` | `object \| None` | `None` | Optional sensor scoring the claim text against its cited supports. Its result is a declaration: `grounding_score` and `grounding_rationale` bound into the signed evidence vector (`ev_*` / `evidence_json`), the same posture as the rest of that vector. It never writes the observed axis. The two never share a value space, so a reader cannot confuse a self-declaration with a computed result. |
@@ -451,7 +451,7 @@ graph.update_claim(claim_id, status="contested")
 
 `status` and `comparison_summary` are always editable. `text`, `supports`, and `contradicts` are bound into the signed payload and refuse to move once the claim carries a signature bundle.
 
-A status change is editorial: it produces no signed envelope, names no validator keyid, and nothing in mareforma records who pulled the lever. Any process with write access to the database can flip an ESTABLISHED claim to `retracted`. For a retraction another party can verify, assert a new claim with `contradicts=[claim_id]` under a validator key; that leaves a signed envelope and a contradiction verdict `restore` re-verifies.
+A status change is editorial: it produces no signed envelope, names no validator keyid, and nothing in mareforma records who pulled the lever. Any process with write access to the database can flip a validated claim to `retracted`. For a retraction another party can verify, assert a new claim with `contradicts=[claim_id]` under a validator key; that leaves a signed envelope and a contradiction verdict `restore` re-verifies.
 
 Two processes updating the same claim are serialised by SQLite at the row level, last writer wins, with no conflict detection.
 
@@ -594,7 +594,7 @@ When `validation_signature` is supplied directly to `db.validate_claim` (advance
 - `ClaimNotFoundError`: if the claim does not exist
 - `ValueError`: if no signer is loaded, if the claim is not open, if it already carries a validation, or if the loaded signer is not an enrolled validator
 - `EvidenceCitationError`: if any `evidence_seen` entry is not a strict-v4 UUID, does not point to an existing claim, post-dates `validated_at`, or disagrees with the validation envelope's signed `evidence_seen` field
-- `LLMValidatorPromotionError`: if the loaded signer is enrolled with `validator_type='llm'`. LLM-typed validators sign validation envelopes but cannot promote past REPLICATED; a human-typed validator has to make the call
+- `LLMValidatorPromotionError`: if the loaded signer is enrolled with `validator_type='llm'`. LLM-typed validators sign validation envelopes, and recording one is refused; a human-typed validator has to make the call
 - `SelfValidationError`: if the loaded signer's keyid is the one on the claim's `signature_bundle`. Promotion needs an external witness, so on a single-key project this is the expected outcome
 - `InvalidValidationEnvelopeError`: if the signed envelope fails a structural or cryptographic gate (malformed payload, wrong `payloadType`, signer not enrolled, signature does not verify, or a payload field disagreeing with the row being promoted)
 
@@ -756,7 +756,7 @@ graph.enroll_validator(bot_pem, identity="reviewer-bot", validator_type="llm")
 |---|---|---|---|
 | `pubkey_pem` | `bytes` | required | Ed25519 public key in PEM form. |
 | `identity` | `str` | required | Human-readable label. Capped at 256 chars; control characters and Unicode display-spoofing forms are rejected. |
-| `validator_type` | `str` | `"human"` | `"human"` or `"llm"`. Self-declared honesty signal, bound into the signed enrollment envelope. LLM-typed validators may sign validation envelopes but cannot promote a claim past REPLICATED: `validate()` refuses at the core with `LLMValidatorPromotionError`. |
+| `validator_type` | `str` | `"human"` | `"human"` or `"llm"`. Self-declared honesty signal, bound into the signed enrollment envelope. LLM-typed validators may sign validation envelopes, and recording one on a claim is refused: `validate()` turns them away at the core with `LLMValidatorPromotionError`. |
 
 **Raises**
 - `ValueError`: no signer loaded, or the loaded signer is not enrolled
@@ -810,7 +810,7 @@ lc_tools = [tool(fn) for fn in tools]
 
 | Name | Type | Default | Description |
 |---|---|---|---|
-| `generated_by` | `str` | `"agent"` | Agent identifier baked into the closure, carried as a display label on each claim. Independence for REPLICATED is the signing key (`asserter_keyid`), not this field; give each independent agent its own key. |
+| `generated_by` | `str` | `"agent"` | Agent identifier baked into the closure, carried as a display label on each claim. Independence is the signing key (`asserter_keyid`), not this field; give each independent agent its own key. |
 | `include_deprecated_aliases` | `bool` | `False` | Append a deprecated `assert_finding` tool that forwards to `record_claim` and warns on use. The claim-recording tool carries the name `record_claim` because `assert_finding` collided with the `EpistemicGraph.assert_finding` method below, a different one-shot path. Leave it `False` for the two-tool surface. |
 
 **Returns** `list`: `[query_graph, record_claim]`
@@ -894,7 +894,7 @@ catching looks like `from mareforma import RekorInclusionError`.
 | `ProjectPolicyError` | `mareforma.db` | `require_rekor_witnessing()` | The project-policy declaration was refused: no signer loaded, the signer is not the project's single root validator, or a concurrent writer declared a rule the envelope in hand does not carry. Subclasses `ValueError` |
 | `EvidenceCitationError` | `mareforma.db` | `validate()` with `evidence_seen=...` | A cited entry isn't a strict-v4 UUID, points to a non-existent claim, post-dates `validated_at`, or disagrees with the envelope's `evidence_seen` field |
 | `InvalidValidationEnvelopeError` | `mareforma.db` | `validate()`, `db.validate_claim()` | Validation envelope is structurally / cryptographically invalid: malformed JSON, wrong `payloadType`, signer not enrolled, signature does not verify against the claimed signer, or payload binds a different `claim_id` / `validator_keyid` / timestamp than the row being promoted |
-| `UnverifiedClaimError` | `mareforma.db` | `JSONLDExporter.export()`, `build_prov_o()`, `build_crate()` | The export would publish a REPLICATED or ESTABLISHED claim whose signature no longer re-verifies. Names the claim ids; run `mareforma verify <claim_id>` for the detail |
+| `UnverifiedClaimError` | `mareforma.db` | `JSONLDExporter.export()`, `build_prov_o()`, `build_crate()` | The export would publish a claim carrying signed material that no longer re-verifies. Names the claim ids; run `mareforma verify <claim_id>` for the detail |
 | `TrustError` | `mareforma.trust` | nothing directly | Base class of every trust-layer exception. It subclasses `MareformaError`, so the broad catch covers the finding path too |
 | `NonFalsifiablePropositionError` | `mareforma.trust` | `register_proposition()`, `register_plan()`, `assert_finding()`, `submit_finding()` | The proposition forbids no observation (`direction` is `UNSPECIFIED` or `scope` is empty), so it cannot anchor a finding |
 | `InconsistentEstimateError` | `mareforma.trust` | `EffectEstimate(...)`, `compute_bearing()` | The estimate fails an input check: the CI does not bracket the point estimate, the CI triple is partial, the p-value is outside `[0, 1]`, neither a p-value nor a CI was supplied, or a superiority / equivalence gate got a CI at the wrong level |

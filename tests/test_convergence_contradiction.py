@@ -44,7 +44,7 @@ def test_invalidated_claim_does_not_ride_convergence_into_replicated(tmp_path):
     with mareforma.open(tmp_path, key_path=root_key) as g:
         cx = g.get_claim(x)
         assert cx["t_invalid"] is not None
-        # A distinct-signer peer converges on the same ESTABLISHED anchor.
+        # A distinct-signer peer converges on the same anchor.
         y = g.assert_claim("Y", supports=[up], generated_by="lab_b", signer=sb)
 
 

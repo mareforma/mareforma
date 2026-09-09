@@ -124,7 +124,7 @@ mareforma validator add --pubkey PATH_OR_PEM --identity LABEL [--type human|llm]
 |---|---|
 | `--pubkey TEXT` | PEM-encoded public key. Pass a file path or paste the PEM text. File reads capped at 64 KB |
 | `--identity TEXT` | Display label (email, lab name, etc.). 256-char cap; control characters and Unicode display-spoofing forms are rejected |
-| `--type human\|llm` | Self-declared validator type. Default `human`. `llm` validators may sign validation envelopes but cannot promote a claim past `REPLICATED` |
+| `--type human\|llm` | Self-declared validator type. Default `human`. `llm` validators may sign validation envelopes, and recording one on a claim is refused |
 
 **Examples**
 
@@ -313,7 +313,7 @@ mareforma status [OPTIONS]
 | Color | Condition |
 |---|---|
 | 🔴 RED | No claims recorded |
-| 🟡 YELLOW | Claims exist but all are PRELIMINARY, or every promoted claim has been retracted or invalidated by a signed contradiction verdict, or a promoted claim does not re-verify on read |
+| 🟡 YELLOW | Claims exist but none standing carries a signed validation, or every claim that carried one has been retracted or invalidated by a signed contradiction verdict, or something carrying signed material does not re-verify on read |
 | 🟢 GREEN | At least one validated claim still standing, meaning not retracted and not invalidated by a signed contradiction verdict, and every promoted claim re-verifies |
 
 The light cannot read green while a claim carrying signed material fails
@@ -418,7 +418,7 @@ Verify a claim, a signed bundle, a signed audit receipt, or an export directory.
 
 A signed audit run record is always unverifiable (exit 2), whether or not its signature checks out. Its `completed` flag is the key a `--corpus` audit resumes on, not a claim verdict, so `verify` reports on it and refuses to call it verified or tampered.
 
-For a bundle, this checks the DSSE signature (over the DSSE PAE encoding, so it interoperates with standard verifiers), every per-claim subject digest, every per-claim **asserter signature** bound to the claim's presented content, the enrolled validator chain to a single root (which must be the bundle signer), and the displayed **support level** (ESTABLISHED against a validator-signed validation envelope, REPLICATED against distinct-signer corroboration). For a claim id, verification uses only public material (auditor mode) and prints the claim's trust map.
+For a bundle, this checks the DSSE signature (over the DSSE PAE encoding, so it interoperates with standard verifiers), every per-claim subject digest, every per-claim **asserter signature** bound to the claim's presented content, the enrolled validator chain to a single root (which must be the bundle signer), and every **validation envelope** a node carries against that validator set. For a claim id, verification uses only public material (auditor mode) and prints the claim's trust map.
 
 Auditor mode verifies against enrolled validator pubkeys only, so a signed claim whose signer is **not an enrolled validator** cannot be authenticated: the claim's binding is all that could be checked, never its signature. `verify` exits **2** on such a claim, not 0. Exit 2 is the unverifiable verdict, not a failure: enrol the signer's key and run it again to reach one. A CI gate built on `verify` therefore no longer passes a claim carrying an all-zero signature under a keyid that was never enrolled, and a gate that treats 2 as a failure will stop a claim that may be perfectly sound. Route 2 to "cannot tell yet", and reserve 1 for a definite failure.
 

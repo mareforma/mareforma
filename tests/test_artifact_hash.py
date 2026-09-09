@@ -1,11 +1,11 @@
-"""tests/test_artifact_hash.py — SHA256 artifact-hash gate for REPLICATED.
+"""tests/test_artifact_hash.py: the SHA256 artifact-hash collapse check.
 
 Covers:
   - normalize_artifact_hash format check (length, hex, case)
   - artifact_hash is part of the signed payload (tamper-evidence)
   - the hash is a data-distinctness signal a caller records; the promotion
     gate that read it is gone with the ladder
-  - distinct or absent hashes never block: REPLICATED then runs on distinct-
+  - distinct or absent hashes never block: the count then runs on distinct-
     signer convergence alone
   - a non-colliding third peer lifts a collapsed pair
   - CLI ``--artifact-hash`` flag round-trips through ``claim show --json``
@@ -171,7 +171,7 @@ class TestArtifactHashSigned:
 
 
 # ---------------------------------------------------------------------------
-# REPLICATED gating, opt-in hash agreement
+# Collapse check, opt-in hash agreement
 # ---------------------------------------------------------------------------
 
 class TestAssertClaimHashParam:
@@ -270,10 +270,10 @@ class TestCLIArtifactHash:
 # Tightened from the silent-merge anti-pattern. Prior
 # behavior matched only on artifact_hash; this let two callers using the
 # same key with different text + generated_by collapse into one row,
-# destroying the second author's content and breaking the REPLICATED
+# destroying the second author's content and collapsing two lines into
 # story (different generated_by converging on shared upstream). For
 # cross-lab convergence, callers must assert two separate claims that
-# share a supports[] entry, the actual REPLICATED path.
+# share a supports[] entry, which is what convergence looks like.
 
 
 class TestIdempotencyStrictContract:

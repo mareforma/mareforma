@@ -220,7 +220,7 @@ def test_asserting_inside_open_scope_is_refused(tmp_path):
 def _converge_on_anchor(tmp_path, subject_grounding):
     """Return the support level of a claim carrying *subject_grounding*.
 
-    The fixture is eligible to promote by construction: an ESTABLISHED anchor,
+    The fixture is corroborated by construction: a shared anchor,
     a GROUNDED peer from a distinct signer citing it, and the claim under test
     citing the same anchor. So the only thing that can hold the level down is
     the grounding gate on the convergence path. The peer is GROUNDED on purpose:

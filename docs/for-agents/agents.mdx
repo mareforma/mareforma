@@ -17,9 +17,8 @@ it are, and querying what is already known before making new assertions. The two
 lead signals are computed, not declared: **grounding** (did the cited data reach
 the finding, or did the model fill the gap from memory) and **effective
 independence** (the number of pairwise-distinct (model, data, signer) checks
-behind a finding). The older `REPLICATED` / `ESTABLISHED` support labels are
-resolve this release as deprecated one-release aliases; read the
-effective-independence number instead.
+behind a finding). No label on a claim stands in for that number; read the
+number.
 
 Trust in a claim is derived from the graph, not from the agent that made it.
 No confidence score. No self-reporting. The structure of the provenance graph
@@ -141,7 +140,7 @@ start. `stdio` is the only transport.
 | `trust_insecure_rekor` | `bool` | `False` | Skip SSRF validation on `rekor_url` (only for private Rekor instances on internal networks). |
 | `rekor_log_pubkey_pem` | `bytes \| None` | `None` | PEM-encoded Rekor log operator public key. Opts into RFC 6962 Merkle inclusion-proof verification on every submit + `refresh_unsigned()`. Persists to `.mareforma/rekor_log_pubkey.pem` as a TOFU pin; silent rotation refused. Mutually exclusive with `rekor_log_pubkey_path`. |
 | `rekor_log_pubkey_path` | `str \| Path \| None` | `None` | Path to a PEM file with the Rekor log operator public key. Equivalent to passing the file bytes via `rekor_log_pubkey_pem`. |
-| `validator_type` | `str` | `"human"` | `"human"` or `"llm"`, the self-declared type recorded if this key auto-enrolls as the project's root validator. Ignored once a root exists. Pass `"llm"` when an agent bootstraps its own project: an `llm` validator cannot promote a claim to ESTABLISHED on its signature alone. |
+| `validator_type` | `str` | `"human"` | `"human"` or `"llm"`, the self-declared type recorded if this key auto-enrolls as the project's root validator. Ignored once a root exists. Pass `"llm"` when an agent bootstraps its own project: an `llm` validator cannot sign off on a claim. |
 
 ```python
 graph = mareforma.open()                                              # cwd, unsigned if no key
@@ -175,7 +174,7 @@ Assert a claim. Returns `claim_id` (UUID).
 | `observed_grounding` | `dict \| None` | `None` | Signed grounding verdict from an `observe()` scope (`obs.verdict.to_signed_dict()`). Bound into the signed statement; a verdict that is not `GROUNDED` never counts toward promotion. |
 | `finding_record` | `dict \| None` | `None` | Set by `submit_finding`, not by hand: the signed record of a finding's verdict inputs (proposition, plan, datasets, bearing, and a digest over its estimate line set). Bound into the signed statement only when present, so a plain claim signs identically; a verdict re-derives against it on read. |
 | `grounding_sensor` | `object \| None` | `None` | Optional sensor exposing `grounding_score(text, supports) → (float, str)`. Its score and rationale are written into the claim's evidence vector. A sensor that raises is caught and the claim is asserted without a grounding score. |
-| `signer` | `object \| None` | `None` | Per-call override for the graph's loaded key (an Ed25519 private key from `signing.load_private_key`). `None` inherits the key from `mareforma.open(key_path=...)`. Not checked against the `validators` table: anyone can sign, only enrolled keys can `validate()` a claim to ESTABLISHED. Use it on a host holding several keys, one per asserter. |
+| `signer` | `object \| None` | `None` | Per-call override for the graph's loaded key (an Ed25519 private key from `signing.load_private_key`). `None` inherits the key from `mareforma.open(key_path=...)`. Not checked against the `validators` table: anyone can sign, only enrolled keys can `validate()` a claim. Use it on a host holding several keys, one per asserter. |
 | `predicate_payload` | `dict \| None` | `None` | Structured predicate body for typed adapters. Stored in the queryable `predicate_payload` column only, NOT bound into the signed envelope or chain hash. |
 | `original_signature_bundle` | `str \| None` | `None` | Source-side DSSE envelope preserved by federation-import flows. Validated only for JSON well-formedness at write time, never re-verified. |
 
@@ -268,14 +267,12 @@ for the full model.
 
 ## What two agreeing agents are worth
 
-There used to be a stored ladder here: a word on each claim, lifted to
-`REPLICATED` when two distinct signing keys converged, and to `ESTABLISHED` by a
-human. It is gone, column and all, and nothing replaces it with another word.
-
 <Warning>
-  Reading `mareforma.REPLICATED` raises `AttributeError`, no read filters on a
-  level, and no claim carries one. The signal to read is the
-  effective-independence number on `mareforma map`: the count of
+  No word on a claim says what it is worth. Nothing stored ranks a claim, no
+  read filters on a level, and there is no field to raise. If you have
+  `REPLICATED` or `ESTABLISHED` in your code, reading `mareforma.REPLICATED` or
+  `mareforma.ESTABLISHED` raises `AttributeError`. The signal to read instead
+  is the effective-independence number on `mareforma map`: the count of
   pairwise-distinct (model, data, signer) checks behind a finding.
 </Warning>
 

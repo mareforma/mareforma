@@ -45,7 +45,7 @@ class TestTrafficLight:
     ) -> None:
         """What turns the light green, now that no rung does.
 
-        It used to be a claim that reached REPLICATED, which happened on its
+        It used to be a claim that reached a rung, which happened on its
         own when two distinct signers converged. Nothing is promoted, so the
         light asks the only thing left that a person put their name to.
         """
@@ -125,10 +125,10 @@ class TestTrafficLight:
     def test_not_green_when_a_promotion_does_not_reverify(
         self, tmp_path: Path,
     ) -> None:
-        # support_level is not a signed field: a direct writer can tamper a
-        # promoted row's envelope while the census still counts it as standing.
-        # The census counts levels as recorded; the separate re-verification count
-        # catches the tampered promotion, and the light cannot read green over it.
+        # The census counts a row as standing when it carries a validation
+        # envelope; the separate re-verification count is what catches an
+        # envelope that no longer verifies, and the light cannot read green
+        # over it.
         import mareforma
         from tests._helpers import _bootstrap_key, _pem_of, _two_signers
         sa, sb = _two_signers(tmp_path)
@@ -142,10 +142,14 @@ class TestTrafficLight:
         with mareforma.open(tmp_path, key_path=val_key) as g:
             g.validate(rep)
 
-        # Forge the promotion: corrupt the validation envelope directly in sqlite,
-        # the way a process with DB write access would.
+        # Corrupt the validation envelope directly in sqlite, the way a process
+        # with DB write access would. The trigger that makes a validation
+        # terminal refuses this UPDATE, and the same writer can drop it, so the
+        # tamper drops it first: what is under test here is the layer below,
+        # the re-verification the health report runs for itself.
         conn = sqlite3.connect(tmp_path / ".mareforma" / "graph.db")
         try:
+            conn.execute("DROP TRIGGER IF EXISTS claims_validation_is_terminal")
             conn.execute(
                 "UPDATE claims SET validation_signature = ? WHERE claim_id = ?",
                 ('{"payloadType":"forged","payload":"x","signatures":[]}', rep),

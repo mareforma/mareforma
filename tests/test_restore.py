@@ -28,17 +28,17 @@ from tests._helpers import _bootstrap_key, _pem_of
 
 def _build_full_graph(tmp_path: Path) -> dict:
     """Populate a project with the full graph surface: root validator,
-    second validator, seed claim, REPLICATED pair, ESTABLISHED claim,
+    second validator, seed claim, converged pair, validated claim,
     one unsigned PRELIMINARY (in a separate unsigned-mode project).
 
     Returns identifiers used by tests for verification.
 
-    REPLICATED now keys on two distinct, non-NULL ``asserter_keyid`` values
+    A reader counts two lines on two distinct, non-NULL ``asserter_keyid`` values
     (the per-claim signer), not distinct ``generated_by``. The two converging
     "converged" claims are therefore signed by two distinct *enrolled* keys
     (the root key and ``val_key``) so the pair promotes AND every signed claim's
     keyid still appears in the validators section (restore's orphan-signer gate
-    requires this). The validator that promotes ``rep_id`` to ESTABLISHED must
+    requires this). The validator that signs off on ``rep_id`` must
     differ from BOTH asserter signers, so a third enrolled key (``val2_key``)
     performs the validation.
     """
@@ -51,7 +51,7 @@ def _build_full_graph(tmp_path: Path) -> dict:
     with mareforma.open(tmp_path, key_path=root_key) as g:
         seed_id = g.assert_claim("anchor", generated_by="seed")
         # Two converging peers signed by two distinct enrolled keys → the
-        # asserter_keyids differ → REPLICATED fires. Enroll val_key (the
+        # asserter_keyids differ, so the two count apart. Enroll val_key (the
         # second asserter) and val2_key (the future validator) first so both
         # signed peers' keyids are present in the validators section.
         g.enroll_validator(_pem_of(val_key), identity="v")
@@ -170,7 +170,7 @@ class TestRestoreHappyPath:
         mareforma.restore(tmp_path)
         with mareforma.open(tmp_path, key_path=ctx["root_key"]) as g:
             results = g.search("converged")
-        # Two REPLICATED claims share the text "converged".
+        # Two converged claims share the text "converged".
         assert len(results) >= 1
         # And one carries the validator_reputation projection.
         ranked = [r for r in results if r.get("validation_signature")]

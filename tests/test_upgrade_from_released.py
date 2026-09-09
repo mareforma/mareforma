@@ -464,7 +464,21 @@ class TestTheUpgradeAUserPerforms:
         # A table the additive script creates on the way in is expected to
         # appear. A row disappearing from one that was already there is not,
         # and the rebuild runs with foreign keys off, so nothing else counts.
+        #
+        # Two of them are the schema's record of its own guards rather than
+        # evidence, and they are supposed to move: a release that adds a guard
+        # to a table every existing graph already has is recorded as missing on
+        # the first open, and the graph then carries it in its seen set. Held to
+        # "never loses a row" instead, which is the property that matters for a
+        # record whose whole job is that nothing forgets.
+        _BOOKKEEPING = ("schema_census", "schema_guards_seen")
         for table, count in before["children"].items():
+            if table in _BOOKKEEPING:
+                assert after["children"][table] >= count, (
+                    f"{table} lost rows across the upgrade, {count} to "
+                    f"{after['children'][table]}"
+                )
+                continue
             assert after["children"][table] == count, (
                 f"{table} went from {count} to {after['children'][table]} "
                 "across the upgrade"

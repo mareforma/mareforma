@@ -101,33 +101,23 @@ The same path runs whether you call `g.assert_claim(...)` from Python
 or `mareforma claim add ...` from the CLI. Both go through
 `mareforma.open()` and pick up the XDG-default signing key.
 
-## Trust: the derived axes and the stored ladder
+## Trust: the derived axes
 
-Trust reads off two axes Mareforma **derives on every read**, not off a stored
-label. `status` per `content_id` is the state of the answer (a `Status` enum
+Trust reads off two axes Mareforma **derives on every read**, never off a
+stored label. `status` per `content_id` is the state of the answer (a `Status` enum
 value: `UNTESTED` → `PRELIMINARY` → `CONVERGENT`, plus `REFUTED` and
 `CONTESTED`); `question_status` per `frame_id` is the state of the question
 (`consistent` / `divided`). Both come from `graph.proposition_status(prop)`, and
 the read-side trust map leads with the effective-independence number rather than
 a single word. These are the vocabulary a reader should reach for.
 
-There was a **stored `support_level` ladder** beside them, a per-claim word a
-graph carried: `PRELIMINARY`, lifted to `REPLICATED` when two distinct signing
-keys converged on a shared `ESTABLISHED` upstream, and lifted again to
-`ESTABLISHED` by a human calling `validate()`. It is gone, column and all.
+**No single word sits on a claim saying what it is worth.** There is no such
+column, so there is nothing a process with write access can raise: a reader
+derives what a claim is worth from signed material on every read, and the two
+axes above plus the effective-independence number are the whole of the answer.
 
-It was removed because a single word never carried what a reader needs, and
-because the word itself was unsigned: any process with write access to the file
-could raise it, so every read had to re-derive whether the level was backed by
-signed material before serving the row. That re-derivation was several hundred
-lines of the read path, and it existed only to police a value nothing signed.
-
-What replaces it is not another word. Trust is read off the derived axes above,
-computed on every read from signed material, and off the effective-independence
-number the trust map reports.
-
-Two things the ladder carried survive it, because neither was ever really about
-levels:
+Two rules that a per-claim ranking would have carried stand on their own,
+because neither was ever really about ranking:
 
 1. **A human's sign-off.** `graph.validate()` still requires an enrolled
    validator whose `validator_type` is `'human'`, and still refuses a validator

@@ -94,7 +94,156 @@ class TestAValidationIsTerminal:
         )
 
 
+class TestTheRuleBindsMoreThanPython:
+    """The Python gate binds callers who come through Python, and nobody else.
+
+    ``validate_claim`` gates its UPDATE on ``validation_signature IS NULL``.
+    That was the whole rule, so a second enrolled validator refused by
+    ``validate()`` could sign its own envelope, write it with plain sqlite3, and
+    the row would read verified under the new name with the first validator's
+    envelope gone and nothing recording that it had ever been there. The read
+    path could not notice, because the envelope that survived verified.
+    """
+
+    @staticmethod
+    def _envelope_for(claim_id: str, key: Path) -> tuple[str, str, str]:
+        """A genuine validation envelope for *claim_id*, signed by *key*."""
+        import json
+        from datetime import datetime, timezone
+
+        priv = _sig.load_private_key(key)
+        keyid = _sig.public_key_id(priv.public_key())
+        when = datetime.now(timezone.utc).isoformat()
+        envelope = _sig.sign_validation(
+            {
+                "claim_id": claim_id,
+                "validator_keyid": keyid,
+                "validated_at": when,
+                "evidence_seen": [],
+            },
+            priv,
+        )
+        return json.dumps(envelope), keyid, when
+
+    def test_a_direct_update_cannot_replace_a_validation(
+        self, tmp_path: Path,
+    ) -> None:
+        import sqlite3
+
+        root_key, alice, bob, claim_id = _project_with_two_validators(tmp_path)
+        with mareforma.open(tmp_path, key_path=alice) as graph:
+            graph.validate(claim_id, validated_by="alice")
+
+        envelope, bob_keyid, when = self._envelope_for(claim_id, bob)
+        conn = sqlite3.connect(tmp_path / ".mareforma" / "graph.db")
+        try:
+            with pytest.raises(sqlite3.IntegrityError, match="validation_is_terminal"):
+                conn.execute(
+                    "UPDATE claims SET validated_by = ?, validated_at = ?, "
+                    "validation_signature = ?, validator_keyid = ? "
+                    "WHERE claim_id = ?",
+                    ("bob", when, envelope, bob_keyid, claim_id),
+                )
+        finally:
+            conn.close()
+
+        with mareforma.open(tmp_path, key_path=root_key) as graph:
+            assert graph.get_claim(claim_id)["validated_by"] == "alice"
+
+    def test_a_direct_update_cannot_move_the_attribution_alone(
+        self, tmp_path: Path,
+    ) -> None:
+        """Leaving the envelope and moving the name is the quieter half.
+
+        ``validated_by`` and ``validator_keyid`` are denormalised out of the
+        signed payload, so moving them alone leaves the row naming one person
+        and the envelope another.
+        """
+        import sqlite3
+
+        root_key, alice, bob, claim_id = _project_with_two_validators(tmp_path)
+        with mareforma.open(tmp_path, key_path=alice) as graph:
+            graph.validate(claim_id, validated_by="alice")
+        bob_keyid = _sig.public_key_id(
+            _sig.load_private_key(bob).public_key()
+        )
+
+        conn = sqlite3.connect(tmp_path / ".mareforma" / "graph.db")
+        try:
+            with pytest.raises(sqlite3.IntegrityError, match="validation_is_terminal"):
+                conn.execute(
+                    "UPDATE claims SET validated_by = ?, validator_keyid = ? "
+                    "WHERE claim_id = ?",
+                    ("bob", bob_keyid, claim_id),
+                )
+        finally:
+            conn.close()
+
+    def test_the_first_validation_is_still_written(self, tmp_path: Path) -> None:
+        """The guard must not cost the honest write it sits in front of."""
+        root_key, alice, bob, claim_id = _project_with_two_validators(tmp_path)
+        with mareforma.open(tmp_path, key_path=alice) as graph:
+            graph.validate(claim_id, validated_by="alice")
+            assert graph.get_claim(claim_id)["validated_by"] == "alice"
+
+
+class TestReputationCountsTheSigner:
+    """The count groups by the signed thing, not the column beside it.
+
+    ``validator_keyid`` is unsigned. Grouping on it credited a validator for a
+    row it never signed, while every read surface refused to serve that row: the
+    count is a separate statement that never consulted the read path.
+    """
+
+    def test_a_stapled_envelope_credits_nobody_it_did_not_sign(
+        self, tmp_path: Path,
+    ) -> None:
+        import sqlite3
+
+        root_key, alice, bob, claim_id = _project_with_two_validators(tmp_path)
+        with mareforma.open(tmp_path, key_path=alice) as graph:
+            graph.validate(claim_id, validated_by="alice")
+        bob_keyid = _sig.public_key_id(
+            _sig.load_private_key(bob).public_key()
+        )
+
+        # A row carrying alice's envelope under bob's name. INSERT, because the
+        # UPDATE route is closed above and the primary key forbids reusing the
+        # claim_id.
+        conn = sqlite3.connect(tmp_path / ".mareforma" / "graph.db")
+        conn.row_factory = sqlite3.Row
+        row = dict(
+            conn.execute(
+                "SELECT * FROM claims WHERE claim_id = ?", (claim_id,)
+            ).fetchone()
+        )
+        row.update(
+            claim_id="11111111-2222-4333-8444-555555555555",
+            validated_by="bob",
+            validator_keyid=bob_keyid,
+            prev_hash=None,
+            idempotency_key=None,
+        )
+        conn.execute(
+            f"INSERT INTO claims ({', '.join(row)}) "
+            f"VALUES ({', '.join('?' * len(row))})",
+            tuple(row.values()),
+        )
+        conn.commit()
+        conn.close()
+
+        with mareforma.open(tmp_path, key_path=root_key) as graph:
+            assert graph.get_validator_reputation()[bob_keyid] == 0, (
+                "a validator was credited for a row it never signed"
+            )
+            served = graph.query("a finding", limit=99)
+            assert all(c["validated_by"] == "alice" for c in served), (
+                "the forged row reached a read surface"
+            )
+
 class TestEverySurfaceSaysWhoVouched:
+
+
     """``generator_enrolled`` rides on all three reads, not just the paged one.
 
     The enumerating reads carried it because they used to drop the row. Now

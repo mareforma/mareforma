@@ -357,14 +357,13 @@ class TestQueryForLLM:
             identity="reviewer@example.org",
         )
         open_graph.close()
+        # The hostile label goes in through the ordinary write, not through a
+        # direct UPDATE afterwards: validated_by is a display name a caller
+        # supplies, so this is the route it actually arrives by, and a
+        # validation cannot be edited once it is written.
         with mareforma.open(root, key_path=reviewer_key) as reviewer:
-            reviewer.validate(cid, validated_by="reviewer@example.org")
+            reviewer.validate(cid, validated_by=hostile)
         open_graph = mareforma.open(root)
-        open_graph._conn.execute(
-            "UPDATE claims SET validated_by = ? WHERE claim_id = ?",
-            (hostile, cid),
-        )
-        open_graph._conn.commit()
         row = open_graph.query_for_llm()[0]
         for field in _LLM_SANITIZE_FIELDS:
             value = row.get(field)

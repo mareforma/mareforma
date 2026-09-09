@@ -104,8 +104,7 @@ Always query before asserting. If the graph already carries a well-supported
 finding on your topic, build on it; don't duplicate it. Trust itself reads off
 the derived axes, not the stored label: `graph.proposition_status(prop)`
 returns the answer's `status` and the question's `question_status`, both
-computed on every read. The `support_level` ladder that used to sit on each
-claim is gone, column and all.
+computed on every read. Nothing stored on a claim ranks it.
 
 When the results will be spliced into an LLM prompt, use
 `graph.query_for_llm(...)` instead: it sanitizes free-text fields and

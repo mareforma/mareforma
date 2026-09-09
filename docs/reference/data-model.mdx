@@ -19,17 +19,17 @@ All persistent state lives in a single SQLite file at `<project_root>/.mareforma
 | `status` | TEXT | `open` | No | Editorial: `open` / `contested` / `retracted` |
 | `source_name` | TEXT | `NULL` | Yes | Data source name; required for `ANALYTICAL` to be meaningful |
 | `generated_by` | TEXT | `agent` | No | Agent identifier; display label only. Independence keys on `asserter_keyid`, never on this. |
-| `asserter_keyid` | TEXT | `NULL` | Yes | Denormalized signer keyid from the `signature_bundle`. The REPLICATED independence axis: two claims signed by distinct keyids count as independent; an unsigned claim (NULL) cannot reach REPLICATED |
+| `asserter_keyid` | TEXT | `NULL` | Yes | Denormalized signer keyid from the `signature_bundle`. The independence axis: two claims signed by distinct keyids count as two lines; an unsigned claim (NULL) counts as none |
 | `supports_json` | TEXT | `[]` | No | JSON array of upstream claim_ids or DOIs |
 | `contradicts_json` | TEXT | `[]` | No | JSON array of claim_ids this finding contests |
 | `comparison_summary` | TEXT | `NULL` | Yes | Human-readable diff note for contradictions. Editable on signed claims (not part of signed payload) |
 | `branch_id` | TEXT | `main` | No | Reserved for future branching; currently always `main` |
-| `unresolved` | INTEGER | `0` | No | Legacy quarantine flag. No write path sets it, but restore replays `unresolved = true` from an older `claims.toml`, and a set flag holds the claim out of REPLICATED promotion with no error raised. `mareforma.db.list_unresolved_claims(conn)` lists the flagged rows; `mareforma.db.mark_claim_resolved(conn, root, claim_id)` clears one and re-checks convergence in the same transaction. `EpistemicGraph.update_claim` is not a substitute: it refuses `supports`/`contradicts` edits on signed claims |
+| `unresolved` | INTEGER | `0` | No | Legacy quarantine flag saying a citation did not resolve. No write path sets it, but restore replays `unresolved = true` from an older `claims.toml`. `mareforma.db.list_unresolved_claims(conn)` lists the flagged rows; `mareforma.db.mark_claim_resolved(conn, root, claim_id)` clears one. `EpistemicGraph.update_claim` is not a substitute: it refuses `supports`/`contradicts` edits on signed claims |
 | `signature_bundle` | TEXT | `NULL` | Yes | DSSE v1 envelope wrapping an in-toto Statement v1 payload (`predicateType=urn:mareforma:predicate:claim:v1`). The signature covers the DSSE Pre-Authentication Encoding (PAE), not the payload bytes directly, so a signature on one `payloadType` cannot be replayed as a signature on another |
-| `transparency_logged` | INTEGER | `1` | No | `1` when the claim has been (or did not need to be) submitted to Sigstore-Rekor. Blocks REPLICATED until `refresh_unsigned()` flips it. **Restore** downgrades a TOML-asserted `1` to `0` when the bundle has no `rekor` block; hand-edited TOML cannot fake a Rekor inclusion |
-| `validation_signature` | TEXT | `NULL` | Yes | Signed `(claim_id, validator_keyid, validated_at)` envelope. CHECK constraint requires this on every `ESTABLISHED` row |
-| `validator_keyid` | TEXT | `NULL` | Yes | Denormalized signer keyid from `validation_signature` for indexable reputation aggregation |
-| `artifact_hash` | TEXT | `NULL` | Yes | SHA-256 hex digest of the output bytes (figure, CSV, model) backing the claim. Bound into the signed payload. Secondary collapse check: two peers with equal `artifact_hash` collapse to one line (a byte-identical rerun is not corroboration). Never a match requirement; NULL never blocks promotion |
+| `transparency_logged` | INTEGER | `1` | No | `1` when the claim has been (or did not need to be) submitted to Sigstore-Rekor. While it is `0`, nothing outside this machine witnesses the signature; `refresh_unsigned()` retries. **Restore** downgrades a TOML-asserted `1` to `0` when the bundle has no `rekor` block; hand-edited TOML cannot fake a Rekor inclusion |
+| `validation_signature` | TEXT | `NULL` | Yes | Signed `(claim_id, validator_keyid, validated_at, evidence_seen)` envelope. A CHECK refuses a row naming a validator without one, and a trigger refuses any UPDATE that would replace or move one already there |
+| `validator_keyid` | TEXT | `NULL` | Yes | Denormalized signer keyid from `validation_signature`. Unsigned, so the read path refuses a row that disagrees with its own envelope, and the reputation count groups by the signer named inside the envelope rather than by this column |
+| `artifact_hash` | TEXT | `NULL` | Yes | SHA-256 hex digest of the output bytes (figure, CSV, model) backing the claim. Bound into the signed payload. Secondary collapse check: two peers with equal `artifact_hash` collapse to one line (a byte-identical rerun is not corroboration). Never a match requirement; NULL on either side leaves the distinct-signer reading alone |
 | `prev_hash` | TEXT | `NULL` | Yes | Append-only chain link `sha256(prev_chain_link \|\| canonical_statement_bytes)`. The chain input is the same bytes the signature covers, so chain integrity and signature integrity move together. UNIQUE partial index catches branched chains |
 | `ev_risk_of_bias` | INTEGER | `0` | No | Opaque evidence-vector downgrade domain in `[-2, 0]`, denormalised from `evidence_json`. CHECK constraint bounds the value. Default `0` |
 | `ev_inconsistency` | INTEGER | `0` | No | Opaque evidence-vector downgrade domain in `[-2, 0]`. Default `0` |
@@ -57,7 +57,7 @@ All persistent state lives in a single SQLite file at `<project_root>/.mareforma
 | `idx_claims_unresolved` | `unresolved` | Non-unique | Finds the claims a restore brought back quarantined |
 | `idx_claims_transparency_logged` | `transparency_logged` | Non-unique | Accelerates `refresh_unsigned()` |
 | `idx_claims_artifact_hash` | `artifact_hash` | Unique (partial) | `WHERE artifact_hash IS NOT NULL`: only rows that supply a data hash |
-| `idx_claims_asserter_keyid` | `asserter_keyid` | Non-unique (partial) | `WHERE asserter_keyid IS NOT NULL`: the REPLICATED independence axis |
+| `idx_claims_asserter_keyid` | `asserter_keyid` | Non-unique (partial) | `WHERE asserter_keyid IS NOT NULL`: the independence axis |
 | `idx_claims_idempotency_key` | `idempotency_key` | Unique (partial) | `WHERE idempotency_key IS NOT NULL` |
 | `idx_claims_prev_hash` | `prev_hash` | Unique (partial) | `WHERE prev_hash IS NOT NULL`: catches branched chains from concurrent writers or manual SQL tamper |
 | `idx_claims_validator_keyid` | `validator_keyid` | Non-unique (partial) | `WHERE validator_keyid IS NOT NULL`: reputation aggregation |
@@ -145,14 +145,14 @@ Append-only at the SQL layer: both UPDATE and DELETE are refused by triggers, mi
 
 ## validators table
 
-The per-project set of enrolled public keys. Only `human`-typed rows can sign off on a claims to `ESTABLISHED`.
+The per-project set of enrolled public keys. Only `human`-typed rows can sign off on a claim.
 
 | Field | Type | Description |
 |---|---|---|
 | `keyid` | TEXT (PK) | SHA-256 of the Ed25519 raw public bytes |
 | `pubkey_pem` | TEXT | Ed25519 public key in PEM form |
 | `identity` | TEXT | Display label (256-char cap, control characters and display-spoofing forms rejected) |
-| `validator_type` | TEXT | `'human'` (default) or `'llm'`. A self-declared honesty signal bound into the signed enrollment envelope, so a post-hoc UPDATE breaks chain verification. `llm` rows may sign validation envelopes but cannot promote a claim past `REPLICATED` and cannot issue contradictions |
+| `validator_type` | TEXT | `'human'` (default) or `'llm'`. A self-declared honesty signal bound into the signed enrollment envelope, so a post-hoc UPDATE breaks chain verification. `llm` rows may sign validation envelopes, and recording one on a claim is refused, as is issuing a contradiction |
 | `enrolled_at` | TEXT | UTC ISO 8601 |
 | `enrolled_by_keyid` | TEXT | Parent validator (root rows have `enrolled_by_keyid = keyid`) |
 | `enrollment_envelope` | TEXT | DSSE-style envelope signed by the parent. Verifying `is_enrolled` walks the chain back to a self-signed root |

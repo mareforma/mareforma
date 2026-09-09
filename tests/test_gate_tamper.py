@@ -75,7 +75,7 @@ _GPT = "gpt-4o-2024-08-06"
 # The six tables a trust gate reads, per the design's section 1 inventory. The
 # first five feed the independence-count gate through ``INDEPENDENCE_COUNTS_SQL``
 # and are swept against ``proposition_status``; ``replication_verdicts`` feeds
-# the separate corroboration gate and is swept against ``support_level`` in its
+# the separate corroboration gate and is swept against the stored columns in its
 # own class.
 _COUNT_GATE_TABLES = (
     "findings",

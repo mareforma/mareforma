@@ -1,9 +1,9 @@
 # Contributing to Mareforma
 
 Mareforma is the local epistemic graph AI scientists use to record
-findings with cryptographic provenance. The core (signing,
-validators, the REPLICATED trust ladder) decides what consumers can
-trust, so changes that touch it land differently from a bug fix.
+findings with cryptographic provenance. The core (signing, validators,
+the read path that derives what a claim is worth) decides what consumers
+can trust, so changes that touch it land differently from a bug fix.
 
 Bug fixes, doc corrections, test coverage, and new examples are
 welcome. For new public API surface, new CLI commands, or anything
@@ -90,12 +90,12 @@ Conventional commits with a tight subject (≤ 70 chars) and a body
 that explains *why*:
 
 ```
-feat: ESTABLISHED-upstream gate + seed-claim bootstrap (8 tests)
+feat: refuse a second validation on a claim (4 tests)
 
-REPLICATED detection now requires at least one ESTABLISHED claim in
-the converging peer's supports[]. Matches Cochrane / GRADE evidence
-chains; stops replication-of-noise. Bootstrap is the seed=True
-parameter on assert_claim, gated by validator enrollment.
+The column holds one envelope, so a second sign-off replaced the
+first with nothing recording that it had ever been there. Refuse it
+at the SQL layer as well as in Python, so the rule binds a caller
+who writes with sqlite3 rather than through this library.
 ```
 
 Prefixes in use: `feat:`, `fix:`, `docs:`, `chore:`, `refactor:`,
@@ -212,14 +212,12 @@ Examples in `examples/` must:
   (API key, dataset, model weights) is missing; see
   `examples/05_drug_target_provenance/run_experiment.py:_require_llm_key`
   for the pattern
-- Use `seed=True` to bootstrap an ESTABLISHED upstream when the
-  example demonstrates REPLICATED convergence (the
-  ESTABLISHED-upstream rule means a plain string anchor or an
-  unsigned upstream will not trigger REPLICATED). Note: `seed=True`
-  emits a deprecation warning and is scheduled for removal in v0.4.0,
-  when a replacement anchor lands; it still writes a signed
-  ESTABLISHED claim for this release, so it stays the way to
-  demonstrate convergence in an example today
+- To demonstrate convergence, have two claims cite the same upstream
+  claim in `supports[]` under two distinct signing keys (pass a
+  per-call `signer=`). A shared anchor is what makes two agreeing
+  claims agreement about one thing; distinct keys are what makes them
+  two lines rather than one. A plain string anchor is stored verbatim
+  and never walked, so it anchors nothing
 
 ## Licence
 

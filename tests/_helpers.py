@@ -76,7 +76,7 @@ def _load_signer(key_path: Path):
 def _two_signers(tmp_path: Path):
     """Bootstrap two distinct signing keys and return loaded signer objects.
 
-    Under the v0.3.7 model, REPLICATED convergence keys on two distinct,
+    A reader counts two lines only on two distinct,
     non-NULL ``asserter_keyid`` values (the per-claim signer keyid), not on
     distinct ``generated_by``. Tests that want two converging claims to
     promote must sign each with a distinct key. This returns ``(sa, sb)``,

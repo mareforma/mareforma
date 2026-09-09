@@ -1,8 +1,8 @@
-"""PR2b verify-on-read cache benchmark over a many-REPLICATED-row graph.
+"""Verify-on-read cache benchmark over a many-converged-row graph.
 
 The read path re-verifies a high-trust row's signature before serving it, with a
 per-query ``(tier, keyid, digest)`` cache. This file MEASURES the cache bound on
-a graph with many REPLICATED rows rather than asserting it by construction: the
+a graph with many converged rows rather than asserting it by construction: the
 cache BOUNDS total signature verifications at most one per distinct
 ``(keyid, digest)`` served. Distinct claims carry distinct signature digests, so
 a varied result set rarely collapses; the bound that matters is "never more than
@@ -23,7 +23,7 @@ def _enrolled_signer(graph, root: Path, name: str):
     """Bootstrap a key, enroll it as a validator, and return its loaded signer.
 
     Enrolling the asserter means its pubkey is in the validators table, so the
-    participant bundle on its REPLICATED rows is actually verified on read
+    participant bundle on its converged rows is actually verified on read
     (an unenrolled asserter would be verify-exempt and skip the crypto).
     """
     kp = root / f"{name}.key"
@@ -36,13 +36,13 @@ def _enrolled_signer(graph, root: Path, name: str):
 
 
 def _build_many_anchors(graph, root: Path, n_anchors: int, n_signers: int = 3) -> int:
-    """Create *n_anchors* ESTABLISHED anchors, each with its own converging set.
+    """Create *n_anchors* validated anchors, each with its own converging set.
 
     The single-anchor fixture below is the shape a real project never has, and
     it is the one shape where the corroboration peer probe finds its match on
     the first row it scans. A regression that makes the probe walk the whole
     graph is invisible there and quadratic here, so the bound is measured on
-    both. Returns the number of REPLICATED rows created.
+    both. Returns the number of converged rows created.
     """
     signers = [_enrolled_signer(graph, root, f"m{i}") for i in range(n_signers)]
     for a in range(n_anchors):
@@ -56,9 +56,9 @@ def _build_many_anchors(graph, root: Path, n_anchors: int, n_signers: int = 3) -
 
 
 def _build_many_replicated(graph, root: Path, n_signers: int) -> int:
-    """Create one ESTABLISHED anchor, then n claims each by a distinct enrolled
+    """Create one validated anchor, then n claims each by a distinct enrolled
     signer citing it. Every claim converges with the others on the anchor, so all
-    n land at REPLICATED. Returns the number of REPLICATED rows created.
+    n converge. Returns the number of converged rows created.
     """
     anchor = graph.assert_claim("anchor", generated_by="seed")
     signers = [_enrolled_signer(graph, root, f"a{i}") for i in range(n_signers)]

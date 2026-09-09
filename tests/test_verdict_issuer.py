@@ -140,7 +140,7 @@ class TestRecordReplicationVerdict:
 
 class TestVerdictPromotionGates:
     """The verdict path must apply the same computed gates the convergence
-    path applies to the PRELIMINARY → REPLICATED transition. An enrolled
+    path applies to a replication verdict too. An enrolled
     issuer must not be able to launder an UNGROUNDED or unsigned claim into
     the trust ladder."""
 
@@ -148,7 +148,7 @@ class TestVerdictPromotionGates:
         self, tmp_path: Path,
     ) -> None:
         # Execution observed 'a' as UNGROUNDED: no real data flowed. A
-        # replication verdict must not ride it into REPLICATED, while its
+        # replication verdict must not count it as a second line, while its
         # grounded peer 'b' (NULL verdict) still promotes.
         root_key, issuer_key, a, b, _, _ = _seed_two_claims(
             tmp_path, grounding_a={"grounding": "UNGROUNDED"},
@@ -298,7 +298,7 @@ class TestLLMContradictionGate:
     it from default ``query()`` results. The human-only rule must apply
     in BOTH directions: humans-only-to-promote AND humans-only-to-demote.
     Without this gate, an enrolled LLM key could mark down any
-    human-validated ESTABLISHED claim by signing a contradiction , 
+    human-validated claim by signing a contradiction, 
     breaking the README's promotion-requires-human framing on the
     demotion side.
     """
@@ -611,12 +611,12 @@ class TestInvalidatedClaimRefusesValidation:
     """validate_claim must refuse to promote a claim that's already
     been invalidated by a signed contradiction verdict. Without this,
     an enrolled human validator could lift an already-refuted claim
-    REPLICATED → ESTABLISHED, riding past the terminal evidence of
+    a signed validation, riding past the terminal evidence of
     the signed contradiction."""
 
     def test_validate_refuses_t_invalid_claim(self, tmp_path: Path) -> None:
         root_key, issuer_key, a, b, _, _ = _seed_two_claims(tmp_path)
-        # Promote (a, b) to REPLICATED via a replication verdict.
+        # Record a replication verdict over (a, b).
         with mareforma.open(tmp_path, key_path=issuer_key) as g:
             g.record_replication_verdict(
                 verdict_id="rv_v1", cluster_id="cl",
@@ -1090,7 +1090,7 @@ class TestVerdictIssuerGatesOnRestore:
 
 class TestRestorePreservesNonRekorTransparency:
     """A non-Rekor project's claims are transparency-ready by default
-    (transparency_logged=1); restore must preserve that so REPLICATED's
+    (transparency_logged=1); restore must preserve that so the log's
     transparency_logged=1 gate still passes after recovery. Witnessed state
     for a Rekor-enabled claim is derived from the [rekor_inclusions] sidecar,
     not the unsigned rekor block inside signature_bundle, the forge-refusal

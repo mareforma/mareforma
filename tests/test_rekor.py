@@ -10,7 +10,7 @@ Covers:
     augmented bundle stored
   - assert_claim with rekor_url + signer + Rekor down: transparency_logged=0,
     bundle stored without rekor block
-  - REPLICATED gating: signed-but-unlogged claim blocks convergence
+  - what a failed submission leaves on the row
   - refresh_unsigned retries pending and clears the flag on success
   - refresh_unsigned no-op when rekor_url is None
   - require_rekor=True without rekor_url raises at open() time
@@ -569,7 +569,7 @@ class TestAssertClaimWithRekor:
     def test_no_rekor_url_yields_transparency_logged_true_by_default(
         self, tmp_path: Path,
     ) -> None:
-        """With rekor_url=None, the column defaults to 1 so REPLICATED is
+        """With rekor_url=None, the column defaults to 1 so nothing is
         not gated even when claims are signed locally."""
         key_path = _bootstrap_key(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as graph:
@@ -598,7 +598,7 @@ class TestAssertClaimWithRekor:
         self, tmp_path: Path, httpx_mock,
     ) -> None:
         """When Rekor is unreachable, the claim still persists locally with
-        transparency_logged=0; REPLICATED promotion waits until a later
+        transparency_logged=0; the public witness waits until a later
         refresh_unsigned() succeeds."""
         httpx_mock.add_response(method="POST", url=_TEST_REKOR_URL, status_code=503)
         key_path = _bootstrap_key(tmp_path)
@@ -619,7 +619,7 @@ class TestAssertClaimWithRekor:
         """A failed submit is pushed, not left for a per-claim trust map.
 
         Submit is the saga step most likely to fail, and while it fails every
-        claim written stops short of REPLICATED. The other three failure
+        claim written carries no log entry. The other three failure
         branches warn; this one must too, and must land in health.jsonl so an
         outage shows up in `mareforma activity`.
         """
@@ -704,15 +704,17 @@ class TestRequireRekor:
 
 
 # ---------------------------------------------------------------------------
-# REPLICATED gating
+# What a failed submission leaves behind
 # ---------------------------------------------------------------------------
 
-class TestReplicatedGating:
-    def test_signed_but_unlogged_blocks_replicated(
+class TestAFailedSubmissionIsRecorded:
+    def test_every_claim_written_while_the_log_is_down_says_so(
         self, tmp_path: Path, httpx_mock,
     ) -> None:
-        """Two agents converge but one is still pending Rekor inclusion;
-        both must stay PRELIMINARY until that one logs."""
+        """A claim the log never saw must say so on the row, not just in a log
+        line nobody reads. Three claims are written while Rekor is down, and
+        every one of them has to come back transparency_logged=0: the signature
+        is local, and nothing outside this machine witnessed it."""
         # Three claims will be asserted (upstream, agent A, agent B); Rekor
         # is down for all three.
         for _ in range(3):
@@ -733,15 +735,17 @@ class TestReplicatedGating:
                 "agent B", supports=[upstream], generated_by="agent/b",
             )
 
-            # Without Rekor confirmation, no REPLICATED promotion fires.
+            for cid in (upstream, id_a, id_b):
+                assert graph.get_claim(cid)["transparency_logged"] == 0, (
+                    "a claim written while the log was down reads as logged"
+                )
 
-    def test_late_doi_resolution_does_not_promote_an_unlogged_claim(
+    def test_resolving_a_doi_later_does_not_invent_a_log_entry(
         self, tmp_path: Path, monkeypatch,
     ) -> None:
-        """The peer filter demands transparency_logged=1 of every candidate,
-        so the claim being resolved must meet the same bar. A claim whose
-        Rekor submission failed must not reach REPLICATED when its DOI
-        resolves later, nor drag a logged peer up with it."""
+        """Clearing the unresolved flag says the citations resolved. It says
+        nothing about the transparency log, and must not quietly flip a claim
+        the log never saw to logged."""
         from mareforma.db import core as _db
         from tests._helpers import _two_signers
         key_path = _bootstrap_key(tmp_path)
@@ -768,25 +772,30 @@ class TestReplicatedGating:
             assert graph.get_claim(id_b)["transparency_logged"] == 0
 
             _db.mark_claim_resolved(graph._conn, graph._root, id_b)
+            assert graph.get_claim(id_b)["transparency_logged"] == 0, (
+                "resolving a citation flipped a claim the log never saw"
+            )
+            assert graph.get_claim(id_a)["transparency_logged"] == 1, (
+                "the logged peer lost its log entry"
+            )
 
 
 
 # ---------------------------------------------------------------------------
-# REPLICATED gating: one peer logged, one peer not
+# One peer logged, one peer not
 # ---------------------------------------------------------------------------
 
 class TestOnePeerLoggedOneNot:
-    def test_neither_replicates_until_both_logged(self, tmp_path, httpx_mock):
-        """Agent A succeeds at Rekor; agent B never does. Agent A is
-        transparency_logged=1 alone, but REPLICATED requires the NEW
-        claim's transparency_logged=1 as well, agent B's continued
-        unlogged state keeps both at PRELIMINARY."""
+    def test_the_pending_one_is_recovered_by_refresh(self, tmp_path, httpx_mock):
+        """Agent A succeeds at Rekor; agent B never does. The rows disagree,
+        which is the state refresh_unsigned exists to clear, and it must
+        re-submit exactly the one that is pending rather than everything."""
         from tests._helpers import _bootstrap_key as _bk
         key_path = _bootstrap_key(tmp_path)
         # Peer A is signed by a distinct key (sa); peer B is signed by the
         # graph's own loaded key so refresh_unsigned (which re-logs only
         # claims signed by the current key) can recover it. The asserters
-        # still differ (sa vs the graph key), so REPLICATED is reachable.
+        # still differ (sa vs the graph key), so the two count as two lines.
         sa = _signing.load_private_key(_bk(tmp_path, "sa.key"))
 
         def one_shot_mirror(httpx_mock):
@@ -820,7 +829,7 @@ class TestOnePeerLoggedOneNot:
             assert graph.get_claim(id_a)["transparency_logged"] == 1
             assert graph.get_claim(id_b)["transparency_logged"] == 0
 
-            # When B's refresh_unsigned succeeds, both must promote.
+            # B is the only pending claim, so it is the only one re-submitted.
             _mirror_rekor(httpx_mock, uuid_prefix="late-b")
             result = graph.refresh_unsigned()
             assert result["logged"] == 1  # only B was pending
@@ -904,13 +913,13 @@ class TestRefreshUnsigned:
         self, tmp_path: Path, httpx_mock,
     ) -> None:
         """After refresh_unsigned succeeds for both peer claims, their shared
-        upstream's REPLICATED check fires.
+        upstream is cited by both.
 
         Under the distinct-signer model a peer's asserter key is per-call, and
         ``refresh_unsigned`` can only re-log claims signed by the graph's
         currently loaded key (the key-rotation guard). The upstream + peer A are
         signed by the graph's own key (``key_path``); peer B is signed by a
-        distinct key (``sb``) so the asserters differ and REPLICATED is
+        distinct key (``sb``) so the asserters differ and the pair is
         reachable. Re-logging therefore happens in two passes, one per loaded
         key, exactly how an operator with two asserter keys would recover."""
         # First three asserts: Rekor down.
@@ -938,7 +947,7 @@ class TestRefreshUnsigned:
             _mirror_rekor(httpx_mock, uuid_prefix="late")
             result = graph.refresh_unsigned()
             assert result == {"checked": 3, "logged": 2, "still_unlogged": 1}
-            # Peer A is logged; peer B not yet -> still not REPLICATED.
+            # Peer A is logged; peer B not yet.
             assert graph.get_claim(id_b)["transparency_logged"] == 0
 
         # Pass 2: reopen with sb loaded so peer B can be re-logged.

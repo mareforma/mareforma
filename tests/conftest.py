@@ -42,9 +42,9 @@ def _isolate_predicate_registry():
 @pytest.fixture()
 def open_graph(tmp_path: Path):
     """Open an EpistemicGraph in a temp directory, with a bootstrapped
-    signing key so seed=True works for ESTABLISHED-upstream bootstrap.
+    signing key.
 
-    REPLICATED detection requires an ESTABLISHED upstream by default, so
+    Two claims converge on a shared upstream, so
     most tests that exercise it need a seeded upstream. A signing key is
     bootstrapped automatically; tests that don't want one can use
     ``mareforma.open(tmp_path)`` directly without the fixture."""

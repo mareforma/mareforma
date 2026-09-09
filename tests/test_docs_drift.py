@@ -943,7 +943,7 @@ def test_replicated_accordion_scopes_the_witnessing_policy_to_recovery(tmp_path)
     ``require_rekor_witnessing()`` root-signs a policy row. The insert path
     never reads it: convergence keys on ``transparency_logged``, which is
     set at insert unless the graph was opened with a ``rekor_url``. So the
-    page that defines REPLICATED must name ``restore`` wherever it names
+    page that defines the read gate must name ``restore`` wherever it names
     the policy, or it sells recovery enforcement as a live gate.
     """
     from mareforma import signing
@@ -1046,15 +1046,14 @@ def test_prov_o_overview_tracks_whether_the_export_path_validates():
         )
 
 
-def test_replicated_promotion_docs_do_not_overclaim_the_model_gate(tmp_path):
-    """the REPLICATED promotion prose must not claim a distinct-model gate.
+def test_convergence_docs_do_not_overclaim_the_model_gate(tmp_path):
+    """the convergence prose must not claim a distinct-model gate.
 
-    On the primary path a claim's finding model lineage is written after
-    promotion runs, so the promotion-time ``model_distinct_pair`` filter reads
-    absent on both sides and passes everything through. The load-bearing
-    model-independence signal is the read-side effective-independence number.
-    So two distinct signers on a shared ESTABLISHED upstream still promote to
-    REPLICATED regardless of model, and the docs must not say otherwise.
+    Two distinct signers on a shared upstream read as two lines whatever model
+    produced them: the claims-graph count asks about signers, and nothing on
+    that path consults model lineage. The load-bearing model-independence
+    signal is the read-side effective-independence number, and the docs must
+    not promise the weaker count is the stronger one.
     """
     from mareforma import signing as _signing
 
@@ -1065,13 +1064,13 @@ def test_replicated_promotion_docs_do_not_overclaim_the_model_gate(tmp_path):
         up = g.assert_claim("anchor", generated_by="seed")
         a = g.assert_claim("A", supports=[up], generated_by="lab_a", signer=sa)
         b = g.assert_claim("B", supports=[up], generated_by="lab_b", signer=sb)
-        # No finding lineage on these claims, so the model gate is a no-op: a
-        # same-(absent-)model pair under distinct keys promotes all the same.
+        # No finding lineage on these claims, so a same-(absent-)model pair
+        # under distinct keys reads as two lines all the same.
 
     for name in ("AGENTS.md", "ARCHITECTURE.md"):
         text = (ROOT / name).read_text(encoding="utf-8")
         assert "genuinely different model" not in text, (
-            f"{name} overclaims a distinct-model REPLICATED promotion gate; the "
+            f"{name} overclaims a distinct-model gate on the signer count; the "
             "read-side effective-independence number is the model signal"
         )
 
@@ -1688,7 +1687,7 @@ def test_unresolved_row_describes_the_restore_path_that_sets_it(tmp_path):
 
     No write path sets the flag, but restore replays it from a claims.toml
     that carries ``unresolved = true``, and a set flag holds the claim out of
-    REPLICATED with no error. An operator who reads "always 0" rules out the
+    counted with no error. An operator who reads "always 0" rules out the
     one thing keeping the claim at PRELIMINARY.
     """
     from mareforma import db as _db
@@ -1745,7 +1744,7 @@ def test_api_compute_status_counts_independence_by_signer():
 
     Independence keys on the claim's ``asserter_keyid``, with ``generated_by``
     only the fallback for legacy or unsigned lines. The reference elsewhere says
-    so (the REPLICATED rows), so the compute_status paragraph must not claim
+    so (the converged rows), so the compute_status paragraph must not claim
     ``generated_by`` is the primary counting axis.
     """
     api = (DOCS / "reference" / "api.mdx").read_text(encoding="utf-8")
@@ -2096,7 +2095,7 @@ def test_query_result_keys_match_the_projection(tmp_path):
     root_key, _, _, _ = _build_established(tmp_path)
     with mareforma.open(tmp_path, key_path=root_key) as g:
         rows = g.query(limit=9)
-    assert rows, "no ESTABLISHED row to read the full projection from"
+    assert rows, "no validated row to read the full projection from"
     returned = set(rows[0])
 
     drift = {}

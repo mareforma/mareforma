@@ -26,10 +26,11 @@ CREATE TABLE IF NOT EXISTS claims (
     transparency_logged INTEGER NOT NULL DEFAULT 1
                         CHECK (transparency_logged IN (0, 1)),
     validation_signature TEXT,
-    -- Denormalized from validation_signature's payload for indexable
-    -- reputation queries. NULL on rows nobody validated. The envelope
-    -- remains authoritative; if this column ever drifts from the
-    -- envelope it is the envelope that wins.
+    -- Denormalized from validation_signature's payload. NULL on rows nobody
+    -- validated. The envelope is authoritative and the read path enforces it:
+    -- a row whose column disagrees with its own envelope about who signed off
+    -- is refused rather than served either way round, and the reputation count
+    -- groups by the signer named INSIDE the envelope, not by this column.
     validator_keyid TEXT,
     -- Denormalized asserter keyid from the claim's signature_bundle (the
     -- primary/asserter-role signature). NULL on unsigned rows and on legacy
@@ -119,12 +120,19 @@ CREATE TABLE IF NOT EXISTS claims (
     updated_at      TEXT NOT NULL,
 
     -- A row cannot say a human validated it without the envelope that proves
-    -- one did. ``validated_by`` and ``validated_at`` are display fields
-    -- denormalised out of the signed payload; ``validation_signature`` is the
-    -- payload. The ladder's CHECK used to cover this from the other side, by
-    -- requiring the envelope on any row at the top of it, and it went with
-    -- the level. The claim it was really making has nothing to do with levels
-    -- and survives them: a validation nobody signed is not a validation.
+    -- one did. ``validation_signature`` is the payload, and ``validated_at``
+    -- is denormalised out of it.
+    --
+    -- ``validated_by`` is NOT. It is a human-readable name the caller passes,
+    -- it is in no signed payload, and nothing can check it against one. What
+    -- backs a validation is the KEY, verified through its enrollment chain; the
+    -- name beside it is a label for a reader. Do not treat it as attribution
+    -- that anybody signed.
+    --
+    -- The ladder's CHECK used to cover this from the other side, by requiring
+    -- the envelope on any row at the top of it, and it went with the level. The
+    -- claim it was really making has nothing to do with levels and survives
+    -- them: a validation nobody signed is not a validation.
     CHECK (validation_signature IS NOT NULL
            OR (validated_by IS NULL AND validated_at IS NULL))
 );
@@ -438,9 +446,9 @@ CREATE TABLE IF NOT EXISTS validators (
 # The Statement v1 envelope + signature binds every SIGNED_FIELDS value plus
 # the evidence vector, the observed-grounding verdict and the statement_cid
 # anchor. observed_grounding is watched for the same reason as the evidence
-# vector, one step sharper: it gates support-level promotion, so a single
-# UPDATE flipping it to GROUNDED lifts exactly the claims the observer refused
-# to promote. Without this trigger, a
+# vector, one step sharper: it is the observer's verdict about whether data
+# reached the finding, so a single UPDATE flipping it to GROUNDED overturns
+# exactly the answer the observer computed. Without this trigger, a
 # direct `UPDATE claims SET ev_risk_of_bias = 0 WHERE …` would silently
 # retroactively upgrade a claim's evidence quality , signature verification on
 # the unchanged envelope would still pass, but the row no longer matches what
@@ -472,6 +480,41 @@ CREATE TABLE IF NOT EXISTS validators (
 # re-check a GROUNDED verdict against the sources the finding names, so one
 # UPDATE clearing it turns a binding violation into a clean verdict. The column
 # is only ever written at INSERT; a change on a signed row is tampering.
+# A validation is terminal, and until now only Python said so. The write path
+# gates its UPDATE on ``validation_signature IS NULL``, which binds every caller
+# that comes through this library and nobody else: a second enrolled validator
+# refused by ``validate()`` could sign its own envelope, write it with plain
+# sqlite3, and the row would read verified under the new name with the first
+# validator's envelope gone and nothing recording that it was ever there. The
+# read path cannot notice, because the envelope that survives verifies.
+#
+# The columns are watched together because the display fields are denormalised
+# out of the signed payload: moving ``validated_by`` alone would leave the row
+# naming one person and the envelope another.
+#
+# Fires only when the row ALREADY carries an envelope, so the honest write, the
+# first validation on a row that had none, passes through untouched. There is no
+# legitimate second write: to record another reviewer's reading, assert it as
+# its own claim rather than over the top of theirs.
+_VALIDATION_TERMINAL_TRIGGER_NAME = "claims_validation_is_terminal"
+
+_VALIDATION_TERMINAL_TRIGGER_SQL = """\
+CREATE TRIGGER claims_validation_is_terminal
+BEFORE UPDATE OF
+    validation_signature, validator_keyid, validated_by, validated_at
+ON claims
+WHEN OLD.validation_signature IS NOT NULL
+  AND (
+        OLD.validation_signature IS NOT NEW.validation_signature
+     OR OLD.validator_keyid IS NOT NEW.validator_keyid
+     OR OLD.validated_by IS NOT NEW.validated_by
+     OR OLD.validated_at IS NOT NEW.validated_at
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:validation_is_terminal');
+END"""
+
+
 _SIGNED_FIELDS_TRIGGER_NAME = "claims_signed_fields_no_laundering"
 
 _SIGNED_FIELDS_TRIGGER_SQL = """\
@@ -759,6 +802,7 @@ END"""
 # where a definition is written down.
 _AUTHORED_TRIGGERS = (
     (_SIGNED_FIELDS_TRIGGER_NAME, _SIGNED_FIELDS_TRIGGER_SQL),
+    (_VALIDATION_TERMINAL_TRIGGER_NAME, _VALIDATION_TERMINAL_TRIGGER_SQL),
     (_FINDINGS_APPEND_ONLY_TRIGGER_NAME, _FINDINGS_APPEND_ONLY_TRIGGER_SQL),
     (_FINDINGS_NO_DELETE_TRIGGER_NAME, _FINDINGS_NO_DELETE_TRIGGER_SQL),
     (

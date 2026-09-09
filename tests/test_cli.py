@@ -475,7 +475,7 @@ class TestClaimValidate:
             _signing.bootstrap_key(gen_key_path)
 
         # The two converging peers need distinct, non-NULL asserter_keyid
-        # values to reach REPLICATED (v0.3.7). Sign each with its own key,
+        # values so the two asserters differ. Sign each with its own key,
         # both distinct from the XDG validator key that will promote it.
         sa_path = Path("_signer_a.key")
         sb_path = Path("_signer_b.key")
@@ -688,10 +688,10 @@ class TestClaimValidateErrors:
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
             _signing.bootstrap_key(_signing.default_key_path())
-            # Build a REPLICATED claim where one converging peer is signed
+            # Build a converged claim where one converging peer is signed
             # by the XDG key (the same key the CLI loads for `claim
             # validate`) and the other by a distinct key, so the pair has
-            # two distinct asserter_keyid (reaches REPLICATED) AND the
+            # two distinct asserter_keyid AND the
             # validating XDG key is itself an asserter (triggers the
             # self-validation refusal on validate).
             xdg_signer = _signing.load_private_key(_signing.default_key_path())

@@ -38,25 +38,29 @@ assembled from checks that all answered false. The discarded number moves to
 the residual for forensics rather than being offered as the value, because a
 number computed on a broken substrate is worse than no number.
 
-## The ladder that used to be here
-
-A stored `support_level` sat on every claim: `PRELIMINARY` on assertion, lifted
-to `REPLICATED` when two distinct signing keys converged on a shared
-`ESTABLISHED` upstream, and lifted again to `ESTABLISHED` by a human calling
-`validate()`. It is gone, column and all.
+## Why no word sits on a claim
 
 <Note>
-  Reading `mareforma.REPLICATED` raises `AttributeError`, no read filters on a
-  level, and no claim carries one.
+  Nothing stored on a claim ranks it. There is no level, no read filters on
+  one, and no field a writer could raise. If you have `REPLICATED` or
+  `ESTABLISHED` in your code, reading `mareforma.REPLICATED` or
+  `mareforma.ESTABLISHED` raises `AttributeError`: the names resolve to
+  nothing, so code carrying one fails where you can see it rather than reading
+  a word that means nothing.
 </Note>
 
-It was removed for two reasons. A single word never carried what a reader needs:
-`REPLICATED` said two keys agreed, which is a convergence marker and not proof
-of independence, and readers took it for one anyway. And the word was unsigned,
-so any process with write access could raise it, which meant every read had to
-re-derive whether the level was backed by signed material before serving the
-row. Several hundred lines of the read path existed to police a value nothing
-signed.
+Two reasons, and both are the point of the project.
+
+A single word never carries what a reader needs. "Two keys agreed" is a
+convergence marker, not proof of independence, and a reader handed one word
+takes it for the other. What you want to know is how many pairwise-distinct
+(model, data, signer) checks stand behind a finding, and that is a count, not a
+label.
+
+And a word on a row is unsigned. Any process with write access could raise it,
+so every read would have to re-derive whether the word was backed by signed
+material before serving the row. If the derivation is what you trust, serve the
+derivation and skip the word.
 
 Nothing replaces it with another word. What a finding is worth is computed on
 every read, from signed material, and reported as a number with a stated

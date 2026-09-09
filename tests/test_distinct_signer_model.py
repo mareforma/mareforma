@@ -2,17 +2,17 @@
 
 These cover the model change directly (not migrated from older expectations):
 
-  * REPLICATED keys on two distinct, non-NULL ``asserter_keyid`` values sharing
-    an ESTABLISHED+open anchor, not on distinct ``generated_by``.
+  * independence keys on two distinct, non-NULL ``asserter_keyid`` values
+    sharing an open anchor, not on distinct ``generated_by``.
   * artifact_hash is an EQUAL-data COLLAPSE, not a convergence reward.
   * data_id content-addressing collapses byte-identical reruns.
-  * the ESTABLISHED boundary refuses a validator that asserted any claim in
+  * validation refuses a validator that asserted any claim in
     the converging set.
   * trust-layer counting agrees with promotion on the asserter_keyid axis,
     with the legacy NULL-keyid generated_by fallback preserved.
   * verify-on-read excludes forged high-trust rows from ``query`` and flags
     them ``verified=False`` in ``get_claim`` without raising.
-  * single_trust_domain disclosure on a solo-operator ESTABLISHED row.
+  * single_trust_domain disclosure on a solo-operator validated row.
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ def _open_root_graph(tmp_path: Path):
 
 
 # ===========================================================================
-# REPLICATED promotion keys on distinct asserter_keyid
+# Independence keys on distinct asserter_keyid
 # ===========================================================================
 
 class TestTrustCounting:
@@ -306,7 +306,7 @@ class TestContentAddressing:
 # ===========================================================================
 
 def _build_established(tmp_path: Path, *, rep_text: str = "A"):
-    """Build an ESTABLISHED claim; return (root_key, val_key, rep_id, peer_id).
+    """Build a validated claim; return (root_key, val_key, rep_id, peer_id).
 
     ``rep_text`` sets the promoted claim's text so a search-side test can find
     it by a distinctive term.
@@ -324,19 +324,37 @@ def _build_established(tmp_path: Path, *, rep_text: str = "A"):
     return root_key, val_key, rep, peer
 
 
+def _forge_validation_envelope(root: Path, claim_id: str, envelope: str) -> None:
+    """Replace a claim's validation envelope the way an attacker would.
+
+    ``claims_validation_is_terminal`` refuses this UPDATE, which is the point of
+    the trigger. It is also droppable by anyone who can write to the file, and
+    that is the same person, so the tamper drops it first. What these tests are
+    about is the layer BELOW: the read path re-verifies the envelope and refuses
+    the row whatever the write layer allowed. Dropping the guard is recorded by
+    the schema census on the next open, which is a separate guarantee with its
+    own tests.
+    """
+    conn = sqlite3.connect(_db_path(root))
+    try:
+        conn.execute("DROP TRIGGER IF EXISTS claims_validation_is_terminal")
+        conn.execute(
+            "UPDATE claims SET validation_signature = ? WHERE claim_id = ?",
+            (envelope, claim_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 class TestVerifyOnRead:
     def test_tampered_established_excluded_and_flagged(self, tmp_path: Path) -> None:
         root_key, _, rep, _ = _build_established(tmp_path)
         # Forge: corrupt the validation_signature directly in sqlite.
-        conn = sqlite3.connect(_db_path(tmp_path))
-        try:
-            conn.execute(
-                "UPDATE claims SET validation_signature = ? WHERE claim_id = ?",
-                ('{"payloadType":"forged","payload":"x","signatures":[]}', rep),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        _forge_validation_envelope(
+            tmp_path, rep,
+            '{"payloadType":"forged","payload":"x","signatures":[]}',
+        )
 
         with mareforma.open(tmp_path, key_path=root_key) as g:
             # get_claim never raises; flags verified=False.
@@ -353,15 +371,10 @@ class TestVerifyOnRead:
         root_key, _, rep, _ = _build_established(
             tmp_path, rep_text="quasarflux marker term",
         )
-        conn = sqlite3.connect(_db_path(tmp_path))
-        try:
-            conn.execute(
-                "UPDATE claims SET validation_signature = ? WHERE claim_id = ?",
-                ('{"payloadType":"forged","payload":"x","signatures":[]}', rep),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        _forge_validation_envelope(
+            tmp_path, rep,
+            '{"payloadType":"forged","payload":"x","signatures":[]}',
+        )
 
         with mareforma.open(tmp_path, key_path=root_key) as g:
             assert g.read_verify_exclusions == 0
@@ -379,7 +392,7 @@ class TestVerifyOnRead:
         assert [e["n"] for e in excluded] == [1, 1]
 
     def test_legacy_unsigned_replicated_is_verify_exempt(self, tmp_path: Path) -> None:
-        """A REPLICATED row whose asserter is not enrolled (no pubkey to check)
+        """A row whose asserter is not enrolled (no pubkey to check)
         is verify-exempt: returned as-is, never falsely excluded."""
         sa, sb = _two_signers(tmp_path)  # NOT enrolled as validators
         root_key = _bootstrap_key(tmp_path, "root.key")
@@ -393,7 +406,7 @@ class TestVerifyOnRead:
             assert rep in ids
 
     def test_tampered_enrolled_asserter_bundle_excluded(self, tmp_path: Path) -> None:
-        """A tampered participant bundle on a REPLICATED row whose asserter IS an
+        """A tampered participant bundle on a row whose asserter IS an
         enrolled validator is excluded from query."""
         sa, sb = _two_signers(tmp_path)
         root_key = _bootstrap_key(tmp_path, "root.key")
@@ -436,20 +449,14 @@ class TestVerifyOnRead:
         self, tmp_path: Path,
     ) -> None:
         """Every read surface gates a high-trust row on re-verification, not just
-        query(). Build an ESTABLISHED row, break its validation envelope in the
+        query(). Build a validated row, break its validation envelope in the
         DB, and assert search() excludes it exactly as query() does."""
         root_key, _, rep, _ = _build_established(
             tmp_path, rep_text="quasarflux marker term",
         )
-        conn = sqlite3.connect(_db_path(tmp_path))
-        try:
-            conn.execute(
-                "UPDATE claims SET validation_signature = ? WHERE claim_id = ?",
-                ('{"payloadType":"x","payload":"x","signatures":[]}', rep),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        _forge_validation_envelope(
+            tmp_path, rep, '{"payloadType":"x","payload":"x","signatures":[]}',
+        )
         with mareforma.open(tmp_path, key_path=root_key) as g:
             q_ids = {r["claim_id"] for r in g.query(limit=99)}
             s_ids = {r["claim_id"] for r in g.search("quasarflux", limit=99)}
@@ -460,7 +467,7 @@ class TestVerifyOnRead:
         self, tmp_path: Path,
     ) -> None:
         """Honest convergence is untouched: two genuinely signed claims on one
-        ESTABLISHED anchor still read verified and are still served."""
+        validated anchor still read verified and are still served."""
         sa, sb = _two_signers(tmp_path)
         root_key = _bootstrap_key(tmp_path, "root.key")
         with mareforma.open(tmp_path, key_path=root_key) as g:
@@ -475,7 +482,7 @@ class TestVerifyOnRead:
     def test_search_returns_a_genuine_established_row_with_disclosure(
         self, tmp_path: Path,
     ) -> None:
-        """The read-path gate must not over-exclude: a genuine ESTABLISHED row is
+        """The read-path gate must not over-exclude: a genuine validated row is
         still served by search, and carries the same trust-domain disclosure
         query attaches (search promises the same projection as query_claims)."""
         root_key, _, rep, _ = _build_established(
@@ -503,7 +510,7 @@ class TestSingleTrustDomain:
 
     def test_export_bundle_predicate(self, tmp_path: Path) -> None:
         """The export bundle carries the mare:singleTrustDomain predicate on the
-        ESTABLISHED row."""
+        validated row."""
         from mareforma import export_bundle as _eb
 
         _build_established(tmp_path)
@@ -524,11 +531,11 @@ class TestSingleTrustDomain:
 class TestVerifyOnReadCacheBinding:
     """Regression: the verify-on-read cache must key on the per-row identity.
 
-    The ESTABLISHED verify result depends on a payload-binds-this-claim check, so
+    The verify result depends on a payload-binds-this-claim check, so
     the cache key must include the row's claim_id. Without it, an attacker who
     copies a genuine validation_signature onto a second row (which they sort
     first via a chosen created_at) would poison the shared query cache and censor
-    the legitimate ESTABLISHED claim.
+    the legitimate validated claim.
     """
 
     def test_copied_validation_signature_does_not_censor_the_real_row(
@@ -543,10 +550,10 @@ class TestVerifyOnReadCacheBinding:
             up = g.assert_claim("anchor", generated_by="seed")
             a = g.assert_claim("legit A", generated_by="x", supports=[up], signer=sa)
             g.assert_claim("peer B", generated_by="y", supports=[up], signer=sb)
-            g.validate(a)  # A -> ESTABLISHED
+            g.validate(a)  # a human signs off on A
             vs_a = g.get_claim(a)["validation_signature"]
 
-        # Forge a second ESTABLISHED row that reuses A's validation envelope and
+        # Forge a second row that reuses A's validation envelope and
         # sorts FIRST by carrying a far-future created_at.
         conn = sqlite3.connect(tmp_path / ".mareforma" / "graph.db")
         conn.execute(
@@ -563,18 +570,18 @@ class TestVerifyOnReadCacheBinding:
             texts = {c["text"] for c in g.query(limit=99)}
             # The forged row is excluded (its envelope does not bind its claim_id)
             assert "forged F" not in texts
-            # ...and the legitimate ESTABLISHED claim is NOT censored by the
+            # ...and the legitimate validated claim is NOT censored by the
             # forged row sharing its envelope bytes.
             assert "legit A" in texts
             assert g.get_claim(a)["verified"] is True
 
 
 class TestParticipantBundleBinding:
-    """Verify-on-read for REPLICATED rows binds the bundle to the claim, so a
+    """Verify-on-read binds the bundle to the claim, so a
     genuine bundle cannot be stapled onto a forged row (the P1 review gap)."""
 
     def test_copied_bundle_onto_other_claim_excluded(self, tmp_path: Path) -> None:
-        """A genuine enrolled-key bundle copied onto a different REPLICATED row
+        """A genuine enrolled-key bundle copied onto a different row
         fails the claim_id binding: get_claim flags verified=False and query
         excludes it, while the genuine row is still served."""
         sa, sb = _two_signers(tmp_path)
@@ -842,7 +849,7 @@ class TestVerifyOnReadContentBinding:
         finally:
             conn.close()
 
-    def _replicated(self, tmp_path: Path) -> tuple[Path, str]:
+    def _converged(self, tmp_path: Path) -> tuple[Path, str]:
         sa, sb = _two_signers(tmp_path)
         root_key = _bootstrap_key(tmp_path, "root.key")
         with mareforma.open(tmp_path, key_path=root_key) as g:
@@ -854,40 +861,47 @@ class TestVerifyOnReadContentBinding:
         return root_key, rep
 
     def _assert_unverified(
-        self, tmp_path: Path, root_key: Path, claim_id: str, level: str,
+        self, tmp_path: Path, root_key: Path, claim_id: str,
     ) -> None:
+        """The row reads unverified AND no enumerating read serves it.
+
+        Both halves, because they can come apart: get_claim flags a row and
+        returns it, while query has to drop it. A test that checked only the
+        flag would pass over a read surface handing the laundered text to a
+        caller who never looks at the flag.
+        """
         with mareforma.open(tmp_path, key_path=root_key) as g:
             row = g.get_claim(claim_id)
             assert row["verified"] is False
-            # The tier is asserted rather than passed and ignored. The read
-            # used to be narrowed by it, and once that filter went the
-            # parameter named a tier nothing checked, which left the class
-            # claiming coverage at every tier while exercising none.
             ids = {r["claim_id"] for r in g.query(limit=99)}
             assert claim_id not in ids
 
-    def test_replicated_text_rewrite_excluded(self, tmp_path: Path) -> None:
-        root_key, rep = self._replicated(tmp_path)
-        self._launder(tmp_path, rep, drop_bundle=False)
-        self._assert_unverified(tmp_path, root_key, rep, "REPLICATED")
-
-    def test_replicated_text_rewrite_without_bundle_excluded(
+    def test_a_converged_row_rewritten_in_place_is_excluded(
         self, tmp_path: Path,
     ) -> None:
-        root_key, rep = self._replicated(tmp_path)
-        self._launder(tmp_path, rep, drop_bundle=True)
-        self._assert_unverified(tmp_path, root_key, rep, "REPLICATED")
-
-    def test_established_text_rewrite_excluded(self, tmp_path: Path) -> None:
-        root_key, _, rep, _ = _build_established(tmp_path)
+        root_key, rep = self._converged(tmp_path)
         self._launder(tmp_path, rep, drop_bundle=False)
-        self._assert_unverified(tmp_path, root_key, rep, "ESTABLISHED")
+        self._assert_unverified(tmp_path, root_key, rep)
 
-    def test_established_text_rewrite_without_bundle_excluded(
+    def test_a_converged_row_rewritten_and_de_signed_is_excluded(
+        self, tmp_path: Path,
+    ) -> None:
+        root_key, rep = self._converged(tmp_path)
+        self._launder(tmp_path, rep, drop_bundle=True)
+        self._assert_unverified(tmp_path, root_key, rep)
+
+    def test_a_validated_row_rewritten_in_place_is_excluded(
         self, tmp_path: Path,
     ) -> None:
         root_key, _, rep, _ = _build_established(tmp_path)
+        self._launder(tmp_path, rep, drop_bundle=False)
+        self._assert_unverified(tmp_path, root_key, rep)
+
+    def test_a_validated_row_rewritten_and_de_signed_is_excluded(
+        self, tmp_path: Path,
+    ) -> None:
+        root_key, _, rep, _ = _build_established(tmp_path)
         self._launder(tmp_path, rep, drop_bundle=True)
-        self._assert_unverified(tmp_path, root_key, rep, "ESTABLISHED")
+        self._assert_unverified(tmp_path, root_key, rep)
 
 

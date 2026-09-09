@@ -7,13 +7,13 @@ Coverage
   open()          : default path, creates db, context manager closes connection
   assert_claim()  : default INFERRED, ANALYTICAL, DERIVED, invalid raises,
                     idempotency no-op, idempotency same id returned,
-                    REPLICATED triggers (independent agents, shared upstream),
-                    REPLICATED not triggered (same agent),
-                    REPLICATED not triggered (no shared upstream)
+                    convergence (independent agents, shared upstream),
+                    no convergence (same agent),
+                    no convergence (no shared upstream)
   query()         : text=None returns all, substring match, no match,
                     classification filter, limit
   get_claim()     : found, not found
-  validate()      : REPLICATED→ESTABLISHED, validated_by stored,
+  validate()      : a signed validation, validated_by stored,
                     PRELIMINARY raises, nonexistent raises
   schema()        : required keys present, values match db constants
 """
@@ -140,7 +140,7 @@ def test_assert_claim_different_keys_creates_two(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# assert_claim(), REPLICATED trigger
+# assert_claim(), convergence
 # ---------------------------------------------------------------------------
 
 def test_query_text_none_returns_all(tmp_path):
@@ -236,7 +236,7 @@ def test_validate_nonexistent_claim_raises(tmp_path):
 def test_validate_without_signer_raises(tmp_path):
     """No key loaded → graph.validate() refuses with a clear error.
 
-    Bootstrap a key, build a REPLICATED pair via the seeded upstream
+    Bootstrap a key, build a converged pair via the seeded upstream
     pathway, then re-open without the key and confirm validate() refuses
     on the loaded-signer gate.
     """
@@ -940,7 +940,7 @@ class TestRekorSagaAtomicity:
 
 
 # ---------------------------------------------------------------------------
-# ESTABLISHED-by-evidence binding
+# validation-by-evidence binding
 # ---------------------------------------------------------------------------
 
 
@@ -951,7 +951,7 @@ class TestEvidenceSeenBinding:
     'reviewed nothing' admission, not an absent field."""
 
     def _setup_replicated(self, graph, root_key):
-        """Build a REPLICATED claim under signers distinct from `root_key`."""
+        """Build a converged claim under signers distinct from `root_key`."""
         sa, sb = _two_signers(graph._root)
         seed = graph.assert_claim(
             "anchor", generated_by="seed",
@@ -971,7 +971,7 @@ class TestEvidenceSeenBinding:
         root_key = _bootstrap_key(tmp_path, "root.key")
         other_key = _bootstrap_key(tmp_path, "validator.key")
 
-        # Build REPLICATED chain under root, validate under another key.
+        # Build converged chain under root, validate under another key.
         with mareforma.open(tmp_path, key_path=root_key) as g:
             _, cid_b = self._setup_replicated(g, root_key)
             g.enroll_validator(
@@ -1209,9 +1209,9 @@ class TestValidationEnvelopeKwargAgreement:
         assert row["validated_at"], "a validation with no time on it"
 
 class TestValidateClaimRequiresSignedEnvelope:
-    """Promotion to ESTABLISHED is gated on a signed validation envelope.
+    """Recording a validation is gated on a signed validation envelope.
     There is no unsigned promotion path: the storage guards refuse an
-    ESTABLISHED row with a NULL signature, so an unsigned call must fail
+    validated row with a NULL signature, so an unsigned call must fail
     up front with a clear ValueError that names the real requirement,
     not an IllegalStateTransitionError that reads like row corruption."""
 

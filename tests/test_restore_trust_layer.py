@@ -79,7 +79,7 @@ def test_signed_non_rekor_claim_keeps_transparency_and_still_converges(
     assert _trust_columns(tmp_path)[c1]["transparency_logged"] == 1
 
     # A second distinct-signer peer added post-restore promotes BOTH to
-    # REPLICATED, only possible if c1 stayed transparency-eligible.
+    # counted as a second line, only possible if c1 stayed eligible.
     with mareforma.open(tmp_path, key_path=root_key) as g:
         c2 = g.assert_claim(
             "converged", supports=[seed], generated_by="B", signer=val_signer,
@@ -124,14 +124,14 @@ def test_restore_refuses_a_forged_rekor_uuid_in_the_bundle(
     assert _trust_columns(tmp_path)[cid]["transparency_logged"] == 0
 
 
-def _forge_established_and_restore(
+def _forge_validation_and_restore(
     tmp_path: Path, claim_id: str, signer,
 ) -> None:
-    """Stamp a claim ESTABLISHED in claims.toml with a real validation envelope.
+    """Hand-write a validation onto a claim in claims.toml and restore it.
 
-    ``support_level`` is unsigned, so the level and the envelope are both
-    hand-written; the envelope is genuinely signed by *signer* and binds this
-    claim_id, which is what makes it survive every signature check restore runs.
+    The envelope is genuinely signed by *signer* and binds this claim_id, which
+    is what makes it survive every signature check restore runs. Whether the
+    signer was entitled to sign it is the separate question these tests ask.
     """
     from mareforma.db import _backup_claims_toml, open_db
     conn = open_db(tmp_path)
@@ -152,7 +152,6 @@ def _forge_established_and_restore(
     toml_path = tmp_path / "claims.toml"
     data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
     entry = data["claims"][claim_id]
-    entry["support_level"] = "ESTABLISHED"
     entry["validation_signature"] = json.dumps(
         envelope, sort_keys=True, separators=(",", ":"),
     )
@@ -185,14 +184,14 @@ def test_restore_refuses_a_self_validated_established(tmp_path: Path) -> None:
             g.validate(c1)
 
     with pytest.raises(RestoreError):
-        _forge_established_and_restore(tmp_path, c1, root_signer)
+        _forge_validation_and_restore(tmp_path, c1, root_signer)
 
 
 def test_restore_refuses_an_established_validated_by_an_llm(
     tmp_path: Path,
 ) -> None:
     """An LLM-typed validator may sign a validation envelope but cannot promote
-    past REPLICATED. The type is bound into the signed enrollment, so restore
+    sign off on a claim. The type is bound into the signed enrollment, so restore
     can hold the replayed envelope to the same ceiling the live path does."""
     root_key = _bootstrap_key(tmp_path, "root.key")
     val_key = _bootstrap_key(tmp_path, "val.key")
@@ -218,7 +217,7 @@ def test_restore_refuses_an_established_validated_by_an_llm(
             g.validate(c1)
 
     with pytest.raises(RestoreError):
-        _forge_established_and_restore(tmp_path, c1, llm_signer)
+        _forge_validation_and_restore(tmp_path, c1, llm_signer)
 
 
 def test_restore_pends_an_unwitnessed_claim_under_a_rekor_policy(
@@ -646,7 +645,7 @@ def test_restore_refuses_an_incomplete_sidecar_entry(
 
 def test_restore_preserves_the_full_trust_layer(tmp_path: Path) -> None:
     """Round-trip a graph carrying every trust-layer state promotion reads , 
-    REPLICATED level, contradiction invalidation, signer identity, transparency
+    convergence, contradiction invalidation, signer identity, transparency
    , and assert the recovered columns are identical to the originals."""
     root_key = _bootstrap_key(tmp_path, "root.key")
     val_key = _bootstrap_key(tmp_path, "val.key")

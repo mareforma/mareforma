@@ -14,7 +14,7 @@ from mareforma import _supports
 # Perf pin: claim_supports cache walk at scale
 # ----------------------------------------------------------------------------
 #
-# The cache exists so REPLICATED queries don't degrade to a full
+# The cache exists so corroboration queries don't degrade to a full
 # table scan as the graph grows. The pin is expressed at 1k claims and
 # relative to a primary-key lookup on the same machine, so it runs in
 # the default suite on every invocation.

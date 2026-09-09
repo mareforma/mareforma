@@ -11,7 +11,7 @@ nobody checked.
   pubkey under a junk enrollment envelope reads as a validator to any check that
   asks only whether the row exists. The chain walk back to the self-signed root
   is what "registered" means everywhere else.
-* **The seed exemption belongs to ESTABLISHED.** ``validation_signature`` is
+* **The seed exemption belongs to the validation column.** ``validation_signature`` is
   verified on read at that tier alone and is not on the laundering trigger's
   watch list, so below it the column is unauthenticated text that bought a lone
   claim the whole corroboration exemption.

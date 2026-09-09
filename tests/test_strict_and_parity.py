@@ -27,7 +27,7 @@ from mareforma.db import (
 
 
 def _converge(tmp_path: Path, *, strict: bool, ah1, ah2) -> tuple[str, str]:
-    """Two distinct-signer claims sharing an ESTABLISHED anchor. Return levels.
+    """Two distinct-signer claims sharing an anchor.
 
     Only k1 (the root) passes the flag: declaring it is a root-signed act, and
     the second signer is bound by the project policy it wrote.

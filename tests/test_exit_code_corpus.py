@@ -288,11 +288,11 @@ class TestPromotionFlagArm:
     promoted row's envelope and the signed evidence backing its level, and a
     tier-independent audit-grade re-check of the row's own bundle. Only the
     flag arm speaks to promotion, and it had no test: the branch that turns a
-    REPLICATED row whose backing collapsed into a tampered verdict was carried
+    converged row whose backing collapsed into a tampered verdict was carried
     on inspection alone.
 
     The peer is what gets tampered here, not the row under test. X earned
-    REPLICATED by converging with a distinct signer on a shared anchor; break
+    corroborated by a distinct signer on a shared anchor; break
     that peer's signature and X's own bundle still verifies, so the audit-grade
     arm stays silent and the flag arm is the only thing that can produce the
     verdict.

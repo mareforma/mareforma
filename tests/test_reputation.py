@@ -28,7 +28,7 @@ class TestValidatorReputationProjection:
         validator_key: Path,
     ) -> list[str]:
         """Build a graph with *n_promotions* claims promoted to
-        ESTABLISHED under *validator_key*. Returns the promoted ids."""
+        validated under *validator_key*. Returns the validated ids."""
         rep_ids: list[str] = []
         sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=root_key) as g:
@@ -64,7 +64,7 @@ class TestValidatorReputationProjection:
         assert len(promoted) == 3
         for r in promoted:
             # Each promoted claim's reputation equals the validator's
-            # total ESTABLISHED-validation count (3 promotions under
+            # total validation count (3 sign-offs under
             # the same validator key).
             assert r["validator_reputation"] == 3
 
@@ -99,7 +99,7 @@ class TestGetValidatorReputation:
         root_key = _bootstrap_key(tmp_path, "root.key")
         with mareforma.open(tmp_path, key_path=root_key) as g:
             reputation = g.get_validator_reputation()
-        # Root is auto-enrolled but has zero ESTABLISHED claims yet.
+        # Root is auto-enrolled but has signed off on nothing yet.
         assert len(reputation) == 1
         assert list(reputation.values()) == [0]
 

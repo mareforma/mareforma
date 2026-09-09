@@ -1,21 +1,19 @@
-"""tests/test_status_attack_chain.py — status-tainted claims must not
-participate in the trust ladder.
+"""tests/test_status_attack_chain.py: a retracted or contested claim must
+not read as a line of evidence.
 
 The scenario these tests defend against:
 
   1. Adversary asserts a claim with status='retracted' (or 'contested')
-     pointing at an ESTABLISHED upstream.
-  2. An honest peer asserts the same upstream under a different
-     signing key, expecting their claim to REPLICATE off the upstream.
-  3. Without a status filter, the graph would also promote the
-     adversary's tainted claim to REPLICATED.
-  4. validate() (or another adversary path) then promotes the tainted
-     row to ESTABLISHED — usable as a fake upstream for further chains.
+     citing a shared upstream.
+  2. An honest peer cites the same upstream under a different signing key.
+  3. Without a status filter, a reader counting distinct signers on that
+     upstream counts the adversary's tainted claim as the second line.
+  4. validate() (or another adversary path) then puts a human's sign-off on
+     the tainted row, and it serves as a fake upstream for further chains.
 
-The defenses: REPLICATED detection skips status != 'open' peers;
-validate() refuses non-open rows; seed=True refuses non-open status;
-the LLM-facing query_graph tool surfaces status so consumers can see
-editorial taint on otherwise-REPLICATED rows.
+The defenses: a withdrawn claim is not counted as a peer; validate() refuses
+non-open rows; and the LLM-facing query_graph tool surfaces status so
+consumers can see editorial taint on a row that otherwise looks corroborated.
 """
 
 from __future__ import annotations
@@ -96,11 +94,10 @@ class TestValidateRefusesNonOpen:
 class TestRetractedIsTerminal:
     """A BEFORE UPDATE trigger refuses any transition out of
     status='retracted'. Without this, an adversary could insert a
-    born-retracted claim and then flip it back to 'open' via
-    update_claim (a pure status mutation doesn't trigger a REPLICATED
-    re-check). The flipped row would then ride an honest peer's INSERT
-    into REPLICATED, with no audit trail since the signed envelope
-    doesn't bind status."""
+    born-retracted claim and then flip it back to 'open' via update_claim,
+    and a withdrawn finding would be back in every default read counting as
+    a line of evidence, with no audit trail since the signed envelope does
+    not bind status."""
 
     def test_retracted_to_open_refused(self, tmp_path: Path) -> None:
         from mareforma.db import update_claim, IllegalStateTransitionError
@@ -142,9 +139,9 @@ class TestRetractedIsTerminal:
             assert g.get_claim(c)["status"] == "open"
 
     def test_full_flip_back_attack_chain_blocked(self, tmp_path: Path) -> None:
-        """The full attack chain Q5 surfaced: born-retracted, flip to open,
-        ride an honest peer's INSERT into REPLICATED. The trigger refuses
-        the flip, so the chain stops at step 2."""
+        """The full chain: born-retracted, flip to open, then ride an honest
+        peer's citation and count as a second line. The trigger refuses the
+        flip, so the chain stops at step 2."""
         from mareforma.db import update_claim, IllegalStateTransitionError
         from tests._helpers import _two_signers
         sa, sb = _two_signers(tmp_path)
@@ -170,14 +167,14 @@ class TestRetractedIsTerminal:
 class TestLLMToolSurfacesStatus:
     def test_query_graph_returns_status_field(self, tmp_path: Path) -> None:
         """An LLM consumer of the agent tool must be able to see editorial
-        taint, even on a REPLICATED row whose peers happen to be open."""
+        taint, even on a converged row whose peers happen to be open."""
         from tests._helpers import _two_signers
         sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=_key(tmp_path)) as g:
             seed = _seeded_upstream(g)
             a = g.assert_claim("W", supports=[seed], generated_by="agent/a", signer=sa)
             b = g.assert_claim("W", supports=[seed], generated_by="agent/b", signer=sb)
-            # Flip a to contested editorially, it remains REPLICATED but
+            # Flip a to contested editorially. Its peers are unchanged, but
             # the LLM must see the taint.
             from mareforma.db import update_claim
             update_claim(g._conn, g._root, a, status="contested")

@@ -3,8 +3,8 @@
 Mareforma is pre-1.0 software maintained by the Mareforma team. The threat model
 matters: mareforma builds the local epistemic record AI scientists rely on
 for cross-agent replication, so a defect that lets an attacker forge cross-agent
-convergence (promoting a claim past `PRELIMINARY` without the distinct-signer
-evidence the promotion rule requires), a signed envelope, or a validator
+convergence (making one line of evidence read as two independent ones), a
+signed envelope, or a validator
 enrollment is a trust-layer failure, not a cosmetic bug. Reports here get
 priority.
 
@@ -36,7 +36,7 @@ hours. Do not include exploit details in the public issue.
 
 - Affected version (`mareforma --version` or `pip show mareforma`)
 - Reproduction: minimum code or CLI commands that demonstrate the issue
-- Impact: what an attacker can do (forge a promotion past `PRELIMINARY`,
+- Impact: what an attacker can do (make one line of evidence read as two,
   mutate a signed claim without detection, bypass identity gates, etc.)
 - Suggested fix or mitigation, if you have one
 
@@ -124,13 +124,12 @@ trust boundaries:
 - Sigstore-Rekor inclusion is opt-in (`rekor_url=` parameter on
   `mareforma.open`). Without it, claims are signed but not
   transparency-logged.
-- A support level above `PRELIMINARY` is derived, not asserted: it is
-  served as verified only when the signed evidence behind it verifies,
-  and a direct write to the column is refused unless a promotion window
-  is open. The window is a per-connection marker that only this library
-  opens, so a process that can both load mareforma and write to your
-  `graph.db` holds promotion authority. Local write access to the graph
-  is the boundary, the same residual as the signing key above.
+- What a claim is worth is derived on read, never stored: a row is served
+  as verified only when the signed material on it verifies. Nothing on the
+  row can be edited to raise it, because there is no such field. A direct
+  writer can still remove signed material, and the read path reports that
+  rather than hiding it. Local write access to the graph is the boundary,
+  the same residual as the signing key above.
 - A local model's lineage is the served weights' digest, resolved from
   the producer's own inference server through a scope-detached probe
   that never follows a redirect off the loopback host and accepts only

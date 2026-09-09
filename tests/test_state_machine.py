@@ -3,7 +3,7 @@
 Covers:
   - SQLite triggers reject illegal state transitions with translated
     `IllegalStateTransitionError`
-  - CHECK constraint enforces validation_signature on ESTABLISHED rows
+  - CHECK constraint refuses a row naming a validator with no envelope
   - ``prev_hash`` chain is built linearly across claims
   - ``prev_hash`` UNIQUE catches branched chains
   - Status-only edits on signed claims still work (status transition
@@ -142,7 +142,7 @@ class TestStatusEditsOnSignedRows:
 class TestAValidationNobodySigned:
     """The CHECK that outlived the ladder, from the other side.
 
-    It used to say an ESTABLISHED row must carry a validation envelope, which
+    It used to say a promoted row must carry a validation envelope, which
     was a claim about a level. The claim underneath had nothing to do with
     levels: a row cannot say a human validated it without the envelope that
     proves one did. ``validated_by`` and ``validated_at`` are display fields
@@ -172,6 +172,28 @@ class TestAValidationNobodySigned:
     ) -> None:
         val_key, claim_id = self._validated_claim(tmp_path)
         with mareforma.open(tmp_path, key_path=val_key) as g:
+            with pytest.raises(
+                sqlite3.IntegrityError, match="validation_is_terminal",
+            ):
+                g._conn.execute(
+                    "UPDATE claims SET validation_signature = NULL "
+                    "WHERE claim_id = ?",
+                    (claim_id,),
+                )
+
+    def test_the_check_still_refuses_it_with_the_trigger_gone(
+        self, tmp_path: Path,
+    ) -> None:
+        """Two layers, and the test above only reaches the outer one.
+
+        A trigger is droppable by anyone who can write to the file, which is
+        the same person this guard is about, so a test that stops at the
+        trigger has not shown the row is safe. The CHECK is not droppable
+        without rebuilding the table.
+        """
+        val_key, claim_id = self._validated_claim(tmp_path)
+        with mareforma.open(tmp_path, key_path=val_key) as g:
+            g._conn.execute("DROP TRIGGER claims_validation_is_terminal")
             with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint"):
                 g._conn.execute(
                     "UPDATE claims SET validation_signature = NULL "
@@ -294,7 +316,7 @@ class TestPrevHashChain:
 
 class TestStatusOnlyEditsBypassTrigger:
     def test_retraction_of_replicated_claim(self, tmp_path: Path) -> None:
-        """A REPLICATED claim's status can be set to retracted without
+        """A converged claim's status can be set to retracted without
         a state-machine trigger firing."""
         from mareforma import signing as _sig
         from tests._helpers import _two_signers
@@ -389,7 +411,7 @@ class TestSignedFieldsAppendOnly:
             g.close()
 
     def test_asserter_keyid_update_blocked(self, tmp_path: Path) -> None:
-        """asserter_keyid is the independence axis of REPLICATED. It is a
+        """asserter_keyid is the independence axis. It is a
         denormalisation of the bundle's signer, so the row may not contradict
         the envelope it was derived from."""
         cid, g = self._signed_claim(tmp_path)
@@ -524,7 +546,7 @@ class TestSignedDeleteAppendOnly:
     """claims_signed_no_delete refuses DELETE on a signed claim.
 
     Without this trigger, a process with DB access could wipe a Rekor-
-    logged ESTABLISHED claim, _backup_claims_toml would rewrite the
+    logged and validated claim, _backup_claims_toml would rewrite the
     TOML as if the claim never existed, and the entire "append-only
     over the signed predicate" framing would be half-implemented
     (UPDATE-of-signed-fields was already locked; DELETE was not).
