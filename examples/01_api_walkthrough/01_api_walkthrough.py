@@ -9,14 +9,14 @@ No external dependencies. Uses a temporary directory, safe to run anywhere.
 Trust reads off the derived axes graph.proposition_status(prop) returns: status
 per content_id (the answer) and question_status per frame_id (the question).
 Steps 5 and 6 cover what two independent agents converging is worth, and what a
-human signing off on a finding records. Neither writes a level: the promotion
-ladder that used to sit under both is gone.
+human signing off on a finding records. Neither writes anything to the claim
+that a later reader has to take on the graph's word.
 
 Sections
 --------
   1. Open                  zero setup, context manager
   2. Assert                INFERRED, ANALYTICAL, DERIVED
-  3. Query                 text, classification, limit
+  3. Query                 text, classification, refutation state, limit
   4. Idempotency           retry-safe writes
   5. Convergence            two independent agents on the same finding
   6. Validation (human only)  a signed sign-off, no automated path
@@ -24,6 +24,7 @@ Sections
   8. Anti-patterns         what breaks the epistemic model silently
 """
 
+import json
 import tempfile
 from pathlib import Path
 
@@ -56,8 +57,8 @@ sep("1. Open")
 # uses a separate enrolled reviewer key for the validate() call.
 agent_key_path = tmp / "_agent_key"
 reviewer_key_path = tmp / "_reviewer_key"
-# Two distinct lab keys for the converging claims in section 5: REPLICATED
-# keys on the signing key, so the two peers must sign with different keys.
+# Two distinct lab keys for the converging claims in section 5: independence
+# is read off the signing key, so the two peers must sign with different keys.
 lab_a_key_path = tmp / "_lab_a_key"
 lab_b_key_path = tmp / "_lab_b_key"
 _signing.bootstrap_key(agent_key_path)
@@ -123,9 +124,10 @@ show("text='cell type A'", f"{len(r)} claims")
 r = graph.query(classification="ANALYTICAL")
 show("classification=ANALYTICAL", f"{len(r)} claim")
 
-# Minimum support, nothing is REPLICATED yet
-r = graph.query(limit=99)
-show("REPLICATED rows", f"{len(r)} claims  ← expected 0")
+# Refutation state. "clean" is the strictest cohort: nothing contradicts the
+# claim and nobody has contested or retracted it.
+r = graph.query(refutation_filter="clean", limit=99)
+show("refutation=clean", f"{len(r)} claims")
 
 # Limit
 r = graph.query(limit=2)
@@ -164,23 +166,22 @@ show("same id?", id_a == id_b)
 # A key is retry safety, not convergence. A replay carrying the same key with
 # any divergent semantic field (text, generated_by, supports, ...) raises
 # IdempotencyConflictError: merging two authors into one row would discard the
-# second contribution. Two agents converge by citing a shared ESTABLISHED
-# upstream in supports= under distinct signing keys.
+# second contribution. Two agents converge by citing a shared upstream in
+# supports= under distinct signing keys.
 
 
 # ---------------------------------------------------------------------------
-# 5. REPLICATED, automatic convergence
+# 5. Convergence, two agents on one finding
 # ---------------------------------------------------------------------------
 sep("5. Convergence")
 
-# REPLICATED fires when >=2 claims share the same upstream in supports[],
-# are signed by DISTINCT keys, and the shared upstream is itself
-# ESTABLISHED. Distinct signing keys are the legacy independence signal, used
-# when no model lineage is observed; effective independence counts distinct
-# model and method. generated_by is a display label and does not drive
-# promotion. The ESTABLISHED-upstream condition (replication-of-noise is not
-# replication) is satisfied here by asserting the upstream as a seed claim,
-# inserted directly at ESTABLISHED with a signed seed envelope.
+# Two claims citing the same upstream in supports[] and signed by DISTINCT
+# keys are what convergence looks like on the record. Nothing is written to
+# either claim to say so: the graph stores who signed what and what each cites,
+# and a reader derives independence from that. Distinct signing keys are the
+# weakest form of it, used when no model lineage is observed; effective
+# independence counts distinct model and method. generated_by is a display
+# label and carries no weight at all.
 
 lab_a_priv = _signing.load_private_key(lab_a_key_path)
 lab_b_priv = _signing.load_private_key(lab_b_key_path)
@@ -188,7 +189,7 @@ lab_b_priv = _signing.load_private_key(lab_b_key_path)
 upstream = graph.assert_claim(
     "Property X is elevated in compartment Y",
     classification="DERIVED",
-    generated_by="agent_seed/model-a",                    # directly ESTABLISHED, anchors the chain
+    generated_by="agent_seed/model-a",                    # anchors the chain
 )
 
 rep_a = graph.assert_claim(
@@ -204,7 +205,7 @@ rep_b = graph.assert_claim(
     "Cell type A preferentially targets compartment Y (lab_b, n=1100)",
     classification="ANALYTICAL",
     generated_by="agent_lab_b/model-b",
-    supports=[upstream],          # same upstream, distinct key: REPLICATED fires
+    supports=[upstream],          # same upstream, distinct key
     source_name="dataset_beta",
     signer=lab_b_priv,            # signed by lab B's key
 )
@@ -213,7 +214,10 @@ c_rep_a = graph.get_claim(rep_a)
 c_rep_b = graph.get_claim(rep_b)
 show("lab_a validated", bool(c_rep_a and c_rep_a.get("validation_signature")))
 show("lab_b validated", bool(c_rep_b and c_rep_b.get("validation_signature")))
-show("REPLICATED count", len(graph.query(limit=99)))
+# The independence signal itself, read off the rows rather than asserted by
+# them: two different signers, one shared upstream.
+show("distinct signers", c_rep_a["asserter_keyid"] != c_rep_b["asserter_keyid"])
+show("shared upstream", upstream in json.loads(c_rep_b["supports_json"]))
 
 
 # ---------------------------------------------------------------------------
@@ -231,8 +235,8 @@ except Exception as exc:
     show("validate(own claim)", f"{type(exc).__name__}: {str(exc)[:60]}…")
 
 # Close and re-open under the reviewer key so the validator differs from the
-# signer of rep_a. mareforma refuses self-validation: a validator cannot
-# promote a claim signed by its own key. Pass evidence_seen=[...] to
+# signer of rep_a. mareforma refuses self-validation: a validator cannot sign
+# off on a claim signed by its own key. Pass evidence_seen=[...] to
 # name the upstream claims the reviewer actually consulted before
 # pressing the validate button, mareforma verifies each cited
 # claim exists and predates validation, and binds the list into the
@@ -242,13 +246,13 @@ with mareforma.open(tmp, key_path=reviewer_key_path) as reviewer_graph:
     reviewer_graph.validate(
         rep_a,
         validated_by="jane@lab.org",
-        evidence_seen=[upstream],  # the ESTABLISHED anchor the reviewer read
+        evidence_seen=[upstream],  # the upstream anchor the reviewer read
     )
 graph = mareforma.open(tmp, key_path=agent_key_path)
-established = graph.get_claim(rep_a)
-if established:
-    show("validated_by", established["validated_by"])
-    show("validated_at", established["validated_at"][:10])
+validated = graph.get_claim(rep_a)
+if validated:
+    show("validated_by", validated["validated_by"])
+    show("validated_at", validated["validated_at"][:10])
 
 
 # ---------------------------------------------------------------------------
@@ -298,12 +302,12 @@ show("null data → classification", c_cid["classification"] if c_cid else "n/a"
 
 print()
 
-# ✗  Correlated agents do not produce genuine REPLICATED
-#    Two runs of the same model on the same data are not independent.
-#    REPLICATED requires two claims signed by DIFFERENT keys (distinct
-#    asserter_keyid) on the same ESTABLISHED upstream, a single key cannot
-#    self-replicate. generated_by is a display label, not the independence
-#    axis; encode model + version + lab context in it for auditability:
+# ✗  Correlated agents do not converge, they agree with themselves
+#    Two runs of the same model on the same data are not independent. A reader
+#    counts distinct signing keys (asserter_keyid) on a shared upstream, and a
+#    single key cannot self-replicate. generated_by is a display label, not the
+#    independence axis; encode model + version + lab context in it for
+#    auditability:
 #      "gpt-4o-2024-11/lab_a"   ← meaningful label
 #      "agent"                  ← meaningless label
 
@@ -311,9 +315,9 @@ print()
 #    The provenance chain is broken. Always pass supports= with DERIVED.
 
 # ✗  Shared upstream from a hallucinated source
-#    Two agents citing the same wrong paper will produce a false REPLICATED signal.
-#    The graph records what agents assert, not what is true.
-#    Validate() exists precisely so a human reviews the chain before ESTABLISHED.
+#    Two agents citing the same wrong paper look exactly like two agents
+#    converging. The graph records what agents assert, not what is true.
+#    Validate() exists so a human reads the chain before anyone leans on it.
 
 print("  See AGENTS.md → 'Forbidden patterns' for the full reference.")
 

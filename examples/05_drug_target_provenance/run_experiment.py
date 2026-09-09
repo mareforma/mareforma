@@ -170,9 +170,9 @@ def main() -> None:
             print("     This was Case B in the original run. See the README for context.")
         else:
             print("\n  ✓  Both forks ran the data pipeline (ANALYTICAL).")
-            print("     Both stay PRELIMINARY: they share one signing key and")
-            print("     cite no upstream, so neither is an independent line for")
-            print("     the other. See the README for the promotion gate.")
+            print("     Neither is an independent line for the other: they")
+            print("     share one signing key and cite no common upstream.")
+            print("     See the README for what independence needs.")
 
     print(f"\nClaims written to: {HERE / 'claims.toml'}")
     print("Run 'mareforma status' for the full epistemic dashboard.")

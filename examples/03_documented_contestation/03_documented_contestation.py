@@ -67,12 +67,12 @@ tmp = Path(tempfile.mkdtemp())
 # `mareforma bootstrap` once and mareforma.open() picks the key up
 # from ~/.config/mareforma/key automatically. The first key opened
 # against a fresh graph auto-enrolls as the root validator. The
-# mareforma refuses self-validation (a validator cannot promote a
+# mareforma refuses self-validation (a validator cannot sign off on a
 # claim it signed itself), so the reviewer is a separate enrolled key.
 agent_key_path = tmp / "_agent_key"
 reviewer_key_path = tmp / "_reviewer_key"
-# Two distinct lab keys for the converging consensus claims. REPLICATED keys
-# on the signing key (asserter_keyid), so the two peers must sign with
+# Two distinct lab keys for the converging consensus claims. Independence is
+# read off the signing key (asserter_keyid), so the two peers must sign with
 # different keys. The reviewer/validator key stays distinct from both.
 lab_a_key_path = tmp / "_lab_a_key"
 lab_b_key_path = tmp / "_lab_b_key"
@@ -93,7 +93,7 @@ graph.enroll_validator(reviewer_pem, identity="reviewer@lab.org")
 # Mareforma tools via get_tools(), one set per agent, generated_by baked in
 # as a display label. query_graph and the challenge agent's assert_finding_c
 # go through langchain tools. The two converging consensus claims do NOT:
-# they must sign with distinct keys to reach REPLICATED, and the tools sign
+# they must sign with distinct keys to count as independent, and the tools sign
 # with the single loaded key, so they use graph.assert_claim(signer=...) below.
 # ---------------------------------------------------------------------------
 
@@ -110,30 +110,24 @@ _, assert_finding_c = [tool(fn) for fn in graph.get_tools(
 
 # ---------------------------------------------------------------------------
 # Setup, establish the prior consensus
-# Two independent agents converge, human validates → ESTABLISHED
+# Two independent agents converge, a human signs off
 # ---------------------------------------------------------------------------
 
-sep("Setup, prior consensus (ESTABLISHED)")
+sep("Setup, prior consensus")
 
-# support_level (PRELIMINARY / REPLICATED / ESTABLISHED) is the legacy stored
-# ladder, deprecated for v0.4.0; trust reads off the derived axes (status per
-# content_id, question_status per frame_id). It stays functional this release.
-# Bootstrap an ESTABLISHED upstream the two lab agents can converge on.
-# Under the ESTABLISHED-upstream rule, REPLICATED requires at least one
-# upstream claim with support_level='ESTABLISHED' in supports[] ,
-# matches Cochrane/GRADE evidence chains. seed=True asserts directly
-# at ESTABLISHED with a signed seed envelope; only the loaded key
-# (auto-enrolled as root above) can produce one.
+# Trust reads off the derived axes: status per content_id, question_status per
+# frame_id. Nothing on a claim ranks it. The upstream below is the shared
+# anchor the two lab agents converge on, which is what makes their agreement
+# worth reading as agreement about one thing.
 upstream_ref = graph.assert_claim(
     "Prior literature: Treatment X is studied in population P",
     classification="DERIVED",
     generated_by="agent_seed/literature",
 )
 
-# Two converging claims on the same ESTABLISHED upstream, signed by DISTINCT
-# keys, so the REPLICATED support level fires. Distinct signers are the legacy
-# independence signal; effective independence counts distinct model. generated_by
-# is a display label only. Asserted via
+# Two converging claims on the same upstream, signed by DISTINCT keys. Distinct
+# signers are the weakest independence signal; effective independence counts
+# distinct model. generated_by is a display label only. Asserted via
 # graph.assert_claim(signer=...) because the langchain tools sign with the one
 # loaded key and could not converge.
 consensus_a = graph.assert_claim(
@@ -149,7 +143,7 @@ consensus_b = graph.assert_claim(
     "Treatment X reduces outcome Y in population P (cohort_2, n=480, p=0.011)",
     classification="ANALYTICAL",
     generated_by="agent_lab_b/model-b",
-    supports=[upstream_ref],          # same upstream, distinct key: REPLICATED fires
+    supports=[upstream_ref],          # same upstream, distinct key
     source_name="dataset_beta",
     signer=lab_b_priv,
 )
@@ -159,9 +153,9 @@ show("consensus_a validated", bool(c_a and c_a.get("validation_signature")))
 
 # Close and re-open under the reviewer key so the validator's signing identity
 # differs from the agent that signed consensus_a. mareforma refuses
-# self-validation: a validator cannot promote a claim signed by its own key.
+# self-validation: a validator cannot sign off on a claim signed by its own key.
 # evidence_seen names the upstream claim_ids the reviewer consulted before
-# promoting, mareforma verifies each cited claim exists and predates
+# signing, mareforma verifies each cited claim exists and predates
 # validation, and binds the list into the signed validation envelope so the
 # review-trail is independently verifiable.
 graph.close()
@@ -180,8 +174,8 @@ query_graph, _ = [tool(fn) for fn in graph.get_tools(
 _, assert_finding_c = [tool(fn) for fn in graph.get_tools(
     generated_by="agent_lab_c/model-c"
 )]
-established = graph.get_claim(consensus_a)
-show("after validate()", (established or {}).get("validated_by") or "n/a")
+validated_claim = graph.get_claim(consensus_a)
+show("after validate()", (validated_claim or {}).get("validated_by") or "n/a")
 
 
 # ---------------------------------------------------------------------------
@@ -197,16 +191,22 @@ def _for_console(text: str) -> str:
     return text.removeprefix("<untrusted_data>\n").removesuffix("\n</untrusted_data>")
 
 
-# Step 1: query the graph, what is already established on this topic?
+# Step 1: query the graph, what is already on record for this topic?
 prior = json.loads(query_graph.invoke({"topic": "Treatment X"}))
-established = [c for c in prior if c.get("validation_signature")]
+# The LLM-facing view carries claim_id, text, classification and status, and no
+# signature material at all. That is deliberate: an agent must not decide what
+# to trust from a field it read out of its own prompt. Ask the graph by id.
+signed_off = {
+    c["claim_id"] for c in prior
+    if (row := graph.get_claim(c["claim_id"])) and row.get("validation_signature")
+}
 print(f"  query_graph('Treatment X') → {len(prior)} claims, "
-      f"{len(established)} of them validated")
+      f"{len(signed_off)} carrying a signed validation")
 for c in prior:
-    mark = "validated" if c.get("validation_signature") else "unvalidated"
+    mark = "validated" if c["claim_id"] in signed_off else "unvalidated"
     print(f"    [{mark:12}] {_for_console(c['text'])[:65]}…")
 
-established_ids = [c["claim_id"] for c in prior]
+prior_ids = [c["claim_id"] for c in prior]
 
 print()
 print("  Prior consensus found. Running analysis on new cohort (n=1,240)…")
@@ -220,7 +220,7 @@ challenge = assert_finding_c.invoke({
             " (cohort_3, n=1240, p=0.21), larger and more diverse cohort than prior studies",
     "classification": "ANALYTICAL",
     "supports": ["upstream_ref_B"],
-    "contradicts": established_ids,
+    "contradicts": prior_ids,
     "source": "dataset_gamma",
 })
 
@@ -230,7 +230,7 @@ show("challenge validated", bool(c_challenge and c_challenge.get("validation_sig
 show("challenge classification", c_challenge["classification"] if c_challenge else "n/a")
 
 contradicts_list = json.loads(c_challenge["contradicts_json"] if c_challenge else "[]")
-show("contradicts", f"{len(contradicts_list)} established claim(s)")
+show("contradicts", f"{len(contradicts_list)} prior claim(s)")
 
 
 # ---------------------------------------------------------------------------
@@ -251,13 +251,13 @@ for c in sorted(all_claims, key=lambda x: x["created_at"]):
     print(f"  {label}  {c['text'][:50]}…{contradicts_flag}")
 
 print()
-print("  The ESTABLISHED finding is not overwritten.")
+print("  The validated finding is not overwritten.")
 print("  The challenge is not discarded.")
 print("  Both are in the graph with full provenance.")
 print()
 print("  A human reviewer can now:")
 print("    query_graph('Treatment X'), see both sides")
-print("    query_graph('Treatment X') and keep the ESTABLISHED rows, for validated consensus")
+print("    keep the rows carrying a signed validation, for reviewed consensus")
 print("    graph.get_claim(challenge_id)['contradicts_json']    , trace the stated tension")
 
 
@@ -277,18 +277,18 @@ print("""
      A future agent querying 'Treatment X' gets contradictory signals
      with no structure to reason about them.
 
-  ✗  Discarding the finding because the consensus is ESTABLISHED
+  ✗  Discarding the finding because a human already signed off on the consensus
 
-     ESTABLISHED means human-validated evidence, not settled truth.
-     A larger, better-powered study is legitimate scientific progress.
-     Silence is not.
+     A signed validation means a reviewer read the evidence, not that the
+     question is settled. A larger, better-powered study is legitimate
+     scientific progress. Silence is not.
 
   ✓  The correct pattern:
 
        assert_finding_c.invoke({
            "text": "...",
            "classification": "ANALYTICAL",
-           "contradicts": [established_id],   # name the tension
+           "contradicts": [prior_claim_id],   # name the tension
            "supports": [new_upstream_ref],    # ground the provenance
            "source": "dataset_gamma",
        })

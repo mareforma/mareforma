@@ -39,6 +39,36 @@ def _script(name: str) -> Path:
     return EXAMPLES / name / f"{name}.py"
 
 
+# What each example has to PRINT, not merely survive. An exit code says the
+# script did not crash; it says nothing about which branch ran. Three examples
+# shipped a branch keyed on a value the release had already changed, so the
+# dead side ran, printed a false sentence, and exited zero. Each line below is
+# from the arm that only runs when the example did the thing it is about.
+_MUST_PRINT = {
+    "01_api_walkthrough": (
+        "distinct signers       True",
+        "shared upstream        True",
+        "validated_by           jane@lab.org",
+    ),
+    # No branches here: the two lines ARE the example. One pipeline read its
+    # data and one silently fell back, and a reader who cannot tell them apart
+    # has nothing. A classifier that broke open would print the same twice.
+    "02_compounding_agents": (
+        "observed grounding           UNGROUNDED",
+        "observed grounding           GROUNDED\n",
+        "effective independence       UNVERIFIABLE",
+    ),
+    "03_documented_contestation": (
+        "1 carrying a signed validation",
+        "[validated   ]",
+    ),
+    "04_private_data_public_findings": (
+        "✓ Two independent data sources, two distinct signing keys.",
+        "✓ Distinct signing keys on a shared upstream, across two datasets.",
+    ),
+}
+
+
 @pytest.mark.parametrize("name", _SELF_CONTAINED)
 def test_the_example_runs_end_to_end(name: str, tmp_path: Path) -> None:
     script = _script(name)
@@ -64,6 +94,26 @@ def test_the_example_runs_end_to_end(name: str, tmp_path: Path) -> None:
         f"{name} exited {run.returncode}\n"
         f"--- stdout tail ---\n{run.stdout[-1500:]}\n"
         f"--- stderr tail ---\n{run.stderr[-2000:]}"
+    )
+    for line in _MUST_PRINT[name]:
+        assert line in run.stdout, (
+            f"{name} exited 0 without printing {line!r}, so the branch that "
+            f"line belongs to did not run\n"
+            f"--- stdout tail ---\n{run.stdout[-2000:]}"
+        )
+
+
+def test_every_example_run_here_has_output_pinned() -> None:
+    """A new example runs under an assertion, not under an exit code alone.
+
+    The list above is the thing that rots: adding an example to _SELF_CONTAINED
+    and forgetting this one buys back exactly the hole it closes. An empty tuple
+    is a legitimate entry, and has to be written down rather than defaulted to.
+    """
+    missing = sorted(set(_SELF_CONTAINED) - set(_MUST_PRINT))
+    assert not missing, (
+        f"examples run with no output pinned: {missing}. Add the lines the "
+        "example prints only when it did what it claims to do."
     )
 
 

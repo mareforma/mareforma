@@ -1759,13 +1759,13 @@ def test_api_compute_status_counts_independence_by_signer():
     )
 
 
-def test_example_05_promotion_prose_matches_the_signer_gate(tmp_path):
-    """example 05 must state the gate it would actually meet, and promise no more.
+def test_example_05_independence_prose_matches_the_signer_rule(tmp_path):
+    """example 05 must state what independence needs, and promise no more.
 
-    Promotion keys on distinct non-NULL ``asserter_keyid`` values over a shared
-    ESTABLISHED upstream; ``generated_by`` is a display label. The script writes
-    both forks through one open handle with no ``supports``, so both stay
-    PRELIMINARY and the run report must not promise a promotion.
+    A reader counts distinct non-NULL ``asserter_keyid`` values over a shared
+    upstream; ``generated_by`` is a display label. The script writes both forks
+    through one open handle with no ``supports``, so neither fork is a check on
+    the other and the run report must not suggest otherwise.
     """
     from mareforma import signing as _signing
 
@@ -1784,17 +1784,20 @@ def test_example_05_promotion_prose_matches_the_signer_gate(tmp_path):
 
     example = ROOT / "examples" / "05_drug_target_provenance"
     readme = (example / "README.md").read_text(encoding="utf-8")
-    section = " ".join(_section(readme, "## Promoting a finding").split())
+    section = " ".join(
+        _section(readme, "## What would make these findings independent").split()
+    )
+    assert section, "example 05 lost the section describing what independence needs"
     assert "asserter_keyid" in section, (
-        "example 05 must state promotion in signer (asserter_keyid) terms"
+        "example 05 must state independence in signer (asserter_keyid) terms"
     )
     assert "different `generated_by` fork" not in section, (
         "example 05 names generated_by as the independence axis; it is a label"
     )
 
     script = (example / "run_experiment.py").read_text(encoding="utf-8")
-    assert "REPLICATED fires automatically" not in script, (
-        "the run report promises a promotion these single-key writes cannot reach"
+    assert "independent line for" in script, (
+        "the run report must say plainly that neither fork checks the other"
     )
 
 
