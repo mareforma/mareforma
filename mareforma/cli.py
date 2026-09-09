@@ -212,7 +212,7 @@ def bootstrap_cmd(key_path: str | None, overwrite: bool) -> None:
     _info("Next steps:")
     _info("  • The first key opened against a project's graph auto-enrolls")
     _info("    as the root validator on that project.")
-    _info("  • To promote a claim to ESTABLISHED you need a SECOND enrolled")
+    _info("  • To record a validation on a claim you need a SECOND enrolled")
     _info("    key (mareforma refuses self-validation). Have a")
     _info("    collaborator run `mareforma bootstrap`, then run")
     _info("    `mareforma key show --pem > pubkey.pem` and send it to you;")
@@ -305,7 +305,7 @@ def key_show(key_path: str | None, as_pem: bool, as_keyid: bool) -> None:
 
 @cli.group()
 def validator() -> None:
-    """Manage the per-project validators table (who may promote ESTABLISHED)."""
+    """Manage the per-project validators table (who may sign a validation)."""
 
 
 @validator.command("add")
@@ -321,9 +321,8 @@ def validator() -> None:
     "--type", "validator_type",
     type=click.Choice(["human", "llm"]), default="human", show_default=True,
     help=(
-        "Self-declared validator type. 'human' may promote claims to "
-        "ESTABLISHED; 'llm' may sign validations but cannot promote "
-        "past REPLICATED."
+        "Self-declared validator type. 'human' may sign a validation; "
+        "'llm' may not, and a validation signed by one is refused."
     ),
 )
 def validator_add(pubkey_arg: str, identity: str, validator_type: str) -> None:
@@ -447,8 +446,8 @@ def validator_list(as_json: bool) -> None:
     unverified = [r for r in rows if not r["verified"]]
     if unverified:
         _err(f"{len(unverified)} of {len(rows)} listed validators do not "
-             "chain back to the root. They cannot promote claims, and the "
-             "rows were not written by `mareforma validator add`.")
+             "chain back to the root. A validation they sign is refused, and "
+             "the rows were not written by `mareforma validator add`.")
         sys.exit(1)
 
 
@@ -501,8 +500,8 @@ def status_cmd(as_json: bool) -> None:
     if report.failed_verification:
         click.echo(
             "  " + click.style(
-                f"Unverified promotions: {report.failed_verification} "
-                "(support level not backed by signed material)",
+                f"Unverified rows: {report.failed_verification} "
+                "(signed material does not re-verify)",
                 fg="red", bold=True,
             )
         )
@@ -512,9 +511,8 @@ def status_cmd(as_json: bool) -> None:
             "  " + click.style(
                 "Project policy unverified: the stored policy row's root "
                 "signature does not verify, so every rule reads at maximum "
-                "strictness (witnessing and strict promotion both required). "
-                "Re-sign the policy with the project root or restore from a "
-                "clean backup.",
+                "strictness and witnessing is required. Re-sign the policy "
+                "with the project root or restore from a clean backup.",
                 fg="red", bold=True,
             )
         )
@@ -1942,8 +1940,8 @@ def claim() -> None:
 
     Claims are falsifiable assertions with a classification (INFERRED |
     ANALYTICAL | DERIVED). Trust reads off the derived status a claim earns in
-    the graph; the stored support level (PRELIMINARY -> REPLICATED ->
-    ESTABLISHED) is the legacy promotion ladder. No public read filters on it.
+    the graph, and off whether a human signed a validation on it. A claim
+    carries no stored level.
 
     \b
     Examples:
@@ -2192,7 +2190,7 @@ def claim_update(claim_id, status, text, supports, contradicts):
 @click.option("--validated-by", "validated_by", default=None,
               help="Identifier of the human reviewer (e.g. email).")
 def claim_validate(claim_id, validated_by):
-    """Promote a REPLICATED claim to ESTABLISHED (human validation).
+    """Record a human validation on a claim, signed.
 
     The currently loaded signing key (from ``~/.config/mareforma/key``)
     must be enrolled as a validator on this project. The validation
@@ -2243,7 +2241,7 @@ def claim_validate(claim_id, validated_by):
         _err(str(exc))
         sys.exit(1)
 
-    _ok(f"Claim '{claim_id}' promoted to ESTABLISHED.")
+    _ok(f"Claim '{claim_id}' carries a signed validation.")
     if validated_by:
         _info(f"validated_by: {validated_by}")
 

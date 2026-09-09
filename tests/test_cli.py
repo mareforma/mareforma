@@ -508,7 +508,7 @@ class TestClaimValidate:
             result = runner.invoke(cli, ["claim", "validate", rep_id],
                                    catch_exceptions=False)
         assert result.exit_code == 0
-        assert "ESTABLISHED" in result.output
+        assert "carries a signed validation" in result.output
 
     def test_validate_not_found_exits_1(self, tmp_path: Path) -> None:
         runner = CliRunner()
@@ -517,10 +517,10 @@ class TestClaimValidate:
             result = runner.invoke(cli, ["claim", "validate", "nonexistent-id"])
         assert result.exit_code == 1
 
-    def test_validate_from_subdirectory_promotes_the_parent_claim(
+    def test_validate_from_subdirectory_reaches_the_parent_claim(
         self, tmp_path: Path,
     ) -> None:
-        """Run from a subdirectory, validate must promote the claim in the
+        """Run from a subdirectory, validate must reach the claim in the
         project it is inside, not fail against a nested empty one."""
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path) as fs:
@@ -532,7 +532,7 @@ class TestClaimValidate:
             result = runner.invoke(cli, ["claim", "validate", rep_id])
             assert result.exit_code == 0, result.output
             assert not (sub / ".mareforma").exists()
-        assert "ESTABLISHED" in result.output
+        assert "carries a signed validation" in result.output
 
     def test_validate_with_validated_by(self, tmp_path: Path) -> None:
         runner = CliRunner()

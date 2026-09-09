@@ -2616,10 +2616,10 @@ def _reconcile_idempotency_row(
             f"with different {', '.join(mismatches)}. Use a "
             "different idempotency_key: silently merging two "
             "different claims into one row would discard the "
-            "second author's content and break REPLICATED "
-            "detection. For cross-lab convergence, assert two "
-            "separate claims signed by distinct keys that share "
-            "an ESTABLISHED upstream claim in supports[]."
+            "second author's content. To record that two groups "
+            "found the same thing, assert two separate claims "
+            "signed by distinct keys that cite the same upstream "
+            "claim in supports[]."
         )
     return row["claim_id"]
 
@@ -3738,8 +3738,8 @@ def validate_claim(
         # claim back into the trust ladder.
         raise ValueError(
             f"Claim '{claim_id}' was invalidated by a signed contradiction "
-            f"verdict at t_invalid={row['t_invalid']!r}. Refuse to promote "
-            "an invalidated claim to ESTABLISHED."
+            f"verdict at t_invalid={row['t_invalid']!r}. Refuse to record a "
+            "validation on an invalidated claim."
         )
 
     # Verification gates over the validation envelope.

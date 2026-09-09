@@ -677,13 +677,11 @@ class EpistemicGraph:
                     include_invalidated=True,
                 )
 
-                # clean claims mentioning "gene therapy" within
-                # unverified preliminary work. refutation_filter is a
-                # query-only feature; the search method does not accept it.
+                # clean claims mentioning "gene therapy". refutation_filter
+                # is a query-only feature; search does not accept it.
                 graph.query(
                     "gene therapy",
                     refutation_filter="clean",
-                    ,
                 )
 
         Returns
