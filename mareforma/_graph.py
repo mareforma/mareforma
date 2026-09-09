@@ -229,11 +229,7 @@ class EpistemicGraph:
         # enumerating surfaces cannot return them, so without this counter a
         # tampered graph reads as a graph with fewer claims.
         self._read_verify_exclusions = 0
-        self._read_unverified_exclusions = 0
         self._read_contested_rows = 0
-        # Whether any disclosure count stopped at its scan ceiling, so a reader
-        # knows the total is a floor rather than an exact number.
-        self._read_unverified_saturated = False
         # Per-kind occurrence counts behind the health-log rate limit. Not the
         # row totals: those are the numbers a reader wants, these only decide
         # when a line is worth writing.
@@ -718,7 +714,6 @@ class EpistemicGraph:
             include_invalidated=include_invalidated,
             refutation_filter=refutation_filter,
             on_verify_excluded=self._record_verify_exclusions,
-            on_unverified_excluded=self._record_unverified_exclusions,
             on_contested=self._record_contested_rows,
         )
 
@@ -874,7 +869,6 @@ class EpistemicGraph:
             limit=limit,
             include_invalidated=include_invalidated,
             on_verify_excluded=self._record_verify_exclusions,
-            on_unverified_excluded=self._record_unverified_exclusions,
             on_contested=self._record_contested_rows,
         )
 
@@ -904,7 +898,7 @@ class EpistemicGraph:
     def _record_contested_rows(self, n: int) -> None:
         """Record that a read SERVED *n* rows whose contradiction record fails.
 
-        Counted apart from the unverified exclusions, which is the whole point.
+        Counted apart from the verify exclusions, which is the whole point.
         Those rows were withheld and the caller's list is short by them; these
         were handed over, and what is wrong with them is that ``t_invalid`` and
         the signed verdicts disagree. Filing one under the other would log a
@@ -919,30 +913,6 @@ class EpistemicGraph:
         _health.append_health_event(
             self._root, "read_contested_served", outcome="degraded",
             n=n, total=self._read_contested_rows,
-        )
-
-    def _record_unverified_exclusions(self, n: int, saturated: bool = False) -> None:
-        """Record that a read held back *n* rows behind the unverified filter.
-
-        A PRELIMINARY claim whose generator key is not enrolled is dropped from
-        an enumerating read unless the caller passes ````.
-        Held back silently, that turns a record written under an unenrolled key
-        into an empty answer, and a caller reads the empty list as "there is
-        nothing here" rather than "there is something here you did not ask to
-        see". Counted so a surface can say how many, and rate-limited in the
-        health log for the same reason the verify exclusions are: it is a state
-        every read re-encounters, not a new event each time.
-        """
-        self._read_unverified_exclusions += n
-        if saturated:
-            self._read_unverified_saturated = True
-        if not self._health_append_due(
-                "read_unverified_excluded", self._read_unverified_exclusions):
-            return
-        from mareforma import health as _health
-        _health.append_health_event(
-            self._root, "read_unverified_excluded", outcome="degraded",
-            n=n, total=self._read_unverified_exclusions,
         )
 
     def _health_append_due(self, kind: str, total: int) -> bool:
@@ -3562,23 +3532,6 @@ class EpistemicGraph:
         again; this counter is exact and is the one to read.
         """
         return self._read_verify_exclusions
-
-    @property
-    def read_unverified_exclusions(self) -> int:
-        """Rows :meth:`query` and :meth:`search` held back behind the filter.
-
-        A PRELIMINARY claim whose generator key is not in the validators table
-        is dropped from an enumerating read unless ````.
-        Unlike the verify exclusions above, a flag DOES bring these back: they
-        are not tampered rows, they are rows the default read does not vouch
-        for. Counted so an empty answer can be told from an empty record, which
-        is the difference between "there is nothing here" and "there is
-        something here you did not ask to see".
-
-        Resets to zero each time the graph is re-opened, and counts only the
-        reads this session made.
-        """
-        return self._read_unverified_exclusions
 
     @_synchronized
     def health(self) -> dict[str, int]:

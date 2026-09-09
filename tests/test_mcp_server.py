@@ -630,19 +630,22 @@ class TestEvidenceCeiling:
 # An empty answer is never passed off as an empty record
 # ---------------------------------------------------------------------------
 
-def _unenrolled_project(tmp_path: Path) -> tuple[Path, str]:
-    """A project whose claims were all written by a key nobody enrolled."""
-    from tests._helpers import _bootstrap_key, _two_signers
+def _project_with_a_tampered_row(tmp_path: Path) -> Path:
+    """A project holding one row whose signature no longer covers its text.
 
-    signer, _ = _two_signers(tmp_path)
+    Every read drops that row and counts it, which is what gives the noisy
+    reader below an exclusion the clean reader could be handed by mistake.
+    """
+    from tests._helpers import _bootstrap_key
+
     root = _bootstrap_key(tmp_path, "root.key")
     with mareforma.open(tmp_path, key_path=root) as g:
-        ids = [
-            g.assert_claim(f"finding {i} by an unenrolled key", generated_by="x",
-                           signer=signer)
-            for i in range(3)
-        ]
-    return root, ids[0]
+        for i in range(3):
+            g.assert_claim(f"alpha finding {i}", generated_by="x")
+        for i in range(4):
+            g.assert_claim(f"beta finding {i}", generated_by="x")
+    _byte_edit(tmp_path, b"alpha finding 2", b"alpha finding X")
+    return root
 
 
 def test_the_generator_field_does_not_claim_the_authority_it_lacks(tmp_path):
@@ -688,20 +691,15 @@ def test_one_calls_exclusions_are_not_reported_on_another_calls_page(tmp_path):
 
     import mareforma as _mf
 
-    root, _ = _unenrolled_project(tmp_path)
-    with _mf.open(tmp_path, key_path=root) as g:
-        # Claims that DO survive the filter, so a read for them is clean.
-        for i in range(4):
-            g.assert_claim(f"beta finding {i}", generated_by="x")
-
+    root = _project_with_a_tampered_row(tmp_path)
     with _mf.open(tmp_path, key_path=root) as g:
         tools = ReadVerifyTools(g)
-        clean_pages = []
+        clean_pages, noisy_pages = [], []
         stop = threading.Event()
 
         def noisy():
             while not stop.is_set():
-                tools.query_claims(text="finding")  # holds 3 back every time
+                noisy_pages.append(tools.query_claims(text="alpha"))
 
         def clean():
             for _ in range(200):
@@ -716,8 +714,11 @@ def test_one_calls_exclusions_are_not_reported_on_another_calls_page(tmp_path):
             worker.join(timeout=5)
 
     assert clean_pages, "the clean reader made no calls"
+    assert noisy_pages and all(p.get("verify_excluded") == 1 for p in noisy_pages), (
+        "the noisy reader dropped nothing, so there was nothing to misattribute"
+    )
     assert all(p["count"] == 4 for p in clean_pages)
-    misattributed = [p for p in clean_pages if "unverified_excluded" in p]
+    misattributed = [p for p in clean_pages if "verify_excluded" in p]
     assert not misattributed, (
         f"{len(misattributed)} of {len(clean_pages)} pages reported another "
         f"call's exclusions"

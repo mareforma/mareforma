@@ -653,22 +653,6 @@ Zero means nothing was excluded from the reads this session made, not that the g
 
 ---
 
-### `read_unverified_exclusions`
-
-Read-only count of rows `query()` and `search()` held back behind the default verified filter.
-
-```python
-graph.read_unverified_exclusions  # 0
-```
-
-A claim whose generator key is not in the validators table is served, carrying `generator_enrolled=False`. It used to be dropped from an enumerating read, and converging lifted it back into view; nothing converges now, so that rule would have answered every query on a project that enrols no validator with an empty list, and a caller would read "there is nothing here" for a record that is not empty.
-
-The count is taken only when a read comes back short, since a full page already says `has_more`. It is bounded by its own fixed 5,000-row scan ceiling rather than the read's (which scales with `limit`), so the disclosed number does not move with the page size you asked for, and a count that stopped at the ceiling is reported as a floor. The MCP `query_claims` and `search_claims` tools report the per-call number as `unverified_excluded`, and add `unverified_excluded_is_at_least: true` when the count stopped at its ceiling. The same event is appended to `.mareforma/health.jsonl` as `read_unverified_excluded` with outcome `degraded`, under the same rate limit as `read_verify_excluded`.
-
-**Returns** `int`, reset to zero on every open.
-
----
-
 ### Contested rows a read served
 
 There is no counter property for this one, because these rows are not held

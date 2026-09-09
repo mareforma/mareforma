@@ -6775,98 +6775,6 @@ def _require_non_negative_limit(limit: int, surface: str) -> None:
         )
 
 
-def _enrolled_generator_condition(prefix: str = "") -> str:
-    """SQL for the default read filter's enrolled-generator half.
-
-    Mirrors the PRELIMINARY branch of :func:`_read_path_row` in SQL so LIMIT
-    counts survivors rather than scanned rows: the dominant drain (unsigned and
-    unenrolled-generator PRELIMINARY traffic) never enters the scan, and cannot
-    push a real match past the scan ceiling. The Python filter stays as written,
-    this only spares it the rows it would have dropped anyway. ``json_valid``
-    guards the extract: a malformed bundle is not enrolled, and must not fail
-    the whole statement. *prefix* qualifies the columns for joined statements.
-    """
-    bundle = f"{prefix}signature_bundle"
-    return (
-        f"(json_valid({bundle}) AND "
-        f"json_extract({bundle}, '$.signatures[0].keyid') "
-        f"IN (SELECT keyid FROM validators))"
-    )
-
-
-# The disclosure's own scan bound, deliberately NOT the read's. The read sizes
-# its ceiling from the caller's limit (max(limit * 50, 5000)), so borrowing it
-# made the disclosed number change with the page size the caller happened to
-# ask for: the same record reported 5,000 held back at limit=20 and 10,050 at
-# limit=200. A count that moves with the question is not a count.
-_DISCLOSURE_SCAN_CEILING = 5000
-
-
-def _count_unverified_held_back(
-    conn: sqlite3.Connection,
-    from_sql: str,
-    where: str,
-    params: list,
-    *,
-    ceiling: int,
-    prefix: str = "",
-) -> "tuple[int, bool]":
-    """How many rows the enrolled-generator filter held back from this read.
-
-    The filter runs in SQL (see :func:`_enrolled_generator_condition`) precisely
-    so the drained rows never enter the scan, which is what makes LIMIT count
-    survivors. The cost of that is that nothing downstream can see what was
-    dropped, and a read whose every match was dropped returns an empty list
-    indistinguishable from an empty record.
-
-    So the count is taken deliberately, with the same WHERE the read used and the
-    enrolled-generator condition NEGATED, bounded by the same scan ceiling so a
-    disclosure can never cost more than the read it describes. Returning a
-    ceiling-capped number is the honest shape: the caller learns rows were held
-    back, and a saturated count reads as "at least this many".
-
-    Called only when the read came back short, which is the only case where the
-    answer could be mistaken for the whole record.
-    """
-    # COALESCE, not a bare NOT. The condition is NULL for a row with no
-    # signature bundle at all (json_valid(NULL) is NULL, and NULL IN (...) is
-    # NULL), and NOT NULL is NULL, so a bare negation counts none of them. The
-    # read excludes those rows, since WHERE NULL is not true, which means the
-    # unsigned traffic the condition's own docstring calls "the dominant drain"
-    # is exactly the class a bare negation would report as zero. Reading NULL as
-    # "not enrolled" makes the count the exact complement of what the read served.
-    # Bound the SCAN, not the matches. A LIMIT on the negated predicate does not
-    # stop sqlite reading the whole table when nothing matches it, which is the
-    # healthy case, so the disclosure would be O(table) on every short read while
-    # the read it describes is index-bounded. Take the first `ceiling` rows the
-    # base conditions match, then count the held-back ones among those: the work
-    # is bounded by the same ceiling the read uses, and the number is "at least
-    # this many", which is how the caller already reads it.
-    #
-    # The inner select aliases the column back to its bare name so the one
-    # enrolled-generator rule can be reused verbatim rather than restated.
-    inner = (
-        f"SELECT {prefix}signature_bundle AS signature_bundle "
-        f"FROM {from_sql} {where} LIMIT ?"
-    )
-    sql = (
-        f"SELECT COUNT(*) FROM ({inner}) "
-        f"WHERE NOT COALESCE({_enrolled_generator_condition()}, 0)"
-    )
-    try:
-        row = conn.execute(
-            sql, list(params) + [_DISCLOSURE_SCAN_CEILING]
-        ).fetchone()
-    except sqlite3.OperationalError:
-        # A disclosure must never be the thing that fails a read.
-        return 0, False
-    n = int(row[0]) if row else 0
-    # Saturated means the scan stopped, not that the record holds exactly this
-    # many. Reported so the caller can tell a floor from a total, which is the
-    # same distinction `has_more` draws for the page itself.
-    return n, n >= _DISCLOSURE_SCAN_CEILING
-
-
 def _count_unbacked_invalidations(
     conn: sqlite3.Connection,
     from_sql: str,
@@ -6878,12 +6786,11 @@ def _count_unbacked_invalidations(
 ) -> "tuple[int, bool]":
     """How many rows this read hid on an invalidation no signed verdict backs.
 
-    The sibling of :func:`_count_unverified_held_back`, and it exists for the
-    same reason stated there: the filter runs in SQL so the drained rows never
-    enter the scan, and nothing downstream can then see what was dropped. Here
-    the filter is ``t_invalid IS NULL``, and that column carries no trigger, so
-    one UPDATE hides a claim from every listing while the per-claim surfaces go
-    on reporting the disagreement to nobody who is looking.
+    The filter runs in SQL, so the drained rows never enter the scan and
+    nothing downstream can see what was dropped. The filter is
+    ``t_invalid IS NULL``, and that column carries no trigger, so one UPDATE
+    hides a claim from every listing while the per-claim surfaces go on
+    reporting the disagreement to nobody who is looking.
 
     The negated condition alone is not the answer, because a claim invalidated
     by a verdict that verifies is honestly hidden. So each hidden row is
@@ -6927,47 +6834,33 @@ def _count_unbacked_invalidations(
     return unbacked, saturated
 
 
-def _disclose_unverified(
+def _disclose_invalidation_gaps(
     conn: sqlite3.Connection,
     from_sql: str,
     where: str,
     params: list,
     *,
     ceiling: int,
-    limit: int,
-    served: int,
-    on_unverified_excluded: "Callable[[int], None] | None",
     prefix: str = "",
     contested: int = 0,
     on_contested: "Callable[[int], None] | None" = None,
     include_invalidated: bool = True,
 ) -> None:
-    """Report what the enrolled-generator filter held back, when it could matter.
+    """Report where ``t_invalid`` and the signed verdicts disagree about a read.
 
-    Skipped entirely when the caller asked for the unverified rows (nothing was
-    held back), when no callback wants the number, and when the page came back
-    full: a full page cannot be mistaken for the whole record, because
-    ``has_more`` already tells the caller to ask again. That leaves the short
-    page, which is the case where an empty or truncated answer reads as "that is
-    all there is" about a record that is not.
+    Two facts, one on each side of the column. A contested row was SERVED with
+    ``t_invalid`` empty while a signed verdict says it is invalid. A hidden row
+    was WITHHELD on a ``t_invalid`` no signed verdict backs. Neither shows in
+    the list the caller gets: the first arrives looking clean, the second does
+    not arrive at all.
     """
-    # One disclosure function, two facts, and they are counted apart because
-    # they are not the same fact. A held-back row was NOT served, and the
-    # caller's list is short by it. A contested row WAS served, and what is
-    # wrong with it is that its contradiction record does not hold up. Routing
-    # the second through the first would have logged a served row as an
-    # excluded one, which is a false sentence in the health record and inflates
-    # a counter that means something else.
-    #
-    # Reported ahead of the full-page return below, because a contested row is
-    # a property of the rows served and a full page does not make it moot the
-    # way it does a held-back count.
+    # Counted apart, because a served row filed under an exclusion is a false
+    # sentence in the health record and inflates a count that answers a
+    # different question. The contested count goes first: it is a property of
+    # the rows served, so it holds whatever the page length.
     if contested and on_contested is not None:
         on_contested(contested)
     if not include_invalidated:
-        # Whatever the page length. A short page is the case the count above is
-        # about; here one hidden row among a full page of served ones is the
-        # whole of the attack, so a full page does not make it moot.
         unbacked, unbacked_saturated = _count_unbacked_invalidations(
             conn, from_sql, where, params, ceiling=ceiling, prefix=prefix,
         )
@@ -6981,6 +6874,8 @@ def _disclose_unverified(
                 "include_invalidated=True to see them.",
                 unbacked, " (at least)" if unbacked_saturated else "",
             )
+
+
 def _scan_ceiling_error(surface: str, ceiling: int, found: int, limit: int):
     """The ScanCeilingReached a read surface raises when its scan ran out."""
     return ScanCeilingReached(
@@ -7010,9 +6905,9 @@ def _read_path_row(
 
     Shared by :func:`query_claims` and :func:`search_claims` so the read-path
     verification cannot drift between the two surfaces. Attaches
-    ``generator_enrolled`` and ``validator_reputation``; drops an
-    drops a row whose signature does not re-verify (returns
-    :data:`_VERIFY_EXCLUDED`); and attaches the trust-domain disclosure.
+    ``generator_enrolled`` and ``validator_reputation``; drops a row whose
+    signature does not re-verify (returns :data:`_VERIFY_EXCLUDED`); and
+    attaches the trust-domain disclosure.
 
     It no longer drops a row for being signed by a key the project never
     enrolled. That filter only ever applied below the top of the support
@@ -7067,12 +6962,10 @@ def _project_verified_rows(
     only trace of a tamper on an enumerating surface is a row that is not
     there, indistinguishable from a claim that never existed.
 
-    The OTHER exclusion class does not pass through here at all: a PRELIMINARY
-    row whose generator keyid is not in the validators table is filtered in SQL
-    (see :func:`_enrolled_generator_condition`) so LIMIT counts survivors, which
-    means it never reaches this loop to be counted. The ``return None`` branch of
-    :func:`_read_path_row` stays as the belt-and-braces check the SQL mirrors.
-    Its disclosure is taken separately by :func:`_disclose_unverified`.
+    A row withheld on a ``t_invalid`` no signed verdict backs does not pass
+    through here at all: that filter runs in SQL, so the row never reaches this
+    loop to be counted. :func:`_disclose_invalidation_gaps` takes its count
+    separately, off the read's own WHERE.
 
     Returns ``(survivors, scanned, contested)``. ``scanned`` is how many rows
     were pulled, which the caller compares against the scan ceiling to tell
@@ -7188,7 +7081,6 @@ def query_claims(
     include_invalidated: bool = False,
     refutation_filter: str | None = None,
     on_verify_excluded: Callable[[int], None] | None = None,
-    on_unverified_excluded: Callable[[int], None] | None = None,
     on_contested: Callable[[int], None] | None = None,
 ) -> list[dict]:
     """Return claims ordered by recency (desc).
@@ -7311,12 +7203,6 @@ def query_claims(
             if "t_invalid IS NULL" in conditions:
                 conditions.remove("t_invalid IS NULL")
 
-    # Snapshot the conditions BEFORE the enrolled-generator filter is added. The
-    # disclosure counts what that filter held back, which means it has to ask the
-    # question this read did not: keeping the filter in and negating it asks for
-    # rows that are both enrolled and not, and the answer is always none.
-    disclose_where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-    disclose_params = list(params)
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
     # The signature re-verification runs in Python after the fetch, so a flat
@@ -7343,11 +7229,9 @@ def query_claims(
     )
     if scanned >= ceiling and len(results) < limit:
         raise _scan_ceiling_error("query", ceiling, len(results), limit)
-    _disclose_unverified(
-        conn, "claims", disclose_where, disclose_params,
-        ceiling=ceiling, limit=limit,
-        served=len(results), on_unverified_excluded=on_unverified_excluded, contested=contested,
-        on_contested=on_contested,
+    _disclose_invalidation_gaps(
+        conn, "claims", where, params,
+        ceiling=ceiling, contested=contested, on_contested=on_contested,
         include_invalidated=include_invalidated,
     )
     return results
@@ -7436,7 +7320,6 @@ def search_claims(
     classification: str | None = None,
     include_invalidated: bool = False,
     on_verify_excluded: Callable[[int], None] | None = None,
-    on_unverified_excluded: Callable[[int], None] | None = None,
     on_contested: Callable[[int], None] | None = None,
 ) -> list[dict]:
     """FTS5-ranked search over claim text.
@@ -7473,9 +7356,6 @@ def search_claims(
     if classification is not None:
         conditions.append("c.classification = ?")
         params.append(classification)
-    # As in query_claims: the disclosure must ask without the filter it reports on.
-    disclose_where = "WHERE " + " AND ".join(conditions)
-    disclose_params = list(params)
     where = " AND ".join(conditions)
     select_cols = ", ".join(f"c.{col}" for col in _CLAIM_COLUMNS)
     # Rank once and materialise up to the scan ceiling in a single statement,
@@ -7508,11 +7388,10 @@ def search_claims(
     )
     if scanned >= ceiling and len(results) < limit:
         raise _scan_ceiling_error("search", ceiling, len(results), limit)
-    _disclose_unverified(
+    _disclose_invalidation_gaps(
         conn,
         "claims_fts f JOIN claims c ON c.claim_id = f.claim_id",
-        disclose_where, disclose_params, ceiling=ceiling, limit=limit,
-        served=len(results), on_unverified_excluded=on_unverified_excluded, prefix="c.",
+        "WHERE " + where, params, ceiling=ceiling, prefix="c.",
         # The contested count reaches the caller here as it does from query.
         # The shared projection replays the signed verdicts for both surfaces
         # and hands the count back to both, and this one bound it to a local
