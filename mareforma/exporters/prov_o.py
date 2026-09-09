@@ -226,7 +226,7 @@ def build_prov_o(root: Path, claim_id: str | None = None) -> dict[str, Any]:
             "prov:wasAssociatedWith": {"@id": _agent_id(agent)},
         })
 
-        # Validation activity + validator agent (when ESTABLISHED).
+        # Validation activity + validator agent (when the row carries one).
         if claim.get("validator_keyid"):
             vkeyid = claim["validator_keyid"]
             if vkeyid not in seen_validators:

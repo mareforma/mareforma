@@ -35,10 +35,9 @@ CREATE TABLE IF NOT EXISTS claims (
     -- primary/asserter-role signature). NULL on unsigned rows and on legacy
     -- rows written before this column existed. Mirrors validator_keyid: the
     -- signature_bundle stays authoritative, this is the indexable projection
-    -- the REPLICATED promotion query and the trust-layer independence count
-    -- both read, so neither walks the bundle JSON. A REPLICATED row with a
-    -- NULL asserter_keyid is necessarily a legacy (pre-build) promotion: the
-    -- current rule refuses to promote a NULL-asserter row.
+    -- the trust-layer independence count reads, so it does not walk the
+    -- bundle JSON. A NULL here means nothing signed the row, and a reader
+    -- counting distinct signers cannot count it as one.
     asserter_keyid  TEXT,
     artifact_hash   TEXT,
     prev_hash       TEXT,
@@ -123,9 +122,9 @@ CREATE TABLE IF NOT EXISTS claims (
     -- one did. ``validated_by`` and ``validated_at`` are display fields
     -- denormalised out of the signed payload; ``validation_signature`` is the
     -- payload. The ladder's CHECK used to cover this from the other side, by
-    -- requiring the envelope on any ESTABLISHED row, and it went with the
-    -- level. The claim it was really making has nothing to do with levels and
-    -- survives them: a validation nobody signed is not a validation.
+    -- requiring the envelope on any row at the top of it, and it went with
+    -- the level. The claim it was really making has nothing to do with levels
+    -- and survives them: a validation nobody signed is not a validation.
     CHECK (validation_signature IS NOT NULL
            OR (validated_by IS NULL AND validated_at IS NULL))
 );
@@ -146,8 +145,8 @@ CREATE INDEX IF NOT EXISTS idx_claims_artifact_hash
 -- NULL keeps index storage proportional to the rows that carry a validator.
 CREATE INDEX IF NOT EXISTS idx_claims_validator_keyid
     ON claims(validator_keyid) WHERE validator_keyid IS NOT NULL;
--- Independence counting and REPLICATED distinctness filter on a non-NULL
--- asserter_keyid. Partial on NOT NULL keeps storage proportional to signed rows.
+-- Independence counting filters on a non-NULL asserter_keyid. Partial on NOT
+-- NULL keeps storage proportional to signed rows.
 CREATE INDEX IF NOT EXISTS idx_claims_asserter_keyid
     ON claims(asserter_keyid) WHERE asserter_keyid IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_claims_idempotency_key
@@ -172,10 +171,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_claims_prev_hash
 -- callers that need to know "what NEW value was rejected" can inspect
 -- the row's pre-image directly.
 -- Retracted is terminal. Without this, an adversary could assert a
--- born-retracted claim, flip it back to 'open' via update_claim (a pure
--- status mutation never triggers a REPLICATED re-check), and then ride
--- an honest peer's INSERT into REPLICATED. The signed envelope does not
--- bind status, so the resurrection carries no signature evidence. Make
+-- born-retracted claim and flip it back to 'open' via update_claim, so a
+-- withdrawn finding returns to every default read with nothing recording
+-- that it was ever withdrawn. The signed envelope does not bind status, so
+-- the resurrection carries no signature evidence. Make
 -- retraction one-way at the storage layer: to resurrect a withdrawn
 -- finding, assert a new claim citing the old via contradicts=[<old>].
 CREATE TRIGGER IF NOT EXISTS claims_update_status_terminal
@@ -190,7 +189,7 @@ END;
 -- A signed claim cannot be deleted. The signature + Rekor entry + chain
 -- hash collectively attest "this claim was asserted by this signer at
 -- this time"; allowing a delete would let a process with DB access wipe
--- a Rekor-logged ESTABLISHED claim and rewrite claims.toml as if it never
+-- a Rekor-logged claim and rewrite claims.toml as if it never
 -- existed (the Rekor entry persists, but the local graph forgets the
 -- context that points to it). The whole "append-only over the signed
 -- predicate" framing requires this trigger as the twin of
@@ -464,9 +463,9 @@ CREATE TABLE IF NOT EXISTS validators (
 # restore's signature-vs-row binding.
 #
 # asserter_keyid is watched for the same reason, one step removed. It is an
-# unsigned denormalisation of the bundle's signer that the REPLICATED promotion
-# query and the trust-layer independence count both read, so a row that
-# contradicts its own envelope inflates the distinct-signer count.
+# unsigned denormalisation of the bundle's signer that the trust-layer
+# independence count reads, so a row that contradicts its own envelope
+# inflates the distinct-signer count.
 #
 # predicate_payload is watched on the same ground. It stays outside the signed
 # envelope, but the audit path reads the finding's citation set out of it to
@@ -1399,8 +1398,8 @@ _CLAIM_COLUMNS = (
     "signature_bundle", "transparency_logged",
     "validation_signature",
     "validator_keyid",
-    # Denormalized asserter keyid from the signature_bundle (REPLICATED
-    # distinctness axis + trust-layer independence count read this column).
+    # Denormalized asserter keyid from the signature_bundle (the trust-layer
+    # independence count reads this column).
     "asserter_keyid",
     "artifact_hash",
     "prev_hash",

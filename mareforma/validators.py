@@ -2,7 +2,7 @@
 validators.py: Per-project validator enrollment.
 
 A validator is a public key permitted to call ``graph.validate()`` and
-promote a REPLICATED claim to ESTABLISHED. The set of permitted keys is
+sign off on a claim. The set of permitted keys is
 stored in the ``validators`` table of the project's ``graph.db``.
 Mareforma is a local epistemic graph; validators here are local-trust
 entries, not cross-org PKI.
@@ -641,7 +641,7 @@ def enroll_validator(
     no external verification; the value reflects what the parent signed
     off on at enroll time. ``'llm'`` validators are subject to the
     promotion ceiling enforced by :func:`mareforma.db.validate_claim`
-    (LLM validators cannot promote past REPLICATED).
+    (an LLM validator cannot sign off on a claim).
 
     Raises
     ------

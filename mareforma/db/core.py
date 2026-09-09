@@ -2308,10 +2308,10 @@ def classify_support(value: str) -> str:
     Three buckets:
 
       * ``"claim"``: strict UUIDv4 shape, candidate graph-node edge.
-        REPLICATED detection and cycle detection walk these.
+        Independence counting and cycle detection walk these.
       * ``"doi"``: DOI form (``10.<registrant>/<suffix>``) per Crossref +
-        DataCite syntax; ineligible as a REPLICATED anchor (the upstream
-        is not a local claim).
+        DataCite syntax; not a shared anchor two claims can converge on
+        (the upstream is not a local claim).
       * ``"external"``: anything else. Free-form strings (URLs, ORCID
         ids, lab-internal references). Stored verbatim, not walked, not
         resolved.
@@ -2519,7 +2519,7 @@ def normalize_artifact_hash(value: str | None) -> str | None:
 
     Accepts canonical hex digests only: no ``sha256:`` prefix, no
     base64, no whitespace. Case is normalised to lowercase so two
-    spellings of the same digest compare equal in the REPLICATED query.
+    spellings of the same digest compare equal when two peers are compared.
     """
     if value is None:
         return None
@@ -2653,10 +2653,11 @@ def add_claim(
     """Insert a new claim and return its claim_id.
 
     Returns the existing claim_id without inserting if idempotency_key
-    already exists. After insert, checks for REPLICATED: if ≥2 claims share
-    the same ESTABLISHED upstream claim_id in supports[] and carry distinct,
-    non-NULL asserter_keyid values, all are promoted to
-    a converging peer.
+    already exists. The insert is the whole of it: nothing is derived from the
+    new row and written back to it, and nothing on any other row changes. Two
+    claims citing a shared upstream under distinct asserter_keyid values are
+    what convergence looks like, and a reader counts that off the rows rather
+    than being told it by them.
 
     Parameters
     ----------
@@ -2675,17 +2676,17 @@ def add_claim(
     status:
         Editorial status: 'open' | 'contested' | 'retracted'
     unresolved:
-        True if any DOI in supports[]/contradicts[] failed to resolve.
-        Unresolved claims are ineligible for REPLICATED promotion.
+        True if any DOI in supports[]/contradicts[] failed to resolve. The
+        claim is stored and served; the flag says its citations did not all
+        resolve, which a reader weighs for itself.
     artifact_hash:
         Optional SHA256 hex digest of the artifact bytes (figure, CSV,
         model) backing this claim. When supplied it is included in the
         signed payload and read as a secondary collapse check: peers
-        sharing an upstream that both supply an EQUAL hash are one line
-        of evidence and do not promote on their own. Distinct hashes, or
-        ``None`` on either side, never block the distinct-signer axis;
-        ``strict_promotion`` is the opt-in that makes non-NULL data on
-        both sides a hard requirement.
+        sharing an upstream that both supply an EQUAL hash are one line of
+        evidence, whatever keys signed them, and the independence count says
+        so. Distinct hashes, or ``None`` on either side, leave the
+        distinct-signer reading alone.
     signer:
         Optional Ed25519 private key. When provided, the claim is signed
         before INSERT and the signature envelope is persisted to the
@@ -2695,7 +2696,7 @@ def add_claim(
         transparency log at this URL. Success augments the signature
         bundle with the log entry coordinates and sets
         ``transparency_logged=1``. Failure persists ``transparency_logged=0``,
-        blocking REPLICATED promotion until
+        so the claim carries no public log entry until
         :meth:`EpistemicGraph.refresh_unsigned` retries.
     require_rekor:
         When True, raise :class:`SigningError` if the initial Rekor
@@ -2748,11 +2749,11 @@ def add_claim(
     # generated_by were discarded into the first caller's row, collapsing
     # what should have been two independent claims into one. The
     # "convergence convention" documented around this primitive actively
-    # destroyed what REPLICATED is supposed to detect (distinct signer
-    # identities converging on a shared upstream). The correct path
-    # for cross-lab convergence is two separate claims that share an entry
-    # in supports[] with distinct asserter_keyid values, which fires REPLICATED.
-    # Idempotency_key is retry-safety only.
+    # destroyed the thing a reader counts (distinct signer identities
+    # converging on a shared upstream). The correct path for cross-lab
+    # convergence is two separate claims that share an entry in supports[]
+    # with distinct asserter_keyid values. Idempotency_key is retry-safety
+    # only.
     if idempotency_key is not None:
         try:
             row = conn.execute(
@@ -2892,8 +2893,8 @@ def add_claim(
     initial_validated_at = None
     initial_validator_keyid = None
     # Denormalize the asserter keyid from the signed envelope so the
-    # REPLICATED promotion query and the trust-layer independence count read
-    # an indexed column rather than walking the bundle JSON. The
+    # trust-layer independence count reads an indexed column rather than
+    # walking the bundle JSON. The
     # signature_bundle stays authoritative. NULL on unsigned claims.
     asserter_keyid = _extract_signature_bundle_keyid(signature_bundle)
     try:
@@ -3007,8 +3008,7 @@ def add_claim(
 
     # Attempt Rekor submission. The saga (submit → sidecar → row UPDATE)
     # is its own concern; the helper returns the new transparency_logged
-    # value so the REPLICATED check below can short-circuit when the
-    # log entry failed to attach.
+    # value the INSERT below stores.
     if rekor_enabled:
         transparency_logged = _attempt_rekor_saga(
             conn,
@@ -3039,8 +3039,8 @@ def _claim_model_lineage(
 
     A finding-derived claim carries its authoring scope's lineage on its evidence
     lines (written identically on every line), so the first non-NULL value
-    represents it. A plain claim with no finding, every claims-graph REPLICATED
-    peer, has none, which reads as absent (no model constraint). Any missing
+    represents it. A plain claim with no finding, every converging peer in the
+    claims graph, has none, which reads as absent (no model constraint). Any missing
     table (a schema without the evidence tree) or unparseable value also reads as
     absent, never as a fabricated distinct model.
     """
@@ -3081,10 +3081,9 @@ def find_dangling_supports(conn: sqlite3.Connection) -> list[dict]:
     ``claim_id`` then ``dangling_ref`` for deterministic output. Returns
     an empty list when nothing is dangling.
 
-    REPLICATED detection already refuses to promote on a dangling
-    reference (it requires the referenced ESTABLISHED claim to actually
-    exist and be open), so a dangling entry cannot trigger spurious
-    promotion. This helper is for auditing, not enforcement.
+    A dangling reference points at no claim, so nothing counts it as a shared
+    anchor and it cannot make two claims look convergent. This helper is for
+    auditing, not enforcement.
     """
     rows = conn.execute(
         "SELECT c.claim_id, j.value AS ref "
@@ -3159,8 +3158,8 @@ def _refuse_llm_validator(conn: sqlite3.Connection, validator_keyid: str) -> Non
         raise LLMValidatorPromotionError(
             f"Validator {validator_keyid[:12]}… is enrolled with "
             "validator_type='llm'. LLM validators may sign validation "
-            "envelopes but cannot promote a claim past REPLICATED. "
-            "Have a human-typed validator co-sign or re-sign to promote."
+            "envelopes, and recording one on a claim is refused. "
+            "Have a human-typed validator sign it instead."
         )
 
 
@@ -3173,13 +3172,11 @@ def _refuse_llm_contradiction_issuer(
     Symmetric to :func:`_refuse_llm_validator`. A signed contradiction
     sets ``t_invalid`` on the older of two claims via the
     ``contradiction_invalidates_older`` trigger; that is equivalent in
-    blast radius to demoting a human-validated ESTABLISHED claim (it
-    drops from default ``query()`` results). The human-only rule must
-    apply to both directions of the trust ladder: humans-only-to-promote
-    AND humans-only-to-demote. Without this gate an enrolled LLM key
-    could mark down any ESTABLISHED claim by signing a contradiction,
-    breaking the README's "promotion requires a human" framing in the
-    opposite direction.
+    blast radius to overturning a human-validated claim (it drops from
+    default ``query()`` results). The human-only rule must apply in both
+    directions: humans only to sign off, humans only to invalidate. Without
+    this gate an enrolled LLM key could mark down any validated claim by
+    signing a contradiction, breaking the same rule from the other side.
 
     A keyid that is not enrolled (no row in validators) does not trip
     this gate; the enrollment check in :func:`_require_enrolled_issuer`
@@ -3404,8 +3401,8 @@ def _refuse_self_validation(
     Walks every keyid in ``signature_bundle.signatures[*].keyid``:
     the primary asserter AND any role-attestation signer (planner /
     executor / reviewer / validator on a ``claim-with-roles:v1``
-    envelope). Promotion to ESTABLISHED requires a witnessing
-    validator whose keyid does not appear on the envelope at all.
+    envelope). A validation has to come from a key that does not appear on
+    the envelope at all.
 
     Unsigned claims (``signature_bundle IS NULL``) carry no signer
     identity to compare against and pass this gate. A malformed bundle
@@ -3454,8 +3451,8 @@ def _refuse_self_validation(
         raise SelfValidationError(
             f"Validator {validator_keyid[:12]}… signed claim "
             f"'{claim_id}' as {matched_role!r}; self-promotion is "
-            "refused. Promotion requires a witnessing validator "
-            "whose keyid does not appear on the claim envelope. "
+            "refused. A validation has to come from a key that does not "
+            "appear on the claim envelope. "
             "Have a different enrolled key call graph.validate(...)."
         )
 
@@ -3465,12 +3462,11 @@ def _refuse_self_validation_across_set(
 ) -> None:
     """Refuse a validator that asserted ANY claim in the converging set.
 
-    The claim being promoted is REPLICATED: it converged with peer claims
-    that share an ESTABLISHED+open anchor and carry distinct asserter keyids.
-    A validator whose keyid equals the ``asserter_keyid`` of any claim in that
-    set is a participant witnessing its own convergence into ESTABLISHED, so
-    the promotion is refused. :func:`_refuse_self_validation` already covers
-    the claim's own signers; this extends the refusal to the converging peers.
+    A claim's converging set is the peers citing the same upstream anchors it
+    cites. A validator whose keyid equals the ``asserter_keyid`` of any claim
+    in that set is signing off on a line it took part in, so the validation is
+    refused. :func:`_refuse_self_validation` already covers the claim's own
+    signers; this extends the refusal to the peers beside it.
     """
     sup_row = conn.execute(
         "SELECT supports_json FROM claims WHERE claim_id = ?", (claim_id,),
@@ -3509,10 +3505,10 @@ def _refuse_self_validation_across_set(
     # expands those and nothing else. Matching the anchors first left the
     # planner no better path than every claim in the graph, and every promotion
     # paid for the whole subset.
-    # Membership is the supports edge, not the peer's current level: a peer an
-    # earlier witness already lifted to ESTABLISHED is still a line its asserter
-    # took part in, so filtering on support_level dropped it from the set and
-    # cleared the refusal.
+    # Membership is the supports edge and nothing else. A peer that somebody
+    # has since validated is still a line its asserter took part in, so
+    # narrowing the set by anything but the edge drops peers and clears a
+    # refusal that should have stood.
     # The peer set is read from claims.supports_json, not from the reverse-edge
     # cache the insert path narrows with. The cache is unsigned and its
     # staleness check only counts claims, so a dropped edge is invisible; there
@@ -3530,7 +3526,7 @@ def _refuse_self_validation_across_set(
         raise SelfValidationError(
             f"Validator {validator_keyid[:12]}… asserted a claim in the "
             f"converging set behind '{claim_id}'; a participant cannot "
-            "witness its own convergence into ESTABLISHED. Have an "
+            "sign off on a line it took part in. Have an "
             "independent enrolled key call graph.validate(...)."
         )
 
@@ -3606,7 +3602,11 @@ def validate_claim(
     validated_at: str | None = None,
     evidence_seen: list[str] | None = None,
 ) -> None:
-    """Promote a REPLICATED claim to ESTABLISHED (human validation).
+    """Record a human validator's signed sign-off on a claim.
+
+    Writes a signed envelope onto the row and nothing else: no level, no
+    ranking, no change to any other claim. A validation is terminal, so a row
+    already carrying one is refused rather than overwritten.
 
     Parameters
     ----------
@@ -3617,10 +3617,8 @@ def validate_claim(
         verbatim on the row so the validation event itself is
         independently verifiable (tampering with
         ``validated_by``/``validated_at``/``evidence_seen`` post-hoc is
-        detectable). Promotion to ESTABLISHED is gated on this envelope:
-        an unsigned call raises ``ValueError`` up front because the
-        storage layer refuses an ESTABLISHED row with a NULL signature,
-        so there is no unsigned promotion path.
+        detectable). There is no unsigned path: an unsigned call raises
+        ``ValueError`` up front.
     validated_at:
         Optional ISO 8601 UTC timestamp to write to the row. The caller
         signs a validation envelope binding a timestamp, so the SAME
@@ -3632,7 +3630,7 @@ def validate_claim(
         against that exact value).
     evidence_seen:
         Optional list of claim_ids the validator declares to have
-        reviewed before signing the promotion. ``None`` is normalized
+        reviewed before signing. ``None`` is normalized
         to ``[]`` and bound into the signed envelope: a positive
         statement that the validator reviewed nothing, which is then
         visible in the audit trail rather than hidden by absence. Each
@@ -3659,8 +3657,8 @@ def validate_claim(
        signer's public key via :func:`signing.verify_envelope` (raises
        :class:`InvalidValidationEnvelopeError`).
     4. The signing validator's ``validator_type`` must be ``'human'``.
-       An ``'llm'``-typed validator can sign a validation envelope but
-       cannot promote past REPLICATED (raises
+       An ``'llm'``-typed validator can sign a validation envelope, and
+       recording it is refused (raises
        :class:`LLMValidatorPromotionError`).
     5. The validator's keyid must NOT match the claim's
        ``signature_bundle`` signing keyid. Self-validation is the
@@ -3668,7 +3666,7 @@ def validate_claim(
     6. The envelope's signed payload must agree on ``claim_id``,
        ``validator_keyid``, and the timestamp (``validated_at`` for
        validation envelopes, ``seeded_at`` for seed envelopes) with the
-       row being promoted and the kwargs being written (raises
+       row being written and the kwargs being written (raises
        :class:`InvalidValidationEnvelopeError`).
     7. The envelope's ``evidence_seen`` field must equal the
        ``evidence_seen`` kwarg, and every cited entry must be a
@@ -3682,10 +3680,13 @@ def validate_claim(
         If no claim with claim_id exists.
     ValueError
         If ``validation_signature`` is ``None`` (recording a validation
-        requires a signed envelope; there is no unsigned path), or if the
+        requires a signed envelope; there is no unsigned path); if the
         claim's status is not 'open' (contested/retracted claims are
         editorially tainted and must not be signed off on; revisit the
-        editorial flag via update_claim before validating).
+        editorial flag via update_claim before validating); if the claim
+        already carries a validation, since the row holds one envelope and a
+        second would erase the first; or if a signed contradiction invalidated
+        the claim inside the check-to-write window.
     InvalidValidationEnvelopeError
         If the validation envelope is malformed, wrong-typed, signed
         by a non-enrolled key, fails cryptographic verification, or
@@ -3702,12 +3703,12 @@ def validate_claim(
         ``created_at > validated_at``.
     """
     if validation_signature is None:
-        # Promotion to ESTABLISHED writes validation_signature straight
-        # from this kwarg. A NULL signature is refused by both the table
-        # CHECK and the claims_update_state_check trigger, so an unsigned
-        # call could only ever surface as an IllegalStateTransitionError
-        # that reads like row corruption. Reject it here with a message
-        # that names the real requirement.
+        # The write below puts this kwarg straight into
+        # validation_signature, and a row carrying a validator with no
+        # envelope is refused by the table CHECK, so an unsigned call could
+        # only ever surface as an integrity error that reads like row
+        # corruption. Reject it here with a message that names the real
+        # requirement.
         raise ValueError(
             f"validate_claim for claim '{claim_id}' requires a signed "
             "validation envelope; recording a validation has no unsigned "
@@ -3755,9 +3756,9 @@ def validate_claim(
     # validator (or any in-process caller) could hand-craft an envelope
     # JSON claiming a human validator's keyid + a garbage signature,
     # then call ``db.validate_claim`` directly. Mareforma would
-    # consult the CLAIMED keyid to enforce the trust-ladder gates
+    # consult the CLAIMED keyid to enforce the validation gates
     # (LLM-type, self-validation), find them satisfied, and persist a
-    # fraudulent ESTABLISHED row anchored by an envelope that does not
+    # fraudulently validated row anchored by an envelope that does not
     # verify against the impersonated signer's public key. Restore would
     # eventually catch it, but the live DB would already have shipped
     # bad data to whoever queried in the meantime.
@@ -3799,9 +3800,8 @@ def validate_claim(
             ) from exc
 
         # The validation_signature column carries either a validation
-        # envelope (REPLICATED→ESTABLISHED) or a seed envelope (born-
-        # ESTABLISHED). Anything else is a type confusion attempt , 
-        # cross-type acceptance lets an attacker pass an enrollment or
+        # envelope or a seed envelope. Anything else is a type confusion
+        # attempt: cross-type acceptance lets an attacker pass an enrollment or
         # claim envelope through a verifier expecting a validation
         # event. verify_envelope's expected_payload_type is the formal
         # guard; the early-rejection here gives a clear error message.
@@ -3865,7 +3865,7 @@ def validate_claim(
     # signed payload describes the row being updated. Without these
     # equality checks a caller could replay a legitimate validation
     # envelope from claim A onto row B (matching signer + matching
-    # cryptography), promoting B to ESTABLISHED with an envelope that
+    # cryptography), so B reads as validated under an envelope that
     # binds a different claim_id and timestamp. Restore would catch the
     # divergence; this is the live-DB equivalent of the restore-path
     # checks at ``_verify_claim_signatures_on_restore``.
@@ -3940,22 +3940,19 @@ def validate_claim(
     # evidence-citation checks ran with no transaction open. Wrap the write in
     # BEGIN IMMEDIATE and re-assert the gate on the UPDATE itself so a signed
     # contradiction (t_invalid) or retraction (status) that lands in the
-    # check-to-write window cannot ride into ESTABLISHED. Mirrors
-    # record_replication_verdict's guarded promotion; when the caller already
+    # check-to-write window cannot land under a signed sign-off. Mirrors
+    # record_replication_verdict's guarded write; when the caller already
     # holds a transaction its outer commit flushes this write.
     _own_txn = not conn.in_transaction
     try:
         if _own_txn:
             conn.execute("BEGIN IMMEDIATE")
         # ``validation_signature IS NULL`` is what makes a validation
-        # terminal, and it has to be said here now. It used to be said by the
-        # level: the row went to the top rung and the UPDATE was gated on the
-        # rung below it, so a second call matched nothing and raised. The level
-        # went and took the rule with it, and the column holds one envelope, so
-        # without this a second validator's sign-off overwrites the first and
-        # the first is gone from the graph with nothing recording that it was
-        # ever there. The read path cannot notice, because the envelope that
-        # survives verifies.
+        # terminal, and it has to be said here. The column holds one envelope,
+        # so without this a second validator's sign-off overwrites the first
+        # and the first is gone from the graph with nothing recording that it
+        # was ever there. The read path cannot notice, because the envelope
+        # that survives verifies.
         #
         # On the UPDATE rather than only in the gate above, so a concurrent
         # validation landing in the check-to-write window loses the race
@@ -4100,7 +4097,7 @@ def _attempt_rekor_saga(
         warnings.warn(
             f"Rekor submission to {rekor_url} failed for claim {claim_id}. "
             "The claim is stored and signed, but transparency_logged stays 0, "
-            "which blocks REPLICATED promotion until "
+            "so nothing outside this machine witnesses the signature until "
             "EpistemicGraph.refresh_unsigned() logs it.",
             stacklevel=2,
         )
@@ -4374,9 +4371,9 @@ def mark_claim_logged(
     """Mark a claim as transparency-log included and update its bundle.
 
     The bundle is rewritten with the Rekor entry attached (uuid + logIndex +
-    integratedTime). The flag-flip and REPLICATED re-evaluation happen in a
-    single transaction so a crash between them cannot strand a claim at
-    PRELIMINARY despite ``transparency_logged=1``.
+    integratedTime). The flag-flip and the bundle rewrite happen in a single
+    transaction, so a crash between them cannot leave a row claiming a log
+    entry its envelope does not carry.
 
     Verification
     ------------
@@ -4526,12 +4523,10 @@ def mark_claim_resolved(
     root: Path,
     claim_id: str,
 ) -> None:
-    """Clear the unresolved flag on a claim and re-check REPLICATED eligibility.
+    """Clear the unresolved flag on a claim.
 
-    The flag-clear and the REPLICATED promotion happen in the same SQLite
-    transaction. A crash between them would otherwise leave the claim with
-    ``unresolved=0`` but stuck at PRELIMINARY, even though a sibling claim
-    is waiting on it for convergence.
+    Every DOI in supports[] and contradicts[] resolved, so the flag that said
+    otherwise comes off and the claim reads as fully cited.
 
     Raises
     ------
@@ -4687,10 +4682,7 @@ def update_claim(
     if supports_changed or contradicts_changed:
         new_unresolved = 0
 
-    # If the claim just became resolved (or supports changed while resolved),
     try:
-        # Wrap the UPDATE and (optional) convergence check in one txn so the
-        # unresolved-flag transition and the REPLICATED promotion are atomic.
         with conn:
             conn.execute(
                 """
@@ -4837,8 +4829,8 @@ def count_unverified_rows(conn: sqlite3.Connection) -> int:
 def _trust_domain_disclosure(conn: sqlite3.Connection) -> tuple[bool, str | None]:
     """(single_trust_domain, trust_domain_root) for this graph's validators.
 
-    A graph-global property of the validator topology, attached per
-    ESTABLISHED row so a consumer reading one promoted claim sees whether all
+    A graph-global property of the validator topology, attached per row so a
+    consumer reading one claim sees whether all
     validators trace to one root of trust. It discloses trust-domain
     concentration; it is NOT a Sybil guard over the participant topology.
     """
@@ -4852,11 +4844,12 @@ def _trust_domain_disclosure(conn: sqlite3.Connection) -> tuple[bool, str | None
 def _verify_validation_on_read(
     conn: sqlite3.Connection, row: dict, cache: dict,
 ) -> bool:
-    """Re-verify an ESTABLISHED row's validation envelope (validator side)."""
+    """Re-verify a row's validation envelope (validator side)."""
     vs = row.get("validation_signature")
     if not vs:
-        # An ESTABLISHED row with no validation envelope violates the schema
-        # CHECK; reaching here means a direct tamper. Refuse to serve it.
+        # The caller only reaches here for a row that carries an envelope,
+        # and a row naming a validator without one is refused by the schema
+        # CHECK; so this means a direct tamper. Refuse to serve it.
         return False
     try:
         env = json.loads(vs)
@@ -4869,7 +4862,7 @@ def _verify_validation_on_read(
     # validation_signature bytes (an attacker copies a genuine envelope onto a
     # second row) would share a cache entry: the row evaluated first, sorted by
     # created_at, which the attacker controls, caches its result and poisons
-    # the second, so a forged row could censor the legitimate ESTABLISHED claim.
+    # the second, so a forged row could censor the legitimate validated claim.
     ck = (
         "V", keyid, row.get("claim_id"),
         hashlib.sha256(vs.encode("utf-8")).hexdigest(),
@@ -4886,8 +4879,8 @@ def _verify_validation_on_read(
         # enrollment envelope makes any key look like a validator; is_enrolled
         # walks the chain back to the self-signed root, the same bar
         # _verdict_verifies and the CLI apply. Without it, that one INSERT
-        # promotes a claim to ESTABLISHED with a signature that verifies against
-        # a key the project never enrolled.
+        # makes a claim read as validated under a signature that verifies
+        # against a key the project never enrolled.
         if signer_row is not None and _validators.is_enrolled(conn, keyid):
             try:
                 pem = base64.standard_b64decode(signer_row["pubkey_pem"])
@@ -4905,23 +4898,23 @@ def _verify_validation_on_read(
                     if ok:
                         # The envelope is genuine, binds this claim, and comes
                         # from an enrolled key. Whether that key was entitled to
-                        # promote is a separate question, and it is the one the
-                        # write path asks. Skipping it here served an
-                        # ESTABLISHED the same graph refuses to write.
+                        # sign off is a separate question, and it is the one the
+                        # write path asks. Skipping it here served a row the
+                        # same graph refuses to write.
                         #
-                        # The llm ceiling applies whatever the envelope calls
+                        # The llm rule applies whatever the envelope calls
                         # itself, because the write path applies it to both: the
                         # seed path refuses an llm signer in as many words, so
-                        # that an llm validator cannot route around the
-                        # ESTABLISHED ceiling by seeding instead of validating.
+                        # that an llm validator cannot route around the rule by
+                        # seeding instead of validating.
                         #
                         # The self-validation rule is where the two types differ,
                         # and the difference is not an exemption to assume. A
-                        # born-ESTABLISHED claim is attested by its own asserter,
+                        # seeded claim is attested by its own asserter,
                         # so for a seed that is the thing to REQUIRE. The signer
                         # picks the payloadType, and taking the word for it let
-                        # any enrolled key promote any claim by calling its
-                        # envelope a seed.
+                        # any enrolled key sign off on any claim by calling
+                        # its envelope a seed.
                         try:
                             _refuse_llm_validator(conn, keyid)
                             if declared == _signing.PAYLOAD_TYPE_VALIDATION:
@@ -4939,7 +4932,7 @@ def _verify_validation_on_read(
             except Exception:
                 ok = False
         # No row, or a row whose chain does not walk back to the root -> the
-        # validator keyid is not enrolled. An ESTABLISHED promotion can only
+        # validator keyid is not enrolled. A validation can only
         # come from an enrolled validator, so this is a forged row: leave ok
         # False (excluded).
     cache[ck] = ok
@@ -5042,7 +5035,7 @@ def _legacy_unsigned_row(conn: sqlite3.Connection, row, cache: dict) -> bool:
 def _verify_participant_bundle_on_read(
     conn: sqlite3.Connection, row: dict, cache: dict,
 ) -> bool:
-    """Re-verify a REPLICATED row's asserter bundle (participant side).
+    """Re-verify a row's asserter bundle (participant side).
 
     Legacy (no bundle, no keyid) rows are verify-exempt, they carry no envelope
     to check. A row with a keyid but no bundle is not legacy: the keyid is
@@ -5174,9 +5167,8 @@ def verify_claim_signatures(
 ) -> tuple[bool, str]:
     """Audit-grade, tier-independent re-verification of a claim's signatures.
 
-    Unlike :func:`_row_verified_on_read`, which is gated by support level and
-    passes PRELIMINARY rows through untouched, this re-checks a signed claim's
-    bundle at ANY tier, for the explicit ``mareforma verify`` audit. It confirms
+    Where :func:`_row_verified_on_read` answers a listing surface, this is the
+    explicit ``mareforma verify`` audit and re-checks the whole bundle. It confirms
     the signed predicate binds THIS row (claim_id + every signed field matches,
     catching a hand-edited row), verifies the asserter signature when the
     asserter is enrolled, and verifies all role attestations. Returns
@@ -6100,10 +6092,10 @@ def record_replication_verdict(
     }
     signature = signer.sign(_replication_verdict_pae(record))
     created_at = _now()
-    # Verdict INSERT + promotion UPDATE run in one BEGIN IMMEDIATE
-    # transaction so a concurrent contradiction verdict cannot land
-    # between the two commits and leave the claim in the contradictory
-    # state (support_level=REPLICATED AND t_invalid IS NOT NULL).
+    # Verdict INSERT and the guarded UPDATE run in one BEGIN IMMEDIATE
+    # transaction so a concurrent contradiction verdict cannot land between
+    # the two commits and leave the claim reading as corroborated and
+    # invalidated at once.
     members = [member_claim_id]
     if other_claim_id is not None:
         members.append(other_claim_id)
@@ -6188,10 +6180,10 @@ def record_contradiction_verdict(
     _require_enrolled_issuer(conn, issuer_keyid)
     # Symmetric to validate_claim's LLM-validator gate: an LLM-typed
     # validator cannot issue a contradiction, because a contradiction
-    # invalidates the older claim and effectively demotes it from default
-    # query() results. Promotion-requires-human and demotion-requires-
-    # human must move together; otherwise an enrolled LLM key can mark
-    # down any ESTABLISHED claim with a signed contradiction.
+    # invalidates the older claim and drops it from default query()
+    # results. Sign-off-requires-human and invalidation-requires-human must
+    # move together; otherwise an enrolled LLM key can mark down any
+    # validated claim with a signed contradiction.
     _refuse_llm_contradiction_issuer(conn, issuer_keyid)
     _require_claim_exists(conn, member_claim_id, "member_claim_id")
     _require_claim_exists(conn, other_claim_id, "other_claim_id")
@@ -6757,9 +6749,9 @@ def refutation_from_column(row: dict) -> dict:
 def _read_scan_ceiling(limit: int) -> int:
     """Max rows a read surface materialises before returning the survivors it
     has. Bounds the adversarial worst case: a flood of rows that fail
-    verify-on-read (mass tamper or unenrolled-PRELIMINARY traffic) must not turn
+    verify-on-read (mass tamper, or a flood of unsigned rows) must not turn
     a cheap insert into a whole-table read amplifier. Generous enough that
-    legitimate verified-heavy / PRELIMINARY-heavy projects are unaffected."""
+    legitimate signature-heavy projects are unaffected."""
     return max(limit * 50, 5000)
 
 
@@ -7108,8 +7100,8 @@ def query_claims(
     Each returned dict carries the standard claim columns plus two
     reputation projections computed at query time:
 
-      - ``validator_reputation`` (int): for ESTABLISHED rows, the number
-        of ESTABLISHED claims signed by the same validator (≥ 1). For
+      - ``validator_reputation`` (int): for a row carrying a validation, the
+        number of claims the same validator has signed off on (≥ 1). For
         other rows, ``0``.
       - ``generator_enrolled`` (bool): True iff the key on the claim's
         ``signature_bundle`` has a row in the ``validators`` table. False
@@ -7255,9 +7247,8 @@ def _enrolled_validator_keyids(conn: sqlite3.Connection) -> set[str]:
     Membership only: does NOT walk the enrollment chain. The chain
     walk in :func:`mareforma.validators.is_enrolled` is the
     authoritative check for individual validations; this set is a
-    cheap pre-filter used by :func:`query_claims` to decide whether a
-    PRELIMINARY claim's generator is "enrolled enough" to surface
-    unless the caller asks for them.
+    cheap pre-filter, reported per row as ``generator_enrolled`` so a reader
+    can tell a signer this project named from one it has not.
     """
     rows = conn.execute("SELECT keyid FROM validators").fetchall()
     return {r["keyid"] for r in rows}
@@ -7273,10 +7264,8 @@ def _compute_validator_reputation(
     the dict (caller defaults to 0). Derived state, recomputed on every call,
     never cached.
 
-    This counted ESTABLISHED rows, which was the same set by a different name:
-    a row reached that level only by being validated. The level is gone and the
-    envelope is not, so the question is asked of the envelope directly, which is
-    the signed thing rather than the word derived from it.
+    Asked of the envelope, which is the signed thing, rather than of any
+    column derived from it.
     """
     rows = conn.execute(
         "SELECT validator_keyid, COUNT(*) AS n FROM claims "
@@ -7360,9 +7349,9 @@ def search_claims(
     select_cols = ", ".join(f"c.{col}" for col in _CLAIM_COLUMNS)
     # Rank once and materialise up to the scan ceiling in a single statement,
     # then project through the SAME read-path filter as query_claims. Routing
-    # both surfaces through _project_verified_rows re-verifies high-trust rows
-    # here too, so search cannot serve a REPLICATED / ESTABLISHED row that query
-    # correctly excludes, and the two projections cannot drift apart.
+    # both surfaces through _project_verified_rows re-verifies every row here
+    # too, so search cannot serve a row that query correctly excludes, and the
+    # two projections cannot drift apart.
     base_sql = (
         f"SELECT {select_cols} FROM claims_fts f "
         f"JOIN claims c ON c.claim_id = f.claim_id "
@@ -7408,8 +7397,8 @@ def search_claims(
 def get_validator_reputation(conn: sqlite3.Connection) -> dict[str, int]:
     """Public wrapper around :func:`_compute_validator_reputation`.
 
-    Returns a dict mapping every enrolled validator keyid to its
-    ESTABLISHED-claim count. Validators with zero validations are
+    Returns a dict mapping every enrolled validator keyid to the number of
+    claims it has signed off on. Validators with zero validations are
     included with ``count=0`` (the bulk map use case wants the full
     enrollment list, not just the active validators).
     """

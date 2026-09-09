@@ -395,7 +395,7 @@ class ProvenanceToolAdapter:
 
         # supports edges come from the operator's own parent claim only.
         # A callee that names a claim gets its declaration recorded in
-        # the predicate, never an edge: lineage and REPLICATED promotion
+        # the predicate, never an edge: lineage and independence counting
         # read this list, and the wrapped tool is not trusted to write it.
         supports: list[str] = []
         if self.parent_claim_id:

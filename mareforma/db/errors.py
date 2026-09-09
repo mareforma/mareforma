@@ -25,12 +25,12 @@ class ScanCeilingReached(DatabaseError):
 class UnverifiedClaimError(MareformaError):
     """Raised when an export is asked to publish a claim that failed verify-on-read.
 
-    The interop exports (JSON-LD, PROV-O, RO-Crate) carry a claim's
-    a trust signal off the machine, where nothing re-checks it. A promoted
-    or ESTABLISHED row whose signature does not re-verify must not leave with
-    that level attached, and demoting it silently would hide the tamper, so the
-    export refuses and names the rows. Run ``mareforma verify <claim_id>`` for
-    the detail, then retract or repair the row.
+    The interop exports (JSON-LD, PROV-O, RO-Crate) carry a claim's signed
+    material off the machine, where nothing re-checks it. A row whose
+    signature does not re-verify must not leave carrying that material, and
+    stripping it silently would hide the tamper, so the export refuses and
+    names the rows. Run ``mareforma verify <claim_id>`` for the detail, then
+    retract or repair the row.
     """
 
 
@@ -86,24 +86,23 @@ class ChainIntegrityError(MareformaError):
 
 
 class LLMValidatorPromotionError(MareformaError):
-    """Raised when a validator with ``validator_type='llm'`` attempts
-    a promotion past REPLICATED.
+    """Raised when a validator with ``validator_type='llm'`` attempts to
+    sign off on a claim.
 
-    The trust ladder treats human validators as the only path to
-    ESTABLISHED. An LLM-typed validator may enroll and may sign
-    validation envelopes, but those envelopes cannot promote a claim
-    past REPLICATED. To promote, the claim must be co-signed (or
-    re-signed) by an enrolled human validator.
+    A validation is a human's statement that they read the evidence. An
+    LLM-typed validator may enroll and may sign validation envelopes, and
+    recording one on a claim is refused. An enrolled human validator has to
+    sign it instead.
     """
 
 
 class SelfValidationError(MareformaError):
-    """Raised when a validator attempts to promote a claim it signed itself.
+    """Raised when a validator attempts to sign off on a claim it signed itself.
 
     Self-validation is the trivial-loop attack: an agent asserts a claim
-    under its own key, then promotes that same claim to ESTABLISHED under
-    the same key. The trust ladder rests on the principle that promotion
-    is an *external* witnessing event. ``validate_claim`` compares the
+    under its own key, then signs off on that same claim under the same key.
+    A validation is worth something only as an *external* statement about
+    somebody else's work. ``validate_claim`` compares the
     signing keyid of the validation envelope with the keyid recorded in
     the claim's ``signature_bundle`` and refuses when they match.
     """

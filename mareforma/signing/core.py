@@ -758,8 +758,8 @@ def sign_validation(
 ) -> dict[str, Any]:
     """Sign a validation event for a claim.
 
-    The record must contain ``claim_id`` (the claim being promoted to
-    ESTABLISHED), ``validator_keyid`` (the signing validator),
+    The record must contain ``claim_id`` (the claim being signed off on),
+    ``validator_keyid`` (the signing validator),
     ``validated_at`` (ISO 8601 UTC), and ``evidence_seen`` (the claim_ids
     the validator reviewed, ``[]`` for none). ``evidence_seen`` is bound
     by the signature like the rest, so an empty list is the way to say
@@ -790,8 +790,8 @@ def sign_seed_claim(
     timestamp or the validator identity.
 
     The envelope is persisted to the claim's ``validation_signature``
-    column, satisfying the CHECK constraint that requires ESTABLISHED
-    rows to carry a signed validation envelope. The payload type
+    column, satisfying the CHECK constraint that refuses a row naming a
+    validator with no signed envelope behind it. The payload type
     ``application/vnd.mareforma.seed+json`` is distinct from the
     regular validation payload type so cross-type envelope
     substitution is detectable.
@@ -1102,8 +1102,8 @@ def bootstrap_key(
        un-loggable. :meth:`EpistemicGraph.refresh_unsigned` checks the
        envelope's keyid against the current signer's keyid and skips
        mismatches; without the old key on disk, those claims cannot
-       advance to ``transparency_logged=1`` and will never reach
-       ``REPLICATED``.
+       advance to ``transparency_logged=1``, so nothing outside this
+       machine ever witnesses their signatures.
 
     If you must rotate, back up the prior key first, run
     ``refresh_unsigned()`` with the old key to drain the pending queue,

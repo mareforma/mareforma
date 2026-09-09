@@ -2,10 +2,10 @@
 
 Traffic light (claim-based)
 ---------------------------
-  green  : at least one standing REPLICATED or ESTABLISHED claim
-  yellow : claims exist but none is standing above PRELIMINARY, either
-           because none was ever promoted or because every promoted one
-           has since been retracted or invalidated
+  green  : at least one standing claim carries a signed validation
+  yellow : claims exist but none standing carries one, either because
+           nobody has signed off on anything or because every claim that
+           was signed off on has since been retracted or invalidated
   red    : no claims at all
   error  : graph.db could not be read (corruption, missing table, locked)
 

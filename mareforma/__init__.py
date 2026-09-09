@@ -78,10 +78,10 @@ def open(  # noqa: A001
         to Rekor at INSERT time; the entry uuid + logIndex are attached to
         the signature bundle and ``transparency_logged`` is set to 1.
         Submission failure persists the claim with ``transparency_logged=0``
-        and blocks REPLICATED promotion (mirrors the DOI ``unresolved``
-        pattern). ``EpistemicGraph.refresh_unsigned()`` retries the
-        pending entries. ``None`` (default) disables Rekor entirely: signed
-        claims still REPLICATE based on the local signature alone.
+        (mirrors the DOI ``unresolved`` pattern), so nothing outside this
+        machine witnesses the signature. ``EpistemicGraph.refresh_unsigned()``
+        retries the pending entries. ``None`` (default) disables Rekor
+        entirely: a signed claim still carries its local signature.
         Use :data:`mareforma.signing.PUBLIC_REKOR_URL` for the public
         sigstore instance.
     require_rekor:
@@ -112,8 +112,8 @@ def open(  # noqa: A001
         ``'human'`` or ``'llm'``, the self-declared type recorded if this key
         auto-enrolls as the project's root validator. Ignored once a root
         exists. An autonomous agent bootstrapping its own project should pass
-        ``'llm'``: an ``llm`` validator cannot promote a claim to ESTABLISHED on
-        its signature alone. The default is ``'human'`` for compatibility, and a
+        ``'llm'``: an ``llm`` validator cannot sign off on a claim. The
+        default is ``'human'`` for compatibility, and a
         defaulted type carries no weight on the trust map's independence axis.
 
     Returns

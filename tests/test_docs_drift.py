@@ -1883,23 +1883,24 @@ def test_get_tools_docstring_names_the_signing_key_as_the_axis():
 
     Every tool from one ``get_tools`` binding signs with the key the graph was
     opened with, so varying ``generated_by`` per run yields one asserter keyid
-    and never promotes. A docstring that ties the label to REPLICATED costs the
-    integrator the run and teaches that a producer-controlled string is
-    corroboration.
+    and one line of evidence however many labels it wore. A docstring that ties
+    the label to independence costs the integrator the run and teaches that a
+    producer-controlled string is corroboration.
     """
     doc = " ".join((mareforma.EpistemicGraph.get_tools.__doc__ or "").split())
-    assert "REPLICATED" in doc, (
-        "get_tools docstring no longer mentions REPLICATED: the generated_by / "
-        "REPLICATED conflation this guard forbids can no longer occur, so update "
-        "or retire the guard rather than letting it pass on nothing"
+    assert "ndepend" in doc, (
+        "get_tools docstring no longer discusses independence: the generated_by "
+        "conflation this guard forbids can no longer occur, so update or retire "
+        "the guard rather than letting it pass on nothing"
     )
     conflated = [
         s for s in doc.split(". ")
-        if "generated_by" in s and "REPLICATED" in s
+        if "generated_by" in s and "ndepend" in s
         and "asserter_keyid" not in s and "signer" not in s
+        and "signing key" not in s
     ]
     assert not conflated, (
-        "get_tools ties generated_by to REPLICATED without naming the signing "
+        "get_tools ties generated_by to independence without naming the signing "
         f"key: {conflated}"
     )
     assert "asserter_keyid" in doc, (

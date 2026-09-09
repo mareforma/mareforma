@@ -199,8 +199,8 @@ class EpistemicGraph:
         # submit and fetch re-validates, so the flag has to travel with
         # the URL or those re-validations reject what open() accepted.
         self._trust_insecure_rekor = trust_insecure_rekor
-        # Opt-in gate: require data on both sides of a REPLICATED pair. Off by
-        # default; threaded into every write path that can trigger promotion.
+        # Opt-in gate: require data on both sides of a converging pair. Off
+        # by default; threaded into every write path it bears on.
         # Asking for it also declares it on the project (see the end of
         # __init__), so this handle's copy of the flag only ever agrees with
         # the stored policy the write paths read.
@@ -321,8 +321,8 @@ class EpistemicGraph:
         #     NOT check that the signer's keyid is enrolled in the
         #     validators table, same trust model as
         #     ``mareforma.open(key_path=...)`` (anyone can sign, but
-        #     only enrolled keys can ``validate()`` claims to
-        #     ESTABLISHED). Use for multi-signer hosts that have
+        #     only enrolled keys can ``validate()`` a claim). Use for
+        #     multi-signer hosts that have
         #     multiple keys loaded (e.g. one per role-actor in the
         #     ``claim-with-roles:v1`` predicate variant).
         # predicate_payload:
@@ -365,17 +365,16 @@ class EpistemicGraph:
             Any mismatch raises
             :class:`mareforma.db.IdempotencyConflictError`. Silently
             merging two different claims would discard the second
-            author's content and break REPLICATED detection. For
-            cross-lab convergence, assert two separate claims that
-            share an ``ESTABLISHED`` entry in ``supports[]`` and are
-            signed by two distinct keys (distinct ``asserter_keyid``):
-            that's the path that fires REPLICATED honestly. Pass a
+            author's content and leave one line of evidence where there
+            were two. For cross-lab convergence, assert two separate
+            claims that share an entry in ``supports[]`` and are signed
+            by two distinct keys (distinct ``asserter_keyid``). Pass a
             per-call ``signer`` for each distinct asserter.
         generated_by:
             Agent identifier. Use ``"model/version/context"`` format.
-            Defaults to ``'agent'``. A display label only: it does not
-            decide REPLICATED convergence (the ``asserter_keyid`` from
-            the signature does).
+            Defaults to ``'agent'``. A display label only: it decides
+            nothing (the ``asserter_keyid`` from the signature is what a
+            reader counts).
         source_name:
             Data source this claim derives from. Required for ANALYTICAL
             classification to be meaningful.
@@ -388,7 +387,7 @@ class EpistemicGraph:
         artifact_hash:
             SHA256 hex digest of the output artifact (figure, CSV, model)
             backing this claim. When supplied it is bound into the signed
-            payload and used as a secondary collapse on REPLICATED: two
+            payload and read as a secondary collapse check: two
             peers citing the same upstream that BOTH supply an EQUAL hash
             are the same output, so they collapse to one line and do not
             converge on their own. Distinct hashes, or an absent hash on
@@ -687,9 +686,9 @@ class EpistemicGraph:
             Each dict contains the standard claim columns plus two
             reputation projections computed at query time:
 
-              - ``validator_reputation`` (int): for ESTABLISHED rows, the
-                number of ESTABLISHED claims signed by the same
-                validator. ``0`` for non-ESTABLISHED rows.
+              - ``validator_reputation`` (int): for a row carrying a
+                validation, the number of claims the same validator has
+                signed off on. ``0`` for every other row.
               - ``generator_enrolled`` (bool): True iff the claim's
                 signing keyid is in the validators table.
 
@@ -741,8 +740,8 @@ class EpistemicGraph:
         A status change (open / contested / retracted) is an EDITORIAL
         action: it produces no signed envelope, requires no validator
         keyid, and is not round-tripped through the signature-verify
-        layer. An ESTABLISHED claim can be flipped to ``retracted`` by
-        any process with DB write access; nothing in mareforma
+        layer. A claim a human validated can be flipped to ``retracted``
+        by any process with DB write access; nothing in mareforma
         cryptographically records who pulled the lever. Compare with
         signed contradiction verdicts, which DO require an enrolled
         validator's signature and DO survive restore intact.
@@ -1091,9 +1090,9 @@ class EpistemicGraph:
     def get_validator_reputation(self) -> dict[str, int]:
         """Return ``{validator_keyid: count}`` for every enrolled validator.
 
-        Count is the number of ESTABLISHED claims whose validation
-        envelope was signed by that keyid. Validators with zero
-        ESTABLISHED validations appear with ``count=0``. Derived state,
+        Count is the number of claims whose validation envelope was signed
+        by that keyid. Validators who have signed off on nothing appear with
+        ``count=0``. Derived state,
         recomputed on every call from the claims table; never cached.
         """
         self._check_open()
@@ -2491,7 +2490,11 @@ class EpistemicGraph:
         validated_by: str | None = None,
         evidence_seen: list[str] | None = None,
     ) -> None:
-        """Promote a REPLICATED claim to ESTABLISHED (human validation).
+        """Record a human validator's signed sign-off on a claim.
+
+        Writes a signed envelope onto the row and nothing else. A validation
+        is terminal: a claim already carrying one is refused rather than
+        overwritten.
 
         Identity check
         --------------
@@ -2556,13 +2559,13 @@ class EpistemicGraph:
             a bypass at this layer too.
         LLMValidatorPromotionError
             If the loaded signer is enrolled with ``validator_type='llm'``.
-            LLM-typed validators can sign validation envelopes but
-            cannot promote past REPLICATED. Have a human-typed
-            validator call :meth:`validate` instead.
+            LLM-typed validators can sign validation envelopes, and
+            recording one is refused. Have a human-typed validator call
+            :meth:`validate` instead.
         SelfValidationError
             If the loaded signer's keyid equals the claim's
-            ``signature_bundle`` signing keyid. Promotion requires an
-            external witnessing validator; self-validation is the
+            ``signature_bundle`` signing keyid. A validation has to come
+            from a key that did not sign the claim; self-validation is the
             trivial-loop attack.
         """
         self._check_open()
@@ -2643,9 +2646,8 @@ class EpistemicGraph:
         validator_type:
             ``'human'`` (default) or ``'llm'``. Self-declared honesty
             signal bound into the signed enrollment envelope. LLM-typed
-            validators may sign validation envelopes but cannot promote
-            a claim past REPLICATED: :meth:`validate` refuses them in
-            mareforma.
+            validators may sign validation envelopes, and recording one
+            is refused: :meth:`validate` turns them away.
 
         Raises
         ------
@@ -2793,7 +2795,7 @@ class EpistemicGraph:
         Thin wrapper over :func:`mareforma.db.classify_supports`. Returns
         ``[{"value": ..., "type": ...}, ...]`` in input order.
         Mareforma uses this same classification for cycle detection,
-        REPLICATED anchoring, dangling-reference audit, and JSON-LD
+        shared-anchor counting, dangling-reference audit, and JSON-LD
         export. Exposed publicly so callers can introspect what
         mareforma sees for any candidate list before insertion.
 
@@ -2872,8 +2874,8 @@ class EpistemicGraph:
 
         # query_provenance is an audit surface, so it FLAGS each high-trust
         # row's verify-on-read result rather than excluding a tampered row:
-        # an auditor must be able to see a forged ESTABLISHED/REPLICATED row
-        # and know it failed verification. One cache for the whole walk, the
+        # an auditor must be able to see a forged row and know it failed
+        # verification. One cache for the whole walk, the
         # focal row included, so a signature is checked once per call.
         prov_verify_cache: dict = {}
 
@@ -3036,8 +3038,9 @@ class EpistemicGraph:
         design: a ``supports`` entry could legitimately reference a
         claim from another project or a not-yet-asserted upstream. This
         helper is for auditing integrity, not for blocking writes.
-        REPLICATED detection already refuses to promote on a dangling
-        reference, so a hanging arrow cannot trigger spurious promotion.
+        A dangling reference points at no claim, so nothing counts it as a
+        shared anchor and a hanging arrow cannot make two claims look
+        convergent.
 
         Raises
         ------
@@ -3062,8 +3065,8 @@ class EpistemicGraph:
         ``signature_bundle`` is non-NULL and whose ``transparency_logged``
         is 0, the original envelope is re-submitted to the Rekor URL the
         graph was opened with. Success updates the bundle (attaches the
-        log entry coordinates) and flips ``transparency_logged`` to 1; the
-        REPLICATED check fires inside the same transaction.
+        log entry coordinates) and flips ``transparency_logged`` to 1, both
+        inside the same transaction.
 
         No-op modes
         -----------
@@ -3331,8 +3334,8 @@ class EpistemicGraph:
 
         Returns two plain Python functions that any agent framework can wrap.
         ``generated_by`` is baked into the closure as a display and provenance
-        label on each claim. REPLICATED independence keys on the signing key
-        (``asserter_keyid``), not on that label, and every tool from one
+        label on each claim. Independence is read off the signing key
+        (``asserter_keyid``), not off that label, and every tool from one
         binding signs with the key the graph was opened with: all claims
         recorded through it share one asserter keyid. Independent lines need a
         graph handle per agent, each opened with its own key, or
@@ -3498,11 +3501,11 @@ class EpistemicGraph:
     def convergence_errors(self) -> int:
         """Number of swallowed SQLite errors during convergence detection.
 
-        Convergence detection (PRELIMINARY → REPLICATED promotion) runs
-        after a successful claim INSERT and swallows SQLite errors so a
-        misconfigured trigger or contention pattern can never crash a
-        write. A WARNING is logged each time; this counter mirrors that
-        log so the failure is observable without log parsing.
+        Nothing advances this counter. The detector it mirrored ran after a
+        claim INSERT and swallowed SQLite errors so a misconfigured trigger
+        could never crash a write; that detector is gone, and the counter is
+        kept only so a caller reading ``health()`` finds the key it expects
+        rather than a KeyError.
 
         Resets to zero each time the graph is re-opened. A non-zero value
         means at least one assertion since open completed but its
@@ -3515,8 +3518,8 @@ class EpistemicGraph:
     def read_verify_exclusions(self) -> int:
         """Rows :meth:`query` and :meth:`search` dropped as unverifiable.
 
-        A REPLICATED or ESTABLISHED row whose signature does not re-verify
-        is excluded from every enumerating read, and no flag brings it back.
+        A row carrying signed material that does not re-verify is excluded
+        from every enumerating read, and no flag brings it back.
         The result is a shorter list that reads exactly like a graph missing
         those claims, so the exclusion is counted here (and appended to
         ``.mareforma/health.jsonl`` as ``read_verify_excluded``).
@@ -3546,14 +3549,14 @@ class EpistemicGraph:
         -------
         dict[str, int]
             ``claim_count``: total claims in the graph (signed and
-            unsigned, all support levels, all statuses).
+            unsigned, every status).
             ``validator_count``: total rows in the validators table
             (every enrolled identity, including LLM-typed).
             ``unresolved_claims``: claims flagged ``unresolved=1``
-            (a legacy quarantine flag; blocks REPLICATED promotion).
+            (their citations did not all resolve).
             ``unsigned_claims``: claims with ``signature_bundle IS
-            NULL`` (no Ed25519 envelope; blocks REPLICATED promotion
-            and any cross-restore verification).
+            NULL`` (no Ed25519 envelope, so nothing to verify on read or
+            across a restore).
             ``dangling_supports``: count of UUID-shaped ``supports[]``
             entries pointing to claims that do not exist in the graph
             (returned in detail by :meth:`find_dangling_supports`).

@@ -725,16 +725,16 @@ def build_trust_map(
     # Attributability must reflect an ACTUAL signature check of its own. It is
     # asked here rather than read off get_claim so the map cannot inherit a
     # verdict computed for another purpose and assert "signature
-    # re-verified on read" for a signed PRELIMINARY claim it never checked (and
-    # miss a tamper). Run the audit-grade, tier-independent re-verification here,
+    # re-verified on read" for a signed claim it never checked (and
+    # miss a tamper). Run the audit-grade re-verification here,
     # the same one ``mareforma verify`` uses, so the standalone map is honest.
     sig_verified = None
     asserter_enrolled = None
     # EITHER column, not both. Gating on both let a row carrying a stapled
     # ``asserter_keyid`` and no bundle skip the check entirely, so
     # ``att_verified`` fell back to the stored ``verified`` gate below, which
-    # get_claim passes through True for PRELIMINARY rows. The map then read
-    # "signature re-verified on read" beside a keyid, for a claim with no
+    # get_claim passes through True for a row it did not check. The map then
+    # read "signature re-verified on read" beside a keyid, for a claim with no
     # signature at all, while ``mareforma verify`` called the same claim
     # tampered. The MCP server now exposes this map standalone, with no verdict
     # beside it, so the disagreement had nothing to correct it.
@@ -1005,8 +1005,8 @@ def _assemble(
     because they heal silently on the way in. ``sig_verified`` is the result of an ACTUAL
     audit-grade signature re-verification (``verify_claim_signatures``); when
     ``None`` (a direct caller that did not run one) it falls back to the stored
-    ``verified`` column, which is the support-level read gate, NOT a signature
-    check on PRELIMINARY rows. ``asserter_enrolled`` is ``False`` when the signed
+    ``verified`` column, which is the read gate's own answer and NOT an
+    audit-grade check. ``asserter_enrolled`` is ``False`` when the signed
     asserter is not an enrolled validator: ``verify_claim_signatures`` passes
     (binding only, no pubkey to check against), so the map must not claim the
     signature was cryptographically re-verified.

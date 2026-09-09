@@ -1371,10 +1371,9 @@ def restore(
                         ),
                     )
                 except sqlite3.IntegrityError as exc:
-                    # Trigger refusals,
-                    # ESTABLISHED without validation_signature) and CHECK
-                    # violations (bad classification /
-                    # status enum, duplicate prev_hash) all surface here.
+                    # Trigger refusals, CHECK violations (a validator named
+                    # with no envelope, a bad classification or status enum,
+                    # a duplicate prev_hash) all surface here.
                     # Translate to RestoreError so callers honour the
                     # documented contract.
                     raise RestoreError(
@@ -1603,7 +1602,7 @@ def restore(
 
             # Refuse a finding attached to a proposition its claim never made.
             # The edge itself is unsigned, so it is re-derived from the claim's
-            # signed text, the same posture as the REPLICATED re-derivation below.
+            # signed text, the same posture as the re-derivations below.
             _verify_finding_proposition_binding(conn)
 
             # Refuse a recovery whose gate inputs a later read would silently
@@ -2801,8 +2800,7 @@ def _verify_claim_signatures_on_restore(
                 kind="claim_unverified",
             ) from exc
         # The validation_signature column carries either a validation
-        # envelope (REPLICATED→ESTABLISHED promotion) or a seed envelope
-        # (born-ESTABLISHED bootstrap). Both are legitimate; pass the
+        # envelope or a seed envelope. Both are legitimate; pass the
         # declared type back to verify_envelope so a mismatch surfaces
         # any tampering between row and column.
         if declared_type not in (
@@ -2852,9 +2850,9 @@ def _verify_claim_signatures_on_restore(
         # the embedded payload, it does NOT prove the embedded payload
         # is about THIS row. A hand-edited claims.toml could copy a
         # legitimate validation/seed envelope onto a different row;
-        # without the field-equality check the row would inherit a
-        # forged ESTABLISHED stamp anchored by a real validator
-        # signature it never authorized for that claim. Mirror the
+        # without the field-equality check the row would read as validated
+        # under a real validator signature it never authorized for that
+        # claim. Mirror the
         # SIGNED_FIELDS cross-check the signature_bundle branch does.
         try:
             val_payload = _signing.envelope_payload(val_env)
@@ -2877,14 +2875,13 @@ def _verify_claim_signatures_on_restore(
                 "validator_keyid than the signing keyid; TOML tampered.",
                 kind="claim_unverified",
             )
-        # The promotion gates the live path runs once the signer is known
-        # authentic. Both read signed material only, the claim's own
-        # signature bundle and the validator's signed enrollment, so a row
-        # that fails them here could not have been promoted there. Seed
-        # envelopes are exempt: a born-ESTABLISHED claim is attested by its
-        # own asserter by design and never climbs the ladder.
+        # The gates the live path runs once the signer is known authentic.
+        # Both read signed material only, the claim's own signature bundle and
+        # the validator's signed enrollment, so a row that fails them here
+        # could not have been written there. Seed envelopes are exempt: a
+        # seeded claim is attested by its own asserter by design.
         try:
-            # The llm ceiling applies whatever the envelope calls itself: the
+            # The llm rule applies whatever the envelope calls itself: the
             # live seed path refuses an llm signer for the same reason
             # validate_claim does, so keying the gate on the payloadType let a
             # signer pick which rule it was under.
@@ -2895,8 +2892,8 @@ def _verify_claim_signatures_on_restore(
                 sig_bundle_json
             ):
                 # A seed is exempt from the self-validation rule because a
-                # born-ESTABLISHED claim is attested by its own asserter. That
-                # is the premise, so require it rather than assume it.
+                # seeded claim is attested by its own asserter. That is the
+                # premise, so require it rather than assume it.
                 raise SelfValidationError(
                     f"seed envelope on claim '{claim_id}' is signed by "
                     f"{val_keyid[:12]}…, which signed no role on the claim; a "

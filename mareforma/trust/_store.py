@@ -949,7 +949,7 @@ def _independence_units(
     cache.
 
     The run token is the distinct **signer** (the claim's ``asserter_keyid``),
-    the same WHO the REPLICATED promotion keys on. The denormalized column is not
+    the same WHO a reader counts distinct signers on. The denormalized column is not
     itself signed, so it is trusted only when the claim's bundle authenticates it
     (embeds the same keyid, binds to this claim, and verifies when the signer is
     enrolled); a forged or unbacked keyid falls back to the retired
@@ -1033,7 +1033,7 @@ def independence_counts(
     counts only when the claim's signature bundle authenticates it
     (:func:`mareforma.trust._gate._signer_axis`), so this axis is
     not the unsigned column
-    the REPLICATED promotion query reads; that query is a separate check under
+    the claims-graph independence count reads; that count is a separate check under
     its own editorial filters, and the two answer different questions and can
     differ. So can this count and the trust map's number:
     :func:`effective_independence` re-keys a line with no observed model call to
