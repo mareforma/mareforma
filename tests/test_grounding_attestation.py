@@ -693,24 +693,32 @@ class TestItDoesNotBreakTheOrdinaryCase:
 
 
 class TestAProjectOlderThanTheAttestations:
-    """The carve-out that keeps every pre-attestation project restorable.
+    """A backup too old to attest gets through on the operator's word, not its own.
 
     A GROUNDED axis arriving with nothing attesting it is how an axis edited
     after the fact looks, and this release refuses it. Backups written before
-    the attestations existed carry none, so without the stamp check every
-    GROUNDED claim in them would read as laundered and their operators would be
-    refused their own history.
+    the attestations existed carry none, so that history needs a way through.
 
-    The guard that draws that line had no test. Removing it turned nothing red
-    across the whole suite while a real pre-attestation backup went from
-    restoring to refused, which is the shape of a promise nothing holds.
+    It used to be read off the file: no ``backup_format`` key meant a backup too
+    old to judge, and the check stood down. That key is unsigned and sits in the
+    file the forger is editing, so the way through was to delete it. Forging the
+    axis and dropping three keys restored a laundered GROUNDED with no override
+    and no warning, and the forger never had to know the attestations existed.
+
+    So the file no longer gets to say. The operator does, the same way the other
+    refusals in this module make them say it.
     """
 
-    def test_a_backup_older_than_the_attestations_still_restores(
+    def _a_forged_axis_in_a_backup_that_attests_nothing(
         self, tmp_path: Path,
-    ) -> None:
-        import shutil as _shutil
+    ) -> "tuple[Path, str]":
+        """The file shape both directions below are about.
 
+        The axis is edited and re-signed with the project's own enrolled key, so
+        every signature still checks out. Then the stamp, the attestations and
+        the completeness table go, which is what a backup predating any of this
+        looks like and equally what a forger would leave behind.
+        """
         import tomli_w
 
         key = _bootstrap_key(tmp_path, "root.key")
@@ -721,9 +729,6 @@ class TestAProjectOlderThanTheAttestations:
             )
         _forge_axis_in_backup(tmp_path, claim_id, key)
 
-        # What a backup written before any of this looks like: the axis is
-        # there, and the stamp, the attestations and the completeness table
-        # are not, because the release that wrote it had none of them.
         toml_path = tmp_path / "claims.toml"
         doc = tomllib.loads(toml_path.read_text())
         doc.pop("backup_format", None)
@@ -731,8 +736,34 @@ class TestAProjectOlderThanTheAttestations:
         doc.pop("completeness", None)
         toml_path.write_text(tomli_w.dumps(doc))
 
-        _shutil.rmtree(tmp_path / ".mareforma")
-        restore(tmp_path)
+        shutil.rmtree(tmp_path / ".mareforma")
+        return key, claim_id
+
+    def test_dropping_the_stamp_no_longer_waves_the_axis_through(
+        self, tmp_path: Path,
+    ) -> None:
+        """The bypass: three deleted keys used to turn the refusal off."""
+        from mareforma.db.restore import RestoreError
+
+        self._a_forged_axis_in_a_backup_that_attests_nothing(tmp_path)
+
+        with pytest.raises(RestoreError) as caught:
+            restore(tmp_path)
+        assert caught.value.kind == "grounding_unattested"
+
+    def test_the_operator_can_still_restore_a_backup_that_old(
+        self, tmp_path: Path,
+    ) -> None:
+        """The half that keeps the honest history restorable.
+
+        The refusal is not a wall. It moves the decision to somebody who can
+        actually know whether the backup predates the attestations.
+        """
+        key, claim_id = self._a_forged_axis_in_a_backup_that_attests_nothing(
+            tmp_path,
+        )
+
+        restore(tmp_path, trust_unaccounted_backup=True)
 
         assert _axis(tmp_path, key, claim_id) == "GROUNDED"
         assert _state(tmp_path, key, claim_id) == "unattested"

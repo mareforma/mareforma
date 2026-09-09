@@ -345,7 +345,7 @@ _UNACCOUNTED = frozenset({
 
 
 def _refuse_a_grounding_axis_nothing_attests(
-    conn, toml_path, stamped: bool, trusted: bool,
+    conn, toml_path, trusted: bool,
 ) -> None:
     """Stop a restore that would put a GROUNDED axis back on a producer's word.
 
@@ -361,16 +361,24 @@ def _refuse_a_grounding_axis_nothing_attests(
     a GROUNDED axis with nothing attesting it is a GROUNDED axis this graph
     never watched being earned.
 
-    Only for a stamped file. A backup written before the attestations existed
-    carries none, and every GROUNDED claim in it would read as laundered, which
-    would refuse the honest history of every project that predates them.
+    A backup written before the attestations existed carries none, and every
+    GROUNDED claim in it would read as laundered, so that history needs a way
+    through. It used to be read off the file: no ``backup_format`` key meant a
+    backup too old to judge, and the check stood down. But that key is unsigned
+    and sits in the file the forger is editing, under a digest that is
+    deliberately not authoritative, so deleting three lines turned the refusal
+    off. The forgery did not even have to know this existed, since a hand
+    written claims.toml would likely omit them anyway.
+
+    So the way through is the operator's word instead of the file's. Every other
+    refusal here makes them say it out loud, and this one now does too.
 
     This raises the cost of the lazy forgery, the one that edits the axis and
     nothing else. It does not beat the producer: the observer runs inside their
     process and they hold the key, so they can mint an attestation as readily as
     a claim. Parity with the write path is the whole of what it buys.
     """
-    if not stamped or trusted:
+    if trusted:
         return
     from mareforma.db.core import grounding_attestation_state
 
@@ -393,7 +401,9 @@ def _refuse_a_grounding_axis_nothing_attests(
         "observer minted the verdict, so an axis arriving without the "
         "attestation beside it was put there afterwards, and restoring it would "
         "make this graph say execution was watched when no record of watching "
-        "came with it. Nothing has been changed and the file is untouched. If "
+        "came with it. Nothing has been changed and the file is untouched. A "
+        "backup written before this release recorded attestations carries none "
+        "either, and reads the same way from here. If this is such a backup, or "
         "you edited it deliberately, pass trust_unaccounted_backup=True to "
         "restore it as it stands.",
         kind="grounding_unattested",
@@ -1425,8 +1435,7 @@ def restore(
             # After the attestations, so the axis is judged against what the
             # file actually carried for it.
             _refuse_a_grounding_axis_nothing_attests(
-                conn, toml_path, data.get("backup_format") is not None,
-                trust_unaccounted_backup,
+                conn, toml_path, trust_unaccounted_backup,
             )
             # What the source graph had seen missing. Carried so a round trip
             # cannot be the thing that forgets it.
