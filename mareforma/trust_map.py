@@ -1049,8 +1049,10 @@ def _assemble(
         tier=Tier.COMPUTED,
         value=f"{n_supports} supports / {n_contradicts} contradicts",
         residual=(
-            "the declared provenance graph the asserter recorded; a declaration, "
-            "not proof that the cited upstreams were used"
+            "the provenance graph the asserter declared, not proof the cited "
+            "upstreams were used. It is no longer the only word on that: the "
+            "grounding axis is computed from the run, and reads UNGROUNDED "
+            "over a claim whose citations no observed read stands behind"
         ),
     )
 

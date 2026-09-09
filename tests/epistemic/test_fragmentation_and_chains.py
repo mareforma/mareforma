@@ -1,5 +1,5 @@
 """
-tests/epistemic/test_support_levels.py — Epistemic correctness tests.
+tests/epistemic/test_fragmentation_and_chains.py: epistemic correctness tests.
 
 Unlike unit tests (which verify function behaviour), these tests validate
 the thesis: that the graph's trust signals are honest under hostile inputs
@@ -7,25 +7,14 @@ and edge-case conditions.
 
 Scenarios covered
 -----------------
-  REPLICATED
-    - fires when two independent agents share an upstream
-    - does not fire when the same agent makes two claims
-    - does not fire when agents have no shared upstream
-    - fires from a contaminated upstream (spurious — detectable by classification)
-
   Fragmentation
     - two agents assert the same semantic claim without idempotency_key
-      → two PRELIMINARY claims, REPLICATED never fires
-    - same agents use idempotency_key → single claim, no fragmentation
+      and the graph records two claims, which is one finding read as two
+    - the same key on divergent fields is refused rather than merged
 
   DERIVED chain
     - DERIVED with valid supports= is traceable to upstream
-    - DERIVED without supports= is recorded but chain is broken
-
-  ESTABLISHED gate
-    - validate() on PRELIMINARY raises ValueError
-    - validate() on REPLICATED succeeds → ESTABLISHED
-    - ESTABLISHED is not reachable in a single assert_claim() call
+    - DERIVED without supports= is recorded but the chain is broken
 """
 
 from __future__ import annotations
@@ -51,7 +40,7 @@ from tests.epistemic._builders import (
 
 
 # ---------------------------------------------------------------------------
-# REPLICATED, genuine independent convergence
+# Fragmentation
 # ---------------------------------------------------------------------------
 
 class TestGraphFragmentation:
@@ -93,7 +82,7 @@ class TestGraphFragmentation:
         broke REPLICATED detection (REPLICATED requires two distinct
         rows with different generated_by). The graph now refuses
         the silent merge. The legitimate cross-lab convergence path is
-        two separate claims that share an entry in ``supports[]`` —
+        two separate claims that share an entry in ``supports[]``,
         that fires REPLICATED honestly. See ``TestCrossLabConvergence``
         below for that pattern.
         """
@@ -150,7 +139,7 @@ class TestDerivedChain:
         """DERIVED with no supports= is accepted but the chain is unverifiable.
 
         The graph records the claim honestly. A reviewer querying supports_json
-        will find an empty list — the provenance is missing.
+        will find an empty list, because the provenance is missing.
         """
         with open_graph(tmp_path) as graph:
             broken = graph.assert_claim(
@@ -164,9 +153,4 @@ class TestDerivedChain:
         supports = json.loads(c_broken["supports_json"])
         assert c_broken["classification"] == "DERIVED"
         assert supports == []   # chain is broken, detectable but not prevented
-
-
-# ---------------------------------------------------------------------------
-# ESTABLISHED gate
-# ---------------------------------------------------------------------------
 

@@ -1,12 +1,10 @@
 """
 tests/epistemic/test_trust.py: trust-layer correctness tests.
 
-The successor to test_trust_ladder.py: where that file documents the old
-support-level ladder, this validates the count-based trust layer that replaces
-it. The graph tests are epistemic-correctness tests in the same spirit as
-test_support_levels.py (the derived signals must be honest under independent and
-contradictory evidence); the rest are unit tests of the primitives that produce
-those signals.
+This validates the count-based trust layer: the derived signals have to be
+honest under independent and contradictory evidence. The graph tests are
+epistemic-correctness tests in that spirit; the rest are unit tests of the
+primitives that produce the signals.
 
 Scenarios covered
 -----------------

@@ -24,6 +24,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The cross-version tests build an older release out of git by commit
+          # and skip themselves when it is unreachable. At the default depth of
+          # one they skip in every CI run, silently, which is the shape of
+          # coverage that is only there when nobody is looking.
+          fetch-depth: 0
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -48,6 +54,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The cross-version tests build an older release out of git by commit
+          # and skip themselves when it is unreachable. At the default depth of
+          # one they skip in every CI run, silently, which is the shape of
+          # coverage that is only there when nobody is looking.
+          fetch-depth: 0
 
       - name: Set up Python 3.13
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0

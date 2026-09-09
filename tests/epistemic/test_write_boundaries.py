@@ -1,10 +1,10 @@
 """
-tests/epistemic/test_trust_ladder.py — Honesty tests for trust ladder boundaries.
+tests/epistemic/test_write_boundaries.py: honesty tests for what the graph
+refuses and what it knowingly permits.
 
-All tests here PASS by design. They pin the ladder's boundaries: the shapes
-the graph refuses at write time, and the limitations it knowingly permits.
-The same posture as test_spurious_replicated in test_support_levels.py:
-make the known limitations explicit and visible.
+All tests here PASS by design. They pin the shapes the graph refuses at write
+time, and the limitations it permits with its eyes open, so a known limitation
+is explicit and visible rather than discovered later.
 
 Scenarios covered
 -----------------
@@ -65,7 +65,7 @@ class TestTrustLaundering:
         table if they want to know who actually validated.
         """
         validator_key_path = _bootstrap_validator_key(tmp_path)
-        # v0.3.7 keys REPLICATED on two distinct non-NULL asserter_keyids, not
+        # A reader counts two lines on two distinct non-NULL asserter_keyids, not
         # on distinct generated_by. Sign the two converging peers with distinct
         # keys so the pair promotes (generated_by stays a display label).
         sa, sb = _two_signers(tmp_path)
@@ -102,7 +102,7 @@ class TestTrustLaundering:
         """validate() stores whatever display string is passed."""
         validator_key_path = _bootstrap_validator_key(tmp_path)
         # Distinct signers on the two converging peers so the pair reaches
-        # REPLICATED under the v0.3.7 asserter-keyid axis (see the test above).
+        # two lines under the asserter-keyid axis (see the test above).
         sa, sb = _two_signers(tmp_path)
         with open_graph(tmp_path) as g:
             upstream = g.assert_claim("prior", generated_by="seed")
@@ -215,20 +215,19 @@ class TestContradictAndSupport:
 # Launch ship-gate: full-graph end-to-end story
 # ---------------------------------------------------------------------------
 #
-# These tests are the OSS core's ship gate. They exercise the
-# complete trust-ladder story end-to-end:
+# These tests are the OSS core's ship gate. They exercise the whole story
+# end-to-end:
 #
 #   - in-toto Statement v1 + DSSE envelope on every signed claim
 #   - GRADE EvidenceVector inside the signed predicate
 #   - Verdict-issuer protocol: signed verdicts from enrolled validators
-#     promote claims to REPLICATED and invalidate via t_invalid
+#     corroborate a claim, and invalidate one via t_invalid
 #   - Restore round-trips claims + validators + verdicts
 #
 # The launch story DOES NOT include the inference layer (embedder, NLI,
 # semantic-cluster predicate). Those live outside the OSS core. Any
-# external verdict-issuer calls the verdict-issuer protocol below; the
-# OSS core accepts the signed verdicts and gates the trust ladder
-# accordingly.
+# external verdict-issuer calls the verdict-issuer protocol below, and the
+# OSS core accepts the signed verdicts.
 
 
 class TestLaunchSubstrateShipGate:

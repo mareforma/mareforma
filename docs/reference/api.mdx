@@ -199,7 +199,7 @@ claim_id = graph.assert_claim("...", idempotency_key="run_abc_claim_1")
 
 ### `query(text=None, *, classification=None, limit=20, include_invalidated=False, refutation_filter=None)`
 
-Query claims ordered by support level (descending) then recency (descending).
+Query claims ordered by recency (descending).
 
 ```python
 results = graph.query("cell type A", classification="ANALYTICAL")
@@ -620,7 +620,7 @@ h = graph.health()
 
 A "healthy" graph has zeros across the four drift counters (`unsigned_claims`, `unresolved_claims`, `dangling_supports`, `convergence_errors`). Non-zero values don't by themselves indicate a defect; they indicate something the operator should look at.
 
-**Returns** `dict[str, int]` with the seven keys above.
+**Returns** `dict[str, int]` with the six keys above.
 
 ---
 
@@ -1332,6 +1332,11 @@ with observe(cites="/data/trial.csv") as obs:
 
 obs.verdict.grounding    # ObservedGrounding.GROUNDED
 ```
+
+The observed code shares your interpreter, which is what makes its reads visible
+at all. A verdict therefore grades a pipeline that does not attack its observer:
+code written to defeat the observation could fabricate what is recorded. The
+verdict attests what the process saw, not the honesty of the code it watched.
 
 ### `GroundingVerdict`
 

@@ -12,11 +12,11 @@ with no migration. The field NAMES follow the metafor/escalc convention so
 existing R tooling can ingest/emit with zero mapping (the names are
 conventions, not copyrightable; no GPL code is vendored).
 
-The current cut stores the minimal estimate the gate needs, not the full
-~18-field set. The richer fields (``variance``/``sei``, ``effect_type_iri``,
+This stores the minimal estimate the gate needs, not the full ~18-field set.
+The richer fields (``variance``/``sei``, ``effect_type_iri``,
 ``test_statistic_*``, per-group n, 2x2 cells, ``comparable_with``,
-``conversion_provenance``) are deferred to later stages because the only
-computation here is the gate.
+``conversion_provenance``) are absent because the only computation here is the
+gate, and a field nothing reads is a field nobody keeps honest.
 """
 from __future__ import annotations
 

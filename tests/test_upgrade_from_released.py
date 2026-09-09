@@ -41,10 +41,16 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 # Every version that wrote a graph this release must carry forward, with the
 # commit that is that version. Pinned to commits rather than tags so the
 # fixture is the code that shipped, not whatever a moving ref points at now.
+# Every release the migration claims to carry, by the commit its tag names.
+# 0.3.13 was missing and 0.3.14 pointed at the last commit of the release branch
+# rather than the merge the tag is on. The package trees happen to match there,
+# which is exactly why it went unnoticed: a source that is right by coincidence
+# is a source nobody can check at a glance.
 _SOURCES = (
     ("0.3.11", "66b73d4"),
     ("0.3.12", "94e0fc7"),
-    ("0.3.14", "871a308"),
+    ("0.3.13", "8cfe69f"),
+    ("0.3.14", "1bcff54"),
 )
 
 

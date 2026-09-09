@@ -2403,24 +2403,95 @@ def _scenarios(doc: str) -> dict[str, str]:
     return scenarios
 
 
-def test_trust_ladder_summary_matches_the_scenarios_it_pins():
-    """The ship gate's own summary is where a reader learns the ladder's edges.
+# Language that promises a catch with no edge. The observer sees the seams it
+# wraps and returns OPAQUE everywhere else, so a general catch is the one claim
+# this project cannot make: it is the claim it exists to refuse in other
+# people's work.
+_UNIVERSAL_CATCH = re.compile(
+    r"catches (every|all|any)\b"
+    r"|always catches"
+    r"|detects (every|all)\b"
+    r"|never misses"
+    r"|catch(es)? (every|all|any) silent",
+    re.IGNORECASE,
+)
+
+
+def _user_facing_pages():
+    """Every page a reader lands on, root prose and docs site alike."""
+    for name in ("README.md", "AGENTS.md", "ARCHITECTURE.md", "CHANGELOG.md"):
+        yield ROOT / name
+    yield from sorted(DOCS.rglob("*.mdx"))
+
+
+def test_no_page_promises_a_catch_without_an_edge():
+    """The catch is real and it is bounded, and both halves have to travel.
+
+    The observer sits at the seams it wraps. Where it cannot see, it returns
+    OPAQUE rather than guessing, and a page that sells the catch without that
+    sentence has sold a general detector. This project exists to catch exactly
+    that move in somebody else's work.
+    """
+    offenders = []
+    for page in _user_facing_pages():
+        text = page.read_text(encoding="utf-8")
+        for match in _UNIVERSAL_CATCH.finditer(text):
+            offenders.append(f"{page.name}: {match.group(0)!r}")
+    assert not offenders, (
+        "a page promises a catch with no edge: " + "; ".join(offenders)
+    )
+
+
+def test_a_page_that_sells_the_catch_states_the_opaque_bound():
+    """Naming the bound on the same page, not one click away.
+
+    A reader who arrives at the quickstart and leaves convinced has read one
+    page. If the limit lives only in the concepts section, the claim that
+    travels is the unbounded one.
+    """
+    missing = []
+    for page in _user_facing_pages():
+        if page.name in ("CHANGELOG.md", "changelog.mdx"):
+            continue  # a release record, not a page selling anything
+        text = page.read_text(encoding="utf-8")
+        if "silent failure" not in text.lower():
+            continue
+        if "OPAQUE" not in text:
+            missing.append(page.name)
+    assert not missing, (
+        "these pages sell the silent-failure catch without naming the OPAQUE "
+        "bound on the same page: " + ", ".join(missing)
+    )
+
+
+@pytest.mark.parametrize("module_name", [
+    "tests.epistemic.test_write_boundaries",
+    "tests.epistemic.test_fragmentation_and_chains",
+])
+def test_a_scenario_summary_matches_the_scenarios_it_pins(module_name):
+    """A file's own summary is where a reader learns what it covers.
 
     A scenario with no section under it sends the reader hunting for coverage
     that is not there, and a scenario the tests refuse must read as a refusal,
     or the summary teaches the inverse of what ships.
+
+    Both files carry such a summary and only one was guarded, which is how the
+    other came to advertise twelve scenarios over four surviving tests. A guard
+    that covers one of two identical shapes is half a guard.
     """
-    import tests.epistemic.test_trust_ladder as module
+    import importlib
+
+    module = importlib.import_module(module_name)
+    short = module_name.rsplit(".", 1)[-1]
 
     body = pathlib.Path(module.__file__).read_text(encoding="utf-8")
     body = body.split('"""', 2)[-1]  # everything after the module docstring
     scenarios = _scenarios(module.__doc__ or "")
-    assert scenarios, "test_trust_ladder lists no scenarios"
+    assert scenarios, f"{short} lists no scenarios"
 
     missing = [head for head in scenarios if head not in body]
     assert not missing, (
-        "test_trust_ladder advertises scenarios it does not test: "
-        + ", ".join(missing)
+        f"{short} advertises scenarios it does not test: " + ", ".join(missing)
     )
 
     # Banner comments carry the headings; the piece after a banner is its code.
@@ -2434,8 +2505,7 @@ def test_trust_ladder_summary_matches_the_scenarios_it_pins():
         and not re.search(r"refus|reject", bullets, re.IGNORECASE)
     ]
     assert not inverted, (
-        "test_trust_ladder describes refused shapes as permitted: "
-        + ", ".join(inverted)
+        f"{short} describes refused shapes as permitted: " + ", ".join(inverted)
     )
 
 
