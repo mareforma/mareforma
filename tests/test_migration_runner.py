@@ -272,6 +272,95 @@ class TestTheHappyPath:
         conn.close()
 
 
+class TestARowTheOldSchemaAllowedAndTheNewOneDoesNot:
+    """A graph carrying one must be told what to do, not left unopenable.
+
+    The new claims table asks that a row naming a validator carry the envelope
+    proving one. The old one never asked it on UPDATE: its check fired on
+    support_level alone, and the validation columns are not on the laundering
+    trigger's watch list either. So the row is legal for an older graph to hold
+    and illegal for this one.
+
+    Left to the rebuild, the CHECK fails inside the migration, the step rolls
+    back, and every later open tries again and fails identically, so the graph
+    never opens again. The only report is SQLite's constraint text, which names
+    no claim and offers no action.
+    """
+
+    def _a_v1_graph_holding_one(self, root: Path) -> Path:
+        key = _populated(root)
+        raw = sqlite3.connect(_db(root))
+        # A real v1 table has no such CHECK. Neutralise it in the stored schema
+        # rather than working around it, so the row lands the way it would have.
+        # Replaced with an always-true check rather than deleted, which keeps the
+        # surrounding commas valid without reflowing the DDL.
+        sql = raw.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='claims'"
+        ).fetchone()[0]
+        stripped = sql.replace(
+            "CHECK (validation_signature IS NOT NULL\n"
+            "           OR (validated_by IS NULL AND validated_at IS NULL))",
+            "CHECK (1)",
+        )
+        assert stripped != sql, "the CHECK this test is about was not found"
+        raw.execute("PRAGMA writable_schema = ON")
+        raw.execute(
+            "UPDATE sqlite_master SET sql = ? WHERE type='table' AND name='claims'",
+            (stripped,),
+        )
+        raw.execute("PRAGMA writable_schema = OFF")
+        raw.commit()
+        raw.close()
+
+        raw = sqlite3.connect(_db(root))
+        raw.execute(
+            "UPDATE claims SET validated_by = 'a name nobody signed for', "
+            "validated_at = '2026-01-01T00:00:00+00:00' "
+            "WHERE claim_id = (SELECT claim_id FROM claims ORDER BY rowid LIMIT 1)"
+        )
+        raw.execute("PRAGMA user_version = 1")
+        raw.commit()
+        raw.close()
+        return key
+
+    def test_the_upgrade_names_the_claim_and_says_what_to_do(
+        self, tmp_path: Path,
+    ) -> None:
+        self._a_v1_graph_holding_one(tmp_path)
+        before = _fingerprint(tmp_path)
+
+        with pytest.raises(MigrationError) as caught:
+            _core.open_db(tmp_path).close()
+
+        said = str(caught.value)
+        claim_id = sqlite3.connect(_db(tmp_path)).execute(
+            "SELECT claim_id FROM claims WHERE validated_by IS NOT NULL"
+        ).fetchone()[0]
+        assert claim_id in said, "the operator cannot act without the claim id"
+        assert "do not delete it" in said
+        assert "Clear validated_by" in said, "no remedy offered"
+        _assert_untouched(tmp_path, before)
+
+    def test_clearing_the_field_lets_the_upgrade_through(
+        self, tmp_path: Path,
+    ) -> None:
+        """The remedy the message gives has to be one that works."""
+        self._a_v1_graph_holding_one(tmp_path)
+        raw = sqlite3.connect(_db(tmp_path))
+        raw.execute(
+            "UPDATE claims SET validated_by = NULL, validated_at = NULL "
+            "WHERE validation_signature IS NULL"
+        )
+        raw.commit()
+        raw.close()
+
+        conn = _core.open_db(tmp_path)
+        try:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        finally:
+            conn.close()
+
+
 class TestTheCrashMatrix:
     """Deny each step at prepare time. The step never runs, nothing changes."""
 

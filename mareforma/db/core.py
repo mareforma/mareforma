@@ -1700,6 +1700,41 @@ def _drop_support_level(conn: sqlite3.Connection) -> None:
     # the other alone, and the runner refuses a step that claims to drop a
     # column the table does not hold as readily as one that drops a column it
     # did not name. Anything else unexpected still trips the undeclared check.
+    # The new table asks that a row naming a validator carry the envelope that
+    # proves one, and the old one never asked it on UPDATE: the check it had
+    # fired on support_level alone, and the validation columns are not on the
+    # laundering trigger's list either. So a row naming a validator with nothing
+    # signed is a legal thing for an older graph to hold and an illegal thing
+    # for this one, and it meets the CHECK inside the rebuild, where the only
+    # report is the constraint's own text and the only outcome is a rollback.
+    # Every later open tries again and fails the same way, so the graph never
+    # opens again, and the generic remedy the runner offers, which is that
+    # nothing changed and the file should be kept, is true and useless.
+    #
+    # Found first, named here, and the file left alone. Restore already refuses
+    # this row shape with a sentence that says what to do; a migration that ends
+    # a graph's life should not say less.
+    unsigned = [
+        row[0] for row in conn.execute(
+            "SELECT claim_id FROM claims WHERE validation_signature IS NULL "
+            "AND (validated_by IS NOT NULL OR validated_at IS NOT NULL) "
+            "ORDER BY rowid"
+        )
+    ]
+    if unsigned:
+        shown = ", ".join(unsigned[:5])
+        more = f" and {len(unsigned) - 5} more" if len(unsigned) > 5 else ""
+        raise MigrationError(
+            f"{len(unsigned)} claim(s) in this graph say a human validated "
+            f"them and carry no validation envelope to prove one did: {shown}"
+            f"{more}. A validation nobody signed is not a validation, and the "
+            "current schema will not store one, so the upgrade stops here "
+            "rather than at a constraint inside the rebuild. Nothing has been "
+            "changed and graph.db is exactly as it was; do not delete it. "
+            "Clear validated_by and validated_at on those claims, or put the "
+            "envelope back beside them, then open the graph again."
+        )
+
     live = {row[1] for row in conn.execute("PRAGMA table_info(claims)")}
     _rebuild_table(
         conn, table="claims",
