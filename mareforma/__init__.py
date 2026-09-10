@@ -1,7 +1,7 @@
 """Mareforma: local verification layer for AI-assisted research."""
 
 __description__ = "Mareforma: local verification layer for AI-assisted research."
-__version__ = "0.3.14"
+__version__ = "0.4.0"
 
 from pathlib import Path
 

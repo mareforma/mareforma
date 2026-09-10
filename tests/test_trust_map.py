@@ -111,6 +111,22 @@ _SHAPE_BY_VERSION = {
         # version at ship and the live-version guard now reads this key.
         "independence_numeric": True,
     },
+    "v0.4.0": {
+        "properties": _EXPECTED_PROPERTIES,
+        # Same property set, and one VALUE changed what it says about itself.
+        #
+        # provenance: still the graph the asserter declared, and the residual
+        # now names what can contradict it. The grounding axis is computed
+        # from the run, so a claim whose citations no observed read stands
+        # behind reads UNGROUNDED beside a provenance the asserter declared in
+        # good faith. A declaration with nothing able to disagree with it is
+        # not worth reporting as a property.
+        #
+        # TRUST_MAP_VERSION is pinned to __version__ and the builder fails
+        # closed when the two disagree, so the stamp moved with the package
+        # version at ship and the live-version guard now reads this key.
+        "independence_numeric": True,
+    },
 }
 
 

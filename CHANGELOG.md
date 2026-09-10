@@ -2,6 +2,178 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-09-10
+
+Schema version 2. **This release is a one-way door for a project.** A graph it
+opens is migrated, and every earlier release refuses a migrated graph. Upgrade
+every machine that shares a project, not a subset of them.
+
+### Changed
+
+- **A graph written by any release from 0.3.11 onward migrates on the open that
+  meets it.** The runner and the table rebuild shipped a release ago on a path
+  nothing reached, so they could be proven before anything irreversible used
+  them; this release adds the route. The rebuild, the version bump and the
+  guards go in one transaction or none, so an interrupted upgrade leaves the
+  graph at the version it started from with every claim, signature and chain
+  link intact. Nothing on that path tells anyone to delete a file.
+- **The schema itself does not change between 1 and 2.** The step rebuilds
+  `claims` under the definition it already has, which is what carries every
+  graph anyone holds through the whole path before a step that also changes the
+  column list depends on any of it. The cost is one table rebuild under a write
+  lock on first open, measured at half a second for fifty thousand claims.
+- **An older reader is refused a migrated graph**, and what it prints is not
+  this release's to choose. Readers up to 0.3.12 say the file was written by a
+  dev branch and tell the operator to delete it. That advice is wrong and cannot
+  be corrected from here, which is the reason to upgrade a project's machines
+  together.
+
+- **A backup no longer carries a verdict chain that does not form a chain.**
+  The writer stops at the first link that does not follow the one before it and
+  records how many it left out and why, so restoring a wrecked graph gives back
+  a working one rather than the same wreckage. It checks structure only, not
+  signatures: a forged link on a well-formed chain still travels into the file,
+  where the restore refuses it.
+- **A backup that says it is short is refused**, as `verdict_chain_cut_short`,
+  and `restore` reports the count. A number nothing acts on is the same as no
+  number, and this one carries weight: a graph with verdicts and no chain is
+  what a project written before the chain existed looks like, so without the
+  refusal one row put in below the numbering, needing no key and no write guard
+  removed, would blank the chain from every later backup and restore in
+  silence. The same override rebuilds from the part that holds.
+
+- **The completeness table describes the file, including the two counts that
+  did not.** The chain coverage and tip were read off the graph, so a backup
+  the writer could not write in full advertised a chain longer than the one it
+  carried and named a tip no link in it produces. Both are measured from the
+  file now.
+- **`validate()` records a signed attestation and sets no level.** It still
+  refuses a claim the graph has withdrawn or contradicted, and no longer asks
+  which rung the claim reached first. A row cannot say a human validated it
+  without the envelope proving one did, which the ladder's own check used to
+  state from the other side.
+- **A claim whose signer nobody enrolled is served, carrying
+  `generator_enrolled`.** It used to be held back, and converging lifted it
+  into view; nothing lifts anything now, so that rule would have answered every
+  read on a project that enrols no validator with an empty list.
+- **`query()` returns claims by recency.** It ordered by ladder tier first.
+- **`trust_map()`'s standing axis reads `VALIDATED`,
+  `VALIDATION_UNVERIFIED` or `UNRATIFIED`** instead of a rung, off the signed
+  envelope rather than a stored word.
+- **The health traffic light is green when a standing claim carries a signed
+  validation**, and yellow when none does or when something carrying signed
+  material fails to re-verify. It used to read the ladder census, so green is
+  narrower: automatic replication used to count and human validation is rarer.
+- **An index behind the reputation count.** It groups by the signer named
+  inside the signed envelope, and without an index matching that expression the
+  count was a full table scan plus a temp b-tree on every enumerating read:
+  5ms on a hundred thousand claims and 52ms on a million, against 0.03ms and
+  0.98ms for the unsigned column it replaced. The cost scaled with the whole
+  table while the rows being counted stay a small minority. The index is
+  partial on the same predicate the query filters on, so a claim carrying no
+  validation pays nothing to insert, and it is additive: a graph written by an
+  earlier release picks it up on the open that meets it, with no migration.
+- **The read path verifies every row's asserter bundle**, not only promoted
+  ones. Rows carrying no envelope stay exempt, so this is a wider net rather
+  than a stricter one.
+- **`mare:supportLevel` and the RO-Crate `support_level` are not emitted.** A
+  consumer keyed on them finds them absent, which is a break they can see,
+  rather than a frozen or fabricated value they would keep trusting.
+- **A backup this release writes cannot be restored by 0.3.12 or earlier.**
+  Their restore asks for the support level by name. That is a one-way door on
+  the artifact to match the one on the database, and the alternative was to
+  keep writing a level that means nothing.
+
+### Removed
+
+- **The support ladder is gone, column and all.** `query`, `search`,
+  `query_for_llm` and the agent tool no longer take `min_support`, and the tool
+  no longer advertises it in its signature or its docstring. Underneath:
+  the stored `support_level`,
+  the promotion machinery, the convergence retry queue and its column, the
+  storage-layer filter, and the schema's levels and transitions. A graph
+  migrates on the open that meets it, in one step, carrying every claim,
+  signature and chain link.
+- **What the removal does not reach.** A direct call refuses the argument.
+  Wrapped in a tool decorator that builds a schema from the signature, which is
+  the wrapping the docs recommend, an unknown key is dropped before the call is
+  made, so an agent still passing a level gets a full unfiltered read rather
+  than an error. Nothing on this side can see that happen. If you wrap the
+  tools, check your agent's calls rather than trusting them to fail loudly.
+- **`mareforma.REPLICATED` and `mareforma.ESTABLISHED` raise `AttributeError`.**
+  They resolved to their own string for one release with a notice saying this
+  would happen.
+- **`proposition_status()` no longer returns `frame_status`.** It echoed the
+  answer's own status word and said nothing `question_status` had not already
+  said, and two words for one fact is a reader deciding which to believe.
+- **`assert_claim(seed=True)`, with no replacement.** The seed anchor existed
+  to place a claim above the first rung so the rung below it was reachable.
+  There are no rungs, so the problem it solved is gone rather than moved. A
+  graph that already holds seed envelopes keeps verifying them; what is removed
+  is writing new ones.
+- **`graph.refresh_convergence()`** and the retry counters on `health()` and
+  `status`. Nothing is promoted, so nothing needs retrying.
+- **`include_unverified` on `query` / `search` / `query_for_llm`.** It only
+  ever relaxed the enrolment filter, and that filter is gone.
+- **`mareforma.db._observed_grounding_promotes`.** Nothing in the package
+  called it. It answered whether a stored grounding verdict permitted a
+  promotion, and its docstring described a peer-promotion SQL guard that went
+  with the ladder. The one test reaching it existed only to exercise it, and
+  the assertion it made is already held by the test beside it.
+- **`graph.convergence_errors` and the `convergence_errors` key on `health()`.**
+  Nothing could advance the counter. It mirrored errors swallowed by a
+  convergence detector that no longer runs, so it reported zero forever while
+  telling an operator that something was being watched for. `health()` returns
+  five keys now.
+- **`unverified_excluded` on the MCP pages, and
+  `graph.read_unverified_exclusions`.** Both counted what the enrolment filter
+  held back. The filter went with the ladder, so the number was always zero
+  while the `query_claims` and `search_claims` tool descriptions went on
+  telling a model that rows were being withheld and counted. `verify_excluded`
+  is unchanged: it reports rows dropped for failing re-verification, and those
+  are still held back.
+- **`mareforma.open(strict_promotion=True)`.** It made a project rule out of a
+  promotion requirement, and root-signed it one way. The policy column and its
+  verification stay, so a graph whose root already signed one keeps verifying.
+- **Two warning filters that ignored warnings nothing can raise.** They named
+  the deprecations for `assert_claim(seed=True)` and `query(min_support=...)`,
+  both of which now raise, and cited two test files that no longer exist.
+
+### Security
+
+- **A backup says what it holds, including its verdict chain.** The writer
+  already recorded the chain's tip, how many links cover it and how many
+  verdicts the file carries. Nothing read them, so an edit that took a verdict
+  and its chain link out of `claims.toml` restored without complaint and the
+  claim that verdict had invalidated came back clean. Restore holds the file to
+  all three now, and refuses a file that does not hold what it says it holds.
+- **What that table is worth, said out loud.** It catches an edit that removes
+  or adds rows and leaves the table behind: a careless edit, a truncated copy,
+  a partial transfer. It does not withstand somebody who rewrites the table to
+  match, because recomputing it is free and nothing signs it. Every signature
+  in the file is still verified against anybody, carefully or not. The bound is
+  on the table, not on the signatures, and `restore.py` now says so where a
+  reader meets it.
+- **A restore warning no longer claims nothing was restored when something
+  was.** The closing sentence was picked from the override flag alone, so a
+  file that only broke its digest, which is deliberately not fatal, was told
+  "Nothing has been restored" and then restored.
+- **A second validation cannot be written over the first, by any route.** The
+  rule lived in one Python function's UPDATE, so it bound callers who came
+  through this library and nobody else: a validator refused by `validate()`
+  could sign its own envelope, write it with sqlite3, and the row would read
+  verified under the new name with the first validator's envelope gone and
+  nothing recording it had been there. A trigger now refuses it, and refuses
+  moving `validated_by` or `validator_keyid` off an envelope that stays put.
+- **The reputation count asks the envelope, not the column beside it.** It
+  grouped by `validator_keyid`, which nothing signs, so a row carrying somebody
+  else's envelope under its own name credited a validator that had signed
+  nothing, while every read surface refused to serve that same row. It groups
+  by the signer named inside the envelope now. It still counts envelopes that
+  are present rather than envelopes that bind, and says so.
+- **A row that disagrees with its own validation envelope is refused on read.**
+  The read path compared `claim_id` and stopped there.
+
 ## [0.3.14] - 2026-09-08
 
 Reads stop taking the database's word for things nothing signs. A claim's
@@ -1017,50 +1189,47 @@ engine removed. Additive on the schema.
 - **The claim-recording agent tool is renamed `record_claim`.** It was
   `assert_finding`, which shadowed the `EpistemicGraph.assert_finding` method. A
   deprecated `assert_finding` alias is available for one release via
-  `get_tools(include_deprecated_aliases=True)` and warns on use. (#51)
+  `get_tools(include_deprecated_aliases=True)` and warns on use.
 - **The cycle check runs as one recursive query** instead of one per ancestor, and
   an oversized reachable graph raises a distinct `GraphTooLargeError` rather than a
-  false "cycle." (#33)
+  false "cycle."
 - **RO-Crate and PROV-O exports align with the profile shapes.** The RO-Crate root
   entity carries a license and a non-null `datePublished` and separates data entities
   (`hasPart`) from provenance actions (`mentions`); PROV-O labels use `rdfs:label`.
-  The tests check shape and label vocabulary, not full validator conformance. (#29,
-  #48)
+  The tests check shape and label vocabulary, not full validator conformance.
 - **`mareforma verify` subsumes the old bundle-path command.** The prior `mareforma
   verify <bundle>` invocation keeps working as the file-detection case; a missing
   local key exits `2` (unverifiable) rather than `1`.
 - **The per-connection validator chain-verification cache now persists**, so a
-  repeated enrollment check skips the chain walk. (#50)
+  repeated enrollment check skips the chain walk.
 
 ### Fixed
 
 - **Re-ingesting a paper no longer leaves orphaned full-text-search rows**, even when
   the re-extraction is empty. The ingest path deletes a document's prior claims by
-  document id before inserting the fresh set, so the FTS delete trigger fires. (#31)
+  document id before inserting the fresh set, so the FTS delete trigger fires.
 - **Multi-role signatures are re-verified on the live read path**, so a forged role
   attestation is caught on read and by `mareforma verify`, not only at restore.
 - **Deleting a signed claim raises the typed `SignedClaimImmutableError`** for both
-  `delete_claim` and `delete_claims_by_generated_by`. (#42)
+  `delete_claim` and `delete_claims_by_generated_by`.
 - **The API-version probe rejects a neighbouring major.** The clawinstitute check
   matched "v10" and "v1beta2" against "v1"; it now matches the exact major or a minor
-  under it. (#49)
+  under it.
 - **`independence_counts` stops full-scanning `effect_estimates`**, via an index on
-  `contrasts(line_id)`. (#32)
+  `contrasts(line_id)`.
 - **The sdist ships a complete, runnable test suite** (conftest, shared helpers, and
-  every test subpackage). (#45)
+  every test subpackage).
 - **The Dependabot config no longer advertises a lockfile the repo does not commit.**
-  (#55)
 - **The reference docs match the code.** The status-policy stamp, the `export
-  --format` choices, and the default-format PROV-O scope note are corrected. (#44,
-  #54)
+  --format` choices, and the default-format PROV-O scope note are corrected.
 
 ### Removed
 
 - **The core-derived classification engine.** `mareforma.derivation` (the keyword and
   log-template classifier), its `[derivation]` install extra, and the `tree_sitter`
   dependencies are gone; execution-observed grounding computes the same signal from
-  observed reads. (#19, #30, #38)
-- **The dead `[git]` install extra** and the unused `gitpython` dev dependency. (#56)
+  observed reads.
+- **The dead `[git]` install extra** and the unused `gitpython` dev dependency.
 
 ## [0.3.8] - 2026-07-06
 

@@ -17,8 +17,8 @@ version, the fix is "upgrade."
 
 | Version | Supported          |
 |---------|--------------------|
-| 0.3.x   | ✅ current         |
-| < 0.3   | ❌ upgrade required |
+| 0.4.x   | ✅ current         |
+| < 0.4   | ❌ upgrade required |
 
 ## Reporting a vulnerability
 
