@@ -137,8 +137,20 @@ trust boundaries:
   sentinel or a name hash yields none). It is content-addressed for an
   honest producer but self-attested against an operator who controls
   that server, the same residual as the signing key above.
+- **A backup's `[completeness]` table is a witness against accident, not
+  against intent.** It records what `claims.toml` holds, so a file that no
+  longer holds it says so, and restore refuses. Nothing signs that table, and
+  recomputing it is free, so an editor who removes rows and rewrites the table
+  to match leaves a file restore accepts. Three edits are known to survive it,
+  all of them requiring the table to be rewritten: deleting a verdict from the
+  tail of the chain, stripping the `verdict_chain_withheld` key, and dropping
+  the `[schema_census]` section. Every signature in the file is verified
+  whatever the table says, so a forged claim or a stapled envelope is refused
+  either way. Closing the rest needs a whole-file signature over
+  `claims.toml`, and there is none.
 
-Defects in any of these are P0 by definition. Report them.
+Defects in any of these are P0 by definition. Report them, except the
+`[completeness]` bound above, which is documented rather than open.
 
 ## Out of scope
 

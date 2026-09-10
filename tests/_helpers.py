@@ -342,13 +342,17 @@ def rewrite_backup(toml_path, doc) -> None:
 
     import tomli_w
 
-    previous = doc.get("completeness") or {}
+    from mareforma.db.core import _verdict_chain_completeness
+
     body_doc = {k: v for k, v in doc.items() if k != "completeness"}
     body = tomli_w.dumps(body_doc)
+    # Every field measured from the edited document, through the writer's own
+    # computation. Carrying the verdict-chain fields forward from the previous
+    # table left a rewritten file still claiming the chain it used to hold, so
+    # a helper whose whole job is to leave the file accounting for itself
+    # planted a second tamper beside the one the test meant to plant.
     tail = tomli_w.dumps({"completeness": {
-        "verdict_chain_tip": previous.get("verdict_chain_tip", ""),
-        "verdict_chain_covered": previous.get("verdict_chain_covered", 0),
-        "verdicts_total": previous.get("verdicts_total", 0),
+        **_verdict_chain_completeness(body_doc),
         "digest": hashlib.sha256(body.encode("utf-8")).hexdigest(),
         "sections": {
             name: len(rows) for name, rows in sorted(body_doc.items())

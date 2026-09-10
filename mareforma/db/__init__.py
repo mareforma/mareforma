@@ -270,6 +270,7 @@ from .core import (
     grounding_attestation_state,
     _backup_completeness_tail,
     _COMPLETENESS_HEADER,
+    _verdict_chain_completeness,
     _BACKUP_FORMAT,
     tables_below_completeness,
     _format_artifact,
@@ -302,6 +303,7 @@ from .core import (
     schema_census_missing,
 )
 from .restore import (
+    _refusal_is_coming,
     restore,
     _claim_envelope,
     _restore_predicate_payload,

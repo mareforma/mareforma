@@ -8001,6 +8001,47 @@ def _backup_schema_census(conn: sqlite3.Connection, data: dict) -> None:
 # The line that separates the backup's body from its completeness table. The
 # digest below covers every byte before it, so both the writer and
 # :func:`verify_completeness_digest` locate the split on this exact string.
+def _verdict_chain_completeness(data: dict) -> dict:
+    """What the verdict chain in *data* says about itself, measured from *data*.
+
+    The writer records it, the restore reader holds the file to it, and the test
+    helper that rebuilds a table after an edit reproduces it. One function, so a
+    file can never disagree with its own table because two places computed it
+    differently.
+
+    Measured from the FILE, never from the graph. Read off the graph, a backup
+    the writer could not write in full advertised a chain longer than the one it
+    carried and named a tip no link in it produces.
+    """
+    links = data.get("verdict_chain")
+    links = links if isinstance(links, dict) else {}
+    # The writer keys links by their sequence number, so the tip is the highest.
+    # A hand-edited file can carry anything, and this runs on the RECOVERY path
+    # over exactly that input, so a key that is not a number is skipped rather
+    # than converted: raising here would surface as a bare ValueError out of
+    # restore, past its documented RestoreError contract, and a disclosure must
+    # never be the thing that fails a recovery. A file whose keys are not the
+    # shape the writer produces disagrees with its own table anyway, which the
+    # caller reports.
+    ordered = []
+    for seq in links:
+        try:
+            ordered.append((int(seq), seq))
+        except (TypeError, ValueError):
+            continue
+    last = max(ordered)[1] if ordered else None
+    tip = links[last] if last is not None else None
+    return {
+        "verdict_chain_tip": tip.get("tip", "") if isinstance(tip, dict) else "",
+        "verdict_chain_covered": len(links),
+        "verdicts_total": sum(
+            len(data[name])
+            for name in ("contradiction_verdicts", "replication_verdicts")
+            if isinstance(data.get(name), dict)
+        ),
+    }
+
+
 _COMPLETENESS_HEADER = "[completeness]\n"
 
 # Which shape of claims.toml this is, stamped at the top of every backup.
@@ -8067,15 +8108,6 @@ def _backup_completeness_tail(
     """
     import tomli_w
 
-    links = data.get("verdict_chain")
-    links = links if isinstance(links, dict) else {}
-    covered = len(links)
-    total = sum(
-        len(data[name])
-        for name in ("contradiction_verdicts", "replication_verdicts")
-        if isinstance(data.get(name), dict)
-    )
-    last = max(links, key=lambda seq: int(seq)) if links else None
     table = {
         "completeness": {
             "sections": {
@@ -8083,9 +8115,7 @@ def _backup_completeness_tail(
                 for name, entries in sorted(data.items())
                 if isinstance(entries, dict)
             },
-            "verdict_chain_tip": links[last]["tip"] if last is not None else "",
-            "verdict_chain_covered": covered,
-            "verdicts_total": total,
+            **_verdict_chain_completeness(data),
             "digest": hashlib.sha256(body.encode("utf-8")).hexdigest(),
         }
     }

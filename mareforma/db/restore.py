@@ -10,6 +10,27 @@ Separated from the live-write path (``db/core.py``) because restore
 is a one-shot disaster-recovery operation with a distinct invariant
 set (the rebuild proves "what was signed is what was written") while
 the live path proves "what is being written is being signed."
+
+What the file's own account of itself is worth
+----------------------------------------------
+Every signature in a backup is verified, and that half holds against anybody:
+a forged claim, a stapled envelope or a rewritten signed field is refused
+however carefully the file was edited around it.
+
+The ``[completeness]`` table is a different instrument and a weaker one. It
+records what the file holds, so that a file which no longer holds it says so:
+row counts per section, the verdict chain's tip, how many links cover it, and
+a digest over everything above the table. That catches an edit that removes or
+adds rows and leaves the table behind, which is what a careless edit, a
+truncated copy or a partial transfer looks like.
+
+It does not withstand somebody who rewrites the table to match. Recomputing it
+is free, and nothing signs it. A deliberate editor who takes a verdict out and
+recomputes the counts, the chain fields and the digest leaves a file this
+module accepts, and the claim that verdict invalidated comes back clean. That
+is a known bound, not an oversight: the table is a witness against accident,
+and the signatures are the witness against intent. A whole-file signature over
+``claims.toml`` is what would close it, and there is none.
 """
 
 from __future__ import annotations
@@ -29,6 +50,7 @@ from .errors import (
     VerdictIssuerError,
 )
 from .core import (
+    _verdict_chain_completeness,
     open_db,
     _compute_prev_hash,
     _is_claim_id,
@@ -341,6 +363,10 @@ _UNACCOUNTED = frozenset({
     "completeness_absent", "content_below_table", "tail_unparseable",
     "row_counts_absent", "row_count_not_a_number", "section_not_declared",
     "section_count_mismatch",
+    # The verdict chain says three things about itself and they are held to the
+    # same bar as the row counts: a file that does not hold what it says it
+    # holds is refused, whichever half of the table said it.
+    "verdict_chain_mismatch", "verdict_chain_count_not_a_number",
 })
 
 
@@ -540,6 +566,25 @@ def _refuse_a_file_that_cannot_account_for_itself(
     )
 
 
+def _refusal_is_coming(reasons, override_absent: bool) -> bool:
+    """Whether the caller is actually about to be refused.
+
+    The override flag alone does not decide it. Only a reason in
+    :data:`_UNACCOUNTED` is fatal, and ``digest_mismatch`` deliberately is not:
+    the completeness table's contract is to make a careless edit visible rather
+    than to refuse it. Reading the flag alone told an operator "Nothing has
+    been restored" over a restore that went on to rebuild the graph, which is a
+    false sentence in the one message they were meant to act on.
+
+    ``format_ahead`` refuses whatever the override says, because upgrading is
+    the answer and overriding is not.
+    """
+    reasons = set(reasons)
+    if "format_ahead" in reasons:
+        return True
+    return override_absent and bool(reasons & _UNACCOUNTED)
+
+
 def _disclose_a_file_that_disagrees_with_itself(
     toml_path, data: dict, will_refuse: bool = False,
 ) -> "tuple[str, ...]":
@@ -585,7 +630,8 @@ def _disclose_a_file_that_disagrees_with_itself(
     say: ``completeness_absent``, ``format_ahead``, ``digest_mismatch``,
     ``content_below_table``, ``tail_unparseable``, ``row_counts_absent``,
     ``row_count_not_a_number``, ``section_not_declared``,
-    ``section_count_mismatch``.
+    ``section_count_mismatch``, ``verdict_chain_mismatch``,
+    ``verdict_chain_count_not_a_number``.
     Tokens rather than the sentences, because these are what a caller that
     refuses would have to select on, and not all of them should be fatal: a
     hand-repaired file has to stay recoverable, and ``format_ahead`` is a
@@ -664,7 +710,8 @@ def _disclose_a_file_that_disagrees_with_itself(
             warnings.warn(
                 f"claims.toml at {toml_path} {detail}. Nothing here can account "
                 "for what the file should hold. "
-                + ("Nothing has been restored." if will_refuse
+                + ("Nothing has been restored."
+                   if _refusal_is_coming(reasons, will_refuse)
                    else "The restored graph is what survived.")
                 + " Take the backup again.",
                 UserWarning,
@@ -736,6 +783,35 @@ def _disclose_a_file_that_disagrees_with_itself(
             + " below the completeness table, where nothing the table says "
             "reaches them"
         )
+    # The three fields the writer stores about the verdict chain, held against
+    # the chain the file actually carries. The writer measures all three from
+    # the file (see _backup_claims_toml), so a file that still holds what it was
+    # written with agrees with them, and one whose verdicts were lifted out does
+    # not. This is the erased-contradiction edit: take a verdict and its chain
+    # link, and the claim it invalidated comes back clean, with the graph
+    # reporting nothing.
+    #
+    # It is not a deliberate-editor guard and does not pretend to be. Somebody
+    # who recomputes the whole table defeats it, exactly as they defeat the row
+    # counts beside it. What it closes is the edit that removes rows and leaves
+    # the table, which is the boundary this file is written to.
+    for field, held in _verdict_chain_completeness(data).items():
+        if field not in declared:
+            continue          # a file written before the field existed
+        said = declared[field]
+        if isinstance(said, bool) or not isinstance(said, type(held)):
+            reasons.append("verdict_chain_count_not_a_number")
+            complaints.append(
+                f"the completeness table's {field} is not the kind of value "
+                "this format writes there"
+            )
+        elif said != held:
+            reasons.append("verdict_chain_mismatch")
+            complaints.append(
+                f"[completeness] says {field} is {said!r} and the file carries "
+                f"{held!r}"
+            )
+
     sections = declared.get("sections")
     if isinstance(sections, dict):
         for name, count in sorted(sections.items()):
@@ -785,7 +861,8 @@ def _disclose_a_file_that_disagrees_with_itself(
         closing = (
             "The restored graph is what the file held."
             if reasons == ["format_ahead"]
-            else ("Nothing has been restored." if will_refuse
+            else ("Nothing has been restored."
+                  if _refusal_is_coming(reasons, will_refuse)
                   else "The restored graph is what the file holds, not what it "
                        "claims to hold.")
                  + " Take the backup again if this was not a deliberate edit."
