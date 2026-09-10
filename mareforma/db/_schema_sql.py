@@ -868,6 +868,24 @@ CREATE INDEX IF NOT EXISTS idx_claims_read_order ON claims(
     created_at DESC
 );
 
+-- The reputation count groups by the signer named INSIDE the validation
+-- envelope, which is the signed thing, rather than by the unsigned
+-- validator_keyid column beside it. Without an index matching that expression
+-- the count is a full table scan plus a temp b-tree, and it runs on every
+-- enumerating read: measured at 5ms on 100k claims and 52ms on a million,
+-- against 0.03ms and 0.98ms for the indexed column it replaced. The cost
+-- scaled with the whole table while the thing being counted stays, as the
+-- partial index below says, a small minority forever.
+--
+-- Partial on the same predicate the query filters on, so an unvalidated claim
+-- pays nothing on insert and only the rows that carry an envelope are stored.
+-- Here rather than in the fresh-database schema for the reason above it: a
+-- statement that runs only for a fresh database never reaches a graph written
+-- by an earlier release.
+CREATE INDEX IF NOT EXISTS idx_claims_validation_signer ON claims(
+    json_extract(validation_signature, '$.signatures[0].keyid')
+) WHERE validation_signature IS NOT NULL;
+
 -- project_policy: a root-signed, single-row declaration of project-wide
 -- trust policy. rekor_required: the project's findings must be witnessed by
 -- the transparency log before they can converge. strict_promotion_required:
